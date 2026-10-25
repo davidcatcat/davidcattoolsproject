@@ -687,6 +687,23 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual(sorted((e.reference, e.event_type) for e in events),
                          [("#7", "pr_merged"), ("#7", "pr_opened"), ("#8", "pr_closed")])
 
+    def test_ci_runs_are_read_only_while_a_runner_is_here_and_never_break_the_source(self):
+        runs = {"workflow_runs": [{"status": "in_progress", "name": "llmtool Mac CI",
+                                   "head_sha": "a" * 40, "pull_requests": [{"number": 7}]}]}
+        fake = FakeRun((0, []), (0, []), (0, runs))
+        source = mon.GitHubSource("o/r", runner=fake, clock=lambda: NOW)
+        source.want_ci = True
+        source.refresh()
+        self.assertEqual([status for status, _, _ in source.ci_runs], ["in_progress"])
+        self.assertEqual(fake.calls[-1][0][:4], [fake.calls[-1][0][0], "api", "-X", "GET"])
+        self.assertIn("actions/runs", fake.calls[-1][0][4])
+        broken = mon.GitHubSource("o/r", runner=FakeRun((0, []), (0, []), (1, b"")),
+                                  clock=lambda: NOW)
+        broken.want_ci = True
+        broken.refresh()
+        self.assertIsNone(broken.ci_runs)
+        self.assertTrue(broken.status.startswith("GitHub o/r："))   # the source itself is fine
+
     def test_source_uses_read_only_gets_rate_limits_and_reports_failure(self):
         run = FakeRun((0, [comment(3, NOW - 30, "hi")]), (0, []), (1, b""))
         clock = lambda: NOW
@@ -2474,7 +2491,7 @@ class OfficeViewTests(unittest.TestCase):
                 f"[x INFO Terminal] WRITE LINE: {when}Z: {text}\n" for when, text in lines))
         return str(root)
 
-    def test_runner_row_shows_job_sandbox_restarts_and_logs(self):
+    def test_runner_row_shows_job_isolation_restarts_and_logs(self):
         now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
         root = self._runner(
             ("Runner_20261024-090000-utc.log", [("2026-10-24 09:00:05", "Listening for Jobs")]),
@@ -2486,17 +2503,37 @@ class OfficeViewTests(unittest.TestCase):
             ("Worker_20261025-111000-utc.log", [("2026-10-25 11:10:00", "Running job: other")]))
         listener = mon.Process(30, 1, 30, "01:00:00", "S", "Actions runner", "Runner.Listener")
         worker = mon.Process(31, 30, 30, "10:00", "S", "Actions runner job", "Runner.Worker")
-        inside = {30: True}.get
+        inside = {30: "專用帳號 ghrunner"}.get
         busy, = mon.runner_rows([listener, worker], now, None, {30: root}.get, inside)
         self.assertEqual((busy.name, busy.state, busy.age, busy.alert),
-                         ("mac ci runner", mon.WORKING, 3600.0, ""))
-        self.assertEqual(busy.detail, f"執行中：Mac Runner Connectivity（10 分鐘）；已開 1 小時；"
-                                      f"日誌：{root}/_diag")
+                         ("mac ci runner", mon.WORKING, 600.0, ""))
+        self.assertEqual(busy.detail, f"執行中：Mac Runner Connectivity（10 分鐘）；專用帳號 ghrunner；"
+                                      f"已開 1 小時；日誌：{root}/_diag")
         idle, = mon.runner_rows([listener], now, None, {30: root}.get, inside)
         self.assertEqual(idle.state, mon.IDLE)
         # A start more than a day old is not counted; the Worker log is not a runner log.
-        self.assertEqual(idle.detail, "閒置，等工作；已開 1 小時；上一個工作：check (macOS 3.13) 失敗"
-                                      f"（40 分鐘前）；日誌：{root}/_diag")
+        self.assertEqual(idle.detail, "閒置，等工作；專用帳號 ghrunner；已開 1 小時；上一個工作："
+                                      f"check (macOS 3.13) 失敗（40 分鐘前）；日誌：{root}/_diag")
+        # GitHub names the running job and the queue (it wins over the log).
+        ci = mon.ci_runs({"workflow_runs": [
+            {"status": "queued", "name": "llmtool Mac CI", "head_sha": "b" * 40,
+             "pull_requests": [{"number": 334}], "created_at": "2026-10-25T11:55:00Z"},
+            {"status": "in_progress", "name": "llmtool Mac CI", "head_sha": "a" * 40,
+             "pull_requests": [{"number": 339}], "run_started_at": "2026-10-25T11:50:00Z"},
+            {"status": "completed", "name": "old", "head_sha": "c" * 40},
+            {"status": "queued", "name": "Mac Runner Smoke Test", "head_sha": "d" * 40,
+             "pull_requests": [], "head_branch": "main", "created_at": "2026-10-25T11:56:00Z"}]})
+        named, = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside, ci=ci)
+        self.assertTrue(named.detail.startswith(
+            "執行中：llmtool Mac CI（PR #339 @aaaaaaa）（10 分鐘）；專用帳號 ghrunner；已開 1 小時；"
+            "排隊 2 個：llmtool Mac CI（PR #334 @bbbbbbb）、Mac Runner Smoke Test（main @ddddddd）"),
+            named.detail)
+        # Logs this account cannot read: the job process alone says it is working.
+        unread, = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside)
+        self.assertEqual(unread.state, mon.WORKING)
+        self.assertTrue(unread.detail.startswith("執行中（10 分鐘）（看不到工作名稱）；專用帳號 ghrunner"))
+        sandboxed, = mon.runner_rows([listener], now, None, {30: root}.get, {30: "沙箱"}.get)
+        self.assertEqual((sandboxed.state, sandboxed.alert), (mon.IDLE, ""))
         self.assertNotIn("啟動", idle.detail)
         # A job may plant a FIFO or a link under a log name: skipped, never read.
         os.mkfifo(os.path.join(root, "_diag", "Runner_20261025-115900-utc.log"))
@@ -2504,22 +2541,22 @@ class OfficeViewTests(unittest.TestCase):
         again, = mon.runner_rows([listener], now, None, {30: root}.get, inside)
         self.assertEqual(again.detail, idle.detail)
 
-    def test_runner_restarts_unsandboxed_and_stopped_are_flagged(self):
+    def test_runner_restarts_unisolated_and_stopped_are_flagged(self):
         now = datetime(2026, 10, 25, 12, 0, tzinfo=timezone.utc).timestamp()
         root = self._runner(("Runner_20261025-100000-utc.log", [
             ("2026-10-25 10:00:05", "Listening for Jobs"), ("2026-10-25 11:00:05", "Listening for Jobs")]))
         listener = mon.Process(30, 1, 30, "30:00", "S", "Actions runner", "Runner.Listener")
-        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: False}.get)
-        self.assertIn("不在沙箱裡", row.detail)
+        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: ""}.get)
+        self.assertIn("沒有隔離", row.detail)
         self.assertEqual(row.state, mon.ATTENTION)
         self.assertIn("近 24 小時啟動 2 次", row.detail)
-        self.assertEqual(row.alert, "CI runner 不在沙箱裡（可能是手動 ./run.sh）：CI 工作沒有隔離")
+        self.assertEqual(row.alert, "CI runner 用你的帳號在跑（可能是手動 ./run.sh）：CI 工作沒有隔離")
         os.makedirs(os.path.join(root, "isolation"))
         Path(root, "isolation", "job-started.sh").write_text("")
-        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: False}.get)
+        row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: ""}.get)
         self.assertTrue(row.alert.endswith("每個 CI 工作都會被拒"))
         row, = mon.runner_rows([listener], now, None, {30: root}.get, {30: None}.get)
-        self.assertIn("無法確認是否在沙箱裡", row.detail)
+        self.assertIn("無法確認是否隔離", row.detail)
         self.assertEqual(row.state, mon.IDLE)
         self.assertEqual(row.alert, "")
         stopped, = mon.runner_rows([], now, root)
@@ -2532,6 +2569,12 @@ class OfficeViewTests(unittest.TestCase):
         with patch.object(os.path, "expanduser", return_value=os.path.dirname(root)):
             row, = mon.runner_rows([], now, root)
         self.assertTrue(row.detail.endswith(f"日誌：~/{os.path.basename(root)}/_diag"))
+        os.chmod(os.path.join(root, "_diag"), 0)   # e.g. the runner account's folder
+        try:
+            row, = mon.runner_rows([], now, root)
+        finally:
+            os.chmod(os.path.join(root, "_diag"), 0o755)
+        self.assertTrue(row.detail.endswith("_diag（這個帳號讀不到）"))
 
     def test_each_agy_cli_gets_a_row_with_cpu_estimate(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
