@@ -488,6 +488,40 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertIsNotNone(error.started_at)
         self.assertIsNotNone(error.ended_at)
 
+    def test_deeply_nested_json_line_keeps_typed_outcome_and_facts(self):
+        # Regression: a nesting depth that makes json.loads raise RecursionError
+        # must not turn a typed outcome into an untyped adapter failure.
+        body = '[' * 200000 + '\n'
+        for exit_code, expected in ((0, 'OPENCODE_OUTPUT_INVALID'),
+                                    (7, 'OPENCODE_PROVIDER_FAILED')):
+            with self.subTest(exit_code=exit_code):
+                cli = self.fake_cli(body, exit_code=exit_code)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=cli)
+                error = caught.exception
+                self.assertEqual(error.direct_opencode_code, expected)
+                self.assertTrue(error.attempted)
+                self.assertEqual(error.process_exit_code, exit_code)
+                self.assertEqual(error.cleanup_status, 'CONFIRMED')
+                self.assertEqual(len(error.stdout_sha256), 64)
+                self.assertEqual(error.task_id, 'a' * 32)
+                self.assertIsNone(error.native_session_id)
+                self.assertIsNotNone(error.ended_at)
+
+    def test_deeply_nested_json_line_does_not_replace_timeout_code(self):
+        cli = self.fake_cli('[' * 200000 + '\n', post_output_delay=5)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=1, executable=cli)
+        error = caught.exception
+        self.assertEqual(error.direct_opencode_code, 'OPENCODE_TIMEOUT')
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertEqual(len(error.stdout_sha256), 64)
+        self.assertIsNone(error.native_session_id)
+
     def test_run_rejects_out_of_root_and_symlinked_paths(self):
         outside = self.root.parent / 'outside-source.py'
         outside.write_text('VALUE = 0\n')

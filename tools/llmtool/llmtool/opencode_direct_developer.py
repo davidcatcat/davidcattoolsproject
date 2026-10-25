@@ -123,7 +123,7 @@ def _has_structured_tool_denial(raw):
         for line in raw.decode('utf-8').splitlines():
             if line and _tool_denied(json.loads(line)):
                 return True
-    except (UnicodeError, ValueError):
+    except (UnicodeError, ValueError, RecursionError):
         return False
     return False
 
@@ -145,7 +145,7 @@ def _observed_native_session(raw):
                     (sid is not None and sid != current)):
                 return None
             sid = current
-    except (UnicodeError, ValueError):
+    except (UnicodeError, ValueError, RecursionError):
         return None
     return sid
 
