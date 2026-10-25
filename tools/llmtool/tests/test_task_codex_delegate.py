@@ -349,6 +349,31 @@ class CodexDelegateTests(unittest.TestCase):
                          '12345678-1234-4234-8234-123456789abc')
         callback.assert_not_called()
 
+    def test_unowned_launched_process_is_unknown_not_failed(self):
+        task = self._task()
+        with patch('llmtool.codex_direct_developer.CLIProcessLifecycle.own',
+                   side_effect=task_completion.LLMToolError('ownership unknown')):
+            with redirect_stdout(io.StringIO()):
+                result, saved, callback = self._dispatch(task)
+        self.assertEqual(result, 1)
+        developer = saved['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'CODEX_PROCESS_OWNERSHIP_UNKNOWN')
+        self.assertEqual(developer['execution']['status'], 'UNKNOWN')
+        callback.assert_not_called()
+
+    def test_bootstrap_that_dirties_the_tree_is_a_binding_change(self):
+        task = self._task()
+        def dirty(_registration):
+            (self.root / 'stray.txt').write_text('left by bootstrap\n')
+        with patch('llmtool.task_submission_cli.codex_direct_developer.run') as codex_run:
+            with redirect_stdout(io.StringIO()):
+                result, saved, _callback = self._dispatch(task, bootstrap_error=dirty)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(saved['developer']['error_code'], 'CODEX_D6_BINDING_CHANGED')
+        codex_run.assert_not_called()
+
     def test_misuse_refusals_name_the_failed_condition(self):
         task = self._task()
         base = dict(task_id=task['task_id'], selection_source='PM',

@@ -392,7 +392,12 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                             max(0, int((time.monotonic() - started) * 1000)),
                             cleanup_status, usage)
     except Exception as exc:
-        close_lifecycle(type(exc), exc, exc.__traceback__)
+        try:
+            close_lifecycle(type(exc), exc, exc.__traceback__)
+        except BaseException as interrupt:
+            # A host signal surfaces from cleanup: keep the observed facts on it.
+            _attach_observed(interrupt, process, output, started, lifecycle)
+            raise
         # An unexpected exception still becomes a typed, fail-closed result
         # with the observed process facts, never a bare adapter UNKNOWN.
         error = (exc if isinstance(exc, DirectCodexError) else
@@ -410,15 +415,19 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         raise error from None
     except BaseException as exc:
         close_lifecycle(type(exc), exc, exc.__traceback__)
-        try:
-            exc._llmtool_direct_codex_execution = {
-                'native_session_id': _thread_from_events(bytes(output)),
-                'process_exit_code': process.returncode if process is not None else None,
-                'stdout_sha256': hashlib.sha256(output).hexdigest() if output else None,
-                'elapsed_ms': max(0, int((time.monotonic() - started) * 1000)),
-                'cleanup_status': 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN',
-            }
-        except Exception:
-            pass
+        _attach_observed(exc, process, output, started, lifecycle)
         raise
+
+
+def _attach_observed(exc, process, output, started, lifecycle):
+    try:
+        exc._llmtool_direct_codex_execution = {
+            'native_session_id': _thread_from_events(bytes(output)),
+            'process_exit_code': process.returncode if process is not None else None,
+            'stdout_sha256': hashlib.sha256(output).hexdigest() if output else None,
+            'elapsed_ms': max(0, int((time.monotonic() - started) * 1000)),
+            'cleanup_status': 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN',
+        }
+    except Exception:
+        pass
 

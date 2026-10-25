@@ -1499,6 +1499,9 @@ def run_task_codex_delegate(args, *, store):
             refreshed, current_snapshot = task_completion.bind_executor_task(
                 registration.task_id, expected_common_dir=registration.common_dir,
                 root=registration.root)
+        except Exception:
+            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED') from None
+        try:
             task_completion.validate_env2_pass_marker(
                 refreshed, expected_root=registration.root, current_head=snapshot.head)
         except Exception:
@@ -1523,9 +1526,10 @@ def run_task_codex_delegate(args, *, store):
         _print(_task_view(saved))
         return 1
     except codex_direct_developer.DirectCodexError as exc:
-        # An adapter exception after launch says nothing about how Codex ended.
+        # FAILED needs an observed exit; a launched process with no exit
+        # (unowned, or an adapter exception) has an UNKNOWN outcome.
         execution_status = ('TIMEOUT' if exc.direct_codex_code == 'CODEX_TIMEOUT' else
-                             'FAILED' if exc.attempted and
+                             'FAILED' if exc.attempted and exc.process_exit_code is not None and
                              not exc.direct_codex_code.startswith('CODEX_ADAPTER_') else
                              'UNKNOWN')
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN' if exc.attempted else 'DEVELOPER_UNAVAILABLE',
