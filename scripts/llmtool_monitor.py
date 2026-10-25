@@ -2828,10 +2828,12 @@ def runner_rows(processes: list[Process], now: float, root: str | None = None,
             notes.append("無法確認是否隔離")
         else:
             notes.append(kept)
-        if any(p.role == "Actions runner job" for p in processes) and jobs:
+        worker = next((p for p in processes if p.role == "Actions runner job"), None)
+        if worker is not None:   # the job process is the evidence; the log only names it
             state = WORKING
-            when, name = jobs[-1]
-            notes.insert(0, f"執行中：{name}（{max(1, int((now - when) // 60))} 分鐘）")
+            ran = _elapsed_seconds(worker.elapsed)
+            minutes = f"（{max(1, int(ran // 60))} 分鐘）" if ran is not None else ""
+            notes.insert(0, f"執行中：{jobs[-1][1]}{minutes}" if jobs else f"執行中{minutes}（看不到工作名稱）")
         else:
             state = IDLE
             notes.insert(0, "閒置，等工作")

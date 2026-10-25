@@ -2497,6 +2497,10 @@ class OfficeViewTests(unittest.TestCase):
         # A start more than a day old is not counted; the Worker log is not a runner log.
         self.assertEqual(idle.detail, "閒置，等工作；專用帳號 ghrunner；已開 1 小時；上一個工作："
                                       f"check (macOS 3.13) 失敗（40 分鐘前）；日誌：{root}/_diag")
+        # Logs this account cannot read: the job process alone says it is working.
+        unread, = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside)
+        self.assertEqual(unread.state, mon.WORKING)
+        self.assertTrue(unread.detail.startswith("執行中（10 分鐘）（看不到工作名稱）；專用帳號 ghrunner"))
         sandboxed, = mon.runner_rows([listener], now, None, {30: root}.get, {30: "沙箱"}.get)
         self.assertEqual((sandboxed.state, sandboxed.alert), (mon.IDLE, ""))
         self.assertNotIn("啟動", idle.detail)
