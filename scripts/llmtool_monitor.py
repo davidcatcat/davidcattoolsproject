@@ -1455,7 +1455,8 @@ def activity_lines(tasks: list[Task], limit: int = 60,
 # through the same redaction as Activity headlines and shortened. Prompts, other
 # model text, reasoning, commands and tool output are never shown; private paths
 # are never shown. A role is named only when a record binds it (a D6 registry
-# root or session_ref, or a PM call naming a PR and head); otherwise no role is
+# root or session_ref, a PM call naming a PR and head, or a Claude session its
+# launcher named claude-pm / claude-reviewer / claude-developer[-…]); otherwise no role is
 # claimed and the row says only who it is.
 import unicodedata
 
@@ -2606,6 +2607,8 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
 
 
 SESSION_NAME = re.compile(r"[A-Za-z0-9._-]{1,64}")
+# The role a launcher assigns in the session name (`claude --name claude-reviewer`).
+SESSION_ROLE = re.compile(r"claude-(pm|reviewer|developer)(?:-[A-Za-z0-9._-]+)?")
 
 
 def claude_roots(root=None) -> list[str]:
@@ -2700,6 +2703,9 @@ def claude_rows(now: float, root=None,
             # find the window that needs an answer.
             name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
             detail += f"｜{name}" if name else ""
+            # The launcher's name is the record that binds a role outside D6.
+            named = SESSION_ROLE.fullmatch(name)
+            role = named.group(1) if named else role
         # A session moved to the background keeps running without a terminal.
         mode = "背景" if kind == "bg" else "互動"
         rows.append(OfficeRow(f"claude {role}（{mode}）" if role else f"claude {mode}",
