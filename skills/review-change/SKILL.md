@@ -47,6 +47,11 @@ Developer) before merge. The comment starts with exactly these lines:
 <!-- activity: type=review_verdict actor=<Claude|Codex> target=PM status=<PASS|FIX|FAIL> -->
 Verdict: <PASS|FAIL|BLOCKED> | Version: v<N> | HEAD: <40-hex reviewed commit>
 LLMTOOL-REVIEW-BINDING v1 task=<task id> run=<run id> contract=<contract digest> head=<40-hex>
+```
+
+and, on PASS only, one more line right after them:
+
+```text
 FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
 ```
 
