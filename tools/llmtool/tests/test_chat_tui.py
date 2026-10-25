@@ -448,14 +448,16 @@ class WidgetTests(Base):
     def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
         def open_menu(ui):
             self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill'])
+            # The short lone-Esc timeout applies only while the picker is open.
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
         ui, _ = self.drive(['/s', open_menu, '\x1b\r',
                             lambda ui: self.assertEqual(ui.input.text, '/s\n'),
                             lambda ui: self.assertEqual(ui.menu_items, [])])
         self.factory.assert_not_called()
         self.assertNotIn('> /s', ui.conversation.text)
         self.assertNotIn('unknown chat command', ui.conversation.text.lower())
-        self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
-        self.assertEqual(chat_tui.ESC_SEQUENCE_TIMEOUT, 0.4)
+        self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.assertGreater(ui._default_timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
         # Esc and Enter delivered as separate chunks within the timeout behave the same.
         ui, _ = self.drive(['/s', '\x1b', '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/s\n'),

@@ -24,8 +24,9 @@ KEY_HELP = """Keys
   Enter                 Send message (or run /command)
   Ctrl-J, Esc Enter     Insert newline (multiline message); paste keeps newlines
   Up/Down               Move in input; on first/last line recall earlier inputs
-  /                     Type / for a command picker: Up/Down choose, Enter completes the draft
-                        (a second Enter runs it), Esc closes the picker
+  /                     Command picker (existing commands only): type to filter, Up/Down
+                        choose, Enter completes the draft (a second Enter runs it),
+                        Esc closes the picker; Esc Enter still inserts a newline
   Tab, Shift-Tab        Switch focus between input and conversation
   PageUp/PageDown       Scroll conversation (arrows also scroll when it is focused)
   F1                    Toggle this help (shown in place of the conversation)
@@ -255,8 +256,9 @@ class ChatTUI:
                                    "menu": "bg:ansibrightblack fg:ansiwhite",
                                    "menu.current": "reverse"}))
         # prompt_toolkit waits timeoutlen (1s) after a lone Esc in case Esc Enter follows;
-        # that made dismissing the picker feel stuck. Scoped to this Application only.
-        self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT
+        # that made dismissing the picker feel stuck. Shortened only while the picker is
+        # open, so the Esc Enter window is unchanged otherwise.
+        self._default_timeoutlen = self.app.timeoutlen
 
     # -- rendering -----------------------------------------------------------------
     def status_text(self):
@@ -321,17 +323,20 @@ class ChatTUI:
             items = []
         else:
             items = slash_matches(text)
+        self._set_menu(items)
+
+    def _set_menu(self, items):
         if items != self.menu_items:
             self.menu_index = 0
         self.menu_items = items
+        self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if items else self._default_timeoutlen
 
     def move_menu(self, direction):
         if self.menu_items:
             self.menu_index = (self.menu_index + direction) % len(self.menu_items)
 
     def close_menu(self):
-        self.menu_items = []
-        self.menu_index = 0
+        self._set_menu([])
 
     def accept_menu(self):
         """Enter with the picker open: complete the draft; True if Enter was consumed."""
