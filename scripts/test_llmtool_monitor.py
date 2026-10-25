@@ -3001,6 +3001,12 @@ class GitHubRunnerTests(unittest.TestCase):
         # The run still counts once as waiting, for the Mac row's queue line.
         self.assertEqual([(run[0], run[3]) for run in source.ci_runs],
                          [("in_progress", "ec2-llmtool-01"), ("queued", None)])
+        run = [("in_progress", "x", NOW, None, 5)]
+        named = lambda jobs: [entry[0] for entry in mon.ci_runner_names(run, lambda _: jobs)]
+        self.assertEqual(named({"jobs": [{"status": "queued"}]}), ["queued"])   # nothing runs yet
+        self.assertEqual(named({"jobs": [{"status": "in_progress", "runner_name": "r"}]}), ["in_progress"])
+        self.assertEqual(named({"jobs": []}), ["in_progress"])   # nothing to go by: the run's word
+        self.assertEqual(named(None), ["in_progress"])           # unreadable: the same
 
     def test_queued_work_is_attributed_only_by_labels_and_unregistered_shows_nothing(self):
         source, _ = self.source(self.ci([self.MAC, self.linux("ec2-llmtool-01", label="other")]))

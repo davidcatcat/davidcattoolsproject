@@ -957,6 +957,7 @@ DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
 GITHUB_REFRESH = 30.0
 GITHUB_STALE = 3 * GITHUB_REFRESH   # older runner data is shown as 未確認, never as offline
 CI_JOB_READS = 5   # finished runs' job lists read per refresh (they are cached)
+CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldest first)
 GITHUB_LIMIT = 16 << 20   # one page of 100 comments; a larger page fails as a stale status
 GITHUB_PAGE = 100    # comments per request (the API maximum)
 GITHUB_PAGES = 5     # a busy 12 hours had 124 comments; beyond 500 the status says so
@@ -1302,8 +1303,9 @@ class GitHubSource:
             jobs_of = lambda run: self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
             try:
                 payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
-                queued = []
-                self.ci_runs = ci_runner_names(ci_runs(payload), jobs_of, queued)
+                queued, active = [], ci_runs(payload)
+                self.ci_runs = (ci_runner_names(active[:CI_RUN_READS], jobs_of, queued)
+                                + active[CI_RUN_READS:])
                 done = ci_finished_runs(payload)
                 self._finished = {run: self._finished[run] for run, _ in done if run in self._finished}
                 for run, text in [item for item in done if item[0] not in self._finished][:CI_JOB_READS]:
@@ -2364,8 +2366,8 @@ def ci_runner_names(runs: list, jobs_of, queued: list | None = None) -> list:
             named.append(("in_progress", text + (f"：{job_name}" if job_name else ""),
                           _github_time(job.get("started_at")) or started,
                           str(job["runner_name"]), run_id))
-        if not jobs:
-            named.append((status, text, started, runner, run_id))
+        if not jobs:   # nothing runs yet, whatever the run says
+            named.append(("queued" if waiting else status, text, started, runner, run_id))
         elif waiting:
             named.append(("queued", text, started, None, run_id))
     return named
