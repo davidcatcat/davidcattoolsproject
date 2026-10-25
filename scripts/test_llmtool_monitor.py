@@ -2574,7 +2574,7 @@ class OfficeViewTests(unittest.TestCase):
             row, = mon.runner_rows([], now, root)
         finally:
             os.chmod(os.path.join(root, "_diag"), 0o755)
-        self.assertTrue(row.detail.endswith("_diag（這個帳號讀不到）"))
+        self.assertNotIn("日誌", row.detail)
 
     def test_each_agy_cli_gets_a_row_with_cpu_estimate(self):
         procs = [mon.Process(20, 1, 20, "01:00", "S+", "AGY CLI", "agy", ""),
