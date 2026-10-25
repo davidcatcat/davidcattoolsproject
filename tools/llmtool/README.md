@@ -699,6 +699,15 @@ conversation, dispatch a Developer, run tests, or continue work in the backgroun
 provider. Its strict JSON input contains `request` and a structured `response`; it accepts only
 LOW-risk `opencode` or `codex` Developer assignments. The record identifies its runtime as
 `active-pm-runtime` and does not claim a Codex or Claude native session ID.
+A Claude Code PM adds `--pm-session-id SESSION_UUID` (and `--pm-cwd DIR`, default the
+current directory). llmtool refuses the record unless this user's Claude Code transcript
+for that session and directory exists (under `$CLAUDE_CONFIG_DIR` or `~/.claude`), with the
+configuration, `projects` and project directories and the file all owned by the user
+and none of them a symlink. It then
+stores the PM session as `pm-SESSION_UUID`, records `pm_runtime: claude-code`, the session
+UUID and directory, and `task show` lists `pm_recovery` (`claude --resume SESSION_UUID`
+in that directory). The file check shows the session exists locally; it does not prove the
+caller is that session.
 
 ### Bounded company Developer proposal and D6 completion evidence
 
@@ -713,6 +722,21 @@ For `task delegate --provider codex`, llmtool resolves the explicitly configured
 `codex-pm` as a fallback; if `codex-developer` is missing, the Developer is recorded as
 `DEVELOPER_UNAVAILABLE` with `DEVELOPER_PROFILE_UNAVAILABLE`. The Codex CLI provider accepts the
 same four optional `reasoning_effort` values described above.
+
+Company-gw and Codex text proposals receive a small conservative normalization
+before the unchanged strict unified-diff and write-scope checks: one outer
+Markdown diff fence can be removed only when all text outside it is whitespace;
+a missing `diff --git` line can be restored
+when the old/new paths match, bare blank hunk lines become context lines, and
+hunk counts are recalculated from the body. The accepted Task result records
+only fixed normalization tokens. Mode changes, renames, binary patches,
+multiple fences, mixed prose, and out-of-scope paths are not normalized into
+acceptance. Rejected company-gw and Codex text proposals, plus collected direct
+Codex diffs that fail output validation, are stored only in the owner-private
+task state directory as a redacted, 64 KiB-bounded diagnostic file; the Task
+record keeps its relative reference and SHA-256, never the rejected text. The
+CLI does not print the capture or include it in evidence packets. Output that
+cannot be safely collected is not captured.
 
 For a direct OpenCode Developer task, the CLI now emits a completion event when the
 bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,
@@ -741,6 +765,35 @@ WAITING_CI. Only a complete evidence packet is sent to the original PM profile;
 the PM response is persisted as a recommendation and grants no execution or Git
 permission. If the original PM is unavailable, complete evidence remains in
 WAITING_PM. Ambiguous provider outcomes are not retried automatically.
+A Task recorded with `task record-pm` has no PM provider profile: completion never
+resolves or calls one. Complete evidence is stored as PM_EVIDENCE_READY, and
+`task show` adds `active_pm_handoff` with the same bounded packet and instructions a
+provider PM would receive, for the active PM runtime to read. All evidence gates
+are unchanged.
+
+Reaching PM_EVIDENCE_READY also stores one completion event in the Task's existing
+event list. `llmtool task inbox --pm-session SESSION [--wait] [--timeout N]` prints, as
+JSON, every unacknowledged event of Tasks recorded by that PM session, with the
+handoff. With `--wait` it blocks (polling the store; no daemon) until an event exists or
+the timeout (default 540 s, at most 3600 s) passes, then returns an empty list. A PM
+runs it as a background command and reads events when it returns.
+`llmtool task ack EVENT_ID --pm-session SESSION` marks an event received; repeating it
+changes nothing. Events survive PM absence and restart: unacknowledged events are
+returned on every read, acknowledged events never again. The event ID is derived from
+the Task, Run and evidence digest, so re-verifying the same evidence never creates a
+second event, and a READY Task whose event write was interrupted gets its event on
+the next inbox read. Events and acknowledgements dispatch nothing; any later dispatch
+still goes through its own one-shot claim.
+A Task keeps at most 32 events. When the list is full, the oldest acknowledged event is
+compacted into a tombstone that keeps its ID and stream position, so it is still never
+recreated, and acknowledging it again returns the same success. Tombstones are never
+dropped: once a Task holds 256, it records no further events and the inbox lists the
+result under `blocked` with `COMPLETION_EVENT_HISTORY_LIMIT` and action
+`START_NEW_TASK_OR_RUN`. If all 32 are unacknowledged, the inbox reports `status:
+ATTENTION` and a `blocked` entry with `COMPLETION_EVENT_LIMIT` and action
+`ACK_DELIVERED_EVENTS_THEN_READ_INBOX` (`--wait` returns at once); acknowledging the
+delivered events and reading again records the new result. Other failures to record an
+event are listed under `blocked` with action `RETRY_INBOX`.
 
 The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
 verified process exit and bounded test gate. Later independent review, PR and CI
