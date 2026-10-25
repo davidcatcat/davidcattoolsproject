@@ -6,12 +6,16 @@ stops at a picker, so a CLI exit is not delivery. This helper:
 
 * resolves the target to one full session UUID (exact name, short id or UUID;
   no CLI fuzzy match) and refuses one that is busy right now;
-* always passes ``-n ROLE`` and ``--add-dir`` with the registered D6 root;
+* always passes ``-n ROLE`` and ``--add-dir`` with the registered D6 root,
+  then ``--`` so the variadic ``--add-dir`` cannot swallow the prompt;
 * polls ``claude agents --json`` for a bounded time until the started session
   is ``busy``/``idle`` and its transcript holds a tool call made after launch
   (history copied by ``--resume`` is older, so it never counts);
-* on ``blocked``/``waiting``, a vanished session or timeout, runs
-  ``claude stop`` and exits 1;
+* on any other status (``blocked``, ``waiting``, ...), a failed or stopped
+  state, a started-without-prompt notice, a vanished session or timeout, runs
+  ``claude stop`` with the full session id and exits 1;
+* adopts only the target itself or a copy the launch output names; a new
+  session that merely appeared nearby is never treated as this dispatch;
 * reports the actual session id when a copy was started or the name differs,
   and when the D6 ``session_ref`` must be updated (the lifecycle has no update
   entrypoint, so it never edits the registry).
@@ -49,8 +53,12 @@ ROLE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 MENTIONED_RE = re.compile(
     r"\b([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)\b")
 DISPATCH_STATES = ("ACTIVE", "REPAIR", "REVIEW_PENDING")
-FAILED_STATUSES = frozenset(("blocked", "waiting"))
+# A live session's `status` is busy or idle; anything else (blocked, waiting,
+# ...) needs attention. A `state` here means it stopped or cannot go on.
 RECEIPT_STATUSES = frozenset(("busy", "idle"))
+FAILED_STATES = frozenset(("blocked", "waiting", "failed", "stopped", "error", "killed"))
+# `claude --bg` prints this when the session started without a task.
+NO_PROMPT_MARKER = "send a prompt to start"
 CLI_TIMEOUT = 30
 OUTPUT_LIMIT = 4 * 1024 * 1024
 PROMPT_LIMIT = 64 * 1024
@@ -221,8 +229,12 @@ def _started_after(row, launch_ms):
     return type(started) in (int, float) and started >= launch_ms - CLOCK_SLACK_MS
 
 
-def identify_started(rows, *, expected, before_ids, launch_ms, launch_output, cwd):
-    """The session the launch actually started: the target itself or a copy."""
+def identify_started(rows, *, expected, before_ids, launch_ms, launch_output):
+    """The session the launch actually started: the target itself or a copy.
+
+    A copy counts only when the launch output names it; a new session that
+    merely appeared nearby may be someone else's, so it is never adopted.
+    """
     row = _row(rows, expected)
     if row is not None and (expected not in before_ids or _started_after(row, launch_ms)):
         return row
@@ -232,19 +244,11 @@ def identify_started(rows, *, expected, before_ids, launch_ms, launch_output, cw
     mentioned = set(MENTIONED_RE.findall(launch_output))
     named = [row for row in fresh
              if row["sessionId"] in mentioned or row.get("id") in mentioned]
-    if len(named) == 1:
-        return named[0]
-    same_place = [row for row in fresh
-                  if row.get("kind") == "background" and row.get("cwd") == cwd]
-    if not named and len(same_place) == 1:
-        return same_place[0]
-    return None
+    return named[0] if len(named) == 1 else None
 
 
 def stop_session(claude, row_or_id):
-    ref = row_or_id
-    if type(row_or_id) is dict:
-        ref = row_or_id.get("id") or row_or_id["sessionId"]
+    ref = row_or_id["sessionId"] if type(row_or_id) is dict else row_or_id
     try:
         code, _ = _run([claude, "stop", ref], timeout=15)
     except DispatchError as exc:
@@ -252,12 +256,23 @@ def stop_session(claude, row_or_id):
     return {"attempted": True, "session": ref, "exit": code}
 
 
+def _session_code(value):
+    if type(value) is str and re.fullmatch(r"[a-z_]{1,32}", value):
+        return "SESSION_" + value.upper()
+    return "SESSION_STATE_UNKNOWN"
+
+
 def _failure_reason(row):
+    """Why this session cannot be (or stay) a healthy receipt, else None.
+
+    ``state == "done"`` is left to the caller: a session that already acted
+    and finished was delivered.
+    """
     status, state = row.get("status"), row.get("state")
-    if status in FAILED_STATUSES:
-        return "SESSION_" + status.upper()
-    if state in FAILED_STATUSES:
-        return "SESSION_" + state.upper()
+    if status not in RECEIPT_STATUSES:
+        return _session_code(status)
+    if state in FAILED_STATES:
+        return _session_code(state)
     return None
 
 
@@ -293,13 +308,15 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         "first_action": None, "stop": {"attempted": False}, "warnings": [],
     }
     argv = ([claude, "--bg"] + session_args +
-            ["-n", role, "--add-dir", registration.root, prompt])
+            # `--add-dir` is variadic: `--` ends it so the prompt stays the prompt.
+            ["-n", role, "--add-dir", registration.root, "--", prompt])
     launch_ms = _now_ms()
     receipt["launched_at"] = _iso(launch_ms)
     code, output = _run(argv, cwd=cwd)
     if code != 0:
         receipt["reason"] = "LAUNCH_FAILED"
         return receipt
+    no_prompt = NO_PROMPT_MARKER in output
     deadline = time.monotonic() + timeout
     started = None
     offsets = {}
@@ -307,7 +324,7 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         rows = list_agents(claude)
         if started is None:
             found = identify_started(rows, expected=expected, before_ids=before_ids,
-                                     launch_ms=launch_ms, launch_output=output, cwd=cwd)
+                                     launch_ms=launch_ms, launch_output=output)
             if found is not None:
                 started = found["sessionId"]
                 _record_identity(receipt, found, expected, registration)
@@ -318,19 +335,22 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
             return receipt
         if row is not None:
             receipt["status"], receipt["state"] = row.get("status"), row.get("state")
-            reason = _failure_reason(row)
+            reason = "PROMPT_NOT_DELIVERED" if no_prompt else _failure_reason(row)
             if reason is not None:
                 receipt["reason"] = reason
                 receipt["stop"] = stop_session(claude, row)
                 return receipt
-            if row.get("status") in RECEIPT_STATUSES:
-                action = first_action_since(started, launch_ms, offsets)
-                if action is not None:
-                    receipt.update(result="DELIVERED", reason=None, first_action=action,
-                                   receipt_at=_iso(_now_ms()))
-                    return receipt
+            action = first_action_since(started, launch_ms, offsets)
+            if action is not None:
+                receipt.update(result="DELIVERED", reason=None, first_action=action,
+                               receipt_at=_iso(_now_ms()))
+                return receipt
+            if row.get("state") == "done":
+                receipt["reason"] = "SESSION_DONE"
+                return receipt
         if time.monotonic() >= deadline:
-            receipt["reason"] = ("NO_NEW_ACTION" if row is not None else "SESSION_NOT_STARTED")
+            receipt["reason"] = ("NO_NEW_ACTION" if row is not None else
+                                 "PROMPT_NOT_DELIVERED" if no_prompt else "SESSION_NOT_STARTED")
             if row is not None:
                 receipt["stop"] = stop_session(claude, row)
             return receipt
@@ -354,24 +374,48 @@ def _record_identity(receipt, row, expected, registration):
         receipt["warnings"].append("SESSION_REF_UPDATE_REQUIRED")
 
 
-def watch(*, claude, session_id, report_file, timeout, poll_interval):
-    """Wait for a report file while the session stays healthy."""
+def _report_signature(path):
+    try:
+        info = Path(path).stat()
+    except OSError:
+        return None
+    return (info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=None):
+    """Wait for a new report file while the session stays healthy.
+
+    With ``since_ms`` (the receipt's ``launched_at``) a report counts when it
+    was written at or after it; without it, only a file that differs from
+    what was there when watching began counts.
+    """
     if not UUID_RE.fullmatch(session_id or ""):
         raise DispatchError("SESSION_ID_INVALID")
     result = {"schema_version": 1, "result": "WAITING", "reason": None,
               "session_id": session_id, "report_file": str(report_file),
               "status": None, "state": None, "stop": {"attempted": False}}
+    initial = _report_signature(report_file)
+
+    def fresh_report():
+        current = _report_signature(report_file)
+        if current is None or current[1] == 0:
+            return False
+        if since_ms is not None:
+            return current[2] >= (since_ms - CLOCK_SLACK_MS) * 1000000
+        return current != initial
+
     deadline = time.monotonic() + timeout
     while True:
-        try:
-            if Path(report_file).stat().st_size > 0:
+        if fresh_report():
+            result["result"] = "REPORT_PRESENT"
+            return result
+        row = _row(list_agents(claude), session_id)
+        if row is None or row.get("state") == "done":
+            if fresh_report():  # it may have written the report and then finished
                 result["result"] = "REPORT_PRESENT"
                 return result
-        except OSError:
-            pass
-        row = _row(list_agents(claude), session_id)
-        if row is None:
-            result.update(result="FAILED", reason="SESSION_GONE")
+            result.update(result="FAILED",
+                          reason="SESSION_GONE" if row is None else "SESSION_DONE")
             return result
         result["status"], result["state"] = row.get("status"), row.get("state")
         reason = _failure_reason(row)
@@ -426,6 +470,7 @@ def _main(argv=None):
     wait.add_argument("--session-id", required=True)
     wait.add_argument("--report-file", required=True)
     wait.add_argument("--timeout", type=float, default=3600.0)
+    wait.add_argument("--since", help="the dispatch receipt's launched_at")
     args = parser.parse_args(argv)
     try:
         poll = _bounded(args.poll_interval, 0.01, 60, "--poll-interval")
@@ -444,10 +489,15 @@ def _main(argv=None):
                 new_session=args.new)
             ok = result["result"] == "DELIVERED"
         else:
+            since_ms = None
+            if args.since is not None:
+                since_ms = _entry_ms({"timestamp": args.since})
+                if since_ms is None:
+                    raise DispatchError("ARGUMENT_INVALID", "--since")
             result = watch(claude=args.claude, session_id=args.session_id,
                            report_file=args.report_file,
                            timeout=_bounded(args.timeout, 1, 86400, "--timeout"),
-                           poll_interval=poll)
+                           poll_interval=poll, since_ms=since_ms)
             ok = result["result"] == "REPORT_PRESENT"
     except DispatchError as exc:
         print(json.dumps({"schema_version": 1, "result": "REJECTED", "reason": exc.code,

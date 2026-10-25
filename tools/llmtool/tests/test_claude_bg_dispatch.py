@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stdout
 from io import StringIO
@@ -58,6 +59,29 @@ if argv[:2] == ['agents', '--json']:
         save()
     print(json.dumps(fill(rows)))
 elif '--bg' in argv:
+    # Parse like commander: a variadic `--add-dir` takes every following
+    # non-option argument; `--` ends options and leaves the prompt positional.
+    add_dirs, positional, index = [], [], 0
+    while index < len(argv):
+        arg = argv[index]
+        if arg == '--':
+            positional += argv[index + 1:]
+            break
+        if arg == '--add-dir':
+            index += 1
+            while index < len(argv) and not argv[index].startswith('-'):
+                add_dirs.append(argv[index])
+                index += 1
+            continue
+        if arg in ('-n', '--resume', '--session-id'):
+            index += 2
+            continue
+        if not arg.startswith('-'):
+            positional.append(arg)
+        index += 1
+    prompt = positional[0] if positional and not scenario.get('drop_prompt') else None
+    with open(home / 'parsed.jsonl', 'a') as log:
+        log.write(json.dumps({'add_dirs': add_dirs, 'prompt': prompt}) + '\n')
     state['launch_ms'] = int(time.time() * 1000)
     if '--session-id' in argv:
         state['new_session'] = argv[argv.index('--session-id') + 1]
@@ -74,11 +98,14 @@ elif '--bg' in argv:
                 out.write(json.dumps({'type': 'assistant',
                     'timestamp': '2026-01-01T00:00:%02d.000Z' % (index % 60),
                     'message': {'content': [{'type': 'tool_use', 'name': 'Old'}]}}) + '\n')
-            if item.get('new_action'):
+            if item.get('new_action') and prompt is not None:
                 out.write(json.dumps({'type': 'assistant', 'timestamp': now,
                     'message': {'content': [{'type': 'text', 'text': 'x'},
                                             {'type': 'tool_use', 'name': 'Bash'}]}}) + '\n')
-    print(scenario.get('launch_stdout', 'backgrounded'))
+    if prompt is None:
+        print('backgrounded · 2b128608 · claude-developer (idle — send a prompt to start)')
+    else:
+        print(scenario.get('launch_stdout', 'backgrounded'))
     sys.exit(scenario.get('launch_exit', 0))
 elif argv[:1] == ['stop']:
     print('stopped')
@@ -125,6 +152,18 @@ class ClaudeBgDispatchTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in path.read_text().splitlines()]
 
+    def reset(self):
+        for name in ('calls.jsonl', 'state.json', 'parsed.jsonl'):
+            (self.home / name).unlink(missing_ok=True)
+
+    def recent(self):
+        """A `--since` value just before now (the dispatch receipt's launched_at)."""
+        return dispatch_tool._iso(int(time.time() * 1000) - 60000)
+
+    def parsed(self):
+        path = self.home / 'parsed.jsonl'
+        return [json.loads(line) for line in path.read_text().splitlines()]
+
     def launches(self):
         return [call for call in self.calls() if '--bg' in call['argv']]
 
@@ -167,6 +206,10 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--resume') + 1], TARGET)
         self.assertEqual(argv[argv.index('-n') + 1], 'claude-developer')
         self.assertEqual(argv[argv.index('--add-dir') + 1], self.root)
+        # `--` ends the variadic --add-dir, so the prompt stays the prompt.
+        self.assertEqual(argv[-2:], ['--', 'Task Contract: do the work'])
+        self.assertEqual(self.parsed(), [{'add_dirs': [self.root],
+                                          'prompt': 'Task Contract: do the work'}])
         self.assertEqual(os.path.realpath(launch['cwd']), os.path.realpath(self.cwd))
         self.assertEqual(self.stops(), [])
 
@@ -180,7 +223,7 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(receipt['result'], 'NOT_DELIVERED')
         self.assertEqual(receipt['reason'], 'NO_NEW_ACTION')
         self.assertIsNone(receipt['first_action'])
-        self.assertEqual(self.stops(), [TARGET[:8]])
+        self.assertEqual(self.stops(), [TARGET])
 
     def test_short_id_resolves_to_the_full_uuid(self):
         self.scenario(
@@ -221,10 +264,12 @@ class ClaudeBgDispatchTests(unittest.TestCase):
     def test_blocked_and_waiting_sessions_are_stopped(self):
         for status, state, reason in (('blocked', None, 'SESSION_BLOCKED'),
                                       ('waiting', None, 'SESSION_WAITING'),
-                                      ('busy', 'blocked', 'SESSION_BLOCKED')):
+                                      ('busy', 'blocked', 'SESSION_BLOCKED'),
+                                      ('exited', None, 'SESSION_EXITED'),
+                                      ('idle', 'failed', 'SESSION_FAILED'),
+                                      ('idle', 'stopped', 'SESSION_STOPPED')):
             with self.subTest(status=status, state=state):
-                for name in ('calls.jsonl', 'state.json'):
-                    (self.home / name).unlink(missing_ok=True)
+                self.reset()
                 self.scenario(
                     all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
                     after=[[row(TARGET, status=status, state=state, cwd=self.cwd)]],
@@ -232,8 +277,8 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 code, receipt = self.dispatch()
                 self.assertEqual(code, 1)
                 self.assertEqual(receipt['reason'], reason)
-                self.assertEqual(receipt['stop']['session'], TARGET[:8])
-                self.assertEqual(self.stops(), [TARGET[:8]])
+                self.assertEqual(receipt['stop']['session'], TARGET)
+                self.assertEqual(self.stops(), [TARGET])
 
     def test_vanished_or_never_started_session_fails(self):
         self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
@@ -242,8 +287,7 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(receipt['reason'], 'SESSION_GONE')
         self.assertEqual(self.stops(), [TARGET])
-        for name in ('calls.jsonl', 'state.json'):
-            (self.home / name).unlink()
+        self.reset()
         self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
                       after=[[]])
         code, receipt = self.dispatch()
@@ -314,14 +358,14 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         (self.home / 'state.json').write_text(json.dumps({'polls': 0, 'launch_ms': 1}))
         report.write_text('PASS')
         code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
-                                     str(report), '--timeout', '1')
+                                     str(report), '--timeout', '1', '--since', self.recent())
         self.assertEqual((code, result['result']), (0, 'REPORT_PRESENT'))
         report.unlink()
         self.scenario(after=[[row(TARGET, status='waiting')]])
         code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1')
         self.assertEqual((code, result['reason']), (1, 'SESSION_WAITING'))
-        self.assertEqual(self.stops(), [TARGET[:8]])
+        self.assertEqual(self.stops(), [TARGET])
         self.scenario(after=[[]])
         code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1')
@@ -354,6 +398,59 @@ class ClaudeBgDispatchTests(unittest.TestCase):
             stream.write(line[10:] + '\n')
         self.assertEqual(dispatch_tool.first_action_since(TARGET, since, offsets),
                          {'tool': 'Read', 'timestamp': '2026-10-26T00:00:00.000Z'})
+
+    def test_prompt_the_cli_did_not_receive_is_not_a_receipt(self):
+        # The real #364 case: `backgrounded ... (idle — send a prompt to start)`, exit 0.
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, status='idle', cwd=self.cwd)]], drop_prompt=True,
+                      transcripts=[{'session': TARGET, 'old_actions': 3, 'new_action': True}])
+        code, receipt = self.dispatch()
+        self.assertEqual(code, 1)
+        self.assertEqual(receipt['reason'], 'PROMPT_NOT_DELIVERED')
+        self.assertEqual(self.stops(), [TARGET])
+
+    def test_a_new_session_nearby_is_never_adopted(self):
+        # The target is idle and the launch names no copy; another agent's
+        # new background session in the same cwd must not become ours.
+        original = row(TARGET, status='idle', started='OLD', cwd=self.cwd)
+        neighbour = row(COPY, name='claude-reviewer', cwd=self.cwd)
+        self.scenario(all=[original], before=[original], after=[[original, neighbour]],
+                      transcripts=[{'session': COPY, 'new_action': True}])
+        code, receipt = self.dispatch()
+        self.assertEqual(code, 1)
+        self.assertEqual(receipt['reason'], 'SESSION_NOT_STARTED')
+        self.assertIsNone(receipt['actual_session_id'])
+        self.assertEqual(self.stops(), [])
+
+    def test_done_session_is_delivered_only_if_it_acted(self):
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, status='idle', state='done', cwd=self.cwd)]],
+                      transcripts=[{'session': TARGET, 'new_action': True}])
+        code, receipt = self.dispatch()
+        self.assertEqual((code, receipt['result']), (0, 'DELIVERED'))
+        self.reset()
+        for path in (self.config / 'projects').glob('*/*.jsonl'):
+            path.unlink()
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, status='idle', state='done', cwd=self.cwd)]])
+        code, receipt = self.dispatch()
+        self.assertEqual((code, receipt['reason']), (1, 'SESSION_DONE'))
+
+    def test_watch_ignores_a_report_written_before_the_dispatch(self):
+        report = self.home / 'report.md'
+        report.write_text('old round')
+        os.utime(report, (1767225600, 1767225600))  # 2026-01-01
+        (self.home / 'state.json').write_text(json.dumps({'polls': 0, 'launch_ms': 1}))
+        self.scenario(after=[[row(TARGET)]])
+        for extra in ([], ['--since', self.recent()]):
+            with self.subTest(extra=extra):
+                code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+                                             str(report), '--timeout', '1', *extra)
+                self.assertEqual((code, result['reason']), (1, 'REPORT_TIMEOUT'))
+        report.write_text('new round')  # mtime is now
+        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+                                     str(report), '--timeout', '1', '--since', self.recent())
+        self.assertEqual((code, result['result']), (0, 'REPORT_PRESENT'))
 
     def test_transcripts_are_read_from_claude_config_dir_only(self):
         other = self.home / 'other-account'
