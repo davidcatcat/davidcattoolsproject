@@ -136,8 +136,10 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
     def _head(self, **kwargs):
         return verdict_head(self.result_sha, **kwargs)
 
-    def _comment(self, body, *, comment_id=1, at='2026-10-25T10:00:00Z', login='davidcatcat'):
-        return {'id': comment_id, 'user': {'login': login}, 'created_at': at, 'body': body}
+    def _comment(self, body, *, comment_id=1, at='2026-10-25T10:00:00Z', login='davidcatcat',
+                 updated=None):
+        return {'id': comment_id, 'user': {'login': login}, 'created_at': at,
+                'updated_at': at if updated is None else updated, 'body': body}
 
     def _collect(self, comments, reviews=(), **overrides):
         api = self.f._github_response_sequence(self.result_sha, self.pr, list(reviews),
@@ -257,6 +259,26 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         result = self._collect([accept], reviews=older)
         self.assertEqual(result['missing_gates'], [])
         self.assertEqual(result['evidence']['review_source'], 'PR_COMMENT')
+
+    def test_edited_verdict_comment_does_not_accept(self):
+        body = '\n'.join((self._head(), ACCEPT, self.binding))
+        # An earlier FIX later edited into a standard Claude PASS is not accepted.
+        edited = self._comment(body, at='2026-10-25T10:00:00Z', updated='2026-10-25T11:00:00Z')
+        result = self._collect([edited])
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+        self.assertEqual(result['evidence']['formal_review_state'], 'UNVERIFIED')
+        # It is still a disposition: it supersedes an earlier unedited PASS.
+        earlier = self._comment(body, comment_id=0, at='2026-10-25T09:00:00Z')
+        result = self._collect([earlier, edited])
+        self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', result['missing_gates'])
+        # A missing or malformed edit time fails closed.
+        for updated in (None, 'not-a-time'):
+            with self.subTest(updated=updated):
+                comment = self._comment(body)
+                comment['updated_at'] = updated
+                with self.assertRaises(LLMToolError) as caught:
+                    self._collect([comment])
+                self.assertEqual(caught.exception.completion_code, 'REVIEW_EVIDENCE_INVALID')
 
     def test_same_timestamp_review_and_comment_fail_closed(self):
         at = '2026-10-25T10:00:00Z'

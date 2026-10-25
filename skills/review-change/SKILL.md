@@ -34,10 +34,10 @@ satisfy a milestone gate that explicitly requires one of the specialist workflow
 
 If no material issue is found, say so directly and identify any testing or environment gaps that remain.
 
-When this is the formal Reviewer gate on a PR, publish the verdict in the exact
-[formal verdict comment](../ai-team-delivery/formal-verdict.md) format, and only from
-a separate Reviewer context with its own D6 Reviewer record. Developers and the PM
-never post a `type=review_verdict` marker.
+When this is the formal Reviewer gate on a PR, publish the verdict under the
+[Transition record](../ai-team-delivery/pm-continuation.md#transition-record) rule; for an
+llmtool Task closed by `task complete --reviewer-task`, use the
+[formal verdict comment](../ai-team-delivery/formal-verdict.md).
 
 ## Provider and runtime reviews
 

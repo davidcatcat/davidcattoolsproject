@@ -810,15 +810,11 @@ never reads the credential, and `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and proxy 
 are not forwarded. Every agent publishes as the same GitHub account and GitHub refuses
 APPROVE from a PR's own author, so the formal Reviewer may publish its verdict as a PR
 conversation comment instead of a PR review, in the one standard
-[formal verdict comment](../../skills/ai-team-delivery/formal-verdict.md) format. It must be
-posted by the Reviewer D6 record's `github_login` and start with exactly
-`<!-- activity: type=review_verdict actor=Claude|Codex target=PM status=PASS|FIX|FAIL -->`,
-then `Verdict: STATUS | Version: vN | HEAD: RESULT_HEAD`, the binding line
-`LLMTOOL-REVIEW-BINDING v1 task=TASK run=RUN contract=DIGEST head=RESULT_HEAD`, and, only on
-PASS, a line exactly `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT`. Only a Claude PASS in exactly
-this form is accepted; a Codex PASS is advisory and ignored. The latest Reviewer disposition
-wins: a later FIX/FAIL, a later malformed verdict that names the result HEAD, or a later PR
-review supersedes an earlier acceptance. A PR
+[formal verdict comment](../../skills/ai-team-delivery/formal-verdict.md) format, posted by
+the Reviewer D6 record's `github_login`. Only an unedited Claude PASS in exactly that form is
+accepted; a Codex PASS is advisory and ignored. The latest Reviewer disposition wins: any
+other verdict that names the result HEAD (including an edited or malformed one), or a later
+PR review, supersedes an earlier acceptance. A PR
 with 100 or more conversation comments fails closed. The D6 independence, native-session,
 reviewer worktree HEAD and exact-head CI gates are unchanged. Create the separate read-only
 Reviewer worktree at the result HEAD with the optional lifecycle bindings
