@@ -390,19 +390,31 @@ def _bootstrap(root, task_id):
 
 
 def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
-                    lease_ref, branch, base_sha, workspace_root=TASKS_ROOT):
-    """Create, register, lock and bootstrap one task-assigned D6 worktree."""
-    canonical_root = Path(canonical_root).resolve(strict=True)
+                    lease_ref, branch, base_sha, workspace_root=TASKS_ROOT,
+                    github_login=None, native_session_id=None):
+    """Create, register, lock and bootstrap one task-assigned D6 worktree.
+
+    ``github_login`` and ``native_session_id`` are optional bindings that
+    ``task complete`` needs for a Reviewer (and a natively pinned Executor).
+    """
     workspace_root = Path(workspace_root)
     uid = os.getuid()
+    # Pure input checks run before any filesystem access, so a bad value is
+    # D6_TASK_INPUT_INVALID even where the canonical root does not exist.
     if (not TASK_ID_RE.fullmatch(task_id or "") or
             not AGENT_RE.fullmatch(agent_id or "") or
             not session_ref or len(session_ref) > 256 or
             any(ord(ch) < 0x20 for ch in session_ref) or
             not lease_ref or len(lease_ref) > 256 or
             any(ord(ch) < 0x20 for ch in lease_ref) or
-            not re.fullmatch(r"[0-9a-f]{40}", base_sha or "")):
+            not re.fullmatch(r"[0-9a-f]{40}", base_sha or "") or
+            (github_login is not None and
+             not re.fullmatch(r"[A-Za-z0-9-]{1,39}", github_login)) or
+            (native_session_id is not None and
+             (not native_session_id or len(native_session_id) > 256 or
+              any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in native_session_id)))):
         _stop("D6_TASK_INPUT_INVALID")
+    canonical_root = Path(canonical_root).resolve(strict=True)
     if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     if _run_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
@@ -474,6 +486,10 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
                 "lock_state": "UNLOCKED",
                 "disposition": "ACTIVE_TASK",
             }
+            if github_login is not None:
+                record["github_login"] = github_login
+            if native_session_id is not None:
+                record["native_session_id"] = native_session_id
             _atomic_record(record_path, record)
             lock_result = _run_git(canonical_root, "worktree", "lock", str(root),
                                    check=False, timeout=None)
@@ -552,6 +568,8 @@ def _main(argv=None):
     parser.add_argument("--lease-ref")
     parser.add_argument("--branch")
     parser.add_argument("--base-sha")
+    parser.add_argument("--github-login")
+    parser.add_argument("--native-session-id")
     parser.add_argument("--resume-task-id")
     parser.add_argument("--resume-root")
     parser.add_argument("--execute-approved-lifecycle", action="store_true")
@@ -560,9 +578,10 @@ def _main(argv=None):
     try:
         create_values = (args.task_id, args.agent_id, args.session_ref,
                          args.lease_ref, args.branch, args.base_sha)
+        create_options = (args.github_login, args.native_session_id)
         if args.execute_approved_lifecycle:
             if (args.resume_task_id is None or args.resume_root is None or
-                    any(value is not None for value in create_values) or
+                    any(value is not None for value in create_values + create_options) or
                     args.repo_root != str(D6_INTEGRATOR_DISPATCHER_ROOT)):
                 _stop("D6_TASK_INPUT_INVALID")
             return _run_approved_lifecycle(
@@ -572,7 +591,8 @@ def _main(argv=None):
                     "--repo-root", args.repo_root,
                 ])
         if args.resume_task_id is not None:
-            if (args.resume_root is None or any(value is not None for value in create_values)):
+            if (args.resume_root is None or
+                    any(value is not None for value in create_values + create_options)):
                 _stop("D6_TASK_INPUT_INVALID")
             resume_worktree(task_id=args.resume_task_id, root=args.resume_root)
             return 0
@@ -582,6 +602,7 @@ def _main(argv=None):
             canonical_root=args.repo_root, task_id=args.task_id,
             agent_id=args.agent_id, session_ref=args.session_ref,
             lease_ref=args.lease_ref, branch=args.branch, base_sha=args.base_sha,
+            github_login=args.github_login, native_session_id=args.native_session_id,
         )
         return 0
     except LifecycleError as exc:

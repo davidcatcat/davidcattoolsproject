@@ -91,7 +91,7 @@ class TaskCompletionTests(unittest.TestCase):
         return kwargs
 
     def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
-                                  workflow=None, runs=None, jobs=None):
+                                  workflow=None, runs=None, jobs=None, comments=()):
         workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-mac-ci.yml',
                                 'name': 'llmtool Mac CI', 'state': 'active'}
         check_runs = checks['check_runs']
@@ -111,7 +111,7 @@ class TaskCompletionTests(unittest.TestCase):
             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
-        return [pr, reviews, workflow, runs, jobs, checks]
+        return [pr, reviews, list(comments), workflow, runs, jobs, checks]
 
     def _git(self, *args):
         return subprocess.check_output(['/usr/bin/git', *args], cwd=self.root,
@@ -753,22 +753,22 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
         api = self._github_response_sequence(result_sha, {}, [], checks)
-        api[4]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
-        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+        api[5]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
             with self.assertRaises(LLMToolError) as rejected:
                 task_completion._collect_ci_evidence(
                     pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
         for name in ('davidproject-self-action-3', 'davidproject-self-action-2 ', ''):
             api = self._github_response_sequence(result_sha, {}, [], checks)
-            api[4]['jobs'][0]['runner_name'] = name
+            api[5]['jobs'][0]['runner_name'] = name
             with self.subTest(runner=name), \
-                    patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+                    patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
                 with self.assertRaises(LLMToolError):
                     task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
         api = self._github_response_sequence(result_sha, {}, [], checks)
-        api[4]['jobs'][0]['runner_name'] = 'davidproject-self-action-2'
-        with patch('llmtool.task_completion._github_get', side_effect=api[2:]):
+        api[5]['jobs'][0]['runner_name'] = 'davidproject-self-action-2'
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:]):
             second = task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(second['successful_checks'], ['check (macOS 3.13)'])
 
@@ -776,8 +776,8 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': 2, 'name': 'check (3.9)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
         api = self._github_response_sequence(result_sha, {}, [], legacy_checks)
-        api[4]['jobs'][0]['name'] = 'check (3.9)'
-        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+        api[5]['jobs'][0]['name'] = 'check (3.9)'
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
             evidence = task_completion._collect_ci_evidence(
                 pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(evidence['successful_checks'], [])
@@ -827,7 +827,7 @@ class TaskCompletionTests(unittest.TestCase):
                          {'check (macOS 3.13)': 21})
         self.assertEqual(evidence['missing_gates'], [])
         self.assertIn('actions/runs/101/attempts/2/jobs?per_page=100',
-                      github_get.call_args_list[4].args[0])
+                      github_get.call_args_list[5].args[0])
 
     def test_newer_failed_workflow_run_defeats_older_success(self):
         result_sha, _ = self._make_result()
