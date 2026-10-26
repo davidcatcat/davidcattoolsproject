@@ -621,8 +621,11 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertIsNone(task_submission_cli._developer_output_rejection(
             artifact, [new_path], allow_new_files=True))
         self.assertEqual(self._completion_git(self.root, ('write-tree',)), before_index)
+
+        outside, outside_raw = task_completion._worktree_diff(self.root, self.source_sha)
+        self.assertEqual(outside, (new_path,))
         self.assertEqual(task_submission_cli._developer_output_rejection(
-            artifact, ['src.py'], allow_new_files=True), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+            outside_raw.decode('utf-8'), ['src.py']), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
 
         (self.root / new_path).unlink()
         (self.root / new_path).symlink_to(self.root / 'src.py')

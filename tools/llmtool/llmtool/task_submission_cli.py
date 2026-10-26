@@ -677,7 +677,9 @@ def _patch_paths(patch):
         paths.add(path)
         index += 1
 
-        # Accept ordinary tracked metadata or the generated new-file patch.
+        # Accept only ordinary index metadata for tracked files. A newly
+        # created file has the exact no-index shape emitted by our capture
+        # helper; other mode changes remain rejected.
         new_file = (index < len(lines) and lines[index] == 'new file mode 100644')
         if new_file:
             index += 1
@@ -1511,17 +1513,22 @@ def run_task_opencode_delegate(args, *, store):
                 artifact=artifact,
                 artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                 usage=result.usage, error_code=None, execution=execution)
-    except (KeyboardInterrupt, CLIHostTermination) as exc:
-        saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, model=model, result=result)
-        _print_without_masking_interrupt(saved)
-        raise
-    except Exception:
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, CLIHostTermination)):
+            saved = _persist_opencode_interruption(
+                store, task['task_id'], developer, exc, model=model, result=result)
+            _print_without_masking_interrupt(saved)
+            raise
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
             provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
             execution=_direct_execution(result, status='UNKNOWN'))
+        if not isinstance(exc, Exception):
+            try:
+                store.update(task['task_id'], developer=developer)
+            finally:
+                raise
     try:
         saved = store.update(task['task_id'], developer=developer)
     except (KeyboardInterrupt, CLIHostTermination) as exc:

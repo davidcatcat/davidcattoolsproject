@@ -387,7 +387,21 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['changed_paths'], [self.source_path])
         self.assertEqual(result['diff_sha256'], hashlib.sha256(artifact).hexdigest())
 
-    def test_worktree_snapshot_includes_in_scope_new_file_without_index_changes(self):
+    def test_worktree_docs_only_gate_returns_explicit_non_test_record(self):
+        docs = self.root / 'README.md'
+        docs.write_text('Documentation.\n')
+        patch_bytes = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', self.source_sha, '--'], cwd=self.root)
+        digest = hashlib.sha256(patch_bytes).hexdigest()
+        evidence = task_completion.run_bounded_worktree_tests(root=str(self.root),
+            source_sha=self.source_sha, diff_sha256=digest, changed_paths=['README.md'],
+            read_paths=[], write_paths=['README.md'])
+        self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
+        self.assertTrue(evidence[0]['docs_only'])
+        self.assertNotIn('exit_code', evidence[0])
+
+    def test_worktree_snapshot_includes_only_regular_in_scope_new_files(self):
         new_path = 'tools/llmtool/tests/new_fixture.py'
         target = self.root / new_path
         target.write_text('VALUE = 7\n')
@@ -427,25 +441,12 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('commit', '-m', 'add scoped files')
         self.source_sha = self._git('rev-parse', 'HEAD')
         out_path.write_text('VALUE = 3\n')
+
         with self.assertRaises(LLMToolError) as rejected:
             task_completion._worktree_snapshot(
                 root=self.root, source_sha=self.source_sha,
                 read_paths=['in.py'], write_paths=['in.py'])
         self.assertEqual(rejected.exception.completion_code, 'WORKTREE_SCOPE_MISMATCH')
-
-    def test_worktree_docs_only_gate_returns_explicit_non_test_record(self):
-        docs = self.root / 'README.md'
-        docs.write_text('Documentation.\n')
-        patch_bytes = subprocess.check_output(
-            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
-             '--no-renames', self.source_sha, '--'], cwd=self.root)
-        digest = hashlib.sha256(patch_bytes).hexdigest()
-        evidence = task_completion.run_bounded_worktree_tests(root=str(self.root),
-            source_sha=self.source_sha, diff_sha256=digest, changed_paths=['README.md'],
-            read_paths=[], write_paths=['README.md'])
-        self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
-        self.assertTrue(evidence[0]['docs_only'])
-        self.assertNotIn('exit_code', evidence[0])
 
     def test_uncommitted_worktree_rejects_stale_artifact_or_untracked_file(self):
         path = self.root / self.source_path
