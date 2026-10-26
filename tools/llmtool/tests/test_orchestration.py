@@ -33,6 +33,10 @@ class OrchestrationModelTests(unittest.TestCase):
             self.assertTrue(definition.instructions.strip())
         with self.assertRaises(LLMToolError):
             role_definition("claude")
+        for bad_name in (None, 1, b"coder"):
+            with self.assertRaises(LLMToolError):
+                role_definition(bad_name)
+
 
     def test_plan_roundtrip_deterministic_and_frozen(self):
         value = make_plan(("grinder", "fast-local"), ("reviewer", "reasoning-model"))
