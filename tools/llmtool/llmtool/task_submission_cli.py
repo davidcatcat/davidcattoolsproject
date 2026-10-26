@@ -849,6 +849,26 @@ def _validate_codex_call_binding(store, task, developer, completion,
         raise LLMToolError('Codex D6 source binding changed before provider invocation')
 
 
+def _refresh_d6_binding_after_bootstrap(registration, snapshot, *, error_type,
+                                       binding_error_code, marker_error_code):
+    """Accept only ENV-2's refreshed PASS marker for the same D6 source."""
+    try:
+        refreshed, current_snapshot = task_completion.bind_executor_task(
+            registration.task_id, expected_common_dir=registration.common_dir,
+            root=registration.root)
+    except Exception:
+        raise error_type(binding_error_code) from None
+    try:
+        task_completion.validate_env2_pass_marker(
+            refreshed, expected_root=registration.root, current_head=snapshot.head)
+    except Exception:
+        raise error_type(marker_error_code) from None
+    if (dataclasses.replace(refreshed, env2_pass_marker=registration.env2_pass_marker) !=
+            registration or current_snapshot != snapshot):
+        raise error_type(binding_error_code)
+    return refreshed
+
+
 def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
                                acceptance, pm_goal):
     packet = {
@@ -1226,6 +1246,10 @@ def run_task_opencode_delegate(args, *, store):
             raise opencode_direct_developer.DirectOpenCodeError(
                 'OPENCODE_D6_BINDING_CHANGED') from None
         _bootstrap_registered_d6(registration)
+        registration = _refresh_d6_binding_after_bootstrap(
+            registration, snapshot, error_type=opencode_direct_developer.DirectOpenCodeError,
+            binding_error_code='OPENCODE_D6_BINDING_CHANGED',
+            marker_error_code='OPENCODE_ENV2_MARKER_INVALID')
 
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
@@ -1521,21 +1545,10 @@ def run_task_codex_delegate(args, *, store):
         # binding read before it is stale. Re-read it once: only the marker may
         # change, and it must be a PASS for this exact root and HEAD. Every
         # later check compares against this refreshed binding.
-        try:
-            refreshed, current_snapshot = task_completion.bind_executor_task(
-                registration.task_id, expected_common_dir=registration.common_dir,
-                root=registration.root)
-        except Exception:
-            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED') from None
-        try:
-            task_completion.validate_env2_pass_marker(
-                refreshed, expected_root=registration.root, current_head=snapshot.head)
-        except Exception:
-            raise codex_direct_developer.DirectCodexError('CODEX_ENV2_MARKER_INVALID') from None
-        if (dataclasses.replace(refreshed, env2_pass_marker=registration.env2_pass_marker) !=
-                registration or current_snapshot != snapshot):
-            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED')
-        registration = refreshed
+        registration = _refresh_d6_binding_after_bootstrap(
+            registration, snapshot, error_type=codex_direct_developer.DirectCodexError,
+            binding_error_code='CODEX_D6_BINDING_CHANGED',
+            marker_error_code='CODEX_ENV2_MARKER_INVALID')
         try:
             ignored_before = _ignored_file_fingerprints(registration.root)
         except Exception:
