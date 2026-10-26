@@ -140,6 +140,20 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertEqual(unchanged, raw)
         self.assertEqual(unchanged_tokens, ())
 
+    def test_source_anchor_accepts_git_diff_index_line_unchanged(self):
+        raw = (f'diff --git a/{self.PATH} b/{self.PATH}\n'
+               'index b2a825b..a287024 100644\n'
+               f'--- a/{self.PATH}\n+++ b/{self.PATH}\n'
+               '@@ -1 +1 @@\n-old\n+new\n')
+        anchored, tokens = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: 'old\n'})
+        self.assertEqual(anchored, raw)
+        self.assertEqual(tokens, ())
+        accepted, _, rejection = _developer_normalized_output(
+            raw, [self.PATH], source_files={self.PATH: 'old\n'})
+        self.assertEqual(accepted, raw)
+        self.assertIsNone(rejection)
+
     def test_source_anchor_preserves_and_accepts_missing_final_newline(self):
         raw = (self.HEADER + '@@ -1 +1 @@\n-old\n+new\n')
         anchored, tokens = reanchor_developer_output(
@@ -163,7 +177,7 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
             with self.subTest(source=source):
                 anchored, tokens = reanchor_developer_output(
                     raw, [self.PATH], {self.PATH: source})
-                self.assertEqual(anchored, raw)
+                self.assertIsNone(anchored)
                 self.assertEqual(tokens, ())
                 self.assertEqual(_developer_normalized_output(
                     raw, [self.PATH], source_files={self.PATH: source})[2],

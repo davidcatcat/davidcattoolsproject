@@ -2121,9 +2121,17 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         system = submission_cli._developer_prompt(
             task, source_sha='d' * 40, read_paths=['example.py'], write_paths=['example.py'],
             acceptance=['ok'], context='', pm_goal='g')[0]['content']
+        user = submission_cli._developer_prompt(
+            task, source_sha='d' * 40, read_paths=['example.py'], write_paths=['example.py'],
+            acceptance=['ok'], context='provided source text', pm_goal='g')[1]['content']
         example = system.split('Exact format example:\n', 1)[1]
         example = example[:example.index('Every hunk header')]
         self.assertIsNone(submission_cli._developer_output_rejection(example, ['example.py']))
+        packet, context = user.split(TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
+        self.assertNotIn('provided source text', packet)
+        self.assertIn('no tools, cannot read files, and all needed file content is provided below.',
+                      context)
+        self.assertTrue(context.endswith('Return only the unified diff starting with "diff --git".'))
 
 
 class ModeMetadataRejectionTests(unittest.TestCase):

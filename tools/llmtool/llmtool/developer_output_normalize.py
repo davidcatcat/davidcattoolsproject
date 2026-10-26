@@ -12,6 +12,7 @@ _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
 _FILE_OLD = re.compile(r'^--- a/([^\r\n]+)$')
 _FILE_NEW = re.compile(r'^\+\+\+ b/([^\r\n]+)$')
 _HUNK = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$')
+_INDEX = re.compile(r'^index [0-9a-f]+\.\.[0-9a-f]+(?: (?:100644|100755))?$')
 _UNSAFE = re.compile(
     r'^(?:old mode |new mode |new file mode |deleted file mode |'
     r'rename from |rename to |copy from |copy to |GIT binary patch|'
@@ -167,43 +168,50 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
         return (text, tokens, valid) if return_valid else (text, tokens)
 
     if type(value) is not str or type(source_files) is not dict:
-        return result(value, (), False)
+        return result(None, (), False)
     lines = value.splitlines()
     expected = set(write_paths)
     starts = [i for i, line in enumerate(lines) if line.startswith('diff --git ')]
     if not starts:
-        return result(value, (), False)
+        return result(None, (), False)
     sections = [lines[start:(starts[index + 1] if index + 1 < len(starts) else len(lines))]
                 for index, start in enumerate(starts)]
     regenerated = []
     for section in sections:
         if len(section) < 3:
-            return result(value, (), False)
+            return result(None, (), False)
         header = _DIFF_HEADER.fullmatch(section[0])
-        old_header = _FILE_OLD.fullmatch(section[1])
-        new_header = _FILE_NEW.fullmatch(section[2])
+        file_header_index = 1
+        if len(section) > 1 and section[1].startswith('index '):
+            if _INDEX.fullmatch(section[1]) is None:
+                return result(None, (), False)
+            file_header_index = 2
+        if len(section) <= file_header_index + 1:
+            return result(None, (), False)
+        old_header = _FILE_OLD.fullmatch(section[file_header_index])
+        new_header = _FILE_NEW.fullmatch(section[file_header_index + 1])
         if (header is None or old_header is None or new_header is None or
                 header.groups() != (old_header.group(1), new_header.group(1)) or
                 old_header.group(1) != new_header.group(1)):
-            return result(value, (), False)
+            return result(None, (), False)
         path = old_header.group(1)
         if path not in expected or path not in source_files:
-            return result(value, (), False)
+            return result(None, (), False)
         try:
             source_text = source_files[path]
             if type(source_text) is not str or '\r' in source_text:
-                return result(value, (), False)
+                return result(None, (), False)
             source_has_final_newline = source_text.endswith('\n')
             source = source_text.splitlines()
         except (UnicodeError, AttributeError):
-            return result(value, (), False)
+            return result(None, (), False)
 
         edits = []
-        i = 3
+        i = file_header_index + 2
         while i < len(section):
             hunk = _HUNK.fullmatch(section[i])
             if hunk is None:
-                return result(value, (), False)
+                return result(None, (), False)
             i += 1
             body = []
             while i < len(section) and not section[i].startswith('@@ '):
@@ -212,7 +220,7 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                 if section[i] == r'\ No newline at end of file':
                     # Git places this marker after the affected old/new line.
                     if not body or not body[-1].startswith((' ', '-', '+')):
-                        return result(value, (), False)
+                        return result(None, (), False)
                     body.append(section[i])
                     i += 1
                     continue
@@ -221,11 +229,11 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
             old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
             new_side = [line[1:] for line in body if line.startswith((' ', '+'))]
             if not old_side or not any(line.startswith(('+', '-')) for line in body):
-                return result(value, (), False)
+                return result(None, (), False)
             matches = [index for index in range(len(source) - len(old_side) + 1)
                        if source[index:index + len(old_side)] == old_side]
             if len(matches) != 1:
-                return result(value, (), False)
+                return result(None, (), False)
             start = matches[0]
             # Reconstruct the target slice by replaying the model's operations
             # against the matched source, preserving every model +/- line.
@@ -242,24 +250,28 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                 elif line.startswith('+'):
                     target.append(line[1:])
                 else:
-                    return result(value, (), False)
+                    return result(None, (), False)
             edits.append((start, cursor, target))
         if not edits:
-            return result(value, (), False)
+            return result(None, (), False)
         modified = list(source)
         previous_end = len(source) + 1
         for start, end, target in reversed(edits):
             if end > previous_end:
-                return result(value, (), False)
+                return result(None, (), False)
             modified[start:end] = target
             previous_end = start
         diff_lines = list(difflib.unified_diff(
             source, modified, fromfile='', tofile='', n=3, lineterm=''))
         hunks = [line for line in diff_lines if line.startswith('@@ ')]
         if not hunks:
-            return result(value, (), False)
-        regenerated.extend([f'diff --git a/{path} b/{path}',
-                            f'--- a/{path}', f'+++ b/{path}'])
+            return result(None, (), False)
+        regenerated.append(f'diff --git a/{path} b/{path}')
+        if file_header_index == 2:
+            # Keep Git's standard index metadata byte-for-byte. Regeneration
+            # changes hunk context only; the modeled +/- content is preserved.
+            regenerated.append(section[1])
+        regenerated.extend([f'--- a/{path}', f'+++ b/{path}'])
         # The first two lines from unified_diff are empty-path file headers.
         body = diff_lines[2:]
         # difflib omits Git's EOF markers. A text patch must preserve the

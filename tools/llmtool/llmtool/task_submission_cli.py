@@ -935,8 +935,10 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
         'files. Do not include credentials, secrets, private data, or prose outside the diff.'
     )
     user = (json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':')) +
-            TEXT_DEVELOPER_CONTEXT_SEPARATOR + 'Context:\n' + context +
-            '\nReturn only the unified diff, starting with "diff --git".')
+            TEXT_DEVELOPER_CONTEXT_SEPARATOR +
+            'The model has no tools, cannot read files, and all needed file content is provided below.\n'
+            'Context:\n' + context +
+            '\nReturn only the unified diff starting with "diff --git".')
     return [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
 
 
