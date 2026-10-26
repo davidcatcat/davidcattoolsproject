@@ -34,6 +34,9 @@ MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_OUTPUT_TOKENS = 2048
+DEFAULT_AGENT_STEPS = 12
+MIN_AGENT_STEPS = 3
+MAX_AGENT_STEPS = 50
 MAX_SOURCE_FILE_BYTES = 256 * 1024
 MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
 MAX_VERSION_OUTPUT_BYTES = 4096
@@ -293,9 +296,17 @@ def _screen_sources(root, read_paths):
     return total, len(entries), hashlib.sha256(encoded).hexdigest(), entries
 
 
-def configuration(*, read_paths, write_paths, model=MODEL):
+def _validate_steps(steps):
+    if type(steps) is not int or not MIN_AGENT_STEPS <= steps <= MAX_AGENT_STEPS:
+        _reject('OPENCODE_STEPS_INVALID')
+    return steps
+
+
+def configuration(*, read_paths, write_paths, model=MODEL,
+                   steps=DEFAULT_AGENT_STEPS):
     """Return the exact task permission envelope consumed by OpenCode V2."""
     selected = validate_model(model)
+    steps = _validate_steps(steps)
     rules = [{'action': '*', 'resource': '*', 'effect': 'deny'}]
     rules.extend({'action': 'read', 'resource': path, 'effect': 'allow'}
                  for path in read_paths)
@@ -325,7 +336,7 @@ def configuration(*, read_paths, write_paths, model=MODEL):
         ],
         'agents': {
             # Read then edit need two tool-capable rounds before the final summary.
-            AGENT: {'mode': 'primary', 'model': selected, 'steps': 3,
+            AGENT: {'mode': 'primary', 'model': selected, 'steps': steps,
                     'permissions': rules},
             'title': {'disabled': True},
             'summary': {'disabled': True},
@@ -380,8 +391,9 @@ def _await_exit_without_reap(process, *, deadline):
         _reject('OPENCODE_TIMEOUT')
 
 
-def parse_json_events(raw):
+def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
     """Validate OpenCode's newline-delimited JSON output; never infer success from prose."""
+    step_limit = _validate_steps(step_limit)
     if type(raw) is not bytes or not raw or len(raw) > MAX_OUTPUT_BYTES:
         _reject('OPENCODE_OUTPUT_INVALID')
     try:
@@ -435,12 +447,15 @@ def parse_json_events(raw):
                 usage_known = False
     if sid is None:
         _reject('OPENCODE_OUTPUT_INCOMPLETE')
+    output_text = ''.join(text)
+    if not output_text and step_finishes >= step_limit:
+        _reject('OPENCODE_STEPS_EXHAUSTED')
     usage = (None if not usage_known or step_finishes == 0 else {
         'prompt_tokens': input_tokens,
         'completion_tokens': output_tokens,
         'total_tokens': input_tokens + output_tokens,
     })
-    return sid, ''.join(text) or None, usage
+    return sid, output_text or None, usage
 
 
 def _version(executable):
@@ -501,7 +516,8 @@ def _version(executable):
 
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
-        timeout_seconds=MAX_WALL_CLOCK_SECONDS, executable=None, model=MODEL):
+        timeout_seconds=MAX_WALL_CLOCK_SECONDS, executable=None, model=MODEL,
+        steps=DEFAULT_AGENT_STEPS):
     """Invoke one bounded OpenCode run in the existing D6 task worktree."""
     validate_model(model)
     root = Path(root).resolve(strict=True)
@@ -526,7 +542,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     if (current_manifest_sha256 != source_manifest_sha256 or
             current_manifest != source_manifest):
         _reject('OPENCODE_SOURCE_CHANGED')
-    config = configuration(read_paths=read_paths, write_paths=write_paths, model=model)
+    config = configuration(read_paths=read_paths, write_paths=write_paths,
+                           model=model, steps=steps)
     config_text = json.dumps(config, ensure_ascii=True, sort_keys=True,
                              separators=(',', ':'), allow_nan=False)
     started = time.monotonic()
@@ -710,7 +727,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   started_at=started_at, ended_at=ended_at,
                                   native_session_id=_observed_native_session(raw))
     try:
-        session_id, text, usage = parse_json_events(raw)
+        session_id, text, usage = parse_json_events(raw, step_limit=steps)
     except DirectOpenCodeError as exc:
         exc.attempted = True
         exc.cleanup_status = cleanup

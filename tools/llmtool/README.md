@@ -742,6 +742,7 @@ For `task delegate --provider opencode`, llmtool accepts any well-formed `openco
 CLI version and records it; the strict JSON event parsing still rejects incompatible output.
 The model is `opencode/deepseek-v4.1-flash-free` unless an optional `opencode-developer`
 profile sets `model`; only an `opencode/<name>-free` model is accepted, never a paid fallback.
+The OpenCode agent step limit defaults to 12 and can be set with the profile's integer `provider_options.steps` value from 3 to 50.
 
 For a direct OpenCode Developer task, the CLI now emits a completion event when the
 bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,

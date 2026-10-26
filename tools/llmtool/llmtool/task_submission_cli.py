@@ -849,6 +849,26 @@ def _validate_codex_call_binding(store, task, developer, completion,
         raise LLMToolError('Codex D6 source binding changed before provider invocation')
 
 
+def _refresh_d6_binding_after_bootstrap(registration, snapshot, *, error_type,
+                                       binding_error_code, marker_error_code):
+    """Accept only ENV-2's refreshed PASS marker for the same D6 source."""
+    try:
+        refreshed, current_snapshot = task_completion.bind_executor_task(
+            registration.task_id, expected_common_dir=registration.common_dir,
+            root=registration.root)
+    except Exception:
+        raise error_type(binding_error_code) from None
+    try:
+        task_completion.validate_env2_pass_marker(
+            refreshed, expected_root=registration.root, current_head=snapshot.head)
+    except Exception:
+        raise error_type(marker_error_code) from None
+    if (dataclasses.replace(refreshed, env2_pass_marker=registration.env2_pass_marker) !=
+            registration or current_snapshot != snapshot):
+        raise error_type(binding_error_code)
+    return refreshed
+
+
 def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
                                acceptance, pm_goal):
     packet = {
@@ -1097,8 +1117,8 @@ def _print_task_without_masking_interrupt(store, task_id):
         pass
 
 
-def _opencode_developer_model():
-    """Return the optional opencode-developer profile model, else the default."""
+def _opencode_developer_profile():
+    """Return the optional OpenCode model and validated agent step limit."""
     try:
         yaml_module()
     except LLMToolError:
@@ -1109,14 +1129,25 @@ def _opencode_developer_model():
         profile = resolve_profile_config('opencode-developer', require_configured=False)
     except LLMToolError as exc:
         if str(exc) == 'requested provider profile is not defined':
-            return opencode_direct_developer.MODEL
+            return (opencode_direct_developer.MODEL,
+                    opencode_direct_developer.DEFAULT_AGENT_STEPS)
         raise LLMToolError('opencode-developer profile is invalid in the llmtool '
                            'user config (~/.config/llmtool/config.yaml)') from None
-    model = selected_provider(profile)['model']
-    if model is None:
-        return opencode_direct_developer.MODEL
+    provider = selected_provider(profile)
+    options = provider.get('provider_options', {})
+    if type(options) is not dict:
+        raise LLMToolError('opencode-developer profile provider_options must be a mapping')
+    steps = options.get('steps', opencode_direct_developer.DEFAULT_AGENT_STEPS)
     try:
-        return opencode_direct_developer.validate_model(model)
+        steps = opencode_direct_developer._validate_steps(steps)
+    except opencode_direct_developer.DirectOpenCodeError:
+        raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 50') \
+            from None
+    model = provider['model']
+    if model is None:
+        model = opencode_direct_developer.MODEL
+    try:
+        return opencode_direct_developer.validate_model(model), steps
     except opencode_direct_developer.DirectOpenCodeError:
         raise LLMToolError('opencode-developer profile model must be an '
                            'opencode/<name>-free model') from None
@@ -1157,7 +1188,7 @@ def run_task_opencode_delegate(args, *, store):
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
-    model = _opencode_developer_model()
+    model, steps = _opencode_developer_profile()
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
@@ -1226,11 +1257,15 @@ def run_task_opencode_delegate(args, *, store):
             raise opencode_direct_developer.DirectOpenCodeError(
                 'OPENCODE_D6_BINDING_CHANGED') from None
         _bootstrap_registered_d6(registration)
+        registration = _refresh_d6_binding_after_bootstrap(
+            registration, snapshot, error_type=opencode_direct_developer.DirectOpenCodeError,
+            binding_error_code='OPENCODE_D6_BINDING_CHANGED',
+            marker_error_code='OPENCODE_ENV2_MARKER_INVALID')
 
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
-            dispatch_store=store, dispatch_task_id=task['task_id'],
+            dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model)
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
@@ -1526,21 +1561,10 @@ def run_task_codex_delegate(args, *, store):
         # binding read before it is stale. Re-read it once: only the marker may
         # change, and it must be a PASS for this exact root and HEAD. Every
         # later check compares against this refreshed binding.
-        try:
-            refreshed, current_snapshot = task_completion.bind_executor_task(
-                registration.task_id, expected_common_dir=registration.common_dir,
-                root=registration.root)
-        except Exception:
-            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED') from None
-        try:
-            task_completion.validate_env2_pass_marker(
-                refreshed, expected_root=registration.root, current_head=snapshot.head)
-        except Exception:
-            raise codex_direct_developer.DirectCodexError('CODEX_ENV2_MARKER_INVALID') from None
-        if (dataclasses.replace(refreshed, env2_pass_marker=registration.env2_pass_marker) !=
-                registration or current_snapshot != snapshot):
-            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED')
-        registration = refreshed
+        registration = _refresh_d6_binding_after_bootstrap(
+            registration, snapshot, error_type=codex_direct_developer.DirectCodexError,
+            binding_error_code='CODEX_D6_BINDING_CHANGED',
+            marker_error_code='CODEX_ENV2_MARKER_INVALID')
         try:
             ignored_before = _ignored_file_fingerprints(registration.root)
         except Exception:
