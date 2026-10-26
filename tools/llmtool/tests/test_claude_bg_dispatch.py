@@ -186,9 +186,10 @@ class ClaudeBgDispatchTests(unittest.TestCase):
             code = dispatch_tool._main(argv)
         return code, json.loads(out.getvalue())
 
-    def dispatch(self, session=TARGET, *, name='claude-developer', task='executor-task'):
+    def dispatch(self, session=TARGET, *, name='claude-developer', task='executor-task', timeout='1'):
         return self.run_tool('dispatch', '--session', session, '--name', name,
-                             '--task-id', task, '--prompt', 'Task Contract: do the work')
+                             '--task-id', task, '--prompt', 'Task Contract: do the work',
+                             timeout=timeout)
 
     def test_busy_with_new_action_is_delivered_and_old_history_is_ignored(self):
         self.scenario(
@@ -220,6 +221,46 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(os.path.realpath(launch['cwd']), os.path.realpath(self.cwd))
         self.assertEqual(self.stops(), [])
 
+    def test_working_null_then_busy_with_new_action_is_delivered_without_stop(self):
+        self.scenario(
+            all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+            after=[[row(TARGET, status=None, state='working', cwd=self.cwd)],
+                   [row(TARGET, status='busy', state='working', cwd=self.cwd)]],
+            transcripts=[{'session': TARGET, 'new_action': True}])
+        code, receipt = self.dispatch()
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt['result'], 'DELIVERED')
+        self.assertEqual(receipt['first_action']['tool'], 'Bash')
+        self.assertEqual(receipt['status'], 'busy')
+        self.assertEqual(receipt['state'], 'working')
+        self.assertEqual(self.stops(), [])
+
+    def test_working_null_until_timeout_is_not_delivered(self):
+        self.scenario(
+            all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+            after=[[row(TARGET, status=None, state='working', cwd=self.cwd)]],
+            transcripts=[{'session': TARGET, 'new_action': False}])
+        code, receipt = self.dispatch(timeout='1')
+        self.assertEqual(code, 1)
+        self.assertEqual(receipt['result'], 'NOT_DELIVERED')
+        self.assertIn('TIMEOUT', receipt['reason'])
+        self.assertEqual(receipt['status'], None)
+        self.assertEqual(receipt['state'], 'working')
+        self.assertEqual(self.stops(), [])
+
+    def test_working_null_with_action_at_timeout_is_delivered_without_stop(self):
+        self.scenario(
+            all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+            after=[[row(TARGET, status=None, state='working', cwd=self.cwd)]],
+            transcripts=[{'session': TARGET, 'new_action': True}])
+        code, receipt = self.dispatch(timeout='1')
+        self.assertEqual(code, 0, receipt)
+        self.assertEqual(receipt['result'], 'DELIVERED')
+        self.assertEqual(receipt['first_action']['tool'], 'Bash')
+        self.assertEqual(receipt['status'], None)
+        self.assertEqual(receipt['state'], 'working')
+        self.assertEqual(self.stops(), [])
+
     def test_only_resumed_history_is_not_a_receipt(self):
         self.scenario(
             all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
@@ -230,7 +271,7 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(receipt['result'], 'NOT_DELIVERED')
         self.assertEqual(receipt['reason'], 'NO_NEW_ACTION')
         self.assertIsNone(receipt['first_action'])
-        self.assertEqual(self.stops(), [TARGET])
+        self.assertEqual(self.stops(), [])
 
     def test_short_id_resolves_to_the_full_uuid(self):
         self.scenario(
