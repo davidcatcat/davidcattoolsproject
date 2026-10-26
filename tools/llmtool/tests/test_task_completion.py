@@ -253,10 +253,8 @@ class TaskCompletionTests(unittest.TestCase):
             self.assertEqual(bootstrap_root, task_root)
             self.assertEqual(bootstrap_task_id, self.task_id)
             current = d6_worktree_lifecycle._read_registry_record(registry_path)
-            current['env2_pass_marker'] = {
-                **current['env2_pass_marker'], 'submitted_head_sha': result_sha,
-                'current_head_sha': result_sha,
-            }
+            self._write_env2_marker(current, task_root, submitted_head=result_sha,
+                                    current_head=result_sha)
             d6_worktree_lifecycle._replace_record(registry_path, current)
 
         with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
