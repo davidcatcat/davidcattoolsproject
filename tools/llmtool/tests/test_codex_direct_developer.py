@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -5,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -230,17 +232,27 @@ class CodexDirectDeveloperTests(unittest.TestCase):
 
     def test_codex_delegate_binds_reported_thread_id_to_executor_record(self):
         task_id = 'a' * 32
-        registration = SimpleNamespace(task_id='executor-task',
+        registration_type = dataclasses.make_dataclass('Registration', (
+            'task_id trusted_agent_id session_ref native_session_id root common_dir '
+            'branch source_sha result_sha').split())
+        registration = registration_type(task_id='executor-task',
             trusted_agent_id='codex-developer', session_ref='direct Codex session',
             native_session_id=None, root=str(self.root), common_dir=str(self.root / '.git'),
-            branch='task/branch', source_sha='b' * 40)
+            branch='task/branch', source_sha='b' * 40, result_sha='b' * 40)
+        bound_registration = dataclasses.replace(
+            registration, native_session_id=self.THREAD)
         snapshot = SimpleNamespace(root=str(self.root), common_dir=registration.common_dir,
             branch=registration.branch, head='b' * 40)
-        task = {'schema_version': 2, 'task_id': task_id, 'run_id': 'c' * 32,
-            'state': 'PM_RESPONDED', 'response': 'PM response', 'developer': None,
-            'request': 'bounded request', 'task_binding': {'contract_digest': 'd' * 64},
-            'pm_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': 'selected goal',
-                              'acceptance': ['works']}}
+        request = 'bounded request'
+        task = task_submission_cli._record(
+            task_id, 'c' * 32, 'pm-session', 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(response='PM response',
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'selected goal', 'acceptance': ['works']})
 
         class Store:
             def __init__(self):
@@ -274,7 +286,6 @@ class CodexDirectDeveloperTests(unittest.TestCase):
              patch.object(task_submission_cli, '_codex_developer_profile',
                           return_value=({'type': 'codex-cli', 'model': 'gpt-6-luna'}, 'high')), \
              patch.object(task_submission_cli, '_codex_direct_prompt', return_value='bounded'), \
-             patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, '_bootstrap_registered_d6'), \
              patch.object(task_submission_cli, '_refresh_d6_binding_after_bootstrap',
                           return_value=registration), \
@@ -284,7 +295,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
              patch.object(task_submission_cli, '_bind_codex_native_session',
                           return_value='BOUND') as bind, \
              patch.object(task_submission_cli.task_completion, 'read_d6_registration',
-                          return_value=registration), \
+                          side_effect=[registration, bound_registration]), \
              patch.object(task_submission_cli.task_completion, '_git', return_value=b''), \
              patch.object(task_submission_cli, '_ignored_output_rejection', return_value=None), \
              patch.object(task_submission_cli, '_developer_output_rejection', return_value=None), \
@@ -295,6 +306,10 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(store.value['developer']['execution']['native_session_binding'], 'BOUND')
         self.assertEqual(store.value['completion']['evidence']['executor_native_session_id'],
                          self.THREAD)
+        self.assertEqual(store.value['developer']['direct_result_callback']['evidence'][
+            'executor_native_session_id'], self.THREAD)
+        self.assertEqual(store.value['developer']['direct_result_callback']['evidence'][
+            'executor_native_session'], 'VERIFIED')
 
     def test_normal_d6_binds_using_pinned_lifecycle_file(self):
         dispatcher = self.root.resolve() / 'dispatcher'

@@ -1695,8 +1695,16 @@ def run_task_codex_delegate(args, *, store):
             execution['native_session_binding'] = _bind_codex_native_session(
                 registration, result.thread_id)
             if execution['native_session_binding'] == 'BOUND':
-                completion['evidence']['executor_native_session_id'] = result.thread_id
-                completion['evidence']['executor_native_session'] = 'VERIFIED'
+                bound_registration = task_completion.read_d6_registration(
+                    registration.task_id, registration.common_dir)
+                if bound_registration != dataclasses.replace(
+                        registration, native_session_id=result.thread_id):
+                    raise LLMToolError('Codex native session binding did not refresh D6 registration')
+                registration = bound_registration
+                for evidence in (completion['evidence'],
+                                 developer['direct_result_callback']['evidence']):
+                    evidence['executor_native_session_id'] = registration.native_session_id
+                    evidence['executor_native_session'] = 'VERIFIED'
         ignored_rejection = _ignored_output_rejection(registration.root, ignored_before)
         untracked = task_completion._git(registration.root,
             ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
