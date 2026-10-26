@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import time
+import unicodedata
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -107,6 +108,10 @@ _DEVELOPER_EXTENSION_SHAPES = tuple(
     for extension in (frozenset(('normalizations',)),
                       frozenset(('rejected_output_capture',)),
                       frozenset(('normalizations', 'rejected_output_capture')))
+)
+_DEVELOPER_BLOCKED_REASON_SHAPES = tuple(
+    shape | frozenset(('blocked_reason',))
+    for shape in (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
 )
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
@@ -590,7 +595,8 @@ def _validate(record):
             _fail()
         developer = record['developer']
         if developer is not None:
-            assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
+            assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+                                 *_DEVELOPER_BLOCKED_REASON_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
@@ -772,6 +778,20 @@ def _validate(record):
                     re.fullmatch(r'[A-Z0-9_]{1,64}', developer['error_code']) is None):
                 _fail()
             dev_state = developer['state']
+            if 'blocked_reason' in developer:
+                reason = developer['blocked_reason']
+                execution = developer.get('execution')
+                if (developer['provider_profile'] != 'codex' or
+                        developer['state'] != 'DEVELOPER_OUTCOME_UNKNOWN' or
+                        developer['error_code'] != 'CODEX_BLOCKED' or
+                        type(execution) is not dict or execution.get('status') != 'BLOCKED' or
+                        type(reason) is not str or
+                        len(reason.encode('utf-8')) > 2048 or
+                        any((ord(char) < 32 and char not in '\t\n\r') or
+                            127 <= ord(char) <= 159 or
+                            unicodedata.category(char) == 'Cf'
+                            for char in reason) or _emitted_sensitive(reason)):
+                    _fail()
             expected_provider = {
                 'company-gw': 'openai-compatible',
                 'codex': 'codex-cli',
