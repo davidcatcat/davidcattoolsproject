@@ -767,7 +767,7 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
     if source_files is not None:
         anchored, anchor_tokens = reanchor_developer_output(
             normalized, write_paths, source_files)
-        if anchored == normalized or not anchor_tokens:
+        if not anchor_tokens:
             return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
         anchored_rejection = _strict_developer_output_rejection(anchored, write_paths)
         if anchored_rejection is not None:
@@ -930,7 +930,7 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
     user = (json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':')) +
             '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n'
             'Context:\n' + context +
-            '\nReturn only the unified diff starting with diff --git.')
+            '\nReturn only the unified diff, starting with "diff --git".')
     return [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
 
 
@@ -2129,7 +2129,7 @@ def run_task_delegate(args, *, store=None):
         return 1
     anchored, anchor_tokens = reanchor_developer_output(
         artifact, write_paths, source_files)
-    if anchored == artifact or not anchor_tokens:
+    if not anchor_tokens:
         saved = _persist_developer_output_rejection(
             store, task['task_id'], developer, 'DEVELOPER_OUTPUT_INVALID_DIFF',
             usage, result.content)

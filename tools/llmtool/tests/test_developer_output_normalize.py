@@ -128,6 +128,14 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertIn('+added four', anchored)
         self.assertIsNone(_developer_output_rejection(anchored, [self.PATH]))
 
+    def test_source_anchor_accepts_already_anchored_patch(self):
+        raw = (self.HEADER + '@@ -1 +1 @@\n-old\n+new\n')
+        anchored, tokens, rejection = _developer_normalized_output(
+            raw, [self.PATH], source_files={self.PATH: 'old\n'})
+        self.assertEqual(anchored, raw)
+        self.assertEqual(tokens, ('HUNK_COUNTS_RECOUNTED', 'HUNK_REANCHORED'))
+        self.assertIsNone(rejection)
+
     def test_source_anchor_rejects_invented_or_ambiguous_old_side(self):
         invented = (self.HEADER + '@@ -1 +1 @@\n-invented\n+replacement\n')
         ambiguous = (self.HEADER + '@@ -1 +1 @@\n-same\n+replacement\n')
