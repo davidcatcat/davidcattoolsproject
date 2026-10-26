@@ -23,6 +23,10 @@ def events(*messages):
     return '\n'.join(json.dumps(record) for record in records).encode('utf-8')
 
 
+def event_stream(*records):
+    return '\n'.join(json.dumps(record) for record in records).encode('utf-8')
+
+
 class CodexDirectEventsTests(unittest.TestCase):
     def test_last_agent_message_is_used_after_interim_message(self):
         raw = events('Working through the change.', json.dumps(FINAL))
@@ -59,6 +63,38 @@ class CodexDirectEventsTests(unittest.TestCase):
 
         self.assertEqual(caught.exception.direct_codex_code,
                          'CODEX_FINAL_MESSAGE_INVALID')
+
+    def test_result_usage_includes_valid_cached_and_reasoning_counts(self):
+        raw = event_stream(
+            {'type': 'thread.started', 'thread_id': THREAD_ID},
+            {'type': 'turn.completed', 'usage': {
+                'input_tokens': 10, 'output_tokens': 4,
+                'cached_input_tokens': 3, 'reasoning_output_tokens': 2}},
+            {'type': 'turn.completed', 'usage': {
+                'input_tokens': 12, 'output_tokens': 5,
+                'cached_input_tokens': True, 'reasoning_output_tokens': -1}},
+            {'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': json.dumps(FINAL)}},
+        )
+
+        _, _, usage = direct._result_from_events(raw)
+
+        self.assertEqual(usage, {
+            'prompt_tokens': 12, 'completion_tokens': 5, 'total_tokens': 17})
+
+    def test_timeout_usage_includes_valid_cached_and_reasoning_counts(self):
+        raw = event_stream(
+            {'type': 'turn.completed', 'usage': {
+                'input_tokens': 10, 'output_tokens': 4,
+                'cached_input_tokens': -1, 'reasoning_output_tokens': False}},
+            {'type': 'turn.completed', 'usage': {
+                'input_tokens': 12, 'output_tokens': 5,
+                'cached_input_tokens': 7, 'reasoning_output_tokens': 3}},
+        )
+
+        self.assertEqual(direct._usage_from_events(raw), {
+            'prompt_tokens': 12, 'completion_tokens': 5, 'total_tokens': 17,
+            'cached_prompt_tokens': 7, 'reasoning_tokens': 3})
 
 
 if __name__ == '__main__':

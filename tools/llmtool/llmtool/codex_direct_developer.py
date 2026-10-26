@@ -153,6 +153,12 @@ def _result_from_events(raw):
                         usage = {'prompt_tokens': prompt_tokens,
                                  'completion_tokens': completion_tokens,
                                  'total_tokens': prompt_tokens + completion_tokens}
+                        cached_tokens = candidate.get('cached_input_tokens')
+                        if type(cached_tokens) is int and cached_tokens >= 0:
+                            usage['cached_prompt_tokens'] = cached_tokens
+                        reasoning_tokens = candidate.get('reasoning_output_tokens')
+                        if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+                            usage['reasoning_tokens'] = reasoning_tokens
     except DirectCodexError:
         raise
     except (UnicodeError, ValueError, RecursionError):
@@ -206,6 +212,12 @@ def _usage_from_events(raw):
                 usage = {'prompt_tokens': prompt_tokens,
                          'completion_tokens': completion_tokens,
                          'total_tokens': prompt_tokens + completion_tokens}
+                cached_tokens = candidate.get('cached_input_tokens')
+                if type(cached_tokens) is int and cached_tokens >= 0:
+                    usage['cached_prompt_tokens'] = cached_tokens
+                reasoning_tokens = candidate.get('reasoning_output_tokens')
+                if type(reasoning_tokens) is int and reasoning_tokens >= 0:
+                    usage['reasoning_tokens'] = reasoning_tokens
     except (UnicodeError, ValueError, RecursionError):
         return usage
     return usage

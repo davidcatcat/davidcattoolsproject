@@ -81,7 +81,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         result = self.run_fake()
         self.assertEqual((result.status, result.thread_id), ('DONE', self.THREAD))
         self.assertEqual(result.usage, {'prompt_tokens': 13, 'completion_tokens': 8,
-                                        'total_tokens': 21})
+                                        'total_tokens': 21,
+                                        'cached_prompt_tokens': 2})
         self.assertTrue(self.invoked.exists())
         argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
                             pycache_prefix='/tmp/codex-direct-cache')
@@ -209,7 +210,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_TIMEOUT')
         self.assertEqual(caught.exception.native_session_id, self.THREAD)
         self.assertEqual(caught.exception.usage, {
-            'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21})
+            'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21,
+            'cached_prompt_tokens': 2})
         self.assertRegex(caught.exception.stdout_sha256, r'^[0-9a-f]{64}$')
 
     def test_paused_dispatch_is_refused_before_codex_launch(self):
