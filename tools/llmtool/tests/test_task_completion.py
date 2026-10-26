@@ -68,7 +68,8 @@ class TaskCompletionTests(unittest.TestCase):
         (self.root / 'tools' / 'llmtool' / '.gitignore').write_text(
             '/.d6-bootstrap-report.json\n')
         source.write_text('import unittest\nclass Fixture(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n')
-        self._git('add', self.source_path, 'tools/llmtool/.gitignore')
+        (self.root / 'README.md').write_text('Repository fixture.\n')
+        self._git('add', self.source_path, 'tools/llmtool/.gitignore', 'README.md')
         self._git('commit', '-m', 'source')
         self.source_sha = self._git('rev-parse', 'HEAD')
         self.common = str(self.root / '.git')
@@ -181,6 +182,22 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result_sha, patch_text
 
+    def _make_path_result(self, path, content):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding='utf-8')
+        self._git('add', path)
+        self._git('commit', '-m', 'executor path result')
+        result_sha = self._git('rev-parse', 'HEAD')
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        return result_sha
+
     def test_advanced_registered_base_completes_from_dispatch_source(self):
         path = self.root / self.source_path
         path.write_text(path.read_text() + '\n# approved branch progress\n')
@@ -284,7 +301,7 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['result_head'], result_sha)
         self.assertEqual(result['changed_paths'], [self.source_path])
         tests = task_completion.run_bounded_tests(
-            root=str(self.root), result_sha=result_sha, read_paths=[self.source_path],
+            root=str(self.root), source_sha=self.source_sha, result_sha=result_sha, read_paths=[self.source_path],
             write_paths=[self.source_path])
         self.assertEqual(tests[0]['exit_code'], 0)
         self.assertEqual(tests[0]['source_sha'], result_sha)
@@ -369,6 +386,20 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['source_sha'], self.source_sha)
         self.assertEqual(result['changed_paths'], [self.source_path])
         self.assertEqual(result['diff_sha256'], hashlib.sha256(artifact).hexdigest())
+
+    def test_worktree_docs_only_gate_returns_explicit_non_test_record(self):
+        docs = self.root / 'README.md'
+        docs.write_text('Documentation.\n')
+        patch_bytes = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', self.source_sha, '--'], cwd=self.root)
+        digest = hashlib.sha256(patch_bytes).hexdigest()
+        evidence = task_completion.run_bounded_worktree_tests(root=str(self.root),
+            source_sha=self.source_sha, diff_sha256=digest, changed_paths=['README.md'],
+            read_paths=[], write_paths=['README.md'])
+        self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
+        self.assertTrue(evidence[0]['docs_only'])
+        self.assertNotIn('exit_code', evidence[0])
 
     def test_uncommitted_worktree_rejects_stale_artifact_or_untracked_file(self):
         path = self.root / self.source_path
@@ -598,9 +629,71 @@ class TaskCompletionTests(unittest.TestCase):
     def test_failed_test_subprocess_is_recorded_with_nonzero_status(self):
         result_sha, _ = self._make_result(code='    def test_fail(self): self.fail("expected")\n')
         evidence = task_completion.run_bounded_tests(
-            root=str(self.root), result_sha=result_sha, read_paths=[self.source_path],
+            root=str(self.root), source_sha=self.source_sha, result_sha=result_sha, read_paths=[self.source_path],
             write_paths=[self.source_path])
         self.assertNotEqual(evidence[0]['exit_code'], 0)
+        self.assertEqual(evidence[0]['status'], 'FAILED')
+        self.assertIsInstance(evidence[0]['output_excerpt'], list)
+
+    def test_registered_scripts_run_isolated_and_failure_is_evidenced(self):
+        path = 'scripts/test_fixture.py'
+        script = ('import unittest\n'
+                  'class Fixture(unittest.TestCase):\n'
+                  '    def test_fail(self): self.fail("expected failure")\n'
+                  'if __name__ == "__main__": unittest.main()\n')
+        result_sha = self._make_path_result(path, script)
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), source_sha=self.source_sha, result_sha=result_sha, read_paths=[path], write_paths=[])
+        self.assertEqual(evidence[0]['path'], path)
+        self.assertEqual(evidence[0]['status'], 'FAILED')
+        self.assertNotEqual(evidence[0]['exit_code'], 0)
+        self.assertTrue(evidence[0]['output_excerpt'])
+        self.assertTrue(all('expected failure' in item['text']
+                            for item in evidence[0]['output_excerpt']))
+
+    def test_out_of_registry_task_path_does_not_add_a_test_entry(self):
+        result_sha = self._make_path_result('docs/guide.md', 'Documentation.\n')
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), source_sha=self.source_sha, result_sha=result_sha,
+            read_paths=['scripts/anything_else.py'], write_paths=[])
+        self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
+        self.assertEqual(evidence[0]['changed_paths'], ['docs/guide.md'])
+
+    def test_docs_only_gate_uses_actual_git_paths(self):
+        result_sha = self._make_path_result('docs/guide.md', 'Documentation.\n')
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), source_sha=self.source_sha, result_sha=result_sha,
+            read_paths=['tools/llmtool/tests/test_fixture.py'], write_paths=[])
+        self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
+
+    def test_multi_commit_result_is_not_misclassified_as_docs_only(self):
+        code_path = 'tools/llmtool/llmtool/x.py'
+        (self.root / 'tools' / 'llmtool' / 'llmtool').mkdir(parents=True)
+        (self.root / code_path).write_text('VALUE = 1\n')
+        self._git('add', code_path)
+        self._git('commit', '-m', 'code change')
+        (self.root / 'README.md').write_text('Documentation.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'docs change')
+        result_sha = self._git('rev-parse', 'HEAD')
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.run_bounded_tests(root=str(self.root), source_sha=self.source_sha,
+                result_sha=result_sha, read_paths=[], write_paths=[])
+        self.assertEqual(raised.exception.completion_code, 'TEST_SCOPE_MISSING')
+
+    def test_mixed_docs_and_code_without_registered_test_stays_missing(self):
+        (self.root / 'docs').mkdir()
+        (self.root / 'docs' / 'guide.md').write_text('Documentation.\n')
+        (self.root / 'src').mkdir()
+        (self.root / 'src' / 'module.py').write_text('VALUE = 1\n')
+        self._git('add', 'docs/guide.md', 'src/module.py')
+        self._git('commit', '-m', 'mixed result')
+        result_sha = self._git('rev-parse', 'HEAD')
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.run_bounded_tests(
+                root=str(self.root), source_sha=self.source_sha, result_sha=result_sha,
+                read_paths=[], write_paths=[])
+        self.assertEqual(raised.exception.completion_code, 'TEST_SCOPE_MISSING')
 
     def test_github_review_requires_d6_actor_session_and_live_exact_head(self):
         result_sha, _ = self._make_result()
