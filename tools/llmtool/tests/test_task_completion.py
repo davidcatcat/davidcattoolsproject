@@ -68,7 +68,8 @@ class TaskCompletionTests(unittest.TestCase):
         (self.root / 'tools' / 'llmtool' / '.gitignore').write_text(
             '/.d6-bootstrap-report.json\n')
         source.write_text('import unittest\nclass Fixture(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n')
-        self._git('add', self.source_path, 'tools/llmtool/.gitignore')
+        (self.root / 'README.md').write_text('Repository fixture.\n')
+        self._git('add', self.source_path, 'tools/llmtool/.gitignore', 'README.md')
         self._git('commit', '-m', 'source')
         self.source_sha = self._git('rev-parse', 'HEAD')
         self.common = str(self.root / '.git')
@@ -387,16 +388,15 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['diff_sha256'], hashlib.sha256(artifact).hexdigest())
 
     def test_worktree_docs_only_gate_returns_explicit_non_test_record(self):
-        docs = self.root / 'docs' / 'guide.md'
-        docs.parent.mkdir()
+        docs = self.root / 'README.md'
         docs.write_text('Documentation.\n')
         patch_bytes = subprocess.check_output(
             ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
              '--no-renames', self.source_sha, '--'], cwd=self.root)
         digest = hashlib.sha256(patch_bytes).hexdigest()
         evidence = task_completion.run_bounded_worktree_tests(root=str(self.root),
-            source_sha=self.source_sha, diff_sha256=digest, changed_paths=['docs/guide.md'],
-            read_paths=[], write_paths=['docs/guide.md'])
+            source_sha=self.source_sha, diff_sha256=digest, changed_paths=['README.md'],
+            read_paths=[], write_paths=['README.md'])
         self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
         self.assertTrue(evidence[0]['docs_only'])
         self.assertNotIn('exit_code', evidence[0])
@@ -667,8 +667,8 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
 
     def test_multi_commit_result_is_not_misclassified_as_docs_only(self):
-        code_path = 'src/module.py'
-        (self.root / 'src').mkdir()
+        code_path = 'tools/llmtool/llmtool/x.py'
+        (self.root / 'tools' / 'llmtool' / 'llmtool').mkdir(parents=True)
         (self.root / code_path).write_text('VALUE = 1\n')
         self._git('add', code_path)
         self._git('commit', '-m', 'code change')
