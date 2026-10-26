@@ -68,6 +68,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
         policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
         policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated route checks'
+        policy['workers']['company-gw']['dispatch'] = 'ALLOWED'
+        policy['workers']['company-gw']['reason'] = 'test fixture allows isolated route checks'
         self.policy_path = Path(self.temp.name).resolve() / 'worker-dispatch.json'
         self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
         policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
@@ -632,7 +634,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
     def test_record_pm_accepts_codex_low_risk_and_refuses_other_routes_or_risk(self):
         for route, risk, expected in (
                 ('codex', 'LOW', True), ('opencode', 'LOW', True),
-                ('company-gw', 'LOW', False), ('none', 'LOW', False),
+                ('company-gw', 'LOW', True), ('none', 'LOW', False),
                 ('codex', 'OTHER', False)):
             with self.subTest(route=route, risk=risk):
                 response = json.dumps({
@@ -1458,7 +1460,24 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(saved['developer']['usage'])
 
     def test_company_gw_patch_is_persisted_with_separate_logical_session_and_usage(self):
-        task = self._pm_task_with_assignment()
+        acceptance = ['new test passes']
+        pm_response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded low-risk task.',
+            'developer_assignment': {
+                'route': 'company-gw', 'risk': 'LOW',
+                'goal': 'Add one focused test.', 'acceptance': acceptance,
+            },
+        })
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(run_task_record_pm(
+                Namespace(stdin_json=True), store=store,
+                input_stream=io.StringIO(json.dumps({
+                    'request': 'Implement one small test change.',
+                    'response': pm_response,
+                }))), 0)
+        task = store.get(next(store.root.glob('*.json')).stem)
         target = 'tools/llmtool/tests/test_task_submission_cli.py'
         patch_text = (f'diff --git a/{target} b/{target}\n'
                       f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-old\n+new\n')
@@ -1473,7 +1492,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
-            code = run_task_delegate(args)
+            code = run_task_delegate(args, store=store)
         self.assertEqual(code, 0, output.getvalue())
         result = json.loads(output.getvalue())
         developer = result['developer']

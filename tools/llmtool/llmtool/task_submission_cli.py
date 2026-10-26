@@ -228,7 +228,7 @@ def _read_pm_record_input(stream=None):
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
     assignment = _pm_assignment(response)
-    if (assignment is None or assignment['route'] not in ('opencode', 'codex') or
+    if (assignment is None or assignment['route'] not in ('company-gw', 'opencode', 'codex') or
             assignment['risk'] != 'LOW'):
         raise LLMToolError('PM response must recommend one low-risk OpenCode or Codex assignment')
     return request, response, assignment
@@ -1898,13 +1898,12 @@ def run_task_delegate(args, *, store=None):
     if task['developer'] is not None:
         # A pending or ambiguous provider call is never replayed.
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
-    if args.provider == 'codex':
-        binding = task.get('task_binding')
-        contract_digest = (binding.get('contract_digest')
-                           if type(binding) is dict else None)
-        task_completion.validate_task_binding(
-            stored_binding=binding, task_id=task.get('task_id'),
-            run_id=task.get('run_id'), contract_digest=contract_digest)
+    binding = task.get('task_binding')
+    contract_digest = (binding.get('contract_digest')
+                       if type(binding) is dict else None)
+    task_completion.validate_task_binding(
+        stored_binding=binding, task_id=task.get('task_id'),
+        run_id=task.get('run_id'), contract_digest=contract_digest)
     pm_assignment = task['pm_assignment']
     if args.selection_source == 'PM':
         if (type(pm_assignment) is not dict or pm_assignment.get('route') != args.provider or

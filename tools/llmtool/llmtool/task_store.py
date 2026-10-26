@@ -583,7 +583,7 @@ def _validate(record):
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
                     type(assignment) is not dict or
-                    assignment.get('route') not in ('opencode', 'codex') or
+                    assignment.get('route') not in ('company-gw', 'opencode', 'codex') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {
