@@ -1117,8 +1117,8 @@ def _print_task_without_masking_interrupt(store, task_id):
         pass
 
 
-def _opencode_developer_model():
-    """Return the optional opencode-developer profile model, else the default."""
+def _opencode_developer_profile():
+    """Return the optional OpenCode model and validated agent step limit."""
     try:
         yaml_module()
     except LLMToolError:
@@ -1129,14 +1129,25 @@ def _opencode_developer_model():
         profile = resolve_profile_config('opencode-developer', require_configured=False)
     except LLMToolError as exc:
         if str(exc) == 'requested provider profile is not defined':
-            return opencode_direct_developer.MODEL
+            return (opencode_direct_developer.MODEL,
+                    opencode_direct_developer.DEFAULT_AGENT_STEPS)
         raise LLMToolError('opencode-developer profile is invalid in the llmtool '
                            'user config (~/.config/llmtool/config.yaml)') from None
-    model = selected_provider(profile)['model']
-    if model is None:
-        return opencode_direct_developer.MODEL
+    provider = selected_provider(profile)
+    options = provider.get('provider_options', {})
+    if type(options) is not dict:
+        raise LLMToolError('opencode-developer profile provider_options must be a mapping')
+    steps = options.get('steps', opencode_direct_developer.DEFAULT_AGENT_STEPS)
     try:
-        return opencode_direct_developer.validate_model(model)
+        steps = opencode_direct_developer._validate_steps(steps)
+    except opencode_direct_developer.DirectOpenCodeError:
+        raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 50') \
+            from None
+    model = provider['model']
+    if model is None:
+        model = opencode_direct_developer.MODEL
+    try:
+        return opencode_direct_developer.validate_model(model), steps
     except opencode_direct_developer.DirectOpenCodeError:
         raise LLMToolError('opencode-developer profile model must be an '
                            'opencode/<name>-free model') from None
@@ -1177,7 +1188,7 @@ def run_task_opencode_delegate(args, *, store):
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
-    model = _opencode_developer_model()
+    model, steps = _opencode_developer_profile()
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
@@ -1254,7 +1265,7 @@ def run_task_opencode_delegate(args, *, store):
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
-            dispatch_store=store, dispatch_task_id=task['task_id'],
+            dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model)
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:

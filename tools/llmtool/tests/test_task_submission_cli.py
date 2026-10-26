@@ -756,18 +756,22 @@ class TaskSubmissionCLITests(unittest.TestCase):
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
 
-    def _write_opencode_developer_model(self, model):
+    def _write_opencode_developer_model(self, model, *, steps=None):
         config = self.home / '.config/llmtool/config.yaml'
         config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text('providers:\n  opencode-developer:\n    model: ' + model + '\n')
+        text = 'providers:\n  opencode-developer:\n    model: ' + model + '\n'
+        if steps is not None:
+            text += '    provider_options:\n      steps: ' + str(steps) + '\n'
+        config.write_text(text)
 
     def test_opencode_developer_profile_free_model_is_used_and_recorded(self):
         task = self._pm_task_with_opencode_assignment()
-        self._write_opencode_developer_model('opencode/other-model-free')
+        self._write_opencode_developer_model('opencode/other-model-free', steps=24)
         output = io.StringIO()
 
         def execute(**kwargs):
             self.assertEqual(kwargs['model'], 'opencode/other-model-free')
+            self.assertEqual(kwargs['steps'], 24)
             (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
             return DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
                 'UNKNOWN', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.1.4',
@@ -781,6 +785,19 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(invoke.call_count, 1)
         developer = json.loads(output.getvalue())['developer']
         self.assertEqual(developer['model'], 'opencode/other-model-free')
+
+    def test_opencode_developer_profile_steps_default_configured_and_invalid(self):
+        with patch.dict(os.environ, {'HOME': str(self.home)}):
+            self._write_opencode_developer_model('opencode/other-model-free')
+            self.assertEqual(submission_cli._opencode_developer_profile(),
+                             ('opencode/other-model-free', 12))
+            self._write_opencode_developer_model('opencode/other-model-free', steps=24)
+            self.assertEqual(submission_cli._opencode_developer_profile(),
+                             ('opencode/other-model-free', 24))
+            self._write_opencode_developer_model('opencode/other-model-free', steps=51)
+            with self.assertRaisesRegex(LLMToolError,
+                                        'steps must be an integer from 3 to 50'):
+                submission_cli._opencode_developer_profile()
 
     def test_opencode_developer_profile_non_free_model_is_refused_before_claim(self):
         task = self._pm_task_with_opencode_assignment()
