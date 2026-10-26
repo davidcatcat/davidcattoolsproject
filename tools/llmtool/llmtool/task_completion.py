@@ -806,7 +806,7 @@ def _git(root, args, *, limit=_GIT_LIMIT):
         'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_ATTR_NOSYSTEM': '1',
         'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
         'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat', 'PAGER': 'cat',
-        'GIT_LITERAL_PATHSPECS': '1',
+        'GIT_LITERAL_PATHSPECS': '1', 'TMPDIR': '/tmp',
     }
     safe = ('-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
             '-c', 'core.untrackedCache=false', '-c', 'core.attributesFile=/dev/null',
@@ -1319,7 +1319,10 @@ def _test_excerpt(home, output, code):
     """Return only bounded excerpts accepted by the sensitive-output screener."""
     if not code:
         return None
-    capture = Path(home) / 'test-output.log'
+    # macOS may expose temporary directories through a /var symlink. Resolve
+    # the trusted TemporaryDirectory path before the excerpt reader's strict
+    # no-follow walk, which intentionally rejects symlinked components.
+    capture = Path(home).resolve(strict=True) / 'test-output.log'
     capture.write_bytes(output)
     try:
         selected = select_test_excerpts(str(capture), code)
@@ -1334,7 +1337,7 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
         env = {'PATH': os.path.dirname(sys.executable) + ':/usr/bin:/bin',
                'LC_ALL': 'C', 'HOME': home,
                'PYTHONPATH': str(Path(root) / 'tools' / 'llmtool'),
-               'PYTHONDONTWRITEBYTECODE': '1'}
+               'PYTHONDONTWRITEBYTECODE': '1', 'TMPDIR': home}
         if pycache is not None:
             env['PYTHONPYCACHEPREFIX'] = pycache
         if kind == 'unittest':
@@ -1403,11 +1406,11 @@ def run_bounded_tests(*, root, result_sha, read_paths, write_paths):
     if before.head != result_sha or not before.clean:
         _stop('TEST_SOURCE_MISMATCH')
     changed_paths = _committed_changed_paths(root, result_sha)
-    if not eligible:
-        if not _docs_only(changed_paths):
-            _stop('TEST_SCOPE_MISSING')
+    if _docs_only(changed_paths):
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': changed_paths,
                  'source_sha': result_sha}]
+    if not eligible:
+        _stop('TEST_SCOPE_MISSING')
     evidence = []
     with tempfile.TemporaryDirectory(prefix='llmtool-task-tests-') as home:
         evidence = _run_registered_tests(root, result_sha, eligible, home=home)
@@ -1428,14 +1431,14 @@ def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
     if (before['diff_sha256'] != diff_sha256 or
             before['changed_paths'] != changed_paths):
         _stop('TEST_SOURCE_MISMATCH')
-    eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
-                       if _registered_test(p) is not None})
-    if not eligible:
-        if not _docs_only(before['changed_paths']):
-            _stop('TEST_SCOPE_MISSING')
+    if _docs_only(before['changed_paths']):
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY',
                  'changed_paths': before['changed_paths'], 'source_sha': source_sha,
                  'diff_sha256': diff_sha256}]
+    eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
+                       if _registered_test(p) is not None})
+    if not eligible:
+        _stop('TEST_SCOPE_MISSING')
     with tempfile.TemporaryDirectory(prefix='llmtool-task-worktree-tests-') as home, \
             tempfile.TemporaryDirectory(prefix='llmtool-task-python-cache-') as pycache:
         evidence = _run_registered_tests(root, source_sha, eligible,
