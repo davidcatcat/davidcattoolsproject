@@ -701,6 +701,93 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_RO
         os.close(lock_fd)
 
 
+def bind_native_session(*, task_id, native_session_id, canonical_root,
+                        workspace_root=TASKS_ROOT):
+    """Bind a native session to a registered D6 task exactly once."""
+    if (not TASK_ID_RE.fullmatch(task_id or "") or
+            not isinstance(native_session_id, str) or not native_session_id or
+            len(native_session_id) > 256 or
+            any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in native_session_id)):
+        _stop("D6_BIND_NATIVE_SESSION_INPUT_INVALID")
+    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+        _stop("D6_BIND_NATIVE_SESSION_WORKSPACE_INVALID")
+    try:
+        canonical_root = Path(canonical_root).resolve(strict=True)
+        workspace_root = Path(os.path.realpath(workspace_root))
+    except (OSError, TypeError):
+        _stop("D6_BIND_NATIVE_SESSION_ROOT_MISMATCH")
+    if (_task_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() !=
+            str(canonical_root)):
+        _stop("D6_BIND_NATIVE_SESSION_CANONICAL_ROOT")
+    common_dir = Path(_task_git(canonical_root, "rev-parse", "--path-format=absolute",
+                                "--git-common-dir").stdout.strip())
+    if (not common_dir.is_absolute() or common_dir.name != ".git" or
+            Path(os.path.realpath(common_dir)) != common_dir):
+        _stop("D6_BIND_NATIVE_SESSION_COMMON_DIR_MISMATCH")
+    registry = common_dir / "llmtool-worktrees"
+    _safe_dir(registry, mode=0o700, uid=os.getuid())
+    try:
+        lock_fd = os.open(registry / ".lifecycle.lock",
+                          os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        lock_info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or
+                stat.S_IMODE(lock_info.st_mode) != 0o600 or lock_info.st_nlink != 1):
+            os.close(lock_fd)
+            _stop("D6_REGISTRY_LOCK_INVALID")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except LifecycleError:
+        raise
+    except OSError:
+        _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
+    try:
+        record_path = registry / (task_id + ".json")
+        if not os.path.lexists(record_path):
+            _stop("D6_BIND_NATIVE_SESSION_UNKNOWN_TASK")
+        record = _read_registry_record(record_path)
+        if record.get("task_id") != task_id:
+            _stop("D6_BIND_NATIVE_SESSION_UNKNOWN_TASK")
+        if record.get("state") in ("RETAIN_BLOCKED", "REMOVED"):
+            _stop("D6_BIND_NATIVE_SESSION_STATE_REFUSED")
+        if record.get("state") not in ("ACTIVE", "REPAIR") or record.get("lock_state") != "LOCKED":
+            _stop("D6_BIND_NATIVE_SESSION_STATE_REFUSED")
+        try:
+            root = Path(record.get("root_realpath")).resolve(strict=True)
+            root_info = root.lstat()
+        except (OSError, TypeError):
+            _stop("D6_BIND_NATIVE_SESSION_ROOT_MISMATCH")
+        registered_identity = record.get("physical_identity")
+        if (str(root) != record.get("root_realpath") or root.parent != workspace_root or
+                type(registered_identity) is not dict or
+                (root_info.st_dev, root_info.st_ino, root_info.st_uid) !=
+                (registered_identity.get("device"), registered_identity.get("inode"),
+                 registered_identity.get("uid")) or
+                root_info.st_uid != os.getuid() or not stat.S_ISDIR(root_info.st_mode) or
+                stat.S_IMODE(root_info.st_mode) != 0o700 or
+                registered_identity.get("mode") != "0o700"):
+            _stop("D6_BIND_NATIVE_SESSION_ROOT_MISMATCH")
+        if record.get("git_common_dir") != str(common_dir):
+            _stop("D6_BIND_NATIVE_SESSION_COMMON_DIR_MISMATCH")
+        if (_task_git(root, "rev-parse", "--show-toplevel").stdout.strip() != str(root) or
+                _task_git(root, "rev-parse", "--path-format=absolute",
+                          "--git-common-dir").stdout.strip() != str(common_dir)):
+            _stop("D6_BIND_NATIVE_SESSION_ROOT_MISMATCH")
+        branch = record.get("branch")
+        if (type(branch) is not str or not _valid_branch(canonical_root, branch) or
+                _task_git(root, "branch", "--show-current").stdout.strip() != branch):
+            _stop("D6_BIND_NATIVE_SESSION_BRANCH_MISMATCH")
+        current = record.get("native_session_id")
+        if current not in (None, "UNKNOWN"):
+            _stop("D6_BIND_NATIVE_SESSION_ALREADY_SET")
+        updated = dict(record)
+        updated["native_session_id"] = native_session_id
+        _replace_record(record_path, updated)
+        print("D6_NATIVE_SESSION_BOUND task_id=" + task_id)
+        return native_session_id
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 # Retire accepts only records the PM can still act on; REVIEW_PENDING,
 # RETAIN_BLOCKED, REMOVED and hand-written states are kept for a human.
 RETIRE_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
@@ -1379,6 +1466,7 @@ def _main(argv=None):
     parser.add_argument("--resume-root")
     parser.add_argument("--record-result-task-id",
                         help="record this clean committed descendant HEAD for the current D6 root")
+    parser.add_argument("--bind-native-session-task-id")
     parser.add_argument("--execute-approved-lifecycle", action="store_true")
     parser.add_argument("--retire-task-id", action="append",
                         help="plan retirement of this task (repeatable); dry run by default")
@@ -1400,6 +1488,19 @@ def _main(argv=None):
         create_values = (args.task_id, args.agent_id, args.session_ref,
                          args.lease_ref, args.branch, args.base_sha)
         create_options = (args.github_login, args.native_session_id)
+        if args.bind_native_session_task_id is not None:
+            if (any(value is not None for value in create_values) or
+                    args.github_login is not None or
+                    args.native_session_id is None or args.resume_task_id is not None or
+                    args.resume_root is not None or args.record_result_task_id is not None or
+                    args.retire_task_id is not None or args.execute_approved_lifecycle or
+                    args.execute_approved_retire or args.squash_evidence or
+                    args.discard_uncommitted or args.retain_blocked_evidence):
+                _stop("D6_TASK_INPUT_INVALID")
+            bind_native_session(task_id=args.bind_native_session_task_id,
+                                native_session_id=args.native_session_id,
+                                canonical_root=args.repo_root)
+            return 0
         if args.record_result_task_id is not None:
             if (any(value is not None for value in create_values + create_options) or
                     args.resume_task_id is not None or args.resume_root is not None or

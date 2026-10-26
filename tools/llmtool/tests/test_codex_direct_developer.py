@@ -4,6 +4,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import codex_direct_developer as direct
@@ -224,6 +225,74 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                           side_effect=LLMToolError('missing')):
             with self.assertRaisesRegex(LLMToolError, 'codex-developer profile is missing'):
                 task_submission_cli._codex_developer_profile()
+
+    def test_codex_delegate_binds_reported_thread_id_to_executor_record(self):
+        task_id = 'a' * 32
+        registration = SimpleNamespace(task_id='executor-task',
+            trusted_agent_id='codex-developer', session_ref='direct Codex session',
+            native_session_id=None, root=str(self.root), common_dir=str(self.root / '.git'),
+            branch='task/branch', source_sha='b' * 40)
+        snapshot = SimpleNamespace(root=str(self.root), common_dir=registration.common_dir,
+            branch=registration.branch, head='b' * 40)
+        task = {'schema_version': 2, 'task_id': task_id, 'run_id': 'c' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'developer': None,
+            'request': 'bounded request', 'task_binding': {'contract_digest': 'd' * 64},
+            'pm_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': 'selected goal',
+                              'acceptance': ['works']}}
+
+        class Store:
+            def __init__(self):
+                self.value = dict(task)
+
+            def get(self, _task_id):
+                return self.value
+
+            def compare_and_update(self, _task_id, expected, **changes):
+                self.value.update(changes)
+                return self.value
+
+            def update(self, _task_id, **changes):
+                self.value.update(changes)
+                return self.value
+
+        store = Store()
+        args = SimpleNamespace(task_id=task_id, context_stdin=False,
+            selection_source='PM', acceptance=['works'], executor_task='executor-task',
+            read_path=['src.py'], write_path=['src.py'], egress_basis='bounded local code')
+        direct_result = SimpleNamespace(status='DONE', thread_id=self.THREAD, exit_code=0,
+            stdout_sha256='e' * 64, elapsed_ms=10, cleanup_status='CONFIRMED', usage=None,
+            blocked_reason=None)
+        with patch.object(task_submission_cli.task_completion, 'validate_task_binding'), \
+             patch.object(task_submission_cli.task_completion, 'collect_git_snapshot',
+                          return_value=snapshot), \
+             patch.object(task_submission_cli.task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])), \
+             patch.object(task_submission_cli, '_codex_developer_profile',
+                          return_value=({'type': 'codex-cli', 'model': 'gpt-6-luna'}, 'high')), \
+             patch.object(task_submission_cli, '_codex_direct_prompt', return_value='bounded'), \
+             patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
+             patch.object(task_submission_cli, '_bootstrap_registered_d6'), \
+             patch.object(task_submission_cli, '_refresh_d6_binding_after_bootstrap',
+                          return_value=registration), \
+             patch.object(task_submission_cli, '_ignored_file_fingerprints', return_value={}), \
+             patch.object(task_submission_cli.codex_direct_developer, 'run',
+                          return_value=direct_result), \
+             patch.object(task_submission_cli, '_bind_codex_native_session',
+                          return_value='BOUND') as bind, \
+             patch.object(task_submission_cli.task_completion, 'read_d6_registration',
+                          return_value=registration), \
+             patch.object(task_submission_cli.task_completion, '_git', return_value=b''), \
+             patch.object(task_submission_cli, '_ignored_output_rejection', return_value=None), \
+             patch.object(task_submission_cli, '_developer_output_rejection', return_value=None), \
+             patch.object(task_submission_cli, 'run_task_direct_result_event', return_value=0):
+            result = task_submission_cli.run_task_codex_delegate(args, store=store)
+        self.assertEqual(result, 0)
+        bind.assert_called_once_with(registration, self.THREAD)
+        self.assertEqual(store.value['developer']['execution']['native_session_binding'], 'BOUND')
+        self.assertEqual(store.value['completion']['evidence']['executor_native_session_id'],
+                         self.THREAD)
 
     def test_out_of_allowlist_diff_gets_typed_rejection(self):
         diff = ('diff --git a/private.py b/private.py\n'

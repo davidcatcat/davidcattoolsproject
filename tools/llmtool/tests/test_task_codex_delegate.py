@@ -212,6 +212,7 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertIn('VALUE = 2', saved['developer']['artifact'])
+        self.assertTrue(saved['developer']['execution']['native_session_binding'])
         callback.assert_called_once()
 
     def test_new_ignored_bytecode_is_typed_output_rejection(self):

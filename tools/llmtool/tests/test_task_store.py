@@ -156,7 +156,7 @@ class TaskStoreTests(unittest.TestCase):
             'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
             'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
             'source_bytes': None, 'source_file_count': None,
-            'source_manifest_sha256': None}
+            'source_manifest_sha256': None, 'native_session_binding': 'BOUND'}
         responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
             'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
             'execution': execution,
@@ -165,6 +165,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['execution']['status'], 'DONE')
         self.assertEqual(saved['developer']['execution']['native_session_id'],
                          execution['native_session_id'])
+        self.assertEqual(saved['developer']['execution']['native_session_binding'], 'BOUND')
         self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
 
     def test_codex_blocked_and_timeout_outcomes_persist_reported_usage(self):

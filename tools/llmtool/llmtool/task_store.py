@@ -119,6 +119,9 @@ _DIRECT_EXECUTION_FIELDS = frozenset((
     'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
     'source_file_count', 'source_manifest_sha256',
 ))
+_DIRECT_EXECUTION_BINDING_FIELDS = _DIRECT_EXECUTION_FIELDS | frozenset((
+    'native_session_binding',
+))
 _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
     'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
@@ -680,7 +683,13 @@ def _validate(record):
                 if execution is not None:
                     if (developer['provider_profile'] not in ('opencode', 'codex') or
                             type(execution) is not dict or
-                            set(execution) != _DIRECT_EXECUTION_FIELDS or
+                            set(execution) not in (
+                                _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS) or
+                            ('native_session_binding' in execution and
+                             (developer['provider_profile'] != 'codex' or
+                              type(execution['native_session_binding']) is not str or
+                              re.fullmatch(r'[A-Z0-9_]{1,64}',
+                                           execution['native_session_binding']) is None)) or
                             execution['status'] not in (
                                 ('SUCCEEDED', 'FAILED', 'UNKNOWN')
                                 if developer['provider_profile'] == 'opencode' else

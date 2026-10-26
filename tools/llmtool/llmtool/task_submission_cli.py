@@ -1060,6 +1060,41 @@ def _bootstrap_registered_d6(registration):
             'ENV_BOOTSTRAP_REJECTED')
 
 
+def _bind_codex_native_session(registration, native_session_id):
+    """Ask the pinned D6 lifecycle entry to bind Codex's reported thread id."""
+    if type(native_session_id) is not str or not native_session_id:
+        return 'D6_BIND_NATIVE_SESSION_INPUT_INVALID'
+    lifecycle_rel = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
+    try:
+        dispatcher_root, lifecycle_source = _trusted_d6_helper_source(
+            registration, source_rel=lifecycle_rel)
+        env = {
+            'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+            'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'LANG': 'C',
+            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+            'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
+            'GIT_NO_LAZY_FETCH': '1', 'GIT_TERMINAL_PROMPT': '0',
+        }
+        result = subprocess.run(
+            [sys.executable, '-B', '-I', '-c', lifecycle_source.decode('utf-8'),
+             '--bind-native-session-task-id', registration.task_id,
+             '--native-session-id', native_session_id],
+            cwd=dispatcher_root, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'
+    except (UnicodeDecodeError, ValueError):
+        return 'D6_BIND_NATIVE_SESSION_HELPER_UNTRUSTED'
+    if result.returncode == 0:
+        return 'BOUND'
+    match = re.search(rb'D6 lifecycle rejected \(([A-Z0-9_]{1,64})\)', result.stderr)
+    if match:
+        return match.group(1).decode('ascii')
+    return 'D6_BIND_NATIVE_SESSION_REFUSED'
+
+
 def _interrupted_execution(exc):
     """Return only adapter-observed process evidence after an interrupt."""
     observed = getattr(exc, '_llmtool_direct_opencode_execution', None)
@@ -1650,6 +1685,12 @@ def run_task_codex_delegate(args, *, store):
                 after.common_dir != registration.common_dir or
                 after.branch != registration.branch or after.head != snapshot.head):
             raise LLMToolError('Codex D6 identity changed during execution')
+        if result.status == 'DONE' and result.thread_id:
+            execution['native_session_binding'] = _bind_codex_native_session(
+                registration, result.thread_id)
+            if execution['native_session_binding'] == 'BOUND':
+                completion['evidence']['executor_native_session_id'] = result.thread_id
+                completion['evidence']['executor_native_session'] = 'VERIFIED'
         ignored_rejection = _ignored_output_rejection(registration.root, ignored_before)
         untracked = task_completion._git(registration.root,
             ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
@@ -1696,7 +1737,7 @@ def run_task_codex_delegate(args, *, store):
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
     try:
-        saved = store.update(task['task_id'], developer=developer)
+        saved = store.update(task['task_id'], developer=developer, completion=completion)
     except Exception:
         developer.pop('blocked_reason', None)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
@@ -1704,7 +1745,7 @@ def run_task_codex_delegate(args, *, store):
             execution={**execution, 'status': 'UNKNOWN', 'usage_source': 'UNKNOWN'},
             usage=None)
         try:
-            saved = store.update(task['task_id'], developer=developer)
+            saved = store.update(task['task_id'], developer=developer, completion=completion)
         except Exception:
             raise LLMToolError('Codex result was observed but could not be persisted') from None
     if developer['state'] == 'DEVELOPER_RESPONDED':
@@ -2188,7 +2229,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             direct_execution = developer.get('execution')
             if (developer.get('provider_profile') == 'codex' and
                     type(direct_execution) is dict and
-                    direct_execution.get('status') == 'DONE'):
+                    direct_execution.get('status') == 'DONE' and
+                    direct_execution.get('native_session_binding') == 'BOUND'):
                 reviewer_independence_session = direct_execution.get('native_session_id')
             github = task_completion.collect_github_evidence(
                 pr_number=args.pr, result_sha=git_evidence['result_head'],
@@ -2201,12 +2243,13 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 common_dir=git_evidence['common_dir'])
             if (developer.get('provider_profile') == 'codex' and
                     type(direct_execution) is dict and
-                    direct_execution.get('status') == 'DONE'):
+                    direct_execution.get('status') == 'DONE' and
+                    direct_execution.get('native_session_binding') == 'BOUND'):
                 try:
                     reviewer_registration = task_completion.read_d6_registration(
                         args.reviewer_task, git_evidence['common_dir'])
                     reviewer_native = reviewer_registration.native_session_id
-                    executor_native = initial.get('executor_native_session_id')
+                    executor_native = direct_execution.get('native_session_id')
                     codex_native = direct_execution.get('native_session_id')
                     if not _reviewer_native_session_independent(
                             reviewer_native, executor_native, codex_native):
