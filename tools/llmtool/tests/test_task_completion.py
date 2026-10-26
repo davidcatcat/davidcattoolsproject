@@ -3,6 +3,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -18,6 +19,9 @@ from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record, run_task_complete
 from llmtool import task_completion
 from llmtool import worker_dispatch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import d6_worktree_lifecycle  # noqa: E402
 
 
 class FakeClient:
@@ -209,6 +213,47 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['source_sha'], dispatch_source)
         self.assertEqual(result['result_head'], result_sha)
         self.assertEqual(result['changed_paths'], [self.source_path])
+
+    def test_record_result_unblocks_task_completion_head_binding(self):
+        task_root = self.base / 'executor-result-worktree'
+        self._git('worktree', 'add', '-b', 'feat/executor-result', str(task_root),
+                  self.source_sha)
+        task_root = task_root.resolve()
+        self._write_registration(self.task_id, 'executor-agent', 'Executor D6 session',
+                                 task_root, 'feat/executor-result', self.source_sha,
+                                 self.source_sha, native_session_id='native-executor')
+        path = task_root / self.source_path
+        path.write_text(path.read_text() + '\n# committed developer result\n')
+        subprocess.run(['/usr/bin/git', 'add', self.source_path], cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', '-c', 'user.name=Executor', '-c',
+                        'user.email=executor@example.invalid', 'commit', '-m',
+                        'committed developer result'], cwd=task_root, check=True,
+                       capture_output=True)
+        result_sha = subprocess.check_output(['/usr/bin/git', 'rev-parse', 'HEAD'],
+                                             cwd=task_root, text=True).strip()
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=task_root, text=True)
+        kwargs = dict(task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(task_root), expected_branch='feat/executor-result',
+            source_sha=self.source_sha,
+            task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                          'contract_digest': '3' * 64},
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor', write_paths=[self.source_path],
+            artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(**kwargs)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_HEAD_MISMATCH')
+
+        with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}):
+            recorded = d6_worktree_lifecycle.record_result(
+                task_id=self.task_id, canonical_root=self.root, root=task_root,
+                workspace_root=self.base)
+        self.assertEqual(recorded, result_sha)
+        result = task_completion.collect_executor_result(**kwargs)
+        self.assertEqual(result['result_head'], result_sha)
 
     def test_actual_registered_diff_and_bounded_test_subprocess_bind_exact_head(self):
         result_sha, artifact = self._make_result()

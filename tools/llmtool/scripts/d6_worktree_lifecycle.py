@@ -561,6 +561,178 @@ def resume_worktree(*, task_id, root):
     return root
 
 
+def _refresh_env2_marker(record, root, head):
+    """Rebind the existing ENV-2 PASS report and marker to a new clean HEAD."""
+    marker = record.get("env2_pass_marker")
+    required = {"schema_version", "result", "task_id", "root_realpath",
+                "submitted_head_sha", "current_head_sha", "tooling_sha",
+                "environment_fingerprint", "report_sha256"}
+    fingerprint_re = re.compile(
+        r"[a-z][a-z0-9]*\d+\.\d+-[a-z0-9][a-z0-9._-]{0,31}-"
+        r"[a-z0-9][a-z0-9._-]{0,31}-[0-9a-f]{12}\Z")
+    if (type(marker) is not dict or set(marker) != required or
+            marker.get("schema_version") != 1 or marker.get("result") != "PASS" or
+            marker.get("task_id") != record.get("task_id") or
+            marker.get("root_realpath") != str(root) or
+            marker.get("tooling_sha") != (record.get("env2_approved_tooling_sha") or
+                                             record.get("base_sha")) or
+            type(marker.get("environment_fingerprint")) is not str or
+            not fingerprint_re.fullmatch(marker["environment_fingerprint"])):
+        _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+    report_path = root / "tools" / "llmtool" / ".d6-bootstrap-report.json"
+    try:
+        info = report_path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or
+                info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or
+                info.st_nlink != 1 or info.st_size > 2 * 1024 * 1024):
+            _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+        raw = report_path.read_bytes()
+        report = json.loads(raw.decode("utf-8"))
+    except LifecycleError:
+        raise
+    except Exception:
+        _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+    if (hashlib.sha256(raw).hexdigest() != marker.get("report_sha256") or
+            type(report) is not dict or report.get("result") != "PASS" or
+            report.get("task_id") != record.get("task_id") or
+            report.get("root_realpath") != str(root) or
+            report.get("head_sha") != marker.get("current_head_sha") or
+            report.get("tooling_sha") != marker.get("tooling_sha") or
+            report.get("cache_fingerprint") != marker.get("environment_fingerprint")):
+        _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+    report["head_sha"] = head
+    payload = (json.dumps(report, ensure_ascii=True, sort_keys=True,
+                          separators=(",", ":")) + "\n").encode("ascii")
+    temporary = None
+    try:
+        fd, temporary = tempfile.mkstemp(prefix=".d6-bootstrap-report.",
+                                         suffix=".tmp", dir=str(report_path.parent))
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, report_path)
+        temporary = None
+        directory_fd = os.open(report_path.parent, os.O_RDONLY |
+                               getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        _stop("D6_RECORD_RESULT_ENV2_MARKER_UPDATE_FAILED")
+    finally:
+        if temporary is not None:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+    updated = dict(marker)
+    updated.update(submitted_head_sha=head, current_head_sha=head,
+                   report_sha256=hashlib.sha256(payload).hexdigest())
+    return updated
+
+
+def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_ROOT):
+    """Advance a registered D6 result HEAD after commit, without changing Git."""
+    if not TASK_ID_RE.fullmatch(task_id or ""):
+        _stop("D6_RECORD_RESULT_TASK_INVALID")
+    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+        _stop("D6_RECORD_RESULT_WORKSPACE_INVALID")
+    try:
+        canonical_root = Path(canonical_root).resolve(strict=True)
+        workspace_root = Path(os.path.realpath(workspace_root))
+        root = None if root is None else Path(root).resolve(strict=True)
+    except (OSError, TypeError):
+        _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+    if _task_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
+        _stop("D6_RECORD_RESULT_CANONICAL_ROOT")
+    common_dir = Path(_task_git(canonical_root, "rev-parse", "--path-format=absolute",
+                                "--git-common-dir").stdout.strip())
+    if (not common_dir.is_absolute() or common_dir.name != ".git" or
+            Path(os.path.realpath(common_dir)) != common_dir):
+        _stop("D6_RECORD_RESULT_COMMON_DIR_MISMATCH")
+    registry = common_dir / "llmtool-worktrees"
+    _safe_dir(registry, mode=0o700, uid=os.getuid())
+    try:
+        lock_fd = os.open(registry / ".lifecycle.lock",
+                          os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        lock_info = os.fstat(lock_fd)
+        if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or
+                stat.S_IMODE(lock_info.st_mode) != 0o600 or lock_info.st_nlink != 1):
+            os.close(lock_fd)
+            _stop("D6_REGISTRY_LOCK_INVALID")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+    except LifecycleError:
+        raise
+    except OSError:
+        _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
+    try:
+        record_path = registry / (task_id + ".json")
+        if not os.path.lexists(record_path):
+            _stop("D6_RECORD_RESULT_UNKNOWN_TASK")
+        record = _read_registry_record(record_path)
+        if record.get("task_id") != task_id:
+            _stop("D6_RECORD_RESULT_UNKNOWN_TASK")
+        if root is None:
+            try:
+                root = Path(record.get("root_realpath")).resolve(strict=True)
+            except (OSError, TypeError):
+                _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+        if record.get("state") in ("RETAIN_BLOCKED", "REMOVED"):
+            _stop("D6_RECORD_RESULT_STATE_REFUSED")
+        if record.get("state") not in ("ACTIVE", "REPAIR") or record.get("lock_state") != "LOCKED":
+            _stop("D6_RECORD_RESULT_STATE_REFUSED")
+        if str(root) == str(canonical_root):
+            _stop("D6_RECORD_RESULT_CANONICAL_ROOT")
+        if str(root) != record.get("root_realpath") or root.parent != workspace_root:
+            _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+        try:
+            identity = root.lstat()
+        except OSError:
+            _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+        registered_identity = record.get("physical_identity")
+        if (type(registered_identity) is not dict or
+                (identity.st_dev, identity.st_ino, identity.st_uid) !=
+                (registered_identity.get("device"), registered_identity.get("inode"),
+                 registered_identity.get("uid")) or
+                identity.st_uid != os.getuid() or not stat.S_ISDIR(identity.st_mode) or
+                stat.S_IMODE(identity.st_mode) != 0o700 or
+                registered_identity.get("mode") != "0o700"):
+            _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+        if record.get("git_common_dir") != str(common_dir):
+            _stop("D6_RECORD_RESULT_COMMON_DIR_MISMATCH")
+        if (_task_git(root, "rev-parse", "--show-toplevel").stdout.strip() != str(root) or
+                _task_git(root, "rev-parse", "--path-format=absolute",
+                          "--git-common-dir").stdout.strip() != str(common_dir)):
+            _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+        branch = record.get("branch")
+        if (type(branch) is not str or not _valid_branch(canonical_root, branch) or
+                _task_git(root, "branch", "--show-current").stdout.strip() != branch):
+            _stop("D6_RECORD_RESULT_BRANCH_MISMATCH")
+        status = _task_git(root, "status", "--porcelain=v1", "--untracked-files=all").stdout
+        if status:
+            _stop("D6_RECORD_RESULT_DIRTY")
+        old_head = record.get("head_sha")
+        head = _task_git(root, "rev-parse", "--verify", "HEAD").stdout.strip()
+        if (type(old_head) is not str or not SHA40_RE.fullmatch(old_head) or
+                not SHA40_RE.fullmatch(head)):
+            _stop("D6_RECORD_RESULT_REGISTRY_INVALID")
+        if _task_git(root, "merge-base", "--is-ancestor", old_head, head,
+                     check=False).returncode:
+            _stop("D6_RECORD_RESULT_NON_DESCENDANT")
+        marker = _refresh_env2_marker(record, root, head)
+        updated = dict(record)
+        updated.update(head_sha=head, last_verified_at=_now(), env2_pass_marker=marker)
+        _replace_record(record_path, updated)
+        print("D6_RESULT_RECORDED task_id=" + task_id + " head=" + head)
+        return head
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 # Retire accepts only records the PM can still act on; REVIEW_PENDING,
 # RETAIN_BLOCKED, REMOVED and hand-written states are kept for a human.
 RETIRE_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
@@ -1237,6 +1409,8 @@ def _main(argv=None):
     parser.add_argument("--native-session-id")
     parser.add_argument("--resume-task-id")
     parser.add_argument("--resume-root")
+    parser.add_argument("--record-result-task-id",
+                        help="record this clean committed descendant HEAD for the current D6 root")
     parser.add_argument("--execute-approved-lifecycle", action="store_true")
     parser.add_argument("--retire-task-id", action="append",
                         help="plan retirement of this task (repeatable); dry run by default")
@@ -1258,6 +1432,16 @@ def _main(argv=None):
         create_values = (args.task_id, args.agent_id, args.session_ref,
                          args.lease_ref, args.branch, args.base_sha)
         create_options = (args.github_login, args.native_session_id)
+        if args.record_result_task_id is not None:
+            if (any(value is not None for value in create_values + create_options) or
+                    args.resume_task_id is not None or args.resume_root is not None or
+                    args.retire_task_id is not None or args.execute_approved_lifecycle or
+                    args.execute_approved_retire or args.squash_evidence or
+                    args.discard_uncommitted or args.retain_blocked_evidence):
+                _stop("D6_TASK_INPUT_INVALID")
+            record_result(task_id=args.record_result_task_id,
+                          canonical_root=args.repo_root)
+            return 0
         if args.retire_task_id is not None:
             if (any(value is not None for value in create_values + create_options) or
                     args.resume_task_id is not None or args.resume_root is not None or
