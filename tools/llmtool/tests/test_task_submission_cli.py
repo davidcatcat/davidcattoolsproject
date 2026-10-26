@@ -2138,6 +2138,9 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
             'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
                          f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
                          'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'new executable file': (f'diff --git a/dev/null b/{target}\nnew file mode 100755\n'
+                                    f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
+                                    'DEVELOPER_OUTPUT_INVALID_DIFF'),
         }
         for label, (text, expected) in shapes.items():
             with self.subTest(label):
