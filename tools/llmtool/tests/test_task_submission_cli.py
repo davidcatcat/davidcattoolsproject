@@ -1478,13 +1478,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     'response': pm_response,
                 }))), 0)
         task = store.get(next(store.root.glob('*.json')).stem)
-        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        target = 'sample.py'
         patch_text = (f'diff --git a/{target} b/{target}\n'
-                      f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-old\n+new\n')
+                      f'--- a/{target}\n+++ b/{target}\n'
+                      '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n')
         client = FakeClient(Reply(patch_text, {
             'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
         }))
-        args = self._delegate_args(task)
+        args = self._delegate_args(task, write_path=[target], context='VALUE = 1\n')
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
@@ -1524,15 +1525,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIn('The first line must be the diff --git header', system_prompt)
         self.assertIn('blank lines', system_prompt)
         self.assertIn('Copy context lines verbatim', system_prompt)
-        developer_packet = json.loads(client.calls[0][1]['content'])
+        packet_text = client.calls[0][1]['content']
+        packet_json, context_section = packet_text.split(
+            '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n\n', 1)
+        developer_packet = json.loads(packet_json)
         self.assertEqual(developer_packet['pm_selected_goal'], 'Add one focused test.')
         self.assertEqual(developer_packet['acceptance'], ['new test passes'])
-        self.assertEqual(developer_packet['context'], 'class TaskSubmissionCLITests: pass')
+        self.assertNotIn('context', developer_packet)
+        self.assertTrue(context_section.startswith('Context:\nVALUE = 1\n'))
+        self.assertTrue(context_section.endswith(
+            'Return only the unified diff, starting with "diff --git".'))
         self.assertEqual(developer_packet['write_paths'], [target])
         self.assertNotIn('original_request', developer_packet)
         self.assertNotIn('pm_response', developer_packet)
-        self.assertNotIn('Implement a health-check', client.calls[0][1]['content'])
-        self.assertNotIn('Bounded test-only task.', client.calls[0][1]['content'])
+        self.assertNotIn('Implement a health-check', packet_text)
+        self.assertNotIn('Bounded test-only task.', packet_text)
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(saved['developer']['artifact'], patch_text)
         self.assertEqual(len(client.calls), 1)
@@ -1590,12 +1597,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertNotIn('abcdefghijklmnop', json.dumps(saved))
 
     def test_markdown_fenced_company_patch_is_normalized_before_persistence(self):
-        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        target = 'sample.py'
         fenced_patch = (
             '```diff\n'
             f'diff --git a/{target} b/{target}\n'
             f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n'
-            '-old\n+FENCED_PROVIDER_PATCH_SENTINEL\n'
+            '-VALUE = 1\n+FENCED_PROVIDER_PATCH_SENTINEL\n'
             '```\n'
         )
         task = self._pm_task_with_assignment()
@@ -1609,11 +1616,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
-            code = run_task_delegate(self._delegate_args(task))
+            args = self._delegate_args(task, write_path=[target], context='VALUE = 1\n')
+            code = run_task_delegate(args)
             with self.assertRaisesRegex(
                     LLMToolError,
                     'developer assignment already exists; duplicate dispatch refused'):
-                run_task_delegate(self._delegate_args(task))
+                run_task_delegate(args)
 
         self.assertEqual(code, 0)
         result = json.loads(output.getvalue())

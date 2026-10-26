@@ -1,6 +1,7 @@
 import unittest
 
 from llmtool.developer_output_normalize import normalize_developer_output
+from llmtool.developer_output_normalize import reanchor_developer_output
 from llmtool.task_submission_cli import (_developer_normalized_output,
                                          _developer_output_rejection)
 
@@ -113,6 +114,33 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
                 normalized, tokens = normalize_developer_output(raw, [self.PATH])
                 self.assertEqual(normalized, raw)
                 self.assertEqual(tokens, ())
+
+    def test_source_anchor_repairs_pm_observed_context_shape(self):
+        source = '\n'.join(f'line {number}' for number in range(1, 45)) + '\n'
+        raw = (self.HEADER + '@@ -33,4 +33,8 @@\n'
+               ' line 33\n line 34\n line 35\n'
+               '+added one\n+added two\n+added three\n+added four\n')
+        normalized, _ = normalize_developer_output(raw, [self.PATH])
+        anchored, tokens = reanchor_developer_output(
+            normalized, [self.PATH], {self.PATH: source})
+        self.assertEqual(tokens, ('HUNK_REANCHORED',))
+        self.assertIn('@@ -33,6 +33,10 @@', anchored)
+        self.assertIn('+added four', anchored)
+        self.assertIsNone(_developer_output_rejection(anchored, [self.PATH]))
+
+    def test_source_anchor_rejects_invented_or_ambiguous_old_side(self):
+        invented = (self.HEADER + '@@ -1 +1 @@\n-invented\n+replacement\n')
+        ambiguous = (self.HEADER + '@@ -1 +1 @@\n-same\n+replacement\n')
+        for raw, source in ((invented, 'real line\n'),
+                            (ambiguous, 'same\nsame\n')):
+            with self.subTest(source=source):
+                anchored, tokens = reanchor_developer_output(
+                    raw, [self.PATH], {self.PATH: source})
+                self.assertEqual(anchored, raw)
+                self.assertEqual(tokens, ())
+                self.assertEqual(_developer_normalized_output(
+                    raw, [self.PATH], source_files={self.PATH: source})[2],
+                    'DEVELOPER_OUTPUT_INVALID_DIFF')
 
 
 if __name__ == '__main__':
