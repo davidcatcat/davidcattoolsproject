@@ -738,6 +738,11 @@ record keeps its relative reference and SHA-256, never the rejected text. The
 CLI does not print the capture or include it in evidence packets. Output that
 cannot be safely collected is not captured.
 
+For `task delegate --provider opencode`, llmtool accepts any well-formed `opencode vX.Y.Z`
+CLI version and records it; the strict JSON event parsing still rejects incompatible output.
+The model is `opencode/deepseek-v4.1-flash-free` unless an optional `opencode-developer`
+profile sets `model`; only an `opencode/<name>-free` model is accepted, never a paid fallback.
+
 For a direct OpenCode Developer task, the CLI now emits a completion event when the
 bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,
 binds the actual uncommitted diff to the Task and Run, and runs only bounded tests
