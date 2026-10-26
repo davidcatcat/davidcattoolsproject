@@ -140,7 +140,7 @@ def _result_from_events(raw):
             elif event.get('type') == 'item.completed':
                 item = event.get('item')
                 if type(item) is dict and item.get('type') == 'agent_message':
-                    if type(item.get('text')) is not str or final is not None:
+                    if type(item.get('text')) is not str:
                         _fail('CODEX_FINAL_MESSAGE_INVALID')
                     final = item['text']
             elif event.get('type') == 'turn.completed':
