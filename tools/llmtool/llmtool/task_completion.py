@@ -63,6 +63,7 @@ _VERDICT_MARKER = re.compile(
 _VERDICT_STATUS = re.compile(
     r'Verdict: (PASS|FIX|FAIL) \| Version: v[1-9][0-9]{0,3} \| HEAD: ([0-9a-f]{40})')
 _FORMAL_ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
+_REVIEW_VERDICT_ACTIVITY_LINE = '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->'
 _GITHUB_API_PATH = re.compile(r'(?!/)(?!.*\.\.)[A-Za-z0-9_./?=&-]{1,256}\Z')
 
 

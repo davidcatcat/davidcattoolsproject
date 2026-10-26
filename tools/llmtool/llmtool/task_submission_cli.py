@@ -509,6 +509,98 @@ def add_task_submission_parsers(actions):
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
     complete.add_argument('--reviewer-task', help='registered D6 independent Reviewer task id (omit for the initial Executor-result callback)')
     complete.add_argument('--pr', type=int, help='public GitHub pull request number (omit for the initial Executor-result callback)')
+    review_prompt = actions.add_parser(
+        'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
+    review_prompt.add_argument('task_id', help='existing durable Task ID')
+    review_prompt.add_argument('--executor-task', required=True,
+                               help='registered D6 Executor task id bound to the Task')
+    review_prompt.add_argument('--reviewer-task', required=True,
+                               help='registered D6 Reviewer task id')
+    review_prompt.add_argument('--pr', required=True, type=int,
+                               help='public GitHub pull request number')
+
+
+def run_task_review_prompt(args, *, store=None):
+    """Print a read-only Reviewer prompt only for one exact, mutually bound HEAD."""
+    store = TaskStore() if store is None else store
+
+    def refuse(code):
+        error = LLMToolError('Reviewer prompt is unavailable; details omitted')
+        error.completion_code = code
+        raise error from None
+
+    task = store.get(args.task_id)
+    completion = task.get('completion')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    binding = task.get('task_binding')
+    try:
+        task_completion.validate_task_binding(
+            stored_binding=binding, task_id=task.get('task_id'),
+            run_id=task.get('run_id'),
+            contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
+    except LLMToolError:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    if (type(evidence) is not dict or
+            completion.get('executor_task_id') != args.executor_task or
+            type(evidence.get('common_dir')) is not str or
+            type(evidence.get('result')) is not dict):
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    expected_head = evidence['result'].get('result_head')
+    if type(expected_head) is not str or re.fullmatch(r'[0-9a-f]{40}', expected_head) is None:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    try:
+        executor = task_completion.read_d6_registration(args.executor_task,
+            evidence['common_dir'], allowed_states=task_completion._D6_EVIDENCE_STATES)
+        executor_snapshot = task_completion.collect_git_snapshot(executor.root)
+        if (executor.result_sha != expected_head or executor_snapshot.head != expected_head or
+                executor_snapshot.root != executor.root or
+                executor_snapshot.common_dir != executor.common_dir or
+                executor_snapshot.branch != executor.branch):
+            refuse('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
+        reviewer = task_completion.read_d6_registration(args.reviewer_task,
+            evidence['common_dir'], allowed_states=task_completion._D6_EVIDENCE_STATES)
+        reviewer_snapshot = task_completion.collect_git_snapshot(reviewer.root)
+        if (reviewer.result_sha != expected_head or reviewer_snapshot.head != expected_head or
+                reviewer_snapshot.root != reviewer.root or
+                reviewer_snapshot.common_dir != reviewer.common_dir or
+                reviewer_snapshot.branch != reviewer.branch):
+            refuse('REVIEW_PROMPT_REVIEWER_HEAD_MISMATCH')
+    except LLMToolError as exc:
+        code = getattr(exc, 'completion_code', None)
+        if code in ('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH',
+                    'REVIEW_PROMPT_REVIEWER_HEAD_MISMATCH'):
+            raise
+        refuse('REVIEW_PROMPT_D6_UNAVAILABLE')
+    except Exception:
+        refuse('REVIEW_PROMPT_D6_UNAVAILABLE')
+    try:
+        pr = task_completion._github_get(f'pulls/{args.pr}')
+    except LLMToolError:
+        refuse('REVIEW_PROMPT_PR_UNAVAILABLE')
+    if (type(pr) is not dict or type(pr.get('number')) is not int or
+            pr['number'] != args.pr or type(pr.get('head')) is not dict or
+            pr['head'].get('sha') != expected_head):
+        refuse('REVIEW_PROMPT_PR_HEAD_MISMATCH')
+    try:
+        binding_line = task_completion._review_binding_line(
+            task['task_id'], task['run_id'], binding['contract_digest'], expected_head)
+    except Exception:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    lines = [
+        f'Review PR #{args.pr} at exact HEAD {expected_head}.',
+        f'Scope: git diff {evidence["result"].get("source_sha")}..{expected_head}',
+        'Review this scope only. Read-only review; do not edit files, run mutating commands, commit, push, or publish.',
+        '',
+        'Post these exact lines in your review:',
+        task_completion._REVIEW_VERDICT_ACTIVITY_LINE,
+        f'Verdict: PASS | Version: v1 | HEAD: {expected_head}',
+        task_completion._FORMAL_ACCEPT,
+        binding_line,
+    ]
+    if not all(type(line) is str for line in lines):
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    print('\n'.join(lines))
+    return 0
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
