@@ -2130,8 +2130,8 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         packet, context = user.split(TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
         self.assertNotIn('provided source text', packet)
         self.assertIn('no tools, cannot read files, and all needed file content is provided below.',
-                      context)
-        self.assertTrue(context.endswith('Return only the unified diff starting with "diff --git".'))
+                      user)
+        self.assertTrue(context.endswith('Return only the unified diff, starting with "diff --git".'))
 
 
 class ModeMetadataRejectionTests(unittest.TestCase):
