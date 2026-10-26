@@ -533,6 +533,23 @@ def add_task_submission_parsers(actions):
                                help='public GitHub pull request number')
     review_prompt.add_argument('--version', type=int, default=1,
                                help='review verdict version (1-9999; default 1)')
+    remote_test = actions.add_parser(
+        'remote-test', help='Run admitted Task tests once on the configured EC2 host')
+    remote_test.add_argument('task_id', help='existing durable Task ID')
+    remote_test.add_argument('--executor-task', required=True, help='registered D6 Executor task')
+    remote_test.add_argument('--sha', required=True, help='40-character registered D6 result SHA')
+    remote_test.add_argument('--ref', required=True, help='fetch ref for the bound result SHA')
+    remote_test.add_argument('--module', action='append', default=[],
+                             help='admitted test module; repeat to select more than one')
+    remote_test.add_argument('--pr', type=int, help='PR whose recorded head is the expected SHA')
+
+
+def run_task_remote_test(args, *, store=None, stdout=None):
+    from .remote_test import run_remote_test
+    result = run_remote_test(args.task_id, executor_task=args.executor_task,
+                             sha=args.sha, ref=args.ref, modules=args.module,
+                             pr=args.pr, store=store)
+    return _print(result, stdout)
 
 
 def run_task_review_prompt(args, *, store=None):

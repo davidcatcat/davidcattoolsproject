@@ -9,6 +9,7 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import stat
@@ -57,8 +58,11 @@ _FIELDS_V2_WITH_DISPATCH_AUDIT = tuple(
 _V2_SHAPES = (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
               _FIELDS_V2_ROUTE_COMPLETION, *_FIELDS_V2_WITH_PROVENANCE,
               *_FIELDS_V2_WITH_DISPATCH_AUDIT)
+_V2_REMOTE_TEST_SHAPES = tuple(shape | frozenset(('remote_test_receipts',))
+                               for shape in _V2_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
-    'dispatch_audit', 'completion_events', 'completion_event_tombstones'))
+    'dispatch_audit', 'completion_events', 'completion_event_tombstones',
+    'remote_test_receipts'))
 MAX_COMPLETION_EVENTS = 32
 # Retention: when the event list is full, the oldest ACKED event is compacted
 # into a tombstone that keeps its identity and stream position, so an acked
@@ -79,7 +83,13 @@ _COMPLETION_INTENT_FIELDS = frozenset((
     'intent_id', 'intent_sha256', 'state', 'persisted_at',
     'receipt_sha256', 'confirmed_at',
 ))
-_COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER'))
+_COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER',
+                                 'EC2_REMOTE_TEST'))
+_REMOTE_TEST_RECEIPT_FIELDS = frozenset((
+    'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
+    'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
+    'failures', 'log_bytes', 'log_sha256', 'remote_log_path', 'task_id',
+    'run_id', 'executor_task', 'pm_session', 'command_digest', 'receipt_digest'))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
 _OPTIONAL_USAGE_FIELDS = frozenset(('cached_prompt_tokens', 'reasoning_tokens'))
 _DISPATCH_AUDIT_FIELDS = frozenset((
@@ -367,14 +377,84 @@ def _validate_completion_tombstones(record):
         positions.add(position)
 
 
+def _validate_remote_test_receipts(record):
+    receipts = record.get('remote_test_receipts', [])
+    if type(receipts) is not list or len(receipts) > 32:
+        _fail('REMOTE_TEST_RECEIPT_INVALID')
+    for receipt in receipts:
+        if (type(receipt) is not dict or set(receipt) != _REMOTE_TEST_RECEIPT_FIELDS or
+                receipt.get('result') not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH',
+                                              'ADMISSION_DENIED', 'UNAVAILABLE', 'UNKNOWN') or
+                type(receipt.get('exit_code')) not in (int, type(None)) or
+                (receipt.get('exit_code') is not None and
+                 not -127 <= receipt['exit_code'] <= 255) or
+                receipt.get('task_id') != record.get('task_id') or
+                receipt.get('run_id') != record.get('run_id') or
+                type(receipt.get('executor_task')) is not str or
+                re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', receipt['executor_task']) is None or
+                receipt.get('pm_session') != record.get('pm_session_id') or
+                type(receipt.get('modules')) is not list or
+                not 1 <= len(receipt['modules']) <= 32 or
+                any(type(item) is not str or
+                    re.fullmatch(r'test_[a-z0-9_]{1,80}', item) is None
+                    for item in receipt['modules']) or
+                receipt['modules'] != sorted(set(receipt['modules'])) or
+                type(receipt.get('identity')) is not dict or
+                set(receipt['identity']) != {'uid'} or
+                (receipt['identity']['uid'] is not None and
+                 (type(receipt['identity']['uid']) is not int or
+                  receipt['identity']['uid'] < 0)) or
+                any(type(receipt.get(field)) is not str or
+                    re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', receipt[field]) is None
+                    for field in ('started_at', 'ended_at')) or
+                type(receipt.get('elapsed_s')) not in (int, float) or
+                not math.isfinite(receipt['elapsed_s']) or receipt['elapsed_s'] < 0 or
+                type(receipt.get('ran_total')) is not int or receipt['ran_total'] < 0 or
+                type(receipt.get('final')) is not list or
+                len(receipt['final']) > 64 or
+                any(type(item) is not str or len(item) > 512 for item in receipt['final']) or
+                type(receipt.get('failures')) is not list or len(receipt['failures']) > 10 or
+                any(item not in receipt['modules'] for item in receipt['failures']) or
+                type(receipt.get('log_bytes')) is not int or
+                not 0 <= receipt['log_bytes'] <= 20_000_000 or
+                type(receipt.get('log_sha256')) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', receipt['log_sha256']) is None or
+                (receipt.get('remote_log_path') is not None and
+                 (type(receipt['remote_log_path']) is not str or
+                  re.fullmatch(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log',
+                               receipt['remote_log_path']) is None)) or
+                type(receipt.get('command_digest')) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', receipt['command_digest']) is None or
+                type(receipt.get('receipt_digest')) is not str or
+                re.fullmatch(r'[0-9a-f]{64}', receipt['receipt_digest']) is None):
+            _fail('REMOTE_TEST_RECEIPT_INVALID')
+        for field in ('source_sha', 'fetch_head', 'tree'):
+            if receipt[field] is not None and (type(receipt[field]) is not str or
+                    re.fullmatch(r'[0-9a-f]{40}', receipt[field]) is None):
+                _fail('REMOTE_TEST_RECEIPT_INVALID')
+        digest_input = dict(receipt)
+        claimed = digest_input.pop('receipt_digest')
+        digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
+        if claimed != digest:
+            _fail('REMOTE_TEST_RECEIPT_INVALID')
+        if (receipt['result'] == 'PASS' and
+                (receipt['exit_code'] != 0 or receipt['fetch_head'] != receipt['source_sha'] or
+                 receipt['tree'] is None or len(receipt['final']) < len(receipt['modules']) or
+                 any(not line.endswith('OK') for line in receipt['final'])) or
+                (receipt['result'] == 'SHA_MISMATCH' and
+                 receipt['fetch_head'] == receipt['source_sha'])):
+            _fail('REMOTE_TEST_RECEIPT_INVALID')
+
+
 def _validate(record):
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
-             (*_V2_SHAPES, *(shape | frozenset(('completion_events',))
-                             for shape in _V2_SHAPES),
+             (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
+              *(shape | frozenset(('completion_events',))
+                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES)),
               *(shape | frozenset(('completion_events', 'completion_event_tombstones'))
-                for shape in _V2_SHAPES))) or
+                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES)))) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -387,6 +467,8 @@ def _validate(record):
     if 'completion_events' in record:
         _validate_completion_events(record)
         _validate_completion_tombstones(record)
+    if 'remote_test_receipts' in record:
+        _validate_remote_test_receipts(record)
     for key in ('created_at', 'updated_at'):
         try:
             stamp = datetime.strptime(record[key], '%Y-%m-%dT%H:%M:%SZ')
@@ -1544,6 +1626,32 @@ class TaskStore:
                     changes=changes,
                     trusted_completion_events=True)
                 return self._completion_result(event, True)
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def append_remote_test_receipt(self, task_id, receipt):
+        """Append one validated remote test receipt idempotently to its Task."""
+        if type(receipt) is not dict or set(receipt) != _REMOTE_TEST_RECEIPT_FIELDS:
+            _fail('REMOTE_TEST_RECEIPT_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            if (receipt.get('task_id') != task_id or
+                    receipt.get('run_id') != current.get('run_id')):
+                _fail('REMOTE_TEST_RECEIPT_INVALID')
+            receipts = list(current.get('remote_test_receipts', []))
+            existing = next((item for item in receipts
+                             if item['receipt_digest'] == receipt['receipt_digest']), None)
+            if existing is not None:
+                if existing != receipt:
+                    _fail('REMOTE_TEST_RECEIPT_CONFLICT')
+                return existing
+            if len(receipts) >= 32:
+                _fail('REMOTE_TEST_RECEIPT_LIMIT')
+            try:
+                self._update(task_id, expected={'record_sha256': current['record_sha256']},
+                             changes={'remote_test_receipts': receipts + [receipt]})
+                return receipt
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')

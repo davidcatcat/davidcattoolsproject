@@ -33,7 +33,7 @@ from .task_lifecycle_cli import add_task_parser, run_task_inspect
 from .task_submission_cli import (add_task_submission_parsers, run_task_ack,
                                  run_task_complete, run_task_delegate, run_task_inbox,
                                  run_task_record_pm, run_task_review_prompt,
-                                 run_task_show, run_task_submit)
+                                 run_task_remote_test, run_task_show, run_task_submit)
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
 
@@ -507,6 +507,8 @@ def main(argv=None):
                 return run_task_complete(args)
             if args.action == 'review-prompt':
                 return run_task_review_prompt(args)
+            if args.action == 'remote-test':
+                return run_task_remote_test(args)
             if args.action in ('review-request','review-wait'):
                 from .review_exchange import run_exchange
                 return run_exchange(args)
