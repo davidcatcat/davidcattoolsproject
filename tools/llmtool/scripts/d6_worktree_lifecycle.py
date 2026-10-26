@@ -564,6 +564,9 @@ def resume_worktree(*, task_id, root):
 # Retire accepts only records the PM can still act on; REVIEW_PENDING,
 # RETAIN_BLOCKED, REMOVED and hand-written states are kept for a human.
 RETIRE_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
+# Dry runs show at most this many unknown paths; evidence may cover no more,
+# so the PM never accepts a path the output did not show.
+UNKNOWN_DISPLAY_CAP = 50
 CONTENT_REASONS = frozenset((
     "D6_RETIRE_UNKNOWN_LOCAL_STATE", "D6_RETIRE_RETENTION_PATH_INVALID",
     "D6_RETIRE_RETENTION_PATH_SYMLINK", "D6_RETIRE_RETENTION_PATH_TRACKED",
@@ -923,10 +926,13 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
             unknown.append(path)
     plan["unknown_digest"] = _unknown_digest(unknown)
     if unknown:
-        plan["unknown_paths"] = unknown[:50]
-        plan["unknown_path_count"] = len(unknown)
+        plan["unknown_paths"] = unknown[:UNKNOWN_DISPLAY_CAP]
+        plan["unknown_count"] = len(unknown)
+        plan["unknown_truncated"] = len(unknown) > UNKNOWN_DISPLAY_CAP
     if unknown_evidence is not None:
-        if unknown_evidence == plan["unknown_digest"]:
+        if len(unknown) > UNKNOWN_DISPLAY_CAP:
+            plan["reasons"].append("D6_RETIRE_EVIDENCE_TRUNCATED")
+        elif unknown_evidence == plan["unknown_digest"]:
             plan["accepted_unknown"] = True
         else:
             plan["reasons"].append("D6_RETIRE_EVIDENCE_MISMATCH")
@@ -1038,13 +1044,19 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
                 updated["lock_state"] = "UNLOCKED"
             try:
                 _replace_record(record_path, updated)
+                plan["failure_recorded"] = True
             except LifecycleError as exc:
                 reasons.append(exc.code)
         return reasons
     if os.path.lexists(root) or _worktree_listing(canonical_root, root) is not None:
         return ["D6_RETIRE_REMOVE_UNVERIFIED"]
-    if _read_registry_record(record_path) != record:
-        return ["D6_REGISTRY_CHANGED"]
+    # The tree is gone from here on; a registry failure is reported, not raised.
+    plan["tree_removed"] = True
+    try:
+        if _read_registry_record(record_path) != record:
+            return ["D6_REGISTRY_CHANGED"]
+    except LifecycleError as exc:
+        return [exc.code]
     now = _now()
     removed = ", ".join(relative + ("/" if is_dir else "")
                         for relative, is_dir in plan["targets"]) or "none"
@@ -1064,7 +1076,10 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
     if discarded_paths:
         updated.update(discarded_uncommitted=True,
                        discarded_uncommitted_paths=discarded_paths)
-    _replace_record(record_path, updated)
+    try:
+        _replace_record(record_path, updated)
+    except LifecycleError as exc:
+        return [exc.code]
     return []
 
 
@@ -1139,7 +1154,7 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                                       "pycache": []}
             result.update({key: plan[key] for key in (
                 "root", "branch", "head", "publication", "live_pids", "unknown_paths",
-                "unknown_path_count", "unknown_digest") if plan.get(key)})
+                "unknown_count", "unknown_truncated", "unknown_digest") if plan.get(key)})
             if plan.get("publication") == "origin_branch":
                 result["publication_note"] = "pushed to origin/<branch>; merge not proven"
             if plan.get("accepted_unknown"):
@@ -1170,8 +1185,10 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                         result["registry_updated"] = True
                     except LifecycleError as exc:
                         result["reasons"].append(exc.code)
-                elif plan.get("discarded_uncommitted"):
+                elif plan.get("failure_recorded"):
                     result["registry_updated"] = True
+                if plan.get("tree_removed"):
+                    result["tree_removed"] = True
             else:
                 result["result"] = "REMOVED" if execute else "RETIRE_READY"
                 result["registry_updated"] = execute

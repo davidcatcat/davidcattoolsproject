@@ -32,7 +32,7 @@ Before removal, verify the exact registered noncanonical path, owner/session/lea
 
 For a squash merge, authoritative PR metadata must show merged/accepted and its final published PR head SHA must equal the local task HEAD. Preserve independent review, CI, source and retention evidence outside the tree. Only the Integrator may later delete that exact local task branch with `git branch -D`, and only for an accepted squash-merged PR with matching final head SHA and no other task/worktree/PR dependency. Do not delete remote refs or unrelated branches/tags. Cancellation of unmerged work requires its explicit recorded disposition.
 
-When every gate passes, unlock only the exact D6-owned locked tree, recheck identity and liveness, then run ordinary `git worktree remove <exact-path>` without `--force`. Verify it is absent and record `REMOVED`, final SHA, task/PR, disposition, evidence and time. Failed unlock/removal means `RETAIN_BLOCKED`; never force-retry.
+When every gate passes, unlock only the exact D6-owned locked tree, recheck identity and liveness, then run ordinary `git worktree remove <exact-path>` without `--force`. Verify it is absent and record `REMOVED`, final SHA, task/PR, disposition, evidence and time. Mark `RETAIN_BLOCKED` only when every other gate passed and unknown or unsafe content is the sole problem; any other failed gate, including a failed unlock/removal, is reported `BLOCKED` with the tree re-locked and the record state unchanged. Never force-retry.
 
 ## Hard Git safety limits
 

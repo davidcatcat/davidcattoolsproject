@@ -79,13 +79,19 @@ class D6RetireTests(unittest.TestCase):
         _git(self.source, "worktree", "lock", str(root))
         return root, head
 
+    def _cwds(self):
+        # A list of lists hands out one answer per lsof call; a plain list repeats.
+        if self.cwds and isinstance(self.cwds[0], list):
+            return self.cwds.pop(0)
+        return self.cwds
+
     def _record(self, task_id):
         return json.loads((self.registry / (task_id + ".json")).read_text())
 
     def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None):
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "_process_cwds", side_effect=lambda: self.cwds), \
+                patch.object(lifecycle, "_process_cwds", side_effect=self._cwds), \
                 contextlib.redirect_stdout(output):
             ok = lifecycle.retire_worktrees(
                 canonical_root=self.source, task_ids=task_ids, execute=execute,
@@ -342,6 +348,43 @@ class D6RetireTests(unittest.TestCase):
         self.assertIn("D6_RETIRE_EVIDENCE_MISMATCH", line["reasons"])
         self.assertEqual(self._record("changed-task"), before)
         self.assertTrue((root / "tools" / "llmtool" / "later.log").is_file())
+
+    def test_retain_blocked_evidence_is_refused_when_unknown_list_is_truncated(self):
+        root, _head = self._task("many-unknown-task")
+        logs = root / "tools" / "llmtool" / "logs"
+        logs.mkdir()
+        for index in range(60):
+            (logs / ("run-%02d.log" % index)).write_text("x\n", encoding="utf-8")
+        ok, (line,) = self._retire(["many-unknown-task"], execute=True)
+        self.assertEqual(line["result"], "RETAIN_BLOCKED")
+        ok, (line,) = self._retire(["many-unknown-task"])
+        self.assertEqual((line["unknown_count"], line["unknown_truncated"],
+                          len(line["unknown_paths"])), (60, True, 50))
+        before = self._record("many-unknown-task")
+        ok, (line,) = self._retire(["many-unknown-task"], execute=True,
+                                   evidence={"many-unknown-task": line["unknown_digest"]})
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertIn("D6_RETIRE_EVIDENCE_TRUNCATED", line["reasons"])
+        self.assertFalse(line["registry_updated"])
+        self.assertEqual(self._record("many-unknown-task"), before)
+        self.assertEqual(len(list(logs.iterdir())), 60)
+
+    def test_failed_registry_write_reports_registry_not_updated(self):
+        root = self._dirty_task("write-fail-task")
+        # Plan sees no process; the post-discard recheck sees one, so the
+        # discard is recorded on the failure path, whose write then fails.
+        self.cwds = [[("1", "/")], [("4242", str(root))]]
+        with patch.object(lifecycle, "_replace_record",
+                          side_effect=lifecycle.LifecycleError("D6_REGISTRY_UPDATE_FAILED")):
+            ok, (line,) = self._retire(["write-fail-task"], execute=True,
+                                       discard=["write-fail-task"])
+        self.assertFalse(ok)
+        self.assertEqual(line["reasons"], ["D6_RETIRE_LIVE_PROCESS",
+                                           "D6_REGISTRY_UPDATE_FAILED"])
+        self.assertTrue(line["discarded_uncommitted"])
+        self.assertFalse(line["registry_updated"])
+        self.assertTrue(root.is_dir())
 
 
 if __name__ == "__main__":
