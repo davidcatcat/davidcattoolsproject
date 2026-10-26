@@ -803,6 +803,31 @@ sources, not protection against malicious same-user tampering. Company proposal 
 PM-return live provider journeys still require their separately authorized runtime
 acceptance.
 
+**Formal Claude Reviewer verdict for `task complete` (Issue #352).** The repository is
+private, so `task complete` reads PR, review, comment and check data through the signed-in
+`gh` CLI (`gh api --method GET` on fixed repository paths, 8s and 1 MiB per read). llmtool
+never reads the credential, and `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and proxy variables
+are not forwarded. Every agent publishes as the same GitHub account and GitHub refuses
+APPROVE from a PR's own author, so the formal Reviewer may publish its verdict as a PR
+conversation comment instead of a PR review, in the one standard
+[formal verdict comment](../../skills/ai-team-delivery/formal-verdict.md) format, posted by
+the Reviewer D6 record's `github_login`. Only an unedited Claude PASS in exactly that form is
+accepted; a Codex PASS is advisory and ignored. The latest Reviewer disposition wins: any
+other verdict that names the result HEAD (including an edited or malformed one), or a later
+PR review, supersedes an earlier acceptance. A PR
+with 100 or more conversation comments fails closed. The D6 independence, native-session,
+reviewer worktree HEAD and exact-head CI gates are unchanged. Create the separate read-only
+Reviewer worktree at the result HEAD with the optional lifecycle bindings
+`--github-login LOGIN --native-session-id SESSION_ID` (a Claude Reviewer can be started with
+`claude --session-id SESSION_ID`). A PR review and a verdict comment with the same timestamp
+have no reliable order and are not accepted. Limitation: with one OS user and one shared
+GitHub account, nothing binds a comment (or a PR review) to the Reviewer Session, so any agent
+using that account could post a bound acceptance. This gate enforces process discipline, not
+adversarial independence; the remaining control is the distinct D6 Reviewer record (agent,
+Session, native Session and worktree at the result HEAD), and, like the registry, it is not
+protection against same-user tampering. A separate Reviewer GitHub identity would be needed
+for a real authorship binding.
+
 Codex can use the same registered D6 direct Developer lifecycle with
 `task delegate TASK_ID --provider codex --mode direct ...`; the default
 `--mode proposal` preserves its text-proposal route. Direct mode requires the

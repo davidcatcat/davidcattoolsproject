@@ -34,6 +34,11 @@ satisfy a milestone gate that explicitly requires one of the specialist workflow
 
 If no material issue is found, say so directly and identify any testing or environment gaps that remain.
 
+When this is the formal Reviewer gate on a PR, publish the verdict under the
+[Transition record](../ai-team-delivery/pm-continuation.md#transition-record) rule; for an
+llmtool Task closed by `task complete --reviewer-task`, use the
+[formal verdict comment](../ai-team-delivery/formal-verdict.md).
+
 ## Provider and runtime reviews
 
 - Distinguish implementation capability from upstream API capability, authorization, permission,
