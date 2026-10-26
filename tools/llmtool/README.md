@@ -846,6 +846,7 @@ are used during the invocation but are not retained in the durable Developer rec
 llmtool independently rechecks the D6 diff and runs its
 bounded test gate before the PM callback. BLOCKED, malformed or ambiguous results
 are retained without automatic retry.
+The prompt carries the PM-selected Developer goal separately from the digest-bound PM intake contract and states that code changes must stay within the allowed write paths.
 For a Codex `BLOCKED` result, the durable Developer record and `task show` include
 only its sensitive-screened `blocked_reason` (up to 2 KiB); DONE and ambiguous outcomes retain no such explanation.
 
