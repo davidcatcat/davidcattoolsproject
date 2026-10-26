@@ -1,5 +1,7 @@
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -293,6 +295,105 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(store.value['developer']['execution']['native_session_binding'], 'BOUND')
         self.assertEqual(store.value['completion']['evidence']['executor_native_session_id'],
                          self.THREAD)
+
+    def test_normal_d6_binds_using_pinned_lifecycle_file(self):
+        dispatcher = self.root.resolve() / 'dispatcher'
+        dispatcher.mkdir()
+        lifecycle_rel = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
+        lifecycle = dispatcher / lifecycle_rel
+        lifecycle.parent.mkdir(parents=True)
+        source_lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
+        lifecycle.write_bytes(source_lifecycle.read_bytes())
+        dispatcher_file = dispatcher / 'tools/llmtool/llmtool/task_submission_cli.py'
+        dispatcher_file.parent.mkdir(parents=True)
+        dispatcher_file.write_text('# pinned dispatcher fixture\n', encoding='utf-8')
+        env_helper = dispatcher / 'tools/llmtool/scripts/d6_worktree_env.py'
+        env_helper.write_text('# pinned helper fixture\n', encoding='utf-8')
+        real_run = subprocess.run
+        git_env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1',
+                       GIT_CONFIG_GLOBAL=os.devnull)
+        real_run(['/usr/bin/git', 'init', '-b', 'main'], cwd=dispatcher,
+                 env=git_env, check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'config', 'user.name', 'Fixture'], cwd=dispatcher,
+                 env=git_env, check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'config', 'user.email', 'fixture@example.invalid'],
+                 cwd=dispatcher, env=git_env, check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'add', '.'], cwd=dispatcher, env=git_env,
+                 check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'commit', '-m', 'pinned dispatcher fixture'],
+                 cwd=dispatcher, env=git_env, check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'remote', 'add', 'origin',
+                  'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                 cwd=dispatcher, env=git_env, check=True, capture_output=True)
+        registration = SimpleNamespace(task_id='normal-d6', env2_approved_tooling_sha=None)
+        invocation = []
+
+        def run(command, **kwargs):
+            if command and command[0] == sys.executable:
+                invocation.append(command)
+                return subprocess.CompletedProcess(command, 0, b'', b'')
+            return real_run(command, **kwargs)
+
+        with patch.object(task_submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher), \
+             patch.object(task_submission_cli, '__file__', str(dispatcher_file)), \
+             patch.object(task_submission_cli.subprocess, 'run', side_effect=run):
+            result = task_submission_cli._bind_codex_native_session(registration, self.THREAD)
+
+        self.assertEqual(result, 'BOUND')
+        self.assertEqual(len(invocation), 1)
+        self.assertEqual(invocation[0][3], str(lifecycle))
+        self.assertNotIn('-c', invocation[0])
+
+    def test_normal_d6_rejects_lifecycle_mismatch_before_binding(self):
+        dispatcher = self.root.resolve() / 'mismatched-dispatcher'
+        dispatcher.mkdir()
+        lifecycle_rel = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
+        lifecycle = dispatcher / lifecycle_rel
+        lifecycle.parent.mkdir(parents=True)
+        lifecycle.write_text('# not the pinned source\n', encoding='utf-8')
+        dispatcher_file = dispatcher / 'tools/llmtool/llmtool/task_submission_cli.py'
+        dispatcher_file.parent.mkdir(parents=True)
+        dispatcher_file.write_text('# pinned dispatcher fixture\n', encoding='utf-8')
+        env_helper = dispatcher / 'tools/llmtool/scripts/d6_worktree_env.py'
+        env_helper.write_text('# pinned helper fixture\n', encoding='utf-8')
+        real_run = subprocess.run
+        git_env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1',
+                       GIT_CONFIG_GLOBAL=os.devnull)
+        for command in (
+                ['/usr/bin/git', 'init', '-b', 'main'],
+                ['/usr/bin/git', 'config', 'user.name', 'Fixture'],
+                ['/usr/bin/git', 'config', 'user.email', 'fixture@example.invalid']):
+            real_run(command, cwd=dispatcher, env=git_env, check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'add', '.'], cwd=dispatcher, env=git_env,
+                 check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'commit', '-m', 'pinned dispatcher fixture'],
+                 cwd=dispatcher, env=git_env, check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'remote', 'add', 'origin',
+                  'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                 cwd=dispatcher, env=git_env, check=True, capture_output=True)
+        # A clean repository with a pinned but incorrect lifecycle source must be
+        # rejected before invoking the lifecycle entry.
+        pinned_source = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
+        lifecycle.write_bytes(pinned_source.read_bytes())
+        real_run(['/usr/bin/git', 'add', lifecycle_rel], cwd=dispatcher, env=git_env,
+                 check=True, capture_output=True)
+        real_run(['/usr/bin/git', 'commit', '-m', 'pin lifecycle source'], cwd=dispatcher,
+                 env=git_env, check=True, capture_output=True)
+        lifecycle.write_text('# mismatch\n', encoding='utf-8')
+        registration = SimpleNamespace(task_id='normal-d6', env2_approved_tooling_sha=None)
+        invocation = []
+
+        def run(command, **kwargs):
+            invocation.append(command)
+            return real_run(command, **kwargs)
+
+        with patch.object(task_submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher), \
+             patch.object(task_submission_cli, '__file__', str(dispatcher_file)), \
+             patch.object(task_submission_cli.subprocess, 'run', side_effect=run):
+            result = task_submission_cli._bind_codex_native_session(registration, self.THREAD)
+
+        self.assertEqual(result, 'D6_BIND_NATIVE_SESSION_HELPER_UNTRUSTED')
+        self.assertFalse(any(command and command[0] == sys.executable for command in invocation))
 
     def test_out_of_allowlist_diff_gets_typed_rejection(self):
         diff = ('diff --git a/private.py b/private.py\n'

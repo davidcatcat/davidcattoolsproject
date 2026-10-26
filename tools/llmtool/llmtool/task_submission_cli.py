@@ -932,10 +932,11 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
     """Return pinned helper/source bytes, using approved D6 blobs when present."""
     dispatcher_root = D6_INTEGRATOR_DISPATCHER_ROOT
     helper_rel = 'tools/llmtool/scripts/d6_worktree_env.py'
+    lifecycle_rel = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
     source_rel = helper_rel if source_rel is None else source_rel
     candidate_sources = {
         helper_rel,
-        'tools/llmtool/scripts/d6_worktree_lifecycle.py',
+        lifecycle_rel,
     }
     if source_rel not in candidate_sources:
         raise ValueError('D6 source path is outside the bootstrap allowlist')
@@ -978,8 +979,12 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
         raise ValueError('dispatcher HEAD is invalid')
     helper_source = git('show', pinned_head + ':' + helper_rel)
     dispatcher_source = git('show', pinned_head + ':' + dispatcher_rel)
-    for relative, expected in ((helper_rel, helper_source),
-                               (dispatcher_rel, dispatcher_source)):
+    expected_sources = [(helper_rel, helper_source),
+                        (dispatcher_rel, dispatcher_source)]
+    if source_rel == lifecycle_rel:
+        lifecycle_source = git('show', pinned_head + ':' + lifecycle_rel)
+        expected_sources.append((lifecycle_rel, lifecycle_source))
+    for relative, expected in expected_sources:
         source_path = dispatcher_root / relative
         info = source_path.lstat()
         if (not source_path.is_file() or source_path.is_symlink() or
@@ -1024,8 +1029,8 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
         if object_id != fields[2].decode():
             raise ValueError('approved D6 source blob hash changed')
         helper_source = approved_source
-    elif source_rel != helper_rel:
-        raise ValueError('approved D6 source commit is required')
+    elif source_rel == lifecycle_rel:
+        helper_source = lifecycle_source
     helper_source.decode('utf-8')
     return dispatcher_root, helper_source
 
@@ -1075,8 +1080,9 @@ def _bind_codex_native_session(registration, native_session_id):
             'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
             'GIT_NO_LAZY_FETCH': '1', 'GIT_TERMINAL_PROMPT': '0',
         }
+        lifecycle_path = dispatcher_root / lifecycle_rel
         result = subprocess.run(
-            [sys.executable, '-B', '-I', '-c', lifecycle_source.decode('utf-8'),
+            [sys.executable, '-B', '-I', str(lifecycle_path),
              '--bind-native-session-task-id', registration.task_id,
              '--native-session-id', native_session_id],
             cwd=dispatcher_root, env=env, stdin=subprocess.DEVNULL,
