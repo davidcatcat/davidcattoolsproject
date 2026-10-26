@@ -1487,6 +1487,22 @@ class OfficeViewTests(unittest.TestCase):
                          [("claude cli #1", mon.IDLE), ("claude 互動", mon.IDLE)])
         self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 2")
 
+    def test_open_agent_clis_outside_the_repo_get_a_row_like_opencode(self):
+        elsewhere = os.path.join(self.tmp.name, "other-project")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Codex CLI", "codex", ""),
+                 mon.Process(82, 1, 82, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(83, 1, 83, "05:00", "S+", "OpenCode CLI", "opencode", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               opencode_db=os.path.join(self.tmp.name, "none.db"),
+                               cwd_of=lambda pid: elsewhere)
+        clis = sorted((row.name, row.state, row.detail.split("：")[0]) for row in rows
+                      if " cli #" in row.name)
+        self.assertEqual(clis, [("claude cli #1", mon.IDLE, "其他資料夾"),
+                                ("codex cli #1", mon.IDLE, "其他資料夾"),
+                                ("opencode cli #1", mon.IDLE, "其他資料夾")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 1  Codex 1  OpenCode 1")
+
     def test_process_fallback_does_not_duplicate_transcript_task_row(self):
         self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},
                     ["task_started"], age=5)

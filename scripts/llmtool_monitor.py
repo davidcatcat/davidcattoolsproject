@@ -2998,10 +2998,10 @@ def kilo_rows(processes: list[Process], now: float, canonical: str,
 
 def _open_cli_rows(clis: list[Process], rows: list[OfficeRow], now: float, canonical: str,
                    cwd_of) -> list[OfficeRow]:
-    """An open Codex or Claude CLI in this repository that no session row
-    shows still gets a row, the one an open OpenCode CLI without a session
-    gets. Nothing records which CLI holds which session, so in each place
-    the live session rows are matched to CLIs by count."""
+    """An open Codex or Claude CLI that no session row shows still gets a
+    row, the one an open OpenCode CLI without a session gets, wherever it
+    is. Nothing records which CLI holds which session, so in each place of
+    this repository the live session rows are matched to CLIs by count."""
     out = []
     for prefix, order in (("codex", 45), ("claude", 47)):
         shown: dict[str, int] = {}
@@ -3012,9 +3012,10 @@ def _open_cli_rows(clis: list[Process], rows: list[OfficeRow], now: float, canon
         idle = []
         for proc in clis:
             place = _place(cwd_of(proc.pid), canonical)
-            if family(proc.role).lower() != prefix or place is None:
+            if family(proc.role).lower() != prefix:
                 continue
-            task = f"task {place[1]}" if place[0] == "task" else ""
+            # Session rows are read only for this repository.
+            task = None if place is None else f"task {place[1]}" if place[0] == "task" else ""
             if shown.get(task, 0):
                 shown[task] -= 1
             else:
