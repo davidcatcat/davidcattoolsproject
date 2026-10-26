@@ -17,13 +17,17 @@ on:
   push:
     branches:
       - main
+    # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
     paths:
       - 'tools/llmtool/**'
+      - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
   pull_request:
+    # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
     paths:
       - 'tools/llmtool/**'
+      - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
   workflow_dispatch:
