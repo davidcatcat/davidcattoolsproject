@@ -1668,10 +1668,10 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows()
         self.assertEqual(sorted(row.sid for row in rows if row.name == "codex developer"),
                          ["da18fd15", "ddaf5381"])
-        claude = self.by_name(rows)["claude 互動"]
+        claude = self.by_name(rows)["claude"]
         self.assertEqual(claude.sid, "8db9ba20")
         lines = mon.office_lines(rows)
-        self.assertTrue(any(line.startswith("claude 互動 8db9ba20 ") for line in lines), lines)
+        self.assertTrue(any(line.startswith("claude 8db9ba20 ") for line in lines), lines)
         self.assertEqual(mon._codex_sid("not-a-uuid PROMPT-SECRET"), "")
         # Two sessions alike but for their id keep separate event keys.
         one = mon.OfficeRow("claude 互動", mon.IDLE, "fix monitor", 1.0, 30, sid="aaaaaaaa")
@@ -1893,10 +1893,10 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows()
         names = [row.name for row in rows]
         self.assertEqual(names.count("claude subagent"), 2)
-        reviewer = self.by_name(rows)["claude 互動"]
+        reviewer = self.by_name(rows)["claude"]
         self.assertEqual((reviewer.state, reviewer.age), (mon.WORKING, 10.0))
         self.assertNotIn("token=abc", reviewer.detail)
-        developer = self.by_name(rows)["claude developer（互動）"]
+        developer = self.by_name(rows)["claude developer"]
         self.assertEqual((developer.state, developer.detail), (mon.IDLE, "Build env cache"))
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
@@ -1938,7 +1938,7 @@ class OfficeViewTests(unittest.TestCase):
             with self.subTest(name):
                 path = self.claude / "dev" / "s.jsonl"
                 self._write(path, entries, age=age)
-                row = self.by_name(self.rows())["claude developer（互動）"]
+                row = self.by_name(self.rows())["claude developer"]
                 self.assertEqual((row.state, row.detail[:len(want[1])]), want)
                 self.assertNotIn("FILE-SECRET", row.detail)
 
@@ -1954,7 +1954,7 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "user", "cwd": self.canonical, "entrypoint": "claude-desktop"}], age=3600)
         cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
         # No registry: nothing is judged.
-        self.assertEqual([row.state for row in self.rows([cli]) if row.name == "claude 互動"],
+        self.assertEqual([row.state for row in self.rows([cli]) if row.name == "claude"],
                          [mon.IDLE] * 4)
         sessions = self.claude.parent / "sessions"
         sessions.mkdir()
@@ -2013,6 +2013,30 @@ class OfficeViewTests(unittest.TestCase):
                                "title q": ("claude developer（互動）", "developer"),
                                "title x": ("claude 互動", ""),
                                "title y": ("claude 互動", "")})
+
+    def test_closed_claude_session_keeps_its_launcher_role_but_claims_no_mode(self):
+        # A stopped background Reviewer, a stopped UI Agent in its D6 task and a
+        # stopped unnamed session: no CLI reports on them any more.
+        for sid, cwd, name in (("r", self.canonical, "claude-reviewer"),
+                               ("u", str(self.task), "claude-developer-ui"),
+                               ("n", self.canonical, None)):
+            entries = [{"type": "user", "cwd": cwd, "entrypoint": "cli"}]
+            if name:
+                entries.append({"type": "agent-name", "agentName": name, "sessionId": sid})
+            entries.append({"type": "ai-title", "aiTitle": f"title {sid}"})
+            self._write(self.claude / "proj" / f"{sid}.jsonl", entries, age=600)
+        rows = self.rows()
+        got = {row.detail.split("｜")[0]: (row.name, row.role) for row in rows if row.kind != "worker"}
+        self.assertEqual(got, {"title r": ("claude reviewer", "reviewer"),
+                               "title u": ("claude ui", "ui"),
+                               "title n": ("claude", "")})
+        # A name that is not exactly claude-<role> still binds nothing.
+        self._write(self.claude / "proj" / "r.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "agent-name", "agentName": "claude-reviewers"},
+            {"type": "ai-title", "aiTitle": "title r"}], age=600)
+        got = {row.detail: (row.name, row.role) for row in self.rows() if row.kind != "worker"}
+        self.assertEqual(got["title r"], ("claude", ""))
 
     def test_claude_sessions_of_every_account_are_shown(self):
         other = self.claude.parent / "claude-account2" / "projects"
@@ -2112,7 +2136,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(sum(row.name == "claude 單次呼叫" for row in rows), 1)   # run2 hidden
         live = next(row for row in rows if row.detail == "Owner chat")
         self.assertEqual((live.name, live.state, live.kind, live.group),
-                         ("claude 互動", mon.IDLE, "agent", ""))
+                         ("claude", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
         self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 7 位")
         live = lines.index(f"── {mon.LIVE_SECTION} ──")
