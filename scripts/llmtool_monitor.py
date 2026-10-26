@@ -3728,7 +3728,7 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
                     cwd_of=process_cwd) -> list[OfficeRow]:
     """Show a live agent CLI in its registered D6 task even without a transcript."""
     covered = {row.task[5:] for row in rows
-               if row.task.startswith("task ")}
+               if row.task.startswith("task ") and row.state != CLOSED}
     seen = set(covered)
     out = []
     for proc in sorted(processes, key=lambda item: item.pid):
