@@ -561,77 +561,15 @@ def resume_worktree(*, task_id, root):
     return root
 
 
-def _refresh_env2_marker(record, root, head):
-    """Rebind the existing ENV-2 PASS report and marker to a new clean HEAD."""
-    marker = record.get("env2_pass_marker")
-    required = {"schema_version", "result", "task_id", "root_realpath",
-                "submitted_head_sha", "current_head_sha", "tooling_sha",
-                "environment_fingerprint", "report_sha256"}
-    fingerprint_re = re.compile(
-        r"[a-z][a-z0-9]*\d+\.\d+-[a-z0-9][a-z0-9._-]{0,31}-"
-        r"[a-z0-9][a-z0-9._-]{0,31}-[0-9a-f]{12}\Z")
-    if (type(marker) is not dict or set(marker) != required or
-            marker.get("schema_version") != 1 or marker.get("result") != "PASS" or
-            marker.get("task_id") != record.get("task_id") or
-            marker.get("root_realpath") != str(root) or
-            marker.get("tooling_sha") != (record.get("env2_approved_tooling_sha") or
-                                             record.get("base_sha")) or
-            type(marker.get("environment_fingerprint")) is not str or
-            not fingerprint_re.fullmatch(marker["environment_fingerprint"])):
-        _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
-    report_path = root / "tools" / "llmtool" / ".d6-bootstrap-report.json"
-    try:
-        info = report_path.lstat()
-        if (not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode) or
-                info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600 or
-                info.st_nlink != 1 or info.st_size > 2 * 1024 * 1024):
-            _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
-        raw = report_path.read_bytes()
-        report = json.loads(raw.decode("utf-8"))
-    except LifecycleError:
-        raise
-    except Exception:
-        _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
-    if (hashlib.sha256(raw).hexdigest() != marker.get("report_sha256") or
-            type(report) is not dict or report.get("result") != "PASS" or
-            report.get("task_id") != record.get("task_id") or
-            report.get("root_realpath") != str(root) or
-            report.get("head_sha") != marker.get("current_head_sha") or
-            report.get("tooling_sha") != marker.get("tooling_sha") or
-            report.get("cache_fingerprint") != marker.get("environment_fingerprint")):
-        _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
-    report["head_sha"] = head
-    payload = (json.dumps(report, ensure_ascii=True, sort_keys=True,
-                          separators=(",", ":")) + "\n").encode("ascii")
-    temporary = None
-    try:
-        fd, temporary = tempfile.mkstemp(prefix=".d6-bootstrap-report.",
-                                         suffix=".tmp", dir=str(report_path.parent))
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, report_path)
-        temporary = None
-        directory_fd = os.open(report_path.parent, os.O_RDONLY |
-                               getattr(os, "O_DIRECTORY", 0))
+def _validate_record_result_report_path(root):
+    """Keep the ENV-2 reader's no-symlink guarantee for report directories."""
+    for directory in (root / "tools", root / "tools" / "llmtool"):
         try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
-    except OSError:
-        _stop("D6_RECORD_RESULT_ENV2_MARKER_UPDATE_FAILED")
-    finally:
-        if temporary is not None:
-            try:
-                os.unlink(temporary)
-            except OSError:
-                pass
-    updated = dict(marker)
-    updated.update(submitted_head_sha=head, current_head_sha=head,
-                   report_sha256=hashlib.sha256(payload).hexdigest())
-    return updated
+            info = directory.lstat()
+        except OSError:
+            _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
 
 
 def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_ROOT):
@@ -684,6 +622,8 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_RO
             _stop("D6_RECORD_RESULT_STATE_REFUSED")
         if record.get("state") not in ("ACTIVE", "REPAIR") or record.get("lock_state") != "LOCKED":
             _stop("D6_RECORD_RESULT_STATE_REFUSED")
+        if record.get("env2_approved_tooling_sha") is not None:
+            _stop("D6_RECORD_RESULT_APPROVED_TOOLING_REFUSED")
         if str(root) == str(canonical_root):
             _stop("D6_RECORD_RESULT_CANONICAL_ROOT")
         if str(root) != record.get("root_realpath") or root.parent != workspace_root:
@@ -707,6 +647,7 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_RO
                 _task_git(root, "rev-parse", "--path-format=absolute",
                           "--git-common-dir").stdout.strip() != str(common_dir)):
             _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+        _validate_record_result_report_path(root)
         branch = record.get("branch")
         if (type(branch) is not str or not _valid_branch(canonical_root, branch) or
                 _task_git(root, "branch", "--show-current").stdout.strip() != branch):
@@ -722,10 +663,37 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_RO
         if _task_git(root, "merge-base", "--is-ancestor", old_head, head,
                      check=False).returncode:
             _stop("D6_RECORD_RESULT_NON_DESCENDANT")
-        marker = _refresh_env2_marker(record, root, head)
+        previous_record = dict(record)
         updated = dict(record)
-        updated.update(head_sha=head, last_verified_at=_now(), env2_pass_marker=marker)
+        updated["head_sha"] = head
         _replace_record(record_path, updated)
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        try:
+            # ENV-2 rechecks the exact registered HEAD and publishes its own
+            # report and PASS marker. It also takes the lifecycle lock itself.
+            _bootstrap(root, task_id)
+        except LifecycleError:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                current = _read_registry_record(record_path)
+                if (current.get("task_id") != task_id or
+                        current.get("head_sha") != head):
+                    _stop("D6_REGISTRY_CHANGED")
+                _replace_record(record_path, previous_record)
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            raise
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        try:
+            current = _read_registry_record(record_path)
+            if (current.get("task_id") != task_id or current.get("head_sha") != head or
+                    not isinstance(current.get("env2_pass_marker"), dict) or
+                    current["env2_pass_marker"].get("current_head_sha") != head):
+                _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+            current["last_verified_at"] = _now()
+            _replace_record(record_path, current)
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
         print("D6_RESULT_RECORDED task_id=" + task_id + " head=" + head)
         return head
     finally:

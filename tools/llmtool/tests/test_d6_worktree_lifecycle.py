@@ -113,6 +113,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                   "git_common_dir": str(self.source / ".git"), "branch": branch,
                   "base_sha": self.base, "head_sha": self.base, "state": "ACTIVE",
                   "last_verified_at": "2026-01-01T00:00:00Z", "lock_state": "LOCKED",
+                  "retention_paths": list(lifecycle.RETENTION_PATHS),
                   "env2_pass_marker": {"schema_version": 1, "result": "PASS",
                       "task_id": task_id, "root_realpath": str(root),
                       "submitted_head_sha": self.base, "current_head_sha": self.base,
@@ -133,26 +134,101 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         return subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"],
                                        cwd=root, text=True).strip()
 
-    def test_record_result_advances_only_result_fields_and_refreshes_marker(self):
+    def test_record_result_rebootstraps_env2_for_new_head(self):
         root, record_path = self._registered_result_fixture()
         before = lifecycle._read_registry_record(record_path)
+        report_path = root / "tools" / "llmtool" / ".d6-bootstrap-report.json"
+        report_before = report_path.read_bytes()
         head = self._commit_file(root, "result\n", "developer result")
         output = io.StringIO()
+        def complete_bootstrap(bootstrap_root, bootstrap_task_id):
+            self.assertEqual(bootstrap_root, root)
+            self.assertEqual(bootstrap_task_id, "record-result-test")
+            current = lifecycle._read_registry_record(record_path)
+            self.assertEqual(current["head_sha"], head)
+            current["env2_pass_marker"] = {
+                **before["env2_pass_marker"], "submitted_head_sha": head,
+                "current_head_sha": head,
+            }
+            lifecycle._replace_record(record_path, current)
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap", side_effect=complete_bootstrap) as bootstrap, \
                 contextlib.redirect_stdout(output):
             recorded = lifecycle.record_result(
                 task_id="record-result-test", canonical_root=self.source,
                 root=root, workspace_root=self.tasks)
+        bootstrap.assert_called_once_with(root, "record-result-test")
         after = lifecycle._read_registry_record(record_path)
         self.assertEqual(recorded, head)
         self.assertEqual(after["head_sha"], head)
         self.assertNotEqual(after["last_verified_at"], before["last_verified_at"])
         self.assertEqual(after["env2_pass_marker"]["current_head_sha"], head)
+        self.assertEqual(after["env2_pass_marker"]["submitted_head_sha"], head)
+        self.assertEqual(report_path.read_bytes(), report_before)
         self.assertEqual({key: value for key, value in after.items()
                           if key not in ("head_sha", "last_verified_at", "env2_pass_marker")},
                          {key: value for key, value in before.items()
                           if key not in ("head_sha", "last_verified_at", "env2_pass_marker")})
         self.assertIn("D6_RESULT_RECORDED", output.getvalue())
+
+    def test_record_result_source_mismatch_rolls_back_registry(self):
+        root, record_path = self._registered_result_fixture("record-result-source-mismatch")
+        makefile = root / "tools" / "llmtool" / "Makefile"
+        makefile.write_text(makefile.read_text() + "# changed bootstrap source\n")
+        subprocess.run(["/usr/bin/git", "add", str(makefile)], cwd=root, check=True)
+        subprocess.run(["/usr/bin/git", "-c", "user.name=D6 test",
+                        "-c", "user.email=d6@example.invalid", "commit", "-m",
+                        "change bootstrap source"], cwd=root, check=True, capture_output=True)
+        before = lifecycle._read_registry_record(record_path)
+        def reject_changed_bootstrap_source(bootstrap_root, bootstrap_task_id):
+            current = lifecycle._read_registry_record(record_path)
+            self.assertEqual(current["head_sha"], subprocess.check_output(
+                ["/usr/bin/git", "rev-parse", "HEAD"], cwd=root, text=True).strip())
+            self.assertNotEqual(
+                subprocess.check_output(["/usr/bin/git", "show",
+                                         before["base_sha"] + ":tools/llmtool/Makefile"],
+                                        cwd=root),
+                (root / "tools" / "llmtool" / "Makefile").read_bytes())
+            raise lifecycle.LifecycleError("ENV_BOOTSTRAP_REJECTED")
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap",
+                             side_effect=reject_changed_bootstrap_source), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(task_id="record-result-source-mismatch",
+                                    canonical_root=self.source, root=root,
+                                    workspace_root=self.tasks)
+        self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_REJECTED")
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+    def test_record_result_refuses_approved_tooling_without_registry_change(self):
+        root, record_path = self._registered_result_fixture("record-result-approved")
+        before = lifecycle._read_registry_record(record_path)
+        before["env2_approved_tooling_sha"] = self.base
+        lifecycle._replace_record(record_path, before)
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(task_id="record-result-approved",
+                                    canonical_root=self.source, root=root,
+                                    workspace_root=self.tasks)
+        self.assertEqual(raised.exception.code,
+                         "D6_RECORD_RESULT_APPROVED_TOOLING_REFUSED")
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+    def test_record_result_refuses_symlinked_report_directories(self):
+        root, record_path = self._registered_result_fixture("record-result-symlink")
+        tools = root / "tools"
+        moved = root / "tools-real"
+        tools.rename(moved)
+        tools.symlink_to(moved, target_is_directory=True)
+        before = lifecycle._read_registry_record(record_path)
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.record_result(task_id="record-result-symlink",
+                                    canonical_root=self.source, root=root,
+                                    workspace_root=self.tasks)
+        self.assertEqual(raised.exception.code,
+                         "D6_RECORD_RESULT_ENV2_MARKER_INVALID")
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
 
     def test_record_result_refuses_unknown_and_blocked_or_removed_tasks(self):
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
