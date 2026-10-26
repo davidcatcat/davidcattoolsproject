@@ -181,6 +181,22 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result_sha, patch_text
 
+    def _make_path_result(self, path, content):
+        target = self.root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding='utf-8')
+        self._git('add', path)
+        self._git('commit', '-m', 'executor path result')
+        result_sha = self._git('rev-parse', 'HEAD')
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        return result_sha
+
     def test_advanced_registered_base_completes_from_dispatch_source(self):
         path = self.root / self.source_path
         path.write_text(path.read_text() + '\n# approved branch progress\n')
@@ -601,6 +617,52 @@ class TaskCompletionTests(unittest.TestCase):
             root=str(self.root), result_sha=result_sha, read_paths=[self.source_path],
             write_paths=[self.source_path])
         self.assertNotEqual(evidence[0]['exit_code'], 0)
+        self.assertEqual(evidence[0]['status'], 'FAILED')
+        self.assertIsInstance(evidence[0]['output_excerpt'], list)
+
+    def test_registered_scripts_run_isolated_and_failure_is_evidenced(self):
+        path = 'scripts/test_fixture.py'
+        script = ('import unittest\n'
+                  'class Fixture(unittest.TestCase):\n'
+                  '    def test_fail(self): self.fail("expected failure")\n'
+                  'if __name__ == "__main__": unittest.main()\n')
+        result_sha = self._make_path_result(path, script)
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), result_sha=result_sha, read_paths=[path], write_paths=[])
+        self.assertEqual(evidence[0]['path'], path)
+        self.assertEqual(evidence[0]['status'], 'FAILED')
+        self.assertNotEqual(evidence[0]['exit_code'], 0)
+        self.assertTrue(evidence[0]['output_excerpt'])
+        self.assertTrue(all('expected failure' in item['text']
+                            for item in evidence[0]['output_excerpt']))
+
+    def test_out_of_registry_task_path_does_not_add_a_test_entry(self):
+        result_sha = self._make_path_result('docs/guide.md', 'Documentation.\n')
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), result_sha=result_sha,
+            read_paths=['scripts/anything_else.py'], write_paths=[])
+        self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
+        self.assertEqual(evidence[0]['changed_paths'], ['docs/guide.md'])
+
+    def test_docs_only_gate_uses_actual_git_paths(self):
+        result_sha = self._make_path_result('docs/guide.md', 'Documentation.\n')
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), result_sha=result_sha,
+            read_paths=['tools/llmtool/tests/test_fixture.py'], write_paths=[])
+        self.assertEqual(evidence[0]['status'], 'NOT_APPLICABLE_DOCS_ONLY')
+
+    def test_mixed_docs_and_code_without_registered_test_stays_missing(self):
+        (self.root / 'docs').mkdir()
+        (self.root / 'docs' / 'guide.md').write_text('Documentation.\n')
+        (self.root / 'src').mkdir()
+        (self.root / 'src' / 'module.py').write_text('VALUE = 1\n')
+        self._git('add', 'docs/guide.md', 'src/module.py')
+        self._git('commit', '-m', 'mixed result')
+        result_sha = self._git('rev-parse', 'HEAD')
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.run_bounded_tests(
+                root=str(self.root), result_sha=result_sha, read_paths=[], write_paths=[])
+        self.assertEqual(raised.exception.completion_code, 'TEST_SCOPE_MISSING')
 
     def test_github_review_requires_d6_actor_session_and_live_exact_head(self):
         result_sha, _ = self._make_result()
