@@ -1697,15 +1697,8 @@ def run_task_codex_delegate(args, *, store):
             if execution['native_session_binding'] == 'BOUND':
                 bound_registration = task_completion.read_d6_registration(
                     registration.task_id, registration.common_dir)
-                if (bound_registration.task_id != registration.task_id or
-                        bound_registration.trusted_agent_id != registration.trusted_agent_id or
-                        bound_registration.session_ref != registration.session_ref or
-                        bound_registration.root != registration.root or
-                        bound_registration.common_dir != registration.common_dir or
-                        bound_registration.branch != registration.branch or
-                        bound_registration.source_sha != registration.source_sha or
-                        bound_registration.result_sha != registration.result_sha or
-                        bound_registration.native_session_id != result.thread_id):
+                if bound_registration != dataclasses.replace(
+                        registration, native_session_id=result.thread_id):
                     raise LLMToolError('Codex native session binding did not refresh D6 registration')
                 registration = bound_registration
                 for evidence in (completion['evidence'],

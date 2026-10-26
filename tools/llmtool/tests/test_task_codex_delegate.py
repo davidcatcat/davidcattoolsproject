@@ -1,3 +1,4 @@
+import dataclasses
 import io
 import hashlib
 import json
@@ -302,14 +303,19 @@ class CodexDelegateTests(unittest.TestCase):
                 return self.value
 
         self.store = MemoryStore(task)
-        registration = SimpleNamespace(task_id='executor-task-1',
+        Registration = dataclasses.make_dataclass('Registration', [
+            ('task_id', object), ('trusted_agent_id', object),
+            ('session_ref', object), ('native_session_id', object),
+            ('root', object), ('common_dir', object), ('branch', object),
+            ('source_sha', object), ('result_sha', object), ('github_login', object),
+        ])
+        registration = Registration(task_id='executor-task-1',
             trusted_agent_id='executor-agent', session_ref='executor-session',
             native_session_id=None, root=str(self.root), common_dir=self.common_dir,
             branch='feat/codex-delegate', source_sha=self.source_sha,
-            result_sha=self.source_sha)
-        bound_registration = SimpleNamespace(**{
-            **vars(registration), 'native_session_id':
-                '12345678-1234-4234-8234-123456789abc'})
+            result_sha=self.source_sha, github_login='owner')
+        bound_registration = dataclasses.replace(registration, native_session_id=
+            '12345678-1234-4234-8234-123456789abc')
         snapshot = SimpleNamespace(root=str(self.root), common_dir=self.common_dir,
             branch='feat/codex-delegate', head=self.source_sha)
         result = {'task_id': task['task_id'], 'run_id': task['run_id'],
@@ -350,6 +356,57 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(collect.call_args.kwargs['expected_native_session_id'],
                          bound_registration.native_session_id)
         callback.assert_called_once()
+
+    def test_bound_codex_session_rejects_other_registration_changes(self):
+        task = self._task()
+        class MemoryStore:
+            def __init__(self, record):
+                self.value = dict(record)
+
+            def get(self, _task_id):
+                return self.value
+
+            def update(self, _task_id, **changes):
+                self.value.update(changes)
+                return self.value
+
+            def compare_and_update(self, _task_id, expected, **changes):
+                if any(self.value.get(key) != value for key, value in expected.items()):
+                    raise AssertionError('unexpected Task update')
+                self.value.update(changes)
+                return self.value
+
+        self.store = MemoryStore(task)
+        Registration = dataclasses.make_dataclass('Registration', [
+            ('task_id', object), ('trusted_agent_id', object),
+            ('session_ref', object), ('native_session_id', object),
+            ('root', object), ('common_dir', object), ('branch', object),
+            ('source_sha', object), ('result_sha', object), ('github_login', object),
+        ])
+        registration = Registration(task_id='executor-task-1',
+            trusted_agent_id='executor-agent', session_ref='executor-session',
+            native_session_id=None, root=str(self.root), common_dir=self.common_dir,
+            branch='feat/codex-delegate', source_sha=self.source_sha,
+            result_sha=self.source_sha, github_login='owner')
+        bound_registration = dataclasses.replace(registration,
+            native_session_id='12345678-1234-4234-8234-123456789abc',
+            github_login='changed-owner')
+
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task,
+                registration=registration, bound_registration=bound_registration)
+
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['developer']['error_code'],
+                         'CODEX_RESULT_EVIDENCE_UNKNOWN')
+        self.assertEqual(saved['completion']['evidence']['executor_native_session'],
+                         'UNKNOWN')
+        self.assertEqual(saved['developer']['direct_result_callback']['evidence'][
+            'executor_native_session'], 'UNKNOWN')
+        self.assertNotEqual(saved['developer']['direct_result_callback']['evidence'][
+            'verification_state'], 'VERIFIED')
+        callback.assert_not_called()
 
     def test_bootstrap_environment_failure_is_unavailable_and_typed(self):
         from llmtool.opencode_direct_developer import DirectOpenCodeError
