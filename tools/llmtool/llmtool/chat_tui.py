@@ -56,6 +56,9 @@ SLASH_COMMANDS = (
     ("/task show", "/task show ", "Show a task by TASK_ID"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
+# Status bar fields in display order, and the order they drop when the row is too narrow.
+STATUS_FIELDS = ("provider", "model", "state", "usage", "help")
+STATUS_DROP_ORDER = ("help", "usage", "model", "provider")
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
 
 
@@ -244,7 +247,10 @@ class ChatTUI:
         @keys.add("enter", filter=input_focused)
         def _submit(event):
             if self.searching:
-                self.accept_search()
+                if picker_shown():
+                    self.accept_search()
+                else:
+                    self.close_menu()  # Unseen search: keep the draft, send nothing.
             elif not (menu_shown() and self.accept_menu()):
                 self.submit()
 
@@ -324,8 +330,10 @@ class ChatTUI:
                                    "menu.header": "bg:ansibrightblack fg:ansiwhite bold"}))
         # prompt_toolkit waits timeoutlen (1s) after a lone Esc in case Esc Enter follows;
         # that made dismissing the picker feel stuck. Shortened only while the picker is
-        # open, so the Esc Enter window is unchanged otherwise.
+        # visible on screen, so the Esc Enter window is unchanged otherwise.
         self._default_timeoutlen = self.app.timeoutlen
+        # A resize can hide the picker without any key press; re-check before each draw.
+        self.app.before_render += lambda _app: self._sync_picker()
 
     # -- rendering -----------------------------------------------------------------
     def status_text(self):
@@ -350,17 +358,23 @@ class ChatTUI:
             value = terminal_safe_text(str(value)).replace("\n", " ").replace("\t", " ")
             return fit_width(value, width, self._get_cwidth)
 
-        # Keep a single status row at common terminal widths. Prefer the actual
-        # reported model when available; keep the profile, current state and
-        # usage visible without allowing long names to expand the footer.
-        parts = [
-            "p:" + compact(session.provider, 10),
-            "m:" + compact(reported or model or "default", 14),
-            compact(state, 14),
-            "t:" + compact(_tokens(session.last_usage), 14),
-            "F1",
-        ]
-        return " | ".join(parts)
+        # One status row at any width. Prefer the actual reported model when available;
+        # long names never expand the footer. When the terminal is too narrow, fields
+        # drop in STATUS_DROP_ORDER; the state stays last and is cut only if alone too wide.
+        fields = {
+            "provider": "p:" + compact(session.provider, 10),
+            "model": "m:" + compact(reported or model or "default", 14),
+            "state": compact(state, 14),
+            "usage": "t:" + compact(_tokens(session.last_usage), 14),
+            "help": "F1",
+        }
+        width = max(1, self.app.output.get_size().columns)
+        shown = list(STATUS_FIELDS)
+        for name in STATUS_DROP_ORDER:
+            if self._get_cwidth(" | ".join(fields[key] for key in shown)) <= width:
+                break
+            shown.remove(name)
+        return fit_width(" | ".join(fields[key] for key in shown), width, self._get_cwidth)
 
     def picker_entries(self):
         if self.searching:
@@ -438,8 +452,20 @@ class ChatTUI:
             self.menu_index = 0
             self.menu_offset = 0
         self.menu_items = items
-        self.app.timeoutlen = (ESC_SEQUENCE_TIMEOUT if items or self.searching
-                               else self._default_timeoutlen)
+        self._sync_picker()
+
+    def _sync_picker(self):
+        """Match picker state to what is on screen.
+
+        A history search with no free row ends and keeps the draft, so nothing can
+        replace it unseen. The short lone-Esc timeout applies only while the picker is
+        visible; otherwise the usual Esc Enter window holds.
+        """
+        if self.searching and not sum(self.picker_layout()):
+            self.close_menu()  # Comes back here with searching off.
+            return
+        shown = sum(self.picker_layout()) > 0
+        self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
     def move_menu(self, direction):
         count = len(self.search_matches) if self.searching else len(self.menu_items)
@@ -460,9 +486,7 @@ class ChatTUI:
         self._set_menu([])
         self.searching = True
         self.search_query = ""
-        self._refresh_search()
-        if not sum(self.picker_layout()):
-            self.close_menu()  # No free row to show it; do not search invisibly.
+        self._refresh_search()  # Ends at once if there is no free row to show it.
 
     def type_search(self, text):
         self.search_query += text
@@ -473,7 +497,7 @@ class ChatTUI:
                                               self.search_query)
         self.menu_index = 0
         self.menu_offset = 0
-        self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT
+        self._sync_picker()
 
     def accept_search(self):
         """Enter while searching: the chosen entry becomes the draft; nothing runs."""

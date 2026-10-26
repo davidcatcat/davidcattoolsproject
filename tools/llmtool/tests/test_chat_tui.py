@@ -679,6 +679,100 @@ class WidgetTests(Base):
                             '\x12', shown, '\x1b\r'])
         self.factory.assert_not_called()
 
+    @staticmethod
+    async def redraw(ui):
+        ui.app.invalidate()
+        await asyncio.sleep(0.2)
+
+    def test_search_hidden_by_resize_ends_and_keeps_draft_after_redraw(self):
+        size = [Size(rows=24, columns=80)]
+
+        def shrink(ui):
+            self.assertTrue(ui.searching)
+            size[0] = Size(rows=4, columns=80)
+
+        def ended(ui):
+            self.assertFalse(ui.searching)
+            self.assertEqual(ui.input.text, 'x')
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        ui, _ = self.drive(['/status\r', 'x', '\x12', shrink, self.redraw, ended,
+                            lambda ui: size.__setitem__(0, Size(rows=24, columns=80)),
+                            self.redraw, lambda ui: self.assertFalse(ui.searching)], size=size)
+        self.assertEqual(ui.input.text, 'x')
+        self.factory.assert_not_called()
+
+    def test_enter_in_unseen_search_keeps_draft_and_sends_nothing(self):
+        """Resize then Enter before any redraw: Enter must not swap or send the draft."""
+        size = [Size(rows=24, columns=80)]
+
+        def shrink_then_enter(ui):
+            self.assertTrue(ui.searching)
+            size[0] = Size(rows=4, columns=80)
+            processor = ui.app.key_processor
+            with set_app(ui.app):
+                processor.feed(KeyPress(Keys.ControlM, '\r'))
+                processor.process_keys()
+            self.assertFalse(ui.searching)
+            self.assertEqual(ui.input.text, 'x')
+        ui, _ = self.drive(['/status\r', 'x', '\x12', shrink_then_enter], size=size)
+        self.assertEqual(ui.conversation.text.count('connectivity: not probed'), 1)
+        self.assertNotIn('> x', ui.conversation.text)
+        self.factory.assert_not_called()
+
+    def test_esc_timeout_follows_picker_visibility(self):
+        def hidden(ui):
+            self.assertTrue(ui.menu_items)
+            self.assertEqual(ui.picker_layout(), (0, 0, 0))
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.drive(['/s', hidden], size=[Size(rows=4, columns=30)])
+        size = [Size(rows=24, columns=80)]
+
+        def short(ui):
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+
+        def default(ui):
+            self.assertTrue(ui.menu_items)
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.drive(['/s', short,
+                    lambda ui: size.__setitem__(0, Size(rows=4, columns=80)), self.redraw, default,
+                    lambda ui: size.__setitem__(0, Size(rows=24, columns=80)), self.redraw, short],
+                   size=size)
+        self.factory.assert_not_called()
+
+    def test_status_bar_drops_low_priority_fields_when_narrow(self):
+        size = [Size(rows=24, columns=80)]
+        widths = {}
+
+        def measure(ui):
+            ui.quit_pending = True  # A long state: 'exit pending'
+            for columns in (80, 50, 40, 30, 20, 12, 8, 3):
+                size[0] = Size(rows=24, columns=columns)
+                widths[columns] = ui.status_text()
+            ui.quit_pending = False
+        self.drive([measure], size=size)
+        self.assertEqual(widths[80], 'p:first | m:test | exit pending | t:UNKNOWN | F1')
+        self.assertEqual(widths[40], 'p:first | m:test | exit pending')
+        self.assertEqual(widths[20], 'exit pending')
+        self.assertEqual(widths[8], 'exit pe…')
+        for columns, status in widths.items():
+            with self.subTest(columns=columns):
+                self.assertNotIn('\n', status)
+                self.assertLessEqual(get_cwidth(status), columns)
+                # The state is the last field to go; it is never dropped while others stay.
+                self.assertTrue(status.startswith(('p:', 'm:', 'ex')), status)
+                if columns >= 12:
+                    self.assertIn('exit pending', status)
+
+    def test_narrow_status_bar_keeps_input_row(self):
+        measurements = []
+
+        def inspect(ui):
+            measurements.append((ui.input.window.render_info.window_height,
+                                 ui.status_window.render_info.window_height))
+        ui, _ = self.drive(['draft', inspect], size=[Size(rows=8, columns=12)])
+        self.assertEqual(measurements, [(1, 1)])
+        self.assertEqual(ui.input.text, 'draft')
+
     def test_help_toggle_and_help_command_are_offline(self):
         def help_shown(ui):
             self.assertTrue(ui.show_help)
