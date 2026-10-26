@@ -16,7 +16,7 @@ from .task_completion import read_d6_registration
 from .task_store import TaskStore
 
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
-_REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9._/-]{1,100})\Z')
+_REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
 _REMOTE_LIMIT = 4096
@@ -31,7 +31,7 @@ _RECEIPT_FIELDS = frozenset((
 _REMOTE_SCRIPT = r'''import hashlib,json,os,re,subprocess,sys,tempfile,time
 from datetime import datetime,timezone
 sha,ref,repo,python,*mods=sys.argv[1:]
-R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z0-9._/-]{1,100})\Z"); M=re.compile(r"test_[a-z0-9_]{1,80}\Z")
+R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z"); M=re.compile(r"test_[a-z0-9_]{1,80}\Z")
 if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or any(not M.fullmatch(x) for x in mods): sys.exit(40)
 started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None
 def run(argv,**kw): return subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,check=False,**kw)
@@ -40,7 +40,7 @@ def nobody(work,argv,env=None):
     values.update(env or {})
     return ["sudo","-n","-u","nobody","env","-i"]+[k+"="+v for k,v in values.items()]+argv
 try:
-    f=run(["git","-C",repo,"fetch","--no-tags","origin",ref],timeout=120)
+    f=run(["git","-C",repo,"fetch","--no-tags","--end-of-options","origin",ref],timeout=120)
     log+=f.stdout
     q=run(["git","-C",repo,"rev-parse","--verify","FETCH_HEAD"],timeout=10)
     fetch=q.stdout.decode("ascii","replace").strip() if q.returncode==0 else None
@@ -63,9 +63,10 @@ try:
             if v.returncode: raise RuntimeError("venv")
             pip=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","-r","tools/llmtool/requirements-ci.txt"]),cwd=work,timeout=180); log+=pip.stdout
             if pip.returncode: raise RuntimeError("requirements")
+            package=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"]),cwd=work,timeout=180); log+=package.stdout
+            if package.returncode: raise RuntimeError("package")
             for mod in mods:
-                test=run(nobody(work,[work+"/venv/bin/python","-m","unittest",mod],
-                                {"PYTHONPATH":work+"/tools/llmtool/tests"}),cwd=work,timeout=180); log+=test.stdout
+                test=run(nobody(work,[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"]),cwd=work+"/tools/llmtool",timeout=180); log+=test.stdout
                 lines=[x.decode("utf8","replace").strip() for x in test.stdout.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
                 finals.append(next((line for line in reversed(lines)
                                     if line.endswith("OK") or line.endswith("FAILED") or
@@ -82,10 +83,12 @@ except subprocess.TimeoutExpired as exc:
 except Exception:
     if result not in ("SHA_MISMATCH","TIMEOUT"): result="FAIL"
     code=code or 1
-log_path="/tmp/llmtool-remote-test-"+sha+".log"
-# Full output remains on EC2 in a private file for every terminal remote result.
-saver=run(["sudo","-n","-u","nobody","sh","-c","umask 077; cat > \"$1\"","sh",log_path],input=log,timeout=10)
-if saver.returncode: result="UNKNOWN"; code=1
+log_dir_run=run(["sudo","-n","-u","nobody","mktemp","-d","-m","0700","/tmp/llmtool-remote-log.XXXXXX"],timeout=10)
+log_dir=log_dir_run.stdout.decode("utf8","replace").strip()
+log_path=log_dir+"/remote-test.log" if log_dir_run.returncode==0 else None
+# Full output remains on EC2 in a private, unique directory owned by nobody.
+saver=run(nobody(log_dir,[python,"-c","import sys; open(sys.argv[1], 'wb').write(sys.stdin.buffer.read())",log_path],{"HOME":log_dir,"TMPDIR":log_dir}),input=log,timeout=10) if log_path and re.fullmatch(r"/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log",log_path) else None
+if saver is None or saver.returncode: result="UNKNOWN"; code=1
 ended=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals[-len(mods)*2:],"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
@@ -124,6 +127,10 @@ def _config(path=None):
 def _admitted_modules(task):
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
+    callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
+    callback_evidence = callback.get('evidence') if type(callback) is dict else None
+    if type(callback) is dict and callback.get('state') == 'PM_EVIDENCE_READY' and type(callback_evidence) is dict:
+        evidence = callback_evidence
     tests = evidence.get('tests') if type(evidence) is dict else None
     if type(tests) is not list:
         return ()
@@ -165,7 +172,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
             type(receipt['log_bytes']) is not int or not 0 <= receipt['log_bytes'] <= 20_000_000 or
             type(receipt['log_sha256']) is not str or re.fullmatch(r'[0-9a-f]{64}', receipt['log_sha256']) is None or
             type(receipt['remote_log_path']) is not str or
-            re.fullmatch(r'/tmp/llmtool-remote-test-[0-9a-f]{40}\.log',
+            re.fullmatch(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log',
                          receipt['remote_log_path']) is None):
         return None
     if receipt['result'] == 'SHA_MISMATCH' and receipt['fetch_head'] == sha:

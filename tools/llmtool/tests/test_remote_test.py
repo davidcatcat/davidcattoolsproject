@@ -22,8 +22,14 @@ class Store:
             'completion': {'evidence': {
                 'common_dir': '/repo/.git',
                 'result': {'result_head': SHA},
-                'tests': [{'path': 'tools/llmtool/tests/test_remote_test.py'}],
-            }}, 'remote_test_receipts': [], 'completion_events': [],
+            }},
+            'developer': {'direct_result_callback': {
+                'state': 'PM_EVIDENCE_READY',
+                'evidence': {'common_dir': '/repo/.git',
+                    'result': {'result_head': SHA},
+                    'tests': [{'path': 'tools/llmtool/tests/test_remote_test.py'}]},
+            }},
+            'remote_test_receipts': [], 'completion_events': [],
             'completion_event_tombstones': [],
         }
 
@@ -64,7 +70,7 @@ class RemoteTestTests(unittest.TestCase):
             'ended_at': '2026-10-27T00:00:01Z', 'elapsed_s': 1.0,
             'ran_total': 1, 'final': list(final), 'failures': [],
             'log_bytes': 0, 'log_sha256': 'd' * 64,
-            'remote_log_path': '/tmp/llmtool-remote-test-' + SHA + '.log',
+            'remote_log_path': '/tmp/llmtool-remote-log.Abc123/remote-test.log',
         }, separators=(',', ':')).encode()
 
     def run_it(self, data=None, *, error=None, modules=('test_remote_test',), sha=SHA):
@@ -110,7 +116,20 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(denied['result'], 'ADMISSION_DENIED')
         injected = self.run_it(sha=SHA + ';id')
         self.assertEqual(injected['result'], 'ADMISSION_DENIED')
+        option_ref = remote_test.run_remote_test(
+            self.store.task['task_id'], executor_task='d6-task', sha=SHA,
+            ref='--prune', modules=('test_remote_test',), store=self.store,
+            config_path=self.config, transport=lambda *args: self.fail('transport called'))
+        self.assertEqual(option_ref['result'], 'ADMISSION_DENIED')
+        self.assertIn('"--end-of-options","origin",ref',
+                      remote_test._REMOTE_SCRIPT)
         self.assertEqual(self.calls, [])
+
+    def test_remote_script_installs_package_and_discovers_selected_test(self):
+        self.assertIn('"install","--no-deps","-e","tools/llmtool"',
+                      remote_test._REMOTE_SCRIPT)
+        self.assertIn('"unittest","discover","-s","tests","-p",mod+".py"',
+                      remote_test._REMOTE_SCRIPT)
 
     def test_identical_call_deduplicates_remote_run_receipt_and_event(self):
         first = self.run_it()
