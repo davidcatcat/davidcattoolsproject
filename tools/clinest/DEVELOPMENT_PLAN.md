@@ -228,3 +228,56 @@ GUI、網頁服務、雲端同步、遠端帳號池、配額／重置時間監�
 ---
 
 **設計決策：CliNest 是獨立工具，不依附其他 AI 專案；登入管理與本機 CLI 呼叫是唯一 v0.1 核心。**
+
+
+## 11. 使用者下載、安裝、更新與解除安裝（v0.1 發布需求）
+
+**決策：首版不只是原始碼專案，必須有能交付給一般使用者的 macOS 安裝產物與安裝說明。** 目前尚未實作 CliNest、尚未發布可執行檔；以下均為目標介面，不得當成已可執行的命令。
+
+### 11.1 發布與安裝通道
+
+| 通道 | v0.1 地位 | 安裝體驗 |
+| --- | --- | --- |
+| GitHub Releases 的 macOS 直接執行檔（Intel x86_64；Apple Silicon arm64 於對應硬體／CI 驗證後釋出） | **正式下載通道，必做** | 下載對應架構的已打包 CLI，核對 checksum；按文件安裝進使用者的 `PATH`，直接執行 `clinest` |
+| `pipx` / `uv tool install` 安裝 Python package | **開發者及進階使用者通道，必做** | 建立可攜的 `pyproject.toml` 與 `[project.scripts]` entry point；Python 相依套件隔離 |
+| Homebrew 自建 Tap | **後續正式發行優化，非 v0.1 阻塞條件** | 先發布有效的 formula 及可下載產物，才能提供例如 `brew install <owner>/tap/clinest`；不可提前宣稱 `brew install clinest` 可用 |
+
+**重要：目前原始碼所在的 GitHub Repo 為 private；私有 Repo 的 Release 並非所有使用者都可匿名下載。** 如果準備公開分發，必須另外決定公開發布位置與權限／授權策略，在得到明確授權之前不得公開整個 private Repo、其他工具原始碼或任何既有 Secret。可由獨立公開發布 Repo 承載已審查之構建產物，或使用其他受控發行管道。
+
+### 11.2 第一次安裝與使用者體驗（目標）
+
+```bash
+# 預期的使用者體驗：安裝後（非目前可執行）
+clinest --version
+clinest doctor               # 確認 macOS / PATH / Codex / Claude 是否已安裝
+clinest                      # 開啟帳號管理 TUI
+clinest add codex codex1
+clinest login codex1
+clinest shell install        # 使用者明確選擇後，才啟用原生 codex / claude 預設帳號入口
+# 新 Terminal 直接執行 codex；已啟動的 CLI 工作階段不變
+```
+
+- **CliNest 安裝不等於替使用者安裝或認證 Codex／Claude**。`doctor` 檢查原生 CLI 與版本，相依程式缺少時提供官方安裝說明，不隱性下載或篡改現有程式。
+- 安裝 CliNest **不得直接更改** `codex`／`claude` 解析路徑；只有 `clinest shell install` 明確 opt-in 之後才插入 Shim／Shell Hook。安裝前列出欲新增的檔案／修改與回復方法。
+- 初次開啟 `clinest` 可透過 TUI 引導新增帳號及登入；沒有帳號時允許安全退出。
+- 對於下載的 macOS CLI，應準備正常的 Developer ID 簽章／Notarization 與 Gatekeeper 驗收流程，且發行時明示實際簽章狀態；**不提供要求使用者關閉 Gatekeeper 的捷徑**。
+- 發布 tar.gz/zip、`checksums.txt`、版本、支援架構與最低 macOS 版本，並驗證下載檔案在新機上解壓／執行／TTY 正常。
+
+### 11.3 更新與移除
+
+- 支援以發行版覆蓋安裝／`pipx upgrade`／`uv tool upgrade` 更新，並保持既有 Profile、預設值、原生登入憑證；v0.1 不必做自動更新或自我升級 Daemon。
+- 使用者可 `clinest shell uninstall` 回復原生命令路由，再透過其原本安裝通道移除 CliNest 可執行程式。
+- 移除軟體**預設保留**本機 Profile／原生登入資料；永久刪除帳號或憑證應有明確的分離動作與確認，不可於解除安裝時靜默刪除。
+- 更新失敗要可回退到上一版本；設定格式調整要有備份／相容性檢查，不能遺失帳號登入資料。
+- 安裝、升級、移除在一般使用者權限下完成，不應要求對整個安裝流程使用 `sudo`。
+
+### 11.4 發布建置與額外驗收
+
+- 在同架構 Mac 完成可執行檔打包與驗收；Intel x86_64 優先，arm64 只有在可驗證的對應 Builder／測試機具備後才標示支援。
+- 發布標記對應不可變的 Git commit／tag、打包工具版本、依賴鎖定及 checksum；GitHub Release 附版更／已知限制。
+- **AC-13**：全新 Mac／乾淨使用者帳號，從發行產物安裝後 `clinest --version`、`doctor`、TUI 正常。
+- **AC-14**：未 opt-in 的原生 `codex`／`claude` 仍照舊；opt-in Shim 後新 Terminal 可直接用對應預設帳號，解除 Shim 後恢復。
+- **AC-15**：升級／重新安裝保持 Profile 與登入資料；解除安裝預設保留資料，且沒有 PATH／Shell RC 殘留。
+- **AC-16**：GitHub Release 的下載產物與 checksum 匹配、目標架構可執行；Gatekeeper 簽章狀態明示且完成實機驗收。
+
+發布先後：P0 驗證帳號隔離 → P1 核心 CLI 與 Python package → P2 TUI／Shell Shim → **P3 新增 Release／安裝測試 Gate**。只有文檔不算產品交付。
