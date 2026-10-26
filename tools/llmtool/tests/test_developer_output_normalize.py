@@ -133,8 +133,12 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         anchored, tokens, rejection = _developer_normalized_output(
             raw, [self.PATH], source_files={self.PATH: 'old\n'})
         self.assertEqual(anchored, raw)
-        self.assertEqual(tokens, ('HUNK_COUNTS_RECOUNTED', 'HUNK_REANCHORED'))
+        self.assertEqual(tokens, ('HUNK_COUNTS_RECOUNTED',))
         self.assertIsNone(rejection)
+        unchanged, unchanged_tokens = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: 'old\n'})
+        self.assertEqual(unchanged, raw)
+        self.assertEqual(unchanged_tokens, ())
 
     def test_source_anchor_rejects_invented_or_ambiguous_old_side(self):
         invented = (self.HEADER + '@@ -1 +1 @@\n-invented\n+replacement\n')

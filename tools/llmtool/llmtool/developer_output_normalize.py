@@ -150,49 +150,52 @@ def normalize_developer_output(value, write_paths):
     return normalized, tuple(dict.fromkeys(tokens))
 
 
-def reanchor_developer_output(value, write_paths, source_files):
+def reanchor_developer_output(value, write_paths, source_files, *, return_valid=False):
     """Rebuild proposal hunks from exact, unique old-side matches in source files.
 
     ``source_files`` maps allowed repository paths to UTF-8 source text read at
     the bound source revision. A failed or ambiguous match is never repaired.
     """
+    def result(text, tokens, valid):
+        return (text, tokens, valid) if return_valid else (text, tokens)
+
     if type(value) is not str or type(source_files) is not dict:
-        return value, ()
+        return result(value, (), False)
     lines = value.splitlines()
     expected = set(write_paths)
     starts = [i for i, line in enumerate(lines) if line.startswith('diff --git ')]
     if not starts:
-        return value, ()
+        return result(value, (), False)
     sections = [lines[start:(starts[index + 1] if index + 1 < len(starts) else len(lines))]
                 for index, start in enumerate(starts)]
     regenerated = []
     for section in sections:
         if len(section) < 3:
-            return value, ()
+            return result(value, (), False)
         header = _DIFF_HEADER.fullmatch(section[0])
         old_header = _FILE_OLD.fullmatch(section[1])
         new_header = _FILE_NEW.fullmatch(section[2])
         if (header is None or old_header is None or new_header is None or
                 header.groups() != (old_header.group(1), new_header.group(1)) or
                 old_header.group(1) != new_header.group(1)):
-            return value, ()
+            return result(value, (), False)
         path = old_header.group(1)
         if path not in expected or path not in source_files:
-            return value, ()
+            return result(value, (), False)
         try:
             source_text = source_files[path]
             if type(source_text) is not str or '\r' in source_text:
-                return value, ()
+                return result(value, (), False)
             source = source_text.splitlines()
         except (UnicodeError, AttributeError):
-            return value, ()
+            return result(value, (), False)
 
         edits = []
         i = 3
         while i < len(section):
             hunk = _HUNK.fullmatch(section[i])
             if hunk is None:
-                return value, ()
+                return result(value, (), False)
             i += 1
             body = []
             while i < len(section) and not section[i].startswith('@@ '):
@@ -203,11 +206,11 @@ def reanchor_developer_output(value, write_paths, source_files):
             old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
             new_side = [line[1:] for line in body if line.startswith((' ', '+'))]
             if not old_side or not any(line.startswith(('+', '-')) for line in body):
-                return value, ()
+                return result(value, (), False)
             matches = [index for index in range(len(source) - len(old_side) + 1)
                        if source[index:index + len(old_side)] == old_side]
             if len(matches) != 1:
-                return value, ()
+                return result(value, (), False)
             start = matches[0]
             # Reconstruct the target slice by replaying the model's operations
             # against the matched source, preserving every model +/- line.
@@ -222,24 +225,26 @@ def reanchor_developer_output(value, write_paths, source_files):
                 elif line.startswith('+'):
                     target.append(line[1:])
                 else:
-                    return value, ()
+                    return result(value, (), False)
             edits.append((start, cursor, target))
         if not edits:
-            return value, ()
+            return result(value, (), False)
         modified = list(source)
         previous_end = len(source) + 1
         for start, end, target in reversed(edits):
             if end > previous_end:
-                return value, ()
+                return result(value, (), False)
             modified[start:end] = target
             previous_end = start
         diff_lines = list(difflib.unified_diff(
             source, modified, fromfile='', tofile='', n=3, lineterm=''))
         hunks = [line for line in diff_lines if line.startswith('@@ ')]
         if not hunks:
-            return value, ()
+            return result(value, (), False)
         regenerated.extend([f'diff --git a/{path} b/{path}',
                             f'--- a/{path}', f'+++ b/{path}'])
         # The first two lines from unified_diff are empty-path file headers.
         regenerated.extend(diff_lines[2:])
-    return '\n'.join(regenerated) + '\n', ('HUNK_REANCHORED',)
+    anchored = '\n'.join(regenerated) + '\n'
+    tokens = ('HUNK_REANCHORED',) if anchored != value else ()
+    return result(anchored, tokens, True)

@@ -85,10 +85,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
         subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
                        cwd=self.executor_root, check=True)
         (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
+        target_fixture = (self.executor_root / 'tools' / 'llmtool' / 'tests' /
+                          'test_task_submission_cli.py')
+        target_fixture.parent.mkdir(parents=True, exist_ok=True)
+        target_fixture.write_text('old\n')
         report_dir = self.executor_root / 'tools' / 'llmtool'
-        report_dir.mkdir(parents=True)
+        report_dir.mkdir(parents=True, exist_ok=True)
         (report_dir / '.gitignore').write_text('/.d6-bootstrap-report.json\n')
-        subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'tools/llmtool/.gitignore'],
+        subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'tools/llmtool/.gitignore',
+                        'tools/llmtool/tests/test_task_submission_cli.py'],
                        cwd=self.executor_root, check=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
                        cwd=self.executor_root, check=True, capture_output=True)
@@ -1485,7 +1490,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         client = FakeClient(Reply(patch_text, {
             'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
         }))
-        args = self._delegate_args(task, write_path=[target], context='VALUE = 1\n')
+        args = self._delegate_args(task, read_path=[target], write_path=[target],
+                                   context='VALUE = 1\n')
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
@@ -1616,7 +1622,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
-            args = self._delegate_args(task, write_path=[target], context='VALUE = 1\n')
+            args = self._delegate_args(task, read_path=[target], write_path=[target],
+                                       context='VALUE = 1\n')
             code = run_task_delegate(args)
             with self.assertRaisesRegex(
                     LLMToolError,

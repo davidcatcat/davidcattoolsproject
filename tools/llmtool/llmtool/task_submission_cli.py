@@ -641,7 +641,8 @@ def _assignment_paths(read_paths, write_paths):
     if (type(read_paths) is not list or type(write_paths) is not list or
             not read_paths or not write_paths or len(read_paths) > 32 or len(write_paths) > 32 or
             any(not valid(path) for path in read_paths + write_paths) or
-            len(set(read_paths)) != len(read_paths) or len(set(write_paths)) != len(write_paths)):
+            len(set(read_paths)) != len(read_paths) or len(set(write_paths)) != len(write_paths) or
+            not set(write_paths).issubset(read_paths)):
         raise LLMToolError('developer assignment scope is invalid')
     return sorted(read_paths), sorted(write_paths)
 
@@ -756,18 +757,19 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
     if (original_rejection is not None and original_rejection not in
             ('DEVELOPER_OUTPUT_INVALID_ENVELOPE', 'DEVELOPER_OUTPUT_INVALID_DIFF')):
         return None, (), original_rejection
-    if source_files is None and original_rejection is None:
-        return value, (), None
-    normalized, tokens = normalize_developer_output(value, write_paths)
-    if original_rejection is not None and (normalized == value or not tokens):
-        return None, (), original_rejection
+    if original_rejection is None:
+        normalized, tokens = value, ()
+    else:
+        normalized, tokens = normalize_developer_output(value, write_paths)
+        if normalized == value or not tokens:
+            return None, (), original_rejection
     normalized_rejection = _strict_developer_output_rejection(normalized, write_paths)
-    if normalized_rejection is not None:
+    if source_files is None and normalized_rejection is not None:
         return None, (), normalized_rejection
     if source_files is not None:
-        anchored, anchor_tokens = reanchor_developer_output(
-            normalized, write_paths, source_files)
-        if not anchor_tokens:
+        anchored, anchor_tokens, valid_anchor = reanchor_developer_output(
+            normalized, write_paths, source_files, return_valid=True)
+        if not valid_anchor:
             return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
         anchored_rejection = _strict_developer_output_rejection(anchored, write_paths)
         if anchored_rejection is not None:
@@ -2112,13 +2114,6 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
-    artifact, normalization_tokens, rejection_code = _developer_normalized_output(
-        result.content, write_paths)
-    if rejection_code is not None:
-        saved = _persist_developer_output_rejection(
-            store, task['task_id'], developer, rejection_code, usage, result.content)
-        _print(_task_view(saved))
-        return 1
     source_files = _text_developer_source_files(
         registration.root, source_sha, write_paths)
     if source_files is None:
@@ -2127,23 +2122,13 @@ def run_task_delegate(args, *, store=None):
             usage, result.content)
         _print(_task_view(saved))
         return 1
-    anchored, anchor_tokens = reanchor_developer_output(
-        artifact, write_paths, source_files)
-    if not anchor_tokens:
-        saved = _persist_developer_output_rejection(
-            store, task['task_id'], developer, 'DEVELOPER_OUTPUT_INVALID_DIFF',
-            usage, result.content)
-        _print(_task_view(saved))
-        return 1
-    rejection_code = _strict_developer_output_rejection(anchored, write_paths)
+    artifact, normalization_tokens, rejection_code = _developer_normalized_output(
+        result.content, write_paths, source_files=source_files)
     if rejection_code is not None:
         saved = _persist_developer_output_rejection(
             store, task['task_id'], developer, rejection_code, usage, result.content)
         _print(_task_view(saved))
         return 1
-    artifact = anchored
-    normalization_tokens = tuple(dict.fromkeys(
-        (*normalization_tokens, *anchor_tokens)))
     if not _text_developer_apply_check(registration.root, source_sha, artifact):
         saved = _persist_developer_output_rejection(
             store, task['task_id'], developer, 'DEVELOPER_OUTPUT_APPLY_FAILED',
