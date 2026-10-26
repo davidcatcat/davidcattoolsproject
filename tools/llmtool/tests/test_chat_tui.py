@@ -19,9 +19,12 @@ from llmtool.providers.base import Reply
 from llmtool.providers.cli_lifecycle import tui_cli_signal_scope
 
 try:
+    from prompt_toolkit.application.current import set_app
     from prompt_toolkit.data_structures import Size
     from prompt_toolkit.input import create_pipe_input
     from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.key_binding.key_processor import KeyPress
+    from prompt_toolkit.keys import Keys
     from prompt_toolkit.utils import get_cwidth
     HAVE_TOOLKIT = True
 except ImportError:  # Optional extra; fallback tests below still run.
@@ -413,6 +416,362 @@ class WidgetTests(Base):
                             lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x1b[A', lambda ui: self.assertEqual(ui.input.text, '/status')])
         self.factory.assert_not_called()
+
+    def test_slash_picker_lists_only_existing_commands(self):
+        labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
+        self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
+                                  '/exit', '/quit', '/task submit', '/task show'])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
+        self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
+        self.assertEqual(chat_tui.slash_matches('hello'), [])
+        self.assertEqual(chat_tui.slash_matches('/nope'), [])
+        self.assertEqual(chat_tui.slash_matches('/s\nx'), [])
+
+    def test_picker_completes_draft_without_executing(self):
+        def open_menu(ui):
+            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill'])
+        ui, _ = self.drive(['/s', open_menu, '\x1b[B', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/skill '),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            lambda ui: self.assertNotIn('> /skill', ui.conversation.text)])
+        self.factory.assert_not_called()
+        self.assertNotIn('> /skill', ui.conversation.text)
+
+    def test_picker_task_completion(self):
+        ui, _ = self.drive(['/task su', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/task submit --provider '),
+                            lambda ui: self.assertNotIn('usage:', ui.conversation.text)])
+
+    def test_picker_lone_escape_closes_on_key_timeout_flush(self):
+        """No wall-clock wait: feed Esc, then the same flush the timeoutlen timer sends."""
+        # Private name, imported here so a rename fails this test instead of skipping all.
+        from prompt_toolkit.key_binding.key_processor import _Flush as timeout_flush
+
+        def lone_escape(ui):
+            processor = ui.app.key_processor
+            with set_app(ui.app):
+                processor.feed(KeyPress(Keys.Escape, '\x1b'))
+                processor.process_keys()
+                # Esc may still start Esc Enter (newline), so the picker waits.
+                self.assertEqual([c[0] for c in ui.menu_items], ['/help'])
+                processor.feed(timeout_flush)
+                processor.process_keys()
+            self.assertEqual(ui.menu_items, [])
+            self.assertEqual(ui.input.text, '/he')
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.drive(['/he', lone_escape])
+        self.factory.assert_not_called()
+
+    def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
+        def open_menu(ui):
+            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill'])
+            # The short lone-Esc timeout applies only while the picker is open.
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+        ui, _ = self.drive(['/s', open_menu, '\x1b\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/s\n'),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+        self.assertNotIn('> /s', ui.conversation.text)
+        self.assertNotIn('unknown chat command', ui.conversation.text.lower())
+        self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.assertGreater(ui._default_timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+        # Esc and Enter delivered as separate chunks within the timeout behave the same.
+        ui, _ = self.drive(['/s', '\x1b', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/s\n'),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+        self.assertNotIn('> /s', ui.conversation.text)
+
+    def test_help_documents_the_slash_picker(self):
+        self.assertIn('Esc closes the picker', chat_tui.KEY_HELP)
+
+    def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
+        # Rule: Enter only completes a draft that differs from the chosen suggestion and
+        # never runs it; a draft the user already typed in full runs as with no picker.
+        def completed_not_run(ui):
+            self.assertEqual(ui.input.text, '/status')
+            self.assertNotIn('connectivity', ui.conversation.text)
+        ui, _ = self.drive(['/s', '\r', completed_not_run, '\r', self.idle])
+        self.assertIn('connectivity: not probed', ui.conversation.text)
+        ui, _ = self.drive(['/status\r', '/zzz\r', 'plain chat\r', self.idle])
+        self.assertIn('connectivity: not probed', ui.conversation.text)
+        self.assertIn('unknown chat command', ui.conversation.text.lower())
+        self.assertEqual(self.client.complete.call_count, 1)
+
+    def test_picker_closed_and_esc_timeout_restored_on_ctrl_c_and_signals(self):
+        def menu_open(ui):
+            self.assertTrue(ui.menu_items)
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+        ui, result = self.drive(['/s', menu_open, '\x03'])
+        self.assertEqual(result, 0)
+        self.assertEqual(ui.menu_items, [])
+        self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            with self.subTest(signal=signum.name):
+                ui, result = self.drive(['/s', menu_open,
+                                         lambda ui, signum=signum: ui._handle_signal(signum)])
+                self.assertEqual(result, 0)
+                self.assertEqual(ui._received_signal, signum)
+                self.assertEqual(ui.menu_items, [])
+                self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.factory.assert_not_called()
+
+    def test_picker_closed_for_recalled_history_and_multiline(self):
+        ui, _ = self.drive(['/status\r', '/help\r', '\x1b[A',
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            '\x1b[A', lambda ui: self.assertEqual(ui.input.text, '/status')])
+        ui, _ = self.drive(['/s\n',
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+
+    @staticmethod
+    def menu_rows(ui):
+        return ''.join(text for _style, text in ui.menu_text()).split('\n')
+
+    @staticmethod
+    def min_layout_height(ui, size):
+        # HSplit shows "Window too small" when its children's minimum heights exceed the screen.
+        return sum(child.preferred_height(size.columns, size.rows).min
+                   for child in ui.app.layout.container.children)
+
+    def test_picker_shrinks_with_terminal_height_instead_of_window_too_small(self):
+        for rows in (4, 5, 6, 8, 9, 12):
+            with self.subTest(rows=rows):
+                size = Size(rows=rows, columns=30)
+
+                def fits(ui, size=size):
+                    self.assertTrue(ui.menu_items)
+                    # Never needs more rows than the screen ("Window too small" otherwise).
+                    self.assertLessEqual(self.min_layout_height(ui, size), size.rows)
+                    self.assertLessEqual(sum(ui.picker_layout()), max(0, size.rows - 4))
+                self.drive(['/', fits], size=[size])
+        # No free row: the picker is not shown, so Up/Down/Enter keep their usual meaning.
+        def hidden(ui):
+            self.assertEqual(ui.picker_layout(), (0, 0, 0))
+        ui, _ = self.drive(['/st', hidden, '\r'], size=[Size(rows=4, columns=30)])
+        self.assertIn('unknown chat command', ui.conversation.text.lower())
+        self.factory.assert_not_called()
+
+    def test_tab_closes_picker_and_restores_esc_timeout(self):
+        def menu_open(ui):
+            self.assertTrue(ui.menu_items)
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+
+        def closed(ui):
+            self.assertFalse(ui.app.layout.has_focus(ui.input))
+            self.assertEqual(ui.menu_items, [])
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        ui, _ = self.drive(['/s', menu_open, '\t', closed, '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/s')])
+        self.factory.assert_not_called()
+
+    def test_picker_scrolls_and_counts_hidden_entries(self):
+        def first_page(ui):
+            self.assertEqual(len(ui.menu_items), 10)
+            rows = self.menu_rows(ui)
+            self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
+            self.assertIn('/help', rows[0])
+            self.assertIn('5 more (0 above, 5 below)', rows[-1])
+
+        def scrolled(ui):
+            rows = self.menu_rows(ui)
+            self.assertEqual(ui.menu_index, 6)
+            self.assertNotIn('/help', ''.join(rows))
+            self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('5 more (2 above, 3 below)', rows[-1])
+
+        def wrapped(ui):
+            rows = self.menu_rows(ui)
+            self.assertEqual(ui.menu_index, 9)
+            self.assertIn('/task show', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(5 above, 0 below)', rows[-1])
+        ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/exit'),
+                            '\x7f' * 5, '/', '\x1b[A', wrapped],
+                           size=[Size(rows=24, columns=80)])
+        self.assertTrue(ui.session.active)
+        self.factory.assert_not_called()
+
+    def test_picker_rows_truncate_with_ellipsis_on_narrow_terminal(self):
+        def narrow(ui):
+            rows = self.menu_rows(ui)
+            self.assertTrue(rows)
+            for row in rows:
+                self.assertLessEqual(get_cwidth(row), 20)
+            self.assertTrue(rows[1].endswith('…'))  # '/status' summary is cut
+        self.drive(['/', narrow], size=[Size(rows=24, columns=20)])
+        self.assertEqual(chat_tui.fit_width('abcdef', 4, get_cwidth), 'abc…')
+        self.assertEqual(chat_tui.fit_width('中文字', 4, get_cwidth), '中…')
+        self.assertEqual(chat_tui.fit_width('ok', 4, get_cwidth), 'ok')
+
+    def test_history_matches_newest_first_unique_case_insensitive(self):
+        entries = ['/status', 'Hello', '/history', 'hello', '/status', '  ']
+        self.assertEqual(chat_tui.history_matches(entries, ''),
+                         ['/status', 'hello', '/history', 'Hello'])
+        self.assertEqual(chat_tui.history_matches(entries, 'HEL'), ['hello', 'Hello'])
+        self.assertEqual(chat_tui.history_matches(entries, 'zz'), [])
+
+    def test_ctrl_r_search_puts_entry_in_draft_without_running(self):
+        def searching(ui):
+            self.assertTrue(ui.searching)
+            self.assertEqual(ui.search_matches, ['/help', '/history', '/status'])
+            self.assertEqual(ui.input.text, 'dr')  # Draft untouched while searching.
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+            self.assertIn('history search:', self.menu_rows(ui)[0])
+
+        def filtered(ui):
+            self.assertEqual(ui.search_query, 'st')
+            self.assertEqual(ui.search_matches, ['/history', '/status'])
+            self.assertEqual(ui.input.text, 'dr')
+        ui, _ = self.drive(['/status\r', '/history\r', '/help\r', 'dr', '\x12', searching,
+                            'st', filtered, '\x12',  # Ctrl-R again: next older match
+                            lambda ui: self.assertEqual(ui.menu_index, 1), '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '/status'),
+                            lambda ui: self.assertFalse(ui.searching),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            lambda ui: self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)])
+        # Only the three typed /status, /history and /help ran; the recalled one did not.
+        self.assertEqual(ui.conversation.text.count('connectivity: not probed'), 1)
+        self.factory.assert_not_called()
+
+    def test_ctrl_r_escape_cancels_and_keeps_draft(self):
+        from prompt_toolkit.key_binding.key_processor import _Flush as timeout_flush
+
+        def lone_escape(ui):
+            processor = ui.app.key_processor
+            with set_app(ui.app):
+                processor.feed(KeyPress(Keys.Escape, '\x1b'))
+                processor.process_keys()
+                self.assertTrue(ui.searching)
+                processor.feed(timeout_flush)
+                processor.process_keys()
+            self.assertFalse(ui.searching)
+            self.assertEqual(ui.input.text, 'keep me')
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        ui, _ = self.drive(['/status\r', 'keep me', '\x12', 'sta', '\x7f',
+                            lambda ui: self.assertEqual(ui.search_query, 'st'),
+                            '\x1b[200~at\x1b[201~',  # bracketed paste goes to the query
+                            lambda ui: self.assertEqual(ui.search_query, 'stat'),
+                            '\x15',  # Ctrl-U (kill line) cannot edit the read-only draft
+                            lambda ui: self.assertEqual(ui.input.text, 'keep me'),
+                            lone_escape])
+        self.assertEqual(ui.input.text, 'keep me')
+        self.factory.assert_not_called()
+
+    def test_ctrl_r_no_match_and_esc_enter_still_newline(self):
+        def no_match(ui):
+            self.assertEqual(ui.search_matches, [])
+            self.assertIn('(no match)', self.menu_rows(ui)[0])
+        ui, _ = self.drive(['/status\r', 'a', '\x12', 'zzz', no_match, '\r',
+                            lambda ui: self.assertFalse(ui.searching),
+                            lambda ui: self.assertEqual(ui.input.text, 'a'),
+                            '\x12', 'st', '\x1b\r',
+                            lambda ui: self.assertFalse(ui.searching),
+                            lambda ui: self.assertEqual(ui.input.text, 'a\n')])
+        self.assertEqual(ui.conversation.text.count('connectivity: not probed'), 1)
+        self.factory.assert_not_called()
+
+    def test_ctrl_r_entry_display_is_terminal_safe(self):
+        def shown(ui):
+            rows = self.menu_rows(ui)
+            self.assertNotIn('\x1b', ''.join(rows))
+            self.assertIn('↵', rows[1])
+        ui, _ = self.drive([lambda ui: ui.input.buffer.history.append_string('a\x1b[2Jb\nc'),
+                            '\x12', shown, '\x1b\r'])
+        self.factory.assert_not_called()
+
+    @staticmethod
+    async def redraw(ui):
+        ui.app.invalidate()
+        await asyncio.sleep(0.2)
+
+    def test_search_hidden_by_resize_ends_and_keeps_draft_after_redraw(self):
+        size = [Size(rows=24, columns=80)]
+
+        def shrink(ui):
+            self.assertTrue(ui.searching)
+            size[0] = Size(rows=4, columns=80)
+
+        def ended(ui):
+            self.assertFalse(ui.searching)
+            self.assertEqual(ui.input.text, 'x')
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        ui, _ = self.drive(['/status\r', 'x', '\x12', shrink, self.redraw, ended,
+                            lambda ui: size.__setitem__(0, Size(rows=24, columns=80)),
+                            self.redraw, lambda ui: self.assertFalse(ui.searching)], size=size)
+        self.assertEqual(ui.input.text, 'x')
+        self.factory.assert_not_called()
+
+    def test_enter_in_unseen_search_keeps_draft_and_sends_nothing(self):
+        """Resize then Enter before any redraw: Enter must not swap or send the draft."""
+        size = [Size(rows=24, columns=80)]
+
+        def shrink_then_enter(ui):
+            self.assertTrue(ui.searching)
+            size[0] = Size(rows=4, columns=80)
+            processor = ui.app.key_processor
+            with set_app(ui.app):
+                processor.feed(KeyPress(Keys.ControlM, '\r'))
+                processor.process_keys()
+            self.assertFalse(ui.searching)
+            self.assertEqual(ui.input.text, 'x')
+        ui, _ = self.drive(['/status\r', 'x', '\x12', shrink_then_enter], size=size)
+        self.assertEqual(ui.conversation.text.count('connectivity: not probed'), 1)
+        self.assertNotIn('> x', ui.conversation.text)
+        self.factory.assert_not_called()
+
+    def test_esc_timeout_follows_picker_visibility(self):
+        def hidden(ui):
+            self.assertTrue(ui.menu_items)
+            self.assertEqual(ui.picker_layout(), (0, 0, 0))
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.drive(['/s', hidden], size=[Size(rows=4, columns=30)])
+        size = [Size(rows=24, columns=80)]
+
+        def short(ui):
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+
+        def default(ui):
+            self.assertTrue(ui.menu_items)
+            self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
+        self.drive(['/s', short,
+                    lambda ui: size.__setitem__(0, Size(rows=4, columns=80)), self.redraw, default,
+                    lambda ui: size.__setitem__(0, Size(rows=24, columns=80)), self.redraw, short],
+                   size=size)
+        self.factory.assert_not_called()
+
+    def test_status_bar_drops_low_priority_fields_when_narrow(self):
+        size = [Size(rows=24, columns=80)]
+        widths = {}
+
+        def measure(ui):
+            ui.quit_pending = True  # A long state: 'exit pending'
+            for columns in (80, 50, 40, 30, 20, 12, 8, 3):
+                size[0] = Size(rows=24, columns=columns)
+                widths[columns] = ui.status_text()
+            ui.quit_pending = False
+        self.drive([measure], size=size)
+        self.assertEqual(widths[80], 'p:first | m:test | exit pending | t:UNKNOWN | F1')
+        self.assertEqual(widths[40], 'p:first | m:test | exit pending')
+        self.assertEqual(widths[20], 'exit pending')
+        self.assertEqual(widths[8], 'exit pe…')
+        for columns, status in widths.items():
+            with self.subTest(columns=columns):
+                self.assertNotIn('\n', status)
+                self.assertLessEqual(get_cwidth(status), columns)
+                # The state is the last field to go; it is never dropped while others stay.
+                self.assertTrue(status.startswith(('p:', 'm:', 'ex')), status)
+                if columns >= 12:
+                    self.assertIn('exit pending', status)
+
+    def test_narrow_status_bar_keeps_input_row(self):
+        measurements = []
+
+        def inspect(ui):
+            measurements.append((ui.input.window.render_info.window_height,
+                                 ui.status_window.render_info.window_height))
+        ui, _ = self.drive(['draft', inspect], size=[Size(rows=8, columns=12)])
+        self.assertEqual(measurements, [(1, 1)])
+        self.assertEqual(ui.input.text, 'draft')
 
     def test_help_toggle_and_help_command_are_offline(self):
         def help_shown(ui):

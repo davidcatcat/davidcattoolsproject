@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -29,9 +30,10 @@ from .retrieval_cli import add_retrieval_parser, run_retrieval
 from .diagnostics_cli import add_diagnostics_parser, run_diagnostics
 from .action_contract_cli import add_action_contract_parsers, run_action_contract
 from .task_lifecycle_cli import add_task_parser, run_task_inspect
-from .task_submission_cli import (add_task_submission_parsers, run_task_complete,
-                                 run_task_delegate, run_task_record_pm, run_task_show,
-                                 run_task_submit)
+from .task_submission_cli import (add_task_submission_parsers, run_task_ack,
+                                 run_task_complete, run_task_delegate, run_task_inbox,
+                                 run_task_record_pm, run_task_review_prompt,
+                                 run_task_show, run_task_submit)
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
 
@@ -495,10 +497,16 @@ def main(argv=None):
                 return run_task_record_pm(args)
             if args.action == 'show':
                 return run_task_show(args)
+            if args.action == 'inbox':
+                return run_task_inbox(args)
+            if args.action == 'ack':
+                return run_task_ack(args)
             if args.action == 'delegate':
                 return run_task_delegate(args)
             if args.action == 'complete':
                 return run_task_complete(args)
+            if args.action == 'review-prompt':
+                return run_task_review_prompt(args)
             if args.action in ('review-request','review-wait'):
                 from .review_exchange import run_exchange
                 return run_exchange(args)
@@ -616,7 +624,14 @@ def main(argv=None):
                 print(f"{key}={value}", file=sys.stderr)
         return 0
     except LLMToolError as exc:
-        print("llmtool: " + str(exc), file=sys.stderr)
+        refusal_code = getattr(exc, 'completion_code', None)
+        if (getattr(args, 'command', None) == 'task' and
+                getattr(args, 'action', None) == 'review-prompt' and
+                type(refusal_code) is str and
+                re.fullmatch(r'[A-Z0-9_]{1,64}', refusal_code)):
+            print('llmtool: review-prompt refused: ' + refusal_code, file=sys.stderr)
+        else:
+            print("llmtool: " + str(exc), file=sys.stderr)
         return 1
     except BrokenPipeError:
         # Avoid the interpreter's flush-at-exit traceback / exit 120 noise.

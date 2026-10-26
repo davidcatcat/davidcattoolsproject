@@ -11,14 +11,17 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool.action_contract import TaskBinding
 from llmtool.errors import LLMToolError
 from llmtool import worker_dispatch
+from llmtool import task_submission_cli as task_submission_cli_module
+from llmtool import codex_direct_developer
 from llmtool.task_store import TaskStore, TaskStoreConflict, new_id
 from llmtool import task_store as task_store_module
-from llmtool.task_submission_cli import _record
+from llmtool.task_submission_cli import _record, _task_view
 from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
 
 
@@ -135,6 +138,371 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(refusal['decision'], 'BLOCKED')
         self.assertEqual(refusal['reason_code'], 'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
         self.assertRegex(refusal['policy_sha256'], r'^[0-9a-f]{64}$')
+
+    def test_codex_direct_success_persists_native_thread_and_usage(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        execution = {'status': 'DONE',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'CLI_REPORTED',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'native_session_binding': 'BOUND'}
+        responded = {**dispatching, 'state': 'DEVELOPER_RESPONDED',
+            'artifact': artifact, 'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': execution,
+            'usage': {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}}
+        saved = self.store.update(task['task_id'], developer=responded)
+        self.assertEqual(saved['developer']['execution']['status'], 'DONE')
+        self.assertEqual(saved['developer']['execution']['native_session_id'],
+                         execution['native_session_id'])
+        self.assertEqual(saved['developer']['execution']['native_session_binding'], 'BOUND')
+        self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
+
+    def test_native_session_binding_rejected_for_opencode_and_invalid_values(self):
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        opencode_execution = {
+            'status': 'SUCCEEDED', 'native_session_id': 'ses_abcdefgh12345678',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+            'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+            'usage_source': 'UNKNOWN', 'source_bytes': 10,
+            'source_file_count': 1, 'source_manifest_sha256': 'd' * 64,
+        }
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='opencode', max_tokens=128)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        pending['execution'] = None
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'opencode-cli', 'model': None}
+        self.store.update(task['task_id'], developer=dispatching)
+        responded = {
+            **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+            'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': {**opencode_execution, 'native_session_binding': 'BOUND'},
+        }
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=responded)
+
+        for invalid_binding in ('bound', 'B' * 65, 7):
+            with self.subTest(invalid_binding=repr(invalid_binding)):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                               'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                invalid = {
+                    **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+                    'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+                    'execution': {
+                        'status': 'DONE',
+                        'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                        'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+                        'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                        'usage_source': 'CLI_REPORTED', 'source_bytes': None,
+                        'source_file_count': None, 'source_manifest_sha256': None,
+                        'native_session_binding': invalid_binding,
+                    },
+                }
+                with self.assertRaises(LLMToolError):
+                    self.store.update(task['task_id'], developer=invalid)
+
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        invalid = {
+            **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+            'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': {
+                'status': 'DONE',
+                'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+                'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                'usage_source': 'CLI_REPORTED', 'source_bytes': None,
+                'source_file_count': None, 'source_manifest_sha256': None,
+                'unexpected_execution_key': 'rejected',
+            },
+        }
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=invalid)
+
+    def test_codex_blocked_and_timeout_outcomes_persist_reported_usage(self):
+        usage = {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}
+        for status, error_code, process_exit in (
+                ('BLOCKED', 'CODEX_BLOCKED', 0), ('TIMEOUT', 'CODEX_TIMEOUT', None)):
+            with self.subTest(status=status):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                execution = {'status': status,
+                    'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                    'process_exit_code': process_exit, 'stdout_sha256': 'd' * 64,
+                    'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                    'usage_source': 'CLI_REPORTED', 'source_bytes': None,
+                    'source_file_count': None, 'source_manifest_sha256': None}
+                outcome = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'error_code': error_code, 'execution': execution, 'usage': usage}
+                if status == 'BLOCKED':
+                    outcome['blocked_reason'] = 'The requested change cannot be made safely.'
+                saved = self.store.update(task['task_id'], developer=outcome)
+                self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(saved['developer']['execution']['status'], status)
+                self.assertEqual(saved['developer']['usage'], usage)
+                if status == 'BLOCKED':
+                    self.assertEqual(saved['developer']['blocked_reason'],
+                                     'The requested change cannot be made safely.')
+                    self.assertEqual(_task_view(saved)['developer']['blocked_reason'],
+                                     saved['developer']['blocked_reason'])
+
+    def test_blocked_reason_must_be_bounded_screened_and_bound_to_codex_blocked(self):
+        for reason in ('x' * 2049, 'api_key=secret-value', 'bad\x01reason'):
+            with self.subTest(reason=reason[:20]):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                invalid = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'provider_type': 'codex-cli', 'error_code': 'CODEX_BLOCKED',
+                    'execution': {'status': 'BLOCKED',
+                        'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                        'process_exit_code': 0, 'stdout_sha256': 'd' * 64,
+                        'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                        'usage_source': 'UNKNOWN', 'source_bytes': None,
+                        'source_file_count': None, 'source_manifest_sha256': None},
+                    'blocked_reason': reason}
+                with self.assertRaises(LLMToolError):
+                    self.store.update(task['task_id'], developer=invalid)
+
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+            'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        not_blocked = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+            'provider_type': 'codex-cli', 'error_code': 'CODEX_TIMEOUT',
+            'execution': {'status': 'TIMEOUT',
+                'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': None, 'stdout_sha256': 'd' * 64,
+                'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                'usage_source': 'UNKNOWN', 'source_bytes': None,
+                'source_file_count': None, 'source_manifest_sha256': None},
+            'blocked_reason': 'must not be attached to an unknown outcome'}
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=not_blocked)
+
+    def test_blocked_reason_is_rejected_for_every_non_blocked_codex_outcome(self):
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        outcomes = (
+            ('DEVELOPER_RESPONDED', None, None, artifact, None),
+            ('DEVELOPER_OUTCOME_UNKNOWN', 'CODEX_RESULT_EVIDENCE_UNKNOWN',
+             'UNKNOWN', None, None),
+            ('DEVELOPER_OUTCOME_UNKNOWN', 'CODEX_RESULT_PERSISTENCE_REJECTED',
+             'UNKNOWN', None, None),
+            ('DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_REJECTED',
+             None, None, None),
+        )
+        for state, error_code, execution_status, result_artifact, usage in outcomes:
+            with self.subTest(state=state, error_code=error_code):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                outcome = {**dispatching, 'state': state,
+                    'error_code': error_code, 'artifact': result_artifact,
+                    'artifact_sha256': (hashlib.sha256(result_artifact.encode()).hexdigest()
+                                        if result_artifact is not None else None),
+                    'usage': usage,
+                    'blocked_reason': 'A bounded reason belongs only to CODEX_BLOCKED.'}
+                if execution_status is not None:
+                    outcome['execution'] = {'status': execution_status,
+                        'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                        'process_exit_code': None,
+                        'stdout_sha256': 'd' * 64, 'elapsed_ms': 25,
+                        'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+                        'source_bytes': None, 'source_file_count': None,
+                        'source_manifest_sha256': None}
+                with self.assertRaises(LLMToolError):
+                    self.store.update(task['task_id'], developer=outcome)
+
+    def test_codex_delegate_screens_blocked_reason_before_persisting(self):
+        self._allow_codex_dispatch()
+        root = str(Path.cwd())
+        snapshot = SimpleNamespace(root=root, common_dir='/registered/common',
+                                   branch='task-branch', head='a' * 40)
+        registration = SimpleNamespace(
+            task_id='executor-task', trusted_agent_id='agent',
+            session_ref='session-ref', native_session_id=None, root=root,
+            common_dir=snapshot.common_dir, branch=snapshot.branch,
+            env2_pass_marker='pass')
+        args = SimpleNamespace(
+            task_id=None, selection_source='USER', context_stdin=False,
+            executor_task='executor-task', read_path=['src.py'],
+            write_path=['src.py'], acceptance=['the outcome is recorded'],
+            egress_basis='Approved non-sensitive test context.')
+
+        cases = (
+            ('bad\x01reason', 'CODEX_BLOCKED', None, 'BLOCKED', False),
+            ('api_key=secret-value', 'CODEX_BLOCKED', None, 'BLOCKED', False),
+            ('The requested change cannot be made safely.', 'CODEX_BLOCKED',
+             'The requested change cannot be made safely.', 'BLOCKED', False),
+            ('The requested change cannot be made safely.',
+             'CODEX_RESULT_EVIDENCE_UNKNOWN', None, 'UNKNOWN', True),
+        )
+        for reason, expected_code, expected_reason, expected_execution, evidence_failure in cases:
+            with self.subTest(reason=reason[:20]):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                args.task_id = task['task_id']
+                result = SimpleNamespace(
+                    status='BLOCKED', blocked_reason=reason,
+                    thread_id='12345678-1234-4234-8234-123456789abc',
+                    exit_code=0, stdout_sha256='d' * 64, elapsed_ms=25,
+                    cleanup_status='CONFIRMED', usage=None)
+                with patch.object(task_submission_cli_module.task_completion,
+                                  'validate_task_binding'), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'collect_git_snapshot', return_value=snapshot), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'bind_executor_task', return_value=(registration, snapshot)), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'validate_env2_pass_marker'), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'read_d6_registration',
+                                     side_effect=(RuntimeError('evidence unavailable')
+                                                  if evidence_failure else None),
+                                     return_value=registration), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     '_git', return_value=b''), \
+                        patch.object(task_submission_cli_module,
+                                     '_bootstrap_registered_d6'), \
+                        patch.object(task_submission_cli_module,
+                                     '_ignored_file_fingerprints', return_value={}), \
+                        patch.object(task_submission_cli_module,
+                                     '_codex_developer_profile',
+                                     return_value=({'model': 'gpt-6-luna'}, 'high')), \
+                        patch.object(task_submission_cli_module,
+                                     '_ignored_output_rejection', return_value=None), \
+                        patch.object(codex_direct_developer, 'run', return_value=result), \
+                        patch.object(task_submission_cli_module.dataclasses, 'replace',
+                                     side_effect=lambda value, **changes: value):
+                    task_submission_cli_module.run_task_codex_delegate(args, store=self.store)
+
+                saved = self.store.get(task['task_id'])['developer']
+                self.assertEqual(saved['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(saved['error_code'], expected_code)
+                self.assertEqual(saved['execution']['status'], expected_execution)
+                self.assertEqual(saved['execution']['process_exit_code'], 0)
+                self.assertEqual(saved['execution']['native_session_id'], result.thread_id)
+                self.assertIsNone(saved['usage'])
+                self.assertEqual(saved.get('blocked_reason'), expected_reason)
+
+    def test_codex_blocked_result_persistence_rejection_drops_blocked_reason(self):
+        self._allow_codex_dispatch()
+        root = str(Path.cwd())
+        snapshot = SimpleNamespace(root=root, common_dir='/registered/common',
+                                   branch='task-branch', head='a' * 40)
+        registration = SimpleNamespace(
+            task_id='executor-task', trusted_agent_id='agent',
+            session_ref='session-ref', native_session_id=None, root=root,
+            common_dir=snapshot.common_dir, branch=snapshot.branch,
+            env2_pass_marker='pass')
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        args = SimpleNamespace(
+            task_id=task['task_id'], selection_source='USER', context_stdin=False,
+            executor_task='executor-task', read_path=['src.py'],
+            write_path=['src.py'], acceptance=['the outcome is recorded'],
+            egress_basis='Approved non-sensitive test context.')
+        result = SimpleNamespace(
+            status='BLOCKED', blocked_reason='The requested change cannot be made safely.',
+            thread_id='12345678-1234-4234-8234-123456789abc',
+            exit_code=0, stdout_sha256='d' * 64, elapsed_ms=25,
+            cleanup_status='CONFIRMED', usage=None)
+        original_update = self.store.update
+        rejected = False
+
+        def reject_first_blocked_result(task_id, **changes):
+            nonlocal rejected
+            developer = changes.get('developer')
+            if (not rejected and type(developer) is dict and
+                    developer.get('error_code') == 'CODEX_BLOCKED'):
+                rejected = True
+                raise TaskStoreConflict('simulated first result persistence rejection')
+            return original_update(task_id, **changes)
+
+        with patch.object(task_submission_cli_module.task_completion,
+                          'validate_task_binding'), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'collect_git_snapshot', return_value=snapshot), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'bind_executor_task', return_value=(registration, snapshot)), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'validate_env2_pass_marker'), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'read_d6_registration', return_value=registration), \
+                patch.object(task_submission_cli_module.task_completion,
+                             '_git', return_value=b''), \
+                patch.object(task_submission_cli_module, '_bootstrap_registered_d6'), \
+                patch.object(task_submission_cli_module,
+                             '_ignored_file_fingerprints', return_value={}), \
+                patch.object(task_submission_cli_module, '_codex_developer_profile',
+                             return_value=({'model': 'gpt-6-luna'}, 'high')), \
+                patch.object(task_submission_cli_module,
+                             '_ignored_output_rejection', return_value=None), \
+                patch.object(codex_direct_developer, 'run', return_value=result), \
+                patch.object(task_submission_cli_module.dataclasses, 'replace',
+                             side_effect=lambda value, **changes: value), \
+                patch.object(self.store, 'update', side_effect=reject_first_blocked_result):
+            task_submission_cli_module.run_task_codex_delegate(args, store=self.store)
+
+        saved = self.store.get(task['task_id'])['developer']
+        self.assertTrue(rejected)
+        self.assertEqual(saved['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['error_code'], 'CODEX_RESULT_PERSISTENCE_REJECTED')
+        self.assertNotIn('blocked_reason', saved)
 
     def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
         self._allow_codex_dispatch()
@@ -652,9 +1020,9 @@ class TaskStoreTests(unittest.TestCase):
         value.update(
             schema_version=2,
             pm_provider_profile='active-pm-runtime',
-            pm_provider_type='codex-cli',
+            pm_provider_type='active-pm-runtime',
             pm_model=None,
-            pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+            pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},
             backend_session_semantics='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
             state='PM_RESPONDED',
             response='{"schema_version":1,"summary":"Ready.","developer_assignment":'
@@ -683,6 +1051,15 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(created['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
 
+    def test_legacy_codex_pm_runtime_records_remain_readable(self):
+        value = self._active_pm_record()
+        value['pm_provider_type'] = 'codex-cli'
+        value['pm_route_binding'] = {
+            'type': 'codex-cli', 'model': None, 'base_url': None}
+        created = self.store.create(value)
+        self.assertEqual(self.store.get(value['task_id']), created)
+        self.assertEqual(created['pm_provider_type'], 'codex-cli')
+
     def test_active_pm_provenance_rejects_false_or_incomplete_claims(self):
         mutations = (
             lambda record: record['pm_provenance'].__setitem__('provider_invoked', True),
@@ -692,6 +1069,8 @@ class TaskStoreTests(unittest.TestCase):
                 'prompt_tokens': 0, 'completion_tokens': 0, 'total_tokens': 0}),
             lambda record: record.__setitem__('pm_assignment', {
                 **record['pm_assignment'], 'risk': 'OTHER'}),
+            lambda record: record.__setitem__('pm_assignment', {
+                **record['pm_assignment'], 'route': 'company-gw'}),
             lambda record: record.pop('pm_provenance'),
         )
         for mutate in mutations:

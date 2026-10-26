@@ -118,13 +118,13 @@ if sys.argv[1]=='serve':
  sys.stdin.buffer.read();server.shutdown();server.server_close()
 else:
  mode=sys.stdin.read()
- if mode=='timeout': time.sleep(4)
  sid='ses_syntheticWorker'
  def emit(kind,**values):print(json.dumps(dict(type=kind,timestamp=1,sessionID=sid,**values)),flush=True)
  if mode=='auth':
   emit('error',error={'type':'provider.auth','status':403,'message':'PRIVATE_ERROR_NOT_FOR_OUTPUT'})
   sys.exit(1)
  if mode=='cancel': os.kill(os.getppid(),signal.SIGINT);time.sleep(4)
+ if mode=='timeout': time.sleep(4)
  if mode=='overflow': print('x'*1100000);sys.exit()
  if mode=='retry':
   for n in range(5): emit('step_start',part={'type':'step-start','messageID':'m1'});time.sleep(0.2)
@@ -222,53 +222,22 @@ class Host:
 
 @unittest.skipUnless(os.name == 'posix', 'POSIX owned process groups required')
 class OpenCodeWorkerTests(unittest.TestCase):
-    """Fixture floor scaling keeps the SAME deadline semantics on every machine.
-
-    The timing-max-cohort tests pin a wall budget (1200ms) that developer CI
-    sized for Linux-speed process launches. On Apple CLT CPython the fixture
-    sandbox HOME carries no prebuilt bytecode cache (Apple pins the cache to
-    $HOME/Library/Caches/com.apple.python), so two serial fixture children eat
-    ~2x350ms before any event; on this hardware the legal pipeline needs
-    ~970ms, i.e. borderline at the fixed 1200ms and reads OPENCODE_TIMEOUT for
-    client-failure/overflow runs. The assertion set below (code mapping,
-    timeout-at-deadline, output-limit-before-timeout, no-resend, forced
-    reconciliation) is unchanged. The budget is derived per process from a
-    bounded fixture measurement and equals the historical 1200ms whenever the
-    machine floor is at most 800ms (the 1.5 scale only exceeds 1200 above
-    that), which is always the case on Linux CI.
-    """
-    _floor_ms: 'int | None' = None
-
-    @classmethod
-    def _pipeline_floor_ms(cls):
-        """Bound time a full legal fixture pipeline needs on this machine."""
-        if cls._floor_ms is not None:
-            return cls._floor_ms
-        # The probe instance is never run by the test runner, so the cleanups
-        # job() registers on it (fixture TemporaryDirectory) must be executed
-        # explicitly; otherwise they are only finalized at GC time.
-        case = cls('test_host_denial_and_unknown_prior_usage_never_spawn')
-        best = 0.0
-        try:
-            for _ in range(2):
-                try:
-                    t0 = time.monotonic()
-                    job = case.job(budget=w.RunBudget(1, 8, 0, 10000, 100, 100))
-                    result = w.run_worker(job, Host())
-                    wall = (time.monotonic() - t0) * 1000
-                    if result.code == 'OPENCODE_OUTPUT_RETURNED':
-                        best = max(best, wall)
-                except Exception:
-                    pass
-        finally:
-            case.doCleanups()
-        cls._floor_ms = int(best) if best else 950
-        return cls._floor_ms
-
     def tight_budget(self):
-        """1200ms when the machine keeps the Linux floor; scaled otherwise."""
-        floor = self._pipeline_floor_ms()
-        return w.RunBudget(1, 8, 0, max(1200, int(floor * 1.5)), 100, 100)
+        """Leave synthetic process startup ample time before timeout cases."""
+        return w.RunBudget(1, 8, 0, 15000, 100, 100)
+
+    def run_client_timeout(self, job, host):
+        """Deliver a timeout at the client pump without waiting on wall time."""
+        original_pump = w._Pipes.pump
+
+        def expire_at_client(pipes, lifecycles):
+            if len(lifecycles) > 1:
+                with patch.object(w.time, 'monotonic', return_value=pipes.deadline + 1):
+                    return original_pump(pipes, lifecycles)
+            return original_pump(pipes, lifecycles)
+
+        with patch.object(w._Pipes, 'pump', expire_at_client):
+            return w.run_worker(job, host)
 
     def job(self, prompt='success', script=FAKE, **changes):
         temp = tempfile.TemporaryDirectory(prefix='opencode-worker-', dir=str(Path(tempfile.gettempdir()).resolve()))
@@ -402,7 +371,8 @@ class OpenCodeWorkerTests(unittest.TestCase):
         for mode,code in (('timeout','OPENCODE_TIMEOUT'),('overflow','OPENCODE_OUTPUT_LIMIT')):
             with self.subTest(mode=mode):
                 job=self.job(mode,budget=self.tight_budget())
-                result=w.run_worker(job,Host())
+                result=(self.run_client_timeout(job,Host()) if mode=='timeout'
+                        else w.run_worker(job,Host()))
                 self.assertEqual(result.code,code,result)
                 self.assertTrue(result.cleanup_confirmed)
                 self.assertEqual(w.run_worker(job,Host()).code,'OPENCODE_ATTEMPT_ALREADY_USED')
@@ -739,7 +709,9 @@ class OpenCodeWorkerTests(unittest.TestCase):
         for mode in ('auth','unknown','incomplete','timeout','overflow'):
             with self.subTest(mode=mode):
                 host=Host()
-                result=w.run_worker(self.job(mode,budget=self.tight_budget()),host)
+                job=self.job(mode,budget=self.tight_budget())
+                result=(self.run_client_timeout(job,host) if mode=='timeout'
+                        else w.run_worker(job,host))
                 self.assertEqual(result.status,'BLOCKED')
                 self.assertEqual(host.calls.count(('check','after')),1)
 

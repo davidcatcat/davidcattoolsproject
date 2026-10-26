@@ -34,33 +34,10 @@ satisfy a milestone gate that explicitly requires one of the specialist workflow
 
 If no material issue is found, say so directly and identify any testing or environment gaps that remain.
 
-## Formal verdict format
-
-A formal review (AGENTS.md *Formal Reviewer*) is posted as one new PR comment, never by
-editing an earlier one. All agents share one GitHub login, so the login proves nothing:
-only the Reviewer, working in its own read-only context with its own D6 reviewer record,
-posts this format; a Developer or the PM never posts a `review_verdict` marker. The PM
-checks the D6 reviewer record (distinct agent, session and native session from the
-Developer) before merge. The comment starts with exactly these lines:
-
-```text
-<!-- activity: type=review_verdict actor=<Claude|Codex> target=PM status=<PASS|FIX|FAIL> -->
-Verdict: <PASS|FAIL|BLOCKED> | Version: v<N> | HEAD: <40-hex reviewed commit>
-LLMTOOL-REVIEW-BINDING v1 task=<task id> run=<run id> contract=<contract digest> head=<40-hex>
-```
-
-and, on PASS only, one more line right after them:
-
-```text
-FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
-```
-
-- `actor` is the Reviewer's model family; it is the other family than the Developer.
-- The binding line is required when the change runs through an llmtool Task; it names
-  that Task's exact IDs and the reviewed HEAD.
-- `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` appears only on PASS. A FIX or FAIL comment omits
-  it, and the latest verdict for a HEAD wins.
-- Findings, gates and disposition follow these lines.
+When this is the formal Reviewer gate on a PR, publish the verdict under the
+[Transition record](../ai-team-delivery/pm-continuation.md#transition-record) rule; for an
+llmtool Task closed by `task complete --reviewer-task`, use the
+[formal verdict comment](../ai-team-delivery/formal-verdict.md).
 
 ## Provider and runtime reviews
 

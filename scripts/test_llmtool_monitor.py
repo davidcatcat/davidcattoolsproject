@@ -32,7 +32,7 @@ _ISOLATED = tempfile.TemporaryDirectory()
 def setUpModule():
     # Never let a test read the developer's real agent sessions: a live session
     # changing state mid-test would add office events to unrelated assertions.
-    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CLAUDE_PROJECTS", "CLAUDE_SESSIONS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
+    for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
 
 
@@ -54,6 +54,9 @@ class ClassifyTests(unittest.TestCase):
             "/u/lib/node_modules/@kilocode/cli/bin/.kilo": "Kilo CLI",
             "/u/.kilo/bin/kilo run --agent a": "Kilo CLIENT",
             "claude": "Claude Code CLI",
+            "/u/.local/bin/claude daemon run --origin transient": "Claude Code daemon",
+            "claude bg-pty-host --bg-pty-host /tmp/d/s.pty.sock 200 50": "Claude Code daemon",
+            "claude bg-spare --bg-spare /tmp/d/s.claim.sock": "Claude Code background session",
             "/Applications/Claude.app/Contents/MacOS/Claude": "Claude Desktop",
             "/Applications/Antigravity.app/Contents/MacOS/Antigravity": "Antigravity App (AGY)",
             "/Users/x/.local/bin/agy": "AGY CLI",
@@ -1365,6 +1368,193 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("wp-1  等審查  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
+    def test_agent_process_cwd_binds_transcript_free_d6_session(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 600))
+        self._register("wp-1", str(self.task), last_verified_at=stamp,
+                       trusted_agent_id="codex-developer-agent")
+        for role in ("Codex CLI", "Codex CLI (node launcher)", "Claude Code CLI",
+                     "Claude Code CLI (node launcher)", "OpenCode CLI", "OpenCode CLIENT",
+                     "OpenCode CLI (node launcher)", "OpenCode CLIENT (node launcher)"):
+            with self.subTest(role=role):
+                process = mon.Process(81, 1, 81, "00:12", "S", role, "cli", "")
+                rows = mon.office_rows([process], self.NOW, codex_root=str(self.codex),
+                                       claude_root=str(self.claude), canonical=self.canonical,
+                                       cwd_of=lambda pid: str(self.task))
+                task_rows = [row for row in rows if row.task == "task wp-1"]
+                self.assertEqual(len(task_rows), 1)
+                self.assertEqual((task_rows[0].state, task_rows[0].role, task_rows[0].evidence),
+                                 (mon.WORKING, "developer", "程序"))
+                task_lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
+                self.assertIn("wp-1", next(line for line in task_lines if "wp-1" in line))
+                gone = mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                       claude_root=str(self.claude), canonical=self.canonical,
+                                       cwd_of=lambda pid: str(self.task))
+                self.assertFalse(any(row.task == "task wp-1" for row in gone))
+
+    def test_idle_claude_session_row_covers_its_d6_process(self):
+        self._write(self.claude / "proj" / "idle.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=10)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "81.json").write_text(json.dumps(
+            {"pid": 81, "sessionId": "idle", "status": "idle", "name": "claude-developer"}),
+            encoding="utf-8")
+        claude = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+        rows = mon.office_rows([claude], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: str(self.task))
+        task_rows = [row for row in rows if row.task == "task wp-1"]
+        self.assertEqual([(row.state, row.evidence) for row in task_rows],
+                         [(mon.IDLE, "claude 紀錄")])
+
+    def test_idle_codex_session_row_covers_its_d6_process(self):
+        self._codex("completed", {"id": "T9", "cwd": str(self.task),
+                                  "thread_source": "user", "originator": "codex-tui"},
+                    ["task_started", "task_complete"], age=10)
+        codex = mon.Process(82, 1, 82, "00:12", "S", "Codex CLI", "codex", "")
+        rows = mon.office_rows([codex], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: str(self.task))
+        task_rows = [row for row in rows if row.task == "task wp-1"]
+        self.assertEqual([(row.state, row.evidence) for row in task_rows],
+                         [(mon.IDLE, "codex 紀錄")])
+
+    def test_closed_claude_session_does_not_cover_live_codex_d6_process(self):
+        closed = mon.OfficeRow("claude developer", mon.CLOSED, "previous session",
+                               1.0, 10, task="task wp-1")
+        codex = mon.Process(82, 1, 82, "00:12", "S", "Codex CLI", "codex", "")
+        rows = mon._d6_process_rows([codex], [closed], self.canonical,
+                                    lambda pid: str(self.task))
+        task_rows = [row for row in rows if row.task == "task wp-1"]
+        self.assertEqual(len(task_rows), 1)
+        self.assertEqual((task_rows[0].state, task_rows[0].evidence),
+                         (mon.WORKING, "程序"))
+
+    def test_d6_process_role_comes_from_registered_agent_id(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-reviewer-agent")
+        proc = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+        rows = mon._d6_process_rows([proc], [], self.canonical, lambda pid: str(self.task))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0].name, rows[0].role), ("claude reviewer", "reviewer"))
+
+    def test_open_codex_cli_without_a_session_row_is_an_idle_member(self):
+        launcher = mon.Process(81, 1, 81, "02:43:00", "S+", "Codex CLI (node launcher)", "node", "")
+        codex = mon.Process(82, 81, 81, "02:43:00", "S+", "Codex CLI", "codex",
+                            "Codex CLI (node launcher) 81")
+        infra = [mon.Process(90, 1, 90, "05:00", "Ss", "Codex daemon", "codex", ""),
+                 mon.Process(91, 90, 91, "05:00", "Ss", "Codex APP-SERVER", "codex", "Codex daemon 90"),
+                 mon.Process(92, 91, 92, "05:00", "S", "Codex code-mode host", "codex-code-mode-host",
+                             "Codex APP-SERVER 91")]
+        procs = [launcher, codex] + infra
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        codex_rows = [row for row in rows if row.name.startswith("codex")]
+        self.assertEqual([(row.name, row.state, row.detail.split("，")[0]) for row in codex_rows],
+                         [("codex cli #1", mon.IDLE, "本 repo：已開啟")])
+        # The launcher pair is one CLI; the daemon, app-server and code-mode host are not members.
+        self.assertEqual(mon.summary(procs, [], []), "Codex 1")
+        # With an active rollout the session row is that CLI: no extra row.
+        self._codex("live", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                             "originator": "codex-tui"}, ["task_started"], age=5)
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertEqual([(row.name, row.state) for row in rows if row.name.startswith("codex")],
+                         [("codex 主對話", mon.WORKING)])
+        # A running `codex exec` call is shown by its own row, not as an idle CLI.
+        run = mon.Process(83, 1, 83, "00:30", "S", "Codex CLI", "codex", "")
+        self._codex("exec", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
+                             "originator": "codex_exec"}, ["task_started"], age=5)
+        rows = mon.office_rows(procs + [run], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertFalse(any(row.name.startswith("codex cli") for row in rows))
+
+    def test_open_claude_cli_without_a_session_row_is_an_idle_member(self):
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"}], age=10)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "81.json").write_text(json.dumps(
+            {"pid": 81, "sessionId": "s1", "status": "idle"}), encoding="utf-8")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(82, 1, 82, "05:00", "S+", "Claude Code CLI", "claude", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertEqual(sorted((row.name, row.state) for row in rows if row.name.startswith("claude")),
+                         [("claude cli #1", mon.IDLE), ("claude 互動", mon.IDLE)])
+        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 2")
+
+    def test_open_agent_clis_outside_the_repo_get_a_row_like_opencode(self):
+        elsewhere = os.path.join(self.tmp.name, "other-project")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Codex CLI", "codex", ""),
+                 mon.Process(82, 1, 82, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(83, 1, 83, "05:00", "S+", "OpenCode CLI", "opencode", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               opencode_db=os.path.join(self.tmp.name, "none.db"),
+                               cwd_of=lambda pid: elsewhere)
+        clis = sorted((row.name, row.state, row.detail) for row in rows if " cli #" in row.name)
+        # Codex/Claude sessions elsewhere are not read, so only "open" is claimed;
+        # OpenCode reads every folder's sessions.
+        self.assertEqual(clis, [("claude cli #1", mon.UNCHECKED, "其他資料夾：已開啟"),
+                                ("codex cli #1", mon.UNCHECKED, "其他資料夾：已開啟"),
+                                ("opencode cli #1", mon.IDLE,
+                                 "其他資料夾：已開啟，沒有執行中的任務，已開 5 分鐘")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 1  Codex 1  OpenCode 1")
+
+    def test_session_that_cd_into_a_d6_keeps_its_cli_to_one_row(self):
+        # The CLI was opened in the canonical checkout; its session `cd`s into the D6.
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=5)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "81.json").write_text(json.dumps(
+            {"pid": 81, "sessionId": "s1", "status": "busy"}), encoding="utf-8")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Claude Code CLI", "claude", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertEqual([(row.state, row.task) for row in rows if row.name.startswith("claude")],
+                         [(mon.WORKING, "task wp-1")])
+        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 1")
+
+    def test_session_that_cd_into_a_d6_never_takes_a_cli_outside_the_repo(self):
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=5)
+        cwds = {70: "/elsewhere/x", 81: self.canonical, 82: self.canonical}
+        cli = lambda pid: mon.Process(pid, 1, pid, "30:00", "S+", "Claude Code CLI", "claude", "")
+
+        def claude_rows(procs):
+            rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                   claude_root=str(self.claude), canonical=self.canonical,
+                                   cwd_of=cwds.get)
+            return sorted((row.state, row.detail) for row in rows if row.name.startswith("claude"))
+
+        procs = [cli(70), cli(81)]
+        self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
+                                              (mon.UNCHECKED, "其他資料夾：已開啟")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 2")
+        # Two canonical CLIs for one session that moved: which is free is a guess.
+        procs.append(cli(82))
+        self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
+                                              (mon.UNCHECKED, "其他資料夾：已開啟"),
+                                              (mon.UNCHECKED, "本 repo：已開啟")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 3")
+
+    def test_process_fallback_does_not_duplicate_transcript_task_row(self):
+        self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},
+                    ["task_started"], age=5)
+        process = mon.Process(81, 1, 81, "00:12", "S", "Codex CLI", "codex", "")
+        rows = mon.office_rows([process], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: str(self.task))
+        task_rows = [row for row in rows if row.task == "task wp-1"]
+        self.assertEqual(len(task_rows), 1)
+        self.assertEqual(task_rows[0].evidence, "codex 紀錄")
+
     def _turn_db(self, turns, name="history.sqlite"):
         """A real WAL database kept open by a writer, as Codex keeps its own."""
         path = self.codex.parent / name
@@ -1654,6 +1844,87 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("codex 主對話", rows)
         self.assertNotIn("codex subagent Bacon", rows)   # leaves with the PM that started it
 
+    def test_rows_show_the_short_session_id_after_the_name(self):
+        self._write(self.claude / "proj" / "8db9ba20-da22-4c36-ba78-9cd68605cc09.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"}], age=60)
+        # Codex ids are UUIDv7: threads of the same minute share the head, so the tail is shown.
+        for name, tid in (("a", "01a173c3-2b86-7600-963f-8f9addaf5381"),
+                          ("b", "01a173c3-55f9-7bb2-8aeb-da71da18fd15")):
+            self._codex(name, {"id": tid, "cwd": str(self.task), "thread_source": "user",
+                               "originator": "codex_exec"}, ["task_started"], age=30)
+        rows = self.rows()
+        self.assertEqual(sorted(row.sid for row in rows if row.name == "codex developer"),
+                         ["da18fd15", "ddaf5381"])
+        claude = self.by_name(rows)["claude"]
+        self.assertEqual(claude.sid, "8db9ba20")
+        lines = mon.office_lines(rows)
+        self.assertTrue(any(line.startswith("claude 8db9ba20 ") for line in lines), lines)
+        self.assertEqual(mon._codex_sid("not-a-uuid PROMPT-SECRET"), "")
+        # Two sessions alike but for their id keep separate event keys.
+        one = mon.OfficeRow("claude 互動", mon.IDLE, "fix monitor", 1.0, 30, sid="aaaaaaaa")
+        two = mon.OfficeRow("claude 互動", mon.WORKING, "fix monitor", 1.0, 30, sid="bbbbbbbb")
+        old, _ = mon.office_events({}, [one, two])
+        self.assertEqual(len(old), 2)
+        self.assertEqual(mon.office_events(old, [two, one])[1], [])
+        _, events = mon.office_events(old, [replace(one, state=mon.WORKING), two])
+        self.assertEqual(events, [("+", "claude 互動 aaaaaaaa「fix monitor」：待命 → 工作中")])
+
+    def test_finished_codex_exec_run_is_done_then_leaves(self):
+        meta = {"id": "E1", "cwd": str(self.task), "thread_source": "user", "originator": "codex_exec"}
+        self._codex("exec", meta, ["task_started", "task_complete"], age=600)
+        self.assertEqual(self.by_name(self.rows())["codex developer"].state, mon.DONE)
+        self._codex("exec", meta, ["task_started"], age=60)
+        self.assertEqual(self.by_name(self.rows())["codex developer"].state, mon.WORKING)
+        self._codex("exec", meta, ["task_started", "task_complete"], age=mon.OFFICE_DONE_WINDOW + 60)
+        self.assertNotIn("codex developer", self.by_name(self.rows()))
+        # In the canonical checkout too it is a one-shot call, as `claude -p`
+        # is: how it was started decides, not where it runs.
+        self._codex("exec", dict(meta, cwd=self.canonical), ["task_started", "task_complete"], age=600)
+        rows = self.by_name(self.rows())
+        self.assertNotIn("codex 主對話", rows)
+        row = rows["codex 單次呼叫"]
+        self.assertEqual((row.state, row.main, row.kind), (mon.DONE, False, "subagent"))
+        self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows())))
+
+    def test_codex_rows_show_what_they_do_like_claude_rows(self):
+        path = self.codex.parent / "state.sqlite"
+        db = sqlite3.connect(path)
+        db.execute("create table threads(id, title, first_user_message)")
+        db.executemany("insert into threads values(?, ?, 'PROMPT-SECRET')", [
+            ("E1", "You are the Codex Reviewer (read-only) for PR #356\nPROMPT-SECRET token=abc"),
+            ("T1", "Fix the monitor rows"), ("D1", "Developer task title")])
+        db.commit()
+        db.close()
+        self._codex("exec", {"id": "E1", "cwd": self.canonical, "thread_source": "user",
+                             "originator": "codex_exec"}, ["task_started", "task_complete"], age=600)
+        self._codex("tui", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                            "originator": "codex-tui"}, ["task_started", "task_complete"], age=90)
+        day = mon.time.strftime("%Y/%m/%d", mon.time.localtime(self.NOW))
+        self._write(self.codex / day / "rollout-dev.jsonl", [
+            {"type": "session_meta", "payload": {"id": "D1", "cwd": str(self.task),
+                                                 "thread_source": "user", "originator": "codex_exec"}},
+            {"type": "event_msg", "payload": {"type": "task_started"}},
+            {"type": "event_msg", "payload": {"type": "item_completed",
+                                              "item": {"type": "Reasoning", "raw_content": "REASONING-SECRET"}}}],
+            age=5)
+        tui = [mon.Process(8, 1, 8, "01:14", "S+", "Codex CLI", "codex", "")]
+        with patch.object(mon, "CODEX_STATE", str(path)):
+            rows = self.by_name(self.rows(tui))
+        # The title's first line, shortened and redacted; never the rest of the prompt.
+        self.assertTrue(rows["codex 單次呼叫"].detail.startswith("You are the Codex Reviewer (read-only)"),
+                        rows["codex 單次呼叫"].detail)
+        self.assertIn("Fix the monitor rows", rows["codex 主對話"].detail)
+        # Working: what it is doing now beats the title.
+        self.assertEqual(rows["codex developer"].detail, "思考中")
+        self.assertEqual(rows["codex developer"].state, mon.WORKING)
+        text = "\n".join(mon.office_lines(list(rows.values())))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+        # Without Codex's thread list nothing changes but the missing title.
+        rows = self.by_name(self.rows(tui))
+        self.assertEqual(rows["codex developer"].detail, "思考中")
+        self.assertNotIn("Fix the monitor rows", rows["codex 主對話"].detail)
+
     def test_reopened_codex_cli_attaches_only_to_its_newest_thread(self):
         self._codex("old", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                             "originator": "codex-tui"}, ["task_started", "turn_aborted"], age=90)
@@ -1852,10 +2123,10 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows()
         names = [row.name for row in rows]
         self.assertEqual(names.count("claude subagent"), 2)
-        reviewer = self.by_name(rows)["claude 互動"]
+        reviewer = self.by_name(rows)["claude"]
         self.assertEqual((reviewer.state, reviewer.age), (mon.WORKING, 10.0))
         self.assertNotIn("token=abc", reviewer.detail)
-        developer = self.by_name(rows)["claude developer（互動）"]
+        developer = self.by_name(rows)["claude developer"]
         self.assertEqual((developer.state, developer.detail), (mon.IDLE, "Build env cache"))
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
@@ -1876,8 +2147,8 @@ class OfficeViewTests(unittest.TestCase):
                      "statusUpdatedAt": (self.NOW - 1200) * 1000, "name": "dev-r4"}),
                     encoding="utf-8")
                 row = self.by_name(self.rows([cli]))["claude developer（互動）"]
-                self.assertEqual((row.state, row.detail, row.age),
-                                 (want[0], want[1] + "｜session s dev-r4", want[2]))
+                self.assertEqual((row.state, row.detail, row.age, row.sid),
+                                 (want[0], want[1] + "｜dev-r4", want[2], ""))   # "s" is no session id
         driven = mon.Process(41, 5718, 41, "05:00", "Ss+", "Claude Code CLI", "claude",
                              "Codex APP-SERVER 5718")
         (sessions / "41.json").write_text(json.dumps(
@@ -1897,7 +2168,7 @@ class OfficeViewTests(unittest.TestCase):
             with self.subTest(name):
                 path = self.claude / "dev" / "s.jsonl"
                 self._write(path, entries, age=age)
-                row = self.by_name(self.rows())["claude developer（互動）"]
+                row = self.by_name(self.rows())["claude developer"]
                 self.assertEqual((row.state, row.detail[:len(want[1])]), want)
                 self.assertNotIn("FILE-SECRET", row.detail)
 
@@ -1913,7 +2184,7 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "user", "cwd": self.canonical, "entrypoint": "claude-desktop"}], age=3600)
         cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
         # No registry: nothing is judged.
-        self.assertEqual([row.state for row in self.rows([cli]) if row.name == "claude 互動"],
+        self.assertEqual([row.state for row in self.rows([cli]) if row.name == "claude"],
                          [mon.IDLE] * 4)
         sessions = self.claude.parent / "sessions"
         sessions.mkdir()
@@ -1933,6 +2204,193 @@ class OfficeViewTests(unittest.TestCase):
         rows = {row.detail: row.state for row in self.rows([cli, other])}
         self.assertEqual(rows["title recent"], mon.IDLE)
         self.assertNotIn("Old sub", rows)
+        # The background daemon, its terminal hosts and an unclaimed spare hold
+        # no session, so they keep no closed session alive.
+        helpers = [mon.Process(50, 1, 50, "05:00", "S", "Claude Code daemon", "claude", ""),
+                   mon.Process(51, 50, 50, "05:00", "S", "Claude Code daemon", "claude", ""),
+                   mon.Process(52, 51, 50, "05:00", "S", "Claude Code background session", "claude",
+                               "Claude Code daemon 51")]
+        rows = {row.detail: row.state for row in self.rows([cli, *helpers])}
+        self.assertEqual(rows["推測 Claude CLI 已關閉（title recent）"], mon.CLOSED)
+
+    def test_launcher_named_claude_session_shows_its_role(self):
+        for sid, name in (("r", "claude-reviewer"), ("p", "claude-pm"),
+                          ("d", "claude-developer-ui"), ("x", "claude-reviewers"),
+                          ("y", "reviewer"), ("u", "claude-ui"), ("q", "claude-developer-g8")):
+            self._write(self.claude / "proj" / f"{sid}.jsonl", [
+                {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+                {"type": "ai-title", "aiTitle": f"title {sid}"}], age=60)
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        for pid, sid, name in ((61, "r", "claude-reviewer"), (62, "p", "claude-pm"),
+                               (63, "d", "claude-developer-ui"), (64, "x", "claude-reviewers"),
+                               (65, "y", "reviewer"), (66, "u", "claude-ui"),
+                               (67, "q", "claude-developer-g8")):
+            (self.claude.parent / "sessions" / f"{pid}.json").write_text(json.dumps(
+                {"pid": pid, "sessionId": sid, "status": "idle", "name": name,
+                 "kind": "bg" if sid == "r" else None}), encoding="utf-8")
+        procs = [mon.Process(pid, 1, pid, "05:00", "S+", "Claude Code CLI", "claude", "")
+                 for pid in (62, 63, 64, 65, 66, 67)]
+        procs.append(mon.Process(61, 7, 7, "05:00", "S", "Claude Code background session",
+                                 "claude", "Claude Code daemon 7"))
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=[str(self.claude)], canonical=self.canonical)
+        got = {row.detail.split("｜")[0]: (row.name, row.role) for row in rows if row.kind != "worker"}
+        # Only an exact claude-<role>[-suffix] name binds a role; anything else stays unnamed.
+        self.assertEqual(got, {"title r": ("claude reviewer（背景）", "reviewer"),
+                               "title p": ("claude pm（互動）", "pm"),
+                               "title d": ("claude ui（互動）", "ui"),
+                               "title u": ("claude ui（互動）", "ui"),
+                               "title q": ("claude developer（互動）", "developer"),
+                               "title x": ("claude 互動", ""),
+                               "title y": ("claude 互動", "")})
+
+    def test_closed_claude_session_keeps_its_launcher_role_but_claims_no_mode(self):
+        # A stopped background Reviewer, a stopped UI Agent in its D6 task and a
+        # stopped unnamed session: no CLI reports on them any more.
+        for sid, cwd, name in (("r", self.canonical, "claude-reviewer"),
+                               ("u", str(self.task), "claude-developer-ui"),
+                               ("n", self.canonical, None)):
+            entries = [{"type": "user", "cwd": cwd, "entrypoint": "cli"}]
+            if name:
+                entries.append({"type": "agent-name", "agentName": name, "sessionId": sid})
+            entries.append({"type": "ai-title", "aiTitle": f"title {sid}"})
+            self._write(self.claude / "proj" / f"{sid}.jsonl", entries, age=600)
+        rows = self.rows()
+        got = {row.detail.split("｜")[0]: (row.name, row.role) for row in rows if row.kind != "worker"}
+        self.assertEqual(got, {"title r": ("claude reviewer", "reviewer"),
+                               "title u": ("claude ui", "ui"),
+                               "title n": ("claude", "")})
+        # A name that is not exactly claude-<role> still binds nothing.
+        self._write(self.claude / "proj" / "r.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "agent-name", "agentName": "claude-reviewers"},
+            {"type": "ai-title", "aiTitle": "title r"}], age=600)
+        got = {row.detail: (row.name, row.role) for row in self.rows() if row.kind != "worker"}
+        self.assertEqual(got["title r"], ("claude", ""))
+
+    def _registry(self, pid, **entry):
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        (self.claude.parent / "sessions" / f"{pid}.json").write_text(
+            json.dumps({"pid": pid, **entry}), encoding="utf-8")
+        return mon.Process(pid, 7, 7, "05:00", "S", "Claude Code background session", "claude",
+                           "Claude Code daemon 7")
+
+    def _job(self, job, state):
+        path = self.claude.parent / "jobs" / job / "state.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"state": state, "intent": "PROMPT-SECRET",
+                                    "providerEnv": {"KEY": "CREDENTIAL-SECRET"}}), encoding="utf-8")
+
+    def test_background_session_needing_a_person_is_listed_without_a_session_file(self):
+        # A `claude --bg --resume` stopped at a menu: blocked, no session file yet.
+        self._job("j1", "blocked")
+        self._job("j3", "working")
+        procs = [self._registry(61, sessionId="aaaaaaaa-0001", kind="bg", status="busy",
+                                name="claude-developer", jobId="j1", cwd=self.canonical),
+                 self._registry(62, sessionId="bbbbbbbb-0002", kind="bg", status="waiting",
+                                waitingFor="permission prompt", cwd=str(self.task)),
+                 self._registry(63, sessionId="cccccccc-0003", kind="bg", status="busy",
+                                jobId="j3", cwd=self.canonical),   # working: not news
+                 self._registry(64, sessionId="dddddddd-0004", kind="bg", status="waiting",
+                                cwd=self.tmp.name + "/elsewhere")]   # not this repository
+        rows = [row for row in self.rows(procs) if row.kind != "worker"]
+        got = {row.sid: (row.name, row.state, row.detail) for row in rows}
+        self.assertEqual(got, {
+            "aaaaaaaa": ("claude developer（背景）", mon.ATTENTION,
+                         "等人操作，要你回（還沒有對話紀錄）｜claude-developer"),
+            "bbbbbbbb": ("claude developer（背景）", mon.ATTENTION,
+                         "等人確認權限，要你回（task wp-1）（還沒有對話紀錄）")})
+        self.assertIn("需注意", "\n".join(mon.office_lines(rows)))
+        text = "\n".join(mon.office_lines(self.rows(procs)))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+        # A job id is a name under jobs/, never a path.
+        self.assertIsNone(mon._job_state(str(self.claude.parent / "sessions"), {"jobId": "../j1"}))
+
+    def test_background_job_state_decides_like_claude_agents(self):
+        for sid in ("w", "b", "s"):
+            self._write(self.claude / "proj" / f"{sid}.jsonl", [
+                {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+                {"type": "ai-title", "aiTitle": f"title {sid}"}], age=600)
+        self._job("jw", "working")
+        self._job("jb", "blocked")
+        self._job("js", "blocked")
+        # Its registry says idle while a background command it started still
+        # runs: the job is working, as `claude agents` says.
+        procs = [self._registry(61, sessionId="w", kind="bg", status="idle", jobId="jw"),
+                 self._registry(62, sessionId="b", kind="bg", status="idle", jobId="jb")]
+        # "s" left a blocked job record behind, but its CLI is gone.
+        got = {row.detail.split("｜")[0]: row.state for row in self.rows(procs) if row.kind != "worker"}
+        self.assertEqual(got, {"title w": mon.WORKING, "等人操作，要你回": mon.ATTENTION,
+                               "推測 Claude CLI 已關閉（title s）": mon.CLOSED})
+
+    def test_running_cli_without_a_readable_entry_keeps_its_launcher_role(self):
+        self._write(self.claude / "proj" / "r.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "agent-name", "agentName": "claude-reviewer"},
+            {"type": "ai-title", "aiTitle": "title r"}], age=600)
+        (self.claude.parent / "sessions").mkdir()
+        (self.claude.parent / "sessions" / "41.json").write_text("{", encoding="utf-8")
+        cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
+        row = self.by_name(self.rows([cli]))["claude reviewer"]
+        # Kept as the running CLI's session, with no claimed mode.
+        self.assertEqual((row.state, row.role, row.detail), (mon.IDLE, "reviewer", "title r"))
+
+    def test_launcher_names_never_end_in_a_dash(self):
+        for name in ("claude-ui-", "claude-developer-ui-", "claude-developer-", "claude-pm-x-"):
+            self.assertIsNone(mon.SESSION_ROLE.fullmatch(name), name)
+        for name, role in (("claude-ui-2", "ui"), ("claude-developer-ui", "ui"),
+                           ("claude-developer-ui-x", "ui"), ("claude-developer-g8", "developer")):
+            found = mon.SESSION_ROLE.fullmatch(name)
+            self.assertEqual(found.group(1) or found.group(2), role)
+
+    def test_claude_sessions_of_every_account_are_shown(self):
+        other = self.claude.parent / "claude-account2" / "projects"
+        self._write(self.claude / "proj" / "a.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "default account"}], age=60)
+        self._write(other / "proj" / "b.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "second account"}], age=60)
+        self._write(other / "proj" / "c.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "moved to background"}], age=60)
+        for top, pid, sid, kind in ((self.claude, 41, "a", None), (other, 42, "b", None),
+                                    (other, 43, "c", "bg")):
+            (top.parent / "sessions").mkdir(exist_ok=True)
+            (top.parent / "sessions" / f"{pid}.json").write_text(json.dumps(
+                {"pid": pid, "sessionId": sid, "status": "idle", "kind": kind}), encoding="utf-8")
+        procs = [mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(42, 1, 42, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(43, 7, 7, "05:00", "S", "Claude Code background session", "claude",
+                             "Claude Code daemon 7")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=[str(self.claude), str(other)], canonical=self.canonical)
+        got = {row.detail.split("｜")[0]: (row.name, row.state) for row in rows if row.kind != "worker"}
+        self.assertEqual(got, {"default account": ("claude 互動", mon.IDLE),
+                               "second account": ("claude 互動", mon.IDLE),
+                               "moved to background": ("claude 背景", mon.IDLE)})
+        # By default every ~/.claude-* account is read next to ~/.claude.
+        with patch.object(mon, "CLAUDE_PROJECTS", str(self.claude)), \
+                patch.object(mon, "CLAUDE_OTHER_PROJECTS", str(self.claude.parent / "claude-*" / "projects")):
+            self.assertEqual(mon.claude_roots(), [str(self.claude), str(other)])
+            (self.claude.parent / "claude-alias").symlink_to(self.claude.parent / "claude-account2")
+            self.assertEqual(mon.claude_roots(), [str(self.claude), str(other)])   # read once
+        # A file another account's crashed CLI left for a reused PID loses to
+        # the running CLI's fresh one.
+        stale = other.parent / "sessions" / "41.json"
+        stale.write_text(json.dumps({"pid": 41, "sessionId": "b"}), encoding="utf-8")
+        os.utime(stale, (self.NOW - 3600, self.NOW - 3600))
+        os.utime(self.claude.parent / "sessions" / "41.json", (self.NOW - 5, self.NOW - 5))
+        found = mon._claude_registered(mon.claude_sessions([str(self.claude), str(other)]), procs)
+        self.assertEqual(found[41]["sessionId"], "a")
+        # The daemon and a spare background session holding no session yet are
+        # infrastructure: listed, not counted as agents.
+        daemon = mon.Process(7, 1, 7, "05:00", "S", "Claude Code daemon", "claude", "")
+        spare = mon.Process(44, 7, 7, "05:00", "S", "Claude Code background session", "claude",
+                            "Claude Code daemon 7")
+        self.assertEqual(mon.summary(procs + [daemon, spare], [],
+                                     mon.claude_sessions([str(self.claude), str(other)])), "Claude 3")
 
     def test_working_claude_shows_its_latest_action_description_only(self):
         call = lambda description: {"type": "assistant", "message": {"content": [
@@ -1988,7 +2446,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(sum(row.name == "claude 單次呼叫" for row in rows), 1)   # run2 hidden
         live = next(row for row in rows if row.detail == "Owner chat")
         self.assertEqual((live.name, live.state, live.kind, live.group),
-                         ("claude 互動", mon.IDLE, "agent", ""))
+                         ("claude", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
         self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 7 位")
         live = lines.index(f"── {mon.LIVE_SECTION} ──")

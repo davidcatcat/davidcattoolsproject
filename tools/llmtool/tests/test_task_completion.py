@@ -3,6 +3,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -18,6 +19,9 @@ from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record, run_task_complete
 from llmtool import task_completion
 from llmtool import worker_dispatch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import d6_worktree_lifecycle  # noqa: E402
 
 
 class FakeClient:
@@ -91,7 +95,7 @@ class TaskCompletionTests(unittest.TestCase):
         return kwargs
 
     def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
-                                  workflow=None, runs=None, jobs=None):
+                                  workflow=None, runs=None, jobs=None, comments=()):
         workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-mac-ci.yml',
                                 'name': 'llmtool Mac CI', 'state': 'active'}
         check_runs = checks['check_runs']
@@ -111,7 +115,7 @@ class TaskCompletionTests(unittest.TestCase):
             'path': '.github/workflows/llmtool-mac-ci.yml', 'event': 'pull_request',
             'head_sha': result_sha, 'status': 'completed', 'conclusion': 'success',
             'pull_requests': [{'number': 10, 'head': {'sha': result_sha}}]}]}
-        return [pr, reviews, workflow, runs, jobs, checks]
+        return [pr, reviews, list(comments), workflow, runs, jobs, checks]
 
     def _git(self, *args):
         return subprocess.check_output(['/usr/bin/git', *args], cwd=self.root,
@@ -209,6 +213,60 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['source_sha'], dispatch_source)
         self.assertEqual(result['result_head'], result_sha)
         self.assertEqual(result['changed_paths'], [self.source_path])
+
+    def test_record_result_unblocks_task_completion_head_binding(self):
+        task_root = self.base / 'executor-result-worktree'
+        self._git('worktree', 'add', '-b', 'feat/executor-result', str(task_root),
+                  self.source_sha)
+        task_root = task_root.resolve()
+        self._write_registration(self.task_id, 'executor-agent', 'Executor D6 session',
+                                 task_root, 'feat/executor-result', self.source_sha,
+                                 self.source_sha, native_session_id='native-executor')
+        path = task_root / self.source_path
+        path.write_text(path.read_text() + '\n# committed developer result\n')
+        subprocess.run(['/usr/bin/git', 'add', self.source_path], cwd=task_root, check=True)
+        subprocess.run(['/usr/bin/git', '-c', 'user.name=Executor', '-c',
+                        'user.email=executor@example.invalid', 'commit', '-m',
+                        'committed developer result'], cwd=task_root, check=True,
+                       capture_output=True)
+        result_sha = subprocess.check_output(['/usr/bin/git', 'rev-parse', 'HEAD'],
+                                             cwd=task_root, text=True).strip()
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=task_root, text=True)
+        kwargs = dict(task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(task_root), expected_branch='feat/executor-result',
+            source_sha=self.source_sha,
+            task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                          'contract_digest': '3' * 64},
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor', write_paths=[self.source_path],
+            artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_executor_result(**kwargs)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_HEAD_MISMATCH')
+
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+
+        def complete_bootstrap(bootstrap_root, bootstrap_task_id):
+            self.assertEqual(bootstrap_root, task_root)
+            self.assertEqual(bootstrap_task_id, self.task_id)
+            current = d6_worktree_lifecycle._read_registry_record(registry_path)
+            self._write_env2_marker(current, task_root, submitted_head=result_sha,
+                                    current_head=result_sha)
+            d6_worktree_lifecycle._replace_record(registry_path, current)
+
+        with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
+                patch.object(d6_worktree_lifecycle, '_bootstrap',
+                             side_effect=complete_bootstrap) as bootstrap:
+            recorded = d6_worktree_lifecycle.record_result(
+                task_id=self.task_id, canonical_root=self.root, root=task_root,
+                workspace_root=self.base)
+        bootstrap.assert_called_once_with(task_root, self.task_id)
+        self.assertEqual(recorded, result_sha)
+        result = task_completion.collect_executor_result(**kwargs)
+        self.assertEqual(result['result_head'], result_sha)
 
     def test_actual_registered_diff_and_bounded_test_subprocess_bind_exact_head(self):
         result_sha, artifact = self._make_result()
@@ -753,22 +811,22 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
         api = self._github_response_sequence(result_sha, {}, [], checks)
-        api[4]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
-        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+        api[5]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
             with self.assertRaises(LLMToolError) as rejected:
                 task_completion._collect_ci_evidence(
                     pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
         for name in ('davidproject-self-action-3', 'davidproject-self-action-2 ', ''):
             api = self._github_response_sequence(result_sha, {}, [], checks)
-            api[4]['jobs'][0]['runner_name'] = name
+            api[5]['jobs'][0]['runner_name'] = name
             with self.subTest(runner=name), \
-                    patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+                    patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
                 with self.assertRaises(LLMToolError):
                     task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
         api = self._github_response_sequence(result_sha, {}, [], checks)
-        api[4]['jobs'][0]['runner_name'] = 'davidproject-self-action-2'
-        with patch('llmtool.task_completion._github_get', side_effect=api[2:]):
+        api[5]['jobs'][0]['runner_name'] = 'davidproject-self-action-2'
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:]):
             second = task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(second['successful_checks'], ['check (macOS 3.13)'])
 
@@ -776,8 +834,8 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': 2, 'name': 'check (3.9)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
         api = self._github_response_sequence(result_sha, {}, [], legacy_checks)
-        api[4]['jobs'][0]['name'] = 'check (3.9)'
-        with patch('llmtool.task_completion._github_get', side_effect=api[2:5]):
+        api[5]['jobs'][0]['name'] = 'check (3.9)'
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
             evidence = task_completion._collect_ci_evidence(
                 pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(evidence['successful_checks'], [])
@@ -827,7 +885,7 @@ class TaskCompletionTests(unittest.TestCase):
                          {'check (macOS 3.13)': 21})
         self.assertEqual(evidence['missing_gates'], [])
         self.assertIn('actions/runs/101/attempts/2/jobs?per_page=100',
-                      github_get.call_args_list[4].args[0])
+                      github_get.call_args_list[5].args[0])
 
     def test_newer_failed_workflow_run_defeats_older_success(self):
         result_sha, _ = self._make_result()
@@ -1076,6 +1134,180 @@ class TaskCompletionTests(unittest.TestCase):
             run_task_direct_result_event(task['task_id'], self.task_id, store=store)
         self.assertEqual(len(client.calls), 1)
         resolve.assert_called_once_with('original-pm', require_configured=True)
+
+    def _active_pm_task(self, template, route='opencode'):
+        """Overlay a fixture's Developer/completion onto a real record-pm Task."""
+        from llmtool.task_submission_cli import run_task_record_pm
+
+        response = json.dumps({'schema_version': 1, 'summary': 'Active PM plan.',
+            'developer_assignment': {'route': route, 'risk': 'LOW',
+                'goal': 'Add bounded test.', 'acceptance': ['test passes']}})
+        scratch = TaskStore(self.base / ('record-pm-' + new_id()))
+        envelope = StringIO(json.dumps({'request': 'Add a bounded test.',
+                                        'response': response}))
+        with redirect_stdout(StringIO()) as out:
+            run_task_record_pm(Namespace(stdin_json=True), store=scratch,
+                               input_stream=envelope)
+        record = scratch.get(json.loads(out.getvalue())['task_id'])
+        record.pop('record_sha256', None)
+        developer = dict(template['developer'])
+        completion = template['completion']
+        if completion is not None:
+            completion = json.loads(json.dumps(completion))
+            completion['evidence'].update(task_id=record['task_id'], run_id=record['run_id'],
+                contract_digest=record['task_binding']['contract_digest'])
+        record.update(developer=developer, completion=completion)
+        return record
+
+    def test_active_pm_runtime_completion_persists_evidence_without_provider(self):
+        from llmtool.task_submission_cli import (_COMPLETION_SYSTEM,
+            _EXECUTOR_RESULT_SYSTEM, _completion_packet, run_task_show)
+
+        task = self._active_pm_task(self._task())
+        store = TaskStore(self.base / 'active-pm-tasks')
+        store.create(task)
+        git, tests, gh = self._mock_complete_evidence(task)
+        forbidden = AssertionError('an active PM runtime has no provider profile')
+
+        def complete(**namespace):
+            out = StringIO()
+            with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
+                       return_value=git), \
+                 patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
+                       return_value=tests), \
+                 patch('llmtool.task_submission_cli.task_completion.collect_github_evidence',
+                       return_value=gh), \
+                 patch('llmtool.task_submission_cli.resolve_profile_config',
+                       side_effect=forbidden), \
+                 patch('llmtool.task_submission_cli.api_key', side_effect=forbidden), \
+                 patch('llmtool.task_submission_cli.create_client', side_effect=forbidden), \
+                 redirect_stdout(out):
+                code = run_task_complete(Namespace(task_id=task['task_id'],
+                    executor_task=self.task_id, **namespace), store=store)
+            return code, json.loads(out.getvalue())
+
+        code, view = complete(reviewer_task=None, pr=None)
+        self.assertEqual(code, 0)
+        completion = view['completion']
+        self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+        self.assertEqual(completion['missing_gates'], [])
+        self.assertIsNone(completion['pm_error_code'])
+        self.assertIsNone(completion['pm_response'])
+        self.assertEqual(completion['evidence']['result'], git)
+        self.assertEqual(completion['evidence']['review_pr_ci']['stage'], 'EXECUTOR_RESULT')
+        handoff = view['active_pm_handoff']
+        self.assertEqual(handoff['provider_invoked'], False)
+        self.assertEqual(handoff['instructions'], _EXECUTOR_RESULT_SYSTEM)
+        saved = store.get(task['task_id'])
+        self.assertEqual(handoff['packet'],
+                         _completion_packet(saved, saved['completion']['evidence']))
+        self.assertNotIn('artifact', json.dumps(handoff['packet']))
+        shown = StringIO()
+        run_task_show(Namespace(task_id=task['task_id']), store=store, stdout=shown)
+        self.assertEqual(json.loads(shown.getvalue())['active_pm_handoff'], handoff)
+
+        # The same evidence gates still run on the post-review/CI path; the result
+        # again stays with the active PM instead of any provider profile.
+        code, view = complete(reviewer_task='reviewer-task', pr=10)
+        self.assertEqual(code, 0)
+        self.assertEqual(view['completion']['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(view['completion']['evidence']['review_pr_ci']['formal_review_state'],
+                         'ACCEPTED')
+        self.assertEqual(view['active_pm_handoff']['instructions'], _COMPLETION_SYSTEM)
+
+    def test_active_pm_runtime_completion_keeps_missing_gates_waiting(self):
+        task = self._active_pm_task(self._task())
+        store = TaskStore(self.base / 'active-pm-gate-tasks')
+        store.create(task)
+        git, tests, _ = self._mock_complete_evidence(task)
+        failing = [dict(tests[0], exit_code=1)]
+        out = StringIO()
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
+                   return_value=git), \
+             patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
+                   return_value=failing), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
+                   side_effect=AssertionError('no PM call')), \
+             redirect_stdout(out):
+            code = run_task_complete(Namespace(task_id=task['task_id'],
+                executor_task=self.task_id, reviewer_task=None, pr=None), store=store)
+        self.assertEqual(code, 1)
+        view = json.loads(out.getvalue())
+        self.assertEqual(view['completion']['state'], 'WAITING_EXECUTOR')
+        self.assertEqual(view['completion']['missing_gates'], ['TEST_FAILED'])
+        self.assertNotIn('active_pm_handoff', view)
+
+    def test_evidence_ready_state_is_rejected_for_provider_pm_tasks(self):
+        def ready(task):
+            git, tests, _ = self._mock_complete_evidence(task)
+            task['completion'] = {**task['completion'], 'state': 'PM_EVIDENCE_READY',
+                'evidence': {**task['completion']['evidence'], 'result': git, 'tests': tests,
+                    'review_pr_ci': {'stage': 'EXECUTOR_RESULT',
+                        'formal_review_state': 'NOT_STARTED', 'ci_state': 'NOT_STARTED'}}}
+            return task
+
+        with self.assertRaises(LLMToolError):
+            TaskStore(self.base / 'provider-pm-ready-tasks').create(ready(self._task()))
+        active = ready(self._active_pm_task(self._task()))
+        store = TaskStore(self.base / 'active-ready-tasks')
+        store.create(active)
+        # Nothing about a PM call may be recorded in the no-provider state.
+        for field, value in (('pm_error_code', 'PM_PROVIDER_UNAVAILABLE'),
+                             ('missing_gates', ['TEST_FAILED']),
+                             ('pm_response', '{}')):
+            with self.subTest(field=field), self.assertRaises(LLMToolError):
+                store.update(active['task_id'],
+                             completion={**active['completion'], field: value})
+
+    def test_active_pm_runtime_direct_result_persists_evidence_without_provider(self):
+        from llmtool.task_submission_cli import (_DIRECT_RESULT_SYSTEM,
+            _direct_result_packet, run_task_direct_result_event)
+
+        template, _, result, tests = self._direct_opencode_task('direct-template-tasks')
+        task = self._active_pm_task(template)
+        callback = task['developer']['direct_result_callback']
+        task['developer']['direct_result_callback'] = {**callback, 'evidence': {
+            **callback['evidence'], 'task_id': task['task_id'], 'run_id': task['run_id'],
+            'contract_digest': task['task_binding']['contract_digest']}}
+        store = TaskStore(self.base / 'active-direct-tasks')
+        store.create(task)
+        result = {**result, 'task_id': task['task_id'], 'run_id': task['run_id']}
+        forbidden = AssertionError('an active PM runtime has no provider profile')
+
+        def run(entry):
+            out = StringIO()
+            with patch('llmtool.task_submission_cli.task_completion.collect_executor_worktree_result',
+                       return_value=result), \
+                 patch('llmtool.task_submission_cli.task_completion.run_bounded_worktree_tests',
+                       return_value=tests) as run_tests, \
+                 patch('llmtool.task_submission_cli.resolve_profile_config',
+                       side_effect=forbidden), \
+                 patch('llmtool.task_submission_cli.create_client', side_effect=forbidden), \
+                 redirect_stdout(out):
+                code = entry()
+            return code, json.loads(out.getvalue()), run_tests.call_count
+
+        code, view, test_runs = run(lambda: run_task_direct_result_event(
+            task['task_id'], self.task_id, store=store))
+        self.assertEqual((code, test_runs), (0, 1))
+        callback = view['developer']['direct_result_callback']
+        self.assertEqual(callback['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(callback['pm_dispatch'], 'NOT_STARTED')
+        self.assertEqual(callback['evidence']['verification_state'], 'READY')
+        handoff = view['active_pm_handoff']
+        self.assertEqual(handoff['instructions'], _DIRECT_RESULT_SYSTEM)
+        saved = store.get(task['task_id'])
+        self.assertEqual(handoff['packet'], _direct_result_packet(
+            saved, saved['developer'], self.task_id,
+            saved['developer']['direct_result_callback']['evidence']))
+        # The public `task complete` retry revalidates the same worktree, never
+        # reruns tests and still never resolves a provider profile.
+        code, again, test_runs = run(lambda: run_task_complete(Namespace(
+            task_id=task['task_id'], executor_task=self.task_id,
+            reviewer_task=None, pr=None), store=store))
+        self.assertEqual((code, test_runs), (0, 0))
+        self.assertEqual(again['active_pm_handoff'], handoff)
 
     def _direct_opencode_task(self, store_name):
         from llmtool.task_submission_cli import _direct_result_callback

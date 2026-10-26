@@ -1,10 +1,13 @@
 """Direct user submission to one explicitly selected PM provider profile."""
 
+import dataclasses
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import secrets
+import stat
 import subprocess
 import sys
 import threading
@@ -13,16 +16,19 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .chat import reply_usage
-from .config import api_key, resolve_profile_config, selected_provider
+from .config import api_key, resolve_profile_config, selected_provider, yaml_module
 from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import TaskStore, TaskStoreConflict, new_id
+from . import active_pm_inbox
 from . import task_completion
 from . import opencode_direct_developer
+from . import codex_direct_developer
 from . import worker_dispatch
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
+from .developer_output_normalize import normalize_developer_output
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
@@ -67,6 +73,15 @@ _EXECUTOR_RESULT_SYSTEM = (
     'or provider authority. Return one raw JSON object with schema_version=1, '
     'decision, and summary; no prose outside the object.'
 )
+_DIRECT_RESULT_SYSTEM = (
+    'You are the original llmtool PM, receiving a new ephemeral continuation call. '
+    'No native session was resumed. Use only the bounded persisted original request, '
+    'your prior response/assignment, and exact Executor/test evidence. The result is '
+    'an uncommitted worktree diff: result_head is null. Independent review, PR, and CI '
+    'are NOT_STARTED. Choose exactly one: SEND_TO_REVIEW, RETURN_TO_DEVELOPER, '
+    'REASSIGN_DEVELOPER, WAIT_FOR_AUTHORIZATION, or STOP. This is recommendation only; '
+    'it grants no execution, review, Git, PR, merge, spend, or provider authority. '
+    'Return one raw JSON object with schema_version=1, decision, summary, no prose.')
 _REVIEW_RESULT_SYSTEM = (
     'You are the original llmtool PM for this Task. Receive only the bounded, '
     'source-bound Reviewer receipt supplied below. The receipt is not permission '
@@ -147,7 +162,7 @@ def _provider_route_binding(provider):
 def _pm_assignment(response):
     """Parse an optional structured recommendation; never infer it from prose."""
     try:
-        value = json.loads(response)
+        value = _strict_json_object(response)
         if (type(value) is not dict or
                 set(value) != {'schema_version', 'summary', 'developer_assignment'} or
                 type(value['schema_version']) is not int or value['schema_version'] != 1):
@@ -213,9 +228,9 @@ def _read_pm_record_input(stream=None):
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
     assignment = _pm_assignment(response)
-    if (assignment is None or assignment['route'] != 'opencode' or
+    if (assignment is None or assignment['route'] not in ('opencode', 'codex') or
             assignment['risk'] != 'LOW'):
-        raise LLMToolError('PM response must recommend one low-risk OpenCode assignment')
+        raise LLMToolError('PM response must recommend one low-risk OpenCode or Codex assignment')
     return request, response, assignment
 
 
@@ -304,6 +319,98 @@ def _record(task_id, run_id, session_id, profile, prompt, *, state='PM_PENDING',
     }
 
 
+def _active_pm_runtime(task):
+    """True when the Task's PM is the live runtime recorded by record-pm.
+
+    Such a PM has no provider profile to call back. Its evidence is persisted
+    as PM_EVIDENCE_READY for the runtime to read through ``task show``.
+    """
+    provenance = task.get('pm_provenance')
+    return (type(provenance) is dict and
+            provenance.get('source') == 'ACTIVE_PM_RUNTIME' and
+            provenance.get('provider_invoked') is False and
+            task.get('backend_session_semantics') == 'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
+
+
+def _pm_assignment_packet(task):
+    assignment = task['pm_assignment']
+    return None if assignment is None else {
+        'route': assignment['route'], 'risk': assignment['risk'],
+        'goal': assignment['goal'], 'acceptance': assignment['acceptance']}
+
+
+def _completion_packet(task, evidence):
+    """Bounded completion summary for the original PM; never code/diff/output."""
+    packet = {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'task_contract_digest': task['task_binding']['contract_digest'],
+        'task_request_sha256': task['request_sha256'],
+        'pm_assignment': _pm_assignment_packet(task),
+        'developer': evidence['developer'], 'executor': evidence['executor'],
+        'source_sha': evidence['result']['source_sha'],
+        'result_head': evidence['result']['result_head'],
+        'changed_paths': evidence['result']['changed_paths'],
+        'diff_sha256': evidence['result']['diff_sha256'],
+        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
+                   'source_sha': item['source_sha'],
+                   'output_sha256': item['output_sha256']} for item in evidence['tests']],
+        'review_pr_ci': evidence['review_pr_ci'],
+    }
+    if evidence.get('execution_mode') == 'HOST_WORKER':
+        packet['host_worker_receipt'] = evidence['host_worker_receipt']
+    return packet
+
+
+def _direct_result_packet(task, developer, executor_task_id, evidence):
+    """Bounded direct-D6 result summary for the original PM."""
+    result = evidence['result']
+    return {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'task_contract_digest': task['task_binding']['contract_digest'],
+        'original_request': task['request'],
+        'original_pm_response': task['response'],
+        'pm_assignment': _pm_assignment_packet(task),
+        'developer': {'provider': developer['provider_profile'], 'model': developer['model'],
+            'session_id': developer['session_id'], 'usage': developer['usage'],
+            'native_session_id': developer['execution']['native_session_id'],
+            'usage_source': developer['execution']['usage_source']},
+        'executor': {'task_id': executor_task_id, 'identity': evidence['executor_identity'],
+            'session_ref': evidence['executor_session_ref'],
+            'native_session': evidence['executor_native_session']},
+        'source_sha': result['source_sha'], 'result_head': None,
+        'result_mode': 'UNCOMMITTED_WORKTREE',
+        'changed_paths': result['changed_paths'], 'diff_sha256': result['diff_sha256'],
+        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
+            'source_sha': item['source_sha'], 'diff_sha256': item['diff_sha256'],
+            'output_sha256': item['output_sha256']} for item in evidence['tests']],
+        'review_pr_ci': evidence['review_pr_ci'],
+    }
+
+
+def _active_pm_handoff(record):
+    """Rebuild, from persisted evidence, exactly what a provider PM would receive."""
+    if record.get('schema_version') != 2 or not _active_pm_runtime(record):
+        return None
+    completion = record.get('completion')
+    developer = record.get('developer')
+    callback = (developer.get('direct_result_callback')
+                if type(developer) is dict else None)
+    if type(callback) is dict and callback.get('state') == 'PM_EVIDENCE_READY':
+        instructions = _DIRECT_RESULT_SYSTEM
+        packet = _direct_result_packet(record, developer, callback['executor_task_id'],
+                                       callback['evidence'])
+    elif type(completion) is dict and completion.get('state') == 'PM_EVIDENCE_READY':
+        evidence = completion['evidence']
+        instructions = (_EXECUTOR_RESULT_SYSTEM
+                        if evidence['review_pr_ci'].get('stage') == 'EXECUTOR_RESULT'
+                        else _COMPLETION_SYSTEM)
+        packet = _completion_packet(record, evidence)
+    else:
+        return None
+    return {'state': 'PM_EVIDENCE_READY', 'provider_invoked': False,
+            'instructions': instructions, 'packet': packet}
+
+
 def _print(value, stdout=None):
     rendered = json.dumps(value, ensure_ascii=True, sort_keys=True,
                           separators=(',', ':'), allow_nan=False)
@@ -342,6 +449,14 @@ def _task_view(record):
                 },
             }
     view['usage_status'] = 'UNKNOWN' if record['usage'] is None else 'REPORTED'
+    handoff = _active_pm_handoff(record)
+    if handoff is not None:
+        view['active_pm_handoff'] = handoff
+    if 'completion_events' in record:
+        view['completion_events'] = record['completion_events']
+    pm_recovery = active_pm_inbox.recovery(record)
+    if pm_recovery is not None:
+        view['pm_recovery'] = pm_recovery
     return view
 
 
@@ -353,13 +468,33 @@ def add_task_submission_parsers(actions):
         'record-pm', help='Record an active PM runtime decision without invoking a provider')
     record_pm.add_argument('--stdin-json', action='store_true', required=True,
                            help='read one bounded JSON object with request and response from stdin')
+    record_pm.add_argument('--pm-session-id',
+                           help='Claude Code session UUID of this PM; its local transcript must exist')
+    record_pm.add_argument('--pm-runtime', choices=('claude-code',),
+                           help='PM runtime that owns --pm-session-id (default claude-code)')
+    record_pm.add_argument('--pm-cwd',
+                           help='working directory of the PM session (default: current directory)')
+    inbox = actions.add_parser(
+        'inbox', help='Read unacknowledged completion events for one active PM session')
+    inbox.add_argument('--pm-session', required=True,
+                       help='Claude Code session UUID (or stored pm- session ID)')
+    inbox.add_argument('--wait', action='store_true',
+                       help='block until an event exists or the timeout passes')
+    inbox.add_argument('--timeout', type=int, default=540,
+                       help='seconds to wait with --wait (0-3600, default 540)')
+    ack = actions.add_parser('ack', help='Acknowledge one completion event; repeating is inert')
+    ack.add_argument('event_id', help='32-character event ID from task inbox')
+    ack.add_argument('--pm-session', required=True,
+                     help='Claude Code session UUID (or stored pm- session ID)')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
     delegate.add_argument('--provider', required=True,
                           choices=('company-gw', 'codex', 'opencode'),
-                          help='explicit Developer route; Codex returns a text diff proposal')
+                          help='explicit Developer route')
+    delegate.add_argument('--mode', choices=('proposal', 'direct'), default='proposal',
+                          help='Codex: text proposal (default) or direct D6 development')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -374,6 +509,113 @@ def add_task_submission_parsers(actions):
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
     complete.add_argument('--reviewer-task', help='registered D6 independent Reviewer task id (omit for the initial Executor-result callback)')
     complete.add_argument('--pr', type=int, help='public GitHub pull request number (omit for the initial Executor-result callback)')
+    review_prompt = actions.add_parser(
+        'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
+    review_prompt.add_argument('task_id', help='existing durable Task ID')
+    review_prompt.add_argument('--executor-task', required=True,
+                               help='registered D6 Executor task id bound to the Task')
+    review_prompt.add_argument('--reviewer-task', required=True,
+                               help='registered D6 Reviewer task id')
+    review_prompt.add_argument('--pr', required=True, type=int,
+                               help='public GitHub pull request number')
+
+
+def run_task_review_prompt(args, *, store=None):
+    """Print a read-only Reviewer prompt only for one exact, mutually bound HEAD."""
+    store = TaskStore() if store is None else store
+
+    def refuse(code):
+        error = LLMToolError('Reviewer prompt is unavailable; details omitted')
+        error.completion_code = code
+        raise error from None
+
+    task = store.get(args.task_id)
+    completion = task.get('completion')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    binding = task.get('task_binding')
+    try:
+        task_completion.validate_task_binding(
+            stored_binding=binding, task_id=task.get('task_id'),
+            run_id=task.get('run_id'),
+            contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
+    except LLMToolError:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    if (type(evidence) is not dict or
+            completion.get('executor_task_id') != args.executor_task or
+            type(evidence.get('common_dir')) is not str):
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    try:
+        executor = task_completion.read_d6_registration(args.executor_task,
+            evidence['common_dir'], allowed_states=task_completion._D6_EVIDENCE_STATES)
+        # The registration is the authoritative result binding before completion
+        # evidence exists. Once evidence is present, it must agree with it.
+        expected_head = executor.result_sha
+        if (type(expected_head) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', expected_head) is None):
+            refuse('REVIEW_PROMPT_BINDING_MISSING')
+        recorded_result = evidence.get('result')
+        if (type(recorded_result) is dict and
+                recorded_result.get('result_head') not in (None, expected_head)):
+            refuse('REVIEW_PROMPT_BINDING_MISSING')
+        executor_snapshot = task_completion.collect_git_snapshot(executor.root)
+        if (executor.result_sha != expected_head or executor_snapshot.head != expected_head or
+                executor_snapshot.root != executor.root or
+                executor_snapshot.common_dir != executor.common_dir or
+                executor_snapshot.branch != executor.branch):
+            refuse('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH')
+        reviewer = task_completion.read_d6_registration(args.reviewer_task,
+            evidence['common_dir'], allowed_states=task_completion._D6_EVIDENCE_STATES)
+        reviewer_snapshot = task_completion.collect_git_snapshot(reviewer.root)
+        if (reviewer.result_sha != expected_head or reviewer_snapshot.head != expected_head or
+                reviewer_snapshot.root != reviewer.root or
+                reviewer_snapshot.common_dir != reviewer.common_dir or
+                reviewer_snapshot.branch != reviewer.branch):
+            refuse('REVIEW_PROMPT_REVIEWER_HEAD_MISMATCH')
+    except LLMToolError as exc:
+        code = getattr(exc, 'completion_code', None)
+        if code in ('REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH',
+                    'REVIEW_PROMPT_REVIEWER_HEAD_MISMATCH'):
+            raise
+        refuse('REVIEW_PROMPT_D6_UNAVAILABLE')
+    except Exception:
+        refuse('REVIEW_PROMPT_D6_UNAVAILABLE')
+    try:
+        pr = task_completion._github_get(f'pulls/{args.pr}')
+    except LLMToolError:
+        refuse('REVIEW_PROMPT_PR_UNAVAILABLE')
+    if (type(pr) is not dict or type(pr.get('number')) is not int or
+            pr['number'] != args.pr or type(pr.get('head')) is not dict or
+            pr['head'].get('sha') != expected_head):
+        refuse('REVIEW_PROMPT_PR_HEAD_MISMATCH')
+    try:
+        binding_line = task_completion._review_binding_line(
+            task['task_id'], task['run_id'], binding['contract_digest'], expected_head)
+    except Exception:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    source_sha = binding.get('source_sha')
+    if source_sha is None:
+        source_sha = evidence.get('source_sha')
+    if source_sha is None and type(evidence.get('result')) is dict:
+        source_sha = evidence['result'].get('source_sha')
+    if source_sha is None:
+        source_sha = executor.source_sha
+    if type(source_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', source_sha) is None:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    lines = [
+        f'Review PR #{args.pr} at exact HEAD {expected_head}.',
+        f'Scope: git diff {source_sha}..{expected_head}',
+        'Review this scope only. Read-only review; do not edit files, run mutating commands, commit, push, or publish.',
+        '',
+        'Post these exact lines in your review:',
+        task_completion._REVIEW_VERDICT_ACTIVITY_LINE,
+        f'Verdict: PASS | Version: v1 | HEAD: {expected_head}',
+        task_completion._FORMAL_ACCEPT,
+        binding_line,
+    ]
+    if not all(type(line) is str for line in lines):
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    print('\n'.join(lines))
+    return 0
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
@@ -478,8 +720,8 @@ def _patch_paths(patch):
     return paths
 
 
-def _developer_output_rejection(value, write_paths):
-    """Classify rejected output using local checks only; never return provider text."""
+def _strict_developer_output_rejection(value, write_paths):
+    """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
     try:
@@ -503,6 +745,140 @@ def _developer_output_rejection(value, write_paths):
     if not paths.issubset(set(write_paths)):
         return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
     return None
+
+
+def _developer_normalized_output(value, write_paths):
+    """Preserve valid input exactly; normalize only rejected salvageable shapes."""
+    original_rejection = _strict_developer_output_rejection(value, write_paths)
+    if original_rejection is None:
+        return value, (), None
+    if original_rejection not in ('DEVELOPER_OUTPUT_INVALID_ENVELOPE',
+                                 'DEVELOPER_OUTPUT_INVALID_DIFF'):
+        return None, (), original_rejection
+    normalized, tokens = normalize_developer_output(value, write_paths)
+    if normalized == value or not tokens:
+        return None, (), original_rejection
+    if len(normalized.encode('utf-8', 'replace')) > RESPONSE_LIMIT:
+        return None, (), 'DEVELOPER_OUTPUT_TOO_LARGE'
+    if _strict_developer_output_rejection(normalized, write_paths) is not None:
+        return None, (), original_rejection
+    return normalized, tokens, None
+
+
+def _developer_output_rejection(value, write_paths, *, normalize=False):
+    """Classify output strictly unless a text-proposal route opts into salvage."""
+    if not normalize:
+        return _strict_developer_output_rejection(value, write_paths)
+    return _developer_normalized_output(value, write_paths)[2]
+
+
+_CAPTURE_SECRET_PATTERNS = (
+    re.compile(r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----.*?-----END (?:[A-Z ]+ )?PRIVATE KEY-----', re.S),
+    re.compile(r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
+               r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}\b'),
+    re.compile(r'\b(?:bearer|basic)\s+\S+', re.I),
+    re.compile(r'(?i)(["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+               r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]\s*)("[^"\n]*"|\'[^\'\n]*\'|[^\s,;}\]]+)'),
+    re.compile(r'\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b'),
+    re.compile(r'\b[a-z][a-z0-9+.-]*://[^\s/:]+:[^\s/@]+@[^\s/]+', re.I),
+)
+
+
+def _redact_rejected_output(value):
+    """Redact recognizable credentials; conservatively replace unclassified sensitive text."""
+    if type(value) is not str:
+        return '[REDACTED_NON_TEXT_OUTPUT]\n'
+    text = value
+    for pattern in _CAPTURE_SECRET_PATTERNS:
+        text = pattern.sub('[REDACTED]', text)
+    if _emitted_sensitive(text):
+        return '[REDACTED_SENSITIVE_OUTPUT]\n'
+    return text
+
+
+def _capture_rejected_output(store, task_id, value):
+    """Persist a bounded owner-private, redacted diagnostic capture; return ref and digest."""
+    text = _redact_rejected_output(value)
+    raw = text.encode('utf-8', 'replace')
+    truncated = len(raw) > RESPONSE_LIMIT
+    if truncated:
+        marker = b'\n[TRUNCATED]\n'
+        prefix = raw[:RESPONSE_LIMIT - len(marker)].decode('utf-8', 'ignore').encode('utf-8')
+        raw = prefix + marker
+    store._ensure_root()
+    parent = store.root / 'rejected-developer-output'
+    try:
+        parent.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    info = parent.lstat()
+    if (stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise LLMToolError('private rejected-output capture unavailable')
+    name = task_id + '-' + secrets.token_hex(8) + '.txt'
+    path = parent / name
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_NOFOLLOW', 0)
+    try:
+        fd = os.open(path, flags, 0o600)
+        with os.fdopen(fd, 'wb') as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+    except OSError:
+        raise LLMToolError('private rejected-output capture unavailable') from None
+    return {'ref': 'rejected-developer-output/' + name,
+            'sha256': hashlib.sha256(raw).hexdigest()}
+
+
+def _persist_developer_output_rejection(store, task_id, developer, error_code,
+                                        usage, value, **fields):
+    """Persist the rejection even if its optional private diagnostic capture fails."""
+    try:
+        capture = _capture_rejected_output(store, task_id, value)
+    except Exception:
+        capture = None
+    developer.pop('rejected_output_capture', None)
+    developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=error_code,
+                     usage=None if usage is None else dict(usage), **fields)
+    if capture is not None:
+        developer['rejected_output_capture'] = capture
+    return store.update(task_id, developer=developer)
+
+
+def _ignored_file_fingerprints(root):
+    """Fingerprint bounded ignored paths so replacement and in-place writes count."""
+    entries = task_completion._git(root,
+        ('ls-files', '--others', '--ignored', '--exclude-standard', '-z'),
+        limit=8 * 1024 * 1024).rstrip(b'\0').split(b'\0')
+    entries = [entry for entry in entries if entry]
+    if len(entries) > 10000:
+        raise LLMToolError('ignored-file inventory exceeds the supported bound')
+    fingerprints = {}
+    root_bytes = os.fsencode(root)
+    for entry in entries:
+        try:
+            info = os.lstat(os.path.join(root_bytes, entry))
+        except OSError:
+            # An unstable inventory cannot establish a safe baseline.
+            raise LLMToolError('ignored-file inventory is unstable') from None
+        fingerprints[entry] = (info.st_mode & 0o170000, info.st_size,
+                               info.st_mtime_ns, info.st_ctime_ns, info.st_ino)
+    return fingerprints
+
+
+def _ignored_output_rejection(root, before):
+    current = _ignored_file_fingerprints(root)
+    return ('DEVELOPER_OUTPUT_IGNORED_FILES'
+            if any(before.get(path) != fingerprint
+                   for path, fingerprint in current.items()) or
+               any(path not in current for path in before) else None)
+
+
+def _reviewer_native_session_independent(reviewer, executor, codex):
+    return (reviewer not in (None, 'UNKNOWN') and
+            executor not in (None, 'UNKNOWN') and
+            codex not in (None, 'UNKNOWN') and
+            reviewer != executor and reviewer != codex)
 
 
 def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, context,
@@ -580,6 +956,26 @@ def _validate_codex_call_binding(store, task, developer, completion,
         raise LLMToolError('Codex D6 source binding changed before provider invocation')
 
 
+def _refresh_d6_binding_after_bootstrap(registration, snapshot, *, error_type,
+                                       binding_error_code, marker_error_code):
+    """Accept only ENV-2's refreshed PASS marker for the same D6 source."""
+    try:
+        refreshed, current_snapshot = task_completion.bind_executor_task(
+            registration.task_id, expected_common_dir=registration.common_dir,
+            root=registration.root)
+    except Exception:
+        raise error_type(binding_error_code) from None
+    try:
+        task_completion.validate_env2_pass_marker(
+            refreshed, expected_root=registration.root, current_head=snapshot.head)
+    except Exception:
+        raise error_type(marker_error_code) from None
+    if (dataclasses.replace(refreshed, env2_pass_marker=registration.env2_pass_marker) !=
+            registration or current_snapshot != snapshot):
+        raise error_type(binding_error_code)
+    return refreshed
+
+
 def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
                                acceptance, pm_goal):
     packet = {
@@ -643,10 +1039,11 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
     """Return pinned helper/source bytes, using approved D6 blobs when present."""
     dispatcher_root = D6_INTEGRATOR_DISPATCHER_ROOT
     helper_rel = 'tools/llmtool/scripts/d6_worktree_env.py'
+    lifecycle_rel = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
     source_rel = helper_rel if source_rel is None else source_rel
     candidate_sources = {
         helper_rel,
-        'tools/llmtool/scripts/d6_worktree_lifecycle.py',
+        lifecycle_rel,
     }
     if source_rel not in candidate_sources:
         raise ValueError('D6 source path is outside the bootstrap allowlist')
@@ -689,8 +1086,12 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
         raise ValueError('dispatcher HEAD is invalid')
     helper_source = git('show', pinned_head + ':' + helper_rel)
     dispatcher_source = git('show', pinned_head + ':' + dispatcher_rel)
-    for relative, expected in ((helper_rel, helper_source),
-                               (dispatcher_rel, dispatcher_source)):
+    expected_sources = [(helper_rel, helper_source),
+                        (dispatcher_rel, dispatcher_source)]
+    if source_rel == lifecycle_rel:
+        lifecycle_source = git('show', pinned_head + ':' + lifecycle_rel)
+        expected_sources.append((lifecycle_rel, lifecycle_source))
+    for relative, expected in expected_sources:
         source_path = dispatcher_root / relative
         info = source_path.lstat()
         if (not source_path.is_file() or source_path.is_symlink() or
@@ -735,8 +1136,8 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
         if object_id != fields[2].decode():
             raise ValueError('approved D6 source blob hash changed')
         helper_source = approved_source
-    elif source_rel != helper_rel:
-        raise ValueError('approved D6 source commit is required')
+    elif source_rel == lifecycle_rel:
+        helper_source = lifecycle_source
     helper_source.decode('utf-8')
     return dispatcher_root, helper_source
 
@@ -771,6 +1172,42 @@ def _bootstrap_registered_d6(registration):
             'ENV_BOOTSTRAP_REJECTED')
 
 
+def _bind_codex_native_session(registration, native_session_id):
+    """Ask the pinned D6 lifecycle entry to bind Codex's reported thread id."""
+    if type(native_session_id) is not str or not native_session_id:
+        return 'D6_BIND_NATIVE_SESSION_INPUT_INVALID'
+    lifecycle_rel = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
+    try:
+        dispatcher_root, lifecycle_source = _trusted_d6_helper_source(
+            registration, source_rel=lifecycle_rel)
+        env = {
+            'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
+            'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'LANG': 'C',
+            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': os.devnull,
+            'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
+            'GIT_NO_LAZY_FETCH': '1', 'GIT_TERMINAL_PROMPT': '0',
+        }
+        lifecycle_path = dispatcher_root / lifecycle_rel
+        result = subprocess.run(
+            [sys.executable, '-B', '-I', str(lifecycle_path),
+             '--bind-native-session-task-id', registration.task_id,
+             '--native-session-id', native_session_id],
+            cwd=dispatcher_root, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            timeout=120,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'
+    except (UnicodeDecodeError, ValueError):
+        return 'D6_BIND_NATIVE_SESSION_HELPER_UNTRUSTED'
+    if result.returncode == 0:
+        return 'BOUND'
+    match = re.search(rb'D6 lifecycle rejected \(([A-Z0-9_]{1,64})\)', result.stderr)
+    if match:
+        return match.group(1).decode('ascii')
+    return 'D6_BIND_NATIVE_SESSION_REFUSED'
+
+
 def _interrupted_execution(exc):
     """Return only adapter-observed process evidence after an interrupt."""
     observed = getattr(exc, '_llmtool_direct_opencode_execution', None)
@@ -792,11 +1229,11 @@ def _interrupted_execution(exc):
     return value
 
 
-def _persist_opencode_interruption(store, task_id, developer, exc, *, result=None):
+def _persist_opencode_interruption(store, task_id, developer, exc, *, model, result=None):
     """Persist an ambiguous outcome without replaying the provider request."""
     developer.update(
         state='DEVELOPER_OUTCOME_UNKNOWN',
-        provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+        provider_type='opencode-cli', model=model,
         max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
         artifact=None, artifact_sha256=None, usage=None,
         error_code=('OPENCODE_INTERRUPTED' if isinstance(exc, KeyboardInterrupt)
@@ -826,6 +1263,42 @@ def _print_task_without_masking_interrupt(store, task_id):
     except BaseException:
         # Recovery reads and output must not replace the original interruption.
         pass
+
+
+def _opencode_developer_profile():
+    """Return the optional OpenCode model and validated agent step limit."""
+    try:
+        yaml_module()
+    except LLMToolError:
+        raise LLMToolError(
+            'opencode-developer profile cannot be read: PyYAML is missing from this Python; '
+            'run llmtool with its virtualenv (tools/llmtool/.venv/bin/python)') from None
+    try:
+        profile = resolve_profile_config('opencode-developer', require_configured=False)
+    except LLMToolError as exc:
+        if str(exc) == 'requested provider profile is not defined':
+            return (opencode_direct_developer.MODEL,
+                    opencode_direct_developer.DEFAULT_AGENT_STEPS)
+        raise LLMToolError('opencode-developer profile is invalid in the llmtool '
+                           'user config (~/.config/llmtool/config.yaml)') from None
+    provider = selected_provider(profile)
+    options = provider.get('provider_options', {})
+    if type(options) is not dict:
+        raise LLMToolError('opencode-developer profile provider_options must be a mapping')
+    steps = options.get('steps', opencode_direct_developer.DEFAULT_AGENT_STEPS)
+    try:
+        steps = opencode_direct_developer._validate_steps(steps)
+    except opencode_direct_developer.DirectOpenCodeError:
+        raise LLMToolError('opencode-developer profile steps must be an integer from 3 to 50') \
+            from None
+    model = provider['model']
+    if model is None:
+        model = opencode_direct_developer.MODEL
+    try:
+        return opencode_direct_developer.validate_model(model), steps
+    except opencode_direct_developer.DirectOpenCodeError:
+        raise LLMToolError('opencode-developer profile model must be an '
+                           'opencode/<name>-free model') from None
 
 
 def run_task_opencode_delegate(args, *, store):
@@ -863,6 +1336,7 @@ def run_task_opencode_delegate(args, *, store):
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
+    model, steps = _opencode_developer_profile()
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
@@ -911,7 +1385,7 @@ def run_task_opencode_delegate(args, *, store):
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
-                         model=opencode_direct_developer.MODEL,
+                         model=model,
                          max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
         store.update(task['task_id'], developer=developer)
 
@@ -931,16 +1405,20 @@ def run_task_opencode_delegate(args, *, store):
             raise opencode_direct_developer.DirectOpenCodeError(
                 'OPENCODE_D6_BINDING_CHANGED') from None
         _bootstrap_registered_d6(registration)
+        registration = _refresh_d6_binding_after_bootstrap(
+            registration, snapshot, error_type=opencode_direct_developer.DirectOpenCodeError,
+            binding_error_code='OPENCODE_D6_BINDING_CHANGED',
+            marker_error_code='OPENCODE_ENV2_MARKER_INVALID')
 
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
-            dispatch_store=store, dispatch_task_id=task['task_id'],
-            prelaunch_validate=validate_prelaunch_d6_binding)
+            dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
+            prelaunch_validate=validate_prelaunch_d6_binding, model=model)
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
-                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
                 error_code=exc.direct_opencode_code,
                 execution={
@@ -966,12 +1444,12 @@ def run_task_opencode_delegate(args, *, store):
         # adapter attaches only observed process/cleanup facts; absent facts
         # remain UNKNOWN, and this path never replays the provider request.
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc)
+            store, task['task_id'], developer, exc, model=model)
         _print_without_masking_interrupt(saved)
         raise
     except Exception:
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
-            provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+            provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_ADAPTER_UNKNOWN',
             execution={
@@ -1002,28 +1480,29 @@ def run_task_opencode_delegate(args, *, store):
             ('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames',
              snapshot.head, '--'), limit=64 * 1024)
         artifact = artifact_raw.decode('utf-8', 'strict')
-        rejection = _developer_output_rejection(artifact, write_paths)
+        rejection = _developer_output_rejection(artifact, write_paths, normalize=False)
         execution = _direct_execution(result)
         if rejection is not None:
-            developer.update(state='DEVELOPER_OUTPUT_REJECTED',
-                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact,
+                provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
-                usage=result.usage, error_code=rejection, execution=execution)
+                execution=execution)
         else:
             developer.update(state='DEVELOPER_RESPONDED',
-                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
                 artifact=artifact,
                 artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                 usage=result.usage, error_code=None, execution=execution)
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, result=result)
+            store, task['task_id'], developer, exc, model=model, result=result)
         _print_without_masking_interrupt(saved)
         raise
     except Exception:
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
-            provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+            provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
             execution=_direct_execution(result, status='UNKNOWN'))
@@ -1031,7 +1510,7 @@ def run_task_opencode_delegate(args, *, store):
         saved = store.update(task['task_id'], developer=developer)
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, result=result)
+            store, task['task_id'], developer, exc, model=model, result=result)
         _print_without_masking_interrupt(saved)
         raise
     if developer['state'] == 'DEVELOPER_RESPONDED':
@@ -1043,8 +1522,365 @@ def run_task_opencode_delegate(args, *, store):
     return 1
 
 
+def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
+                         acceptance, pm_goal, model, reasoning_effort):
+    contract = task.get('task_contract')
+    if type(contract) is not dict:
+        raise LLMToolError('Codex Developer Task Contract is unavailable')
+    test_commands = contract.get('test_commands')
+    if not test_commands:
+        test_commands = [
+            {'argv': ['python3', '-m', 'unittest', 'discover', '-s',
+                      'tools/llmtool/tests', '-p', Path(path).name],
+             'cwd': '.'}
+            for path in read_paths
+            if (path.startswith('tools/llmtool/tests/test_') and
+                path.endswith('.py') and '/' not in path[len('tools/llmtool/tests/'):])
+        ]
+    packet = {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'contract_digest': task['task_binding']['contract_digest'],
+        'task_contract': contract, 'goal': contract.get('goal'),
+        'pm_selected_goal': pm_goal,
+        'source_sha': source_sha,
+        'allowed_read_paths': read_paths, 'allowed_write_paths': write_paths,
+        'acceptance': acceptance,
+        'test_commands': test_commands,
+        'budget': {'wall_clock_seconds': codex_direct_developer.MAX_WALL_CLOCK_SECONDS,
+                   'stdout_bytes': codex_direct_developer.MAX_OUTPUT_BYTES,
+                   'stderr_bytes': codex_direct_developer.MAX_STDERR_BYTES,
+                   'repair_attempts': 1},
+        'model': model, 'reasoning_effort': reasoning_effort,
+    }
+    return (
+        'You are the Codex Developer for this bounded llmtool Task. Work in the '
+        'current registered D6 worktree. The task_contract is only the digest-bound '
+        'PM intake record; it is not your scope. Your development goal is '
+        'pm_selected_goal. Your code changes must stay inside allowed_write_paths. '
+        'Read only allowed_read_paths. Do not run Git commands that write, commit, push, '
+        'or publish; llmtool and the PM handle Git. Run the test_commands listed in '
+        'the Task Contract; when no commands are listed, report that no tests were '
+        'provided and do not invent commands. Review your own diff and test results, and use at most '
+        'one repair attempt within the stated budget. Do not use web search, '
+        'memories, apps, hooks, plugins, subagents, or network access. Finish with '
+        'one strict JSON final message exactly shaped as {"status":"DONE"|"BLOCKED",'
+        '"summary":"...","tests":[...],"self_review":"...",'
+        '"blocked_reason":null|string}; include no Markdown or text outside JSON. '
+        'Report BLOCKED when you cannot complete the requested work safely.\n'
+        'TASK_CONTRACT_JSON=' + json.dumps(packet, ensure_ascii=True, sort_keys=True,
+                                           separators=(',', ':'))
+    )
+
+
+def _codex_developer_profile():
+    # Each refusal names the condition that failed; none echoes config values.
+    try:
+        yaml_module()
+    except LLMToolError:
+        raise LLMToolError(
+            'codex-developer profile cannot be read: PyYAML is missing from this Python; '
+            'run llmtool with its virtualenv (tools/llmtool/.venv/bin/python)') from None
+    try:
+        profile = resolve_profile_config('codex-developer', require_configured=True)
+        provider = selected_provider(profile)
+    except Exception:
+        raise LLMToolError('codex-developer profile is missing or invalid in the llmtool '
+                           'user config (~/.config/llmtool/config.yaml)') from None
+    options = provider.get('provider_options', {})
+    if (provider.get('type') != 'codex-cli' or type(provider.get('model')) is not str or
+            type(options) is not dict):
+        raise LLMToolError('codex-developer profile must be type codex-cli with a model')
+    effort = options.get('reasoning_effort', 'high')
+    try:
+        codex_direct_developer.validate_profile(provider['model'], effort)
+    except LLMToolError:
+        raise LLMToolError('codex-developer profile model or reasoning_effort is invalid') from None
+    return provider, effort
+
+
+def run_task_codex_delegate(args, *, store):
+    """Run Codex's own agent loop inside the assigned D6 workspace."""
+    task = store.get(args.task_id)
+    if (task['state'] != 'PM_RESPONDED' or not task['response'] or
+            task['schema_version'] != 2):
+        raise LLMToolError('task has no successful PM response')
+    if task['developer'] is not None:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+    if getattr(args, 'context_stdin', False):
+        raise LLMToolError('Codex direct takes no --context-stdin: it reads only its registered '
+                           'D6 task scope (Task Contract goal, --acceptance and allowed paths)')
+    pm_assignment = task['pm_assignment']
+    if args.selection_source == 'PM':
+        if (type(pm_assignment) is not dict or pm_assignment.get('route') != 'codex' or
+                pm_assignment.get('risk') != 'LOW'):
+            raise LLMToolError('no validated low-risk Codex recommendation from the selected PM')
+        if args.acceptance != pm_assignment.get('acceptance'):
+            raise LLMToolError('--acceptance must repeat the acceptance recorded by task '
+                               'record-pm exactly (same items, same order)')
+    task_completion.validate_task_binding(
+        stored_binding=task.get('task_binding'), task_id=task.get('task_id'),
+        run_id=task.get('run_id'),
+        contract_digest=task.get('task_binding', {}).get('contract_digest'))
+    try:
+        snapshot = task_completion.collect_git_snapshot(os.getcwd())
+        registration, snapshot = task_completion.bind_executor_task(
+            args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+    except LLMToolError as exc:
+        raise LLMToolError(
+            'Codex direct D6 binding failed (' + codex_direct_developer.adapter_error_code(
+                exc, prefix='') + '): run it with the current directory at the registered '
+            'D6 root of --executor-task, on its registered branch and HEAD, with a clean '
+            'tree') from None
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
+        raise LLMToolError('developer acceptance scope is invalid')
+    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    egress_basis = _screen_text(args.egress_basis, 512)
+    _screen_text(task['request'], REQUEST_LIMIT)
+    _screen_text(task['response'], RESPONSE_LIMIT)
+    provider, reasoning_effort = _codex_developer_profile()
+    prompt = _codex_direct_prompt(task, source_sha=snapshot.head,
+        read_paths=read_paths, write_paths=write_paths, acceptance=acceptance,
+        pm_goal=(pm_assignment['goal'] if args.selection_source == 'PM'
+                 else task['request']),
+        model=provider['model'], reasoning_effort=reasoning_effort)
+    _screen_text(prompt, codex_direct_developer.MAX_PROMPT_BYTES)
+    prompt_size = len(prompt.encode('utf-8'))
+    if prompt_size > codex_direct_developer.MAX_PROMPT_BYTES:
+        raise LLMToolError('Codex Developer task prompt exceeds the supported size')
+    developer = {
+        'assignment_id': new_id(), 'selection_source': args.selection_source,
+        'state': 'DEVELOPER_PENDING', 'provider_profile': 'codex',
+        'provider_type': None, 'model': None,
+        'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+        'session_id': 'dev-' + new_id(), 'source_sha': snapshot.head,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': read_paths, 'write_paths': write_paths,
+        'acceptance': acceptance,
+        'context_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
+        'egress_basis': egress_basis, 'input_bytes': prompt_size,
+        'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
+        'artifact_sha256': None, 'usage': None, 'error_code': None,
+        'execution': None, 'created_at': _timestamp(),
+        'direct_result_callback': _direct_result_callback(task, registration, snapshot.head),
+    }
+    completion = {
+        'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
+        'reviewer_task_id': None,
+        'evidence': {'task_id': task['task_id'], 'run_id': task['run_id'],
+            'contract_digest': task['task_binding']['contract_digest'],
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': registration.native_session_id,
+            'executor_native_session': ('VERIFIED' if registration.native_session_id else 'UNKNOWN'),
+            'execution_mode': 'DIRECT_D6', 'root': registration.root,
+            'common_dir': registration.common_dir, 'branch': registration.branch,
+            'source_sha': snapshot.head, 'result_head': None},
+        'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+        'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+    }
+    try:
+        store.compare_and_update(task['task_id'],
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None}, developer=developer, completion=completion)
+    except TaskStoreConflict:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
+    try:
+        developer.update(state='DEVELOPER_DISPATCHING', provider_type='codex-cli',
+                         model=provider['model'])
+        store.update(task['task_id'], developer=developer)
+        def validate_binding():
+            current_registration, current_snapshot = task_completion.bind_executor_task(
+                registration.task_id, expected_common_dir=registration.common_dir,
+                root=registration.root)
+            if current_registration != registration or current_snapshot != snapshot:
+                raise LLMToolError('D6 or Git identity changed before Codex launch')
+            return True
+        try:
+            validate_binding()
+        except Exception:
+            raise codex_direct_developer.DirectCodexError('CODEX_D6_BINDING_CHANGED') from None
+        try:
+            _bootstrap_registered_d6(registration)
+        except opencode_direct_developer.DirectOpenCodeError as exc:
+            raise codex_direct_developer.DirectCodexError(
+                exc.direct_opencode_code) from None
+        # ENV-2 rewrites the registry PASS marker on every bootstrap, so the
+        # binding read before it is stale. Re-read it once: only the marker may
+        # change, and it must be a PASS for this exact root and HEAD. Every
+        # later check compares against this refreshed binding.
+        registration = _refresh_d6_binding_after_bootstrap(
+            registration, snapshot, error_type=codex_direct_developer.DirectCodexError,
+            binding_error_code='CODEX_D6_BINDING_CHANGED',
+            marker_error_code='CODEX_ENV2_MARKER_INVALID')
+        try:
+            ignored_before = _ignored_file_fingerprints(registration.root)
+        except Exception:
+            raise codex_direct_developer.DirectCodexError(
+                'CODEX_IGNORED_BASELINE_UNAVAILABLE') from None
+        result = codex_direct_developer.run(root=registration.root, prompt=prompt,
+            model=provider['model'], reasoning_effort=reasoning_effort,
+            dispatch_store=store, dispatch_task_id=task['task_id'],
+            prelaunch_validate=validate_binding)
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        developer.update(state='DEVELOPER_UNAVAILABLE', provider_type='codex-cli',
+                         model=provider['model'], error_code=exc.dispatch_code)
+        saved = store.update(task['task_id'], developer=developer)
+        _print(_task_view(saved))
+        return 1
+    except codex_direct_developer.DirectCodexError as exc:
+        # FAILED needs an observed exit; a launched process with no exit
+        # (unowned, or an adapter exception) has an UNKNOWN outcome.
+        execution_status = ('TIMEOUT' if exc.direct_codex_code == 'CODEX_TIMEOUT' else
+                             'FAILED' if exc.attempted and exc.process_exit_code is not None and
+                             not exc.direct_codex_code.startswith('CODEX_ADAPTER_') else
+                             'UNKNOWN')
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN' if exc.attempted else 'DEVELOPER_UNAVAILABLE',
+            provider_type='codex-cli', model=provider['model'], error_code=exc.direct_codex_code,
+            execution={'status': execution_status, 'native_session_id': exc.native_session_id,
+                'process_exit_code': exc.process_exit_code, 'stdout_sha256': exc.stdout_sha256,
+                'elapsed_ms': exc.elapsed_ms, 'cleanup_status': exc.cleanup_status,
+                'usage_source': 'CLI_REPORTED' if exc.usage is not None else 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None}, usage=exc.usage)
+        saved = store.update(task['task_id'], developer=developer)
+        _print(_task_view(saved))
+        return 1
+    except (KeyboardInterrupt, CLIHostTermination) as exc:
+        observed = getattr(exc, '_llmtool_direct_codex_execution', {})
+        if type(observed) is not dict:
+            observed = {}
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', provider_type='codex-cli',
+            model=provider['model'], error_code='CODEX_INTERRUPTED',
+            execution={'status': 'UNKNOWN',
+                'native_session_id': observed.get('native_session_id'),
+                'process_exit_code': observed.get('process_exit_code'),
+                'stdout_sha256': observed.get('stdout_sha256'),
+                'elapsed_ms': observed.get('elapsed_ms'),
+                'cleanup_status': observed.get('cleanup_status', 'UNKNOWN'),
+                'usage_source': 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None})
+        try:
+            store.update(task['task_id'], developer=developer)
+        except Exception:
+            pass
+        raise
+    except Exception as exc:
+        # Fail closed (no automatic resend), but keep a stable, content-free
+        # code naming what failed instead of one opaque adapter UNKNOWN.
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', provider_type='codex-cli',
+            model=provider['model'],
+            error_code=codex_direct_developer.adapter_error_code(exc),
+            execution={'status': 'UNKNOWN', 'native_session_id': None,
+                'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+                'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None})
+        try:
+            saved = store.update(task['task_id'], developer=developer)
+        except Exception:
+            raise LLMToolError('Codex outcome is ambiguous and could not be persisted') from None
+        _print(_task_view(saved))
+        return 1
+    execution = {'status': 'DONE' if result.status == 'DONE' else 'BLOCKED',
+        'native_session_id': result.thread_id, 'process_exit_code': result.exit_code,
+        'stdout_sha256': result.stdout_sha256, 'elapsed_ms': result.elapsed_ms,
+        'cleanup_status': result.cleanup_status,
+        'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+        'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None}
+    try:
+        after_registration = task_completion.read_d6_registration(
+            registration.task_id, registration.common_dir)
+        after = task_completion.collect_git_snapshot(registration.root)
+        if (after_registration != registration or after.root != registration.root or
+                after.common_dir != registration.common_dir or
+                after.branch != registration.branch or after.head != snapshot.head):
+            raise LLMToolError('Codex D6 identity changed during execution')
+        if result.status == 'DONE' and result.thread_id:
+            execution['native_session_binding'] = _bind_codex_native_session(
+                registration, result.thread_id)
+            if execution['native_session_binding'] == 'BOUND':
+                bound_registration = task_completion.read_d6_registration(
+                    registration.task_id, registration.common_dir)
+                if bound_registration != dataclasses.replace(
+                        registration, native_session_id=result.thread_id):
+                    raise LLMToolError('Codex native session binding did not refresh D6 registration')
+                registration = bound_registration
+                for evidence in (completion['evidence'],
+                                 developer['direct_result_callback']['evidence']):
+                    evidence['executor_native_session_id'] = registration.native_session_id
+                    evidence['executor_native_session'] = 'VERIFIED'
+        ignored_rejection = _ignored_output_rejection(registration.root, ignored_before)
+        untracked = task_completion._git(registration.root,
+            ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
+        if untracked:
+            raise LLMToolError('Codex created an untracked file outside the captured diff')
+        raw = task_completion._git(registration.root,
+            ('diff', '--binary', '--no-ext-diff', '--no-textconv', '--no-renames',
+             snapshot.head, '--'), limit=64 * 1024)
+        artifact = raw.decode('utf-8', 'strict')
+        try:
+            changed_paths = task_completion._git(registration.root,
+                ('diff', '--name-only', '-z', snapshot.head, '--'),
+                limit=64 * 1024).decode('utf-8', 'strict').rstrip('\0').split('\0')
+            changed_paths = [path for path in changed_paths if path]
+        except Exception:
+            raise LLMToolError('Codex changed-path evidence is unavailable') from None
+        rejection = (ignored_rejection if ignored_rejection is not None else
+                     'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
+                     if any(path not in write_paths for path in changed_paths) else None)
+        if result.status == 'DONE' and rejection is None:
+            rejection = _developer_output_rejection(artifact, write_paths)
+        if rejection is not None:
+            developer.update(execution=execution)
+            saved = _persist_developer_output_rejection(
+                store, task['task_id'], developer, rejection, result.usage, artifact)
+        elif result.status != 'DONE':
+            developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
+                             execution=execution, usage=result.usage)
+            try:
+                developer['blocked_reason'] = _screen_text(result.blocked_reason, 2048)
+            except LLMToolError:
+                developer.pop('blocked_reason', None)
+        else:
+            developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
+                artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                error_code=None, execution=execution, usage=result.usage)
+    except Exception:
+        developer.pop('blocked_reason', None)
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_RESULT_EVIDENCE_UNKNOWN',
+            execution={'status': 'UNKNOWN', 'native_session_id': result.thread_id,
+                'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
+                'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
+                'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None})
+    try:
+        saved = store.update(task['task_id'], developer=developer, completion=completion)
+    except Exception:
+        developer.pop('blocked_reason', None)
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
+            artifact_sha256=None, error_code='CODEX_RESULT_PERSISTENCE_REJECTED',
+            execution={**execution, 'status': 'UNKNOWN', 'usage_source': 'UNKNOWN'},
+            usage=None)
+        try:
+            saved = store.update(task['task_id'], developer=developer, completion=completion)
+        except Exception:
+            raise LLMToolError('Codex result was observed but could not be persisted') from None
+    if developer['state'] == 'DEVELOPER_RESPONDED':
+        return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
+    _print(_task_view(saved))
+    return 1
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
+    if getattr(args, 'mode', 'proposal') == 'direct':
+        if args.provider != 'codex':
+            raise LLMToolError('--mode direct is supported only for the Codex Developer route')
+        return run_task_codex_delegate(args, store=store)
     if args.provider == 'opencode':
         return run_task_opencode_delegate(args, store=store)
     if args.provider not in ('company-gw', 'codex'):
@@ -1144,8 +1980,19 @@ def run_task_delegate(args, *, store=None):
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
-        profile = 'company-gw' if args.provider == 'company-gw' else 'codex-pm'
-        config = resolve_profile_config(profile, require_configured=True)
+        profile = ('company-gw' if args.provider == 'company-gw' else
+                   'codex-developer')
+        try:
+            config = resolve_profile_config(profile, require_configured=True)
+        except Exception as exc:
+            if (args.provider == 'codex' and
+                    str(exc) == 'requested provider profile is not defined'):
+                developer.update(state='DEVELOPER_UNAVAILABLE',
+                                 error_code='DEVELOPER_PROFILE_UNAVAILABLE')
+                saved = store.update(task['task_id'], developer=developer)
+                _print(_task_view(saved))
+                return 1
+            raise
         provider = selected_provider(config)
         if args.provider == 'company-gw':
             if provider.get('type') != 'openai-compatible':
@@ -1210,17 +2057,16 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
-    rejection_code = _developer_output_rejection(result.content, write_paths)
+    artifact, normalization_tokens, rejection_code = _developer_normalized_output(
+        result.content, write_paths)
     if rejection_code is not None:
-        developer.update(state='DEVELOPER_OUTPUT_REJECTED',
-                         error_code=rejection_code,
-                         usage=None if usage is None else dict(usage))
-        saved = store.update(task['task_id'], developer=developer)
+        saved = _persist_developer_output_rejection(
+            store, task['task_id'], developer, rejection_code, usage, result.content)
         _print(_task_view(saved))
         return 1
-    artifact = result.content
     developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                       artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                      normalizations=list(normalization_tokens),
                       usage=None if usage is None else dict(usage), error_code=None)
     try:
         saved = store.update(task['task_id'], developer=developer)
@@ -1310,28 +2156,44 @@ def run_task_submit(args, *, store=None, stdout=None):
 
 def run_task_record_pm(args, *, store=None, input_stream=None):
     """Persist a real active-PM decision; this path never resolves or calls a provider."""
-    del args  # The required flag is enforced by argparse; no caller text is trusted from argv.
     store = TaskStore() if store is None else store
+    native_session = getattr(args, 'pm_session_id', None)
+    runtime = getattr(args, 'pm_runtime', None)
+    cwd = getattr(args, 'pm_cwd', None)
+    session = None
+    if native_session is None:
+        if runtime is not None or cwd is not None:
+            raise LLMToolError('--pm-runtime/--pm-cwd require --pm-session-id')
+    else:
+        # The transcript must exist before anything is read or stored.
+        session = {'pm_runtime': runtime or 'claude-code',
+                   'pm_native_session_id': native_session,
+                   'pm_cwd': active_pm_inbox.observe_claude_session(
+                       native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = new_id(), new_id()
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
     record = _record(
-        task_id, run_id, 'pm-' + new_id(), 'active-pm-runtime', prompt,
-        state='PM_RESPONDED', provider_type='codex-cli', model=None,
+        task_id, run_id,
+        'pm-' + (new_id() if session is None else session['pm_native_session_id']),
+        'active-pm-runtime', prompt,
+        state='PM_RESPONDED', provider_type='active-pm-runtime', model=None,
         backend='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL', request_sha=digest,
         contract=contract,
     )
     record.update(
-        pm_route_binding={'type': 'codex-cli', 'model': None, 'base_url': None},
+        pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},
         response=response, usage=None, error_code=None, pm_assignment=assignment,
         pm_provenance={
             'source': 'ACTIVE_PM_RUNTIME',
             'provider_invoked': False,
-            'native_session_id_status': 'UNAVAILABLE',
+            'native_session_id_status': ('UNAVAILABLE' if session is None
+                                         else 'LOCAL_SESSION_FILE_OBSERVED'),
             'usage_status': 'UNKNOWN',
             'session_restored': False,
             'automatic_callback': False,
+            **({} if session is None else session),
         },
     )
     try:
@@ -1341,6 +2203,31 @@ def run_task_record_pm(args, *, store=None, input_stream=None):
         raise LLMToolError('active PM outcome could not be saved; details omitted') from None
     _print(_task_view(saved))
     return 0
+
+
+def run_task_inbox(args, *, store=None, stdout=None, sleep=None):
+    """Return this PM session's unacknowledged completion events (JSON)."""
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    kwargs = {} if sleep is None else {'sleep': sleep}
+    _print(active_pm_inbox.wait_inbox(store, key, wait=args.wait, timeout=args.timeout,
+                                      **kwargs), stdout=stdout)
+    return 0
+
+
+def run_task_ack(args, *, store=None, stdout=None):
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    _print(active_pm_inbox.ack(store, args.event_id, key), stdout=stdout)
+    return 0
+
+
+def _record_ready_event(store, task_id):
+    """Best effort: `task inbox` reconciles a READY Task whose event is missing."""
+    try:
+        active_pm_inbox.record_ready_event(store, task_id)
+    except LLMToolError:
+        pass
 
 
 def run_task_show(args, *, store=None, stdout=None):
@@ -1365,7 +2252,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     direct_callback = (task.get('developer') or {}).get('direct_result_callback')
     if (executor_result_only and type(direct_callback) is dict and
             direct_callback.get('executor_task_id') == args.executor_task and
-            direct_callback.get('state') == 'WAITING_PM' and
+            direct_callback.get('state') in ('WAITING_PM', 'PM_EVIDENCE_READY') and
             direct_callback.get('pm_dispatch') == 'NOT_STARTED' and
             direct_callback.get('evidence', {}).get('verification_state') == 'READY'):
         # Public recovery route after a pre-call PM configuration/setup failure.
@@ -1385,7 +2272,7 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
             task.get('developer') is None or completion is None or
             completion['executor_task_id'] != args.executor_task or
-            task.get('pm_route_binding') is None):
+            (task.get('pm_route_binding') is None and not _active_pm_runtime(task))):
         raise LLMToolError('task completion binding is unavailable')
     if completion['pm_dispatch'] in ('CLAIMED', 'UNKNOWN', 'RETURNED'):
         raise LLMToolError('original PM request already claimed or completed; replay refused')
@@ -1459,15 +2346,42 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 'ci_state': 'NOT_STARTED',
             }
         else:
+            reviewer_independence_session = initial.get('executor_native_session_id')
+            direct_execution = developer.get('execution')
+            if (developer.get('provider_profile') == 'codex' and
+                    type(direct_execution) is dict and
+                    direct_execution.get('status') == 'DONE' and
+                    direct_execution.get('native_session_binding') == 'BOUND'):
+                reviewer_independence_session = direct_execution.get('native_session_id')
             github = task_completion.collect_github_evidence(
                 pr_number=args.pr, result_sha=git_evidence['result_head'],
                 task_id=task['task_id'], run_id=task['run_id'],
                 contract_digest=task['task_binding']['contract_digest'],
                 executor_identity=git_evidence['executor_identity'],
                 executor_session_ref=initial.get('executor_session_ref'),
-                executor_native_session_id=initial.get('executor_native_session_id'),
+                executor_native_session_id=reviewer_independence_session,
                 reviewer_task_id=args.reviewer_task,
                 common_dir=git_evidence['common_dir'])
+            if (developer.get('provider_profile') == 'codex' and
+                    type(direct_execution) is dict and
+                    direct_execution.get('status') == 'DONE' and
+                    direct_execution.get('native_session_binding') == 'BOUND'):
+                try:
+                    reviewer_registration = task_completion.read_d6_registration(
+                        args.reviewer_task, git_evidence['common_dir'])
+                    reviewer_native = reviewer_registration.native_session_id
+                    executor_native = direct_execution.get('native_session_id')
+                    codex_native = direct_execution.get('native_session_id')
+                    if not _reviewer_native_session_independent(
+                            reviewer_native, executor_native, codex_native):
+                        github['missing_gates'] = sorted(set(
+                            github['missing_gates'] +
+                            ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
+                        github['evidence']['formal_review_state'] = 'UNVERIFIED'
+                except LLMToolError:
+                    # The primary collector already records unavailable D6
+                    # registration as a fail-closed reviewer gate.
+                    pass
             evidence['review_pr_ci'] = github['evidence']
             missing.extend(github['missing_gates'])
     except LLMToolError as exc:
@@ -1494,30 +2408,24 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
 
     # Never export code/diff/output. The PM receives only screened identifiers,
     # statuses and hashes needed to reason about this exact Task/Run.
-    packet = {
-        'task_id': task['task_id'], 'run_id': task['run_id'],
-        'task_contract_digest': task['task_binding']['contract_digest'],
-        'task_request_sha256': task['request_sha256'],
-        'pm_assignment': (None if task['pm_assignment'] is None else {
-            'route': task['pm_assignment']['route'],
-            'risk': task['pm_assignment']['risk'],
-            'goal': task['pm_assignment']['goal'],
-            'acceptance': task['pm_assignment']['acceptance'],
-        }),
-        'developer': evidence['developer'], 'executor': evidence['executor'],
-        'source_sha': evidence['result']['source_sha'],
-        'result_head': evidence['result']['result_head'],
-        'changed_paths': evidence['result']['changed_paths'],
-        'diff_sha256': evidence['result']['diff_sha256'],
-        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
-                   'source_sha': item['source_sha'],
-                   'output_sha256': item['output_sha256']} for item in evidence['tests']],
-        'review_pr_ci': evidence['review_pr_ci'],
-    }
-    if evidence['execution_mode'] == 'HOST_WORKER':
-        packet['host_worker_receipt'] = evidence['host_worker_receipt']
+    packet = _completion_packet(task, evidence)
     content = json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
     _screen_text(content, 16 * 1024)
+    if _active_pm_runtime(task):
+        # The PM is the live runtime that recorded this Task (record-pm). There is
+        # no provider profile to call, and none is resolved: persist the verified
+        # evidence for that runtime to read with `task show` (#352 G6).
+        ready = {**completion, 'state': 'PM_EVIDENCE_READY',
+                 'reviewer_task_id': args.reviewer_task,
+                 'evidence': evidence, 'missing_gates': [],
+                 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                 'pm_recommendation': None, 'pm_usage': None,
+                 'pm_error_code': None}
+        store.compare_and_update(task['task_id'],
+            expected={'completion': completion}, completion=ready)
+        _record_ready_event(store, task['task_id'])
+        _print(_task_view(store.get(task['task_id'])))
+        return 0
     before_claim = {**completion, 'state': 'PM_DISPATCHING',
                     'reviewer_task_id': args.reviewer_task,
                     'evidence': evidence, 'missing_gates': [],
@@ -2057,12 +2965,12 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
     task = store.get(task_id)
     developer = task.get('developer')
     if (task['schema_version'] != 2 or task['state'] != 'PM_RESPONDED' or
-            type(developer) is not dict or developer.get('provider_profile') != 'opencode' or
+            type(developer) is not dict or developer.get('provider_profile') not in ('opencode', 'codex') or
             developer.get('state') != 'DEVELOPER_RESPONDED' or
             developer.get('artifact') is None or developer.get('execution') is None or
-            developer['execution'].get('status') != 'SUCCEEDED' or
+            developer['execution'].get('status') not in ('SUCCEEDED', 'DONE') or
             developer['execution'].get('process_exit_code') != 0 or
-            task.get('pm_route_binding') is None):
+            (task.get('pm_route_binding') is None and not _active_pm_runtime(task))):
         raise LLMToolError('direct Executor result callback is unavailable')
     task_completion.validate_task_binding(
         stored_binding=task['task_binding'], task_id=task['task_id'],
@@ -2204,7 +3112,8 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         developer = task['developer']
         callback = developer['direct_result_callback']
         evidence = callback['evidence']
-    elif callback['state'] == 'WAITING_PM' and evidence.get('verification_state') == 'READY':
+    elif (callback['state'] in ('WAITING_PM', 'PM_EVIDENCE_READY') and
+          evidence.get('verification_state') == 'READY'):
         # A configuration failure may be retried, but tests and provider calls
         # are never replayed. Revalidate the same live diff and file snapshot.
         try:
@@ -2230,32 +3139,21 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         raise LLMToolError('direct Executor callback is not in a retryable state')
 
     result = evidence['result']
-    packet = {
-        'task_id': task['task_id'], 'run_id': task['run_id'],
-        'task_contract_digest': task['task_binding']['contract_digest'],
-        'original_request': task['request'],
-        'original_pm_response': task['response'],
-        'pm_assignment': (None if task['pm_assignment'] is None else {
-            'route': task['pm_assignment']['route'], 'risk': task['pm_assignment']['risk'],
-            'goal': task['pm_assignment']['goal'],
-            'acceptance': task['pm_assignment']['acceptance']}),
-        'developer': {'provider': developer['provider_profile'], 'model': developer['model'],
-            'session_id': developer['session_id'], 'usage': developer['usage'],
-            'native_session_id': developer['execution']['native_session_id'],
-            'usage_source': developer['execution']['usage_source']},
-        'executor': {'task_id': executor_task_id, 'identity': evidence['executor_identity'],
-            'session_ref': evidence['executor_session_ref'],
-            'native_session': evidence['executor_native_session']},
-        'source_sha': result['source_sha'], 'result_head': None,
-        'result_mode': 'UNCOMMITTED_WORKTREE',
-        'changed_paths': result['changed_paths'], 'diff_sha256': result['diff_sha256'],
-        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
-            'source_sha': item['source_sha'], 'diff_sha256': item['diff_sha256'],
-            'output_sha256': item['output_sha256']} for item in evidence['tests']],
-        'review_pr_ci': evidence['review_pr_ci'],
-    }
+    packet = _direct_result_packet(task, developer, executor_task_id, evidence)
     content = json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
     _screen_text(content, 64 * 1024)
+    if _active_pm_runtime(task):
+        # No provider profile exists for a live-runtime PM (#352 G6): keep the
+        # verified result durable for `task show` and never resolve a profile.
+        ready = {**callback, 'state': 'PM_EVIDENCE_READY',
+                 'pm_dispatch': 'NOT_STARTED', 'pm_error_code': None}
+        try:
+            _persist_direct_callback(store, task, developer, ready)
+        except Exception:
+            raise LLMToolError('verified direct result could not be persisted') from None
+        _record_ready_event(store, task_id)
+        _print(_task_view(store.get(task_id)))
+        return 0
     before_claim = {**callback, 'state': 'PM_DISPATCHING',
                     'pm_dispatch': 'CLAIMED', 'pm_error_code': None}
     try:
@@ -2308,18 +3206,9 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
         _persist_direct_callback_drift(store, task, developer, before_claim,
                                        'WORKTREE_CHANGED_BEFORE_PM_CALL')
         return 1
-    system = (
-        'You are the original llmtool PM, receiving a new ephemeral continuation call. '
-        'No native session was resumed. Use only the bounded persisted original request, '
-        'your prior response/assignment, and exact Executor/test evidence. The result is '
-        'an uncommitted worktree diff: result_head is null. Independent review, PR, and CI '
-        'are NOT_STARTED. Choose exactly one: SEND_TO_REVIEW, RETURN_TO_DEVELOPER, '
-        'REASSIGN_DEVELOPER, WAIT_FOR_AUTHORIZATION, or STOP. This is recommendation only; '
-        'it grants no execution, review, Git, PR, merge, spend, or provider authority. '
-        'Return one raw JSON object with schema_version=1, decision, summary, no prose.')
     try:
         reply = client.complete([
-            {'role': 'system', 'content': system},
+            {'role': 'system', 'content': _DIRECT_RESULT_SYSTEM},
             {'role': 'user', 'content': content},
         ])
     except (KeyboardInterrupt, CLIHostTermination) as exc:

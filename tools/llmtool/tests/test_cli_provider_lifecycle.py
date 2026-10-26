@@ -541,6 +541,27 @@ class CLIProviderLifecycleTests(unittest.TestCase):
         environment['LLMTOOL_HOME'] = str((self.directory / 'state').resolve())
         self.environment = environment
         bootstrap = 'from llmtool.cli import main; raise SystemExit(main())'
+        if timeout == 1:
+            # Hold the CLI clock at its launch value until the synthetic
+            # provider has recorded its complete process tree. Then expire the
+            # one-second provider deadline deterministically.
+            bootstrap = '''
+import time
+from pathlib import Path
+capture = Path(%r)
+started = time.monotonic()
+real_monotonic = time.monotonic
+expired = False
+def controlled_monotonic():
+    global expired
+    if capture.exists() and not expired:
+        expired = True
+        return started + 2
+    return started if not capture.exists() else real_monotonic()
+time.monotonic = controlled_monotonic
+from llmtool.cli import main
+raise SystemExit(main())
+''' % str(self.capture)
         if phase:
             bootstrap = '''
 import os, signal, subprocess, time

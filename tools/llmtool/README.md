@@ -395,12 +395,13 @@ active_provider: local-codex
 
 Select it with `llmtool ask --provider local-codex 'your question'`, or make it active in user
 config. `llmtool configure` skips HTTP endpoint and API-key prompts for this type. Non-null
-`base_url`, `api_key`, and `api_key_env` are rejected. `provider_options` must be an empty mapping;
-executable, cwd, approval, sandbox, and arbitrary CLI fields are rejected. Model identifiers
-must match `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`. Temperature/max_tokens are stored but neither
-sent nor enforced. Only `chat` is true: large-context workflows, reasoning control, streaming,
-code editing, shell, and Git are not exposed. Model window size alone does not establish
-large-context workflow support. This version does not expose a tested reasoning-option mapping.
+`base_url`, `api_key`, and `api_key_env` are rejected. `provider_options` may contain only
+`reasoning_effort`, with one of `low`, `medium`, `high`, or `xhigh`; it maps to the CLI setting
+`model_reasoning_effort`. Executable, cwd, approval, sandbox, and arbitrary CLI fields are
+rejected. Model identifiers must match `[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}`.
+Temperature/max_tokens are stored but neither
+sent nor enforced. Only `chat` is true: large-context workflows, streaming, code editing, shell,
+and Git are not exposed. Model window size alone does not establish large-context workflow support.
 
 Each request creates an empty, private temporary cwd under `/tmp` (fallback `/var/tmp`), outside
 the caller's repository. Inherited `TMPDIR` cannot redirect it into the project. Both subprocess
@@ -694,6 +695,20 @@ Provider uses one ephemeral CLI call and has no native resumable Session ID;
 `task show` retrieves the recorded Task and response but does not resume a model
 conversation, dispatch a Developer, run tests, or continue work in the background.
 
+`task record-pm --stdin-json` records a decision from the active PM runtime without invoking a
+provider. Its strict JSON input contains `request` and a structured `response`; it accepts only
+LOW-risk `opencode` or `codex` Developer assignments. The record identifies its runtime as
+`active-pm-runtime` and does not claim a Codex or Claude native session ID.
+A Claude Code PM adds `--pm-session-id SESSION_UUID` (and `--pm-cwd DIR`, default the
+current directory). llmtool refuses the record unless this user's Claude Code transcript
+for that session and directory exists (under `$CLAUDE_CONFIG_DIR` or `~/.claude`), with the
+configuration, `projects` and project directories and the file all owned by the user
+and none of them a symlink. It then
+stores the PM session as `pm-SESSION_UUID`, records `pm_runtime: claude-code`, the session
+UUID and directory, and `task show` lists `pm_recovery` (`claude --resume SESSION_UUID`
+in that directory). The file check shows the session exists locally; it does not prove the
+caller is that session.
+
 ### Bounded company Developer proposal and D6 completion evidence
 
 `task delegate` can request a bounded company-gw code proposal for a PM-assigned
@@ -701,6 +716,33 @@ low-risk task. It reads the current root, branch, source HEAD and Executor ident
 from the registered D6 record; do not supply a SHA as an identity claim. The
 company provider returns a diff proposal only. An already authorized Executor
 must apply it and run the allowed checks in its registered worktree.
+
+For `task delegate --provider codex`, llmtool resolves the explicitly configured
+`codex-developer` profile (`type: codex-cli`) and records that profile's model. It never uses
+`codex-pm` as a fallback; if `codex-developer` is missing, the Developer is recorded as
+`DEVELOPER_UNAVAILABLE` with `DEVELOPER_PROFILE_UNAVAILABLE`. The Codex CLI provider accepts the
+same four optional `reasoning_effort` values described above.
+
+Company-gw and Codex text proposals receive a small conservative normalization
+before the unchanged strict unified-diff and write-scope checks: one outer
+Markdown diff fence can be removed only when all text outside it is whitespace;
+a missing `diff --git` line can be restored
+when the old/new paths match, bare blank hunk lines become context lines, and
+hunk counts are recalculated from the body. The accepted Task result records
+only fixed normalization tokens. Mode changes, renames, binary patches,
+multiple fences, mixed prose, and out-of-scope paths are not normalized into
+acceptance. Rejected company-gw and Codex text proposals, plus collected direct
+Codex diffs that fail output validation, are stored only in the owner-private
+task state directory as a redacted, 64 KiB-bounded diagnostic file; the Task
+record keeps its relative reference and SHA-256, never the rejected text. The
+CLI does not print the capture or include it in evidence packets. Output that
+cannot be safely collected is not captured.
+
+For `task delegate --provider opencode`, llmtool accepts any well-formed `opencode vX.Y.Z`
+CLI version and records it; the strict JSON event parsing still rejects incompatible output.
+The model is `opencode/deepseek-v4.1-flash-free` unless an optional `opencode-developer`
+profile sets `model`; only an `opencode/<name>-free` model is accepted, never a paid fallback.
+The OpenCode agent step limit defaults to 12 and can be set with the profile's integer `provider_options.steps` value from 3 to 50.
 
 For a direct OpenCode Developer task, the CLI now emits a completion event when the
 bounded OpenCode process exits successfully. It rechecks the registered D6 worktree,
@@ -717,6 +759,11 @@ trigger an automatic PM failure callback.
 For final committed-result, Reviewer, PR and exact-head CI evidence, an operator
 still explicitly runs
 `llmtool task complete TASK_ID --executor-task D6_TASK_ID --reviewer-task D6_REVIEW_TASK_ID --pr PR_NUMBER`.
+To prepare the formal Reviewer handoff, run
+`llmtool task review-prompt TASK_ID --executor-task D6_TASK_ID --reviewer-task REVIEWER_D6_TASK_ID --pr PR_NUMBER`.
+It prints the prompt only when the recorded Task result, both live D6 worktrees
+and the public PR head all match; the prompt includes the exact verdict and
+Task binding lines for that HEAD.
 This manually invoked command checks the real D6 registration, current Git result,
 the persisted proposal against the applied diff, bounded tests, public exact-head
 PR/check data, and a formal review marker plus a binding line containing the
@@ -729,6 +776,35 @@ WAITING_CI. Only a complete evidence packet is sent to the original PM profile;
 the PM response is persisted as a recommendation and grants no execution or Git
 permission. If the original PM is unavailable, complete evidence remains in
 WAITING_PM. Ambiguous provider outcomes are not retried automatically.
+A Task recorded with `task record-pm` has no PM provider profile: completion never
+resolves or calls one. Complete evidence is stored as PM_EVIDENCE_READY, and
+`task show` adds `active_pm_handoff` with the same bounded packet and instructions a
+provider PM would receive, for the active PM runtime to read. All evidence gates
+are unchanged.
+
+Reaching PM_EVIDENCE_READY also stores one completion event in the Task's existing
+event list. `llmtool task inbox --pm-session SESSION [--wait] [--timeout N]` prints, as
+JSON, every unacknowledged event of Tasks recorded by that PM session, with the
+handoff. With `--wait` it blocks (polling the store; no daemon) until an event exists or
+the timeout (default 540 s, at most 3600 s) passes, then returns an empty list. A PM
+runs it as a background command and reads events when it returns.
+`llmtool task ack EVENT_ID --pm-session SESSION` marks an event received; repeating it
+changes nothing. Events survive PM absence and restart: unacknowledged events are
+returned on every read, acknowledged events never again. The event ID is derived from
+the Task, Run and evidence digest, so re-verifying the same evidence never creates a
+second event, and a READY Task whose event write was interrupted gets its event on
+the next inbox read. Events and acknowledgements dispatch nothing; any later dispatch
+still goes through its own one-shot claim.
+A Task keeps at most 32 events. When the list is full, the oldest acknowledged event is
+compacted into a tombstone that keeps its ID and stream position, so it is still never
+recreated, and acknowledging it again returns the same success. Tombstones are never
+dropped: once a Task holds 256, it records no further events and the inbox lists the
+result under `blocked` with `COMPLETION_EVENT_HISTORY_LIMIT` and action
+`START_NEW_TASK_OR_RUN`. If all 32 are unacknowledged, the inbox reports `status:
+ATTENTION` and a `blocked` entry with `COMPLETION_EVENT_LIMIT` and action
+`ACK_DELIVERED_EVENTS_THEN_READ_INBOX` (`--wait` returns at once); acknowledging the
+delivered events and reading again records the new result. Other failures to record an
+event are listed under `blocked` with action `RETRY_INBOX`.
 
 The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
 verified process exit and bounded test gate. Later independent review, PR and CI
@@ -737,6 +813,75 @@ workflow is not yet automatic. Registry and API facts are fail-closed evidence
 sources, not protection against malicious same-user tampering. Company proposal and
 PM-return live provider journeys still require their separately authorized runtime
 acceptance.
+
+**Formal Claude Reviewer verdict for `task complete` (Issue #352).** The repository is
+private, so `task complete` reads PR, review, comment and check data through the signed-in
+`gh` CLI (`gh api --method GET` on fixed repository paths, 8s and 1 MiB per read). llmtool
+never reads the credential, and `GH_TOKEN`, `GITHUB_TOKEN`, `GH_HOST` and proxy variables
+are not forwarded. Every agent publishes as the same GitHub account and GitHub refuses
+APPROVE from a PR's own author, so the formal Reviewer may publish its verdict as a PR
+conversation comment instead of a PR review, in the one standard
+[formal verdict comment](../../skills/ai-team-delivery/formal-verdict.md) format, posted by
+the Reviewer D6 record's `github_login`. Only an unedited Claude PASS in exactly that form is
+accepted; a Codex PASS is advisory and ignored. The latest Reviewer disposition wins: any
+other verdict that names the result HEAD (including an edited or malformed one), or a later
+PR review, supersedes an earlier acceptance. A PR
+with 100 or more conversation comments fails closed. The D6 independence, native-session,
+reviewer worktree HEAD and exact-head CI gates are unchanged. Create the separate read-only
+Reviewer worktree at the result HEAD with the optional lifecycle bindings
+`--github-login LOGIN --native-session-id SESSION_ID` (a Claude Reviewer can be started with
+`claude --session-id SESSION_ID`). A PR review and a verdict comment with the same timestamp
+have no reliable order and are not accepted. Limitation: with one OS user and one shared
+GitHub account, nothing binds a comment (or a PR review) to the Reviewer Session, so any agent
+using that account could post a bound acceptance. This gate enforces process discipline, not
+adversarial independence; the remaining control is the distinct D6 Reviewer record (agent,
+Session, native Session and worktree at the result HEAD), and, like the registry, it is not
+protection against same-user tampering. A separate Reviewer GitHub identity would be needed
+for a real authorship binding.
+
+Codex can use the same registered D6 direct Developer lifecycle with
+`task delegate TASK_ID --provider codex --mode direct ...`; the default
+`--mode proposal` preserves its text-proposal route. Direct mode requires the
+`codex-developer` `codex-cli` profile, uses its model and reasoning-effort setting,
+and invokes Codex CLI's own `codex exec --json` agent loop with workspace-write
+sandboxing, bounded output and a wall-clock limit. It records the CLI thread ID as
+the Developer native session, checks the resulting diff against `--write-path`,
+persists the typed execution outcome and sends a successful bounded result through
+the existing original-PM callback. Codex's requested self-review and test report
+are used during the invocation but are not retained in the durable Developer record;
+llmtool independently rechecks the D6 diff and runs its
+bounded test gate before the PM callback. BLOCKED, malformed or ambiguous results
+are retained without automatic retry.
+The prompt carries the PM-selected Developer goal separately from the digest-bound PM intake contract and states that code changes must stay within the allowed write paths.
+For a Codex `BLOCKED` result, the durable Developer record and `task show` include
+only its sensitive-screened `blocked_reason` (up to 2 KiB); DONE and ambiguous outcomes retain no such explanation.
+
+The workspace-write sandbox controls writes, not reads: `allowed_read_paths` is
+prompt scope only, and Codex may read other files available to its process.
+
+How to run direct mode, and what each refusal means:
+
+- Run it with llmtool's virtualenv Python (`tools/llmtool/.venv/bin/python -B -m
+  llmtool ...`); without PyYAML the `codex-developer` profile cannot be read and the
+  refusal says so.
+- Run it with the current directory at the registered D6 root of `--executor-task`,
+  on its registered branch and HEAD with a clean tree. Otherwise the refusal names the
+  failed binding code (for example `D6_SOURCE_BINDING_MISMATCH`).
+- With `--selection-source PM`, every `--acceptance` must repeat the acceptance that
+  `task record-pm` recorded, exactly and in the same order.
+- Direct mode takes no `--context-stdin`. Codex reads only the Task Contract goal,
+  `--acceptance` and the allowed paths, so put any background the Developer needs
+  in the PM's recorded goal or acceptance.
+
+Before launch, llmtool runs the ENV-2 bootstrap for the D6 root. Bootstrap rewrites
+the registry PASS marker, so llmtool rereads the D6 binding once afterwards: only
+that marker may change, and it must be a PASS for the same root and HEAD
+(`CODEX_ENV2_MARKER_INVALID` or `CODEX_D6_BINDING_CHANGED` otherwise, before Codex
+starts). Codex runs its shell commands with no inherited environment and an explicit
+`PATH`: the worktree's `tools/llmtool/.venv/bin` first, then fixed system
+directories. An unexpected failure stays fail-closed with no automatic resend, and
+is recorded with a stable code that names the binding stop or exception class
+(`CODEX_ADAPTER_<NAME>`, never message or prompt text).
 
 `git diff` / `cat` 是使用者在 shell 明確執行的上游程式；llmtool 只讀 pipe。
 每次只接受一種來源：一個 positional argument、`--file` 或非空 stdin。
