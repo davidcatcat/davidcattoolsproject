@@ -6,6 +6,7 @@ import sys
 import tempfile
 import time
 import unittest
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -231,12 +232,15 @@ class CodexDirectDeveloperTests(unittest.TestCase):
 
     def test_codex_delegate_binds_reported_thread_id_to_executor_record(self):
         task_id = 'a' * 32
-        registration = SimpleNamespace(task_id='executor-task',
+        registration_type = dataclasses.make_dataclass('Registration', (
+            'task_id trusted_agent_id session_ref native_session_id root common_dir '
+            'branch source_sha result_sha').split())
+        registration = registration_type(task_id='executor-task',
             trusted_agent_id='codex-developer', session_ref='direct Codex session',
             native_session_id=None, root=str(self.root), common_dir=str(self.root / '.git'),
             branch='task/branch', source_sha='b' * 40, result_sha='b' * 40)
-        bound_registration = SimpleNamespace(**{
-            **vars(registration), 'native_session_id': self.THREAD})
+        bound_registration = dataclasses.replace(
+            registration, native_session_id=self.THREAD)
         snapshot = SimpleNamespace(root=str(self.root), common_dir=registration.common_dir,
             branch=registration.branch, head='b' * 40)
         request = 'bounded request'
