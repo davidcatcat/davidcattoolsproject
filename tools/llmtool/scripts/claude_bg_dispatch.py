@@ -62,8 +62,9 @@ NO_PROMPT_MARKER = "send a prompt to start"
 CLI_TIMEOUT = 30
 OUTPUT_LIMIT = 4 * 1024 * 1024
 PROMPT_LIMIT = 64 * 1024
-# Clock tolerance between the launch time taken here and transcript stamps.
-CLOCK_SLACK_MS = 2000
+# There is no backward clock tolerance: the launch time is taken before
+# `claude` runs, so every event of this dispatch is stamped at or after it,
+# and anything earlier (e.g. resumed history) could be mistaken for a receipt.
 
 
 class DispatchError(Exception):
@@ -207,7 +208,7 @@ def first_action_since(session_id, since_ms, offsets=None):
             if entry.get("type") != "assistant":
                 continue
             at = _entry_ms(entry)
-            if at is None or at < since_ms - CLOCK_SLACK_MS:
+            if at is None or at < since_ms:
                 continue
             content = (entry.get("message") or {}).get("content")
             if type(content) is not list:
@@ -226,7 +227,7 @@ def _row(rows, session_id):
 
 def _started_after(row, launch_ms):
     started = row.get("startedAt")
-    return type(started) in (int, float) and started >= launch_ms - CLOCK_SLACK_MS
+    return type(started) in (int, float) and started >= launch_ms
 
 
 def identify_started(rows, *, expected, before_ids, launch_ms, launch_output):
@@ -265,8 +266,8 @@ def _session_code(value):
 def _failure_reason(row):
     """Why this session cannot be (or stay) a healthy receipt, else None.
 
-    ``state == "done"`` is left to the caller: a session that already acted
-    and finished was delivered.
+    Callers check ``state == "done"`` first: a session that already acted and
+    finished was delivered.
     """
     status, state = row.get("status"), row.get("state")
     if status not in RECEIPT_STATUSES:
@@ -335,6 +336,17 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
             return receipt
         if row is not None:
             receipt["status"], receipt["state"] = row.get("status"), row.get("state")
+            if row.get("state") == "done":
+                # A finished session (often `status` null) is checked before the
+                # failure rules: it was delivered if it acted after launch, and
+                # there is nothing left to stop either way.
+                action = first_action_since(started, launch_ms, offsets)
+                if action is not None:
+                    receipt.update(result="DELIVERED", reason=None, first_action=action,
+                                   receipt_at=_iso(_now_ms()))
+                else:
+                    receipt["reason"] = "SESSION_DONE"
+                return receipt
             reason = "PROMPT_NOT_DELIVERED" if no_prompt else _failure_reason(row)
             if reason is not None:
                 receipt["reason"] = reason
@@ -344,9 +356,6 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
             if action is not None:
                 receipt.update(result="DELIVERED", reason=None, first_action=action,
                                receipt_at=_iso(_now_ms()))
-                return receipt
-            if row.get("state") == "done":
-                receipt["reason"] = "SESSION_DONE"
                 return receipt
         if time.monotonic() >= deadline:
             receipt["reason"] = ("NO_NEW_ACTION" if row is not None else
@@ -401,7 +410,7 @@ def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=N
         if current is None or current[1] == 0:
             return False
         if since_ms is not None:
-            return current[2] >= (since_ms - CLOCK_SLACK_MS) * 1000000
+            return current[2] >= since_ms * 1000000
         return current != initial
 
     deadline = time.monotonic() + timeout

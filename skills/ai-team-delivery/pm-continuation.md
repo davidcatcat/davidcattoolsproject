@@ -71,7 +71,7 @@ For other GitHub activity posts, begin the post with whole-line `<!-- activity: 
 
 **Sending is not delivery.** A CLI exit code (including `claude --bg` exiting 0 or printing `backgrounded`), a GitHub comment and a SendMessage `success` show only that a dispatch was sent. A dispatch is delivered only when an observed start receipt exists:
 
-- a background Claude session: `claude agents --json` shows it `busy` and its transcript holds a first action made after the dispatch (history carried over by `--resume` does not count); [claude_bg_dispatch.py](../../tools/llmtool/scripts/claude_bg_dispatch.py) checks this and prints the receipt;
+- a background Claude session: `claude agents --json` shows it running (`busy` or `idle`) or finished (`state` `done`), and its transcript holds a first action stamped at or after the dispatch time (history carried over by `--resume` does not count); [claude_bg_dispatch.py](../../tools/llmtool/scripts/claude_bg_dispatch.py) checks this and prints the receipt;
 - a Codex session: its session ID plus its first event;
 - any other Worker: the Worker run or an ACK.
 

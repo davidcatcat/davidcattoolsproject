@@ -86,7 +86,9 @@ elif '--bg' in argv:
     if '--session-id' in argv:
         state['new_session'] = argv[argv.index('--session-id') + 1]
     save()
-    now = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(time.time() + 0.5))
+    def stamp(ms):
+        return time.strftime('%Y-%m-%dT%H:%M:%S', time.gmtime(ms // 1000)) + '.%03dZ' % (ms % 1000)
+    now = stamp(int(time.time() * 1000) + 50)
     for item in scenario.get('transcripts', []):
         sid = fill(item['session'])
         folder = Path(os.environ['CLAUDE_CONFIG_DIR']) / 'projects' / item.get('project', 'p')
@@ -98,6 +100,11 @@ elif '--bg' in argv:
                 out.write(json.dumps({'type': 'assistant',
                     'timestamp': '2026-01-01T00:00:%02d.000Z' % (index % 60),
                     'message': {'content': [{'type': 'tool_use', 'name': 'Old'}]}}) + '\n')
+            if item.get('pre_launch_action'):
+                # Just inside the old 2-second tolerance, but before this launch.
+                out.write(json.dumps({'type': 'assistant',
+                    'timestamp': stamp(state['launch_ms'] - 1000),
+                    'message': {'content': [{'type': 'tool_use', 'name': 'Earlier'}]}}) + '\n')
             if item.get('new_action') and prompt is not None:
                 out.write(json.dumps({'type': 'assistant', 'timestamp': now,
                     'message': {'content': [{'type': 'text', 'text': 'x'},
@@ -422,6 +429,24 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertIsNone(receipt['actual_session_id'])
         self.assertEqual(self.stops(), [])
 
+    def test_tool_use_one_second_before_launch_is_not_a_receipt(self):
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, cwd=self.cwd)]],
+                      transcripts=[{'session': TARGET, 'pre_launch_action': True}])
+        code, receipt = self.dispatch()
+        self.assertEqual(code, 1)
+        self.assertEqual(receipt['reason'], 'NO_NEW_ACTION')
+        self.assertIsNone(receipt['first_action'])
+
+    def test_finished_session_with_null_status_is_delivered_without_a_stop(self):
+        # `claude agents --json` reports most finished sessions as status=None, state=done.
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, status=None, state='done', cwd=self.cwd)]],
+                      transcripts=[{'session': TARGET, 'new_action': True}])
+        code, receipt = self.dispatch()
+        self.assertEqual((code, receipt['result']), (0, 'DELIVERED'), receipt)
+        self.assertEqual(self.stops(), [])
+
     def test_done_session_is_delivered_only_if_it_acted(self):
         self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
                       after=[[row(TARGET, status='idle', state='done', cwd=self.cwd)]],
@@ -435,6 +460,7 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                       after=[[row(TARGET, status='idle', state='done', cwd=self.cwd)]])
         code, receipt = self.dispatch()
         self.assertEqual((code, receipt['reason']), (1, 'SESSION_DONE'))
+        self.assertEqual(self.stops(), [])  # already ended: nothing to stop
 
     def test_watch_ignores_a_report_written_before_the_dispatch(self):
         report = self.home / 'report.md'
@@ -447,6 +473,12 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
                                              str(report), '--timeout', '1', *extra)
                 self.assertEqual((code, result['reason']), (1, 'REPORT_TIMEOUT'))
+        since = self.recent()
+        stale = dispatch_tool._entry_ms({'timestamp': since}) / 1000 - 1
+        os.utime(report, (stale, stale))  # one second before the dispatch
+        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+                                     str(report), '--timeout', '1', '--since', since)
+        self.assertEqual((code, result['reason']), (1, 'REPORT_TIMEOUT'))
         report.write_text('new round')  # mtime is now
         code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1', '--since', self.recent())
