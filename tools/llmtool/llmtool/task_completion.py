@@ -898,7 +898,19 @@ def _worktree_diff(root, source_sha, write_paths):
         if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
                 (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
             _stop('WORKTREE_FILE_CHANGED')
-        extra.append(raw)
+        # --no-index names /dev/null in its header. Emit Git's standard
+        # new-file patch shape so the direct Developer parser can validate it.
+        try:
+            text = raw.decode('utf-8', 'strict')
+        except UnicodeError:
+            _stop('WORKTREE_PATH_INVALID')
+        standard_header = f'diff --git a/{path} b/{path}\n'
+        null_header = f'diff --git a/dev/null b/{path}\n'
+        if text.startswith(null_header):
+            text = standard_header + text[len(null_header):]
+        elif not text.startswith(standard_header):
+            _stop('WORKTREE_FILE_UNSUPPORTED')
+        extra.append(text.encode('utf-8'))
     paths = tuple(sorted(tracked | set(untracked)))
     if not paths or len(paths) > _PROPOSAL_FILE_LIMIT:
         _stop('WORKTREE_SCOPE_MISMATCH')
@@ -1170,6 +1182,15 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
             any(type(task_binding.get(key)) is not str for key in
                 ('task_id', 'run_id', 'contract_digest'))):
         _stop('TASK_BINDING_MISSING')
+    untracked_raw = _git(registration.root,
+        ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
+    try:
+        untracked = [path for path in untracked_raw.decode('utf-8', 'strict').split('\x00')
+                     if path]
+    except UnicodeError:
+        _stop('WORKTREE_PATH_INVALID')
+    if any(path not in set(write_paths) for path in untracked):
+        _stop('WORKTREE_UNTRACKED_FILES')
     live = _worktree_snapshot(root=registration.root, source_sha=source_sha,
                               read_paths=read_paths, write_paths=write_paths)
     if (live['common_dir'] != registration.common_dir or

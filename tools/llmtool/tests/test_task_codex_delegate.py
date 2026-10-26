@@ -619,7 +619,7 @@ class CodexDelegateTests(unittest.TestCase):
         artifact = raw.decode('utf-8')
         self.assertEqual(changed, (new_path,))
         self.assertIsNone(task_submission_cli._developer_output_rejection(
-            artifact, [new_path]))
+            artifact, [new_path], allow_new_files=True))
         self.assertEqual(self._completion_git(self.root, ('write-tree',)), before_index)
 
         outside, outside_raw = task_completion._worktree_diff(

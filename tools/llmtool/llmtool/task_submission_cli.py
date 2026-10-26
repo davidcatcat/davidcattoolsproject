@@ -657,10 +657,10 @@ def _patch_paths(patch):
         if match is None:
             raise ValueError
         left, right = match.groups()
-        new_file = left == 'dev/null' and right != 'dev/null'
-        if left.startswith('"') or right.startswith('"') or (left != right and not new_file):
+        if (left.startswith('"') or right.startswith('"') or left != right or
+                left == 'dev/null' or right == 'dev/null'):
             raise ValueError
-        path = right if new_file else left
+        path = left
         if (not path or path.startswith('/') or '\\' in path or
                 any(part in ('', '.', '..') for part in path.split('/'))):
             raise ValueError
@@ -674,9 +674,8 @@ def _patch_paths(patch):
         # helper; other mode changes remain rejected.
         while index < len(lines) and lines[index].startswith(_INDEX_METADATA):
             index += 1
+        new_file = (index < len(lines) and lines[index] == 'new file mode 100644')
         if new_file:
-            if index >= len(lines) or lines[index] != 'new file mode 100644':
-                raise ValueError
             index += 1
         elif index < len(lines) and lines[index].startswith(_MODE_METADATA):
             raise ValueError
@@ -728,7 +727,7 @@ def _patch_paths(patch):
     return paths
 
 
-def _strict_developer_output_rejection(value, write_paths):
+def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=False):
     """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
@@ -752,6 +751,9 @@ def _strict_developer_output_rejection(value, write_paths):
         return 'DEVELOPER_OUTPUT_INVALID_DIFF'
     if not paths.issubset(set(write_paths)):
         return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
+    if not allow_new_files and any(
+            line.startswith('new file mode ') for line in value.splitlines()):
+        return 'DEVELOPER_OUTPUT_INVALID_DIFF'
     return None
 
 
@@ -773,10 +775,12 @@ def _developer_normalized_output(value, write_paths):
     return normalized, tokens, None
 
 
-def _developer_output_rejection(value, write_paths, *, normalize=False):
+def _developer_output_rejection(value, write_paths, *, normalize=False,
+                                allow_new_files=False):
     """Classify output strictly unless a text-proposal route opts into salvage."""
     if not normalize:
-        return _strict_developer_output_rejection(value, write_paths)
+        return _strict_developer_output_rejection(value, write_paths,
+                                                  allow_new_files=allow_new_files)
     return _developer_normalized_output(value, write_paths)[2]
 
 
@@ -1485,7 +1489,8 @@ def run_task_opencode_delegate(args, *, store):
         if len(artifact_raw) > 64 * 1024:
             raise LLMToolError('OpenCode diff exceeds the supported size')
         artifact = artifact_raw.decode('utf-8', 'strict')
-        rejection = _developer_output_rejection(artifact, write_paths, normalize=False)
+        rejection = _developer_output_rejection(
+            artifact, write_paths, normalize=False, allow_new_files=True)
         execution = _direct_execution(result)
         if rejection is not None:
             saved = _persist_developer_output_rejection(
@@ -1500,17 +1505,22 @@ def run_task_opencode_delegate(args, *, store):
                 artifact=artifact,
                 artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                 usage=result.usage, error_code=None, execution=execution)
-    except (KeyboardInterrupt, CLIHostTermination) as exc:
-        saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, model=model, result=result)
-        _print_without_masking_interrupt(saved)
-        raise
-    except Exception:
+    except BaseException as exc:
+        if isinstance(exc, (KeyboardInterrupt, CLIHostTermination)):
+            saved = _persist_opencode_interruption(
+                store, task['task_id'], developer, exc, model=model, result=result)
+            _print_without_masking_interrupt(saved)
+            raise
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
             provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
             execution=_direct_execution(result, status='UNKNOWN'))
+        if not isinstance(exc, Exception):
+            try:
+                store.update(task['task_id'], developer=developer)
+            finally:
+                raise
     try:
         saved = store.update(task['task_id'], developer=developer)
     except (KeyboardInterrupt, CLIHostTermination) as exc:
@@ -1827,7 +1837,8 @@ def run_task_codex_delegate(args, *, store):
                      'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
                      if any(path not in write_paths for path in changed_paths) else None)
         if result.status == 'DONE' and rejection is None:
-            rejection = _developer_output_rejection(artifact, write_paths)
+            rejection = _developer_output_rejection(
+                artifact, write_paths, allow_new_files=True)
         if rejection is not None:
             developer.update(execution=execution)
             saved = _persist_developer_output_rejection(
