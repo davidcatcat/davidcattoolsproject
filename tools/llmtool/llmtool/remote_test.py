@@ -49,16 +49,18 @@ try:
     else:
         t=run(["git","-C",repo,"rev-parse",sha+"^{tree}"],timeout=10); log+=t.stdout
         tree=t.stdout.decode("ascii","replace").strip() if t.returncode==0 else None
-        made=run(["sudo","-n","-u","nobody","mktemp","-d","-m","0700","/tmp/llmtool-remote-test.XXXXXX"],timeout=10)
+        made=run(["sudo","-n","-u","nobody","mktemp","-d","/tmp/llmtool-remote-test.XXXXXX"],timeout=10)
         log+=made.stdout; work=made.stdout.decode("utf8","replace").strip()
         if made.returncode or not work.startswith("/tmp/llmtool-remote-test."): raise RuntimeError("workspace")
+        uidrun=run(["sudo","-n","-u","nobody","id","-u"],timeout=5); uid=int(uidrun.stdout.strip())
+        info=os.stat(work)
+        if info.st_uid!=uid or info.st_mode&0o777!=0o700: raise RuntimeError("workspace")
         try:
             archive=run(["git","-C",repo,"archive",sha],timeout=30)
             log+=archive.stdout[:0]
             extracted=run(nobody(work,["tar","-xf","-","-C",work]),input=archive.stdout,timeout=30)
             log+=extracted.stdout
             if archive.returncode or extracted.returncode: raise RuntimeError("archive")
-            uidrun=run(["sudo","-n","-u","nobody","id","-u"],timeout=5); uid=int(uidrun.stdout.strip())
             v=run(nobody(work,[python,"-m","venv",work+"/venv"]),cwd=work,timeout=60); log+=v.stdout
             if v.returncode: raise RuntimeError("venv")
             pip=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","-r","tools/llmtool/requirements-ci.txt"]),cwd=work,timeout=180); log+=pip.stdout
@@ -83,8 +85,12 @@ except subprocess.TimeoutExpired as exc:
 except Exception:
     if result not in ("SHA_MISMATCH","TIMEOUT"): result="FAIL"
     code=code or 1
-log_dir_run=run(["sudo","-n","-u","nobody","mktemp","-d","-m","0700","/tmp/llmtool-remote-log.XXXXXX"],timeout=10)
+log_dir_run=run(["sudo","-n","-u","nobody","mktemp","-d","/tmp/llmtool-remote-log.XXXXXX"],timeout=10)
 log_dir=log_dir_run.stdout.decode("utf8","replace").strip()
+if log_dir_run.returncode==0:
+    nobody_uid=int(run(["sudo","-n","-u","nobody","id","-u"],timeout=5).stdout.strip())
+    log_info=os.stat(log_dir)
+    if log_info.st_uid!=nobody_uid or log_info.st_mode&0o777!=0o700: log_dir_run.returncode=1
 log_path=log_dir+"/remote-test.log" if log_dir_run.returncode==0 else None
 # Full output remains on EC2 in a private, unique directory owned by nobody.
 saver=run(nobody(log_dir,[python,"-c","import sys; open(sys.argv[1], 'wb').write(sys.stdin.buffer.read())",log_path],{"HOME":log_dir,"TMPDIR":log_dir}),input=log,timeout=10) if log_path and re.fullmatch(r"/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log",log_path) else None

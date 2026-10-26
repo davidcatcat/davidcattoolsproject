@@ -131,6 +131,11 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('"unittest","discover","-s","tests","-p",mod+".py"',
                       remote_test._REMOTE_SCRIPT)
 
+    def test_remote_script_mktemp_dirs_are_verified_as_private(self):
+        self.assertNotIn('"mktemp","-d","-m"', remote_test._REMOTE_SCRIPT)
+        self.assertIn('info.st_mode&0o777!=0o700', remote_test._REMOTE_SCRIPT)
+        self.assertIn('log_info.st_mode&0o777!=0o700', remote_test._REMOTE_SCRIPT)
+
     def test_identical_call_deduplicates_remote_run_receipt_and_event(self):
         first = self.run_it()
         second = self.run_it()
