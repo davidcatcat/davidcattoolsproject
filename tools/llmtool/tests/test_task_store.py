@@ -168,6 +168,86 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['execution']['native_session_binding'], 'BOUND')
         self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
 
+    def test_native_session_binding_rejected_for_opencode_and_invalid_values(self):
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        opencode_execution = {
+            'status': 'SUCCEEDED', 'native_session_id': 'ses_abcdefgh12345678',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+            'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+            'usage_source': 'UNKNOWN', 'source_bytes': 10,
+            'source_file_count': 1, 'source_manifest_sha256': 'd' * 64,
+        }
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='opencode', max_tokens=128)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        pending['execution'] = None
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'opencode-cli', 'model': None}
+        self.store.update(task['task_id'], developer=dispatching)
+        responded = {
+            **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+            'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': {**opencode_execution, 'native_session_binding': 'BOUND'},
+        }
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=responded)
+
+        for invalid_binding in ('bound', 'B' * 65, 7):
+            with self.subTest(invalid_binding=repr(invalid_binding)):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                               'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                invalid = {
+                    **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+                    'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+                    'execution': {
+                        'status': 'DONE',
+                        'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                        'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+                        'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                        'usage_source': 'CLI_REPORTED', 'source_bytes': None,
+                        'source_file_count': None, 'source_manifest_sha256': None,
+                        'native_session_binding': invalid_binding,
+                    },
+                }
+                with self.assertRaises(LLMToolError):
+                    self.store.update(task['task_id'], developer=invalid)
+
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        invalid = {
+            **dispatching, 'state': 'DEVELOPER_RESPONDED', 'artifact': artifact,
+            'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest(),
+            'execution': {
+                'status': 'DONE',
+                'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+                'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                'usage_source': 'CLI_REPORTED', 'source_bytes': None,
+                'source_file_count': None, 'source_manifest_sha256': None,
+                'unexpected_execution_key': 'rejected',
+            },
+        }
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=invalid)
+
     def test_codex_blocked_and_timeout_outcomes_persist_reported_usage(self):
         usage = {'prompt_tokens': 13, 'completion_tokens': 8, 'total_tokens': 21}
         for status, error_code, process_exit in (
