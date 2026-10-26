@@ -387,6 +387,52 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['changed_paths'], [self.source_path])
         self.assertEqual(result['diff_sha256'], hashlib.sha256(artifact).hexdigest())
 
+    def test_worktree_snapshot_includes_in_scope_new_file_without_index_changes(self):
+        new_path = 'tools/llmtool/tests/new_fixture.py'
+        target = self.root / new_path
+        target.write_text('VALUE = 7\n')
+        before_index = task_completion._git(self.root, ('write-tree',))
+        snapshot = task_completion._worktree_snapshot(
+            root=self.root, source_sha=self.source_sha,
+            read_paths=[new_path], write_paths=[new_path])
+        self.assertEqual(snapshot['changed_paths'], [new_path])
+        self.assertIn(b'new file mode 100644', snapshot['diff'])
+        self.assertIn(b'+++ b/' + new_path.encode(), snapshot['diff'])
+        self.assertEqual(snapshot['diff_sha256'], hashlib.sha256(snapshot['diff']).hexdigest())
+        self.assertEqual(task_completion._git(self.root, ('write-tree',)), before_index)
+
+        outside = self.root / 'outside.py'
+        outside.write_text('VALUE = 8\n')
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion._worktree_snapshot(
+                root=self.root, source_sha=self.source_sha,
+                read_paths=[new_path], write_paths=[new_path])
+        self.assertEqual(rejected.exception.completion_code, 'WORKTREE_UNTRACKED_FILES')
+        outside.unlink()
+
+        target.unlink()
+        target.symlink_to(self.root / self.source_path)
+        with self.assertRaises(LLMToolError) as symlink:
+            task_completion._worktree_snapshot(
+                root=self.root, source_sha=self.source_sha,
+                read_paths=[new_path], write_paths=[new_path])
+        self.assertEqual(symlink.exception.completion_code, 'WORKTREE_FILE_UNSUPPORTED')
+
+    def test_worktree_snapshot_rejects_tracked_change_outside_write_paths(self):
+        in_path = self.root / 'in.py'
+        out_path = self.root / 'out.py'
+        in_path.write_text('VALUE = 1\n')
+        out_path.write_text('VALUE = 2\n')
+        self._git('add', 'in.py', 'out.py')
+        self._git('commit', '-m', 'add scoped files')
+        self.source_sha = self._git('rev-parse', 'HEAD')
+        out_path.write_text('VALUE = 3\n')
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion._worktree_snapshot(
+                root=self.root, source_sha=self.source_sha,
+                read_paths=['in.py'], write_paths=['in.py'])
+        self.assertEqual(rejected.exception.completion_code, 'WORKTREE_SCOPE_MISMATCH')
+
     def test_worktree_docs_only_gate_returns_explicit_non_test_record(self):
         docs = self.root / 'README.md'
         docs.write_text('Documentation.\n')

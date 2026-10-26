@@ -2095,10 +2095,25 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
             'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
                          f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
                          'DEVELOPER_OUTPUT_INVALID_DIFF'),
+            'new executable file': (f'diff --git a/dev/null b/{target}\nnew file mode 100755\n'
+                                    f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
+                                    'DEVELOPER_OUTPUT_INVALID_DIFF'),
         }
         for label, (text, expected) in shapes.items():
             with self.subTest(label):
                 self.assertEqual(rejection(text, [target]), expected)
+
+    def test_direct_delegate_accepts_only_generated_in_scope_new_file_diff(self):
+        target = 'tools/llmtool/new_module.py'
+        new_file = (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
+                    f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+VALUE = 1\n')
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            new_file, [target], allow_new_files=True))
+        self.assertEqual(submission_cli._developer_output_rejection(
+            new_file, ['tools/llmtool/other.py'], allow_new_files=True),
+            'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        self.assertEqual(submission_cli._developer_output_rejection(
+            new_file, [target]), 'DEVELOPER_OUTPUT_INVALID_DIFF')
 
     def test_unsafe_shapes_remain_rejected(self):
         target = 'tools/llmtool/example.py'

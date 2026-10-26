@@ -799,7 +799,7 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
     return marker
 
 
-def _git(root, args, *, limit=_GIT_LIMIT):
+def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False):
     """Run one fixed Git read with bounded output and no inherited Git config."""
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
@@ -841,7 +841,8 @@ def _git(root, args, *, limit=_GIT_LIMIT):
                     errors += len(chunk)
                     if errors > 16 * 1024:
                         _stop('GIT_INSPECTION_FAILED')
-        if time.monotonic() >= deadline or process.wait(timeout=max(0, deadline-time.monotonic())) != 0:
+        returncode = process.wait(timeout=max(0, deadline-time.monotonic()))
+        if time.monotonic() >= deadline or returncode not in ((0, 1) if allow_exit_1 else (0,)):
             _stop('GIT_INSPECTION_FAILED')
         if errors:
             _stop('GIT_INSPECTION_FAILED')
@@ -858,6 +859,66 @@ def _git(root, args, *, limit=_GIT_LIMIT):
             process.wait()
         process.stdout.close()
         process.stderr.close()
+
+
+def _worktree_diff(root, source_sha):
+    """Return a bounded source diff including safe untracked files."""
+    tracked_patch = _git(root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
+        '--no-renames', source_sha, '--'), limit=_GIT_LIMIT)
+    tracked_raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff',
+        '--no-textconv', '--no-renames', source_sha, '--'), limit=1024 * 1024)
+    untracked_raw = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
+                         limit=64 * 1024)
+    try:
+        tracked = set(path for path in tracked_raw.decode('utf-8', 'strict').split('\x00') if path)
+        untracked = [path for path in untracked_raw.decode('utf-8', 'strict').split('\x00') if path]
+    except UnicodeError:
+        _stop('WORKTREE_PATH_INVALID')
+    if len(untracked) > _PROPOSAL_FILE_LIMIT or len(set(untracked)) != len(untracked):
+        _stop('WORKTREE_UNTRACKED_FILES')
+    extra = []
+    for path in untracked:
+        parts = Path(path).parts
+        if (not path or Path(path).is_absolute() or '\\' in path or
+                any(part in ('', '.', '..') for part in parts) or
+                any(ord(char) < 0x20 or ord(char) >= 0x7f for char in path)):
+            _stop('WORKTREE_PATH_INVALID')
+        target = Path(root).joinpath(*parts)
+        try:
+            before = target.lstat()
+        except OSError:
+            _stop('WORKTREE_FILE_UNAVAILABLE')
+        if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or
+                before.st_size > _GIT_LIMIT):
+            _stop('WORKTREE_FILE_UNSUPPORTED')
+        raw = _git(root, ('diff', '--no-index', '--binary', '--no-ext-diff',
+            '--no-textconv', '--no-renames', '/dev/null', path),
+            limit=_GIT_LIMIT, allow_exit_1=True)
+        try:
+            after = target.lstat()
+        except OSError:
+            _stop('WORKTREE_FILE_CHANGED')
+        if ((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns) !=
+                (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)):
+            _stop('WORKTREE_FILE_CHANGED')
+        try:
+            text = raw.decode('utf-8', 'strict')
+        except UnicodeError:
+            _stop('WORKTREE_PATH_INVALID')
+        standard_header = f'diff --git a/{path} b/{path}\n'
+        null_header = f'diff --git a/dev/null b/{path}\n'
+        if text.startswith(null_header):
+            text = standard_header + text[len(null_header):]
+        elif not text.startswith(standard_header):
+            _stop('WORKTREE_FILE_UNSUPPORTED')
+        extra.append(text.encode('utf-8'))
+    paths = tuple(sorted(tracked | set(untracked)))
+    if len(paths) > _PROPOSAL_FILE_LIMIT:
+        _stop('WORKTREE_SCOPE_MISMATCH')
+    patch = tracked_patch + b''.join(extra)
+    if len(patch) > _GIT_LIMIT:
+        _stop('GIT_EVIDENCE_TOO_LARGE')
+    return paths, patch
 
 
 @dataclass(frozen=True)
@@ -1027,24 +1088,19 @@ def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
     snapshot = collect_git_snapshot(root)
     if snapshot.head != source_sha:
         _stop('WORKTREE_SOURCE_HEAD_MISMATCH')
-    untracked = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
-                     limit=64 * 1024)
-    if untracked:
-        _stop('WORKTREE_UNTRACKED_FILES')
     status = _git(root, ('status', '--porcelain=v1', '-z', '--untracked-files=all'),
                    limit=1024 * 1024)
-    patch = _git(root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
-                        '--no-renames', source_sha, '--'), limit=_GIT_LIMIT)
-    changed_raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff',
-                              '--no-textconv', '--no-renames', source_sha, '--'),
-                       limit=1024 * 1024)
+    untracked_raw = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
+                         limit=64 * 1024)
     try:
-        changed = tuple(sorted(set(path for path in
-            changed_raw.decode('utf-8', 'strict').split('\x00') if path)))
+        untracked = [path for path in untracked_raw.decode('utf-8', 'strict').split('\x00')
+                     if path]
     except UnicodeError:
         _stop('WORKTREE_PATH_INVALID')
-    if (not changed or len(changed) > _PROPOSAL_FILE_LIMIT or
-            not set(changed).issubset(set(write_paths))):
+    if any(path not in set(write_paths) for path in untracked):
+        _stop('WORKTREE_UNTRACKED_FILES')
+    changed, patch = _worktree_diff(root, source_sha)
+    if not changed and not patch:
         _stop('WORKTREE_SCOPE_MISMATCH')
     for path in changed:
         parts = Path(path).parts
@@ -1052,6 +1108,8 @@ def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
                 any(part in ('', '.', '..') for part in parts) or '\\' in path or
                 any(ord(char) < 0x20 or ord(char) >= 0x7f for char in path)):
             _stop('WORKTREE_PATH_INVALID')
+    if any(path not in set(write_paths) for path in changed):
+        _stop('WORKTREE_SCOPE_MISMATCH')
 
     paths = sorted(set(read_paths) | set(write_paths))
     if not paths or len(paths) > 32:
