@@ -759,6 +759,11 @@ trigger an automatic PM failure callback.
 For final committed-result, Reviewer, PR and exact-head CI evidence, an operator
 still explicitly runs
 `llmtool task complete TASK_ID --executor-task D6_TASK_ID --reviewer-task D6_REVIEW_TASK_ID --pr PR_NUMBER`.
+To prepare the formal Reviewer handoff, run
+`llmtool task review-prompt TASK_ID --executor-task D6_TASK_ID --reviewer-task REVIEWER_D6_TASK_ID --pr PR_NUMBER`.
+It prints the prompt only when the recorded Task result, both live D6 worktrees
+and the public PR head all match; the prompt includes the exact verdict and
+Task binding lines for that HEAD.
 This manually invoked command checks the real D6 registration, current Git result,
 the persisted proposal against the applied diff, bounded tests, public exact-head
 PR/check data, and a formal review marker plus a binding line containing the
