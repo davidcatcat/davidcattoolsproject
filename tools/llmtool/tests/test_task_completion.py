@@ -247,10 +247,25 @@ class TaskCompletionTests(unittest.TestCase):
             task_completion.collect_executor_result(**kwargs)
         self.assertEqual(raised.exception.completion_code, 'RESULT_HEAD_MISMATCH')
 
-        with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}):
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+
+        def complete_bootstrap(bootstrap_root, bootstrap_task_id):
+            self.assertEqual(bootstrap_root, task_root)
+            self.assertEqual(bootstrap_task_id, self.task_id)
+            current = d6_worktree_lifecycle._read_registry_record(registry_path)
+            current['env2_pass_marker'] = {
+                **current['env2_pass_marker'], 'submitted_head_sha': result_sha,
+                'current_head_sha': result_sha,
+            }
+            d6_worktree_lifecycle._replace_record(registry_path, current)
+
+        with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
+                patch.object(d6_worktree_lifecycle, '_bootstrap',
+                             side_effect=complete_bootstrap) as bootstrap:
             recorded = d6_worktree_lifecycle.record_result(
                 task_id=self.task_id, canonical_root=self.root, root=task_root,
                 workspace_root=self.base)
+        bootstrap.assert_called_once_with(task_root, self.task_id)
         self.assertEqual(recorded, result_sha)
         result = task_completion.collect_executor_result(**kwargs)
         self.assertEqual(result['result_head'], result_sha)
