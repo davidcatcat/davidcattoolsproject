@@ -9,11 +9,11 @@ stops at a picker, so a CLI exit is not delivery. This helper:
 * always passes ``-n ROLE`` and ``--add-dir`` with the registered D6 root,
   then ``--`` so the variadic ``--add-dir`` cannot swallow the prompt;
 * polls ``claude agents --json`` for a bounded time until the started session
-  is ``busy``/``idle`` and its transcript holds a tool call made after launch
-  (history copied by ``--resume`` is older, so it never counts);
-* on any other status (``blocked``, ``waiting``, ...), a failed or stopped
-  state, a started-without-prompt notice, a vanished session or timeout, runs
-  ``claude stop`` with the full session id and exits 1;
+  has a transcript tool call made after launch (history copied by ``--resume``
+  is older, so it never counts); a live row without a receipt status keeps
+  polling, while explicit failed or blocked states run ``claude stop`` with
+  the full session id and exit 1; at timeout it reports without stopping, and
+  a post-launch action already present then counts as delivered;
 * adopts only the target itself or a copy the launch output names; a new
   session that merely appeared nearby is never treated as this dispatch;
 * reports the actual session id when a copy was started or the name differs,
