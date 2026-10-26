@@ -936,7 +936,16 @@ def _validate(record):
                     paths = result.get('changed_paths')
                     if (type(paths) is not list or not paths or paths != sorted(set(paths)) or
                             not set(paths).issubset(set(developer['write_paths'])) or
-                            any(type(test) is not dict or test.get('exit_code') != 0 or
+                            any(type(test) is not dict or
+                                (test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and
+                                 (test.get('docs_only') is not True or
+                                  test.get('changed_paths') != paths or
+                                  test.get('source_sha') != developer['source_sha'] or
+                                  test.get('result_head') is not None or
+                                  test.get('diff_sha256') != result['diff_sha256'] or
+                                  not all(path.endswith('.md') for path in paths))) or
+                                (test.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
+                                (test.get('exit_code') != 0 or
                                 type(test.get('exit_code')) is not int or
                                 test.get('source_sha') != developer['source_sha'] or
                                 test.get('result_head') is not None or
@@ -944,7 +953,7 @@ def _validate(record):
                                 test.get('path') not in developer['read_paths'] +
                                     developer['write_paths'] or
                                 type(test.get('output_sha256')) is not str or
-                                re.fullmatch(r'[0-9a-f]{64}', test['output_sha256']) is None
+                                re.fullmatch(r'[0-9a-f]{64}', test['output_sha256']) is None))
                                 for test in tests)):
                         _fail()
                 callback_response = callback['pm_response']
@@ -1140,8 +1149,17 @@ def _validate(record):
                         re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
                         evidence['result'].get('task_id') != record['task_id'] or
                         evidence['result'].get('run_id') != record['run_id'] or
-                        any(type(test) is not dict or test.get('source_sha') != result_head or
+                        any(type(test) is not dict or
+                            (test.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and
+                             (test.get('docs_only') is not True or
+                              test.get('source_sha') != result_head or
+                              test.get('changed_paths') != evidence['result'].get('changed_paths') or
+                              not all(path.endswith('.md') for path in
+                                      evidence['result'].get('changed_paths', [])))) or
+                            (test.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
+                            (test.get('source_sha') != result_head or
                             type(test.get('exit_code')) is not int or test.get('exit_code') != 0
+                            ))
                             for test in evidence['tests'])):
                     _fail()
                 if review_ci.get('stage') == 'EXECUTOR_RESULT':

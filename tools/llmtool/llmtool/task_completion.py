@@ -1302,10 +1302,10 @@ def _docs_only(paths):
             for path in paths))
 
 
-def _committed_changed_paths(root, result_sha):
-    """Read the actual paths in the exact result commit from Git."""
-    raw = _git(root, ('diff-tree', '--no-commit-id', '--name-only', '-r', '-z',
-                      result_sha, '--'), limit=1024 * 1024)
+def _committed_changed_paths(root, source_sha, result_sha):
+    """Read all paths changed between the task source and exact result."""
+    raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
+                      '--no-renames', source_sha, result_sha, '--'), limit=1024 * 1024)
     try:
         paths = sorted(set(path for path in raw.decode('utf-8', 'strict').split('\x00') if path))
     except UnicodeError:
@@ -1398,17 +1398,17 @@ def _run_registered_tests(root, source_sha, eligible, *, home, pycache=None):
     return evidence
 
 
-def run_bounded_tests(*, root, result_sha, read_paths, write_paths):
+def run_bounded_tests(*, root, source_sha, result_sha, read_paths, write_paths):
     """Run fixed registered tests or record an actual Git-derived docs-only result."""
     eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
                        if _registered_test(p) is not None})
     before = collect_git_snapshot(root)
     if before.head != result_sha or not before.clean:
         _stop('TEST_SOURCE_MISMATCH')
-    changed_paths = _committed_changed_paths(root, result_sha)
+    changed_paths = _committed_changed_paths(root, source_sha, result_sha)
     if _docs_only(changed_paths):
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY', 'changed_paths': changed_paths,
-                 'source_sha': result_sha}]
+                 'source_sha': result_sha, 'docs_only': True}]
     if not eligible:
         _stop('TEST_SCOPE_MISSING')
     evidence = []
@@ -1434,7 +1434,7 @@ def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
     if _docs_only(before['changed_paths']):
         return [{'status': 'NOT_APPLICABLE_DOCS_ONLY',
                  'changed_paths': before['changed_paths'], 'source_sha': source_sha,
-                 'diff_sha256': diff_sha256}]
+                 'diff_sha256': diff_sha256, 'result_head': None, 'docs_only': True}]
     eligible = sorted({(p, _registered_test(p)) for p in (*read_paths, *write_paths)
                        if _registered_test(p) is not None})
     if not eligible:

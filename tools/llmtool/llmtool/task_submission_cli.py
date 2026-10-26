@@ -351,9 +351,7 @@ def _completion_packet(task, evidence):
         'result_head': evidence['result']['result_head'],
         'changed_paths': evidence['result']['changed_paths'],
         'diff_sha256': evidence['result']['diff_sha256'],
-        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
-                   'source_sha': item['source_sha'],
-                   'output_sha256': item['output_sha256']} for item in evidence['tests']],
+        'tests': [_test_packet(item) for item in evidence['tests']],
         'review_pr_ci': evidence['review_pr_ci'],
     }
     if evidence.get('execution_mode') == 'HOST_WORKER':
@@ -380,11 +378,20 @@ def _direct_result_packet(task, developer, executor_task_id, evidence):
         'source_sha': result['source_sha'], 'result_head': None,
         'result_mode': 'UNCOMMITTED_WORKTREE',
         'changed_paths': result['changed_paths'], 'diff_sha256': result['diff_sha256'],
-        'tests': [{'path': item['path'], 'exit_code': item['exit_code'],
-            'source_sha': item['source_sha'], 'diff_sha256': item['diff_sha256'],
-            'output_sha256': item['output_sha256']} for item in evidence['tests']],
+        'tests': [_test_packet(item) for item in evidence['tests']],
         'review_pr_ci': evidence['review_pr_ci'],
     }
+
+
+def _test_packet(item):
+    if item.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and item.get('docs_only') is True:
+        return {'status': item['status'], 'docs_only': True,
+                'changed_paths': item['changed_paths'], 'source_sha': item['source_sha'],
+                **({'diff_sha256': item['diff_sha256']} if 'diff_sha256' in item else {})}
+    return {'path': item['path'], 'exit_code': item['exit_code'],
+            'source_sha': item['source_sha'],
+            **({'diff_sha256': item['diff_sha256']} if 'diff_sha256' in item else {}),
+            'output_sha256': item['output_sha256']}
 
 
 def _active_pm_handoff(record):
@@ -2328,11 +2335,13 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             write_paths=developer['write_paths'], artifact=developer['artifact'],
             artifact_sha256=developer['artifact_sha256'])
         tests = task_completion.run_bounded_tests(root=git_evidence['root'],
+            source_sha=developer['source_sha'],
             result_sha=git_evidence['result_head'], read_paths=developer['read_paths'],
             write_paths=developer['write_paths'])
         evidence['result'] = git_evidence
         evidence['tests'] = tests
-        if any(item['exit_code'] != 0 for item in tests):
+        if any(item.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
+               item['exit_code'] != 0 for item in tests):
             missing.append('TEST_FAILED')
         elif evidence['execution_mode'] == 'HOST_WORKER' and not task_completion.validate_host_worker_receipt(
                 evidence.get('host_worker_receipt'), task_binding=task['task_binding'],
@@ -3068,7 +3077,8 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
                 'review_pr_ci': {'stage': 'EXECUTOR_RESULT',
                     'formal_review_state': 'NOT_STARTED', 'ci_state': 'NOT_STARTED'},
             })
-            if any(test['exit_code'] != 0 for test in tests):
+            if any(test.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
+                   test['exit_code'] != 0 for test in tests):
                 evidence['verification_state'] = 'FAILED'
                 waiting = {**callback, 'state': 'WAITING_EXECUTOR',
                            'evidence': evidence, 'missing_gates': ['TEST_FAILED']}
