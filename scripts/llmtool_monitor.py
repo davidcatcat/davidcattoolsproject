@@ -2699,17 +2699,25 @@ def claude_rows(now: float, root=None,
             # is still with the model, not idle.
             state = WORKING if age <= OFFICE_STALL else STALLED
             detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + suffix
+        if status is None:
+            # A CLI that is no longer running reports nothing; its session file
+            # still holds the name its launcher gave it.
+            name = next((item.get("agentName") for item in reversed(tail)
+                         if item.get("type") == "agent-name"), None)
+        # The name and id its launcher gave it: what a PM looks for to
+        # find the window that needs an answer.
+        name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
         if status is not None:
-            # The name and id its launcher gave it: what a PM looks for to
-            # find the window that needs an answer.
-            name = name if type(name) is str and SESSION_NAME.fullmatch(name) else ""
             detail += f"｜{name}" if name else ""
-            # The launcher's name is the record that binds a role outside D6.
-            named = SESSION_ROLE.fullmatch(name)
-            role = (named.group(1) or named.group(2)) if named else role
-        # A session moved to the background keeps running without a terminal.
-        mode = "背景" if kind == "bg" else "互動"
-        rows.append(OfficeRow(f"claude {role}（{mode}）" if role else f"claude {mode}",
+        # The launcher's name is the record that binds a role outside D6.
+        named = SESSION_ROLE.fullmatch(name)
+        role = (named.group(1) or named.group(2)) if named else role
+        # Only a running CLI says whether it has a terminal; a session moved to
+        # the background keeps running without one.
+        mode = ("背景" if kind == "bg" else "互動") if status is not None else ""
+        label = f"claude {role}".rstrip()
+        rows.append(OfficeRow(f"{label}（{mode}）" if role and mode else
+                              f"{label} {mode}".rstrip(),
                               state, detail,
                               age, 30 if place[0] == "pm" else 10, key=key, role=role,
                               task=task, evidence="claude 紀錄", cli=first == "cli",
