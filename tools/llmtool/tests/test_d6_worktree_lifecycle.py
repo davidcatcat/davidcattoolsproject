@@ -248,6 +248,44 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                                         workspace_root=self.tasks)
             self.assertEqual(raised.exception.code, "D6_RECORD_RESULT_STATE_REFUSED")
 
+    def test_bind_native_session_sets_unset_value_without_changing_other_fields(self):
+        root, record_path = self._registered_result_fixture("bind-native-session")
+        before = lifecycle._read_registry_record(record_path)
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            bound = lifecycle.bind_native_session(task_id="bind-native-session",
+                native_session_id="12345678-1234-4234-8234-123456789abc",
+                canonical_root=self.source, workspace_root=self.tasks)
+        after = lifecycle._read_registry_record(record_path)
+        self.assertEqual(bound, "12345678-1234-4234-8234-123456789abc")
+        self.assertEqual(after["native_session_id"], bound)
+        self.assertEqual({key: value for key, value in after.items()
+                          if key != "native_session_id"}, before)
+
+    def test_bind_native_session_refuses_overwrite_and_bad_format(self):
+        root, record_path = self._registered_result_fixture("bind-native-refused")
+        before = lifecycle._read_registry_record(record_path)
+        before["native_session_id"] = "existing-session"
+        lifecycle._replace_record(record_path, before)
+        cases = [("replacement-session", "D6_BIND_NATIVE_SESSION_ALREADY_SET"),
+                 ("bad\nsession", "D6_BIND_NATIVE_SESSION_INPUT_INVALID")]
+        for native_session_id, expected in cases:
+            with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                    self.assertRaises(lifecycle.LifecycleError) as raised:
+                lifecycle.bind_native_session(task_id="bind-native-refused",
+                    native_session_id=native_session_id, canonical_root=self.source,
+                    workspace_root=self.tasks)
+            self.assertEqual(raised.exception.code, expected)
+            self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+    def test_bind_native_session_refuses_unknown_task(self):
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            lifecycle.bind_native_session(task_id="missing-bind-task",
+                native_session_id="native-session", canonical_root=self.source,
+                workspace_root=self.tasks)
+        self.assertEqual(raised.exception.code,
+                         "D6_BIND_NATIVE_SESSION_UNKNOWN_TASK")
+
     def test_record_result_refuses_dirty_branch_root_and_canonical_mismatch(self):
         root, _ = self._registered_result_fixture("record-result-mismatch")
         cases = [
