@@ -112,6 +112,7 @@ class ClaudePMCodexFlowTests(unittest.TestCase):
 
         # 2. llmtool delegates to the Codex Developer route (fake codex-cli client).
         codex = FakeCodexDeveloper(self._proposal())
+        self.assertRegex(codex.diff, r'(?m)^index [0-9a-f]+\.\.[0-9a-f]+ 100644$')
         profiles = []
 
         def resolve(profile, require_configured=True):

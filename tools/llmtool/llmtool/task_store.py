@@ -127,6 +127,7 @@ _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
     'DEVELOPER_OUTPUT_SENSITIVE', 'DEVELOPER_OUTPUT_INVALID_TEXT',
     'DEVELOPER_OUTPUT_TOO_LARGE', 'DEVELOPER_OUTPUT_IGNORED_FILES',
+    'DEVELOPER_OUTPUT_APPLY_FAILED',
 ))
 _PM_ASSIGNMENT_FIELDS = frozenset(('schema_version', 'route', 'risk', 'goal', 'acceptance'))
 _PM_PROVENANCE_FIELDS = frozenset((
@@ -641,10 +642,11 @@ def _validate(record):
             if 'normalizations' in developer:
                 tokens = developer['normalizations']
                 if (developer['state'] != 'DEVELOPER_RESPONDED' or
-                        type(tokens) is not list or len(tokens) > 4 or
+                        type(tokens) is not list or len(tokens) > 5 or
                         any(token not in ('OUTER_FENCE_STRIPPED', 'DIFF_HEADER_ADDED',
                                           'BARE_BLANK_CONTEXT_SPACED',
-                                          'HUNK_COUNTS_RECOUNTED') for token in tokens) or
+                                          'HUNK_COUNTS_RECOUNTED',
+                                          'HUNK_REANCHORED') for token in tokens) or
                         len(tokens) != len(set(tokens))):
                     _fail()
             if 'rejected_output_capture' in developer:
