@@ -28,7 +28,13 @@ from . import codex_direct_developer
 from . import worker_dispatch
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
-from .developer_output_normalize import normalize_developer_output
+from .developer_output_normalize import (normalize_developer_output,
+                                         reanchor_developer_output)
+
+
+TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
+    '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n\n'
+)
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
@@ -758,21 +764,31 @@ def _strict_developer_output_rejection(value, write_paths):
     return None
 
 
-def _developer_normalized_output(value, write_paths):
-    """Preserve valid input exactly; normalize only rejected salvageable shapes."""
+def _developer_normalized_output(value, write_paths, *, source_files=None):
+    """Normalize salvageable text, then preserve strict rejection categories."""
     original_rejection = _strict_developer_output_rejection(value, write_paths)
+    if (original_rejection is not None and original_rejection not in
+            ('DEVELOPER_OUTPUT_INVALID_ENVELOPE', 'DEVELOPER_OUTPUT_INVALID_DIFF')):
+        return None, (), original_rejection
     if original_rejection is None:
-        return value, (), None
-    if original_rejection not in ('DEVELOPER_OUTPUT_INVALID_ENVELOPE',
-                                 'DEVELOPER_OUTPUT_INVALID_DIFF'):
-        return None, (), original_rejection
-    normalized, tokens = normalize_developer_output(value, write_paths)
-    if normalized == value or not tokens:
-        return None, (), original_rejection
-    if len(normalized.encode('utf-8', 'replace')) > RESPONSE_LIMIT:
-        return None, (), 'DEVELOPER_OUTPUT_TOO_LARGE'
-    if _strict_developer_output_rejection(normalized, write_paths) is not None:
-        return None, (), original_rejection
+        normalized, tokens = value, ()
+    else:
+        normalized, tokens = normalize_developer_output(value, write_paths)
+        if normalized == value or not tokens:
+            return None, (), original_rejection
+    normalized_rejection = _strict_developer_output_rejection(normalized, write_paths)
+    if source_files is None and normalized_rejection is not None:
+        return None, (), normalized_rejection
+    if source_files is not None:
+        anchored, anchor_tokens, valid_anchor = reanchor_developer_output(
+            normalized, write_paths, source_files, return_valid=True)
+        if not valid_anchor:
+            return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
+        anchored_rejection = _strict_developer_output_rejection(anchored, write_paths)
+        if anchored_rejection is not None:
+            return None, (), anchored_rejection
+        normalized = anchored
+        tokens = tuple(dict.fromkeys((*tokens, *anchor_tokens)))
     return normalized, tokens, None
 
 
@@ -899,7 +915,7 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
         'pm_session_id': task['pm_session_id'],
         'task_contract_digest': task['task_binding']['contract_digest'],
         'source_sha': source_sha, 'read_paths': read_paths,
-        'write_paths': write_paths, 'acceptance': acceptance, 'context': context,
+        'write_paths': write_paths, 'acceptance': acceptance,
         'pm_selected_goal': pm_goal,
     }
     if developer_route not in ('company-gw', 'codex-cli'):
@@ -926,9 +942,11 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
         'tests, execute tools, commit, dispatch another agent, approve work, or modify '
         'files. Do not include credentials, secrets, private data, or prose outside the diff.'
     )
-    return [{'role': 'system', 'content': system},
-            {'role': 'user', 'content': json.dumps(packet, ensure_ascii=True,
-                                                  sort_keys=True, separators=(',', ':'))}]
+    user = (json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':')) +
+            TEXT_DEVELOPER_CONTEXT_SEPARATOR +
+            'Context:\n' + context +
+            '\nReturn only the unified diff, starting with "diff --git".')
+    return [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
 
 
 def _validate_codex_call_binding(store, task, developer, completion,
@@ -1007,6 +1025,48 @@ def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
         'TASK_PACKET_JSON=' + json.dumps(packet, ensure_ascii=True, sort_keys=True,
                                          separators=(',', ':'))
     )
+
+
+def _text_developer_source_files(root, source_sha, write_paths):
+    """Read only allowed source blobs from the bound D6 revision."""
+    files = {}
+    for path in write_paths:
+        try:
+            raw = task_completion._git(
+                root, ('show', f'{source_sha}:{path}'), limit=8 * 1024 * 1024)
+            files[path] = raw.decode('utf-8', 'strict')
+        except (Exception, UnicodeError):
+            return None
+    return files
+
+
+def _text_developer_apply_check(root, source_sha, artifact):
+    """Check the proposal against the source worktree without applying it."""
+    try:
+        head = task_completion._git(
+            root, ('rev-parse', '--verify', f'{source_sha}^{{commit}}'), limit=128
+        ).decode('ascii', 'strict').strip()
+        current = task_completion._git(
+            root, ('rev-parse', 'HEAD'), limit=128).decode('ascii', 'strict').strip()
+    except Exception:
+        return False
+    if head != source_sha or current != source_sha:
+        return False
+    env = {
+        'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
+        'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_ATTR_NOSYSTEM': '1',
+        'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
+        'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat', 'PAGER': 'cat',
+    }
+    try:
+        result = subprocess.run(
+            ['/usr/bin/git', '-C', root, '-c', 'core.fsmonitor=false', '-c',
+             'core.hooksPath=/dev/null', 'apply', '--check', '-'],
+            input=artifact.encode('utf-8'), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, timeout=15, env=env, shell=False, check=False)
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return False
+    return result.returncode == 0 and len(result.stdout) <= 64 * 1024 and len(result.stderr) <= 64 * 1024
 
 
 def _direct_execution(result, *, status='SUCCEEDED'):
@@ -2067,11 +2127,25 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
+    source_files = _text_developer_source_files(
+        registration.root, source_sha, write_paths)
+    if source_files is None:
+        saved = _persist_developer_output_rejection(
+            store, task['task_id'], developer, 'DEVELOPER_OUTPUT_INVALID_DIFF',
+            usage, result.content)
+        _print(_task_view(saved))
+        return 1
     artifact, normalization_tokens, rejection_code = _developer_normalized_output(
-        result.content, write_paths)
+        result.content, write_paths, source_files=source_files)
     if rejection_code is not None:
         saved = _persist_developer_output_rejection(
             store, task['task_id'], developer, rejection_code, usage, result.content)
+        _print(_task_view(saved))
+        return 1
+    if not _text_developer_apply_check(registration.root, source_sha, artifact):
+        saved = _persist_developer_output_rejection(
+            store, task['task_id'], developer, 'DEVELOPER_OUTPUT_APPLY_FAILED',
+            usage, result.content)
         _print(_task_view(saved))
         return 1
     developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,

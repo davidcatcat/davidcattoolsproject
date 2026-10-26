@@ -4,6 +4,7 @@ All output remains subject to the strict task-submission parser and later Git
 application checks. This module has no filesystem, provider, or Git behavior.
 """
 
+import difflib
 import re
 
 
@@ -11,6 +12,7 @@ _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
 _FILE_OLD = re.compile(r'^--- a/([^\r\n]+)$')
 _FILE_NEW = re.compile(r'^\+\+\+ b/([^\r\n]+)$')
 _HUNK = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)$')
+_INDEX = re.compile(r'^index [0-9a-f]+\.\.[0-9a-f]+(?: (?:100644|100755))?$')
 _UNSAFE = re.compile(
     r'^(?:old mode |new mode |new file mode |deleted file mode |'
     r'rename from |rename to |copy from |copy to |GIT binary patch|'
@@ -138,7 +140,12 @@ def normalize_developer_output(value, write_paths):
                 i += 1
             old_count = sum(1 for item in body if item.startswith((' ', '-')))
             new_count = sum(1 for item in body if item.startswith((' ', '+')))
-            rebuilt = f'@@ -{hunk.group(1)},{old_count} +{hunk.group(3)},{new_count} @@{hunk.group(5)}'
+            old_declared = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            new_declared = int(hunk.group(4)) if hunk.group(4) is not None else 1
+            if old_count == old_declared and new_count == new_declared:
+                rebuilt = line
+            else:
+                rebuilt = f'@@ -{hunk.group(1)},{old_count} +{hunk.group(3)},{new_count} @@{hunk.group(5)}'
             if rebuilt != line:
                 tokens.append('HUNK_COUNTS_RECOUNTED')
             fixed.append(rebuilt)
@@ -147,3 +154,127 @@ def normalize_developer_output(value, write_paths):
 
     normalized = '\n'.join(output) + '\n'
     return normalized, tuple(dict.fromkeys(tokens))
+
+
+def reanchor_developer_output(value, write_paths, source_files, *, return_valid=False):
+    """Rebuild proposal hunks from exact, unique old-side matches in source files.
+
+    ``source_files`` maps allowed repository paths to UTF-8 source text read at
+    the bound source revision. A failed or ambiguous match is never repaired.
+    """
+    def result(text, tokens, valid):
+        return (text, tokens, valid) if return_valid else (text, tokens)
+
+    if type(value) is not str or type(source_files) is not dict:
+        return result(None, (), False)
+    lines = value.splitlines()
+    expected = set(write_paths)
+    starts = [i for i, line in enumerate(lines) if line.startswith('diff --git ')]
+    if not starts:
+        return result(None, (), False)
+    sections = [lines[start:(starts[index + 1] if index + 1 < len(starts) else len(lines))]
+                for index, start in enumerate(starts)]
+    regenerated = []
+    for section in sections:
+        if len(section) < 3:
+            return result(None, (), False)
+        header = _DIFF_HEADER.fullmatch(section[0])
+        file_header_index = 1
+        if len(section) > 1 and section[1].startswith('index '):
+            if _INDEX.fullmatch(section[1]) is None:
+                return result(None, (), False)
+            file_header_index = 2
+        if len(section) <= file_header_index + 1:
+            return result(None, (), False)
+        old_header = _FILE_OLD.fullmatch(section[file_header_index])
+        new_header = _FILE_NEW.fullmatch(section[file_header_index + 1])
+        if (header is None or old_header is None or new_header is None or
+                header.groups() != (old_header.group(1), new_header.group(1)) or
+                old_header.group(1) != new_header.group(1)):
+            return result(None, (), False)
+        path = old_header.group(1)
+        if path not in expected or path not in source_files:
+            return result(None, (), False)
+        try:
+            source_text = source_files[path]
+            if type(source_text) is not str or '\r' in source_text:
+                return result(None, (), False)
+            source_has_final_newline = source_text.endswith('\n')
+            source = source_text.splitlines()
+        except (UnicodeError, AttributeError):
+            return result(None, (), False)
+
+        edits = []
+        i = file_header_index + 2
+        while i < len(section):
+            hunk = _HUNK.fullmatch(section[i])
+            if hunk is None:
+                return result(None, (), False)
+            i += 1
+            body = []
+            while i < len(section) and not section[i].startswith('@@ '):
+                if section[i].startswith('diff --git '):
+                    break
+                if section[i] == r'\ No newline at end of file':
+                    if not body or not body[-1].startswith((' ', '-', '+')):
+                        return result(None, (), False)
+                    body.append(section[i])
+                    i += 1
+                    continue
+                body.append(section[i])
+                i += 1
+            old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
+            if not old_side or not any(line.startswith(('+', '-')) for line in body):
+                return result(None, (), False)
+            matches = [index for index in range(len(source) - len(old_side) + 1)
+                       if source[index:index + len(old_side)] == old_side]
+            if len(matches) != 1:
+                return result(None, (), False)
+            start = matches[0]
+            target = []
+            cursor = start
+            for line in body:
+                if line == r'\ No newline at end of file':
+                    continue
+                if line.startswith(' '):
+                    target.append(source[cursor])
+                    cursor += 1
+                elif line.startswith('-'):
+                    cursor += 1
+                elif line.startswith('+'):
+                    target.append(line[1:])
+                else:
+                    return result(None, (), False)
+            edits.append((start, cursor, target))
+        if not edits:
+            return result(None, (), False)
+        modified = list(source)
+        previous_end = len(source) + 1
+        for start, end, target in reversed(edits):
+            if end > previous_end:
+                return result(None, (), False)
+            modified[start:end] = target
+            previous_end = start
+        diff_lines = list(difflib.unified_diff(
+            source, modified, fromfile='', tofile='', n=3, lineterm=''))
+        if not any(line.startswith('@@ ') for line in diff_lines):
+            return result(None, (), False)
+        regenerated.append(f'diff --git a/{path} b/{path}')
+        if file_header_index == 2:
+            regenerated.append(section[1])
+        regenerated.extend([f'--- a/{path}', f'+++ b/{path}'])
+        body = diff_lines[2:]
+        if source and modified and not source_has_final_newline:
+            eof_records = set()
+            for prefixes, final_line in (((' ', '-'), source[-1]),
+                                         ((' ', '+'), modified[-1])):
+                for index in range(len(body) - 1, -1, -1):
+                    if body[index].startswith(prefixes) and body[index][1:] == final_line:
+                        eof_records.add(index)
+                        break
+            for index in sorted(eof_records, reverse=True):
+                body.insert(index + 1, r'\ No newline at end of file')
+        regenerated.extend(body)
+    anchored = '\n'.join(regenerated) + '\n'
+    tokens = ('HUNK_REANCHORED',) if anchored != value else ()
+    return result(anchored, tokens, True)

@@ -20,6 +20,7 @@ from llmtool.providers import get_provider_capabilities
 from llmtool.providers.base import Reply
 from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
+from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_complete,
@@ -86,11 +87,16 @@ class TaskSubmissionCLITests(unittest.TestCase):
                        cwd=self.executor_root, check=True)
         (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
         (self.executor_root / 'README.md').write_text('Executor fixture documentation.\n')
+        target_fixture = (self.executor_root / 'tools' / 'llmtool' / 'tests' /
+                          'test_task_submission_cli.py')
+        target_fixture.parent.mkdir(parents=True, exist_ok=True)
+        target_fixture.write_text('old\n')
         report_dir = self.executor_root / 'tools' / 'llmtool'
-        report_dir.mkdir(parents=True)
+        report_dir.mkdir(parents=True, exist_ok=True)
         (report_dir / '.gitignore').write_text('/.d6-bootstrap-report.json\n')
         subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'README.md',
-                        'tools/llmtool/.gitignore'],
+                        'tools/llmtool/.gitignore',
+                        'tools/llmtool/tests/test_task_submission_cli.py'],
                        cwd=self.executor_root, check=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
                        cwd=self.executor_root, check=True, capture_output=True)
@@ -1354,7 +1360,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
             patch_text.encode()).hexdigest())
         self.assertEqual(result['completion']['evidence']['source_sha'], self.executor_head)
         self.assertEqual(result['completion']['executor_task_id'], 'executor-task-1')
-        packet = json.loads(messages[1]['content'])
+        packet_json, _context_section = messages[1]['content'].split(
+            TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
+        packet = json.loads(packet_json)
         self.assertEqual(packet['task_contract_digest'], task['task_binding']['contract_digest'])
         self.assertEqual(packet['source_sha'], self.executor_head)
         self.assertEqual(packet['write_paths'], ['sample.py'])
@@ -1531,13 +1539,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     'response': pm_response,
                 }))), 0)
         task = store.get(next(store.root.glob('*.json')).stem)
-        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        target = 'sample.py'
         patch_text = (f'diff --git a/{target} b/{target}\n'
-                      f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n-old\n+new\n')
+                      f'--- a/{target}\n+++ b/{target}\n'
+                      '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n')
         client = FakeClient(Reply(patch_text, {
             'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
         }))
-        args = self._delegate_args(task)
+        args = self._delegate_args(task, read_path=[target], write_path=[target],
+                                   context='VALUE = 1\n')
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.resolve_profile_config',
@@ -1577,18 +1587,49 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIn('The first line must be the diff --git header', system_prompt)
         self.assertIn('blank lines', system_prompt)
         self.assertIn('Copy context lines verbatim', system_prompt)
-        developer_packet = json.loads(client.calls[0][1]['content'])
+        packet_text = client.calls[0][1]['content']
+        packet_json, context_section = packet_text.split(
+            TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
+        developer_packet = json.loads(packet_json)
         self.assertEqual(developer_packet['pm_selected_goal'], 'Add one focused test.')
         self.assertEqual(developer_packet['acceptance'], ['new test passes'])
-        self.assertEqual(developer_packet['context'], 'class TaskSubmissionCLITests: pass')
+        self.assertNotIn('context', developer_packet)
+        self.assertTrue(context_section.startswith('Context:\nVALUE = 1\n'))
+        self.assertTrue(context_section.endswith(
+            'Return only the unified diff, starting with "diff --git".'))
+        self.assertIn('The model has no tools, cannot read files, and all needed file content is provided below.',
+                      packet_text)
         self.assertEqual(developer_packet['write_paths'], [target])
         self.assertNotIn('original_request', developer_packet)
         self.assertNotIn('pm_response', developer_packet)
-        self.assertNotIn('Implement a health-check', client.calls[0][1]['content'])
-        self.assertNotIn('Bounded test-only task.', client.calls[0][1]['content'])
+        self.assertNotIn('Implement a health-check', packet_text)
+        self.assertNotIn('Bounded test-only task.', packet_text)
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(saved['developer']['artifact'], patch_text)
         self.assertEqual(len(client.calls), 1)
+
+    def test_apply_check_failure_is_durably_rejected(self):
+        task = self._pm_task_with_assignment()
+        client = FakeClient(Reply(
+            'diff --git a/sample.py b/sample.py\n--- a/sample.py\n+++ b/sample.py\n'
+            '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n', {}))
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                patch('llmtool.task_submission_cli._text_developer_apply_check',
+                      return_value=False), redirect_stdout(output):
+            code = run_task_delegate(self._delegate_args(
+                task, read_path=['sample.py'], write_path=['sample.py']))
+        self.assertEqual(code, 1)
+        developer = json.loads(output.getvalue())['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(developer['error_code'], 'DEVELOPER_OUTPUT_APPLY_FAILED')
+        self.assertIsNone(developer['artifact'])
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_APPLY_FAILED')
 
     def test_pm_recommendation_not_text_or_wrong_risk_cannot_authorize_gw(self):
         task = self._pm_task_with_assignment()
@@ -1613,7 +1654,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                      fromlist=['_pm_assignment'])._pm_assignment(malformed))
 
     def test_fake_ack_and_sensitive_patch_are_not_persisted(self):
-        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        target = 'sample.py'
         rejected = (
             ('Developer started and completed the work.',
              'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),
@@ -1643,12 +1684,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertNotIn('abcdefghijklmnop', json.dumps(saved))
 
     def test_markdown_fenced_company_patch_is_normalized_before_persistence(self):
-        target = 'tools/llmtool/tests/test_task_submission_cli.py'
+        target = 'sample.py'
         fenced_patch = (
             '```diff\n'
             f'diff --git a/{target} b/{target}\n'
             f'--- a/{target}\n+++ b/{target}\n@@ -1 +1 @@\n'
-            '-old\n+FENCED_PROVIDER_PATCH_SENTINEL\n'
+            '-VALUE = 1\n+FENCED_PROVIDER_PATCH_SENTINEL\n'
             '```\n'
         )
         task = self._pm_task_with_assignment()
@@ -1662,11 +1703,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 patch('llmtool.task_submission_cli.api_key', return_value=None), \
                 patch('llmtool.task_submission_cli.create_client', return_value=client), \
                 redirect_stdout(output):
-            code = run_task_delegate(self._delegate_args(task))
+            args = self._delegate_args(task, read_path=[target], write_path=[target],
+                                       context='VALUE = 1\n')
+            code = run_task_delegate(args)
             with self.assertRaisesRegex(
                     LLMToolError,
                     'developer assignment already exists; duplicate dispatch refused'):
-                run_task_delegate(self._delegate_args(task))
+                run_task_delegate(args)
 
         self.assertEqual(code, 0)
         result = json.loads(output.getvalue())
@@ -2131,9 +2174,17 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         system = submission_cli._developer_prompt(
             task, source_sha='d' * 40, read_paths=['example.py'], write_paths=['example.py'],
             acceptance=['ok'], context='', pm_goal='g')[0]['content']
+        user = submission_cli._developer_prompt(
+            task, source_sha='d' * 40, read_paths=['example.py'], write_paths=['example.py'],
+            acceptance=['ok'], context='provided source text', pm_goal='g')[1]['content']
         example = system.split('Exact format example:\n', 1)[1]
         example = example[:example.index('Every hunk header')]
         self.assertIsNone(submission_cli._developer_output_rejection(example, ['example.py']))
+        packet, context = user.split(TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
+        self.assertNotIn('provided source text', packet)
+        self.assertIn('no tools, cannot read files, and all needed file content is provided below.',
+                      user)
+        self.assertTrue(context.endswith('Return only the unified diff, starting with "diff --git".'))
 
 
 class ModeMetadataRejectionTests(unittest.TestCase):

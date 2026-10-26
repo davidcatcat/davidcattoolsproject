@@ -136,6 +136,7 @@ class ClaudePMCodexFlowTests(unittest.TestCase):
                 context='Fixture test file only.'), store=store)
         self.assertEqual(code, 0, out.getvalue())
         self.assertEqual(len(codex.calls), 1)
+        self.assertRegex(codex.diff, r'(?m)^index [0-9a-f]+\.\.[0-9a-f]+ 100644$')
         # G1: the Developer call uses its own profile, never the Codex PM profile.
         self.assertEqual(profiles, ['codex-developer'])
         self.assertEqual(create.call_count, 1)
