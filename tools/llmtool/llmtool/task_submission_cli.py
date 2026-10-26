@@ -1340,7 +1340,7 @@ def run_task_opencode_delegate(args, *, store):
 
 
 def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
-                         acceptance, model, reasoning_effort):
+                         acceptance, pm_goal, model, reasoning_effort):
     contract = task.get('task_contract')
     if type(contract) is not dict:
         raise LLMToolError('Codex Developer Task Contract is unavailable')
@@ -1358,6 +1358,7 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'contract_digest': task['task_binding']['contract_digest'],
         'task_contract': contract, 'goal': contract.get('goal'),
+        'pm_selected_goal': pm_goal,
         'source_sha': source_sha,
         'allowed_read_paths': read_paths, 'allowed_write_paths': write_paths,
         'acceptance': acceptance,
@@ -1370,8 +1371,10 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
     }
     return (
         'You are the Codex Developer for this bounded llmtool Task. Work in the '
-        'current registered D6 worktree. Read only allowed_read_paths and modify '
-        'only allowed_write_paths. Do not run Git commands that write, commit, push, '
+        'current registered D6 worktree. The task_contract is only the digest-bound '
+        'PM intake record; it is not your scope. Your development goal is '
+        'pm_selected_goal. Your code changes must stay inside allowed_write_paths. '
+        'Read only allowed_read_paths. Do not run Git commands that write, commit, push, '
         'or publish; llmtool and the PM handle Git. Run the test_commands listed in '
         'the Task Contract; when no commands are listed, report that no tests were '
         'provided and do not invent commands. Review your own diff and test results, and use at most '
@@ -1455,6 +1458,8 @@ def run_task_codex_delegate(args, *, store):
     provider, reasoning_effort = _codex_developer_profile()
     prompt = _codex_direct_prompt(task, source_sha=snapshot.head,
         read_paths=read_paths, write_paths=write_paths, acceptance=acceptance,
+        pm_goal=(pm_assignment['goal'] if args.selection_source == 'PM'
+                 else task['request']),
         model=provider['model'], reasoning_effort=reasoning_effort)
     _screen_text(prompt, codex_direct_developer.MAX_PROMPT_BYTES)
     prompt_size = len(prompt.encode('utf-8'))
