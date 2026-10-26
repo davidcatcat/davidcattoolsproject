@@ -56,8 +56,6 @@ IGNORED = frozenset({"grep", "egrep", "fgrep", "pgrep", "ps"})
 PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
 NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
-# Infrastructure processes: listed, but not counted as agents.
-HELPER_ROLES = frozenset({"Claude Code daemon"})
 
 
 @dataclass(frozen=True)
@@ -327,11 +325,15 @@ def running_stages(tasks: list) -> int:
     return sum(1 for t in tasks for s in t.stages if stage_state(s) == "RUNNING")
 
 
-def summary(processes: list[Process], lingering: list) -> str:
+def summary(processes: list[Process], lingering: list, sessions=None) -> str:
+    # An agent family counts its open CLIs, the processes office rows stand
+    # for; its daemons and servers are listed in the table, not counted.
+    members = {p.pid for p in agent_clis(processes, sessions)}
     counts: dict[str, int] = {}
     for p in processes:
-        if not p.role.startswith(" ") and p.role.replace(" (zombie)", "") not in HELPER_ROLES:
-            counts[family(p.role)] = counts.get(family(p.role), 0) + 1
+        if p.role.startswith(" ") or family(p.role) in AGENT_FAMILIES and p.pid not in members:
+            continue
+        counts[family(p.role)] = counts.get(family(p.role), 0) + 1
     order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "Actions runner", "other")
     text = "  ".join(f"{k} {counts[k]}" for k in order if k in counts) or "no agent process"
     return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")
@@ -2924,7 +2926,7 @@ def _elapsed_seconds(text: str) -> float | None:
 
 
 def _forget_cwds(processes: list[Process]) -> None:
-    alive = {p.pid for p in processes if p.role in OPENCODE_ROLES + KILO_ROLES + ("AGY CLI",)}
+    alive = {p.pid for p in processes if p.role.removesuffix(" (node launcher)") in AGENT_CLI_ROLES}
     for pid in [pid for pid in _cwd_cache if pid not in alive]:
         _cwd_cache.pop(pid, None)
 
@@ -2992,6 +2994,33 @@ def kilo_rows(processes: list[Process], now: float, canonical: str,
         return []
     return _cli_rows(procs, kilo_sessions(now, db), now, canonical, cwd_of,
                      "kilo", "Kilo CLIENT", 75, "（未列入派工）")
+
+
+def _open_cli_rows(clis: list[Process], rows: list[OfficeRow], now: float, canonical: str,
+                   cwd_of) -> list[OfficeRow]:
+    """An open Codex or Claude CLI in this repository that no session row
+    shows still gets a row, the one an open OpenCode CLI without a session
+    gets. Nothing records which CLI holds which session, so in each place
+    the live session rows are matched to CLIs by count."""
+    out = []
+    for prefix, order in (("codex", 45), ("claude", 47)):
+        shown: dict[str, int] = {}
+        for row in rows:
+            if (row.name.startswith(prefix) and not row.group and row.kind != "worker"
+                    and row.state not in (CLOSED, DONE)):
+                shown[row.task] = shown.get(row.task, 0) + 1
+        idle = []
+        for proc in clis:
+            place = _place(cwd_of(proc.pid), canonical)
+            if family(proc.role).lower() != prefix or place is None:
+                continue
+            task = f"task {place[1]}" if place[0] == "task" else ""
+            if shown.get(task, 0):
+                shown[task] -= 1
+            else:
+                idle.append(proc)
+        out += _cli_rows(idle, [], now, canonical, cwd_of, prefix, "", order, "")
+    return out
 
 
 def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical: str,
@@ -3625,6 +3654,21 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
 
 
 CLAUDE_CLI_ROLES = ("Claude Code CLI", "Claude Code CLI (node launcher)")
+AGENT_FAMILIES = ("Claude", "Codex", "OpenCode", "Kilo")
+# Roles of an open agent CLI (also behind its npm launcher): each is one member.
+AGENT_CLI_ROLES = ("Claude Code CLI", "Claude Code background session", "Codex CLI",
+                   "AGY CLI") + OPENCODE_ROLES + KILO_ROLES
+
+
+def agent_clis(processes: list[Process], sessions=None) -> list[Process]:
+    """Open agent CLIs, by PID. An npm launcher and the CLI it started are one;
+    a background session counts once a session has moved into it."""
+    procs = [p for p in processes if p.role.removesuffix(" (node launcher)") in AGENT_CLI_ROLES]
+    launched = {p.owner for p in procs}
+    registered = _claude_registered(claude_sessions() if sessions is None else sessions, procs) or {}
+    return sorted((p for p in procs if f"{p.role} {p.pid}" not in launched
+                   and (p.role != "Claude Code background session" or p.pid in registered)),
+                  key=lambda p: p.pid)
 
 
 def _claude_registered(sessions, processes: list[Process]) -> dict[int, dict] | None:
@@ -3786,14 +3830,13 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
     # Monitor.poll builds the office only after the process table was read,
     # so an empty list means nothing is running, not "unknown".
-    calls = [-(_elapsed_seconds(p.elapsed) or 0.0) for p in _one_shot_runs(processes, sessions)]
+    running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
+    calls = [-(_elapsed_seconds(p.elapsed) or 0.0) for p in running]
     rows = (codex_rows(now, codex_root, canonical, calls, verdicts)
             + claude_rows(now, claude_root, canonical, live))
-    # Each running CLI is attached to one thread; with npm, the launcher and
-    # its binary are one CLI.
-    clis = sum(p.role == "Codex CLI" for p in processes) or sum(
-        p.role == "Codex CLI (node launcher)" for p in processes)
-    rows = _closed_codex_cli(rows, clis)
+    # Each running CLI is attached to one thread.
+    clis = agent_clis(processes, sessions)
+    rows = _closed_codex_cli(rows, sum(family(p.role) == "Codex" for p in clis))
     rows = _closed_claude_cli(rows, sessions, processes)
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
@@ -3801,12 +3844,12 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
     rows += opencode + kilo_rows(processes, now, canonical, kilo_db, cwd_of)
     rows += _d6_process_rows(processes, rows, canonical, cwd_of)
+    rows += _open_cli_rows([p for p in clis if p not in running], rows, now, canonical, cwd_of)
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
     # `claude -p --no-session-persistence` started by Codex leaves no session
     # file. Calls a Codex record already shows are not repeated; any further
     # process is listed on its own, since nothing says which thread started it.
     recorded = [row for row in rows if row.key == "review"]
-    running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
     for proc in running[sum(row.state == WORKING for row in recorded):]:
         rows.append(OfficeRow("claude 單次呼叫", WORKING,
                               "由 Codex 啟動，執行中（看不出是哪個對話、在做什麼）",
