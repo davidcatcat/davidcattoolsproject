@@ -327,6 +327,46 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.update(task['task_id'], developer=not_blocked)
 
+    def test_blocked_reason_is_rejected_for_every_non_blocked_codex_outcome(self):
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        outcomes = (
+            ('DEVELOPER_RESPONDED', None, None, artifact, None),
+            ('DEVELOPER_OUTCOME_UNKNOWN', 'CODEX_RESULT_EVIDENCE_UNKNOWN',
+             'UNKNOWN', None, None),
+            ('DEVELOPER_OUTCOME_UNKNOWN', 'CODEX_RESULT_PERSISTENCE_REJECTED',
+             'UNKNOWN', None, None),
+            ('DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_REJECTED',
+             None, None, None),
+        )
+        for state, error_code, execution_status, result_artifact, usage in outcomes:
+            with self.subTest(state=state, error_code=error_code):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                outcome = {**dispatching, 'state': state,
+                    'error_code': error_code, 'artifact': result_artifact,
+                    'artifact_sha256': (hashlib.sha256(result_artifact.encode()).hexdigest()
+                                        if result_artifact is not None else None),
+                    'usage': usage,
+                    'blocked_reason': 'A bounded reason belongs only to CODEX_BLOCKED.'}
+                if execution_status is not None:
+                    outcome['execution'] = {'status': execution_status,
+                        'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                        'process_exit_code': None,
+                        'stdout_sha256': 'd' * 64, 'elapsed_ms': 25,
+                        'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+                        'source_bytes': None, 'source_file_count': None,
+                        'source_manifest_sha256': None}
+                with self.assertRaises(LLMToolError):
+                    self.store.update(task['task_id'], developer=outcome)
+
     def test_codex_delegate_screens_blocked_reason_before_persisting(self):
         self._allow_codex_dispatch()
         root = str(Path.cwd())
