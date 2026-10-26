@@ -1015,8 +1015,15 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.create(value)
 
-    def _active_pm_record(self):
+    def _active_pm_record(self, route='opencode'):
         value = record()
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Ready.',
+            'developer_assignment': {
+                'route': route, 'risk': 'LOW', 'goal': 'Do task.',
+                'acceptance': ['A test passes.'],
+            },
+        }, separators=(',', ':'))
         value.update(
             schema_version=2,
             pm_provider_profile='active-pm-runtime',
@@ -1025,13 +1032,11 @@ class TaskStoreTests(unittest.TestCase):
             pm_route_binding={'type': 'active-pm-runtime', 'model': None, 'base_url': None},
             backend_session_semantics='ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL',
             state='PM_RESPONDED',
-            response='{"schema_version":1,"summary":"Ready.","developer_assignment":'
-                     '{"route":"opencode","risk":"LOW","goal":"Do task.",'
-                     '"acceptance":["A test passes."]}}',
+            response=response,
             error_code=None,
             developer=None,
             pm_assignment={
-                'schema_version': 1, 'route': 'opencode', 'risk': 'LOW',
+                'schema_version': 1, 'route': route, 'risk': 'LOW',
                 'goal': 'Do task.', 'acceptance': ['A test passes.'],
             },
             completion=None,
@@ -1050,6 +1055,12 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(created['pm_provenance']['usage_status'], 'UNKNOWN')
         self.assertEqual(created['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
+
+    def test_active_pm_company_gateway_assignment_is_validated_and_round_trips(self):
+        value = self._active_pm_record(route='company-gw')
+        created = self.store.create(value)
+        self.assertEqual(self.store.get(value['task_id']), created)
+        self.assertEqual(created['pm_assignment']['route'], 'company-gw')
 
     def test_legacy_codex_pm_runtime_records_remain_readable(self):
         value = self._active_pm_record()
@@ -1070,7 +1081,7 @@ class TaskStoreTests(unittest.TestCase):
             lambda record: record.__setitem__('pm_assignment', {
                 **record['pm_assignment'], 'risk': 'OTHER'}),
             lambda record: record.__setitem__('pm_assignment', {
-                **record['pm_assignment'], 'route': 'company-gw'}),
+                **record['pm_assignment'], 'route': 'none'}),
             lambda record: record.pop('pm_provenance'),
         )
         for mutate in mutations:
