@@ -1370,7 +1370,8 @@ class OfficeViewTests(unittest.TestCase):
 
     def test_agent_process_cwd_binds_transcript_free_d6_session(self):
         stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 600))
-        self._register("wp-1", str(self.task), last_verified_at=stamp)
+        self._register("wp-1", str(self.task), last_verified_at=stamp,
+                       trusted_agent_id="codex-developer-agent")
         for role in ("Codex CLI", "Codex CLI (node launcher)", "Claude Code CLI",
                      "Claude Code CLI (node launcher)", "OpenCode CLI", "OpenCode CLIENT",
                      "OpenCode CLI (node launcher)", "OpenCode CLIENT (node launcher)"):
@@ -1389,6 +1390,40 @@ class OfficeViewTests(unittest.TestCase):
                                        claude_root=str(self.claude), canonical=self.canonical,
                                        cwd_of=lambda pid: str(self.task))
                 self.assertFalse(any(row.task == "task wp-1" for row in gone))
+
+    def test_idle_session_rows_cover_their_d6_process(self):
+        self._write(self.claude / "proj" / "idle.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=10)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "81.json").write_text(json.dumps(
+            {"pid": 81, "sessionId": "idle", "status": "idle", "name": "claude-developer"}),
+            encoding="utf-8")
+        claude = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+        rows = mon.office_rows([claude], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: str(self.task))
+        task_rows = [row for row in rows if row.task == "task wp-1"]
+        self.assertEqual([(row.state, row.evidence) for row in task_rows],
+                         [(mon.IDLE, "claude 紀錄")])
+
+        self._codex("completed", {"id": "T9", "cwd": str(self.task),
+                                  "thread_source": "user", "originator": "codex-tui"},
+                    ["task_started", "task_complete"], age=10)
+        codex = mon.Process(82, 1, 82, "00:12", "S", "Codex CLI", "codex", "")
+        rows = mon.office_rows([codex], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: str(self.task))
+        task_rows = [row for row in rows if row.task == "task wp-1"]
+        self.assertEqual([(row.state, row.evidence) for row in task_rows],
+                         [(mon.IDLE, "codex 紀錄")])
+
+    def test_d6_process_role_comes_from_registered_agent_id(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-reviewer-agent")
+        proc = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+        rows = mon._d6_process_rows([proc], [], self.canonical, lambda pid: str(self.task))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual((rows[0].name, rows[0].role), ("claude reviewer", "reviewer"))
 
     def test_process_fallback_does_not_duplicate_transcript_task_row(self):
         self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},

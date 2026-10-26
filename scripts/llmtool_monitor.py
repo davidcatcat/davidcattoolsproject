@@ -3014,11 +3014,11 @@ def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical
     for number, proc in enumerate(procs, 1):
         cwd, latest = cwds[proc.pid], own[proc.pid]
         busy = latest is not None and running(latest)
-        place = _place(latest[0] if busy else cwd, canonical)
         where = _where(latest[0] if busy else cwd, canonical)
-        task = f"task {place[1]}" if place and place[0] == "task" else ""
         name = f"{prefix} {'worker' if proc.role == client_role else 'cli'} #{number}"
         if busy:
+            place = _place(latest[0], canonical)
+            task = f"task {place[1]}" if place and place[0] == "task" else ""
             detail = f"{where}：{_label(latest[1], 28) or '執行中'}{note}"
             rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), base + number,
                                   kind="worker", role="developer" if task else "", task=task,
@@ -3026,9 +3026,7 @@ def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical
         else:
             opened = _elapsed_seconds(proc.elapsed)
             since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
-            state = IDLE
-            detail = f"{where}：已開啟，沒有執行中的任務{since}{note}"
-            rows.append(OfficeRow(name, state, detail,
+            rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}{note}",
                                   opened if opened is not None else 0.0, base + number,
                                   kind="worker",
                                   evidence="程序"))
@@ -3729,23 +3727,19 @@ def _closed_claude_cli(rows: list[OfficeRow], sessions,
 def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical: str,
                     cwd_of=process_cwd) -> list[OfficeRow]:
     """Show a live agent CLI in its registered D6 task even without a transcript."""
-    cli_names = {
-        "Codex CLI": "codex developer",
-        "Codex CLI (node launcher)": "codex developer",
-        "Claude Code CLI": "claude developer",
-        "Claude Code CLI (node launcher)": "claude developer",
-        "OpenCode CLIENT": "opencode developer",
-        "OpenCode CLI": "opencode developer",
-        "OpenCode CLIENT (node launcher)": "opencode developer",
-        "OpenCode CLI (node launcher)": "opencode developer",
-    }
     covered = {row.task[5:] for row in rows
-               if row.task.startswith("task ") and row.state == WORKING}
+               if row.task.startswith("task ")}
     seen = set(covered)
     out = []
     for proc in sorted(processes, key=lambda item: item.pid):
-        name = cli_names.get(proc.role)
-        if not name:
+        base_role = proc.role.removesuffix(" (node launcher)")
+        if proc.role in CLAUDE_CLI_ROLES or base_role == "Claude Code CLI":
+            family = "claude"
+        elif proc.role in OPENCODE_ROLES or base_role in OPENCODE_ROLES:
+            family = "opencode"
+        elif base_role == "Codex CLI":
+            family = "codex"
+        else:
             continue
         cwd = cwd_of(proc.pid)
         place = _place(cwd, canonical)
@@ -3755,10 +3749,13 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         if not registered or os.path.realpath(cwd) != registered[0]:
             continue
         seen.add(place[1])
+        agent = registry_details(canonical).get(place[1], ("", "", 0, 0, ""))[1]
+        found = re.search(r"(?:^|[-_])(developer|reviewer|pm|ui)(?:[-_]agent)?$", agent)
+        role = found.group(1) if found else ""
         age = _elapsed_seconds(proc.elapsed)
-        out.append(OfficeRow(name, WORKING, f"task {place[1]}（程序 cwd）",
+        out.append(OfficeRow(f"{family} {role}".rstrip(), WORKING, f"task {place[1]}（程序 cwd）",
                              age if age is not None else 0.0, 10,
-                             role="developer", task=f"task {place[1]}", evidence="程序"))
+                             role=role, task=f"task {place[1]}", evidence="程序"))
     return out
 
 
