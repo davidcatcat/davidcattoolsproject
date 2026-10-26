@@ -858,8 +858,8 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False):
         process.stderr.close()
 
 
-def _worktree_diff(root, source_sha, write_paths):
-    """Return a bounded source diff including safe, in-scope untracked files."""
+def _worktree_diff(root, source_sha):
+    """Return a bounded source diff including safe untracked files."""
     tracked_patch = _git(root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
         '--no-renames', source_sha, '--'), limit=_GIT_LIMIT)
     tracked_raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff',
@@ -1098,7 +1098,7 @@ def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
         _stop('WORKTREE_PATH_INVALID')
     if any(path not in set(write_paths) for path in untracked):
         _stop('WORKTREE_UNTRACKED_FILES')
-    changed, patch = _worktree_diff(root, source_sha, write_paths)
+    changed, patch = _worktree_diff(root, source_sha)
     if not changed and not patch:
         _stop('WORKTREE_SCOPE_MISMATCH')
     for path in changed:
@@ -1107,6 +1107,8 @@ def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
                 any(part in ('', '.', '..') for part in parts) or '\\' in path or
                 any(ord(char) < 0x20 or ord(char) >= 0x7f for char in path)):
             _stop('WORKTREE_PATH_INVALID')
+    if any(path not in set(write_paths) for path in changed):
+        _stop('WORKTREE_SCOPE_MISMATCH')
 
     paths = sorted(set(read_paths) | set(write_paths))
     if not paths or len(paths) > 32:

@@ -1485,7 +1485,7 @@ def run_task_opencode_delegate(args, *, store):
                 after.branch != registration.branch or after.head != snapshot.head):
             raise LLMToolError('OpenCode changed the registered Git identity')
         changed_paths, artifact_raw = task_completion._worktree_diff(
-            registration.root, snapshot.head, write_paths)
+            registration.root, snapshot.head)
         if len(artifact_raw) > 64 * 1024:
             raise LLMToolError('OpenCode diff exceeds the supported size')
         artifact = artifact_raw.decode('utf-8', 'strict')
@@ -1829,7 +1829,7 @@ def run_task_codex_delegate(args, *, store):
                     evidence['executor_native_session'] = 'VERIFIED'
         ignored_rejection = _ignored_output_rejection(registration.root, ignored_before)
         changed_paths, raw = task_completion._worktree_diff(
-            registration.root, snapshot.head, write_paths)
+            registration.root, snapshot.head)
         if len(raw) > 64 * 1024:
             raise LLMToolError('Codex diff exceeds the supported size')
         artifact = raw.decode('utf-8', 'strict')

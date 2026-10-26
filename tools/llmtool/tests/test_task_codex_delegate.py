@@ -615,15 +615,14 @@ class CodexDelegateTests(unittest.TestCase):
         new_path = 'new_module.py'
         (self.root / new_path).write_text('VALUE = 3\n')
         before_index = self._completion_git(self.root, ('write-tree',))
-        changed, raw = task_completion._worktree_diff(self.root, self.source_sha, [new_path])
+        changed, raw = task_completion._worktree_diff(self.root, self.source_sha)
         artifact = raw.decode('utf-8')
         self.assertEqual(changed, (new_path,))
         self.assertIsNone(task_submission_cli._developer_output_rejection(
             artifact, [new_path], allow_new_files=True))
         self.assertEqual(self._completion_git(self.root, ('write-tree',)), before_index)
 
-        outside, outside_raw = task_completion._worktree_diff(
-            self.root, self.source_sha, ['src.py'])
+        outside, outside_raw = task_completion._worktree_diff(self.root, self.source_sha)
         self.assertEqual(outside, (new_path,))
         self.assertEqual(task_submission_cli._developer_output_rejection(
             outside_raw.decode('utf-8'), ['src.py']), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
@@ -631,7 +630,7 @@ class CodexDelegateTests(unittest.TestCase):
         (self.root / new_path).unlink()
         (self.root / new_path).symlink_to(self.root / 'src.py')
         with self.assertRaises(task_completion.LLMToolError) as symlink:
-            task_completion._worktree_diff(self.root, self.source_sha, [new_path])
+            task_completion._worktree_diff(self.root, self.source_sha)
         self.assertEqual(symlink.exception.completion_code, 'WORKTREE_FILE_UNSUPPORTED')
 
 

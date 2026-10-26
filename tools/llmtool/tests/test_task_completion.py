@@ -401,6 +401,22 @@ class TaskCompletionTests(unittest.TestCase):
                 read_paths=[new_path], write_paths=[new_path])
         self.assertEqual(symlink.exception.completion_code, 'WORKTREE_FILE_UNSUPPORTED')
 
+    def test_worktree_snapshot_rejects_tracked_change_outside_write_paths(self):
+        in_path = self.root / 'in.py'
+        out_path = self.root / 'out.py'
+        in_path.write_text('VALUE = 1\n')
+        out_path.write_text('VALUE = 2\n')
+        self._git('add', 'in.py', 'out.py')
+        self._git('commit', '-m', 'add scoped files')
+        self.source_sha = self._git('rev-parse', 'HEAD')
+        out_path.write_text('VALUE = 3\n')
+
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion._worktree_snapshot(
+                root=self.root, source_sha=self.source_sha,
+                read_paths=['in.py'], write_paths=['in.py'])
+        self.assertEqual(rejected.exception.completion_code, 'WORKTREE_SCOPE_MISMATCH')
+
     def test_uncommitted_worktree_rejects_stale_artifact_or_untracked_file(self):
         path = self.root / self.source_path
         path.write_text(path.read_text() + '\n# live uncommitted change\n')
