@@ -11,11 +11,14 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool.action_contract import TaskBinding
 from llmtool.errors import LLMToolError
 from llmtool import worker_dispatch
+from llmtool import task_submission_cli as task_submission_cli_module
+from llmtool import codex_direct_developer
 from llmtool.task_store import TaskStore, TaskStoreConflict, new_id
 from llmtool import task_store as task_store_module
 from llmtool.task_submission_cli import _record, _task_view
@@ -242,6 +245,78 @@ class TaskStoreTests(unittest.TestCase):
             'blocked_reason': 'must not be attached to an unknown outcome'}
         with self.assertRaises(LLMToolError):
             self.store.update(task['task_id'], developer=not_blocked)
+
+    def test_codex_delegate_screens_blocked_reason_before_persisting(self):
+        self._allow_codex_dispatch()
+        root = str(Path.cwd())
+        snapshot = SimpleNamespace(root=root, common_dir='/registered/common',
+                                   branch='task-branch', head='a' * 40)
+        registration = SimpleNamespace(
+            task_id='executor-task', trusted_agent_id='agent',
+            session_ref='session-ref', native_session_id=None, root=root,
+            common_dir=snapshot.common_dir, branch=snapshot.branch,
+            env2_pass_marker='pass')
+        args = SimpleNamespace(
+            task_id=None, selection_source='USER', context_stdin=False,
+            executor_task='executor-task', read_path=['src.py'],
+            write_path=['src.py'], acceptance=['the outcome is recorded'],
+            egress_basis='Approved non-sensitive test context.')
+
+        cases = (
+            ('bad\x01reason', 'CODEX_BLOCKED', None, 'BLOCKED', False),
+            ('api_key=secret-value', 'CODEX_BLOCKED', None, 'BLOCKED', False),
+            ('The requested change cannot be made safely.', 'CODEX_BLOCKED',
+             'The requested change cannot be made safely.', 'BLOCKED', False),
+            ('The requested change cannot be made safely.',
+             'CODEX_RESULT_EVIDENCE_UNKNOWN', None, 'UNKNOWN', True),
+        )
+        for reason, expected_code, expected_reason, expected_execution, evidence_failure in cases:
+            with self.subTest(reason=reason[:20]):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                args.task_id = task['task_id']
+                result = SimpleNamespace(
+                    status='BLOCKED', blocked_reason=reason,
+                    thread_id='12345678-1234-4234-8234-123456789abc',
+                    exit_code=0, stdout_sha256='d' * 64, elapsed_ms=25,
+                    cleanup_status='CONFIRMED', usage=None)
+                with patch.object(task_submission_cli_module.task_completion,
+                                  'validate_task_binding'), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'collect_git_snapshot', return_value=snapshot), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'bind_executor_task', return_value=(registration, snapshot)), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'validate_env2_pass_marker'), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     'read_d6_registration',
+                                     side_effect=(RuntimeError('evidence unavailable')
+                                                  if evidence_failure else None),
+                                     return_value=registration), \
+                        patch.object(task_submission_cli_module.task_completion,
+                                     '_git', return_value=b''), \
+                        patch.object(task_submission_cli_module,
+                                     '_bootstrap_registered_d6'), \
+                        patch.object(task_submission_cli_module,
+                                     '_ignored_file_fingerprints', return_value={}), \
+                        patch.object(task_submission_cli_module,
+                                     '_codex_developer_profile',
+                                     return_value=({'model': 'gpt-6-luna'}, 'high')), \
+                        patch.object(task_submission_cli_module,
+                                     '_ignored_output_rejection', return_value=None), \
+                        patch.object(codex_direct_developer, 'run', return_value=result), \
+                        patch.object(task_submission_cli_module.dataclasses, 'replace',
+                                     side_effect=lambda value, **changes: value):
+                    task_submission_cli_module.run_task_codex_delegate(args, store=self.store)
+
+                saved = self.store.get(task['task_id'])['developer']
+                self.assertEqual(saved['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(saved['error_code'], expected_code)
+                self.assertEqual(saved['execution']['status'], expected_execution)
+                self.assertEqual(saved['execution']['process_exit_code'], 0)
+                self.assertEqual(saved['execution']['native_session_id'], result.thread_id)
+                self.assertIsNone(saved['usage'])
+                self.assertEqual(saved.get('blocked_reason'), expected_reason)
 
     def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
         self._allow_codex_dispatch()

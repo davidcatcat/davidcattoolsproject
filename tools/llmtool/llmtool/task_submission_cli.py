@@ -1622,13 +1622,17 @@ def run_task_codex_delegate(args, *, store):
                 store, task['task_id'], developer, rejection, result.usage, artifact)
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
-                             execution=execution, usage=result.usage,
-                             blocked_reason=result.blocked_reason)
+                             execution=execution, usage=result.usage)
+            try:
+                developer['blocked_reason'] = _screen_text(result.blocked_reason, 2048)
+            except LLMToolError:
+                developer.pop('blocked_reason', None)
         else:
             developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                 artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                 error_code=None, execution=execution, usage=result.usage)
     except Exception:
+        developer.pop('blocked_reason', None)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_RESULT_EVIDENCE_UNKNOWN',
             execution={'status': 'UNKNOWN', 'native_session_id': result.thread_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
