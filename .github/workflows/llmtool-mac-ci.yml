@@ -12,15 +12,19 @@ on:
   push:
     branches:
       - main
+    # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
     paths:
       - 'tools/llmtool/**'
+      - '!tools/llmtool/*.md'
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
       - '.github/workflows/llmtool-mac-ci.yml'
       - 'tools/mac-runner/**'
   pull_request:
+    # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
     paths:
       - 'tools/llmtool/**'
+      - '!tools/llmtool/*.md'
       - 'scripts/llmtool_monitor.py'
       - 'scripts/test_llmtool_monitor.py'
       - '.github/workflows/llmtool-mac-ci.yml'
