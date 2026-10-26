@@ -1544,6 +1544,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertTrue(context_section.startswith('Context:\nVALUE = 1\n'))
         self.assertTrue(context_section.endswith(
             'Return only the unified diff, starting with "diff --git".'))
+        self.assertIn('The model has no tools, cannot read files, and all needed file content is provided below.',
+                      packet_text)
         self.assertEqual(developer_packet['write_paths'], [target])
         self.assertNotIn('original_request', developer_packet)
         self.assertNotIn('pm_response', developer_packet)
@@ -1552,6 +1554,29 @@ class TaskSubmissionCLITests(unittest.TestCase):
         saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(saved['developer']['artifact'], patch_text)
         self.assertEqual(len(client.calls), 1)
+
+    def test_apply_check_failure_is_durably_rejected(self):
+        task = self._pm_task_with_assignment()
+        client = FakeClient(Reply(
+            'diff --git a/sample.py b/sample.py\n--- a/sample.py\n+++ b/sample.py\n'
+            '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n', {}))
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value=None), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                patch('llmtool.task_submission_cli._text_developer_apply_check',
+                      return_value=False), redirect_stdout(output):
+            code = run_task_delegate(self._delegate_args(
+                task, read_path=['sample.py'], write_path=['sample.py']))
+        self.assertEqual(code, 1)
+        developer = json.loads(output.getvalue())['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(developer['error_code'], 'DEVELOPER_OUTPUT_APPLY_FAILED')
+        self.assertIsNone(developer['artifact'])
+        saved = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_APPLY_FAILED')
 
     def test_pm_recommendation_not_text_or_wrong_risk_cannot_authorize_gw(self):
         task = self._pm_task_with_assignment()

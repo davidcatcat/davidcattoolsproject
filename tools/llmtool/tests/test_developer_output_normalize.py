@@ -140,6 +140,21 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertEqual(unchanged, raw)
         self.assertEqual(unchanged_tokens, ())
 
+    def test_source_anchor_preserves_and_accepts_missing_final_newline(self):
+        raw = (self.HEADER + '@@ -1 +1 @@\n-old\n+new\n')
+        anchored, tokens = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: 'old'})
+        self.assertIn(r'\ No newline at end of file', anchored)
+        self.assertEqual(anchored.count(r'\ No newline at end of file'), 2)
+        self.assertIn('HUNK_REANCHORED', tokens)
+        accepted = (self.HEADER + '@@ -1 +1 @@\n-old\n'
+                    r'\ No newline at end of file' + '\n+new\n'
+                    r'\ No newline at end of file' + '\n')
+        anchored, _, rejection = _developer_normalized_output(
+            accepted, [self.PATH], source_files={self.PATH: 'old'})
+        self.assertIsNone(rejection)
+        self.assertIn(r'\ No newline at end of file', anchored)
+
     def test_source_anchor_rejects_invented_or_ambiguous_old_side(self):
         invented = (self.HEADER + '@@ -1 +1 @@\n-invented\n+replacement\n')
         ambiguous = (self.HEADER + '@@ -1 +1 @@\n-same\n+replacement\n')
