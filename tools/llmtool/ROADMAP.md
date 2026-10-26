@@ -29,7 +29,7 @@ implementation/runtime 的技術能力，不是 authorization、policy 或 appro
 
 ## A11 single delivery roadmap — llmtool replaces temporary ai-loop (owner decision 2026-10-09)
 
-**Authoritative priority and numbering:** A0–A12 are the product milestones.
+**Authoritative priority and numbering:** A0–A13 are the product milestones.
 The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcatcat/davidcattoolsproject/pull/50) are **historical release/measurement aliases**, not separate tracks, duplicate executors or new sequential blockers. Keep the labels when citing old issues, tests and reports, but **all new plans, status and work contracts must name their owning A milestone**. Preserve PR #50 and subsequent historical evidence unchanged. The [Claude review](https://github.com/davidcatcat/davidcattoolsproject/pull/69) documents why much of C was already planned under A; the owner confirmed this consolidation and the temporary-runner transition after that review.
 
 **Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review by the fixed Claude Reviewer defined in AGENTS.md, deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
@@ -197,6 +197,7 @@ current roadmap.
 | A11b — Execution, Approval & Recovery | **IN PROGRESS — A11b.1 PR #32, A11b.2.1 PR #43, A11b.2.2.1 PR #49, and private F1 A11b.2.2.2 PR #84 DONE/merged** | Next F2 real-repo mutation design + A11b.3 approval semantics; F2 execution NOT AUTHORIZED |
 | A11c — Integration & Real-world Acceptance | **WP1, WP4a and WP2 slices merged ([work packages and gaps](#a11c-work-packages-and-continuation-runtime-gaps)); S1a DONE/MERGED; S1b contract merged; Product A fake-only MERGED; B1 fake-first source MERGED via PR #133; T1 HOLD; M1b useful real-task adoption and full M2 NOT_VERIFIED** | **Priority: verify first M1a/M1b real-task adoption now**, independently of F2; finish separately granted production foreground Worker trial, then verified same-Integrator resume / delegated-Worker M2. Full native cutover still needs all applicable A11b/QA/Mac/route gates; F2 specifically gates direct llmtool Git mutation |
 | A12 — Remote Frontends / Telegram Agent | **FUTURE OPTIONAL** | Reuse A11 core task/run/event/error/approval semantics; no parallel execution stack |
+| A13 — Distribution, Installation & Updates | **FUTURE / PLANNED — NOT STARTED** ([Issue #396](https://github.com/davidcatcat/davidcattoolsproject/issues/396)) | End-user install, onboarding, release/upgrade/uninstall; A11c priority unchanged; never claim unsupported platform/agent capabilities |
 
 Current gate evidence: [QG-S1](../../reports/llmtool_qg_s1_security_baseline_20261005.md)
 PASS WITH REQUIRED A11b DESIGN CONTROLS; [QA round 2](../../reports/llmtool_qg_qa1_targeted_rereview_round2_20261005.md)
@@ -1425,6 +1426,22 @@ Provider != Role != Agent != Skill；遠端入口不因 transport 或 provider c
 
 Frontend 擴充方向：CLI / Interactive Chat、Telegram、Web UI。各入口共用 runtime
 與相同的 task lifecycle、事件及 approval 語意，不另建獨立的 orchestration。
+
+## A13 — Distribution, Installation & Updates — FUTURE / NOT STARTED
+
+**Owner decision (2026-10-26):** Add a future product-release milestone, tracked by [Issue #396](https://github.com/davidcatcat/davidcattoolsproject/issues/396). This is **planning only**. No Developer dispatch, packaging, release, date commitment, new dependency, or authorization to change existing Owner/Host/worktree security gates. A11c's real PM/Worker/continuation and Mac pilot take priority; A12 remains separately planned.
+
+**User outcome:** Someone on a supported computer can obtain a trusted llmtool release, install it without cloning this repository or manually creating a Python virtualenv, configure **their own** Provider CLI/API access, start CLI/TUI, and update or uninstall safely.
+
+| Slice | Future deliverable / acceptance |
+| --- | --- |
+| A13.0 — Portability, scope and trust | Separate portable base CLI/chat from full PM/Agent/worktree functionality; map machine-specific canonical paths, repo/Issue pins, D6/Host registration, CLI version constraints and security/authorization boundaries. Preserve fail-closed behavior and review any trusted configurability. Start with the [2026-10-20 portability assessment](../../reports/llmtool_portability_assessment_20261020.md) and [Issue #369](https://github.com/davidcatcat/davidcattoolsproject/issues/369). |
+| A13.1 — Cross-platform packaging | Target **macOS Intel + Apple Silicon** and **Linux x86_64 + ARM64** initially, subject to actual native tests; evaluate standalone artifacts/archives and Python wheel/pipx; define artifact provenance, checksums, code signing/notarization where applicable. Windows is **future only** and remains NOT_SUPPORTED/NOT_TESTED until dedicated Windows portability, security and native QA gates pass. |
+| A13.2 — Install and first run | Clear download/install command or installer; safe PATH/preflight; `llmtool --version`, diagnostics/doctor and `configure` onboarding; help for user-installed/authenticated Codex, Claude, OpenCode or personal API Providers. Never ship, enumerate, migrate, print or reuse the Owner's credentials, company config/VPN, or another user's auth state. |
+| A13.3 — Release and lifecycle | GitHub Releases/official channel, version policy, changelog, verifiable binaries, dependency/supply-chain controls, safe updates, documented rollback/compatibility policy, and uninstall without silent user-data removal. |
+| A13.4 — Clean-machine acceptance | Prove download → verify → install → first-run configuration → CLI/TUI smoke → upgrade → uninstall on supported OS/architecture combinations using fresh user HOME/PATH and non-Owner machines. Publish security/release QA, exact-artifact evidence, independent review and applicable CI/native gates; missing Windows evidence stays NOT_RUN. |
+
+**Definition of Done:** A non-developer can complete the supported basic workflow without Git clone or manual virtualenv; package integrity and platform support are evidence-based; Provider authentication remains user-owned; full PM/Agent orchestration is not advertised as portable until its own D6/Host/Session/authorization tests pass; documentation, upgrade/uninstall behavior, independent security/QA and release evidence are complete. A13 is not done merely because `pip install -e tools/llmtool` works on another computer.
 
 ## 未來 config 方向（目前 schema 尚未接受此完整形式）
 
