@@ -3000,27 +3000,31 @@ def _open_cli_rows(clis: list[Process], rows: list[OfficeRow], now: float, canon
                    cwd_of) -> list[OfficeRow]:
     """An open Codex or Claude CLI that no session row shows still gets a
     row, the one an open OpenCode CLI without a session gets, wherever it
-    is. Nothing records which CLI holds which session, so in each place of
-    this repository the live session rows are matched to CLIs by count."""
+    is. Nothing records which CLI holds which session, so session rows are
+    matched to CLIs by count: first in the CLI's own folder, then, as in
+    _cli_rows, a session working elsewhere takes a CLI left over."""
     out = []
     for prefix, order in (("codex", 45), ("claude", 47)):
-        shown: dict[str, int] = {}
-        for row in rows:
-            if (row.name.startswith(prefix) and not row.group and row.kind != "worker"
-                    and row.state not in (CLOSED, DONE)):
-                shown[row.task] = shown.get(row.task, 0) + 1
+        shown = [row.task for row in rows
+                 if row.name.startswith(prefix) and not row.group and row.kind != "worker"
+                 and row.state not in (CLOSED, DONE)]
         idle = []
         for proc in clis:
             place = _place(cwd_of(proc.pid), canonical)
             if family(proc.role).lower() != prefix:
                 continue
-            # Session rows are read only for this repository.
             task = None if place is None else f"task {place[1]}" if place[0] == "task" else ""
-            if shown.get(task, 0):
-                shown[task] -= 1
+            if task in shown:
+                shown.remove(task)
             else:
                 idle.append(proc)
-        out += _cli_rows(idle, [], now, canonical, cwd_of, prefix, "", order, "")
+        # A Bash `cd` into a D6 moves the session's place, not the CLI's cwd.
+        idle = idle[len(shown):]
+        for proc, row in zip(idle, _cli_rows(idle, [], now, canonical, cwd_of, prefix, "", order, "")):
+            # Sessions outside this repository are not read: only that it is open is known.
+            if _place(cwd_of(proc.pid), canonical) is None:
+                row = replace(row, state=UNCHECKED, detail=f"{_where(cwd_of(proc.pid), canonical)}：已開啟")
+            out.append(row)
     return out
 
 
@@ -3657,8 +3661,8 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
 CLAUDE_CLI_ROLES = ("Claude Code CLI", "Claude Code CLI (node launcher)")
 AGENT_FAMILIES = ("Claude", "Codex", "OpenCode", "Kilo")
 # Roles of an open agent CLI (also behind its npm launcher): each is one member.
-AGENT_CLI_ROLES = ("Claude Code CLI", "Claude Code background session", "Codex CLI",
-                   "AGY CLI") + OPENCODE_ROLES + KILO_ROLES
+AGENT_CLI_ROLES = CLAUDE_CLI_ROLES[:1] + ("Claude Code background session", "Codex CLI",
+                                         "AGY CLI") + OPENCODE_ROLES + KILO_ROLES
 
 
 def agent_clis(processes: list[Process], sessions=None) -> list[Process]:

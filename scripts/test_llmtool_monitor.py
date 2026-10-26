@@ -1496,12 +1496,30 @@ class OfficeViewTests(unittest.TestCase):
                                claude_root=str(self.claude), canonical=self.canonical,
                                opencode_db=os.path.join(self.tmp.name, "none.db"),
                                cwd_of=lambda pid: elsewhere)
-        clis = sorted((row.name, row.state, row.detail.split("：")[0]) for row in rows
-                      if " cli #" in row.name)
-        self.assertEqual(clis, [("claude cli #1", mon.IDLE, "其他資料夾"),
-                                ("codex cli #1", mon.IDLE, "其他資料夾"),
-                                ("opencode cli #1", mon.IDLE, "其他資料夾")])
+        clis = sorted((row.name, row.state, row.detail) for row in rows if " cli #" in row.name)
+        # Codex/Claude sessions elsewhere are not read, so only "open" is claimed;
+        # OpenCode reads every folder's sessions.
+        self.assertEqual(clis, [("claude cli #1", mon.UNCHECKED, "其他資料夾：已開啟"),
+                                ("codex cli #1", mon.UNCHECKED, "其他資料夾：已開啟"),
+                                ("opencode cli #1", mon.IDLE,
+                                 "其他資料夾：已開啟，沒有執行中的任務，已開 5 分鐘")])
         self.assertEqual(mon.summary(procs, [], []), "Claude 1  Codex 1  OpenCode 1")
+
+    def test_session_that_cd_into_a_d6_keeps_its_cli_to_one_row(self):
+        # The CLI was opened in the canonical checkout; its session `cd`s into the D6.
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=5)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "81.json").write_text(json.dumps(
+            {"pid": 81, "sessionId": "s1", "status": "busy"}), encoding="utf-8")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Claude Code CLI", "claude", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertEqual([(row.state, row.task) for row in rows if row.name.startswith("claude")],
+                         [(mon.WORKING, "task wp-1")])
+        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 1")
 
     def test_process_fallback_does_not_duplicate_transcript_task_row(self):
         self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},
