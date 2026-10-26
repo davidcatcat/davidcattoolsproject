@@ -32,7 +32,7 @@ implementation/runtime 的技術能力，不是 authorization、policy 或 appro
 **Authoritative priority and numbering:** A0–A13 are the product milestones; A13 is future/deferred for end-user release and does not change the A11c delivery priority.
 The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcatcat/davidcattoolsproject/pull/50) are **historical release/measurement aliases**, not separate tracks, duplicate executors or new sequential blockers. Keep the labels when citing old issues, tests and reports, but **all new plans, status and work contracts must name their owning A milestone**. Preserve PR #50 and subsequent historical evidence unchanged. The [Claude review](https://github.com/davidcatcat/davidcattoolsproject/pull/69) documents why much of C was already planned under A; the owner confirmed this consolidation and the temporary-runner transition after that review.
 
-**Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review by the fixed Claude Reviewer defined in AGENTS.md, deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
+**Product goal:** `llmtool` coordinates scoped Codex/OpenCode implementation, independent formal review by a Reviewer from the other model family as defined in AGENTS.md (Claude for Codex/OpenCode changes, Codex for Claude changes), deterministic tests, bounded repair, permitted Git/PR publication and optional permitted Company LLM Developer assistance/triage, **including developing llmtool itself**. Deliver reliably before making broad Token-savings claims. Avoid the owner carrying prompts between agents; the owner defines the tool goal, reports usability problems and accepts results. The AI coordinator owns technical planning, independent gates and authorized eligible merges.
 
 ### A11c developer-worktree environment reuse — OPEN (Owner 2026-10-22; tracked by #267)
 
@@ -1345,7 +1345,7 @@ CHANGES_REQUIRED verdict and does not grant mutation.
 | S1a, delivered | PR #128 task inspect / explicit independent expectation, replay and read-only preview | No agent/provider/repair authority |
 | S1b A/B1, delivered source | PR #131 collector/packet/verdict/fake flow; PR #133 host adapters and one-use provider ledger | Public production factory remains unavailable; native T1 HOLD and production enablement are not passed |
 | Next S1b preparation | One finite deterministic task worker, existing events/paired contracts, fake clocks/transports and dedup; no model while waiting | Separate source task after this docs contract's independent review/merge and genuine C3; no real calls or new service |
-| Read-only native handoff | Claude author READY -> exact-SHA advisory/pre-review (optional) -> fixed Claude formal review -> original Claude notification/receipt -> worker exit | Any Codex transport is advisory/pre-review only and cannot replace the fixed Claude formal gate; independently reviewed transport/identity/tool/route extension plus explicit native synthetic scope; fake PASS never supplies a grant |
+| Read-only native handoff | Claude author READY -> exact-SHA advisory/pre-review (optional) -> formal review by the other model family (AGENTS.md *Formal Reviewer*; for a Claude author that is an independent Codex Reviewer) -> original Claude notification/receipt -> worker exit | A Codex Reviewer transport is wired only after an independently reviewed transport/identity/tool/route extension plus explicit native synthetic scope; fake PASS never supplies a grant |
 | S2, later | Permission-controlled repair/tests/publication and actual end-to-end execution | A11b approval/containment/recovery/audit, scoped action grants and separate F2 authority; no automatic merge |
 | A11c.2 / cutover | Independently accepted native task -> review -> bounded authorized repair -> Draft PR or STOP | All applicable gates including provider/privacy/native evidence; ai-loop fallback is not retired early |
 
@@ -1362,10 +1362,11 @@ delivery-pending snapshot only. It does not establish arbitrary GitHub wake,
 closed-TUI recovery, zero-human production pickup or the complete cross-CLI loop.
 CROSS_CLI_AUTO_HANDOFF_NOT_VERIFIED remains the overall status.
 
-The current B route is a fresh isolated Claude text/no-tools child. Any future
-Codex Reviewer transport is optional advisory/pre-review only and requires an
-independently reviewed S1b host/transport extension; it cannot replace the fixed
-Claude formal gate. Production Host/ledger/T2/T3 remain blocked; T1 additional
+The current B route is a fresh isolated Claude text/no-tools child. A future
+Codex Reviewer transport requires an independently reviewed S1b host/transport
+extension before wiring; once wired, formal review follows the cross-family rule
+in AGENTS.md (#357), so a Codex Reviewer is the formal gate for Claude-authored
+changes and advisory otherwise. Production Host/ledger/T2/T3 remain blocked; T1 additional
 native measurement is
 [HOLD_REPRIORITIZE](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6145275723).
 Read-only deterministic/fake development may be separately authorized before
