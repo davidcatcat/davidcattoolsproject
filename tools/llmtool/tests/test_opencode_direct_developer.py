@@ -126,10 +126,27 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             {'action': 'edit', 'resource': 'source.py', 'effect': 'allow'},
         ])
         self.assertEqual(value['mcp'], {'servers': {}})
-        self.assertEqual(value['agents'][AGENT]['steps'], 3)
+        self.assertEqual(value['agents'][AGENT]['steps'], 12)
         self.assertEqual(value['agents'][AGENT]['permissions'], value['permissions'])
         self.assertEqual(value['policies'][-1], {
             'action': 'integration.use', 'resource': '*', 'effect': 'deny'})
+
+    def test_configured_agent_steps_are_bounded(self):
+        value = configuration(read_paths=['source.py'], write_paths=['source.py'], steps=23)
+        self.assertEqual(value['agents'][AGENT]['steps'], 23)
+        for steps in (2, 51, True, 12.0, '12'):
+            with self.subTest(steps=steps), self.assertRaises(DirectOpenCodeError) as caught:
+                configuration(read_paths=['source.py'], write_paths=['source.py'],
+                              steps=steps)
+            self.assertEqual(caught.exception.direct_opencode_code,
+                             'OPENCODE_STEPS_INVALID')
+
+    def test_no_final_text_after_step_limit_has_distinct_error(self):
+        raw = '\n'.join([self.event('step_finish', part={}) for _ in range(12)]).encode()
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events(raw)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_STEPS_EXHAUSTED')
 
     def test_json_event_parser_binds_one_session_and_reports_usage(self):
         raw = ('\n'.join((
