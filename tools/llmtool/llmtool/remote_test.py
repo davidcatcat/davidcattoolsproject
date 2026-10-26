@@ -38,7 +38,8 @@ def run(argv,**kw): return subprocess.run(argv,stdout=subprocess.PIPE,stderr=sub
 def nobody(work,argv,env=None):
     values={"PATH":"/usr/bin:/bin","HOME":work,"TMPDIR":work,"PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1"}
     values.update(env or {})
-    return ["sudo","-n","-u","nobody","env","-i"]+[k+"="+v for k,v in values.items()]+argv
+    return ["sudo","-n","-u","nobody","env","-i","-C",work]+[k+"="+v for k,v in values.items()]+argv
+stage="workspace"
 try:
     f=run(["git","-C",repo,"fetch","--no-tags","--end-of-options","origin",ref],timeout=120)
     log+=f.stdout
@@ -56,19 +57,24 @@ try:
         info=os.stat(work)
         if info.st_uid!=uid or info.st_mode&0o777!=0o700: raise RuntimeError("workspace")
         try:
+            stage="archive"
             archive=run(["git","-C",repo,"archive",sha],timeout=30)
             log+=archive.stdout[:0]
             extracted=run(nobody(work,["tar","-xf","-","-C",work]),input=archive.stdout,timeout=30)
             log+=extracted.stdout
             if archive.returncode or extracted.returncode: raise RuntimeError("archive")
-            v=run(nobody(work,[python,"-m","venv",work+"/venv"]),cwd=work,timeout=60); log+=v.stdout
+            stage="venv"
+            v=run(nobody(work,[python,"-m","venv",work+"/venv"]),timeout=60); log+=v.stdout
             if v.returncode: raise RuntimeError("venv")
-            pip=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","-r","tools/llmtool/requirements-ci.txt"]),cwd=work,timeout=180); log+=pip.stdout
+            stage="requirements"
+            pip=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","-r","tools/llmtool/requirements-ci.txt"]),timeout=180); log+=pip.stdout
             if pip.returncode: raise RuntimeError("requirements")
-            package=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"]),cwd=work,timeout=180); log+=package.stdout
+            stage="package"
+            package=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"]),timeout=180); log+=package.stdout
             if package.returncode: raise RuntimeError("package")
+            stage="tests"
             for mod in mods:
-                test=run(nobody(work,[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"]),cwd=work+"/tools/llmtool",timeout=180); log+=test.stdout
+                test=run(nobody(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"]),timeout=180); log+=test.stdout
                 lines=[x.decode("utf8","replace").strip() for x in test.stdout.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
                 finals.append(next((line for line in reversed(lines)
                                     if line.endswith("OK") or line.endswith("FAILED") or
@@ -81,10 +87,10 @@ try:
         finally:
             gone=run(["sudo","-n","-u","nobody","rm","-rf","--",work],timeout=10); log+=gone.stdout
 except subprocess.TimeoutExpired as exc:
-    result="TIMEOUT"; code=124; log+=exc.stdout or b""
-except Exception:
+    result="TIMEOUT"; code=124; log+=exc.stdout or b""; log+=f"REMOTE_STAGE_FAILED {stage} {type(exc).__name__}\n".encode()
+except Exception as exc:
     if result not in ("SHA_MISMATCH","TIMEOUT"): result="FAIL"
-    code=code or 1
+    code=code or 1; log+=f"REMOTE_STAGE_FAILED {stage} {type(exc).__name__}\n".encode()
 log_dir_run=run(["sudo","-n","-u","nobody","mktemp","-d","/tmp/llmtool-remote-log.XXXXXX"],timeout=10)
 log_dir=log_dir_run.stdout.decode("utf8","replace").strip()
 if log_dir_run.returncode==0:
@@ -177,9 +183,10 @@ def _validate_remote_receipt(raw, *, sha, modules):
             any(x not in modules for x in receipt['failures']) or
             type(receipt['log_bytes']) is not int or not 0 <= receipt['log_bytes'] <= 20_000_000 or
             type(receipt['log_sha256']) is not str or re.fullmatch(r'[0-9a-f]{64}', receipt['log_sha256']) is None or
-            type(receipt['remote_log_path']) is not str or
-            re.fullmatch(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log',
-                         receipt['remote_log_path']) is None):
+            (receipt['remote_log_path'] is not None and
+             (type(receipt['remote_log_path']) is not str or
+              re.fullmatch(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log',
+                           receipt['remote_log_path']) is None))):
         return None
     if receipt['result'] == 'SHA_MISMATCH' and receipt['fetch_head'] == sha:
         return None

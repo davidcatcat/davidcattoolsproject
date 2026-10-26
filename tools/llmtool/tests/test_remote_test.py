@@ -136,6 +136,21 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('info.st_mode&0o777!=0o700', remote_test._REMOTE_SCRIPT)
         self.assertIn('log_info.st_mode&0o777!=0o700', remote_test._REMOTE_SCRIPT)
 
+    def test_nobody_commands_change_directory_through_env_without_cwd(self):
+        self.assertIn('["sudo","-n","-u","nobody","env","-i","-C",work]',
+                      remote_test._REMOTE_SCRIPT)
+        self.assertNotIn('cwd=work', remote_test._REMOTE_SCRIPT)
+        self.assertNotIn('cwd=work+', remote_test._REMOTE_SCRIPT)
+        self.assertIn('REMOTE_STAGE_FAILED {stage} {type(exc).__name__}',
+                      remote_test._REMOTE_SCRIPT)
+
+    def test_receipt_accepts_missing_log_path(self):
+        receipt = json.loads(self.receipt().decode())
+        receipt['remote_log_path'] = None
+        self.assertIsNotNone(remote_test._validate_remote_receipt(
+            json.dumps(receipt, separators=(',', ':')).encode(),
+            sha=SHA, modules=('test_remote_test',)))
+
     def test_identical_call_deduplicates_remote_run_receipt_and_event(self):
         first = self.run_it()
         second = self.run_it()

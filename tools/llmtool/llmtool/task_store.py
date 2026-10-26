@@ -407,9 +407,10 @@ def _validate_remote_test_receipts(record):
                 not 0 <= receipt['log_bytes'] <= 20_000_000 or
                 type(receipt.get('log_sha256')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', receipt['log_sha256']) is None or
-                type(receipt.get('remote_log_path')) is not str or
-                re.fullmatch(r'/tmp/llmtool-remote-test-[0-9a-f]{40}\.log',
-                             receipt['remote_log_path']) is None or
+                (receipt.get('remote_log_path') is not None and
+                 (type(receipt['remote_log_path']) is not str or
+                  re.fullmatch(r'/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log',
+                               receipt['remote_log_path']) is None)) or
                 type(receipt.get('command_digest')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', receipt['command_digest']) is None or
                 type(receipt.get('receipt_digest')) is not str or
