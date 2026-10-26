@@ -66,10 +66,11 @@ class CodexDirectDeveloperTests(unittest.TestCase):
 
     def run_fake(self, **kwargs):
         timeout = kwargs.pop('timeout', 3)
+        kwargs.setdefault('prelaunch_validate', lambda: True)
         with patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
             return direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
-                prelaunch_validate=lambda: True, timeout=timeout, **kwargs)
+                timeout=timeout, **kwargs)
 
     def test_done_captures_thread_usage_and_hardening_arguments(self):
         result = self.run_fake()
@@ -87,6 +88,57 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"', argv)
         self.assertIn('shell_environment_policy.set.PYTHONPYCACHEPREFIX="/tmp/codex-direct-cache"',
                       argv)
+
+    def test_shell_commands_get_an_explicit_path_with_the_worktree_venv_first(self):
+        # Regression (#352 G5): with inherit="none" and no PATH, every Codex
+        # shell command failed with "command not found" (exit 127).
+        argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
+                            pycache_prefix='/tmp/codex-direct-cache')
+        self.assertIn('shell_environment_policy.set.PATH="/opt/homebrew/bin:/usr/local/bin:'
+                      '/usr/bin:/bin"', argv)
+        venv_bin = self.root / 'tools' / 'llmtool' / '.venv' / 'bin'
+        venv_bin.mkdir(parents=True)
+        argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
+                            pycache_prefix='/tmp/codex-direct-cache')
+        self.assertIn('shell_environment_policy.set.PATH=' + json.dumps(
+            str(venv_bin) + ':/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin'), argv)
+        for bad in ('', 'relative/bin', '/bin:\nx'):
+            with self.subTest(path=bad), self.assertRaises(direct.DirectCodexError):
+                direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
+                             pycache_prefix='/tmp/c', command_path=bad)
+
+    def test_prelaunch_exception_is_typed_and_codex_is_not_started(self):
+        self.invoked.unlink(missing_ok=True)
+        def stale_binding():
+            raise LLMToolError('D6 or Git identity changed before Codex launch')
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake(prelaunch_validate=stale_binding)
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_D6_BINDING_CHANGED')
+        self.assertIs(caught.exception.attempted, False)
+        self.assertFalse(self.invoked.exists())
+
+    def test_unexpected_exception_after_launch_keeps_class_code_and_facts(self):
+        with patch.object(direct, '_result_from_events', side_effect=KeyError('secret')):
+            with self.assertRaises(direct.DirectCodexError) as caught:
+                self.run_fake()
+        error = caught.exception
+        self.assertEqual(error.direct_codex_code, 'CODEX_ADAPTER_KEY_ERROR')
+        self.assertIs(error.attempted, True)
+        self.assertEqual(error.process_exit_code, 0)
+        self.assertEqual(error.native_session_id, self.THREAD)
+        self.assertEqual(error.cleanup_status, 'CONFIRMED')
+        self.assertNotIn('secret', str(error))
+
+    def test_adapter_error_codes_are_stable_and_content_free(self):
+        coded = LLMToolError('details omitted')
+        coded.completion_code = 'D6_SOURCE_BINDING_MISMATCH'
+        self.assertEqual(direct.adapter_error_code(coded),
+                         'CODEX_ADAPTER_D6_SOURCE_BINDING_MISMATCH')
+        self.assertEqual(direct.adapter_error_code(LLMToolError('/some/path')),
+                         'CODEX_ADAPTER_LLMTOOL_ERROR')
+        self.assertEqual(direct.adapter_error_code(OSError()), 'CODEX_ADAPTER_OSERROR')
+        long_name = type('X' * 80 + 'Error', (Exception,), {})()
+        self.assertRegex(direct.adapter_error_code(long_name), r'^[A-Z0-9_]{1,64}$')
 
     def test_blocked_final_is_recorded_as_blocked(self):
         final = dict(self.final, status='BLOCKED', blocked_reason='cannot safely edit')
