@@ -1521,6 +1521,29 @@ class OfficeViewTests(unittest.TestCase):
                          [(mon.WORKING, "task wp-1")])
         self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 1")
 
+    def test_session_that_cd_into_a_d6_never_takes_a_cli_outside_the_repo(self):
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=5)
+        cwds = {70: "/elsewhere/x", 81: self.canonical, 82: self.canonical}
+        cli = lambda pid: mon.Process(pid, 1, pid, "30:00", "S+", "Claude Code CLI", "claude", "")
+
+        def claude_rows(procs):
+            rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                   claude_root=str(self.claude), canonical=self.canonical,
+                                   cwd_of=cwds.get)
+            return sorted((row.state, row.detail) for row in rows if row.name.startswith("claude"))
+
+        procs = [cli(70), cli(81)]
+        self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
+                                              (mon.UNCHECKED, "其他資料夾：已開啟")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 2")
+        # Two canonical CLIs for one session that moved: which is free is a guess.
+        procs.append(cli(82))
+        self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
+                                              (mon.UNCHECKED, "其他資料夾：已開啟"),
+                                              (mon.UNCHECKED, "本 repo：已開啟")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 3")
+
     def test_process_fallback_does_not_duplicate_transcript_task_row(self):
         self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},
                     ["task_started"], age=5)

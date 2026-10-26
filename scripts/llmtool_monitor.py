@@ -3001,8 +3001,10 @@ def _open_cli_rows(clis: list[Process], rows: list[OfficeRow], now: float, canon
     """An open Codex or Claude CLI that no session row shows still gets a
     row, the one an open OpenCode CLI without a session gets, wherever it
     is. Nothing records which CLI holds which session, so session rows are
-    matched to CLIs by count: first in the CLI's own folder, then, as in
-    _cli_rows, a session working elsewhere takes a CLI left over."""
+    matched to CLIs by count: first in the CLI's own folder, then a session
+    working elsewhere in this repository takes a CLI left over in it. Where
+    that leaves the pairing a guess, or the CLI's sessions are not read,
+    only that it is open is claimed."""
     out = []
     for prefix, order in (("codex", 45), ("claude", 47)):
         shown = [row.task for row in rows
@@ -3018,11 +3020,13 @@ def _open_cli_rows(clis: list[Process], rows: list[OfficeRow], now: float, canon
                 shown.remove(task)
             else:
                 idle.append(proc)
-        # A Bash `cd` into a D6 moves the session's place, not the CLI's cwd.
-        idle = idle[len(shown):]
+        # A Bash `cd` into a D6 moves the session's place, not the CLI's cwd;
+        # sessions outside this repository are not read.
+        inside = [proc for proc in idle if _place(cwd_of(proc.pid), canonical) is not None]
+        taken, guessed = inside[:len(shown)], inside[len(shown):] if shown else []
+        idle = [proc for proc in idle if proc not in taken]
         for proc, row in zip(idle, _cli_rows(idle, [], now, canonical, cwd_of, prefix, "", order, "")):
-            # Sessions outside this repository are not read: only that it is open is known.
-            if _place(cwd_of(proc.pid), canonical) is None:
+            if proc in guessed or proc not in inside:
                 row = replace(row, state=UNCHECKED, detail=f"{_where(cwd_of(proc.pid), canonical)}：已開啟")
             out.append(row)
     return out
