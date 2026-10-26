@@ -542,15 +542,21 @@ def run_task_review_prompt(args, *, store=None):
         refuse('REVIEW_PROMPT_BINDING_MISSING')
     if (type(evidence) is not dict or
             completion.get('executor_task_id') != args.executor_task or
-            type(evidence.get('common_dir')) is not str or
-            type(evidence.get('result')) is not dict):
-        refuse('REVIEW_PROMPT_BINDING_MISSING')
-    expected_head = evidence['result'].get('result_head')
-    if type(expected_head) is not str or re.fullmatch(r'[0-9a-f]{40}', expected_head) is None:
+            type(evidence.get('common_dir')) is not str):
         refuse('REVIEW_PROMPT_BINDING_MISSING')
     try:
         executor = task_completion.read_d6_registration(args.executor_task,
             evidence['common_dir'], allowed_states=task_completion._D6_EVIDENCE_STATES)
+        # The registration is the authoritative result binding before completion
+        # evidence exists. Once evidence is present, it must agree with it.
+        expected_head = executor.result_sha
+        if (type(expected_head) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', expected_head) is None):
+            refuse('REVIEW_PROMPT_BINDING_MISSING')
+        recorded_result = evidence.get('result')
+        if (type(recorded_result) is dict and
+                recorded_result.get('result_head') not in (None, expected_head)):
+            refuse('REVIEW_PROMPT_BINDING_MISSING')
         executor_snapshot = task_completion.collect_git_snapshot(executor.root)
         if (executor.result_sha != expected_head or executor_snapshot.head != expected_head or
                 executor_snapshot.root != executor.root or
@@ -586,9 +592,18 @@ def run_task_review_prompt(args, *, store=None):
             task['task_id'], task['run_id'], binding['contract_digest'], expected_head)
     except Exception:
         refuse('REVIEW_PROMPT_BINDING_MISSING')
+    source_sha = binding.get('source_sha')
+    if source_sha is None:
+        source_sha = evidence.get('source_sha')
+    if source_sha is None and type(evidence.get('result')) is dict:
+        source_sha = evidence['result'].get('source_sha')
+    if source_sha is None:
+        source_sha = executor.source_sha
+    if type(source_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', source_sha) is None:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
     lines = [
         f'Review PR #{args.pr} at exact HEAD {expected_head}.',
-        f'Scope: git diff {evidence["result"].get("source_sha")}..{expected_head}',
+        f'Scope: git diff {source_sha}..{expected_head}',
         'Review this scope only. Read-only review; do not edit files, run mutating commands, commit, push, or publish.',
         '',
         'Post these exact lines in your review:',

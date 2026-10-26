@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import signal
 import stat
 import sys
@@ -623,7 +624,14 @@ def main(argv=None):
                 print(f"{key}={value}", file=sys.stderr)
         return 0
     except LLMToolError as exc:
-        print("llmtool: " + str(exc), file=sys.stderr)
+        refusal_code = getattr(exc, 'completion_code', None)
+        if (getattr(args, 'command', None) == 'task' and
+                getattr(args, 'action', None) == 'review-prompt' and
+                type(refusal_code) is str and
+                re.fullmatch(r'[A-Z0-9_]{1,64}', refusal_code)):
+            print('llmtool: review-prompt refused: ' + refusal_code, file=sys.stderr)
+        else:
+            print("llmtool: " + str(exc), file=sys.stderr)
         return 1
     except BrokenPipeError:
         # Avoid the interpreter's flush-at-exit traceback / exit 120 noise.

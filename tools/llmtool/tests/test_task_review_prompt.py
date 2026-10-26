@@ -1,12 +1,12 @@
 import io
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from llmtool.errors import LLMToolError
-from llmtool import task_completion, task_submission_cli
+from llmtool import cli, task_completion, task_submission_cli
 
 
 TASK_ID = 'a' * 32
@@ -18,7 +18,10 @@ COMMON = '/repo/.git'
 
 
 class FakeStore:
-    def __init__(self, *, binding=True):
+    def __init__(self, *, binding=True, completed=True):
+        evidence = {'common_dir': COMMON}
+        if completed:
+            evidence['result'] = {'result_head': HEAD, 'source_sha': SOURCE}
         self.task = {
             'task_id': TASK_ID,
             'run_id': RUN_ID,
@@ -26,8 +29,7 @@ class FakeStore:
                               'contract_digest': CONTRACT} if binding else None),
             'completion': {
                 'executor_task_id': 'executor-d6',
-                'evidence': {'common_dir': COMMON,
-                             'result': {'result_head': HEAD, 'source_sha': SOURCE}},
+                'evidence': evidence,
             },
         }
 
@@ -39,7 +41,7 @@ class FakeStore:
 
 def registration(task_id):
     return SimpleNamespace(task_id=task_id, root='/repo', common_dir=COMMON,
-                           branch='task-branch', result_sha=HEAD)
+                           branch='task-branch', source_sha=SOURCE, result_sha=HEAD)
 
 
 def snapshot(head=HEAD):
@@ -77,6 +79,12 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertIn(task_completion._FORMAL_ACCEPT, output)
         self.assertIn(binding, output)
 
+    def test_success_before_task_completion_uses_d6_result_and_source(self):
+        code, output = self.invoke(store=FakeStore(completed=False))
+        self.assertEqual(code, 0)
+        self.assertIn(f'Review PR #42 at exact HEAD {HEAD}.', output)
+        self.assertIn(f'Scope: git diff {SOURCE}..{HEAD}', output)
+
     def test_refuses_unrecorded_executor_head_without_prompt(self):
         with self.assertRaises(LLMToolError) as raised:
             self.invoke(snapshots=[snapshot('f' * 40), snapshot()])
@@ -104,6 +112,25 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertEqual(raised.exception.completion_code,
                          'REVIEW_PROMPT_BINDING_MISSING')
         self.assertEqual(output.getvalue(), '')
+
+    def test_cli_prints_each_refusal_code(self):
+        codes = ('REVIEW_PROMPT_BINDING_MISSING',
+                 'REVIEW_PROMPT_EXECUTOR_HEAD_MISMATCH',
+                 'REVIEW_PROMPT_REVIEWER_HEAD_MISMATCH',
+                 'REVIEW_PROMPT_PR_HEAD_MISMATCH',
+                 'REVIEW_PROMPT_D6_UNAVAILABLE',
+                 'REVIEW_PROMPT_PR_UNAVAILABLE')
+        for code in codes:
+            error = LLMToolError('Reviewer prompt is unavailable; details omitted')
+            error.completion_code = code
+            output = io.StringIO()
+            with self.subTest(code=code), patch.object(
+                    cli, 'run_task_review_prompt', side_effect=error), \
+                    redirect_stderr(output):
+                self.assertEqual(cli.main(['task', 'review-prompt', TASK_ID,
+                                           '--executor-task', 'executor-d6',
+                                           '--reviewer-task', 'reviewer-d6', '--pr', '42']), 1)
+            self.assertIn(f'llmtool: review-prompt refused: {code}', output.getvalue())
 
 
 if __name__ == '__main__':
