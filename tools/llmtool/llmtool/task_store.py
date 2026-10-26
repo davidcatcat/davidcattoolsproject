@@ -81,6 +81,7 @@ _COMPLETION_INTENT_FIELDS = frozenset((
 ))
 _COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER'))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
+_OPTIONAL_USAGE_FIELDS = frozenset(('cached_prompt_tokens', 'reasoning_tokens'))
 _DISPATCH_AUDIT_FIELDS = frozenset((
     'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
     'policy_sha256', 'at',
@@ -199,6 +200,17 @@ def _fail(code='TASK_STORE_INVALID'):
     error.task_store_code = category
     error.task_store_error_code = safe_code
     raise error from None
+
+
+def _validate_usage(value):
+    fields = set(value) if type(value) is dict else set()
+    if (type(value) is not dict or not _USAGE_FIELDS.issubset(fields) or
+            not fields.issubset(_USAGE_FIELDS | _OPTIONAL_USAGE_FIELDS)):
+        raise ValueError('invalid usage fields')
+    for name in _OPTIONAL_USAGE_FIELDS & fields:
+        if type(value[name]) is not int or value[name] < 0:
+            raise ValueError('invalid optional usage count')
+    validate_provider_usage({name: value[name] for name in _USAGE_FIELDS})
 
 
 class TaskStoreConflict(LLMToolError):
@@ -522,9 +534,7 @@ def _validate(record):
         _fail()
     if type(record['usage']) is dict:
         try:
-            if set(record['usage']) != _USAGE_FIELDS:
-                _fail()
-            validate_provider_usage(record['usage'])
+            _validate_usage(record['usage'])
         except Exception:
             _fail()
     elif record['usage'] is not None:
@@ -780,9 +790,7 @@ def _validate(record):
             usage = developer['usage']
             if usage is not None:
                 try:
-                    if type(usage) is not dict or set(usage) != _USAGE_FIELDS:
-                        _fail()
-                    validate_provider_usage(usage)
+                    _validate_usage(usage)
                 except Exception:
                     _fail()
             if developer['error_code'] is not None and (
@@ -978,9 +986,7 @@ def _validate(record):
                 usage = callback['pm_usage']
                 if usage is not None:
                     try:
-                        if type(usage) is not dict or set(usage) != _USAGE_FIELDS:
-                            _fail()
-                        validate_provider_usage(usage)
+                        _validate_usage(usage)
                     except Exception:
                         _fail()
                 if 'review_return' in callback:
@@ -1024,9 +1030,7 @@ def _validate(record):
                     usage = returned['pm_usage']
                     if usage is not None:
                         try:
-                            if type(usage) is not dict or set(usage) != _USAGE_FIELDS:
-                                _fail()
-                            validate_provider_usage(usage)
+                            _validate_usage(usage)
                         except Exception:
                             _fail()
                     if state == 'RETURNED' and (response is None or recommendation is None):
@@ -1219,9 +1223,7 @@ def _validate(record):
             completion_usage = None if completion is None else completion['pm_usage']
             if completion_usage is not None:
                 try:
-                    if type(completion_usage) is not dict or set(completion_usage) != _USAGE_FIELDS:
-                        _fail()
-                    validate_provider_usage(completion_usage)
+                    _validate_usage(completion_usage)
                 except Exception:
                     _fail()
             error = None if completion is None else completion['pm_error_code']
