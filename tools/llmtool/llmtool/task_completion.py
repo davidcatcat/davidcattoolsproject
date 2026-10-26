@@ -912,7 +912,7 @@ def _worktree_diff(root, source_sha, write_paths):
             _stop('WORKTREE_FILE_UNSUPPORTED')
         extra.append(text.encode('utf-8'))
     paths = tuple(sorted(tracked | set(untracked)))
-    if not paths or len(paths) > _PROPOSAL_FILE_LIMIT:
+    if len(paths) > _PROPOSAL_FILE_LIMIT:
         _stop('WORKTREE_SCOPE_MISMATCH')
     patch = tracked_patch + b''.join(extra)
     if len(patch) > _GIT_LIMIT:
@@ -1089,7 +1089,18 @@ def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
         _stop('WORKTREE_SOURCE_HEAD_MISMATCH')
     status = _git(root, ('status', '--porcelain=v1', '-z', '--untracked-files=all'),
                    limit=1024 * 1024)
+    untracked_raw = _git(root, ('ls-files', '--others', '--exclude-standard', '-z'),
+                         limit=64 * 1024)
+    try:
+        untracked = [path for path in untracked_raw.decode('utf-8', 'strict').split('\x00')
+                     if path]
+    except UnicodeError:
+        _stop('WORKTREE_PATH_INVALID')
+    if any(path not in set(write_paths) for path in untracked):
+        _stop('WORKTREE_UNTRACKED_FILES')
     changed, patch = _worktree_diff(root, source_sha, write_paths)
+    if not changed and not patch:
+        _stop('WORKTREE_SCOPE_MISMATCH')
     for path in changed:
         parts = Path(path).parts
         if (Path(path).is_absolute() or not parts or

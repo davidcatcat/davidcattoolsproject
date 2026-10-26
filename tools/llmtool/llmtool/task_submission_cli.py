@@ -672,13 +672,13 @@ def _patch_paths(patch):
         # Accept only ordinary index metadata for tracked files. A newly
         # created file has the exact no-index shape emitted by our capture
         # helper; other mode changes remain rejected.
-        while index < len(lines) and lines[index].startswith(_INDEX_METADATA):
-            index += 1
         new_file = (index < len(lines) and lines[index] == 'new file mode 100644')
         if new_file:
             index += 1
         elif index < len(lines) and lines[index].startswith(_MODE_METADATA):
             raise ValueError
+        while index < len(lines) and lines[index].startswith(_INDEX_METADATA):
+            index += 1
         if index + 2 >= len(lines):
             raise ValueError
         expected_old = '--- /dev/null' if new_file else '--- a/' + path

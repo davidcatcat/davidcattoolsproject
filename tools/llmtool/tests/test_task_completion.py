@@ -390,7 +390,7 @@ class TaskCompletionTests(unittest.TestCase):
             task_completion._worktree_snapshot(
                 root=self.root, source_sha=self.source_sha,
                 read_paths=[new_path], write_paths=[new_path])
-        self.assertEqual(rejected.exception.completion_code, 'WORKTREE_SCOPE_MISMATCH')
+        self.assertEqual(rejected.exception.completion_code, 'WORKTREE_UNTRACKED_FILES')
         outside.unlink()
 
         target.unlink()
