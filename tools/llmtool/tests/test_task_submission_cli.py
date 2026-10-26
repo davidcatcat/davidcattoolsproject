@@ -854,6 +854,79 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIn('"TEST_SCOPE_MISSING"', output.getvalue())
         self.assertEqual(events, ['bootstrap', 'provider'])
 
+    def test_opencode_accepts_atomic_env2_pass_marker_refresh_after_bootstrap(self):
+        task = self._pm_task_with_opencode_assignment()
+        events = []
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None, 'UNKNOWN',
+                              'a' * 64, 32, 'CONFIRMED', 'opencode v2.0.32',
+                              10, 1, 'b' * 64)
+
+        def bootstrap(_registration):
+            report_path = (self.executor_root / 'tools' / 'llmtool' /
+                           '.d6-bootstrap-report.json')
+            report = json.loads(report_path.read_text(encoding='utf-8'))
+            fingerprint = 'cpython3.13-darwin-arm64-abcdef123456'
+            report['cache_fingerprint'] = fingerprint
+            report_bytes = (json.dumps(report, sort_keys=True, separators=(',', ':')) +
+                            '\n').encode()
+            report_tmp = report_path.with_suffix('.tmp')
+            report_tmp.write_bytes(report_bytes)
+            report_tmp.chmod(0o600)
+            os.replace(report_tmp, report_path)
+
+            self.executor_registry['env2_pass_marker'].update(
+                environment_fingerprint=fingerprint,
+                report_sha256=hashlib.sha256(report_bytes).hexdigest())
+            record_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
+                           'executor-task-1.json')
+            record_tmp = record_path.with_suffix('.tmp')
+            record_tmp.write_text(json.dumps(self.executor_registry), encoding='utf-8')
+            record_tmp.chmod(0o600)
+            os.replace(record_tmp, record_path)
+            events.append('bootstrap')
+
+        def launch(**kwargs):
+            kwargs['prelaunch_validate']()
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            events.append('provider')
+            return result
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli._bootstrap_registered_d6',
+                      side_effect=bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=launch), \
+                patch('llmtool.task_submission_cli._developer_output_rejection',
+                      return_value=None), redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertEqual(events, ['bootstrap', 'provider'])
+        self.assertIn('"TEST_SCOPE_MISSING"', output.getvalue())
+
+    def test_opencode_bootstrap_head_change_fails_before_provider_launch(self):
+        task = self._pm_task_with_opencode_assignment()
+        output = io.StringIO()
+
+        def bootstrap(_registration):
+            subprocess.run(['/usr/bin/git', 'commit', '--allow-empty', '-m',
+                            'synthetic bootstrap drift'], cwd=self.executor_root,
+                           check=True, capture_output=True)
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli._bootstrap_registered_d6',
+                      side_effect=bootstrap), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run') as launch, \
+                redirect_stdout(output):
+            code = run_task_delegate(self._opencode_delegate_args(task))
+
+        result = json.loads(output.getvalue())
+        self.assertEqual(code, 1)
+        self.assertEqual(result['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(result['developer']['error_code'], 'OPENCODE_D6_BINDING_CHANGED')
+        launch.assert_not_called()
+
     def test_opencode_bootstrap_rejection_blocks_launch_and_binds_process(self):
         self.bootstrap_patch.stop()
         task = self._pm_task_with_opencode_assignment()
