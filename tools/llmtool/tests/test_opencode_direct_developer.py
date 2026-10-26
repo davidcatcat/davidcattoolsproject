@@ -226,7 +226,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                  version_output='opencode v2.0.32\n',
                  version_descendant_marker=None, run_descendant_marker=None,
                  version_mutate_path=None, run_invocation_marker=None,
-                 post_output_delay=0):
+                 post_output_delay=0, model=MODEL):
         marker_code = (f"open({str(invocation_marker)!r}, 'a').write('called\\n')\n"
                        if invocation_marker else '')
         mutation_code = (f"    open({str(version_mutate_path)!r}, 'w').write('CHANGED\\n')\n"
@@ -270,7 +270,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             '    raise SystemExit(0)\n'
             + run_marker_code +
             "assert sys.argv[1:4] == ['run', '--standalone', '--model']\n"
-            "assert sys.argv[4] == 'opencode/deepseek-v4.1-flash-free'\n"
+            f"assert sys.argv[4] == {model!r}\n"
             "assert sys.argv[sys.argv.index('--format') + 1] == 'json'\n"
             "assert sys.argv[sys.argv.index('--agent') + 1] == 'llmtool-direct-developer'\n"
             'config_path = os.environ["OPENCODE_CONFIG"]\n'
@@ -279,7 +279,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             'assert os.environ["OPENCODE_CONFIG_PROJECT_DISABLE"] == "1"\n'
             'assert "OPENCODE_CONFIG_CONTENT" not in os.environ\n'
             'cfg = json.load(open(config_path, encoding="utf-8"))\n'
-            'assert cfg["model"] == "opencode/deepseek-v4.1-flash-free"\n'
+            f'assert cfg["model"] == {model!r}\n'
             'assert cfg["permissions"][0]["effect"] == "deny"\n'
             'assert cfg["agents"]["llmtool-direct-developer"]["mode"] == "primary"\n'
             'assert cfg["agents"]["llmtool-direct-developer"]["permissions"] == cfg["permissions"]\n'
@@ -354,6 +354,53 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             self.run_with_valid_binding(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                 prompt='bounded task prompt', timeout_seconds=5, executable=cli)
         self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_SOURCE_TOO_LARGE')
+        self.assertFalse(marker.exists())
+
+    def test_any_well_formed_version_runs_and_is_recorded(self):
+        body = self.event('step_start') + '\n'
+        for version in ('opencode v2.1.4', 'opencode v3.0.0-beta.1+build.7'):
+            with self.subTest(version=version):
+                cli = self.fake_cli(body, version_output=version + '\n')
+                result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                    write_paths=['source.py'], prompt='bounded task prompt',
+                    timeout_seconds=5, executable=cli)
+                self.assertEqual(result.cli_version, version)
+
+    def test_malformed_version_is_rejected_before_provider_run(self):
+        marker = self.root / 'run-invoked'
+        for version in ('opencode v2.1', 'opencode v2.1.4 (beta)', 'opencode v2.1.4\nextra',
+                        'OpenCode 2.1.4', 'opencode v2.1.4-', 'opencode v\u0662.1.4'):
+            with self.subTest(version=version):
+                cli = self.fake_cli(self.event('step_start') + '\n',
+                                    version_output=version + '\n',
+                                    run_invocation_marker=marker)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=cli)
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_VERSION_UNSUPPORTED')
+                self.assertFalse(marker.exists())
+
+    def test_configured_free_model_is_passed_to_cli_and_config(self):
+        cli = self.fake_cli(self.event('step_start') + '\n', model='opencode/other-model-free')
+        result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+            write_paths=['source.py'], prompt='bounded task prompt',
+            timeout_seconds=5, executable=cli, model='opencode/other-model-free')
+        self.assertEqual(result.exit_code, 0)
+
+    def test_non_free_or_malformed_model_is_rejected_before_any_cli_launch(self):
+        marker = self.root / 'invoked'
+        cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
+        for model in ('opencode/paid-model', 'other/name-free', 'opencode/a/b-free',
+                      'opencode/-free', 'opencode/x-free\n', None):
+            with self.subTest(model=model):
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=cli, model=model)
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_MODEL_INVALID')
         self.assertFalse(marker.exists())
 
     def test_version_probe_output_is_bounded(self):
