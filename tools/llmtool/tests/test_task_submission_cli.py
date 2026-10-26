@@ -1654,7 +1654,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                      fromlist=['_pm_assignment'])._pm_assignment(malformed))
 
     def test_fake_ack_and_sensitive_patch_are_not_persisted(self):
-        target = 'sample.py'
+        target = 'tools/llmtool/tests/test_task_submission_cli.py'
         rejected = (
             ('Developer started and completed the work.',
              'DEVELOPER_OUTPUT_INVALID_ENVELOPE'),

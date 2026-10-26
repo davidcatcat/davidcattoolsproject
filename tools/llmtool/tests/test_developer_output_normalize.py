@@ -1,7 +1,7 @@
 import unittest
 
-from llmtool.developer_output_normalize import (normalize_developer_output,
-                                                reanchor_developer_output)
+from llmtool.developer_output_normalize import normalize_developer_output
+from llmtool.developer_output_normalize import reanchor_developer_output
 from llmtool.task_submission_cli import (_developer_normalized_output,
                                          _developer_output_rejection)
 
@@ -129,7 +129,7 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertIsNone(_developer_output_rejection(anchored, [self.PATH]))
 
     def test_source_anchor_accepts_already_anchored_patch(self):
-        raw = self.HEADER + '@@ -1 +1 @@\n-old\n+new\n'
+        raw = (self.HEADER + '@@ -1 +1 @@\n-old\n+new\n')
         anchored, tokens, rejection = _developer_normalized_output(
             raw, [self.PATH], source_files={self.PATH: 'old\n'})
         self.assertEqual(anchored, raw)
@@ -155,7 +155,7 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertIsNone(rejection)
 
     def test_source_anchor_preserves_and_accepts_missing_final_newline(self):
-        raw = self.HEADER + '@@ -1 +1 @@\n-old\n+new\n'
+        raw = (self.HEADER + '@@ -1 +1 @@\n-old\n+new\n')
         anchored, tokens = reanchor_developer_output(
             raw, [self.PATH], {self.PATH: 'old'})
         self.assertIn(r'\ No newline at end of file', anchored)
@@ -170,8 +170,8 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertIn(r'\ No newline at end of file', anchored)
 
     def test_source_anchor_rejects_invented_or_ambiguous_old_side(self):
-        invented = self.HEADER + '@@ -1 +1 @@\n-invented\n+replacement\n'
-        ambiguous = self.HEADER + '@@ -1 +1 @@\n-same\n+replacement\n'
+        invented = (self.HEADER + '@@ -1 +1 @@\n-invented\n+replacement\n')
+        ambiguous = (self.HEADER + '@@ -1 +1 @@\n-same\n+replacement\n')
         for raw, source in ((invented, 'real line\n'),
                             (ambiguous, 'same\nsame\n')):
             with self.subTest(source=source):

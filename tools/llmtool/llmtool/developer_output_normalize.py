@@ -143,6 +143,8 @@ def normalize_developer_output(value, write_paths):
             old_declared = int(hunk.group(2)) if hunk.group(2) is not None else 1
             new_declared = int(hunk.group(4)) if hunk.group(4) is not None else 1
             if old_count == old_declared and new_count == new_declared:
+                # Keep an already-valid header byte-for-byte; in particular,
+                # do not report a normalization for omitted count fields.
                 rebuilt = line
             else:
                 rebuilt = f'@@ -{hunk.group(1)},{old_count} +{hunk.group(3)},{new_count} @@{hunk.group(5)}'
@@ -216,6 +218,7 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                 if section[i].startswith('diff --git '):
                     break
                 if section[i] == r'\ No newline at end of file':
+                    # Git places this marker after the affected old/new line.
                     if not body or not body[-1].startswith((' ', '-', '+')):
                         return result(None, (), False)
                     body.append(section[i])
@@ -224,6 +227,7 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                 body.append(section[i])
                 i += 1
             old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
+            new_side = [line[1:] for line in body if line.startswith((' ', '+'))]
             if not old_side or not any(line.startswith(('+', '-')) for line in body):
                 return result(None, (), False)
             matches = [index for index in range(len(source) - len(old_side) + 1)
@@ -231,6 +235,8 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
             if len(matches) != 1:
                 return result(None, (), False)
             start = matches[0]
+            # Reconstruct the target slice by replaying the model's operations
+            # against the matched source, preserving every model +/- line.
             target = []
             cursor = start
             for line in body:
@@ -257,19 +263,26 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
             previous_end = start
         diff_lines = list(difflib.unified_diff(
             source, modified, fromfile='', tofile='', n=3, lineterm=''))
-        if not any(line.startswith('@@ ') for line in diff_lines):
+        hunks = [line for line in diff_lines if line.startswith('@@ ')]
+        if not hunks:
             return result(None, (), False)
         regenerated.append(f'diff --git a/{path} b/{path}')
         if file_header_index == 2:
+            # Keep Git's standard index metadata byte-for-byte. Regeneration
+            # changes hunk context only; the modeled +/- content is preserved.
             regenerated.append(section[1])
         regenerated.extend([f'--- a/{path}', f'+++ b/{path}'])
+        # The first two lines from unified_diff are empty-path file headers.
         body = diff_lines[2:]
+        # difflib omits Git's EOF markers. A text patch must preserve the
+        # source's final-newline state, so mark both affected sides as needed.
         if source and modified and not source_has_final_newline:
             eof_records = set()
             for prefixes, final_line in (((' ', '-'), source[-1]),
                                          ((' ', '+'), modified[-1])):
                 for index in range(len(body) - 1, -1, -1):
-                    if body[index].startswith(prefixes) and body[index][1:] == final_line:
+                    if (body[index].startswith(prefixes) and
+                            body[index][1:] == final_line):
                         eof_records.add(index)
                         break
             for index in sorted(eof_records, reverse=True):

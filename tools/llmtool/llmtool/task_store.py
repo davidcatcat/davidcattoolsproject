@@ -642,10 +642,11 @@ def _validate(record):
             if 'normalizations' in developer:
                 tokens = developer['normalizations']
                 if (developer['state'] != 'DEVELOPER_RESPONDED' or
-                        type(tokens) is not list or len(tokens) > 4 or
+                        type(tokens) is not list or len(tokens) > 5 or
                         any(token not in ('OUTER_FENCE_STRIPPED', 'DIFF_HEADER_ADDED',
                                           'BARE_BLANK_CONTEXT_SPACED',
-                                          'HUNK_COUNTS_RECOUNTED') for token in tokens) or
+                                          'HUNK_COUNTS_RECOUNTED',
+                                          'HUNK_REANCHORED') for token in tokens) or
                         len(tokens) != len(set(tokens))):
                     _fail()
             if 'rejected_output_capture' in developer:
