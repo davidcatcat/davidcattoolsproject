@@ -1368,6 +1368,37 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("wp-1  等審查  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
+    def test_agent_process_cwd_binds_transcript_free_d6_session(self):
+        for role in ("Codex CLI", "Codex CLI (node launcher)", "Claude Code CLI",
+                     "Claude Code CLI (node launcher)", "OpenCode CLI", "OpenCode CLIENT",
+                     "OpenCode CLI (node launcher)", "OpenCode CLIENT (node launcher)"):
+            with self.subTest(role=role):
+                process = mon.Process(81, 1, 81, "00:12", "S", role, "cli", "")
+                rows = mon.office_rows([process], self.NOW, codex_root=str(self.codex),
+                                       claude_root=str(self.claude), canonical=self.canonical,
+                                       cwd_of=lambda pid: str(self.task))
+                task_rows = [row for row in rows if row.task == "task wp-1"]
+                self.assertEqual(len(task_rows), 1)
+                self.assertEqual((task_rows[0].state, task_rows[0].role, task_rows[0].evidence),
+                                 (mon.WORKING, "developer", "程序"))
+                task_lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
+                self.assertIn("wp-1", next(line for line in task_lines if "wp-1" in line))
+                gone = mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                       claude_root=str(self.claude), canonical=self.canonical,
+                                       cwd_of=lambda pid: str(self.task))
+                self.assertFalse(any(row.task == "task wp-1" for row in gone))
+
+    def test_process_fallback_does_not_duplicate_transcript_task_row(self):
+        self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},
+                    ["task_started"], age=5)
+        process = mon.Process(81, 1, 81, "00:12", "S", "Codex CLI", "codex", "")
+        rows = mon.office_rows([process], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: str(self.task))
+        task_rows = [row for row in rows if row.task == "task wp-1"]
+        self.assertEqual(len(task_rows), 1)
+        self.assertEqual(task_rows[0].evidence, "codex 紀錄")
+
     def _turn_db(self, turns, name="history.sqlite"):
         """A real WAL database kept open by a writer, as Codex keeps its own."""
         path = self.codex.parent / name

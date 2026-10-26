@@ -3014,18 +3014,25 @@ def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical
     for number, proc in enumerate(procs, 1):
         cwd, latest = cwds[proc.pid], own[proc.pid]
         busy = latest is not None and running(latest)
+        place = _place(latest[0] if busy else cwd, canonical)
         where = _where(latest[0] if busy else cwd, canonical)
+        task = f"task {place[1]}" if place and place[0] == "task" else ""
         name = f"{prefix} {'worker' if proc.role == client_role else 'cli'} #{number}"
         if busy:
             detail = f"{where}：{_label(latest[1], 28) or '執行中'}{note}"
             rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), base + number,
-                                  kind="worker"))
+                                  kind="worker", role="developer" if task else "", task=task,
+                                  evidence="session 紀錄"))
         else:
             opened = _elapsed_seconds(proc.elapsed)
             since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
-            rows.append(OfficeRow(name, IDLE, f"{where}：已開啟，沒有執行中的任務{since}{note}",
+            state = WORKING if task else IDLE
+            detail = (f"{where}：CLI 執行中（程序 cwd）{note}" if task else
+                      f"{where}：已開啟，沒有執行中的任務{since}{note}")
+            rows.append(OfficeRow(name, state, detail,
                                   opened if opened is not None else 0.0, base + number,
-                                  kind="worker"))
+                                  kind="worker", role="developer" if task else "", task=task,
+                                  evidence="程序"))
     return rows
 
 
@@ -3720,6 +3727,41 @@ def _closed_claude_cli(rows: list[OfficeRow], sessions,
     return [row for row in out if row.group not in gone]
 
 
+def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical: str,
+                    cwd_of=process_cwd) -> list[OfficeRow]:
+    """Show a live agent CLI in its registered D6 task even without a transcript."""
+    cli_names = {
+        "Codex CLI": "codex developer",
+        "Codex CLI (node launcher)": "codex developer",
+        "Claude Code CLI": "claude developer",
+        "Claude Code CLI (node launcher)": "claude developer",
+        "OpenCode CLIENT": "opencode developer",
+        "OpenCode CLI": "opencode developer",
+        "OpenCode CLIENT (node launcher)": "opencode developer",
+        "OpenCode CLI (node launcher)": "opencode developer",
+    }
+    covered = {row.task[5:] for row in rows if row.task.startswith("task ")}
+    seen = set(covered)
+    out = []
+    for proc in sorted(processes, key=lambda item: item.pid):
+        name = cli_names.get(proc.role)
+        if not name:
+            continue
+        cwd = cwd_of(proc.pid)
+        place = _place(cwd, canonical)
+        if not place or place[0] != "task" or place[1] in seen:
+            continue
+        registered = registered_tasks(canonical).get(place[1])
+        if not registered or os.path.realpath(cwd) != registered[0]:
+            continue
+        seen.add(place[1])
+        age = _elapsed_seconds(proc.elapsed)
+        out.append(OfficeRow(name, WORKING, f"task {place[1]}（程序 cwd）",
+                             age if age is not None else 0.0, 10,
+                             role="developer", task=f"task {place[1]}", evidence="程序"))
+    return out
+
+
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root=None,
                 canonical: str | None = None,
@@ -3761,6 +3803,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     _forget_cwds(processes)
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
     rows += opencode + kilo_rows(processes, now, canonical, kilo_db, cwd_of)
+    rows += _d6_process_rows(processes, rows, canonical, cwd_of)
     agy_open = any(p.role == "Antigravity App (AGY)" for p in processes)
     # `claude -p --no-session-persistence` started by Codex leaves no session
     # file. Calls a Codex record already shows are not repeated; any further
