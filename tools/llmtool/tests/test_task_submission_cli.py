@@ -756,6 +756,46 @@ class TaskSubmissionCLITests(unittest.TestCase):
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
 
+    def _write_opencode_developer_model(self, model):
+        config = self.home / '.config/llmtool/config.yaml'
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text('providers:\n  opencode-developer:\n    model: ' + model + '\n')
+
+    def test_opencode_developer_profile_free_model_is_used_and_recorded(self):
+        task = self._pm_task_with_opencode_assignment()
+        self._write_opencode_developer_model('opencode/other-model-free')
+        output = io.StringIO()
+
+        def execute(**kwargs):
+            self.assertEqual(kwargs['model'], 'opencode/other-model-free')
+            (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+            return DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                'UNKNOWN', 'a' * 64, 1234, 'CONFIRMED', 'opencode v2.1.4',
+                10, 1, 'b' * 64)
+
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      side_effect=execute) as invoke, \
+                redirect_stdout(output):
+            run_task_delegate(self._opencode_delegate_args(task))
+        self.assertEqual(invoke.call_count, 1)
+        developer = json.loads(output.getvalue())['developer']
+        self.assertEqual(developer['model'], 'opencode/other-model-free')
+
+    def test_opencode_developer_profile_non_free_model_is_refused_before_claim(self):
+        task = self._pm_task_with_opencode_assignment()
+        for model in ('opencode/paid-model', 'other/name-free', 'opencode/a/b-free'):
+            with self.subTest(model=model):
+                self._write_opencode_developer_model(model)
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run') as invoke, \
+                        self.assertRaisesRegex(LLMToolError, 'opencode/<name>-free'):
+                    run_task_delegate(self._opencode_delegate_args(task))
+                invoke.assert_not_called()
+                stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(
+                    task['task_id'])
+                self.assertIsNone(stored['developer'])
+
     def test_opencode_d6_head_drift_blocks_dispatch_before_provider_process(self):
         task = self._pm_task_with_opencode_assignment()
         output = io.StringIO()

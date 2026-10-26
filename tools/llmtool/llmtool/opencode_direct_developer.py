@@ -39,6 +39,12 @@ MAX_SOURCE_TOTAL_BYTES = 2 * 1024 * 1024
 MAX_VERSION_OUTPUT_BYTES = 4096
 VERSION_TIMEOUT_SECONDS = 5
 _SESSION = re.compile(r'ses_[A-Za-z0-9]{1,100}\Z')
+# Any well-formed release is accepted; event compatibility is enforced by the
+# strict JSON event parser rather than by pinning one CLI version.
+_VERSION = re.compile(r'opencode v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}'
+                      r'(?:-[0-9A-Za-z.-]{1,64})?(?:\+[0-9A-Za-z.-]{1,64})?\Z')
+# Only OpenCode-hosted free models; a paid model is never selected or a fallback.
+_FREE_MODEL = re.compile(r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free\Z')
 
 
 class DirectOpenCodeError(LLMToolError):
@@ -88,6 +94,16 @@ class DirectResult:
 
 def _reject(code):
     raise DirectOpenCodeError(code)
+
+
+def is_free_model(model):
+    return type(model) is str and _FREE_MODEL.match(model) is not None
+
+
+def validate_model(model):
+    if not is_free_model(model):
+        _reject('OPENCODE_MODEL_INVALID')
+    return model
 
 
 def _utc_now():
@@ -277,16 +293,17 @@ def _screen_sources(root, read_paths):
     return total, len(entries), hashlib.sha256(encoded).hexdigest(), entries
 
 
-def configuration(*, read_paths, write_paths):
+def configuration(*, read_paths, write_paths, model=MODEL):
     """Return the exact task permission envelope consumed by OpenCode V2."""
+    selected = validate_model(model)
     rules = [{'action': '*', 'resource': '*', 'effect': 'deny'}]
     rules.extend({'action': 'read', 'resource': path, 'effect': 'allow'}
                  for path in read_paths)
     rules.extend({'action': 'edit', 'resource': path, 'effect': 'allow'}
                  for path in write_paths)
-    provider, model = MODEL.split('/', 1)
+    provider, model = selected.split('/', 1)
     return {
-        'model': MODEL,
+        'model': selected,
         'default_agent': AGENT,
         'share': 'disabled',
         'snapshots': False,
@@ -308,7 +325,7 @@ def configuration(*, read_paths, write_paths):
         ],
         'agents': {
             # Read then edit need two tool-capable rounds before the final summary.
-            AGENT: {'mode': 'primary', 'model': MODEL, 'steps': 3,
+            AGENT: {'mode': 'primary', 'model': selected, 'steps': 3,
                     'permissions': rules},
             'title': {'disabled': True},
             'summary': {'disabled': True},
@@ -477,15 +494,16 @@ def _version(executable):
         _reject('OPENCODE_RUNTIME_UNAVAILABLE')
     value = bytes(output).decode('utf-8', 'replace').strip()
     if (not lifecycle.cleanup_confirmed or process is None or process.returncode != 0 or
-            value != 'opencode v2.0.32'):
+            _VERSION.match(value) is None):
         _reject('OPENCODE_VERSION_UNSUPPORTED')
     return value
 
 
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
-        timeout_seconds=MAX_WALL_CLOCK_SECONDS, executable=None):
+        timeout_seconds=MAX_WALL_CLOCK_SECONDS, executable=None, model=MODEL):
     """Invoke one bounded OpenCode run in the existing D6 task worktree."""
+    validate_model(model)
     root = Path(root).resolve(strict=True)
     if not root.is_dir():
         _reject('OPENCODE_WORKTREE_INVALID')
@@ -508,7 +526,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     if (current_manifest_sha256 != source_manifest_sha256 or
             current_manifest != source_manifest):
         _reject('OPENCODE_SOURCE_CHANGED')
-    config = configuration(read_paths=read_paths, write_paths=write_paths)
+    config = configuration(read_paths=read_paths, write_paths=write_paths, model=model)
     config_text = json.dumps(config, ensure_ascii=True, sort_keys=True,
                              separators=(',', ':'), allow_nan=False)
     started = time.monotonic()
@@ -531,7 +549,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         except OSError:
             _reject('OPENCODE_CONFIG_UNAVAILABLE')
         env = _safe_environment(config_file, config_dir)
-        argv = [executable, 'run', '--standalone', '--model', MODEL, '--agent', AGENT,
+        argv = [executable, 'run', '--standalone', '--model', model, '--agent', AGENT,
                 '--format', 'json', '--title', 'llmtool-task-developer']
         lifecycle = CLIProcessLifecycle('opencode-cli', deadline=cleanup_deadline)
         try:

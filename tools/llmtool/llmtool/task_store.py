@@ -22,6 +22,7 @@ from urllib.parse import urlsplit
 from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
+from .opencode_direct_developer import is_free_model
 from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
 from .task_completion import validate_host_worker_receipt
@@ -660,7 +661,7 @@ def _validate(record):
             if (developer['provider_profile'] == 'opencode' and
                     (developer['provider_type'] not in (None, 'opencode-cli') or
                      developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
-                     developer['model'] not in (None, 'opencode/deepseek-v4.1-flash-free'))):
+                     not (developer['model'] is None or is_free_model(developer['model'])))):
                 _fail()
             if (developer['provider_profile'] == 'codex' and
                     (developer['provider_type'] not in (None, 'codex-cli') or

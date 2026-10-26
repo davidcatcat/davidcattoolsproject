@@ -263,9 +263,13 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             'task_contract': {'goal': 'bounded goal', 'criteria': [],
                               'test_commands': [['python3', '-m', 'unittest']]},
         }, source_sha='d' * 40, read_paths=['src.py'], write_paths=['src.py'],
-            acceptance=['expected behavior'], model='gpt-6-luna',
+            acceptance=['expected behavior'], pm_goal='selected Developer goal',
+            model='gpt-6-luna',
             reasoning_effort='high')
         self.assertIn('"task_contract":{"criteria":[],"goal":"bounded goal"', prompt)
+        self.assertIn('"pm_selected_goal":"selected Developer goal"', prompt)
+        self.assertIn('it is not your scope', prompt)
+        self.assertIn('Your code changes must stay inside allowed_write_paths', prompt)
         self.assertIn('"task_id":"' + 'a' * 32 + '"', prompt)
         self.assertIn('"contract_digest":"' + 'c' * 64 + '"', prompt)
         self.assertIn('"allowed_write_paths":["src.py"]', prompt)

@@ -1061,11 +1061,11 @@ def _interrupted_execution(exc):
     return value
 
 
-def _persist_opencode_interruption(store, task_id, developer, exc, *, result=None):
+def _persist_opencode_interruption(store, task_id, developer, exc, *, model, result=None):
     """Persist an ambiguous outcome without replaying the provider request."""
     developer.update(
         state='DEVELOPER_OUTCOME_UNKNOWN',
-        provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+        provider_type='opencode-cli', model=model,
         max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
         artifact=None, artifact_sha256=None, usage=None,
         error_code=('OPENCODE_INTERRUPTED' if isinstance(exc, KeyboardInterrupt)
@@ -1095,6 +1095,31 @@ def _print_task_without_masking_interrupt(store, task_id):
     except BaseException:
         # Recovery reads and output must not replace the original interruption.
         pass
+
+
+def _opencode_developer_model():
+    """Return the optional opencode-developer profile model, else the default."""
+    try:
+        yaml_module()
+    except LLMToolError:
+        raise LLMToolError(
+            'opencode-developer profile cannot be read: PyYAML is missing from this Python; '
+            'run llmtool with its virtualenv (tools/llmtool/.venv/bin/python)') from None
+    try:
+        profile = resolve_profile_config('opencode-developer', require_configured=False)
+    except LLMToolError as exc:
+        if str(exc) == 'requested provider profile is not defined':
+            return opencode_direct_developer.MODEL
+        raise LLMToolError('opencode-developer profile is invalid in the llmtool '
+                           'user config (~/.config/llmtool/config.yaml)') from None
+    model = selected_provider(profile)['model']
+    if model is None:
+        return opencode_direct_developer.MODEL
+    try:
+        return opencode_direct_developer.validate_model(model)
+    except opencode_direct_developer.DirectOpenCodeError:
+        raise LLMToolError('opencode-developer profile model must be an '
+                           'opencode/<name>-free model') from None
 
 
 def run_task_opencode_delegate(args, *, store):
@@ -1132,6 +1157,7 @@ def run_task_opencode_delegate(args, *, store):
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
+    model = _opencode_developer_model()
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'opencode',
@@ -1180,7 +1206,7 @@ def run_task_opencode_delegate(args, *, store):
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
-                         model=opencode_direct_developer.MODEL,
+                         model=model,
                          max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
         store.update(task['task_id'], developer=developer)
 
@@ -1205,11 +1231,11 @@ def run_task_opencode_delegate(args, *, store):
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'],
-            prelaunch_validate=validate_prelaunch_d6_binding)
+            prelaunch_validate=validate_prelaunch_d6_binding, model=model)
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
-                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
                 error_code=exc.direct_opencode_code,
                 execution={
@@ -1235,12 +1261,12 @@ def run_task_opencode_delegate(args, *, store):
         # adapter attaches only observed process/cleanup facts; absent facts
         # remain UNKNOWN, and this path never replays the provider request.
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc)
+            store, task['task_id'], developer, exc, model=model)
         _print_without_masking_interrupt(saved)
         raise
     except Exception:
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
-            provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+            provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_ADAPTER_UNKNOWN',
             execution={
@@ -1276,24 +1302,24 @@ def run_task_opencode_delegate(args, *, store):
         if rejection is not None:
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact,
-                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
                 execution=execution)
         else:
             developer.update(state='DEVELOPER_RESPONDED',
-                provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+                provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
                 artifact=artifact,
                 artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                 usage=result.usage, error_code=None, execution=execution)
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, result=result)
+            store, task['task_id'], developer, exc, model=model, result=result)
         _print_without_masking_interrupt(saved)
         raise
     except Exception:
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
-            provider_type='opencode-cli', model=opencode_direct_developer.MODEL,
+            provider_type='opencode-cli', model=model,
             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
             execution=_direct_execution(result, status='UNKNOWN'))
@@ -1301,7 +1327,7 @@ def run_task_opencode_delegate(args, *, store):
         saved = store.update(task['task_id'], developer=developer)
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, result=result)
+            store, task['task_id'], developer, exc, model=model, result=result)
         _print_without_masking_interrupt(saved)
         raise
     if developer['state'] == 'DEVELOPER_RESPONDED':
@@ -1314,7 +1340,7 @@ def run_task_opencode_delegate(args, *, store):
 
 
 def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
-                         acceptance, model, reasoning_effort):
+                         acceptance, pm_goal, model, reasoning_effort):
     contract = task.get('task_contract')
     if type(contract) is not dict:
         raise LLMToolError('Codex Developer Task Contract is unavailable')
@@ -1332,6 +1358,7 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'contract_digest': task['task_binding']['contract_digest'],
         'task_contract': contract, 'goal': contract.get('goal'),
+        'pm_selected_goal': pm_goal,
         'source_sha': source_sha,
         'allowed_read_paths': read_paths, 'allowed_write_paths': write_paths,
         'acceptance': acceptance,
@@ -1344,8 +1371,10 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
     }
     return (
         'You are the Codex Developer for this bounded llmtool Task. Work in the '
-        'current registered D6 worktree. Read only allowed_read_paths and modify '
-        'only allowed_write_paths. Do not run Git commands that write, commit, push, '
+        'current registered D6 worktree. The task_contract is only the digest-bound '
+        'PM intake record; it is not your scope. Your development goal is '
+        'pm_selected_goal. Your code changes must stay inside allowed_write_paths. '
+        'Read only allowed_read_paths. Do not run Git commands that write, commit, push, '
         'or publish; llmtool and the PM handle Git. Run the test_commands listed in '
         'the Task Contract; when no commands are listed, report that no tests were '
         'provided and do not invent commands. Review your own diff and test results, and use at most '
@@ -1429,6 +1458,8 @@ def run_task_codex_delegate(args, *, store):
     provider, reasoning_effort = _codex_developer_profile()
     prompt = _codex_direct_prompt(task, source_sha=snapshot.head,
         read_paths=read_paths, write_paths=write_paths, acceptance=acceptance,
+        pm_goal=(pm_assignment['goal'] if args.selection_source == 'PM'
+                 else task['request']),
         model=provider['model'], reasoning_effort=reasoning_effort)
     _screen_text(prompt, codex_direct_developer.MAX_PROMPT_BYTES)
     prompt_size = len(prompt.encode('utf-8'))

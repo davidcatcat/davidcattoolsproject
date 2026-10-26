@@ -1437,6 +1437,113 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0].name, rows[0].role), ("claude reviewer", "reviewer"))
 
+    def test_open_codex_cli_without_a_session_row_is_an_idle_member(self):
+        launcher = mon.Process(81, 1, 81, "02:43:00", "S+", "Codex CLI (node launcher)", "node", "")
+        codex = mon.Process(82, 81, 81, "02:43:00", "S+", "Codex CLI", "codex",
+                            "Codex CLI (node launcher) 81")
+        infra = [mon.Process(90, 1, 90, "05:00", "Ss", "Codex daemon", "codex", ""),
+                 mon.Process(91, 90, 91, "05:00", "Ss", "Codex APP-SERVER", "codex", "Codex daemon 90"),
+                 mon.Process(92, 91, 92, "05:00", "S", "Codex code-mode host", "codex-code-mode-host",
+                             "Codex APP-SERVER 91")]
+        procs = [launcher, codex] + infra
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        codex_rows = [row for row in rows if row.name.startswith("codex")]
+        self.assertEqual([(row.name, row.state, row.detail.split("，")[0]) for row in codex_rows],
+                         [("codex cli #1", mon.IDLE, "本 repo：已開啟")])
+        # The launcher pair is one CLI; the daemon, app-server and code-mode host are not members.
+        self.assertEqual(mon.summary(procs, [], []), "Codex 1")
+        # With an active rollout the session row is that CLI: no extra row.
+        self._codex("live", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
+                             "originator": "codex-tui"}, ["task_started"], age=5)
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertEqual([(row.name, row.state) for row in rows if row.name.startswith("codex")],
+                         [("codex 主對話", mon.WORKING)])
+        # A running `codex exec` call is shown by its own row, not as an idle CLI.
+        run = mon.Process(83, 1, 83, "00:30", "S", "Codex CLI", "codex", "")
+        self._codex("exec", {"id": "T2", "cwd": self.canonical, "thread_source": "user",
+                             "originator": "codex_exec"}, ["task_started"], age=5)
+        rows = mon.office_rows(procs + [run], self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertFalse(any(row.name.startswith("codex cli") for row in rows))
+
+    def test_open_claude_cli_without_a_session_row_is_an_idle_member(self):
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"}], age=10)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "81.json").write_text(json.dumps(
+            {"pid": 81, "sessionId": "s1", "status": "idle"}), encoding="utf-8")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(82, 1, 82, "05:00", "S+", "Claude Code CLI", "claude", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertEqual(sorted((row.name, row.state) for row in rows if row.name.startswith("claude")),
+                         [("claude cli #1", mon.IDLE), ("claude 互動", mon.IDLE)])
+        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 2")
+
+    def test_open_agent_clis_outside_the_repo_get_a_row_like_opencode(self):
+        elsewhere = os.path.join(self.tmp.name, "other-project")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Codex CLI", "codex", ""),
+                 mon.Process(82, 1, 82, "05:00", "S+", "Claude Code CLI", "claude", ""),
+                 mon.Process(83, 1, 83, "05:00", "S+", "OpenCode CLI", "opencode", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               opencode_db=os.path.join(self.tmp.name, "none.db"),
+                               cwd_of=lambda pid: elsewhere)
+        clis = sorted((row.name, row.state, row.detail) for row in rows if " cli #" in row.name)
+        # Codex/Claude sessions elsewhere are not read, so only "open" is claimed;
+        # OpenCode reads every folder's sessions.
+        self.assertEqual(clis, [("claude cli #1", mon.UNCHECKED, "其他資料夾：已開啟"),
+                                ("codex cli #1", mon.UNCHECKED, "其他資料夾：已開啟"),
+                                ("opencode cli #1", mon.IDLE,
+                                 "其他資料夾：已開啟，沒有執行中的任務，已開 5 分鐘")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 1  Codex 1  OpenCode 1")
+
+    def test_session_that_cd_into_a_d6_keeps_its_cli_to_one_row(self):
+        # The CLI was opened in the canonical checkout; its session `cd`s into the D6.
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=5)
+        sessions = self.claude.parent / "sessions"
+        sessions.mkdir()
+        (sessions / "81.json").write_text(json.dumps(
+            {"pid": 81, "sessionId": "s1", "status": "busy"}), encoding="utf-8")
+        procs = [mon.Process(81, 1, 81, "05:00", "S+", "Claude Code CLI", "claude", "")]
+        rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                               claude_root=str(self.claude), canonical=self.canonical,
+                               cwd_of=lambda pid: self.canonical)
+        self.assertEqual([(row.state, row.task) for row in rows if row.name.startswith("claude")],
+                         [(mon.WORKING, "task wp-1")])
+        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 1")
+
+    def test_session_that_cd_into_a_d6_never_takes_a_cli_outside_the_repo(self):
+        self._write(self.claude / "proj" / "s1.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "cli"}], age=5)
+        cwds = {70: "/elsewhere/x", 81: self.canonical, 82: self.canonical}
+        cli = lambda pid: mon.Process(pid, 1, pid, "30:00", "S+", "Claude Code CLI", "claude", "")
+
+        def claude_rows(procs):
+            rows = mon.office_rows(procs, self.NOW, codex_root=str(self.codex),
+                                   claude_root=str(self.claude), canonical=self.canonical,
+                                   cwd_of=cwds.get)
+            return sorted((row.state, row.detail) for row in rows if row.name.startswith("claude"))
+
+        procs = [cli(70), cli(81)]
+        self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
+                                              (mon.UNCHECKED, "其他資料夾：已開啟")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 2")
+        # Two canonical CLIs for one session that moved: which is free is a guess.
+        procs.append(cli(82))
+        self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
+                                              (mon.UNCHECKED, "其他資料夾：已開啟"),
+                                              (mon.UNCHECKED, "本 repo：已開啟")])
+        self.assertEqual(mon.summary(procs, [], []), "Claude 3")
+
     def test_process_fallback_does_not_duplicate_transcript_task_row(self):
         self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},
                     ["task_started"], age=5)
@@ -2277,9 +2384,13 @@ class OfficeViewTests(unittest.TestCase):
         os.utime(self.claude.parent / "sessions" / "41.json", (self.NOW - 5, self.NOW - 5))
         found = mon._claude_registered(mon.claude_sessions([str(self.claude), str(other)]), procs)
         self.assertEqual(found[41]["sessionId"], "a")
-        # The daemon is infrastructure: listed, not counted as an agent.
+        # The daemon and a spare background session holding no session yet are
+        # infrastructure: listed, not counted as agents.
         daemon = mon.Process(7, 1, 7, "05:00", "S", "Claude Code daemon", "claude", "")
-        self.assertEqual(mon.summary(procs + [daemon], []), "Claude 3")
+        spare = mon.Process(44, 7, 7, "05:00", "S", "Claude Code background session", "claude",
+                            "Claude Code daemon 7")
+        self.assertEqual(mon.summary(procs + [daemon, spare], [],
+                                     mon.claude_sessions([str(self.claude), str(other)])), "Claude 3")
 
     def test_working_claude_shows_its_latest_action_description_only(self):
         call = lambda description: {"type": "assistant", "message": {"content": [
