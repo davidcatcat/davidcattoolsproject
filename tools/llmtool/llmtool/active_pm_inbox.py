@@ -39,6 +39,7 @@ MAX_WAIT_SECONDS = 3600
 POLL_SECONDS = 2.0
 _EVENT_ID_DOMAIN = b'llmtool-active-pm-completion-event-v1\0'
 _ACK_DOMAIN = b'llmtool-active-pm-ack-v1\0'
+_REMOTE_TEST_EVENT_DOMAIN = b'llmtool-active-pm-remote-test-event-v1\0'
 
 
 def pm_session_key(value):
@@ -152,6 +153,38 @@ def record_ready_event(store, task_id):
     error = LLMToolError('completion event could not be recorded; retry later')
     error.task_store_error_code = 'COMPLETION_EVENT_BUSY'
     raise error
+
+
+def record_remote_test_event(store, task_id, receipt):
+    """Deliver an already validated EC2 remote test receipt to its PM inbox."""
+    record = store.get(task_id)
+    from .task_submission_cli import _active_pm_runtime
+
+    if (record.get('pm_session_id') != receipt.get('pm_session') or
+            receipt.get('task_id') != task_id or receipt.get('run_id') != record.get('run_id') or
+            not _active_pm_runtime(record)):
+        raise LLMToolError('remote test receipt does not match this Task')
+    payload = json.dumps(receipt, ensure_ascii=True, sort_keys=True,
+                         separators=(',', ':')).encode('utf-8')
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
+    source_sha = receipt.get('source_sha')
+    if type(source_sha) is not str or len(source_sha) != 40:
+        raise LLMToolError('remote test receipt has no bound source SHA')
+    session_id = 'remote-test-' + receipt['executor_task']
+    event_id = hashlib.sha256(_REMOTE_TEST_EVENT_DOMAIN + '\0'.join((
+        task_id, record['run_id'], source_sha,
+        ','.join(receipt['modules']), receipt['receipt_digest'])).encode()).hexdigest()[:32]
+    known = record.get('completion_events', []) + record.get('completion_event_tombstones', [])
+    existing = next((event for event in known if event['event_id'] == event_id), None)
+    if existing is not None:
+        return existing
+    stream = [event['sequence'] for event in known
+              if (event['source'], event['session_id']) == ('EC2_REMOTE_TEST', session_id)]
+    return store.record_completion_event(
+        task_id, event_id=event_id, run_id=record['run_id'], session_id=session_id,
+        source='EC2_REMOTE_TEST', source_sha=source_sha,
+        sequence=max(stream) + 1 if stream else 0,
+        payload_sha256=payload_sha256)['event']
 
 
 # What the PM should do when a READY result could not be turned into an event.

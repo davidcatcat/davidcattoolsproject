@@ -55,6 +55,30 @@ class TaskStoreTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve() / 'tasks'
         self.store = TaskStore(self.root)
 
+    def test_remote_test_receipt_is_appended_idempotently_to_same_task(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        receipt = {
+            'result': 'PASS', 'exit_code': 0, 'source_sha': 'a' * 40,
+            'tree': 'b' * 40, 'fetch_head': 'a' * 40,
+            'modules': ['test_task_store'], 'identity': {'uid': 65534},
+            'started_at': '2026-10-27T00:00:00Z', 'ended_at': '2026-10-27T00:00:01Z',
+            'elapsed_s': 1.0, 'ran_total': 1, 'final': ['OK'], 'failures': [],
+            'log_bytes': 0, 'log_sha256': 'c' * 64,
+            'remote_log_path': '/tmp/llmtool-remote-test-' + 'a' * 40 + '.log',
+            'task_id': task['task_id'],
+            'run_id': task['run_id'], 'executor_task': 'd6-task',
+            'pm_session': task['pm_session_id'], 'command_digest': 'd' * 64,
+            'receipt_digest': 'e' * 64,
+        }
+        receipt['receipt_digest'] = hashlib.sha256(json.dumps(
+            {key: value for key, value in receipt.items() if key != 'receipt_digest'},
+            ensure_ascii=False, sort_keys=True, separators=(',', ':'),
+            allow_nan=False).encode() + b'\n').hexdigest()
+        self.assertEqual(self.store.append_remote_test_receipt(task['task_id'], receipt), receipt)
+        self.assertEqual(self.store.append_remote_test_receipt(task['task_id'], receipt), receipt)
+        self.assertEqual(self.store.get(task['task_id'])['remote_test_receipts'], [receipt])
+
     def _codex_dispatch_task(self):
         request = 'Bounded non-sensitive Codex proposal task.'
         task_id, run_id = new_id(), new_id()

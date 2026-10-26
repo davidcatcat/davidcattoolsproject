@@ -228,6 +228,21 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(len(saved['completion_events']), 1)
         self.assertEqual(len(self._inbox()['events']), 1)
 
+    def test_remote_test_receipt_event_reaches_original_pm_inbox(self):
+        task = self._ready_task()
+        receipt = {
+            'task_id': task['task_id'], 'run_id': task['run_id'],
+            'pm_session': task['pm_session_id'], 'executor_task': self.task_id,
+            'source_sha': 'a' * 40, 'modules': ['test_remote_test'],
+            'receipt_digest': 'b' * 64,
+        }
+        active_pm_inbox.record_remote_test_event(self.store, task['task_id'], receipt)
+        events = self._inbox()['events']
+        remote_events = [event for event in events if event['source'] == 'EC2_REMOTE_TEST']
+        self.assertEqual(len(remote_events), 1)
+        self.assertEqual(remote_events[0]['task_id'], task['task_id'])
+        self.assertEqual(remote_events[0]['source_sha'], receipt['source_sha'])
+
     def test_crash_between_ready_state_and_event_is_reconciled_by_inbox(self):
         task = self._ready_task()
         with patch('llmtool.active_pm_inbox.record_ready_event',
