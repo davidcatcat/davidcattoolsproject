@@ -1643,6 +1643,7 @@ def run_task_codex_delegate(args, *, store):
     try:
         saved = store.update(task['task_id'], developer=developer)
     except Exception:
+        developer.pop('blocked_reason', None)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
             artifact_sha256=None, error_code='CODEX_RESULT_PERSISTENCE_REJECTED',
             execution={**execution, 'status': 'UNKNOWN', 'usage_source': 'UNKNOWN'},

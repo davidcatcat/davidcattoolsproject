@@ -318,6 +318,71 @@ class TaskStoreTests(unittest.TestCase):
                 self.assertIsNone(saved['usage'])
                 self.assertEqual(saved.get('blocked_reason'), expected_reason)
 
+    def test_codex_blocked_result_persistence_rejection_drops_blocked_reason(self):
+        self._allow_codex_dispatch()
+        root = str(Path.cwd())
+        snapshot = SimpleNamespace(root=root, common_dir='/registered/common',
+                                   branch='task-branch', head='a' * 40)
+        registration = SimpleNamespace(
+            task_id='executor-task', trusted_agent_id='agent',
+            session_ref='session-ref', native_session_id=None, root=root,
+            common_dir=snapshot.common_dir, branch=snapshot.branch,
+            env2_pass_marker='pass')
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        args = SimpleNamespace(
+            task_id=task['task_id'], selection_source='USER', context_stdin=False,
+            executor_task='executor-task', read_path=['src.py'],
+            write_path=['src.py'], acceptance=['the outcome is recorded'],
+            egress_basis='Approved non-sensitive test context.')
+        result = SimpleNamespace(
+            status='BLOCKED', blocked_reason='The requested change cannot be made safely.',
+            thread_id='12345678-1234-4234-8234-123456789abc',
+            exit_code=0, stdout_sha256='d' * 64, elapsed_ms=25,
+            cleanup_status='CONFIRMED', usage=None)
+        original_update = self.store.update
+        rejected = False
+
+        def reject_first_blocked_result(task_id, **changes):
+            nonlocal rejected
+            developer = changes.get('developer')
+            if (not rejected and type(developer) is dict and
+                    developer.get('error_code') == 'CODEX_BLOCKED'):
+                rejected = True
+                raise TaskStoreConflict('simulated first result persistence rejection')
+            return original_update(task_id, **changes)
+
+        with patch.object(task_submission_cli_module.task_completion,
+                          'validate_task_binding'), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'collect_git_snapshot', return_value=snapshot), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'bind_executor_task', return_value=(registration, snapshot)), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'validate_env2_pass_marker'), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'read_d6_registration', return_value=registration), \
+                patch.object(task_submission_cli_module.task_completion,
+                             '_git', return_value=b''), \
+                patch.object(task_submission_cli_module, '_bootstrap_registered_d6'), \
+                patch.object(task_submission_cli_module,
+                             '_ignored_file_fingerprints', return_value={}), \
+                patch.object(task_submission_cli_module, '_codex_developer_profile',
+                             return_value=({'model': 'gpt-6-luna'}, 'high')), \
+                patch.object(task_submission_cli_module,
+                             '_ignored_output_rejection', return_value=None), \
+                patch.object(codex_direct_developer, 'run', return_value=result), \
+                patch.object(task_submission_cli_module.dataclasses, 'replace',
+                             side_effect=lambda value, **changes: value), \
+                patch.object(self.store, 'update', side_effect=reject_first_blocked_result):
+            task_submission_cli_module.run_task_codex_delegate(args, store=self.store)
+
+        saved = self.store.get(task['task_id'])['developer']
+        self.assertTrue(rejected)
+        self.assertEqual(saved['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['error_code'], 'CODEX_RESULT_PERSISTENCE_REJECTED')
+        self.assertNotIn('blocked_reason', saved)
+
     def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
         self._allow_codex_dispatch()
         task = self._codex_dispatch_task()
