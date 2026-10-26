@@ -18,7 +18,7 @@ from llmtool.errors import LLMToolError
 from llmtool import worker_dispatch
 from llmtool.task_store import TaskStore, TaskStoreConflict, new_id
 from llmtool import task_store as task_store_module
-from llmtool.task_submission_cli import _record
+from llmtool.task_submission_cli import _record, _task_view
 from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
 
 
@@ -186,10 +186,62 @@ class TaskStoreTests(unittest.TestCase):
                     'source_file_count': None, 'source_manifest_sha256': None}
                 outcome = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
                     'error_code': error_code, 'execution': execution, 'usage': usage}
+                if status == 'BLOCKED':
+                    outcome['blocked_reason'] = 'The requested change cannot be made safely.'
                 saved = self.store.update(task['task_id'], developer=outcome)
                 self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
                 self.assertEqual(saved['developer']['execution']['status'], status)
                 self.assertEqual(saved['developer']['usage'], usage)
+                if status == 'BLOCKED':
+                    self.assertEqual(saved['developer']['blocked_reason'],
+                                     'The requested change cannot be made safely.')
+                    self.assertEqual(_task_view(saved)['developer']['blocked_reason'],
+                                     saved['developer']['blocked_reason'])
+
+    def test_blocked_reason_must_be_bounded_screened_and_bound_to_codex_blocked(self):
+        for reason in ('x' * 2049, 'api_key=secret-value', 'bad\x01reason'):
+            with self.subTest(reason=reason[:20]):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                pending = self._developer_assignment(provider='codex', max_tokens=None)
+                pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=pending)
+                dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                    'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+                self.store.update(task['task_id'], developer=dispatching)
+                invalid = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'provider_type': 'codex-cli', 'error_code': 'CODEX_BLOCKED',
+                    'execution': {'status': 'BLOCKED',
+                        'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                        'process_exit_code': 0, 'stdout_sha256': 'd' * 64,
+                        'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                        'usage_source': 'UNKNOWN', 'source_bytes': None,
+                        'source_file_count': None, 'source_manifest_sha256': None},
+                    'blocked_reason': reason}
+                with self.assertRaises(LLMToolError):
+                    self.store.update(task['task_id'], developer=invalid)
+
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+            'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        not_blocked = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+            'provider_type': 'codex-cli', 'error_code': 'CODEX_TIMEOUT',
+            'execution': {'status': 'TIMEOUT',
+                'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': None, 'stdout_sha256': 'd' * 64,
+                'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+                'usage_source': 'UNKNOWN', 'source_bytes': None,
+                'source_file_count': None, 'source_manifest_sha256': None},
+            'blocked_reason': 'must not be attached to an unknown outcome'}
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=not_blocked)
 
     def test_unknown_token_cap_is_rejected_for_other_routes_and_codex_cannot_claim_one(self):
         self._allow_codex_dispatch()

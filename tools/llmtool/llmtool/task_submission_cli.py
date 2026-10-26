@@ -1622,7 +1622,8 @@ def run_task_codex_delegate(args, *, store):
                 store, task['task_id'], developer, rejection, result.usage, artifact)
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
-                             execution=execution, usage=result.usage)
+                             execution=execution, usage=result.usage,
+                             blocked_reason=result.blocked_reason)
         else:
             developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                 artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
