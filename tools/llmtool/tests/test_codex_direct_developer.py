@@ -168,9 +168,39 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertFalse(marker.exists())
 
     def test_wait_timeout_keeps_observed_thread_usage_and_digest(self):
-        self.write_fake(self.events(self.final), delay_after_output=2)
-        with self.assertRaises(direct.DirectCodexError) as caught:
-            self.run_fake(timeout=0.8)
+        # Expire the invocation clock only after stdout has delivered the usage
+        # event. This keeps the assertion independent of process startup speed.
+        self.write_fake(self.events(self.final), delay_after_output=20)
+        timeout = 10
+        real_monotonic = time.monotonic
+        started = None
+        output_seen = False
+        original_selector = direct.selectors.DefaultSelector
+
+        class ObservedSelector:
+            def __init__(self):
+                self.selector = original_selector()
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                nonlocal output_seen
+                events = self.selector.select(wait)
+                output_seen = output_seen or any(key.data == 'stdout' for key, _ in events)
+                return events
+
+        def controlled_monotonic():
+            nonlocal started
+            current = real_monotonic()
+            if started is None:
+                started = current
+            return started + timeout + 1 if output_seen else current
+
+        with patch.object(direct.selectors, 'DefaultSelector', ObservedSelector), \
+                patch.object(direct.time, 'monotonic', side_effect=controlled_monotonic), \
+                self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake(timeout=timeout)
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_TIMEOUT')
         self.assertEqual(caught.exception.native_session_id, self.THREAD)
         self.assertEqual(caught.exception.usage, {
