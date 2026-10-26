@@ -74,6 +74,16 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(f'Review PR #42 at exact HEAD {HEAD}.', output)
         self.assertIn(f'Scope: git diff {SOURCE}..{HEAD}', output)
+        targeted_tests = 'Run only tests relevant to the reviewed change.'
+        full_suite_gate = 'Do not run the full test suite locally; exact-head CI is the full-suite gate.'
+        session_exit = 'After posting the verdict and sending the summary, end this session and leave no background process.'
+        self.assertIn(targeted_tests, output)
+        self.assertIn(full_suite_gate, output)
+        self.assertIn(session_exit, output)
+        self.assertLess(output.index('Read-only review;'), output.index(targeted_tests))
+        self.assertLess(output.index(targeted_tests), output.index(full_suite_gate))
+        self.assertLess(output.index(full_suite_gate), output.index(session_exit))
+        self.assertLess(output.index(session_exit), output.index('Post these exact lines in your review:'))
         self.assertIn(task_completion._REVIEW_VERDICT_ACTIVITY_LINE, output)
         self.assertIn(f'Verdict: PASS | Version: v1 | HEAD: {HEAD}', output)
         self.assertIn(task_completion._FORMAL_ACCEPT, output)
