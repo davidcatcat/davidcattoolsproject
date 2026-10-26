@@ -361,12 +361,16 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
                                    receipt_at=_iso(_now_ms()))
                     return receipt
         if time.monotonic() >= deadline:
+            if row is not None:
+                action = first_action_since(started, launch_ms, offsets)
+                if action is not None:
+                    receipt.update(result="DELIVERED", reason=None, first_action=action,
+                                   receipt_at=_iso(_now_ms()))
+                    return receipt
             receipt["reason"] = ("NO_NEW_ACTION" if row is not None and
                                  row.get("status") in RECEIPT_STATUSES else
                                  "SESSION_TIMEOUT" if row is not None else
                                  "PROMPT_NOT_DELIVERED" if no_prompt else "SESSION_NOT_STARTED")
-            if row is not None:
-                receipt["stop"] = stop_session(claude, row)
             return receipt
         time.sleep(poll_interval)
 
