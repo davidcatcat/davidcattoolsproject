@@ -14,6 +14,7 @@ RUN_ID = 'b' * 32
 CONTRACT = 'c' * 64
 HEAD = 'd' * 40
 SOURCE = 'e' * 40
+BASE = 'f' * 40
 COMMON = '/repo/.git'
 
 
@@ -50,9 +51,10 @@ def snapshot(head=HEAD):
 
 
 class TaskReviewPromptTests(unittest.TestCase):
-    def invoke(self, *, store=None, snapshots=None, pr_head=HEAD):
+    def invoke(self, *, store=None, snapshots=None, pr_head=HEAD, pr_base=BASE,
+               version=1):
         args = Namespace(task_id=TASK_ID, executor_task='executor-d6',
-                         reviewer_task='reviewer-d6', pr=42)
+                         reviewer_task='reviewer-d6', pr=42, version=version)
         output = io.StringIO()
         registrations = {'executor-d6': registration('executor-d6'),
                           'reviewer-d6': registration('reviewer-d6')}
@@ -62,7 +64,8 @@ class TaskReviewPromptTests(unittest.TestCase):
                           side_effect=lambda task_id, *_a, **_kw: registrations[task_id]), \
                 patch.object(task_completion, 'collect_git_snapshot', side_effect=snapshots), \
                 patch.object(task_completion, '_github_get', return_value={
-                    'number': 42, 'head': {'sha': pr_head}}), \
+                    'number': 42, 'head': {'sha': pr_head},
+                    'base': {'sha': pr_base}}), \
                 redirect_stdout(output):
             code = task_submission_cli.run_task_review_prompt(args, store=store or FakeStore())
         return code, output.getvalue()
@@ -73,7 +76,7 @@ class TaskReviewPromptTests(unittest.TestCase):
                    f'contract={CONTRACT} head={HEAD}')
         self.assertEqual(code, 0)
         self.assertIn(f'Review PR #42 at exact HEAD {HEAD}.', output)
-        self.assertIn(f'Scope: git diff {SOURCE}..{HEAD}', output)
+        self.assertIn(f'Scope: git diff {BASE}...{HEAD}', output)
         targeted_tests = 'Run only tests relevant to the reviewed change.'
         full_suite_gate = 'Do not run the full test suite locally; exact-head CI is the full-suite gate.'
         session_exit = 'After posting the verdict and sending the summary, end this session and leave no background process.'
@@ -86,6 +89,7 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertLess(output.index(session_exit), output.index('Post these exact lines in your review:'))
         self.assertIn(task_completion._REVIEW_VERDICT_ACTIVITY_LINE, output)
         self.assertIn(f'Verdict: PASS | Version: v1 | HEAD: {HEAD}', output)
+        self.assertIn(f'For a non-pass result, use marker status=FIX and "Verdict: FAIL | Version: v1 | HEAD: {HEAD}".', output)
         self.assertIn(task_completion._FORMAL_ACCEPT, output)
         self.assertIn(binding, output)
 
@@ -93,7 +97,19 @@ class TaskReviewPromptTests(unittest.TestCase):
         code, output = self.invoke(store=FakeStore(completed=False))
         self.assertEqual(code, 0)
         self.assertIn(f'Review PR #42 at exact HEAD {HEAD}.', output)
-        self.assertIn(f'Scope: git diff {SOURCE}..{HEAD}', output)
+        self.assertIn(f'Scope: git diff {BASE}...{HEAD}', output)
+
+    def test_invalid_pr_base_is_refused(self):
+        with self.assertRaises(LLMToolError) as raised:
+            self.invoke(pr_base='invalid')
+        self.assertEqual(raised.exception.completion_code,
+                         'REVIEW_PROMPT_PR_UNAVAILABLE')
+
+    def test_version_two_is_printed(self):
+        code, output = self.invoke(version=2)
+        self.assertEqual(code, 0)
+        self.assertIn(f'Verdict: PASS | Version: v2 | HEAD: {HEAD}', output)
+        self.assertIn(f'For a non-pass result, use marker status=FIX and "Verdict: FAIL | Version: v2 | HEAD: {HEAD}".', output)
 
     def test_refuses_unrecorded_executor_head_without_prompt(self):
         with self.assertRaises(LLMToolError) as raised:

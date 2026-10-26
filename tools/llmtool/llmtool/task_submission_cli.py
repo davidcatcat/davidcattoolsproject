@@ -518,6 +518,8 @@ def add_task_submission_parsers(actions):
                                help='registered D6 Reviewer task id')
     review_prompt.add_argument('--pr', required=True, type=int,
                                help='public GitHub pull request number')
+    review_prompt.add_argument('--version', type=int, default=1,
+                               help='review verdict version (1-9999; default 1)')
 
 
 def run_task_review_prompt(args, *, store=None):
@@ -587,23 +589,21 @@ def run_task_review_prompt(args, *, store=None):
             pr['number'] != args.pr or type(pr.get('head')) is not dict or
             pr['head'].get('sha') != expected_head):
         refuse('REVIEW_PROMPT_PR_HEAD_MISMATCH')
+    version = getattr(args, 'version', 1)
+    if type(version) is not int or not 1 <= version <= 9999:
+        refuse('REVIEW_PROMPT_BINDING_MISSING')
+    base = pr.get('base')
+    base_sha = base.get('sha') if type(base) is dict else None
+    if type(base_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', base_sha) is None:
+        refuse('REVIEW_PROMPT_PR_UNAVAILABLE')
     try:
         binding_line = task_completion._review_binding_line(
             task['task_id'], task['run_id'], binding['contract_digest'], expected_head)
     except Exception:
         refuse('REVIEW_PROMPT_BINDING_MISSING')
-    source_sha = binding.get('source_sha')
-    if source_sha is None:
-        source_sha = evidence.get('source_sha')
-    if source_sha is None and type(evidence.get('result')) is dict:
-        source_sha = evidence['result'].get('source_sha')
-    if source_sha is None:
-        source_sha = executor.source_sha
-    if type(source_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', source_sha) is None:
-        refuse('REVIEW_PROMPT_BINDING_MISSING')
     lines = [
         f'Review PR #{args.pr} at exact HEAD {expected_head}.',
-        f'Scope: git diff {source_sha}..{expected_head}',
+        f'Scope: git diff {base_sha}...{expected_head}',
         'Review this scope only. Read-only review; do not edit files, run mutating commands, commit, push, or publish.',
         'Run only tests relevant to the reviewed change.',
         'Do not run the full test suite locally; exact-head CI is the full-suite gate.',
@@ -611,9 +611,10 @@ def run_task_review_prompt(args, *, store=None):
         '',
         'Post these exact lines in your review:',
         task_completion._REVIEW_VERDICT_ACTIVITY_LINE,
-        f'Verdict: PASS | Version: v1 | HEAD: {expected_head}',
+        f'Verdict: PASS | Version: v{version} | HEAD: {expected_head}',
         task_completion._FORMAL_ACCEPT,
         binding_line,
+        f'For a non-pass result, use marker status=FIX and "Verdict: FAIL | Version: v{version} | HEAD: {expected_head}".',
     ]
     if not all(type(line) is str for line in lines):
         refuse('REVIEW_PROMPT_BINDING_MISSING')
