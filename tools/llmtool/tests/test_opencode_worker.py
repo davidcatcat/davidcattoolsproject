@@ -124,6 +124,7 @@ else:
   emit('error',error={'type':'provider.auth','status':403,'message':'PRIVATE_ERROR_NOT_FOR_OUTPUT'})
   sys.exit(1)
  if mode=='cancel': os.kill(os.getppid(),signal.SIGINT);time.sleep(4)
+ if mode=='timeout': time.sleep(4)
  if mode=='overflow': print('x'*1100000);sys.exit()
  if mode=='retry':
   for n in range(5): emit('step_start',part={'type':'step-start','messageID':'m1'});time.sleep(0.2)
