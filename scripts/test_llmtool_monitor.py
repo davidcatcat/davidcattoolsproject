@@ -1369,6 +1369,8 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("SECRET", "\n".join(lines))
 
     def test_agent_process_cwd_binds_transcript_free_d6_session(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 600))
+        self._register("wp-1", str(self.task), last_verified_at=stamp)
         for role in ("Codex CLI", "Codex CLI (node launcher)", "Claude Code CLI",
                      "Claude Code CLI (node launcher)", "OpenCode CLI", "OpenCode CLIENT",
                      "OpenCode CLI (node launcher)", "OpenCode CLIENT (node launcher)"):

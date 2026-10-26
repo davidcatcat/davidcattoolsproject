@@ -3026,12 +3026,11 @@ def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical
         else:
             opened = _elapsed_seconds(proc.elapsed)
             since = f"，已開 {_ago(opened)[:-1]}" if opened is not None and opened >= 60 else ""
-            state = WORKING if task else IDLE
-            detail = (f"{where}：CLI 執行中（程序 cwd）{note}" if task else
-                      f"{where}：已開啟，沒有執行中的任務{since}{note}")
+            state = IDLE
+            detail = f"{where}：已開啟，沒有執行中的任務{since}{note}"
             rows.append(OfficeRow(name, state, detail,
                                   opened if opened is not None else 0.0, base + number,
-                                  kind="worker", role="developer" if task else "", task=task,
+                                  kind="worker",
                                   evidence="程序"))
     return rows
 
@@ -3740,7 +3739,8 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         "OpenCode CLIENT (node launcher)": "opencode developer",
         "OpenCode CLI (node launcher)": "opencode developer",
     }
-    covered = {row.task[5:] for row in rows if row.task.startswith("task ")}
+    covered = {row.task[5:] for row in rows
+               if row.task.startswith("task ") and row.state == WORKING}
     seen = set(covered)
     out = []
     for proc in sorted(processes, key=lambda item: item.pid):
