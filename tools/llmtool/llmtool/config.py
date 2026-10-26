@@ -199,9 +199,14 @@ def _timeout_seconds(value):
     return result
 
 
-def _validate_provider(provider):
+def _validate_provider(provider, profile_name):
     implementation = client_type(provider["type"])
-    implementation.validate_options(provider["provider_options"])
+    options = provider["provider_options"]
+    if profile_name == "opencode-developer" and isinstance(options, dict) and "steps" in options:
+        # OpenCode's direct Developer route consumes this profile-only setting;
+        # it is not an option understood by the configured provider client.
+        options = {key: value for key, value in options.items() if key != "steps"}
+    implementation.validate_options(options)
     implementation.validate_config(provider)
     url = provider["base_url"]
     if url is not None:
@@ -241,7 +246,7 @@ def _validate(config):
     selected_provider(config)
     for name, provider in config["providers"].items():
         _provider_name(name)
-        _validate_provider(provider)
+        _validate_provider(provider, name)
     generation = config["generation"]
     generation["max_tokens"] = _number(generation["max_tokens"], "max_tokens", integer=True)
     if generation["max_tokens"] <= 0:

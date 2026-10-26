@@ -424,6 +424,20 @@ active_provider: local
                 self.user.write_text(yaml.safe_dump({"providers": {"default": {"provider_options": options}}}))
                 self.assertEqual(self.resolve()["providers"]["default"]["provider_options"], options)
 
+    def test_steps_option_is_allowed_only_for_opencode_developer_profile(self):
+        options = {"steps": 24}
+        self.user.write_text(yaml.safe_dump({"providers": {
+            "opencode-developer": {"provider_options": options},
+        }}))
+        config = self.resolve()
+        self.assertEqual(config["providers"]["opencode-developer"]["provider_options"], options)
+
+        self.user.write_text(yaml.safe_dump({"providers": {
+            "default": {"provider_options": options},
+        }}))
+        with self.assertRaises(LLMToolError):
+            self.resolve()
+
     def test_missing_endpoint_or_model_fails_request_readiness(self):
         for fields, field in (({}, "base_url"), ({"model": "test-model"}, "base_url"),
                               ({"base_url": "http://localhost:1234"}, "model")):
