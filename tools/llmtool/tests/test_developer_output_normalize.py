@@ -133,7 +133,7 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         anchored, tokens, rejection = _developer_normalized_output(
             raw, [self.PATH], source_files={self.PATH: 'old\n'})
         self.assertEqual(anchored, raw)
-        self.assertEqual(tokens, ('HUNK_COUNTS_RECOUNTED',))
+        self.assertEqual(tokens, ())
         self.assertIsNone(rejection)
         unchanged, unchanged_tokens = reanchor_developer_output(
             raw, [self.PATH], {self.PATH: 'old\n'})

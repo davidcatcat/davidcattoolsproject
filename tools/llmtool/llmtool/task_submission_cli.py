@@ -31,6 +31,11 @@ from .test_output_excerpts import _emitted_sensitive
 from .developer_output_normalize import (normalize_developer_output,
                                          reanchor_developer_output)
 
+
+TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
+    '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n\n'
+)
+
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
 D6_INTEGRATOR_DISPATCHER_ROOT = Path(
@@ -930,8 +935,7 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
         'files. Do not include credentials, secrets, private data, or prose outside the diff.'
     )
     user = (json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':')) +
-            '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n'
-            'Context:\n' + context +
+            TEXT_DEVELOPER_CONTEXT_SEPARATOR + 'Context:\n' + context +
             '\nReturn only the unified diff, starting with "diff --git".')
     return [{'role': 'system', 'content': system}, {'role': 'user', 'content': user}]
 

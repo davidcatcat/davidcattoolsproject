@@ -20,6 +20,7 @@ from llmtool.providers import get_provider_capabilities
 from llmtool.providers.base import Reply
 from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
+from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_complete,
@@ -1306,7 +1307,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
             patch_text.encode()).hexdigest())
         self.assertEqual(result['completion']['evidence']['source_sha'], self.executor_head)
         self.assertEqual(result['completion']['executor_task_id'], 'executor-task-1')
-        packet = json.loads(messages[1]['content'])
+        packet_json, _context_section = messages[1]['content'].split(
+            TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
+        packet = json.loads(packet_json)
         self.assertEqual(packet['task_contract_digest'], task['task_binding']['contract_digest'])
         self.assertEqual(packet['source_sha'], self.executor_head)
         self.assertEqual(packet['write_paths'], ['sample.py'])
@@ -1533,7 +1536,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIn('Copy context lines verbatim', system_prompt)
         packet_text = client.calls[0][1]['content']
         packet_json, context_section = packet_text.split(
-            '\n\nThe model has no tools, cannot read files, and all needed file content is provided below.\n\n', 1)
+            TEXT_DEVELOPER_CONTEXT_SEPARATOR, 1)
         developer_packet = json.loads(packet_json)
         self.assertEqual(developer_packet['pm_selected_goal'], 'Add one focused test.')
         self.assertEqual(developer_packet['acceptance'], ['new test passes'])

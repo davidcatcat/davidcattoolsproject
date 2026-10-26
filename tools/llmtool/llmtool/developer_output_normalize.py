@@ -139,7 +139,14 @@ def normalize_developer_output(value, write_paths):
                 i += 1
             old_count = sum(1 for item in body if item.startswith((' ', '-')))
             new_count = sum(1 for item in body if item.startswith((' ', '+')))
-            rebuilt = f'@@ -{hunk.group(1)},{old_count} +{hunk.group(3)},{new_count} @@{hunk.group(5)}'
+            old_declared = int(hunk.group(2)) if hunk.group(2) is not None else 1
+            new_declared = int(hunk.group(4)) if hunk.group(4) is not None else 1
+            if old_count == old_declared and new_count == new_declared:
+                # Keep an already-valid header byte-for-byte; in particular,
+                # do not report a normalization for omitted count fields.
+                rebuilt = line
+            else:
+                rebuilt = f'@@ -{hunk.group(1)},{old_count} +{hunk.group(3)},{new_count} @@{hunk.group(5)}'
             if rebuilt != line:
                 tokens.append('HUNK_COUNTS_RECOUNTED')
             fixed.append(rebuilt)
