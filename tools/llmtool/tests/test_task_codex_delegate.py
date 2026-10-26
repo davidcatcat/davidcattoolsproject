@@ -8,11 +8,15 @@ import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import task_completion
+from llmtool import task_submission_cli
 from llmtool.task_store import TaskStore, new_id
-from llmtool.task_submission_cli import _record, run_task_codex_delegate
+from llmtool.task_submission_cli import (
+    _record, run_task_codex_delegate, run_task_direct_result_event,
+)
 
 
 class CodexDelegateTests(unittest.TestCase):
@@ -160,13 +164,17 @@ class CodexDelegateTests(unittest.TestCase):
         return script
 
     def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None,
-                  overwrite_ignored=None, malformed_diff=None):
+                  overwrite_ignored=None, malformed_diff=None, callback_handler=None,
+                  registration=None, bound_registration=None):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
             acceptance=['src.py is changed'], executor_task='executor-task-1',
             read_path=['src.py'], write_path=['src.py'],
             egress_basis='approved bounded fixture')
+        snapshot = (SimpleNamespace(root=registration.root,
+            common_dir=registration.common_dir, branch=registration.branch,
+            head=registration.source_sha) if registration else None)
         original_cwd = os.getcwd()
         try:
             os.chdir(self.root)
@@ -181,9 +189,27 @@ class CodexDelegateTests(unittest.TestCase):
                           return_value=({'model': 'gpt-6-luna'}, 'high')), \
                     patch('llmtool.task_submission_cli._bootstrap_registered_d6',
                           side_effect=bootstrap_error), \
+                    (patch.object(task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)) if registration else
+                     patch.object(task_completion, 'bind_executor_task',
+                          wraps=task_completion.bind_executor_task)), \
+                    (patch.object(task_completion, 'read_d6_registration',
+                          side_effect=[registration, bound_registration])
+                     if registration and bound_registration else
+                     patch.object(task_completion, 'read_d6_registration',
+                          wraps=task_completion.read_d6_registration)), \
                     patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'), \
                     patch.object(task_completion, '_git', side_effect=read_git), \
-                    patch('llmtool.task_submission_cli.run_task_direct_result_event', return_value=0) as callback:
+                    (patch('llmtool.task_submission_cli._refresh_d6_binding_after_bootstrap',
+                          return_value=registration) if registration else
+                     patch('llmtool.task_submission_cli._refresh_d6_binding_after_bootstrap',
+                          wraps=task_submission_cli._refresh_d6_binding_after_bootstrap)), \
+                    (patch('llmtool.task_submission_cli._bind_codex_native_session',
+                          return_value='BOUND') if registration else
+                     patch('llmtool.task_submission_cli._bind_codex_native_session',
+                          wraps=task_submission_cli._bind_codex_native_session)), \
+                    patch('llmtool.task_submission_cli.run_task_direct_result_event',
+                          side_effect=callback_handler, return_value=0) as callback:
                 result = run_task_codex_delegate(args, store=self.store)
         finally:
             os.chdir(original_cwd)
@@ -255,6 +281,75 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
         callback.assert_called_once()
         self.assertFalse((self.root / '__pycache__').exists())
+
+    def test_bound_codex_session_reaches_pm_evidence_ready(self):
+        task = self._task()
+        class MemoryStore:
+            def __init__(self, record):
+                self.value = dict(record)
+
+            def get(self, _task_id):
+                return self.value
+
+            def update(self, _task_id, **changes):
+                self.value.update(changes)
+                return self.value
+
+            def compare_and_update(self, _task_id, expected, **changes):
+                if any(self.value.get(key) != value for key, value in expected.items()):
+                    raise AssertionError('unexpected Task update')
+                self.value.update(changes)
+                return self.value
+
+        self.store = MemoryStore(task)
+        registration = SimpleNamespace(task_id='executor-task-1',
+            trusted_agent_id='executor-agent', session_ref='executor-session',
+            native_session_id=None, root=str(self.root), common_dir=self.common_dir,
+            branch='feat/codex-delegate', source_sha=self.source_sha,
+            result_sha=self.source_sha)
+        bound_registration = SimpleNamespace(**{
+            **vars(registration), 'native_session_id':
+                '12345678-1234-4234-8234-123456789abc'})
+        snapshot = SimpleNamespace(root=str(self.root), common_dir=self.common_dir,
+            branch='feat/codex-delegate', head=self.source_sha)
+        result = {'task_id': task['task_id'], 'run_id': task['run_id'],
+            'executor_task_id': registration.task_id,
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': bound_registration.native_session_id,
+            'executor_native_session': 'VERIFIED', 'root': str(self.root),
+            'common_dir': self.common_dir, 'branch': registration.branch,
+            'source_sha': self.source_sha, 'result_head': None,
+            'result_mode': 'UNCOMMITTED_WORKTREE', 'changed_paths': ['src.py'],
+            'diff_sha256': 'e' * 64, 'status_sha256': 'f' * 64,
+            'file_manifest_sha256': 'a' * 64}
+
+        def callback_handler(task_id, executor_task_id, *, store):
+            return run_task_direct_result_event(task_id, executor_task_id, store=store)
+
+        with patch.object(task_completion, 'collect_executor_worktree_result',
+                          return_value=result) as collect, \
+             patch.object(task_completion, 'run_bounded_worktree_tests',
+                          return_value=[]), \
+             patch.object(task_submission_cli, '_recollect_direct_worktree'), \
+             patch.object(task_submission_cli, '_active_pm_runtime', return_value=True), \
+             patch.object(task_submission_cli, '_record_ready_event'), \
+             redirect_stdout(io.StringIO()):
+            _dispatch_result, saved, callback = self._dispatch(task,
+                callback_handler=callback_handler, registration=registration,
+                bound_registration=bound_registration)
+
+        self.assertEqual(saved['developer']['execution']['native_session_binding'], 'BOUND')
+        self.assertEqual(saved['developer']['direct_result_callback']['state'],
+                         'PM_EVIDENCE_READY',
+                         saved['developer']['direct_result_callback'].get('missing_gates'))
+        self.assertEqual(saved['developer']['direct_result_callback']['evidence'][
+            'executor_native_session_id'], bound_registration.native_session_id)
+        self.assertNotIn('D6_TASK_BINDING_MISMATCH',
+                         saved['developer']['direct_result_callback']['missing_gates'])
+        self.assertEqual(collect.call_args.kwargs['expected_native_session_id'],
+                         bound_registration.native_session_id)
+        callback.assert_called_once()
 
     def test_bootstrap_environment_failure_is_unavailable_and_typed(self):
         from llmtool.opencode_direct_developer import DirectOpenCodeError

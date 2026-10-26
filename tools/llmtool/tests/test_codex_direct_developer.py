@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import subprocess
@@ -233,16 +234,21 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         registration = SimpleNamespace(task_id='executor-task',
             trusted_agent_id='codex-developer', session_ref='direct Codex session',
             native_session_id=None, root=str(self.root), common_dir=str(self.root / '.git'),
-            branch='task/branch', source_sha='b' * 40)
+            branch='task/branch', source_sha='b' * 40, result_sha='b' * 40)
         bound_registration = SimpleNamespace(**{
             **vars(registration), 'native_session_id': self.THREAD})
         snapshot = SimpleNamespace(root=str(self.root), common_dir=registration.common_dir,
             branch=registration.branch, head='b' * 40)
-        task = {'schema_version': 2, 'task_id': task_id, 'run_id': 'c' * 32,
-            'state': 'PM_RESPONDED', 'response': 'PM response', 'developer': None,
-            'request': 'bounded request', 'task_binding': {'contract_digest': 'd' * 64},
-            'pm_assignment': {'route': 'codex', 'risk': 'LOW', 'goal': 'selected goal',
-                              'acceptance': ['works']}}
+        request = 'bounded request'
+        task = task_submission_cli._record(
+            task_id, 'c' * 32, 'pm-session', 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(response='PM response',
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'selected goal', 'acceptance': ['works']})
 
         class Store:
             def __init__(self):
