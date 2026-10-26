@@ -15,6 +15,10 @@ When the PM receives PASS, FAIL or BLOCKED for a Task, it records the next decis
 | BLOCKED | Diagnose the block first (next section). Then retry, reassign or isolate the Task. |
 | Work package complete | Check the queue and pick the next executable, authorized work package (see "Queue and IDLE"). |
 
+### Close out sessions that finished their part
+
+A Reviewer or Developer session is done once its result is recorded (a verdict on GitHub, or a Developer outcome in llmtool). A Reviewer request asks the Reviewer to run only tests relevant to the change, leave the full suite to exact-head CI, and end the session after posting. After recording the next decision, the PM checks `claude agents` for that session. If it is still busy, the PM stops it with `claude stop <id>`. It then sends `TERM` only to leftover processes whose working directory is inside that session's own D6 root; it never touches other processes and never uses a stronger signal first. The PM notes the close-out on the PR or Issue, and retires the D6 after merge under [safe-git](../safe-git/worktree-lifecycle.md). Leftover full-suite runs compete with the Mac CI runners and change no decision.
+
 ## BLOCKED: diagnose, then retry, reassign or isolate
 
 1. **Confirm the cause with evidence:** the exact error code, run/Task ID, observed time and the check that produced it. A stale comment, an assumption or a single indirect signal does not confirm a cause.
