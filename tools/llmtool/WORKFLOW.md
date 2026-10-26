@@ -6,7 +6,7 @@
 
 Codex and OpenCode are Developer routes assigned by the existing PM only after checking [worker-dispatch.json](worker-dispatch.json); a PAUSED switch forbids dispatch regardless of live health. Direct OpenCode work uses a registered D6 task worktree, task-local permissions and a free DeepSeek model. D4/G3/M2 is background and does not block direct Developer work. Company `gw` is a third Developer route through llmtool for small, low-risk, clearly testable tasks; the model proposes changes but the authorized execution environment alone edits files and runs tests. Preserve per-task data screening, no secrets/private data, usage and bounded-repair evidence, independent review and exact-head CI.
 
-Claude is the fixed formal Reviewer under [AGENTS.md](../../AGENTS.md). Codex Reviewer output is advisory/pre-review only and does not replace the formal Claude gate. Formal reviews remain exact-head, read-only and subject to all applicable security, CI and Mac-native gates. Owner dispatch switches are in [worker-dispatch.json](worker-dispatch.json); the local monitor at [scripts/llmtool_monitor.py](../../scripts/llmtool_monitor.py) reports live technical state separately. The PM's next-step duty after each result is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). Company LLM unavailability is recorded and does not block unrelated Developers.
+The formal Reviewer is from the other model family than the Developer under [AGENTS.md](../../AGENTS.md) (Claude for Codex Developer changes, Codex for Claude Developer and PM changes); other reviews are advisory. Formal reviews remain exact-head, read-only and subject to all applicable security, CI and Mac-native gates. Owner dispatch switches are in [worker-dispatch.json](worker-dispatch.json); the local monitor at [scripts/llmtool_monitor.py](../../scripts/llmtool_monitor.py) reports live technical state separately. The PM's next-step duty after each result is the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md). Company LLM unavailability is recorded and does not block unrelated Developers.
 
 
 ## Historical role and stop decisions
@@ -120,7 +120,7 @@ are the owner-approved architecture source; they do not implement new runtime ri
 
 ### Current handoff
 
-Follow the bounded Developer → independent formal Claude Reviewer → Integrator path and the dispatch-switch check in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). Codex Reviewer output may provide advisory/pre-review feedback only and does not replace formal Claude review. D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
+Follow the bounded Developer → independent formal Reviewer (other model family) → Integrator path and the dispatch-switch check in [ai-team-delivery](../../skills/ai-team-delivery/SKILL.md). D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work, not a prerequisite for direct Developer sessions; earlier D7/S3 wording is historical.
 
 Prior D1–D5 role text is archived with the other historical allocation decisions linked above.
 
@@ -1066,9 +1066,10 @@ task grant and safe-git, not adapter permission to mutate.
 The B contract currently launches a fresh isolated Claude text/no-tools child.
 A future Codex Reviewer transport would be a separate host/session/tool boundary;
 its launch provenance, restrictive tools, route, packet-export policy and
-independence would require separate review before wiring. Under current authority,
-Codex Reviewer output is advisory/pre-review only and cannot replace the fixed
-Claude formal gate. Do not select a reviewer through caller JSON or infer a
+independence would require separate review before wiring. Under current authority
+(AGENTS.md *Formal Reviewer*, 2026-10-25), a Codex Reviewer is the formal Reviewer
+only for Claude Developer and Claude PM changes, and Claude for Codex Developer
+changes; any other review is advisory. Do not select a reviewer through caller JSON or infer a
 provider grant from CLI support. This docs task performs no model launch.
 
 #### Minimal adapter: existing events and one finite worker
