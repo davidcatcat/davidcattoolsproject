@@ -83,10 +83,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
         subprocess.run(['/usr/bin/git', 'config', 'user.email', 'executor@example.invalid'],
                        cwd=self.executor_root, check=True)
         (self.executor_root / 'sample.py').write_text('VALUE = 1\n')
+        (self.executor_root / 'README.md').write_text('Executor fixture documentation.\n')
         report_dir = self.executor_root / 'tools' / 'llmtool'
         report_dir.mkdir(parents=True)
         (report_dir / '.gitignore').write_text('/.d6-bootstrap-report.json\n')
-        subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'tools/llmtool/.gitignore'],
+        subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'README.md',
+                        'tools/llmtool/.gitignore'],
                        cwd=self.executor_root, check=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
                        cwd=self.executor_root, check=True, capture_output=True)
@@ -755,6 +757,57 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       developer['direct_result_callback']['missing_gates'])
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
+
+    def test_opencode_direct_callback_accepts_docs_only_and_blocks_mixed_unregistered(self):
+        for mixed in (False, True):
+            with self.subTest(mixed=mixed):
+                task = self._pm_task_with_opencode_assignment()
+                output = io.StringIO()
+                paths = ['README.md', 'sample.py'] if mixed else ['README.md']
+
+                def execute(**kwargs):
+                    self.assertEqual(kwargs['write_paths'], paths)
+                    (self.executor_root / 'README.md').write_text(
+                        'Updated executor documentation.\n')
+                    if mixed:
+                        (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+                    return DirectResult(0, 'ses_Abc123', 'Updated documentation.', None,
+                        'UNKNOWN', 'a' * 64, 32, 'CONFIRMED', 'opencode v2.0.32',
+                        10, len(paths), 'b' * 64)
+
+                args = self._opencode_delegate_args(
+                    task, read_path=paths, write_path=paths)
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=execute), redirect_stdout(output):
+                    code = run_task_delegate(args)
+
+                self.assertEqual(code, 1, output.getvalue())
+                developer = json.loads(output.getvalue())['developer']
+                callback = developer['direct_result_callback']
+                if mixed:
+                    self.assertEqual(callback['state'], 'WAITING_EXECUTOR')
+                    self.assertIn('TEST_SCOPE_MISSING', callback['missing_gates'])
+                else:
+                    self.assertEqual(callback['evidence']['verification_state'], 'READY')
+                    self.assertEqual(callback['evidence']['tests'], [{
+                        'status': 'NOT_APPLICABLE_DOCS_ONLY',
+                        'changed_paths': ['README.md'], 'source_sha': self.executor_head,
+                        'diff_sha256': callback['evidence']['result']['diff_sha256'],
+                        'result_head': None, 'docs_only': True,
+                    }])
+                    complete = Namespace(task_id=task['task_id'],
+                        executor_task='executor-task-1', reviewer_task=None, pr=None)
+                    with patch('llmtool.task_submission_cli.run_task_direct_result_event',
+                               return_value=0) as resume:
+                        self.assertEqual(run_task_complete(
+                            complete, store=TaskStore(
+                                Path(self.home) / '.local/state/llmtool/tasks')), 0)
+                    resume.assert_called_once_with(
+                        task['task_id'], 'executor-task-1', store=unittest.mock.ANY,
+                        reviewer_adapter=None)
+                subprocess.run(['/usr/bin/git', 'checkout', '--', 'README.md', 'sample.py'],
+                               cwd=self.executor_root, check=True, capture_output=True)
 
     def _write_opencode_developer_model(self, model, *, steps=None):
         config = self.home / '.config/llmtool/config.yaml'
