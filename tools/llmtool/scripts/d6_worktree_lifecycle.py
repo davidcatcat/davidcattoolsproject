@@ -12,11 +12,11 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import shutil
 import stat
 import subprocess
 import sys
@@ -564,6 +564,10 @@ def resume_worktree(*, task_id, root):
 # Retire accepts only records the PM can still act on; REVIEW_PENDING,
 # RETAIN_BLOCKED, REMOVED and hand-written states are kept for a human.
 RETIRE_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
+CONTENT_REASONS = frozenset((
+    "D6_RETIRE_UNKNOWN_LOCAL_STATE", "D6_RETIRE_RETENTION_PATH_INVALID",
+    "D6_RETIRE_RETENTION_PATH_SYMLINK", "D6_RETIRE_RETENTION_PATH_TRACKED",
+    "D6_RETIRE_RETENTION_PATH_UNAVAILABLE"))
 WORKTREE_GIT_LOCKS = ("index.lock", "HEAD.lock", "ORIG_HEAD.lock")
 COMMON_GIT_LOCKS = ("packed-refs.lock", "config.lock", "shallow.lock")
 LSOF = "/usr/sbin/lsof"
@@ -798,21 +802,49 @@ def _publication(root, branch, head, squash):
     return None
 
 
+def _covered(path, entries):
+    return any(path == relative or (is_dir and path.startswith(relative + "/"))
+               for relative, is_dir in entries)
+
+
+def _pycache_file(root, root_dev, relative):
+    """One regular ``__pycache__/*.pyc`` file beneath root, or None."""
+    parts = relative.split("/")
+    if (len(parts) < 2 or parts[-2] != "__pycache__" or not parts[-1].endswith(".pyc") or
+            not _safe_relative(relative)):
+        return None
+    path = _uncommitted_file(root, root_dev, relative)
+    if path is None or not stat.S_ISREG(path.lstat().st_mode):
+        return None
+    return path
+
+
+def _unknown_digest(paths):
+    """sha256 of the sorted unknown paths joined by NUL (the evidence value)."""
+    joined = "\0".join(sorted(paths)).encode("utf-8", "surrogateescape")
+    return hashlib.sha256(joined).hexdigest()
+
+
 def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root, squash,
-                 discard_uncommitted=False):
+                 discard_uncommitted=False, unknown_evidence=None):
     """Evaluate every retire gate for one task without changing anything.
 
     With ``discard_uncommitted`` (an Owner-approved task), tracked changes and
     untracked non-ignored files become discard candidates instead of blocks.
+    ``unknown_evidence`` is the PM's digest of the exact unknown paths seen in
+    a dry run; when it matches, that content (and a RETAIN_BLOCKED state) is
+    accepted for removal by ``git worktree remove``.
     """
     root = workspace_root / task_id
     plan = {"task_id": task_id, "root": str(root), "reasons": [],
             "content_block": False, "targets": [], "unknown_paths": [],
-            "discard_tracked": [], "discard_untracked": []}
+            "discard_tracked": [], "discard_untracked": [], "pycache": [],
+            "accepted_unknown": False}
     if (record.get("schema_version") != 1 or record.get("task_id") != task_id):
         plan["reasons"].append("D6_RETIRE_RECORD_INVALID")
         return plan
-    if record.get("state") not in RETIRE_STATES:
+    state = record.get("state")
+    if state not in RETIRE_STATES and state != "RETAIN_BLOCKED":
         plan["reasons"].append("D6_RETIRE_STATE_NOT_RETIRABLE")
         return plan
     reasons = _identity_reasons(root, record, canonical_root, common_dir, workspace_root)
@@ -879,46 +911,43 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
         candidates = {path for path in raw.split("\0") if path}
     unknown = []
     for path in _untracked(root):
-        if any(path == relative or (is_dir and path.startswith(relative + "/"))
-               for relative, is_dir in entries):
+        if _covered(path, entries):
             continue
+        if _pycache_file(root, root_dev, path) is not None:
+            plan["pycache"].append(path)
         # Ignored files are never "uncommitted changes"; they stay unknown.
-        if (path in candidates and _safe_relative(path) and
+        elif (path in candidates and _safe_relative(path) and
                 _uncommitted_file(root, root_dev, path) is not None):
             plan["discard_untracked"].append(path)
         else:
             unknown.append(path)
+    plan["unknown_digest"] = _unknown_digest(unknown)
     if unknown:
-        plan["reasons"].append("D6_RETIRE_UNKNOWN_LOCAL_STATE")
-        plan["content_block"] = True
         plan["unknown_paths"] = unknown[:50]
         plan["unknown_path_count"] = len(unknown)
+    if unknown_evidence is not None:
+        if unknown_evidence == plan["unknown_digest"]:
+            plan["accepted_unknown"] = True
+        else:
+            plan["reasons"].append("D6_RETIRE_EVIDENCE_MISMATCH")
+    elif state == "RETAIN_BLOCKED":
+        plan["reasons"].append("D6_RETIRE_STATE_RETAIN_BLOCKED")
+    if unknown and not plan["accepted_unknown"]:
+        plan["reasons"].append("D6_RETIRE_UNKNOWN_LOCAL_STATE")
+        plan["content_block"] = True
     return plan
 
 
-def _discard(root, relative, is_dir):
-    """Delete one exact registered DISCARD_REGENERABLE path beneath root.
-
-    The single recursive case is a registered directory entry (for example
-    the venv). shutil.rmtree is used only where it is symlink-attack safe: it
-    refuses a symlinked top, never follows symlinks inside, and unlinks them.
-    """
-    target = _retention_target(root, root.lstat().st_dev, relative, is_dir)
-    if target is None:
-        return
-    if isinstance(target, str):
-        _stop(target)
-    if is_dir:
-        if not shutil.rmtree.avoids_symlink_attacks:
-            _stop("D6_RETIRE_DISCARD_UNSAFE")
-        shutil.rmtree(target)
-    else:
-        os.unlink(target)
-
-
 def _execute_retire(plan, record, record_path, canonical_root, common_dir, workspace_root):
-    """Discard registered paths, unlock and remove one gated tree; return result."""
+    """Discard approved/regenerable files, unlock and remove one gated tree.
+
+    This code deletes only exact files (Owner-approved uncommitted changes and
+    regular ``__pycache__/*.pyc``) and rmdirs emptied ``__pycache__``
+    directories. Registered retention paths stay for ``git worktree remove``
+    (without --force), which deletes ignored content itself.
+    """
     root = Path(plan["root"])
+    entries = _retention_entries(record.get("retention_paths"))
 
     def recheck():
         reasons = _identity_reasons(root, record, canonical_root, common_dir,
@@ -932,10 +961,22 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
             return ["D6_RETIRE_LIVENESS_UNKNOWN"]
         if live:
             return ["D6_RETIRE_LIVE_PROCESS"]
+        if _task_git(root, "status", "--porcelain=v1", "-z",
+                     "--untracked-files=no").stdout:
+            return ["D6_RETIRE_DIRTY_TRACKED"]
+        root_dev = root.lstat().st_dev
+        for relative, is_dir in entries:
+            target = _retention_target(root, root_dev, relative, is_dir)
+            if isinstance(target, str):
+                return [target]
+        unknown = [path for path in _untracked(root) if not _covered(path, entries)]
+        if unknown and not (plan["accepted_unknown"] and
+                            _unknown_digest(unknown) == plan["unknown_digest"]):
+            return ["D6_RETIRE_UNKNOWN_LOCAL_STATE"]
         return []
 
-    unlocked = False
     discarded_paths = sorted(plan["discard_tracked"] + plan["discard_untracked"])
+    unlocked = False
     try:
         if discarded_paths:
             plan["discarded_uncommitted"] = True
@@ -949,12 +990,18 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
             if path is None:
                 _stop("D6_RETIRE_DISCARD_PATH_INVALID")
             os.unlink(path)
-        for relative, is_dir in plan["targets"]:
-            _discard(root, relative, is_dir)
+        for relative in plan["pycache"]:
+            path = _pycache_file(root, root.lstat().st_dev, relative)
+            if path is None:
+                _stop("D6_RETIRE_DISCARD_PATH_INVALID")
+            os.unlink(path)
+        for directory in sorted({relative.rsplit("/", 1)[0] for relative in plan["pycache"]}):
+            try:
+                # Plain rmdir: succeeds only for an emptied real directory.
+                os.rmdir(root / directory)
+            except OSError:
+                pass
         reasons = recheck()
-        if not reasons and (_untracked(root) or _task_git(
-                root, "status", "--porcelain=v1", "-z", "--untracked-files=no").stdout):
-            reasons = ["D6_RETIRE_UNKNOWN_LOCAL_STATE"]
         if not reasons and plan["locked"]:
             if _task_git(canonical_root, "worktree", "unlock", str(root),
                          check=False, timeout=None).returncode:
@@ -970,17 +1017,37 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
     except OSError:
         reasons = ["D6_RETIRE_DISCARD_FAILED"]
     if reasons:
+        relocked = True
         if unlocked and os.path.lexists(root):
-            _task_git(canonical_root, "worktree", "lock", "--reason",
-                      "D6 retire refused", str(root), check=False, timeout=None)
+            relocked = _task_git(canonical_root, "worktree", "lock", "--reason",
+                                 "D6 retire refused", str(root),
+                                 check=False, timeout=None).returncode == 0
+            if not relocked:
+                reasons.append("D6_RETIRE_RELOCK_FAILED")
+        # The state stays as it was; only facts that changed are recorded.
+        if plan.get("discarded_uncommitted") or not relocked:
+            updated = dict(record)
+            now = _now()
+            updated.update(last_verified_at=now, evidence_refs=list(
+                record.get("evidence_refs") or []) + [
+                    "Retire failed " + now + ": " + ",".join(reasons)])
+            if plan.get("discarded_uncommitted"):
+                updated.update(discarded_uncommitted=True,
+                               discarded_uncommitted_paths=discarded_paths)
+            if not relocked:
+                updated["lock_state"] = "UNLOCKED"
+            try:
+                _replace_record(record_path, updated)
+            except LifecycleError as exc:
+                reasons.append(exc.code)
         return reasons
     if os.path.lexists(root) or _worktree_listing(canonical_root, root) is not None:
         return ["D6_RETIRE_REMOVE_UNVERIFIED"]
     if _read_registry_record(record_path) != record:
         return ["D6_REGISTRY_CHANGED"]
     now = _now()
-    discarded = ", ".join(relative + ("/" if is_dir else "")
-                          for relative, is_dir in plan["targets"]) or "none"
+    removed = ", ".join(relative + ("/" if is_dir else "")
+                        for relative, is_dir in plan["targets"]) or "none"
     updated = dict(record)
     updated.update(
         state="REMOVED", lock_state="UNLOCKED", head_sha=plan["head"],
@@ -990,7 +1057,10 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
                      plan["head"] + "; branch kept."),
         evidence_refs=list(record.get("evidence_refs") or []) + [
             "Retire " + now + ": publication=" + plan["publication"] +
-            " head=" + plan["head"] + " discarded=" + discarded])
+            " head=" + plan["head"] + " retention removed by git=" + removed +
+            " pycache files=" + str(len(plan["pycache"])) +
+            (" accepted unknown digest=" + plan["unknown_digest"]
+             if plan["accepted_unknown"] else "")])
     if discarded_paths:
         updated.update(discarded_uncommitted=True,
                        discarded_uncommitted_paths=discarded_paths)
@@ -998,29 +1068,29 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
     return []
 
 
-def _mark_retain_blocked(record_path, record, reasons, plan):
+def _mark_retain_blocked(record_path, record, reasons):
     updated = dict(record)
     now = _now()
     updated.update(state="RETAIN_BLOCKED", last_verified_at=now,
                    evidence_refs=list(record.get("evidence_refs") or []) + [
                        "Retire refused " + now + ": " + ",".join(reasons)])
-    if plan.get("discarded_uncommitted"):
-        updated.update(discarded_uncommitted=True, discarded_uncommitted_paths=sorted(
-            plan["discard_tracked"] + plan["discard_untracked"]))
     _replace_record(record_path, updated)
 
 
 def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence=None,
-                     discard_uncommitted=(), workspace_root=TASKS_ROOT):
+                     discard_uncommitted=(), unknown_evidence=None,
+                     workspace_root=TASKS_ROOT):
     """Plan (default) or execute gated retirement; print one JSON line per task.
 
     Returns True only when every task is ready (dry run) or removed.
     """
     workspace_root = Path(workspace_root)
     squash_evidence = squash_evidence or {}
+    unknown_evidence = unknown_evidence or {}
     if (not task_ids or len(task_ids) != len(set(task_ids)) or
             any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids) or
             not set(squash_evidence) <= set(task_ids) or
+            not set(unknown_evidence) <= set(task_ids) or
             len(discard_uncommitted) != len(set(discard_uncommitted)) or
             not set(discard_uncommitted) <= set(task_ids)):
         _stop("D6_TASK_INPUT_INVALID")
@@ -1059,41 +1129,49 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                 plan = _retire_plan(task_id, record, canonical_root=canonical_root,
                                     common_dir=common_dir, workspace_root=workspace_root,
                                     squash=squash_evidence.get(task_id),
-                                    discard_uncommitted=task_id in discard_uncommitted)
+                                    discard_uncommitted=task_id in discard_uncommitted,
+                                    unknown_evidence=unknown_evidence.get(task_id))
             except LifecycleError as exc:
                 record, plan = None, {"root": str(workspace_root / task_id),
                                       "reasons": [exc.code], "content_block": False,
                                       "targets": [], "unknown_paths": [],
-                                      "discard_tracked": [], "discard_untracked": []}
+                                      "discard_tracked": [], "discard_untracked": [],
+                                      "pycache": []}
             result.update({key: plan[key] for key in (
                 "root", "branch", "head", "publication", "live_pids", "unknown_paths",
-                "unknown_path_count") if plan.get(key)})
-            result["discard_paths"] = [relative + ("/" if is_dir else "")
+                "unknown_path_count", "unknown_digest") if plan.get(key)})
+            if plan.get("publication") == "origin_branch":
+                result["publication_note"] = "pushed to origin/<branch>; merge not proven"
+            if plan.get("accepted_unknown"):
+                result["unknown_accepted"] = True
+            result["git_removes_retention_paths"] = [relative + ("/" if is_dir else "")
                                        for relative, is_dir in plan["targets"]]
+            result["pycache_discard_count"] = len(plan["pycache"])
             uncommitted = sorted(plan["discard_tracked"] + plan["discard_untracked"])
             if uncommitted:
                 result["discard_uncommitted_paths"] = uncommitted
             reasons = plan["reasons"]
-            # Unknown content blocks retirement durably; transient gates such
-            # as a live process or unpublished work leave the state untouched.
+            # RETAIN_BLOCKED is durable, so it is written only when every other
+            # gate passed and unknown or unsafe content is the sole problem.
             retain_blocked = (plan["content_block"] and record is not None and
-                              not {"D6_RETIRE_LIVE_PROCESS", "D6_RETIRE_LIVENESS_UNKNOWN"}
-                              & set(reasons))
+                              set(reasons) <= CONTENT_REASONS)
             if not reasons and execute:
                 reasons = _execute_retire(plan, record, record_path, canonical_root,
                                           common_dir, workspace_root)
-                retain_blocked = bool(reasons)
             if reasons:
                 all_ok = False
                 result["reasons"] = reasons
                 result["result"] = "RETAIN_BLOCKED" if retain_blocked else "BLOCKED"
-                if retain_blocked and execute:
+                if (retain_blocked and execute and
+                        record.get("state") != "RETAIN_BLOCKED"):
                     try:
                         _mark_retain_blocked(record_path, _read_registry_record(record_path),
-                                             reasons, plan)
+                                             reasons)
                         result["registry_updated"] = True
                     except LifecycleError as exc:
                         result["reasons"].append(exc.code)
+                elif plan.get("discarded_uncommitted"):
+                    result["registry_updated"] = True
             else:
                 result["result"] = "REMOVED" if execute else "RETIRE_READY"
                 result["registry_updated"] = execute
@@ -1120,6 +1198,16 @@ def _parse_squash_evidence(values):
     return evidence
 
 
+def _parse_unknown_evidence(values):
+    evidence = {}
+    for value in values or []:
+        task_id, _sep, digest = value.partition("=")
+        if task_id in evidence or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            _stop("D6_TASK_INPUT_INVALID")
+        evidence[task_id] = digest
+    return evidence
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id")
@@ -1141,8 +1229,12 @@ def _main(argv=None):
     parser.add_argument("--discard-uncommitted", action="append", metavar="TASK_ID",
                         help="Owner-approved: discard this retire task's tracked and "
                              "untracked changes (repeatable); needs the execute flag to act")
+    parser.add_argument("--retain-blocked-evidence", action="append",
+                        metavar="TASK_ID=SHA256",
+                        help="accept exactly the unknown paths whose digest the dry run "
+                             "printed (also needed to retire a RETAIN_BLOCKED record)")
     parser.add_argument("--execute-approved-retire", action="store_true",
-                        help="actually discard registered paths and remove the worktrees")
+                        help="actually discard approved files and remove the worktrees")
     parser.add_argument("--repo-root", default=str(D6_INTEGRATOR_DISPATCHER_ROOT))
     args = parser.parse_args(argv)
     try:
@@ -1158,9 +1250,10 @@ def _main(argv=None):
                 canonical_root=args.repo_root, task_ids=args.retire_task_id,
                 execute=args.execute_approved_retire,
                 discard_uncommitted=args.discard_uncommitted or (),
+                unknown_evidence=_parse_unknown_evidence(args.retain_blocked_evidence),
                 squash_evidence=_parse_squash_evidence(args.squash_evidence)) else 1
         if (args.execute_approved_retire or args.squash_evidence or
-                args.discard_uncommitted):
+                args.discard_uncommitted or args.retain_blocked_evidence):
             _stop("D6_TASK_INPUT_INVALID")
         if args.execute_approved_lifecycle:
             if (args.resume_task_id is None or args.resume_root is None or

@@ -36,7 +36,7 @@ class D6RetireTests(unittest.TestCase):
         _git(self.source, "init", "-b", "main")
         _git(self.source, "remote", "add", "origin",
              "git@github.com:davidcatcat/davidcattoolsproject.git")
-        (self.source / ".gitignore").write_text(".venv/\n*.lock\n*.log\n", encoding="utf-8")
+        (self.source / ".gitignore").write_text(".venv/\n*.lock\n*.log\n__pycache__/\n", encoding="utf-8")
         (self.source / "tools" / "llmtool").mkdir(parents=True)
         (self.source / "tools" / "llmtool" / "app.py").write_text("x = 1\n", encoding="utf-8")
         _git(self.source, "add", ".")
@@ -82,7 +82,7 @@ class D6RetireTests(unittest.TestCase):
     def _record(self, task_id):
         return json.loads((self.registry / (task_id + ".json")).read_text())
 
-    def _retire(self, task_ids, *, execute=False, squash=None, discard=()):
+    def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None):
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
                 patch.object(lifecycle, "_process_cwds", side_effect=lambda: self.cwds), \
@@ -90,6 +90,7 @@ class D6RetireTests(unittest.TestCase):
             ok = lifecycle.retire_worktrees(
                 canonical_root=self.source, task_ids=task_ids, execute=execute,
                 squash_evidence=squash, discard_uncommitted=discard,
+                unknown_evidence=evidence,
                 workspace_root=self.tasks)
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([line["task_id"] for line in lines], task_ids)
@@ -116,7 +117,7 @@ class D6RetireTests(unittest.TestCase):
         ok, (line,) = self._retire(["dry-task"])
         self.assertTrue(ok)
         self.assertEqual(line["result"], "RETIRE_READY")
-        self.assertEqual(line["discard_paths"],
+        self.assertEqual(line["git_removes_retention_paths"],
                          ["tools/llmtool/.venv/", "tools/llmtool/.worktree-env.lock"])
         self.assertTrue((root / "tools" / "llmtool" / ".venv" / "lib" / "site.py").is_file())
         self.assertEqual(self._record("dry-task"), before)
@@ -155,11 +156,13 @@ class D6RetireTests(unittest.TestCase):
         self.assertTrue(record["discarded_uncommitted"])
         self.assertEqual(record["discarded_uncommitted_paths"],
                          ["notes.txt", "tools/llmtool/app.py"])
-        # Unnamed: dirty tracked work is refused and its untracked file is
-        # unknown content, exactly as without the option.
-        self.assertEqual(second["result"], "RETAIN_BLOCKED")
+        # Unnamed: dirty tracked work is refused exactly as without the
+        # option, and the record is left alone because a gate other than
+        # unknown content failed.
+        self.assertEqual(second["result"], "BLOCKED")
         self.assertEqual(second["reasons"], ["D6_RETIRE_DIRTY_TRACKED",
                                              "D6_RETIRE_UNKNOWN_LOCAL_STATE"])
+        self.assertEqual(self._record("other-task")["state"], "ACTIVE")
         self.assertNotIn("discarded_uncommitted", second)
         self.assertEqual((other / "tools" / "llmtool" / "app.py").read_text(), "x = 3\n")
         self.assertEqual((other / "notes.txt").read_text(), "draft\n")
@@ -262,6 +265,83 @@ class D6RetireTests(unittest.TestCase):
         ok, (line,) = self._retire(["squash-task"], squash={"squash-task": (head, squash)})
         self.assertTrue(ok, line)
         self.assertEqual(line["publication"], "squash_evidence")
+
+    def test_unpublished_active_task_with_unknown_content_is_not_rewritten(self):
+        root, _head = self._task("unpublished-task", publish=False)
+        cache = root / "tools" / "llmtool" / "__pycache__"
+        cache.mkdir()
+        (cache / "app.cpython-313.pyc").write_bytes(b"bytecode")
+        (root / "tools" / "llmtool" / "evidence.log").write_text("unique\n", encoding="utf-8")
+        before = self._record("unpublished-task")
+        ok, (line,) = self._retire(["unpublished-task"], execute=True)
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertEqual(line["reasons"], ["D6_RETIRE_UNPUBLISHED",
+                                           "D6_RETIRE_UNKNOWN_LOCAL_STATE"])
+        self.assertFalse(line["registry_updated"])
+        self.assertEqual(self._record("unpublished-task"), before)
+        self.assertTrue((cache / "app.cpython-313.pyc").is_file())
+
+    def test_regular_pycache_files_are_discarded_and_others_stay_unknown(self):
+        root, _head = self._task("pycache-task")
+        caches = [root / "tools" / "llmtool" / "__pycache__",
+                  root / "tools" / "__pycache__"]
+        for cache in caches:
+            cache.mkdir()
+            (cache / "app.cpython-313.pyc").write_bytes(b"bytecode")
+        odd = root / "odd" / "__pycache__"
+        odd.mkdir(parents=True)
+        os.symlink(self.outside_file, odd / "link.cpython-313.pyc")
+        (odd / "notes.txt").write_text("not bytecode\n", encoding="utf-8")
+        ok, (line,) = self._retire(["pycache-task"])
+        self.assertFalse(ok)
+        self.assertEqual(line["pycache_discard_count"], 2)
+        self.assertEqual(line["unknown_paths"], ["odd/__pycache__/link.cpython-313.pyc",
+                                                 "odd/__pycache__/notes.txt"])
+        (odd / "link.cpython-313.pyc").unlink()
+        (odd / "notes.txt").unlink()
+        odd.rmdir()
+        odd.parent.rmdir()
+        ok, (line,) = self._retire(["pycache-task"], execute=True)
+        self.assertTrue(ok, line)
+        self.assertEqual((line["result"], line["pycache_discard_count"]), ("REMOVED", 2))
+        self.assertFalse(os.path.lexists(root))
+        self.assertEqual(self.outside_file.read_text(), "keep\n")
+        self.assertIn("pycache files=2", self._record("pycache-task")["evidence_refs"][-1])
+
+    def _retain_blocked_task(self, task_id):
+        root, _head = self._task(task_id)
+        (root / "tools" / "llmtool" / "evidence.log").write_text("reviewed\n", encoding="utf-8")
+        ok, (line,) = self._retire([task_id], execute=True)
+        self.assertEqual(line["result"], "RETAIN_BLOCKED")
+        self.assertEqual(self._record(task_id)["state"], "RETAIN_BLOCKED")
+        ok, (line,) = self._retire([task_id])
+        self.assertIn("D6_RETIRE_STATE_RETAIN_BLOCKED", line["reasons"])
+        return root, line["unknown_digest"]
+
+    def test_retain_blocked_evidence_with_matching_digest_proceeds(self):
+        root, digest = self._retain_blocked_task("blocked-task")
+        ok, (line,) = self._retire(["blocked-task"], execute=True,
+                                   evidence={"blocked-task": digest})
+        self.assertTrue(ok, line)
+        self.assertEqual(line["result"], "REMOVED")
+        self.assertTrue(line["unknown_accepted"])
+        self.assertFalse(os.path.lexists(root))
+        record = self._record("blocked-task")
+        self.assertEqual(record["state"], "REMOVED")
+        self.assertIn("accepted unknown digest=" + digest, record["evidence_refs"][-1])
+
+    def test_retain_blocked_evidence_refuses_changed_content(self):
+        root, digest = self._retain_blocked_task("changed-task")
+        (root / "tools" / "llmtool" / "later.log").write_text("new\n", encoding="utf-8")
+        before = self._record("changed-task")
+        ok, (line,) = self._retire(["changed-task"], execute=True,
+                                   evidence={"changed-task": digest})
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertIn("D6_RETIRE_EVIDENCE_MISMATCH", line["reasons"])
+        self.assertEqual(self._record("changed-task"), before)
+        self.assertTrue((root / "tools" / "llmtool" / "later.log").is_file())
 
 
 if __name__ == "__main__":
