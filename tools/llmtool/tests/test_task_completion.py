@@ -370,6 +370,37 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['changed_paths'], [self.source_path])
         self.assertEqual(result['diff_sha256'], hashlib.sha256(artifact).hexdigest())
 
+    def test_worktree_snapshot_includes_only_regular_in_scope_new_files(self):
+        new_path = 'tools/llmtool/tests/new_fixture.py'
+        target = self.root / new_path
+        target.write_text('VALUE = 7\n')
+        before_index = task_completion._git(self.root, ('write-tree',))
+        snapshot = task_completion._worktree_snapshot(
+            root=self.root, source_sha=self.source_sha,
+            read_paths=[new_path], write_paths=[new_path])
+        self.assertEqual(snapshot['changed_paths'], [new_path])
+        self.assertIn(b'new file mode 100644', snapshot['diff'])
+        self.assertIn(b'+++ b/' + new_path.encode(), snapshot['diff'])
+        self.assertEqual(snapshot['diff_sha256'], hashlib.sha256(snapshot['diff']).hexdigest())
+        self.assertEqual(task_completion._git(self.root, ('write-tree',)), before_index)
+
+        outside = self.root / 'outside.py'
+        outside.write_text('VALUE = 8\n')
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion._worktree_snapshot(
+                root=self.root, source_sha=self.source_sha,
+                read_paths=[new_path], write_paths=[new_path])
+        self.assertEqual(rejected.exception.completion_code, 'WORKTREE_SCOPE_MISMATCH')
+        outside.unlink()
+
+        target.unlink()
+        target.symlink_to(self.root / self.source_path)
+        with self.assertRaises(LLMToolError) as symlink:
+            task_completion._worktree_snapshot(
+                root=self.root, source_sha=self.source_sha,
+                read_paths=[new_path], write_paths=[new_path])
+        self.assertEqual(symlink.exception.completion_code, 'WORKTREE_FILE_UNSUPPORTED')
+
     def test_uncommitted_worktree_rejects_stale_artifact_or_untracked_file(self):
         path = self.root / self.source_path
         path.write_text(path.read_text() + '\n# live uncommitted change\n')
