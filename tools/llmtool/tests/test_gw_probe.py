@@ -145,6 +145,16 @@ class FakeServer(unittest.TestCase):
         self.assertEqual(result["runs"][0]["error_code"], "HTTP_413")
         self.assertEqual(len([r for r in FakeHandler.requests if r[0] == "POST"]), 1)
 
+    def test_context_disables_thinking_and_saves_answer(self):
+        result = probe.probe_context(self.client)
+        first = result["runs"][0]
+        self.assertIn("SYNTHETIC_CONTEXT_NEEDLE_7f3a", first["answer"])
+        self.assertEqual(first["finish_reason"], "stop")
+        for method, _path, body in FakeHandler.requests:
+            if method == "POST":
+                self.assertEqual(body.get("chat_template_kwargs"), {"enable_thinking": False})
+                self.assertEqual(body.get("max_tokens"), 256)
+
     def test_dry_run_uses_canned_response_without_network(self):
         self.client = probe.ProbeClient("http://127.0.0.1:1", "fake-model", None, dry_run=True)
         self.assertEqual(probe.probe_models(self.client)["models"][0]["id"], "fake-model")

@@ -3,7 +3,7 @@
 Run this only from the PM's authorized host after confirming the `company-gw` profile is configured. The probe sends synthetic prompts to the configured gateway. It does not read repository source or internal names. The API credential is read through llmtool configuration and kept in memory for request authorization; it is never intentionally written to output or printed.
 
 ```sh
-python3 -I -B tools/llmtool/eval/gw_probe/probe.py --out-dir /private/tmp/gw-probe
+tools/llmtool/.venv/bin/python -I -B tools/llmtool/eval/gw_probe/probe.py --out-dir /private/tmp/gw-probe
 ```
 
 Use `--only NAME` to run one probe, or repeat it for a selection. Names are `models`, `thinking`, `tools`, `determinism`, `context`, `output`, `concurrency`, and `quality`. Results go to `gw_probe.json` and `gw_probe.md` under `--out-dir`; without it, they go under the system temporary directory in `gw-probe`.

@@ -14,6 +14,7 @@ import sys
 import threading
 import time
 
+from . import chat_tui_events, chat_tui_status, chat_tui_task
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
@@ -34,12 +35,29 @@ KEY_HELP = """Keys
   Tab, Shift-Tab        Switch focus between input and conversation
   PageUp/PageDown       Scroll conversation (arrows also scroll when it is focused)
   F1                    Toggle this help (shown in place of the conversation)
+  F2                    Toggle the last Task detail (Esc also closes it)
+  F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
+                        detail, F5 or r refreshes, Esc closes; refreshes itself every
+                        %d s while shown (local TaskStore read only, no AI call)
+  F4                    Toggle recent events across Tasks (/task events): newest first;
+                        F5 or r refreshes, Esc closes; never acknowledges or polls
   Ctrl-C, Ctrl-D        Exit (Ctrl-D only with empty input)
 A request in progress cannot be cancelled; exit waits for it to finish or time out.
 
-Formal task commands (separate from ordinary chat)
+Formal task commands (separate from ordinary chat; results come only from llmtool Core)
+  /task mode PROFILE    Task mode: Enter submits each non-command draft as a formal PM
+                        Task to PM provider PROFILE (no implicit default); "task>" prompt
+  /task mode off        Back to chat mode: Enter sends to the chat provider again
   /task submit --provider PROFILE REQUEST
-  /task show TASK_ID"""
+                        Submit one Task explicitly (also from chat mode, and to resend a
+                        request Task mode refused as a repeat)
+  /task show TASK_ID    Open a Task's detail
+  /task list            Open the Task list (stage, update time, request) from TaskStore
+  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
+A Task receipt shows the PM provider, Task ID, Run ID and state recorded by Core;
+已建立／待派工 means no Developer has been dispatched. A chat reply is never a Task.
+Stage and next responsible are derived by the TUI from Core fields; values Core does
+not record are UNKNOWN or NOT_AVAILABLE.""" % chat_tui_status.REFRESH_SECONDS
 
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
 # Picking one edits the input draft; it never runs the command.
@@ -54,10 +72,13 @@ SLASH_COMMANDS = (
     ("/quit", "/quit", "Exit"),
     ("/task submit", "/task submit --provider ", "Submit a task: --provider PROFILE REQUEST"),
     ("/task show", "/task show ", "Show a task by TASK_ID"),
+    ("/task mode", "/task mode ", "Task mode for drafts: PROFILE, or off"),
+    ("/task list", "/task list", "Task list with status from TaskStore"),
+    ("/task events", "/task events", "Recent Task events from TaskStore"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
-STATUS_FIELDS = ("provider", "model", "state", "usage", "help")
+STATUS_FIELDS = ("mode", "provider", "model", "state", "usage", "help")
 STATUS_DROP_ORDER = ("help", "usage", "model", "provider")
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
 
@@ -202,15 +223,34 @@ class ChatTUI:
         self.searching = False
         self.search_query = ""
         self.search_matches = []
+        # Task mode: PM provider profile chosen with /task mode, else None (chat mode).
+        self.task_profile = None
+        # (profile, request) of the last Task-mode submit: the same draft is not resent.
+        self.last_task_request = None
+        self.last_task_id = None
+        self.show_detail = False
+        # Task list: rows read from TaskStore on a reader thread (never busy/single-flight).
+        self.show_list = False
+        self.list_records = []
+        self.list_index = 0
+        self.list_unreadable = 0
+        self.list_error = None
+        self.list_loaded = None  # (monotonic, local clock text) of the last finished read
+        self.list_reader = None
+        self.unseen_output = False
+        self.show_events = False
         self._loop = None
         self._received_signal = None
         self.conversation = TextArea(
             text=terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
-                                    + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."),
+                                    + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."
+                                    + "\nChat mode talks to the chat provider directly; it is not a PM."
+                                    + " /task mode PROFILE sends drafts to a PM as formal Tasks."),
             read_only=True, scrollbar=True, wrap_lines=True, focus_on_click=True,
             height=Dimension(min=1, weight=1))
         self.conversation.buffer.cursor_position = len(self.conversation.text)
-        self.input = TextArea(multiline=True, wrap_lines=True, prompt="> ", focus_on_click=True,
+        self.input = TextArea(multiline=True, wrap_lines=True, focus_on_click=True,
+                              prompt=lambda: "task> " if self.task_profile else "> ",
                               height=lambda: Dimension(
                                   min=min(4, max(1, self.input.buffer.document.line_count)),
                                   max=min(4, max(1, self.input.buffer.document.line_count))),
@@ -220,7 +260,20 @@ class ChatTUI:
         self.help = TextArea(text=KEY_HELP + "\n\n" + HELP, read_only=True, scrollbar=True,
                              wrap_lines=True, style="class:help",
                              height=Dimension(min=1, weight=1))
+        self.detail = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True,
+                               height=Dimension(min=1, weight=1))
         showing_help = Condition(lambda: self.show_help)
+        showing_detail = Condition(lambda: self.show_detail and not self.show_help)
+        showing_list = Condition(lambda: self.show_list and not self.show_detail
+                                 and not self.show_help)
+        showing_events = Condition(lambda: self.show_events and not self.show_list
+                                   and not self.show_detail and not self.show_help)
+        self.events = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True,
+                               height=Dimension(min=1, weight=1))
+        events_focused = has_focus(self.events)
+        self.list_window = Window(FormattedTextControl(self.list_text, focusable=True),
+                                  wrap_lines=False, height=Dimension(min=1, weight=1))
+        list_focused = has_focus(self.list_window)
         picker_shown = Condition(lambda: sum(self.picker_layout()) > 0)
         menu_shown = picker_shown & Condition(lambda: not self.searching)
         searching = Condition(lambda: self.searching)
@@ -234,8 +287,13 @@ class ChatTUI:
         self.rule_window = Window(height=1, char="-", style="class:rule")
         self.status_window = Window(FormattedTextControl(self.status_text), style="class:status",
                                    height=Dimension.exact(1), wrap_lines=False)
-        root = HSplit([ConditionalContainer(self.conversation, filter=~showing_help),
+        root = HSplit([ConditionalContainer(self.conversation,
+                                            filter=~showing_help & ~showing_detail & ~showing_list
+                                            & ~showing_events),
                        ConditionalContainer(self.help, filter=showing_help),
+                       ConditionalContainer(self.detail, filter=showing_detail),
+                       ConditionalContainer(self.list_window, filter=showing_list),
+                       ConditionalContainer(self.events, filter=showing_events),
                        self.rule_window,
                        ConditionalContainer(self.menu_window, filter=picker_shown),
                        self.input, self.status_window],
@@ -267,6 +325,10 @@ class ChatTUI:
         @keys.add("escape", filter=input_focused & (menu_shown | searching))
         def _menu_close(event):
             self.close_menu()
+
+        @keys.add("escape", filter=showing_detail & ~picker_shown)
+        def _detail_close(event):
+            self.toggle_detail(False)
 
         @keys.add("c-r", filter=input_focused)
         def _history_search(event):
@@ -313,6 +375,43 @@ class ChatTUI:
         def _help(event):
             self.toggle_help()
 
+        @keys.add("f2")
+        def _detail(event):
+            self.toggle_detail(not self.show_detail)
+
+        @keys.add("f3")
+        def _list(event):
+            self.toggle_list(not self.show_list)
+
+        @keys.add("f4")
+        def _events(event):
+            self.toggle_events(not self.show_events)
+
+        @keys.add("escape", filter=events_focused & showing_events)
+        def _events_close(event):
+            self.toggle_events(False)
+
+        @keys.add("f5", filter=showing_list | showing_events)
+        @keys.add("r", filter=list_focused | events_focused)
+        def _list_refresh(event):
+            self.refresh_list()
+
+        @keys.add("up", filter=list_focused)
+        def _list_up(event):
+            self.move_list(-1)
+
+        @keys.add("down", filter=list_focused)
+        def _list_down(event):
+            self.move_list(1)
+
+        @keys.add("enter", filter=list_focused)
+        def _list_open(event):
+            self.open_selected()
+
+        @keys.add("escape", filter=list_focused & ~showing_detail)
+        def _list_close(event):
+            self.toggle_list(False)
+
         @keys.add("c-c")
         def _interrupt(event):
             self.request_quit()
@@ -334,6 +433,8 @@ class ChatTUI:
         self._default_timeoutlen = self.app.timeoutlen
         # A resize can hide the picker without any key press; re-check before each draw.
         self.app.before_render += lambda _app: self._sync_picker()
+        # A shown list re-reads TaskStore when stale; redraws never read more often.
+        self.app.before_render += lambda _app: self._list_tick()
 
     # -- rendering -----------------------------------------------------------------
     def status_text(self):
@@ -362,6 +463,7 @@ class ChatTUI:
         # long names never expand the footer. When the terminal is too narrow, fields
         # drop in STATUS_DROP_ORDER; the state stays last and is cut only if alone too wide.
         fields = {
+            "mode": "TASK→PM:" + compact(self.task_profile or "", 12),
             "provider": "p:" + compact(session.provider, 10),
             "model": "m:" + compact(reported or model or "default", 14),
             "state": compact(state, 14),
@@ -369,7 +471,8 @@ class ChatTUI:
             "help": "F1",
         }
         width = max(1, self.app.output.get_size().columns)
-        shown = list(STATUS_FIELDS)
+        # The mode field appears only in Task mode, so the chat footer is unchanged.
+        shown = [key for key in STATUS_FIELDS if key != "mode" or self.task_profile]
         for name in STATUS_DROP_ORDER:
             if self._get_cwidth(" | ".join(fields[key] for key in shown)) <= width:
                 break
@@ -464,7 +567,10 @@ class ChatTUI:
         if self.searching and not sum(self.picker_layout()):
             self.close_menu()  # Comes back here with searching off.
             return
-        shown = sum(self.picker_layout()) > 0
+        # The detail and events panes are text areas with Esc-prefixed bindings, so a
+        # lone Esc (close) would otherwise wait the full default timeout.
+        shown = (sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
+                 or self.events_visible())
         self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
     def move_menu(self, direction):
@@ -523,7 +629,16 @@ class ChatTUI:
         return True
 
     def append(self, text):
-        """Add untrusted text; follow new output only if the caret was at the end."""
+        """Add untrusted text; follow new output only if the caret was at the end.
+
+        New output closes the Task detail so it is never hidden behind that pane.
+        """
+        if self.show_detail:
+            self.toggle_detail(False)
+        if self.show_list or self.show_events:
+            self.unseen_output = True  # The pane header says so; it stays for browsing.
+            if self.show_events:
+                self.render_events()
         buffer = self.conversation.buffer
         safe = terminal_safe_text(text)
         old = buffer.text
@@ -548,13 +663,184 @@ class ChatTUI:
     def toggle_focus(self):
         self.close_menu()  # Also restores the default Esc timeout.
         layout = self.app.layout
-        pane = self.help if self.show_help else self.conversation
+        pane = (self.help if self.show_help else self.detail if self.show_detail
+                else self.list_window if self.show_list
+                else self.events if self.show_events else self.conversation)
         layout.focus(pane if layout.has_focus(self.input) else self.input)
 
     def toggle_help(self):
         self.show_help = not self.show_help
         # Never leave focus on a hidden pane; the help pane itself scrolls when focused.
-        self.app.layout.focus(self.input)
+        # Closing help over the list or events pane gives it focus back, so Esc closes it.
+        pane = (self.list_window if self.list_visible()
+                else self.events if self.events_visible() else self.input)
+        self.app.layout.focus(pane)
+        self._sync_picker()
+
+    def toggle_detail(self, show):
+        """Show the last Task detail read from Core in place of the conversation."""
+        if show and not self.detail.text:
+            self.append("llmtool: no Task detail loaded yet; use /task show TASK_ID")
+            show = False
+        self.show_detail = show
+        # Closing a detail opened from the list goes back to the list.
+        self.app.layout.focus(self.list_window if self.show_list and not show else self.input)
+        self._sync_picker()
+
+    # -- Task list (TaskStore reads only; never a provider or network call) ----------
+    def toggle_list(self, show):
+        self.show_list = show
+        if show:
+            self.show_detail = False
+            self.show_help = False
+            self.refresh_list()
+            self.app.layout.focus(self.list_window)
+        else:
+            self.unseen_output = self.unseen_output and self.show_events
+            self.app.layout.focus(self.events if self.show_events else self.input)
+        self._sync_picker()
+
+    def toggle_events(self, show):
+        """Recent events across Tasks; shares the list's TaskStore reader and interval."""
+        self.show_events = show
+        if show:
+            self.show_list = False
+            self.show_detail = False
+            self.show_help = False
+            self.render_events()
+            self.refresh_list()
+            self.app.layout.focus(self.events)
+        else:
+            self.unseen_output = False
+            self.app.layout.focus(self.input)
+        self._sync_picker()
+
+    def render_events(self):
+        if self.list_loaded is None:
+            text = "Recent events: reading TaskStore…"
+        elif self.list_error is not None:
+            text = "Recent events: llmtool: " + self.list_error
+        else:
+            text = chat_tui_events.recent_text(self.list_records, self.list_unreadable,
+                                               self.list_loaded[1])
+        if self.unseen_output:
+            text = "new conversation output — Esc shows it\n" + text
+        buffer = self.events.buffer
+        position = min(buffer.cursor_position, len(text))
+        buffer.set_document(self._Document(terminal_safe_text(text), position),
+                            bypass_readonly=True)
+
+    def refresh_list(self):
+        """Start one TaskStore read unless one is already running."""
+        if self.list_reader is not None:
+            return
+        self._loop = asyncio.get_running_loop()
+        self.list_reader = threading.Thread(target=self._read_list, args=(self._loop,),
+                                            name="llmtool-chat-task-list", daemon=True)
+        self.list_reader.start()
+
+    def _read_list(self, loop):
+        from .task_store import TaskStore
+        try:
+            records, unreadable = chat_tui_status.load_records(TaskStore())
+            outcome = (records, unreadable, None)
+        except LLMToolError as exc:
+            outcome = ([], 0, str(exc))
+        except Exception:
+            outcome = ([], 0, "task list read failed; details omitted")
+        try:
+            loop.call_soon_threadsafe(self.finish_list, outcome)
+        except RuntimeError:
+            pass
+
+    def finish_list(self, outcome):
+        records, unreadable, error = outcome
+        selected = self.selected_task_id()
+        self.list_reader = None
+        self.list_records, self.list_unreadable, self.list_error = records, unreadable, error
+        self.list_loaded = (time.monotonic(), time.strftime("%H:%M:%S"))
+        ids = [chat_tui_task.value(r, "task_id") for r in records]
+        # Keep the selection on the same Task when it is still listed.
+        self.list_index = ids.index(selected) if selected in ids else min(
+            self.list_index, max(0, len(records) - 1))
+        if self.show_events:
+            self.render_events()
+        self.app.invalidate()
+
+    def list_visible(self):
+        """The list is on screen: not hidden behind the detail or help pane."""
+        return self.show_list and not self.show_detail and not self.show_help
+
+    def events_visible(self):
+        """The recent-events pane is on screen (the list, detail and help cover it)."""
+        return (self.show_events and not self.show_list and not self.show_detail
+                and not self.show_help)
+
+    def _list_tick(self):
+        # Interval reads only while the list or events pane is actually visible (#510 review v2).
+        if ((self.list_visible() or self.events_visible()) and self.list_reader is None
+                and self.list_loaded is not None
+                and time.monotonic() - self.list_loaded[0] >= chat_tui_status.REFRESH_SECONDS):
+            self.refresh_list()
+
+    def selected_task_id(self):
+        if not self.list_records:
+            return None
+        return chat_tui_task.value(self.list_records[self.list_index], "task_id")
+
+    def move_list(self, direction):
+        if self.list_records:
+            self.list_index = max(0, min(len(self.list_records) - 1, self.list_index + direction))
+
+    def open_selected(self):
+        task_id = self.selected_task_id()
+        if task_id is None or task_id in (chat_tui_task.UNKNOWN, chat_tui_task.NOT_AVAILABLE):
+            return
+        if self.busy:
+            self.append("llmtool: a request is in progress; open the Task again when idle")
+            return
+        self.start_task("show", task_id, None)
+
+    def list_text(self):
+        width = max(1, self.app.output.get_size().columns)
+        cut = lambda text: fit_width(terminal_safe_text(text).replace("\n", " "), width,
+                                     self._get_cwidth)
+        if self.list_loaded is None:
+            state = "reading TaskStore…"
+        else:
+            state = ("%d shown, %d unreadable; refreshed %s; auto every %ds"
+                     % (len(self.list_records), self.list_unreadable, self.list_loaded[1],
+                        chat_tui_status.REFRESH_SECONDS))
+        rows = [("class:menu.header", cut(" Tasks (TaskStore records; stage derived by the TUI) — "
+                                          + state + " — Enter detail, F5/r refresh, Esc close")),
+                ("class:menu.header", cut("  " + "Task ID".ljust(8) + "  " + "Stage (derived)".ljust(26)
+                                          + "Updated (Core)".ljust(20) + "  Request (Core, first line)"))]
+        if self.unseen_output:
+            rows.append(("class:menu.header", cut(" new conversation output — Esc shows it")))
+        if self.list_error is not None:
+            rows.append(("", cut(" llmtool: " + self.list_error)))
+        elif self.list_loaded is not None and not self.list_records:
+            rows.append(("", cut(" no Tasks in TaskStore")))
+        info = self.list_window.render_info
+        space = max(1, (info.window_height if info is not None else 20) - len(rows))
+        top = max(0, min(self.list_index - space + 1, len(self.list_records) - space))
+        top = min(top, self.list_index)
+        for index in range(top, min(len(self.list_records), top + space)):
+            item = chat_tui_status.row(self.list_records[index])
+            stage = item["stage"] + " " * max(0, 26 - self._get_cwidth(item["stage"]))
+            text = (("▶ " if index == self.list_index else "  ") + item["task_id"][:8] + "  "
+                    + stage + item["updated"][:20] + "  " + item["name"])
+            rows.append(("class:menu.current" if index == self.list_index else "", cut(text)))
+        result = []
+        for row in rows:
+            result.extend([row, ("", "\n")])
+        return result[:-1]
+
+    def set_detail(self, text):
+        self.detail.buffer.set_document(self._Document(terminal_safe_text(text), 0),
+                                        bypass_readonly=True)
+        self.show_help = False
+        self.toggle_detail(True)
 
     # -- actions -------------------------------------------------------------------
     def submit(self):
@@ -566,11 +852,34 @@ class ChatTUI:
         if not text.strip():
             self.input.buffer.reset()
             return
-        self.input.buffer.reset(append_to_history=True)
         if text.lstrip().startswith("/"):
+            self.input.buffer.reset(append_to_history=True)
             self.run_command(text)
+        elif self.task_profile is not None:
+            self.submit_task_draft(text)
         else:
+            self.input.buffer.reset(append_to_history=True)
             self.start_send(text)
+
+    def submit_task_draft(self, text):
+        """Task mode Enter: one formal Core submit per distinct draft.
+
+        The draft leaves the editor before the worker starts, and busy is set in the
+        same key handler, so a repeated Enter, a resize or a redraw finds nothing to
+        send. Resending the identical request needs the explicit /task submit command.
+        """
+        key = (self.task_profile, text.strip())
+        if key == self.last_task_request:
+            self.append("llmtool: this exact request was already submitted in Task mode as Task "
+                        + (self.last_task_id or chat_tui_task.UNKNOWN) + "; not sent again. "
+                        "Edit the draft, or use /task submit --provider " + self.task_profile
+                        + " REQUEST to create another Task on purpose.")
+            return
+        self.input.buffer.reset(append_to_history=True)
+        self.last_task_request = key
+        self.last_task_id = None
+        self.append("task> " + text.strip())
+        self.start_task("submit", self.task_profile, text.strip(), from_mode=True)
 
     def run_command(self, text):
         self.append("> " + text.strip())
@@ -616,43 +925,127 @@ class ChatTUI:
         if len(parts) == 3 and parts[1] == "show":
             self.start_task("show", parts[2], None)
             return
+        if len(parts) == 2 and parts[1] == "list":
+            self.toggle_list(True)
+            return
+        if len(parts) == 2 and parts[1] == "events":
+            self.toggle_events(True)
+            return
+        if len(parts) == 3 and parts[1] == "mode":
+            self.set_task_mode(parts[2])
+            return
         self.append("usage: /task submit --provider PROFILE REQUEST\n"
-                    "       /task show TASK_ID")
+                    "       /task show TASK_ID\n"
+                    "       /task mode PROFILE|off\n"
+                    "       /task list\n"
+                    "       /task events")
 
-    def start_task(self, action, first, request):
+    def set_task_mode(self, profile):
+        """Explicit chat/Task choice; the profile is checked by Core at submit time."""
+        if profile == "off":
+            self.task_profile = None
+            self.last_task_request = None
+            self.append("chat mode: Enter sends drafts to chat provider " + self.session.provider
+                        + " (not a PM); chat replies are never Tasks")
+            return
+        self.task_profile = profile
+        self.last_task_request = None
+        self.append("Task mode: Enter submits each draft as a formal PM Task to PM provider "
+                    "profile " + profile + " through llmtool Core (task submit). Nothing is sent "
+                    "to the chat provider. The PM type, model and session are shown from the "
+                    "Core record after each submit. /task mode off returns to chat.")
+
+    def start_task(self, action, first, request, from_mode=False):
         self.busy = True
         self.worker_kind = "task"
-        self.append("llmtool: task intake only; Developer dispatch is not implied")
+        if action == "submit":
+            self.append("llmtool: task intake only; Developer dispatch is not implied. "
+                        "Submitting to PM provider profile " + first + "...")
         self._loop = asyncio.get_running_loop()
         self.worker = threading.Thread(target=self._task_request,
-                                       args=(action, first, request, self._loop),
+                                       args=(action, first, request, from_mode, self._loop),
                                        name="llmtool-chat-task")
         self.worker.start()
 
-    def _task_request(self, action, first, request, loop):
-        """Run existing task submit/show APIs with task-local captured output."""
-        import io
+    def _task_request(self, action, first, request, from_mode, loop):
+        """Worker thread: existing Core task submit/show with task-local captured output.
+
+        After a submit that created a Task, the detail is read back from Core with
+        task show, so the detail pane never reuses the submit output.
+        """
         from argparse import Namespace
         from .task_submission_cli import run_task_show, run_task_submit
 
-        output = io.StringIO()
+        result = {"action": action, "first": first, "from_mode": from_mode, "code": None,
+                  "view": None, "raw": "", "error": None, "detail": None}
         try:
             if action == "submit":
                 with background_cli_invocation():
-                    code = run_task_submit(
-                        Namespace(provider=first, request=[request]), stdout=output)
+                    result["code"], result["raw"] = self._core_call(
+                        run_task_submit, Namespace(provider=first, request=[request]))
             else:
-                code = run_task_show(Namespace(task_id=first), stdout=output)
-            rendered = output.getvalue().strip()
-            outcome = (code == 0, rendered or "task command returned no result")
+                result["code"], result["raw"] = self._core_call(
+                    run_task_show, Namespace(task_id=first))
+            result["view"] = chat_tui_task.parse_core_view(result["raw"])
+            if action == "show":
+                if result["view"] is not None:
+                    result["detail"] = self._detail_text(result["view"])
+            elif result["view"] is not None and result["code"] == 0:
+                _code, raw = self._core_call(
+                    run_task_show, Namespace(task_id=result["view"]["task_id"]))
+                shown = chat_tui_task.parse_core_view(raw)
+                if shown is not None:
+                    result["detail"] = self._detail_text(shown)
         except LLMToolError as exc:
-            outcome = (False, str(exc))
+            result["error"] = str(exc)
         except BaseException:
-            outcome = (False, "task command failed; details omitted")
+            result["error"] = "task command failed; details omitted"
         try:
-            loop.call_soon_threadsafe(self.finish_send, outcome)
+            loop.call_soon_threadsafe(self.finish_task, result)
         except RuntimeError:
             pass
+
+    @staticmethod
+    def _detail_text(view):
+        """Worker thread: status summary from the stored record, then Core's task show view."""
+        from .task_store import TaskStore
+        try:
+            record = TaskStore().get(view["task_id"])
+        except Exception:
+            summary = "Status: " + chat_tui_task.UNKNOWN + " (TaskStore record unreadable)"
+            extra = ""
+        else:
+            summary = (chat_tui_status.summary_text(record) + "\n\n"
+                       + chat_tui_events.timeline_text(record))
+            extra = chat_tui_status.detail_extra(record)
+        text = summary + "\n\n" + chat_tui_task.detail_text(view)
+        return text + ("\n" + extra if extra else "")
+
+    @staticmethod
+    def _core_call(function, args):
+        import io
+        output = io.StringIO()
+        code = function(args, stdout=output)
+        return code, output.getvalue().strip()
+
+    def task_outcome_text(self, result):
+        """Conversation text for a finished task command, built only from Core output."""
+        view, error, raw = result["view"], result["error"], result["raw"]
+        if result["action"] == "submit":
+            text = chat_tui_task.receipt_text(result["code"], view, result["first"],
+                                              raw=raw, error=error)
+            if result["detail"] is not None:
+                text += "\n  Task detail opened from Core (F2 toggles, Esc closes)."
+            elif view is not None:
+                text += "\n  Detail: /task show " + chat_tui_task.value(view, "task_id")
+            return "task result:\n" + text
+        if view is None:
+            return ("llmtool task command failed:\n"
+                    + (error or raw or "task command returned no result"))
+        return ("task result:\nTask " + chat_tui_task.value(view, "task_id") + " state "
+                + chat_tui_task.value(view, "state") + "; dispatch: "
+                + chat_tui_task.dispatch_status(view)
+                + "\n  Task detail opened from Core (F2 toggles, Esc closes).")
 
     def start_send(self, text):
         self.busy = True
@@ -677,10 +1070,23 @@ class ChatTUI:
         except RuntimeError:
             pass  # Loop already closed; state stays in ChatSession only.
 
+    def finish_task(self, result):
+        """Event-loop callback for a task command; only Core output reaches the screen."""
+        def render():
+            view = result["view"]
+            if result["from_mode"] and view is not None:
+                self.last_task_id = chat_tui_task.value(view, "task_id")
+            self.append(self.task_outcome_text(result))
+            if result["detail"] is not None:
+                self.set_detail(result["detail"])
+        self._finish(render)
+
     def finish_send(self, outcome):
         """Runs as an event-loop callback, where an exception would bypass run()."""
         ok, text = outcome
-        kind = self.worker_kind
+        self._finish(lambda: self.append(("assistant:\n" if ok else "llmtool: ") + (text or "")))
+
+    def _finish(self, render):
         self.busy = False
         self.worker = None
         self.worker_kind = None
@@ -688,11 +1094,7 @@ class ChatTUI:
             self.app.exit(result=0)
             return
         try:
-            if kind == "task":
-                prefix = "task result:\n" if ok else "llmtool task command failed:\n"
-            else:
-                prefix = "assistant:\n" if ok else "llmtool: "
-            self.append(prefix + (text or ""))
+            render()
         except Exception:
             self.app.exit(result=1)  # Sanitized FAILED; ChatSession history is already correct.
             return
