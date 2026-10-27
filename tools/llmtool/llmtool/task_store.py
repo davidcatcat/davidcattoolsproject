@@ -594,7 +594,7 @@ def _validate(record):
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
                     type(item.get('attempt')) is not int or item['attempt'] not in (1, 2) or
-                    item.get('state') != 'CLAIMED' or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
                     (item.get('comment_id') is not None and
                      (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
                     type(item.get('packet_sha256')) is not str or
@@ -2292,15 +2292,30 @@ class TaskStore:
                 old_claims = current.get('review_repair_claims', [])
                 new_claims = changes['review_repair_claims']
                 if (type(old_claims) is not list or type(new_claims) is not list or
-                        len(new_claims) != len(old_claims) + 1 or
-                        new_claims[:-1] != old_claims or len(new_claims) > 64):
+                        len(new_claims) not in (len(old_claims), len(old_claims) + 1) or
+                        len(new_claims) > 64):
                     _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
-                added = new_claims[-1]
-                if (type(added) is not dict or
-                        type(added.get('repair_task_id')) is not str or
-                        re.fullmatch(r'[0-9a-f]{32}', added['repair_task_id']) is None or
-                        sum(1 for item in old_claims if item.get('pr') == added.get('pr')) >= 2):
-                    _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
+                if len(new_claims) == len(old_claims) + 1:
+                    if new_claims[:-1] != old_claims:
+                        _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+                    added = new_claims[-1]
+                    if (type(added) is not dict or added.get('state') != 'CLAIMED' or
+                            type(added.get('repair_task_id')) is not str or
+                            re.fullmatch(r'[0-9a-f]{32}', added['repair_task_id']) is None or
+                            sum(1 for item in old_claims if item.get('pr') == added.get('pr')) >= 2):
+                        _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
+                else:
+                    changed = [i for i, (old, new) in enumerate(zip(old_claims, new_claims))
+                               if old != new]
+                    if len(changed) != 1:
+                        _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+                    i = changed[0]
+                    old, new = old_claims[i], new_claims[i]
+                    if (old.get('state') != 'CLAIMED' or
+                            new.get('state') not in ('DISPATCHED', 'UNKNOWN') or
+                            any(old.get(key) != new.get(key) for key in
+                                old.keys() - {'state'})):
+                        _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
             from . import worker_dispatch
             if trusted_dispatch_audit:
                 prior_audit = list(current.get('dispatch_audit', []))

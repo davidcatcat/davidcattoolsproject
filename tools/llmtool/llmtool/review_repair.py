@@ -8,6 +8,7 @@ from argparse import Namespace
 
 from . import review_result, task_completion, worker_dispatch
 from .errors import LLMToolError
+from .task_store import new_id
 
 MAX_REPAIR_ATTEMPTS = 2
 MAX_EXCERPT_CHARS = 2000
@@ -21,6 +22,20 @@ def _refuse(code):
 
 def _now():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _update_claim_state(store, task_id, claim, state):
+    record = store.get(task_id)
+    claims = record.get('review_repair_claims', [])
+    for index, item in enumerate(claims):
+        if item.get('repair_task_id') == claim['repair_task_id']:
+            updated = dict(item, state=state)
+            claims[index] = updated
+            store.compare_and_update(
+                task_id, expected={'record_sha256': record['record_sha256']},
+                review_repair_claims=claims)
+            return
+    _refuse('REPAIR_CLAIM_UNAVAILABLE')
 
 
 def _worker_key(profile):
@@ -52,7 +67,7 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     return invoke(args, store=store)
 
 
-def _record_repair_task(*, task, developer, packet, attempt, store):
+def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_id=None):
     """Create the bounded continuation through the ordinary record-pm path."""
     from . import task_submission_cli
 
@@ -62,7 +77,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store):
             type(provenance.get('pm_cwd')) is not str):
         _refuse('REPAIR_PM_SESSION_UNAVAILABLE')
     route = developer.get('provider_profile')
-    if route not in ('company-gw', 'codex', 'opencode'):
+    if route not in ('codex', 'opencode'):
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     pm_assignment = task.get('pm_assignment')
     if type(pm_assignment) is not dict or type(pm_assignment.get('goal')) is not str:
@@ -93,7 +108,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store):
         pm_runtime='claude-code', pm_cwd=provenance['pm_cwd'],
     )
     record = task_submission_cli.run_task_record_pm(
-        args, store=store,
+        args, store=store, task_id=repair_task_id,
         input_stream=io.StringIO(json.dumps({'request': request, 'response': response})),
         return_record=True)
     if type(record) is not dict or type(record.get('task_id')) is not str:
@@ -196,6 +211,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, github_get=None,
     worker = _worker_key(profile)
     if worker is None:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
+    if profile == 'company-gw':
+        _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     decision = worker_dispatch.evaluate(
         worker, developer.get('owner_assignment_ref'), task_id)
     if not decision.allowed:
@@ -211,29 +228,23 @@ def repair_review(*, store, task_id, executor_task, pr_number, github_get=None,
                      if claim.get('head_sha') == packet['failed_head'] and
                      claim.get('version') == packet['version']), None)
     if existing is not None:
-        return {'claim': existing, 'repair_task_id': existing.get('repair_task_id'),
-                'replayed': True,
-                'next_action': f"review-dispatch --version {packet['version'] + 1}"}
+        task_id_for_repair = existing.get('repair_task_id')
+        dispatched = existing.get('state') == 'DISPATCHED'
+        return {'claim': existing, 'repair_task_id': task_id_for_repair,
+                'replayed': dispatched,
+                'next_action': (f"review-dispatch --version {packet['version'] + 1}"
+                                if dispatched else f"task delegate {task_id_for_repair}")}
     if len(attempts) >= MAX_REPAIR_ATTEMPTS:
         _refuse('REPAIR_LIMIT_REACHED')
     packet_sha = hashlib.sha256(json.dumps(
         packet, ensure_ascii=True, sort_keys=True,
         separators=(',', ':')).encode('utf-8')).hexdigest()
-    recorder = repair_task_recorder
-    if recorder is None:
-        repair_task = _record_repair_task(
-            task=task, developer=developer, packet=packet,
-            attempt=len(attempts) + 1, store=store)
-    else:
-        repair_task = recorder(task=task, developer=developer, packet=packet,
-                               attempt=len(attempts) + 1, store=store)
-    if type(repair_task) is not dict or type(repair_task.get('task_id')) is not str:
-        _refuse('REPAIR_TASK_RECORD_UNAVAILABLE')
+    repair_task_id = new_id()
     claim = {
         'executor_task': executor_task, 'pr': pr_number,
         'head_sha': packet['failed_head'], 'version': packet['version'],
         'attempt': len(attempts) + 1, 'state': 'CLAIMED',
-        'repair_task_id': repair_task['task_id'],
+        'repair_task_id': repair_task_id,
         'comment_id': packet['verdict_comment_id'], 'packet_sha256': packet_sha,
         'claimed_at': _now(),
     }
@@ -244,6 +255,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, github_get=None,
     except Exception:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
 
+    recorder = repair_task_recorder
+    if recorder is None:
+        repair_task = _record_repair_task(
+            task=task, developer=developer, packet=packet,
+            attempt=len(attempts) + 1, store=store, repair_task_id=repair_task_id)
+    else:
+        repair_task = recorder(task=task, developer=developer, packet=packet,
+                               attempt=len(attempts) + 1, store=store,
+                               repair_task_id=repair_task_id)
+    if (type(repair_task) is not dict or
+            repair_task.get('task_id') != repair_task_id):
+        _refuse('REPAIR_TASK_RECORD_UNAVAILABLE')
+
     # Re-read the Owner switch immediately before the provider side effect.
     decision = worker_dispatch.evaluate(
         worker, developer.get('owner_assignment_ref'), task_id)
@@ -253,9 +277,15 @@ def repair_review(*, store, task_id, executor_task, pr_number, github_get=None,
     if adapter is None:
         adapter = lambda **request: _delegate_repair(
             **request, delegate=delegate_callable, store=store)
-    result = adapter(task=repair_task, developer=developer, packet=packet,
-                     executor_task=executor_task, provider_profile=profile,
-                     model=developer.get('model'))
+    try:
+        result = adapter(task=repair_task, developer=developer, packet=packet,
+                         executor_task=executor_task, provider_profile=profile,
+                         model=developer.get('model'))
+    except Exception:
+        _update_claim_state(store, task_id, claim, 'UNKNOWN')
+        raise
+    _update_claim_state(store, task_id, claim, 'DISPATCHED')
+    claim['state'] = 'DISPATCHED'
     response = {'result': result, 'attempt': claim['attempt'],
                 'repair_task_id': repair_task['task_id'],
                 'claim': claim,

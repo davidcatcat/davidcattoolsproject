@@ -1636,6 +1636,7 @@ def run_task_opencode_delegate(args, *, store):
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > REQUEST_LIMIT:
         raise LLMToolError('OpenCode task prompt exceeds the supported size')
+    _screen_text(prompt, REQUEST_LIMIT)
     model, steps = _opencode_developer_profile()
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
@@ -2500,7 +2501,8 @@ def run_task_submit(args, *, store=None, stdout=None):
     return 0
 
 
-def run_task_record_pm(args, *, store=None, input_stream=None, return_record=False):
+def run_task_record_pm(args, *, store=None, input_stream=None, return_record=False,
+                       task_id=None):
     """Persist a real active-PM decision; this path never resolves or calls a provider."""
     store = TaskStore() if store is None else store
     native_session = getattr(args, 'pm_session_id', None)
@@ -2517,7 +2519,7 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
                    'pm_cwd': active_pm_inbox.observe_claude_session(
                        native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
-    task_id, run_id = new_id(), new_id()
+    task_id, run_id = (new_id() if task_id is None else task_id), new_id()
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()
     contract = _contract(task_id, digest)
     record = _record(
