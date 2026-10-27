@@ -265,6 +265,7 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_repair_task_uses_record_pm_path_and_original_session(self):
         task = _record()
+        repair_task_id = '1' * 32
         packet = {'verdict_comment_id': 9, 'failed_head': HEAD, 'version': 1,
                   'findings_count': 1}
         seen = []
@@ -274,7 +275,8 @@ class ReviewRepairTests(unittest.TestCase):
             return {'task_id': task_id}
         result = review_repair._record_repair_task(
             task=task, developer=task['developer'], packet=packet,
-            attempt=1, store=self.store, record_pm=record_pm)
+            attempt=1, store=self.store, repair_task_id=repair_task_id,
+            record_pm=record_pm)
         args, store, envelope, return_record, recorded_task_id = seen[0]
         self.assertIs(store, self.store)
         self.assertEqual(args.pm_session_id, task['pm_provenance']['pm_native_session_id'])
@@ -287,7 +289,24 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertIn(HEAD, assignment['acceptance'][-1])
         self.assertIn('findings count 1', assignment['acceptance'][-1])
         self.assertTrue(return_record)
-        self.assertEqual(result['task_id'], recorded_task_id)
+        self.assertEqual(recorded_task_id, repair_task_id)
+        self.assertEqual(result['task_id'], repair_task_id)
+
+    def test_repair_task_rejects_recorder_without_task_id(self):
+        task = _record()
+        packet = {'verdict_comment_id': 9, 'failed_head': HEAD, 'version': 1,
+                  'findings_count': 1}
+
+        def record_pm(args, *, store, input_stream, return_record, task_id=None):
+            return {'task_id': None}
+
+        with self.assertRaises(review_repair.LLMToolError) as raised:
+            review_repair._record_repair_task(
+                task=task, developer=task['developer'], packet=packet,
+                attempt=1, store=self.store, repair_task_id='1' * 32,
+                record_pm=record_pm)
+        self.assertEqual(raised.exception.review_repair_code,
+                         'REPAIR_TASK_RECORD_UNAVAILABLE')
 
     def test_cli_route_reaches_handler(self):
         with patch.object(cli, 'run_task_repair', return_value=17) as handler:
