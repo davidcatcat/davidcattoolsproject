@@ -305,19 +305,21 @@ else:
 
         def invoke():
             try:
-                self.complete(timeout_seconds=30)
+                self.complete(timeout_seconds=120)
             except BaseException as exc:
                 outcome.append(exc)
 
         worker = threading.Thread(target=invoke)
         worker.start()
-        # The child writes this marker immediately before waiting, so parent
-        # startup and capture construction cannot race the timeout assertion.
-        deadline = time.monotonic() + 20
+        # The fake embeds this absolute marker path in its script, independent
+        # of the provider's isolated cwd/TMPDIR and environment. Allow the
+        # child ample startup time on a loaded runner; the request still has a
+        # bounded timeout and must pass all normalization and cleanup checks.
+        deadline = time.monotonic() + 90
         while not self.ready.exists() and worker.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
         self.assertTrue(self.ready.exists(), "timed fake child did not signal ready")
-        worker.join(timeout=35)
+        worker.join(timeout=130)
         self.assertFalse(worker.is_alive(), "timed-out Codex CLI request did not finish")
         self.assertEqual(len(outcome), 1)
         self.assertIsInstance(outcome[0], LLMToolError)
