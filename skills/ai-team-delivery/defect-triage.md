@@ -57,14 +57,4 @@ issues in one tracked list with owner, target milestone and explanation.
 Do not create a PR for every review report: publish SHA-bound review evidence
 on the product PR or tracking Issue.
 
-**Bounded convergence (C-6):** two unsuccessful correction attempts for one
-confirmed root-cause family trigger coordinator disposition, not automatic
-attempt 3. Four independent review rounds, third recurrence of an equivalent
-finding family, or disproportionate token/time spend trigger a **whole-feature
-cost/benefit decision**: safe narrowly reduced release, independently reviewed
-redesign, or HOLD/reprioritize. Reviewer independent of the author adjudicates
-root-cause equivalence; renaming a finding does not reset counters. Budgets
-are measured where evidence exists and `UNKNOWN` otherwise, never invented
-zero. No count or cost threshold waives an actual mandatory blocker, permission
-boundary or unresolved product-correctness invariant. Owner only receives
-a P0-level product choice when necessary, not routine technical troubleshooting.
+**Bounded convergence (C-6; Owner 2026-10-27):** two unsuccessful correction attempts in one confirmed root-cause/finding family trigger coordinator disposition, **not** automatic repair attempt 3. When the existing dispatch, data, D6 and budget gates permit, PM must first assign a separate bounded **Codex CLI `gpt-6.1-sol` High Debug diagnosis** under [PM Continuation](pm-continuation.md), using the [mandatory Root Cause and exact-file-change report](high-debug-report.md). High Debug is read-only by default, not permission to bypass the existing per-assignment repair cap or to merge. Counters do not reset when a Task/Worker changes or a finding is renamed; uncertain family equivalence is adjudicated independently. Four independent review rounds, a third recurrence of equivalent findings, or disproportionate token/time spend trigger a **whole-feature cost/benefit decision**: safe reduced release, reviewed redesign or HOLD/reprioritize. Budget evidence must be measured or `UNKNOWN`. No count or cost threshold waives a mandatory blocker, permission boundary or product invariant. Ask Owner only for reserved authority/product choices, not routine technical troubleshooting.
