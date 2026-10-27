@@ -13,7 +13,13 @@ from llmtool.errors import LLMToolError
 
 class HighDebugTests(unittest.TestCase):
     def test_dispatch_refusal_has_stable_code(self):
-        store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
+        store = SimpleNamespace(get=lambda _task: {
+            'task_id': 'a' * 32,
+            'review_repair_claims': [
+                {'family': 'family', 'pr': 17},
+                {'family': 'family', 'pr': 17},
+            ],
+        })
         with patch.object(high_debug.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=False)):
             with self.assertRaises(LLMToolError) as caught:
@@ -113,7 +119,13 @@ class HighDebugTests(unittest.TestCase):
                                      'HIGH_DEBUG_ARGUMENT_INVALID')
 
     def test_sensitive_evidence_is_refused(self):
-        store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
+        store = SimpleNamespace(get=lambda _task: {
+            'task_id': 'a' * 32,
+            'review_repair_claims': [
+                {'family': 'family', 'pr': 17},
+                {'family': 'family', 'pr': 17},
+            ],
+        })
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / 'evidence.txt'
             evidence.write_text('Bear' + 'er ' + 'a' * 40, encoding='utf-8')

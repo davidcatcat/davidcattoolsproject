@@ -126,7 +126,7 @@ class ReviewRepairTests(unittest.TestCase):
                          self.store.get(TASK)['review_repair_claims'][0]['repair_task_id'])
         self.assertEqual(len(self.calls), 1)
 
-    def test_limit_reached(self):
+    def test_third_attempt_without_report_requires_high_debug(self):
         result = self.dispatch()
         record = self.store.get(TASK)
         second = dict(record['review_repair_claims'][0], head_sha='a' * 40,
@@ -147,7 +147,8 @@ class ReviewRepairTests(unittest.TestCase):
             self.dispatch(github_get=lambda _path: [_comment(
                 comment_id=10, head='b' * 40, version=3)],
                 current_head=lambda _task, _executor: 'b' * 40)
-        self.assertEqual(getattr(raised.exception, 'review_repair_code'), 'REPAIR_LIMIT_REACHED')
+        self.assertEqual(getattr(raised.exception, 'review_repair_code'),
+                         'REPAIR_NEEDS_HIGH_DEBUG')
 
     def _repair_history(self, count, *, status=None, examined_sha=HEAD):
         record = self.store.get(TASK)
