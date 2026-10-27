@@ -2,6 +2,7 @@
 
 - **Snapshot：** `139a62c0483560be4e7a0aadd76c82652a8a2cd9`　**審查者：** Independent Auditor（Claude Fable 5.1）
 - 完整證據見 [Report A](full-repository-technical-audit-20261028.md)、[Report B](project-evolution-decision-retrospective-20261028.md)、[Report C](product-owner-playbook-ai-development-20261028.md)。本文只給結論。
+- **v4 註記：** 補入 Owner 對省 token 路線的說明（Report B 9B）；DEC-008／029 改評 REASONABLE AT THE TIME。
 - **v3 註記（2026-10-28 Owner 身份重判）：** Owner 是需求方與出資者，不是 PM／CTO。v1／v2 用專業管理標準評價 Owner 的部分已撤銷；責任重判見問題四，AI 失職與能力限制見「問題十之前」，Owner 只需做的四件事見文末。
 - **v2 註記（2026-10-28 自我校正）：** 本文所有「應停止／應優先／建議」都是審查者建議；凡涉及 Gate、Reviewer 配對、Dispatch 政策或 Roadmap 者為 **OWNER_DECISION_REQUIRED**，不取代 AGENTS.md。本機 TaskStore 統計（279 Task、COMPLETED 1、review claim 0）只代表 llmtool 子命令在 Owner Mac 上的使用情況，不代表專案整體產出（Report A 2.4）。Snapshot 後 main 已合併 #513（TUI Task mode／Task list／事件／pm_runtime／developer route 契約），AUDIT-001 部分改善但核心未變（Report A 第 26 章）。
 
@@ -27,7 +28,7 @@
 - **AI PM 管理：** 需求不釐清直接展開（D6、AGY）、無影響分析、手動串接而非驅動器、merge train 雙 CI、每輪新 Reviewer worktree、docs PR 全 gate、把額度事件呈現為 Owner 決策並代記 73 則、收到容量警告（PR #322）不處理、從未安排 demo。
 - **AI CTO／Architect（Coordinator）：** F1、fake-only、五套授權、三套修復上限；12 項關鍵決策中 11 項無替代方案與停損紀錄；閉環未通時批准多路線。
 - **AI QA／Reviewer：** 只審 diff，從未驗使用者可用性。
-- **Owner：** 三項：「省錢」與「可用」未定先後；全權委託與逐條指令切換；未要求定期 demo。**沒有找到 AI 明確警告後 Owner 仍堅持的案例。** v1／v2 歸給 Owner 的「規格不完整、接受大型契約、無停損、未親手驗收、以 PR 判斷進度」已撤銷，改歸 AI 角色（Report B 第 6、9A 章）。
+- **Owner：** 兩項：「省錢」與「可用」未定先後；全權委託與逐條指令切換。（「未要求 demo」已撤銷：Owner 說明當時沒有可操作的東西，不看 TUI 是正確判斷。省 token 路線是 Owner 有意的前期投資，評價 REASONABLE AT THE TIME；投資去向與回收分析缺失為 AI 責任，見 Report B 9B。）**沒有找到 AI 明確警告後 Owner 仍堅持的案例。** v1／v2 歸給 Owner 的「規格不完整、接受大型契約、無停損、未親手驗收、以 PR 判斷進度」已撤銷，改歸 AI 角色（Report B 第 6、9A 章）。
 
 ## 問題五：過度工程？
 **是，集中在治理層。** 五套授權模型、三套修復上限、Worker 描述五處、政策文件約 60 萬 bytes、Mac CI 驗證自己 guard 的 12 個案例、每個 Reviewer 一個 worktree。核心執行層（provider、store、D6、CI）不過度。
