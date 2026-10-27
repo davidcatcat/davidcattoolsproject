@@ -554,6 +554,17 @@ def add_task_submission_parsers(actions):
                                  help='public GitHub pull request number')
     review_dispatch.add_argument('--version', type=int, default=1,
                                  help='review verdict version (1-9999; default 1)')
+    review_result = actions.add_parser(
+        'review-result', help='Record the dispatched Reviewer verdict for the original PM')
+    review_result.add_argument('task_id', help='existing durable Task ID')
+    review_result.add_argument('--executor-task', required=True,
+                               help='registered D6 Executor task bound to the Task')
+    review_result.add_argument('--pr', required=True, type=int,
+                               help='GitHub pull request number')
+    review_result.add_argument('--version', type=int, default=1,
+                               help='review verdict version (1-9999; default 1)')
+    review_result.add_argument('--reviewer-session-done', action='store_true',
+                               help='record REVIEW_BLOCKED when no verdict exists')
     remote_test = actions.add_parser(
         'remote-test', help='Run admitted Task tests once on the configured EC2 host')
     remote_test.add_argument('task_id', help='existing durable Task ID')
@@ -679,6 +690,18 @@ def run_task_review_dispatch(args, *, store=None):
     result = dispatch_review(store=TaskStore() if store is None else store,
                              task_id=args.task_id, executor_task=args.executor_task,
                              pr_number=args.pr, version=getattr(args, 'version', 1))
+    return _print(result)
+
+
+def run_task_review_result(args, *, store=None, github_get=None):
+    """Thin CLI adapter for the durable Reviewer result collector."""
+    from .review_result import record_review_result
+    result = record_review_result(
+        store=TaskStore() if store is None else store, task_id=args.task_id,
+        executor_task=args.executor_task, pr_number=args.pr,
+        version=getattr(args, 'version', 1),
+        reviewer_session_done=getattr(args, 'reviewer_session_done', False),
+        github_get=github_get)
     return _print(result)
 
 

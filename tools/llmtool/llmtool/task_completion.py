@@ -1603,6 +1603,23 @@ def _review_binding_line(task_id, run_id, contract_digest, result_sha):
             f'contract={contract_digest} head={result_sha}')
 
 
+def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha):
+    """Return whether a comment is the exact task-bound formal Claude PASS."""
+    if type(body) is not str:
+        return False
+    raw_lines = [line for line in body.splitlines() if line.strip()]
+    if len(raw_lines) < 2:
+        return False
+    marker = _VERDICT_MARKER.fullmatch(raw_lines[0])
+    status = _VERDICT_STATUS.fullmatch(raw_lines[1])
+    binding_line = _review_binding_line(task_id, run_id, contract_digest, result_sha)
+    lines = [line.strip() for line in raw_lines]
+    return (marker is not None and status is not None and
+            marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
+            status.group(1) == 'PASS' and status.group(2) == result_sha and
+            _FORMAL_ACCEPT in lines and binding_line in lines)
+
+
 def _collect_ci_evidence(*, pr_number, result_sha):
     workflow = _github_get('actions/workflows/llmtool-mac-ci.yml')
     if (type(workflow) is not dict or type(workflow.get('id')) is not int or
@@ -1786,8 +1803,9 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             continue  # Advisory Codex PASS neither accepts nor supersedes.
         # Anything else that claims to be a verdict for this HEAD is a
         # disposition; only the exact standard Claude PASS form accepts.
-        accepted = (standard and marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
-                    _FORMAL_ACCEPT in lines and binding_line in lines)
+        accepted = (standard and is_formal_claude_pass(
+            body, task_id=task_id, run_id=run_id, contract_digest=contract_digest,
+            result_sha=result_sha))
         if type(comment.get('id')) is not int:
             _stop('REVIEW_EVIDENCE_INVALID')
         created = _review_time(comment, 'created_at')
