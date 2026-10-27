@@ -3503,25 +3503,31 @@ REMOTE_TEST_FILES = 32        # newest task files read per office rebuild
 REMOTE_TEST_READ = 4 << 20    # a Task holds up to 32 receipts of up to 64 result lines
 REMOTE_TEST_SKEW = 300.0      # receipts carry the EC2 clock; file times the local one
 REMOTE_TEST_RELIST = 60.0     # seconds a task-file listing is reused while the folder is unchanged
-_remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths)
+REMOTE_TEST_SCAN = 4096       # folder entries looked at per listing, at most
+REMOTE_TEST_CAPPED = "task 目錄超過上限，結果可能不是最新"
+_remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths, capped)
 
 
-def _remote_test_paths(root: str) -> list:
-    """Up to REMOTE_TEST_FILES newest *.json paths in root. The folder is
-    listed again only when its mtime changes (TaskStore writes by rename, which
-    changes it) or after REMOTE_TEST_RELIST seconds; otherwise only the kept
-    paths are looked at again."""
+def _remote_test_paths(root: str) -> tuple[list, bool]:
+    """(up to REMOTE_TEST_FILES newest *.json paths in root, whether the listing
+    stopped at REMOTE_TEST_SCAN entries). The folder is listed again only when
+    its mtime changes (TaskStore writes by rename, which changes it) or after
+    REMOTE_TEST_RELIST seconds; otherwise only the kept paths are looked at again."""
     try:
         folder = os.stat(root).st_mtime_ns
     except OSError:
-        return []
+        return [], False
     kept = _remote_test_listing.get(root)
     if kept and kept[0] == folder and time.monotonic() - kept[1] < REMOTE_TEST_RELIST:
-        return kept[2]
-    stamped = []
+        return kept[2], kept[3]
+    stamped, seen, capped = [], 0, False
     try:
         with os.scandir(root) as entries:
             for entry in entries:
+                if seen >= REMOTE_TEST_SCAN:
+                    capped = True   # more entries remain; the newest may be among them
+                    break
+                seen += 1
                 if not entry.name.endswith(".json"):
                     continue
                 try:
@@ -3529,12 +3535,12 @@ def _remote_test_paths(root: str) -> list:
                 except OSError:
                     continue
     except OSError:
-        return []
+        return [], False
     paths = [path for _, path in heapq.nlargest(REMOTE_TEST_FILES, stamped)]
     if len(_remote_test_listing) >= 8:
         _remote_test_listing.clear()   # one root in use; tests pass many
-    _remote_test_listing[root] = (folder, time.monotonic(), paths)
-    return paths
+    _remote_test_listing[root] = (folder, time.monotonic(), paths, capped)
+    return paths, capped
 
 
 def _remote_test_time(value) -> float:
@@ -3543,16 +3549,18 @@ def _remote_test_time(value) -> float:
     return _github_time(re.sub(r"\.\d{6}Z$", "Z", value))
 
 
-def remote_test_latest(root: str | None = None) -> tuple[float, str] | None:
-    """(when, words) of the newest EC2 remote-test receipt or receipt-less
-    outcome in llmtool's local task records. Only result words, codes, the
+def remote_test_latest(root: str | None = None) -> tuple[tuple[float, str] | None, bool]:
+    """((when, words) or None, capped): the newest EC2 remote-test receipt or
+    receipt-less outcome in llmtool's local task records; capped means the
+    folder listing stopped early, so a newer one may exist unseen. Only result words, codes, the
     Task id, the SHA and the test count are read; the remote config, host,
     paths and logs are never touched. At most REMOTE_TEST_FILES files are read,
     newest first, stopping once a file is older than the newest entry found.
     Every field is type-checked before use; anything else is skipped."""
     root = LLMTOOL_TASKS if root is None else root
     stamped = []
-    for path in _remote_test_paths(root):
+    listed, capped = _remote_test_paths(root)
+    for path in listed:
         try:
             stamped.append((os.path.getmtime(path), path))
         except OSError:
@@ -3592,7 +3600,7 @@ def remote_test_latest(root: str | None = None) -> tuple[float, str] | None:
             words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
             if when and (best is None or when > best[0]):
                 best = (when, words)
-    return best
+    return best, capped
 
 
 def remote_test_row(processes: list[Process], now: float, root: str | None = None) -> OfficeRow:
@@ -3610,7 +3618,12 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
             detail += f"；另有 {len(runs) - 1} 個執行中"
         return OfficeRow("EC2 遠端測試", WORKING, detail, _elapsed_seconds(runs[0].elapsed),
                          80, kind="worker", evidence="程序")
-    latest = remote_test_latest(root)
+    latest, capped = remote_test_latest(root)
+    if capped:   # only part of the folder was read: never claim the newest
+        detail = (f"已讀到的一次：{latest[1]}；" if latest else "") + REMOTE_TEST_CAPPED
+        return OfficeRow("EC2 遠端測試", UNCHECKED, detail,
+                         max(0.0, now - latest[0]) if latest else None, 80, kind="worker",
+                         evidence="llmtool 紀錄")
     if latest is None:
         return OfficeRow("EC2 遠端測試", IDLE, "尚無遠端測試紀錄", None, 80, kind="worker",
                          evidence="llmtool 紀錄")

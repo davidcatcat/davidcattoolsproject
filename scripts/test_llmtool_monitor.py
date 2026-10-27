@@ -3055,8 +3055,8 @@ class OfficeViewTests(unittest.TestCase):
         real_scandir, real_open = os.scandir, open
         with patch.object(mon.os, "scandir", side_effect=lambda p: listed.append(p) or real_scandir(p)), \
                 patch("builtins.open", side_effect=lambda *a, **k: opened.append(a[0]) or real_open(*a, **k)):
-            self.assertIsNone(mon.remote_test_latest(str(root)))
-            self.assertIsNone(mon.remote_test_latest(str(root)))
+            self.assertEqual(mon.remote_test_latest(str(root)), (None, False))
+            self.assertEqual(mon.remote_test_latest(str(root)), (None, False))
             self.assertEqual(len(listed), 1)   # folder unchanged: the listing is reused
             self.assertLessEqual(len(opened), 2 * mon.REMOTE_TEST_FILES)
             # TaskStore writes by rename, which changes the folder: listed again
@@ -3064,13 +3064,56 @@ class OfficeViewTests(unittest.TestCase):
             temp.write_text(json.dumps(newest), encoding="utf-8")
             os.replace(temp, root / "new.json")
             os.utime(root / "new.json", (self.NOW - 1, self.NOW - 1))
-            self.assertEqual(mon.remote_test_latest(str(root))[1], "task abcdef01 PASS @0123456，跑了 3 個測試")
+            self.assertEqual(mon.remote_test_latest(str(root))[0][1], "task abcdef01 PASS @0123456，跑了 3 個測試")
             self.assertEqual(len(listed), 2)
             # an unchanged folder is still listed again after REMOTE_TEST_RELIST
             later = time.monotonic() + mon.REMOTE_TEST_RELIST + 1
             with patch.object(mon.time, "monotonic", return_value=later):
                 mon.remote_test_latest(str(root))
             self.assertEqual(len(listed), 3)
+
+    def test_ec2_worker_listing_stops_at_the_entry_cap_and_says_unchecked(self):
+        receipt = {"task_id": self.TASK, "remote_test_receipts": [
+            {"result": "PASS", "source_sha": self.SHA, "ran_total": 3, "ended_at": self._stamp(50)}]}
+        root = Path(self._remote_tasks(("r", receipt, 50),
+                                       *[(f"t{i:02}", {"task_id": self.TASK}, 100 + i) for i in range(24)]))
+        visited, real_scandir = [], os.scandir
+
+        class Counted:
+            def __init__(self, path):
+                self.inner, self.ours = real_scandir(path), os.fspath(path) == str(root)
+            def __enter__(self):
+                return self
+            def __exit__(self, *exc):
+                self.inner.close()
+            def __iter__(self):
+                for entry in self.inner:
+                    if self.ours:   # other office scans also list folders
+                        visited.append(entry.name)
+                    yield entry
+
+        def row():   # the EC2 row alone: other office readers glob the same folder
+            with patch.object(mon.os, "scandir", side_effect=Counted):
+                return mon.remote_test_row([], self.NOW, str(root))
+
+        with patch.object(mon, "REMOTE_TEST_SCAN", 10):
+            capped = row()
+            # entry 11 is only fetched to learn more remain; none past it is looked at
+            self.assertLessEqual(len(visited), 11)
+            self.assertEqual(capped.state, mon.UNCHECKED)
+            self.assertTrue(capped.detail.endswith(mon.REMOTE_TEST_CAPPED))
+            self.assertNotIn("最近一次", capped.detail)
+            # after a directory change the rescan is bounded again
+            temp = root / "new.tmp"
+            temp.write_text(json.dumps({"task_id": self.TASK}), encoding="utf-8")
+            os.replace(temp, root / "new.json")
+            visited.clear()
+            self.assertEqual(row().state, mon.UNCHECKED)
+            self.assertLessEqual(len(visited), 11)
+        # under the cap the newest receipt is the newest again
+        os.replace(root / "new.json", root / "new2.json")
+        self.assertEqual((row().state, row().detail),
+                         (mon.IDLE, "最近一次：task abcdef01 PASS @0123456，跑了 3 個測試"))
 
     def test_ec2_worker_without_records_never_reads_the_remote_config(self):
         home = Path(tempfile.mkdtemp(dir=self.tmp.name))
