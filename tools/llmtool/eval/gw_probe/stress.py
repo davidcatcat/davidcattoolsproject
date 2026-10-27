@@ -128,7 +128,7 @@ SUSTAINED_PROMPTS = (
 )
 
 
-def _request_record(client, prompt, expected, thinking, deadline, started_at):
+def _request_record(client, prompt, expected, thinking, started_at):
     offset = time.monotonic() - started_at
     result = _safe_chat(client, prompt, thinking=thinking, max_tokens=512)
     response, _, message = _response(result)
@@ -169,7 +169,7 @@ def _sustained(client, concurrency, duration, window, thinking):
                 index = sequence
                 sequence += 1
             prompt, expected = SUSTAINED_PROMPTS[index % len(SUSTAINED_PROMPTS)]
-            record = _request_record(client, prompt, expected, thinking, deadline, started_at)
+            record = _request_record(client, prompt, expected, thinking, started_at)
             with lock:
                 records.append(record)
 
@@ -190,7 +190,7 @@ def _sustained(client, concurrency, duration, window, thinking):
     ok = sum(r["status"] == 200 and not r["error_code"] for r in records)
     tokens = sum(r["completion_tokens"] for r in records if isinstance(r["completion_tokens"], (int, float)))
     windows = [_window_summary(records, start, min(start + window, elapsed))
-               for start in (i * window for i in range(max(1, math.ceil(elapsed / window))))]
+               for start in (i * window for i in range(max(1, math.ceil(duration / window))))]
     return {"duration_seconds": round(elapsed, 3), "requested_duration_seconds": duration,
             "concurrency": concurrency, "count": count, "ok_count": ok, "error_count": count - ok,
             "http_429_count": sum(r["error_code"] == "HTTP_429" for r in records),
@@ -348,6 +348,7 @@ def main(argv=None):
         except Exception as exc:
             results[name] = {"error_code": "MODE_ERROR", "error_type": type(exc).__name__}
     output = {"status": "DONE", "model": model, "thinking": args.thinking,
+              "thinking_applies_to": ["burst", "sustained"],
               "started_at": datetime.now(timezone.utc).isoformat(), "dry_run": args.dry_run,
               "modes": results}
     output = _redact(output, credential_value)
