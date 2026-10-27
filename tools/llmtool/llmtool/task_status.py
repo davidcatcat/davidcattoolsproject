@@ -3,28 +3,39 @@
 import json
 import re
 
-from .task_store import TaskStore
+from .task_store import STATES, TaskStore
 
 
 # Persisted states have meaning only where explicitly listed here. In particular,
 # review claims and test receipts are evidence, not a review or test PASS.
 _TASK_STATES = {
-    'PM_PENDING': 'RUNNING',
-    'PM_RESPONDED': 'RUNNING',
+    **dict.fromkeys(('PM_PENDING', 'PM_RESPONDED'), 'RUNNING'),
     'PM_UNAVAILABLE': 'UNAVAILABLE',
-    'INPUT_REJECTED': 'FAILED',
-    'PM_RESPONSE_REJECTED': 'FAILED',
+    **dict.fromkeys(('INPUT_REJECTED', 'PM_RESPONSE_REJECTED'), 'FAILED'),
 }
+assert set(_TASK_STATES) == set(STATES)
 _CALLBACK_STATES = {
-    'WAITING_EXECUTOR': 'RUNNING', 'VERIFYING_EXECUTOR': 'RUNNING',
-    'WAITING_PM': 'RUNNING', 'PM_EVIDENCE_READY': 'RUNNING',
-    'PM_DISPATCHING': 'RUNNING', 'PM_RETURNED': 'RUNNING',
-    'PM_RESPONSE_REJECTED': 'FAILED', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN',
+    **dict.fromkeys(('WAITING_EXECUTOR', 'VERIFYING_EXECUTOR', 'WAITING_PM',
+                     'PM_EVIDENCE_READY', 'PM_DISPATCHING'), 'RUNNING'),
+    'PM_RETURNED': 'COMPLETED',
+    'PM_RESPONSE_REJECTED': 'FAILED',
+    'PM_UNAVAILABLE': 'UNAVAILABLE',
+    'PM_OUTCOME_UNKNOWN': 'UNKNOWN',
 }
 _COMPLETION_STATES = {
-    'PENDING': 'RUNNING', 'RUNNING': 'RUNNING', 'SUCCEEDED': 'COMPLETED',
-    'COMPLETED': 'COMPLETED', 'FAILED': 'FAILED', 'BLOCKED': 'BLOCKED',
-    'UNAVAILABLE': 'UNAVAILABLE', 'UNKNOWN': 'UNKNOWN',
+    **dict.fromkeys(('WAITING_EXECUTOR', 'WAITING_REVIEW', 'WAITING_CI',
+                     'WAITING_PM', 'PM_EVIDENCE_READY', 'PM_DISPATCHING'), 'RUNNING'),
+    'PM_RETURNED': 'COMPLETED',
+    'PM_RESPONSE_REJECTED': 'FAILED',
+    'PM_UNAVAILABLE': 'UNAVAILABLE',
+    'PM_OUTCOME_UNKNOWN': 'UNKNOWN',
+}
+_DEVELOPER_STATES = {
+    **dict.fromkeys(('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
+                     'DEVELOPER_RESPONDED'), 'RUNNING'),
+    'DEVELOPER_UNAVAILABLE': 'UNAVAILABLE',
+    'DEVELOPER_OUTCOME_UNKNOWN': 'UNKNOWN',
+    'DEVELOPER_OUTPUT_REJECTED': 'FAILED',
 }
 
 
@@ -44,10 +55,13 @@ def derive_state(record):
                 return 'BLOCKED'
             return state
         state = developer.get('state')
-        mapped = {'DEVELOPER_RESPONDED': 'RUNNING', 'DEVELOPER_UNAVAILABLE': 'UNAVAILABLE',
-                  'DEVELOPER_FAILED': 'FAILED', 'DEVELOPER_BLOCKED': 'BLOCKED'}.get(state)
+        mapped = _DEVELOPER_STATES.get(state)
         if mapped is not None:
+            if state == 'DEVELOPER_OUTCOME_UNKNOWN' and developer.get('error_code') == 'CODEX_BLOCKED':
+                return 'BLOCKED'
             return mapped
+        if state is not None:
+            return 'UNKNOWN'
     completion = record.get('completion')
     if type(completion) is dict:
         mapped = _COMPLETION_STATES.get(completion.get('state'))
