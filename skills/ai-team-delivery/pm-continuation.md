@@ -55,6 +55,23 @@ Escalate to the Owner only when one of these applies:
 
 Everything else is a PM decision: routine failures, Reviewer FAIL, a quota pause, a VPN outage and repair choices. Record the PM decision and continue. While the escalation is open, only the dependent action waits.
 
+Every Owner decision request must appear in the monitor (Owner 2026-10-28, #515):
+
+- Ask in chat with the options in plain language and a recommendation.
+- In the same step, post a comment on the relevant Issue or PR. It begins with `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`.
+- When the Owner answers, post a new comment that quotes the answer verbatim. It begins with `<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->`.
+
+A chat question alone does not count as asking the Owner.
+
+### Close your own gaps (Owner 2026-10-28, #515)
+
+When an AI finds that it missed something, whether the AI or the Owner noticed it first:
+
+1. Open a GitHub Issue that states what was missed, the root cause and the fix.
+2. Fix the immediate gap.
+3. Change the rule, skill or tool so the same miss cannot recur.
+4. Close the Issue only when the change is merged.
+
 ### Reviewer and Developer quota continuation (Owner 2026-10-27)
 
 Quota exhaustion is a technical availability observation, not a dispatch-authority change. An `OWNER_ASSIGNMENT_ONLY` Worker (including AGY) cannot be assigned to a different Task, retried or used as fallback without the exact Owner binding. For quota-limited Developer Tasks, persist the exact Task/Session, checked-out SHA, partial artifacts, changed-file scope, tests and the last confirmed action; mark UNKNOWN operations as non-replayable. Confirm the previous Writer released its D6 lease before any reassignment. Never broaden a Task or silently buy a fallback.
