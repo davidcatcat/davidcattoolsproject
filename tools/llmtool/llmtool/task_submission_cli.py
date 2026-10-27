@@ -545,6 +545,15 @@ def add_task_submission_parsers(actions):
                                help='public GitHub pull request number')
     review_prompt.add_argument('--version', type=int, default=1,
                                help='review verdict version (1-9999; default 1)')
+    review_dispatch = actions.add_parser(
+        'review-dispatch', help='Create and dispatch the cross-family formal Reviewer once')
+    review_dispatch.add_argument('task_id', help='existing durable Task ID')
+    review_dispatch.add_argument('--executor-task', required=True,
+                                 help='registered D6 Executor task bound to the Task')
+    review_dispatch.add_argument('--pr', required=True, type=int,
+                                 help='public GitHub pull request number')
+    review_dispatch.add_argument('--version', type=int, default=1,
+                                 help='review verdict version (1-9999; default 1)')
     remote_test = actions.add_parser(
         'remote-test', help='Run admitted Task tests once on the configured EC2 host')
     remote_test.add_argument('task_id', help='existing durable Task ID')
@@ -662,6 +671,15 @@ def run_task_review_prompt(args, *, store=None):
         refuse('REVIEW_PROMPT_BINDING_MISSING')
     print('\n'.join(lines))
     return 0
+
+
+def run_task_review_dispatch(args, *, store=None):
+    """Thin CLI adapter for the one-shot Reviewer dispatcher."""
+    from .review_dispatch import dispatch_review
+    result = dispatch_review(store=TaskStore() if store is None else store,
+                             task_id=args.task_id, executor_task=args.executor_task,
+                             pr_number=args.pr, version=getattr(args, 'version', 1))
+    return _print(result)
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
