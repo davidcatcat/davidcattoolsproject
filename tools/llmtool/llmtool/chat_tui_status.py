@@ -236,18 +236,38 @@ def ci(record):
     return UNKNOWN
 
 
-def pull_request(record):
-    """(number, link) from the newest review/repair claim; Core has no other PR field."""
-    numbers = []
-    for key in ("review_dispatch_claim", "review_repair_claims"):
+def _pr_sources(record):
+    """[(number, source label)] for every PR number Core records for this Task."""
+    found = []
+    for key, label in (("review_dispatch_claim", "review claim"),
+                       ("review_repair_claims", "repair claim")):
         items = record.get(key)
         items = [items] if type(items) is dict else items if type(items) is list else []
-        numbers += [item["pr"] for item in items
-                    if type(item) is dict and type(item.get("pr")) is int]
-    if not numbers:
+        found += [(item["pr"], label) for item in items
+                  if type(item) is dict and type(item.get("pr")) is int]
+    _completion, review_ci = _review_ci(record)
+    number = (review_ci or {}).get("pr_number")
+    if type(number) is int and 1 <= number <= 999999999:
+        found.append((number, "completion review_pr_ci.pr_number"))
+    return found
+
+
+def pull_request(record):
+    """(number text, link text) with sources named; disagreeing sources are a CONFLICT."""
+    found = _pr_sources(record)
+    if not found:
         return NOT_AVAILABLE, NOT_AVAILABLE
-    number = numbers[-1]
-    return "#" + str(number), PR_URL + str(number)
+    numbers = []
+    for number, _label in found:
+        if number not in numbers:
+            numbers.append(number)
+    labels = {n: sorted({label for m, label in found if m == n}) for n in numbers}
+    if len(numbers) == 1:
+        number = numbers[0]
+        return ("#%d (from %s)" % (number, ", ".join(labels[number])), PR_URL + str(number))
+    return ("CONFLICT: " + " vs ".join("#%d (from %s)" % (n, ", ".join(labels[n]))
+                                       for n in numbers),
+            " | ".join(PR_URL + str(n) for n in numbers))
 
 
 def _usage(usage):

@@ -1354,7 +1354,37 @@ class StatusProjectionTests(unittest.TestCase):
             {'pr': 505, 'version': 2, 'state': 'CLAIMED', 'reviewer_task': 'rev-2'}])
         self.assertNotEqual(self.status.stage(rereview)[0], 'REPAIRING')
         self.assertEqual(self.status.pull_request(rereview),
-                         ('#505', 'https://github.com/davidcatcat/davidcattoolsproject/pull/505'))
+                         ('#505 (from repair claim, review claim)',
+                          'https://github.com/davidcatcat/davidcattoolsproject/pull/505'))
+
+    def test_pr_number_sources_are_named_and_conflicts_shown(self):
+        url = 'https://github.com/davidcatcat/davidcattoolsproject/pull/'
+
+        def with_evidence(record, number):
+            completion = {'state': 'WAITING_CI', 'pm_recommendation': None, 'pm_usage': None,
+                          'evidence': {'review_pr_ci': {'stage': 'INTEGRATION',
+                                                        'pr_number': number}}}
+            return dict(record, completion=completion)
+
+        only = with_evidence(_record(developer=_developer()), 510)
+        self.assertEqual(self.status.pull_request(only),
+                         ('#510 (from completion review_pr_ci.pr_number)', url + '510'))
+        claimed = _record(developer=_developer(), review_dispatch_claim=[
+            {'pr': 510, 'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'r'}])
+        agree = with_evidence(claimed, 510)
+        self.assertEqual(self.status.pull_request(agree),
+                         ('#510 (from completion review_pr_ci.pr_number, review claim)', url + '510'))
+        number, link = self.status.pull_request(with_evidence(claimed, 511))
+        self.assertEqual(number, 'CONFLICT: #510 (from review claim) vs '
+                                 '#511 (from completion review_pr_ci.pr_number)')
+        self.assertEqual(link, url + '510 | ' + url + '511')
+        self.assertIn('PR: CONFLICT: #510', self.status.summary_text(with_evidence(claimed, 511)))
+        mixed_claims = dict(claimed, review_repair_claims=[{'pr': 512, 'version': 1, 'attempt': 1,
+                                                            'state': 'CLAIMED'}])
+        self.assertTrue(self.status.pull_request(mixed_claims)[0].startswith('CONFLICT: #510'))
+        for bad in ('510', 0, True, None):
+            self.assertEqual(self.status.pull_request(with_evidence(_record(), bad)),
+                             ('NOT_AVAILABLE', 'NOT_AVAILABLE'))
 
     def test_completion_ci_and_done(self):
         review_ci = {'stage': 'INTEGRATION', 'formal_review_state': 'ACCEPTED', 'ci_state': 'X',
