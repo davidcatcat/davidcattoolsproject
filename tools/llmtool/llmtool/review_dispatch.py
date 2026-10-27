@@ -51,6 +51,8 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
             executor_task, evidence['common_dir'], allowed_states=task_completion._D6_EVIDENCE_STATES)
         head = executor.result_sha
         snap = task_completion.collect_git_snapshot(executor.root)
+        if not snap.clean:
+            _refuse('REVIEW_PROMPT_EXECUTOR_DIRTY')
         recorded = evidence.get('result')
         if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
                 type(recorded) is dict and recorded.get('result_head') not in (None, head) or
