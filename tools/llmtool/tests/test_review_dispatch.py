@@ -1,3 +1,4 @@
+import hashlib
 import json
 import io
 from contextlib import redirect_stderr
@@ -186,11 +187,14 @@ def _real_store(tmp_path):
         'backend_session_semantics': 'NOT_STARTED', 'native_session_id': None,
         'state': 'PM_PENDING', 'created_at': '2026-10-27T00:00:00Z',
         'updated_at': '2026-10-27T00:00:00Z', 'task_contract': contract,
-        'task_binding': vars(parsed.binding(run_id)), 'request': None,
-        'request_sha256': 'c' * 64, 'response': None, 'usage': None,
+        'task_binding': vars(parsed.binding(run_id)),
+        'request': 'test formal review dispatch claims',
+        'request_sha256': hashlib.sha256(
+            b'test formal review dispatch claims').hexdigest(),
+        'response': None, 'usage': None,
         'error_code': None,
     }
-    store = task_store.TaskStore(tmp_path)
+    store = task_store.TaskStore(Path(tmp_path).resolve())
     store.create(record)
     return store, task_id
 
