@@ -51,6 +51,8 @@ from llmtool import worker_dispatch  # noqa: E402
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 SHORT_RE = re.compile(r"[0-9a-f]{8}\Z")
 ROLE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
+CLAUDE_DEVELOPER_ROLE_RE = re.compile(
+    r"claude-developer(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?\Z")
 MENTIONED_RE = re.compile(
     r"\b([0-9a-f]{8}(?:-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})?)\b")
 DISPATCH_STATES = ("ACTIVE", "REPAIR", "REVIEW_PENDING")
@@ -282,11 +284,14 @@ def _failure_reason(row):
 
 def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_interval,
              new_session=False, owner_assignment_ref=None):
-    if not ROLE_RE.fullmatch(role or ""):
+    is_claude_developer_role = (type(role) is str and
+                                CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role) is not None)
+    if not is_claude_developer_role and not ROLE_RE.fullmatch(role or ""):
         raise DispatchError("ROLE_NAME_INVALID")
     worker_key = {"claude-reviewer": "claude-reviewer",
-                  "claude-developer": "claude-developer",
                   "codex-reviewer": "codex-reviewer"}.get(role)
+    if worker_key is None and is_claude_developer_role:
+        worker_key = "claude-developer"
     if worker_key is None:
         raise DispatchError("WORKER_UNKNOWN")
     decision = worker_dispatch.evaluate(worker_key, owner_assignment_ref, task_id)
