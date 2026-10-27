@@ -433,7 +433,7 @@ class ProviderTests(unittest.TestCase):
                 self.open.assert_not_called()
                 self.client.provider[field] = original
 
-    def test_explicit_company_example_user_config_and_no_thinking_payload(self):
+    def test_explicit_company_example_user_config_and_thinking_payload(self):
         example = Path(__file__).resolve().parents[1] / "config.example.company-qwen.yaml"
         with tempfile.TemporaryDirectory() as directory:
             user = user_config_path(directory)
@@ -449,5 +449,12 @@ class ProviderTests(unittest.TestCase):
             self.assertEqual(req.full_url, "http://10.29.7.58:4000/v1/chat/completions")
             payload = json.loads(req.data)
             self.assertEqual(payload["model"], "gw")
-            self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": False})
+            self.assertEqual(payload["chat_template_kwargs"], {"enable_thinking": True})
             self.assertEqual(reply.content, "final answer")
+
+    def test_thinking_response_returns_final_content_without_reasoning(self):
+        self.client.provider["provider_options"] = {"enable_thinking": True}
+        reply = self.answer(success("final answer"))
+        self.assertEqual(reply.content, "final answer")
+        self.assertNotIn("private-reasoning-marker", repr(reply))
+        self.assertNotIn("also-private", repr(reply))
