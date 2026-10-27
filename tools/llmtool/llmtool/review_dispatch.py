@@ -31,8 +31,9 @@ def _policy(task, reviewer_key):
     return worker_dispatch.evaluate(reviewer_key, assignment, task.get('task_id'))
 
 
-def _preflight(store, task_id, executor_task, pr_number, version):
-    task = store.get(task_id)
+def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
+    if task is None:
+        task = store.get(task_id)
     binding = task.get('task_binding')
     try:
         task_completion.validate_task_binding(
@@ -136,8 +137,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
                     prompt_renderer=None):
     """Claim once, create a read-only Reviewer D6 and bind its dispatched session."""
-    task, executor, head, _base, reviewer_key = _preflight(
-        store, task_id, executor_task, pr_number, version)
+    task = store.get(task_id)
+    _, executor, head, _base, reviewer_key = _preflight(
+        store, task_id, executor_task, pr_number, version, task=task)
     prior = task.get('review_dispatch_claim')
     if prior is not None:
         if (prior.get('executor_task'), prior.get('pr'), prior.get('head_sha'),
