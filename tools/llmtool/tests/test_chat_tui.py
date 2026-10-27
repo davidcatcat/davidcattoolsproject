@@ -994,6 +994,17 @@ class TaskReceiptTextTests(unittest.TestCase):
         self.assertIsNone(text.parse_core_view('[1]'))
         self.assertEqual(text.parse_core_view('{"task_id":"' + 'c' * 32 + '"}\n')['task_id'], 'c' * 32)
 
+    def test_core_view_found_among_other_output_and_conflicts_refused(self):
+        from llmtool import chat_tui_task as text
+        view = '{"task_id":"' + 'c' * 32 + '","state":"PM_RESPONDED"}'
+        other = '{"task_id":"' + 'd' * 32 + '","state":"PM_RESPONDED"}'
+        for raw in (view + '\nllmtool: trailing note\n{"note":1}\n',
+                    'leading noise\n[1]\n' + view,
+                    view + '\n' + view):
+            with self.subTest(raw=raw):
+                self.assertEqual(text.parse_core_view(raw)['task_id'], 'c' * 32)
+        self.assertIsNone(text.parse_core_view(view + '\n' + other))
+
     def test_no_view_means_no_receipt(self):
         from llmtool import chat_tui_task as text
         receipt = text.receipt_text(None, None, 'pm', error='select one valid configured PM provider profile')
@@ -1078,6 +1089,24 @@ class TaskModeTests(Base):
         self.assertEqual(self.session.history, [])
         self.factory.assert_not_called()
         self.assertEqual(self.pm.complete.call_args.args[0][-1]['content'], request)
+
+    def test_trailing_output_after_submit_still_gives_receipt_and_detail(self):
+        from llmtool import task_submission_cli
+        original = task_submission_cli.run_task_submit
+
+        def noisy_submit(args, *, stdout=None):
+            stdout.write('leading notice\n')
+            code = original(args, stdout=stdout)
+            stdout.write('llmtool: trailing notice\n')
+            return code
+
+        with patch('llmtool.task_submission_cli.run_task_submit', side_effect=noisy_submit):
+            ui, _ = self.drive(['/task mode first\r', 'noisy\r', self.idle])
+        record, = self.store_records()
+        self.assertIn('Task submit result: CREATED', ui.conversation.text)
+        self.assertIn('Task ID: ' + record['task_id'], ui.conversation.text)
+        self.assertNotIn('No Task receipt exists', ui.conversation.text)
+        self.assertTrue(ui.show_detail)
 
     def test_large_paste_is_one_task_request(self):
         request = '\n'.join('第%d行 large paste 內容' % i for i in range(1500))

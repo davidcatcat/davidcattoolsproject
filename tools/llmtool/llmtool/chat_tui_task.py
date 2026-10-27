@@ -50,18 +50,21 @@ _FAILED_STATES = frozenset(("PM_UNAVAILABLE", "INPUT_REJECTED", "PM_RESPONSE_REJ
 
 
 def parse_core_view(text):
-    """The Task view dict Core printed (one JSON object line), else None."""
-    lines = [line for line in (text or "").splitlines() if line.strip()]
-    if not lines:
-        return None
-    try:
-        value = json.loads(lines[-1])
-    except ValueError:
-        return None
-    if type(value) is not dict or not (type(value.get("task_id")) is str
-                                       and _TASK_ID.fullmatch(value["task_id"])):
-        return None
-    return value
+    """The one Task view dict Core printed, else None.
+
+    Every line is checked, so output before or after the view does not hide it.
+    Two different Task views are ambiguous and yield None; nothing is guessed.
+    """
+    views = []
+    for line in (text or "").splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if (type(value) is dict and type(value.get("task_id")) is str
+                and _TASK_ID.fullmatch(value["task_id"]) and value not in views):
+            views.append(value)
+    return views[0] if len(views) == 1 else None
 
 
 def error_text(view):
