@@ -45,7 +45,7 @@ class LadderTest(unittest.TestCase):
                 result = unittest.TestResult()
                 suite.run(result)
                 self.assertGreater(result.testsRun, 0)
-                self.assertGreater(result.errors + result.failures, 0,
+                self.assertGreater(len(result.errors + result.failures), 0,
                                    f"tests did not reject mutant: {name}")
 
 
