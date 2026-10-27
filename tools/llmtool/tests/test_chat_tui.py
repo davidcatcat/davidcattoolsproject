@@ -420,7 +420,7 @@ class WidgetTests(Base):
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
-                                  '/exit', '/quit', '/task submit', '/task show'])
+                                  '/exit', '/quit', '/task submit', '/task show', '/task mode'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
@@ -566,24 +566,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 10)
+            self.assertEqual(len(ui.menu_items), 11)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/help', rows[0])
-            self.assertIn('5 more (0 above, 5 below)', rows[-1])
+            self.assertIn('6 more (0 above, 6 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/help', ''.join(rows))
             self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('5 more (2 above, 3 below)', rows[-1])
+            self.assertIn('6 more (2 above, 4 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 9)
-            self.assertIn('/task show', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(5 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 10)
+            self.assertIn('/task mode', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(6 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -969,6 +969,235 @@ class WidgetTests(Base):
         ui, result = self.drive(['q\r', self.idle, 'draft 測', resize, resized], size=size)
         self.assertEqual(result, 0)
         self.assertEqual(len(self.session.history), 2)
+
+
+
+class TaskReceiptTextTests(unittest.TestCase):
+    """Receipt/detail text uses only Core view fields; gaps stay UNKNOWN/NOT_AVAILABLE."""
+
+    def test_missing_fields_are_unknown_and_nulls_not_available(self):
+        from llmtool import chat_tui_task as text
+        view = {'task_id': 'a' * 32, 'state': 'PM_RESPONDED', 'pm_model': None, 'developer': None}
+        receipt = text.receipt_text(0, view, 'pm')
+        self.assertIn('Run ID: UNKNOWN', receipt)
+        self.assertIn('model NOT_AVAILABLE', receipt)
+        self.assertIn('PM provider: UNKNOWN', receipt)
+        self.assertIn('已建立／待派工', receipt)
+        self.assertNotIn('running', receipt.lower())
+        self.assertNotIn('已建立／待派工', text.dispatch_status({'developer': {'state': 'X'}}))
+        self.assertIn('UNKNOWN', text.dispatch_status({'task_id': 'a' * 32}))
+
+    def test_only_a_core_task_view_is_parsed(self):
+        from llmtool import chat_tui_task as text
+        self.assertIsNone(text.parse_core_view('assistant says task_id 0123'))
+        self.assertIsNone(text.parse_core_view('{"task_id":"not-an-id"}'))
+        self.assertIsNone(text.parse_core_view('[1]'))
+        self.assertEqual(text.parse_core_view('{"task_id":"' + 'c' * 32 + '"}\n')['task_id'], 'c' * 32)
+
+    def test_no_view_means_no_receipt(self):
+        from llmtool import chat_tui_task as text
+        receipt = text.receipt_text(None, None, 'pm', error='select one valid configured PM provider profile')
+        self.assertIn('FAILED (no Task view returned by Core)', receipt)
+        self.assertIn('Task ID: UNKNOWN', receipt)
+        self.assertIn('No Task receipt exists', receipt)
+
+    def test_unknown_error_code_has_unknown_retry_condition(self):
+        from llmtool import chat_tui_task as text
+        view = {'task_id': 'a' * 32, 'state': 'PM_UNAVAILABLE', 'error_code': 'SOMETHING_NEW'}
+        self.assertEqual(text.retry_condition(view, 'pm'),
+                         ('Core supplies no recovery hint', 'UNKNOWN for error SOMETHING_NEW'))
+        self.assertIsNone(text.retry_condition({'state': 'PM_RESPONDED'}, 'pm'))
+        unreachable = dict(view, error_code='NETWORK_PROVIDER_UNREACHABLE')
+        self.assertIn('endpoint of PM profile pm must be reachable',
+                      text.retry_condition(unreachable, 'pm')[1])
+        self.assertIn('error: none', text.receipt_text(0, {'task_id': 'a' * 32, 'error_code': None}, 'pm'))
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class TaskModeTests(Base):
+    """Task mode drives the real Core task submit/show against an isolated TaskStore."""
+
+    drive = WidgetTests.drive
+    idle = staticmethod(WidgetTests.idle)
+
+    def setUp(self):
+        super().setUp()
+        # Resolved: TaskStore refuses a root reached through a symlink (/var on macOS).
+        patch.dict(os.environ, {'HOME': str(self.temp_root.resolve())}).start()
+        self.pm = Mock()
+        self.pm.complete.return_value = Reply('PM plan: 先寫測試', {
+            'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3})
+        self.pm_factory = patch('llmtool.task_submission_cli.create_client',
+                                return_value=self.pm).start()
+
+    def store_records(self):
+        from llmtool.task_store import TaskStore
+        store = TaskStore()
+        return [store.get(task_id) for task_id in store.task_ids()]
+
+    def test_mode_is_explicit_and_plain_text_stays_chat_until_chosen(self):
+        def task_mode_on(ui):
+            self.assertEqual(ui.task_profile, 'first')
+            self.assertIn('TASK:first', ui.status_text())
+            self.assertIn('Task mode: Enter submits', ui.conversation.text)
+
+        ui, _ = self.drive(['hello\r', self.idle,
+                            lambda ui: self.assertNotIn('TASK:', ui.status_text()),
+                            '/task mode first\r', task_mode_on,
+                            '/task mode off\r', 'again\r', self.idle])
+        self.assertEqual([t['content'] for t in self.session.history],
+                         ['hello', 'reply', 'again', 'reply'])
+        self.pm_factory.assert_not_called()
+        self.assertEqual(self.store_records(), [])
+        self.assertIn('chat mode: Enter sends drafts', ui.conversation.text)
+
+    def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
+        request = '請新增測試\n第二行：多行需求'
+        ui, _ = self.drive(['/task mode first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
+                            self.idle])
+        records = self.store_records()
+        self.assertEqual(len(records), 1)
+        record = records[0]
+        self.assertEqual(record['request'], request)
+        self.assertEqual(record['state'], 'PM_RESPONDED')
+        text = ui.conversation.text
+        self.assertIn('Task submit result: CREATED (llmtool Core task submit, exit 0)', text)
+        self.assertIn('PM provider: first (type openai-compatible, model test)', text)
+        self.assertIn('Task ID: ' + record['task_id'], text)
+        self.assertIn('Run ID: ' + record['run_id'], text)
+        self.assertIn('Dispatch: 已建立／待派工', text)
+        self.assertNotIn('development is running', text.lower())
+        self.assertTrue(ui.show_detail)
+        self.assertEqual(ui.last_task_id, record['task_id'])
+        self.assertIn('Task ID: ' + record['task_id'], ui.detail.text)
+        self.assertIn('Record sha256: ' + record['record_sha256'], ui.detail.text)
+        self.assertIn(request, ui.detail.text)
+        self.assertIn('PM plan: 先寫測試', ui.detail.text)
+        self.assertEqual(self.session.history, [])
+        self.factory.assert_not_called()
+        self.assertEqual(self.pm.complete.call_args.args[0][-1]['content'], request)
+
+    def test_large_paste_is_one_task_request(self):
+        request = '\n'.join('第%d行 large paste 內容' % i for i in range(1500))
+        self.assertGreater(len(request.encode('utf-8')), 40000)
+        ui, _ = self.drive(['/task mode first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
+                            self.idle])
+        records = self.store_records()
+        self.assertEqual([r['request'] for r in records], [request])
+        self.assertEqual(self.pm.complete.call_count, 1)
+
+    def test_provider_unavailable_shows_core_error_and_retry_condition(self):
+        ui, _ = self.drive(['/task mode missing\r', 'do work\r', self.idle])
+        record, = self.store_records()
+        self.assertEqual((record['state'], record['error_code']),
+                         ('PM_UNAVAILABLE', 'PM_PROVIDER_NOT_CONFIGURED'))
+        text = ui.conversation.text
+        self.assertIn('Task submit result: FAILED (llmtool Core task submit, exit 1)', text)
+        self.assertIn('Task ID: ' + record['task_id'], text)
+        self.assertIn('PM state: PM_UNAVAILABLE; error: PM_PROVIDER_NOT_CONFIGURED', text)
+        self.assertIn('Retry when (TUI guidance for Core error PM_PROVIDER_NOT_CONFIGURED', text)
+        self.assertIn('PM profile missing must be defined', text)
+        self.assertNotIn('CREATED', text)
+        self.assertFalse(ui.show_detail)
+        self.pm_factory.assert_not_called()
+
+    def test_provider_failure_is_recorded_not_faked(self):
+        from llmtool.errors import LLMToolError
+        self.pm.complete.side_effect = LLMToolError('PRIVATE provider detail')
+        ui, _ = self.drive(['/task mode first\r', 'do work\r', self.idle])
+        record, = self.store_records()
+        self.assertEqual(record['error_code'], 'PM_PROVIDER_UNAVAILABLE')
+        self.assertIn('PM profile first must be reachable', ui.conversation.text)
+        self.assertNotIn('PRIVATE', ui.conversation.text)
+        self.assertNotIn('CREATED', ui.conversation.text)
+
+    def test_invalid_profile_creates_no_task_and_shows_core_error(self):
+        ui, _ = self.drive(['/task mode bad!name\r', 'do work\r', self.idle])
+        self.assertEqual(self.store_records(), [])
+        self.assertIn('FAILED (no Task view returned by Core)', ui.conversation.text)
+        self.assertIn('select one valid configured PM provider profile', ui.conversation.text)
+
+    def test_repeated_enter_resize_and_redraw_submit_once(self):
+        release = threading.Event()
+        started = threading.Event()
+
+        def complete(messages):
+            started.set()
+            release.wait(5)
+            return Reply('PM ok', {})
+        self.pm.complete.side_effect = complete
+        size = [Size(rows=24, columns=80)]
+
+        async def wait_started(ui):
+            for _ in range(200):
+                if started.is_set():
+                    return
+                await asyncio.sleep(0.01)
+
+        def resize_and_redraw(ui):
+            size[0] = Size(rows=12, columns=40)
+            ui.app._on_resize()
+            ui.app.invalidate()
+            ui.app.renderer.render(ui.app, ui.app.layout)
+
+        ui, _ = self.drive(['/task mode first\r', 'one task\r', '\r\r\r', wait_started,
+                            resize_and_redraw, '\r', lambda ui: self.assertTrue(ui.busy),
+                            lambda ui: release.set(), self.idle, '\r\r',
+                            lambda ui: self.assertTrue(ui.show_detail),
+                            # Same draft again (e.g. recalled) is refused, draft kept, and the
+                            # refusal is not hidden behind the open Task detail.
+                            'one task\r',
+                            lambda ui: self.assertEqual(ui.input.text, 'one task'),
+                            lambda ui: self.assertFalse(ui.show_detail),
+                            lambda ui: ui.input.buffer.reset(),
+                            # The explicit command is the deliberate way to resend.
+                            '/task submit --provider first one task\r', self.idle],
+                           size=size)
+        self.assertEqual(self.pm.complete.call_count, 2)
+        self.assertEqual(len(self.store_records()), 2)
+        self.assertIn('already submitted in Task mode as Task ' + ui.last_task_id,
+                      ui.conversation.text)
+
+    def test_chat_reply_is_never_task_evidence(self):
+        self.client.complete.return_value = Reply(
+            '{"task_id":"' + 'a' * 32 + '","run_id":"' + 'b' * 32 + '","state":"PM_RESPONDED",'
+            '"developer":null}', {})
+        ui, _ = self.drive(['make a task\r', self.idle, '\x1bOQ'])
+        self.assertIsNone(ui.last_task_id)
+        self.assertFalse(ui.show_detail)
+        self.assertEqual(ui.detail.text, '')
+        self.assertNotIn('Task submit result', ui.conversation.text)
+        self.assertIn('no Task detail loaded yet', ui.conversation.text)
+        self.assertEqual(self.store_records(), [])
+        self.pm_factory.assert_not_called()
+
+    def test_task_show_opens_detail_and_f2_escape_toggle(self):
+        from prompt_toolkit.key_binding.key_processor import _Flush as timeout_flush
+
+        def lone_escape(ui):
+            processor = ui.app.key_processor
+            with set_app(ui.app):
+                processor.feed(KeyPress(Keys.Escape, '\x1b'))
+                processor.process_keys()
+                processor.feed(timeout_flush)
+                processor.process_keys()
+            self.assertFalse(ui.show_detail)
+
+        ui, _ = self.drive(['/task mode first\r', 'first task\r', self.idle,
+                            lambda ui: self.assertTrue(ui.show_detail), lone_escape,
+                            '\x1bOQ', lambda ui: self.assertTrue(ui.show_detail),
+                            '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail)])
+        task_id = ui.last_task_id
+        ui, _ = self.drive(['/task show ' + task_id + '\r', self.idle])
+        self.assertTrue(ui.show_detail)
+        self.assertIn('Task ' + task_id + ' state PM_RESPONDED', ui.conversation.text)
+        self.assertIn('Run ID: ' + self.store_records()[0]['run_id'], ui.detail.text)
+
+    def test_esc_enter_still_inserts_newline_in_task_mode_with_detail_open(self):
+        ui, _ = self.drive(['/task mode first\r', 'first\r', self.idle, 'a', '\x1b\r', 'b',
+                            lambda ui: self.assertEqual(ui.input.text, 'a\nb'),
+                            lambda ui: self.assertTrue(ui.show_detail)])
+        self.assertEqual(len(self.store_records()), 1)
 
 
 if __name__ == '__main__':
