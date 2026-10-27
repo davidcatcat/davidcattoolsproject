@@ -308,8 +308,19 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_auto_review_calls_next_version(self):
         seen = []
+        repair_published = False
+
+        def current_head(_task, _executor):
+            return 'f' * 40 if repair_published else HEAD
+
+        def dispatch_repair(**_request):
+            nonlocal repair_published
+            repair_published = True
+            return {'status': 'DISPATCHED', 'head': 'f' * 40}
+
         self.dispatch(auto_review=True,
-                      current_head=lambda _task, _executor: 'f' * 40,
+                      current_head=current_head,
+                      dispatch_adapter=dispatch_repair,
                       review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
         self.assertEqual(seen[0]['version'], 2)
 
