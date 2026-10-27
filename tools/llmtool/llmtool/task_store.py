@@ -86,12 +86,14 @@ _COMPLETION_EVENT_FIELDS = frozenset((
     'sequence', 'payload_sha256', 'state', 'received_at', 'consumed_at',
     'pm_decision_sha256', 'acked_at', 'dispatch_intent',
 ))
+_GITHUB_EVENT_FIELDS = frozenset(('issue_number', 'comment_id', 'marker_type',
+                                  'marker_status', 'merge_sha'))
 _COMPLETION_INTENT_FIELDS = frozenset((
     'intent_id', 'intent_sha256', 'state', 'persisted_at',
     'receipt_sha256', 'confirmed_at',
 ))
 _COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER',
-                                 'EC2_REMOTE_TEST'))
+                                 'EC2_REMOTE_TEST', 'GITHUB'))
 _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
@@ -283,7 +285,11 @@ def _validate_completion_events(record):
         _fail('COMPLETION_EVENT_INVALID')
     ids, sequences, last_sequence = set(), set(), {}
     for event in events:
-        if (type(event) is not dict or set(event) != _COMPLETION_EVENT_FIELDS or
+        github_fields = set(event) - _COMPLETION_EVENT_FIELDS if type(event) is dict else set()
+        if (type(event) is not dict or
+                (set(event) != _COMPLETION_EVENT_FIELDS and
+                 not (set(event) == _COMPLETION_EVENT_FIELDS | _GITHUB_EVENT_FIELDS and
+                      event.get('source') == 'GITHUB')) or
                 not _safe_identifier(event['event_id'], TASK_ID) or
                 event['event_id'] in ids or
                 event['task_id'] != record['task_id'] or
@@ -301,6 +307,17 @@ def _validate_completion_events(record):
                 type(event['payload_sha256']) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', event['payload_sha256']) is None or
                 event['state'] not in ('PENDING', 'PM_CONSUMED', 'ACKED')):
+            _fail('COMPLETION_EVENT_INVALID')
+        if github_fields and (type(event.get('issue_number')) is not int or
+                not 1 <= event['issue_number'] <= 9999999 or
+                (event.get('comment_id') is not None and
+                 (type(event['comment_id']) is not int or event['comment_id'] <= 0)) or
+                type(event.get('marker_type')) is not str or
+                re.fullmatch(r'[a-z][a-z0-9_]{0,63}', event['marker_type']) is None or
+                type(event.get('marker_status')) is not str or
+                re.fullmatch(r'[A-Z][A-Z0-9_]{0,31}', event['marker_status']) is None or
+                (event.get('merge_sha') is not None and
+                 re.fullmatch(r'[0-9a-f]{40}', event['merge_sha']) is None)):
             _fail('COMPLETION_EVENT_INVALID')
         ids.add(event['event_id'])
         sequence_key = (event['source'], event['session_id'], event['sequence'])
@@ -1643,7 +1660,8 @@ class TaskStore:
         return {'event': json.loads(json.dumps(event)), 'created': created}
 
     def record_completion_event(self, task_id, *, event_id, run_id, session_id,
-                                source, source_sha, sequence, payload_sha256):
+                                source, source_sha, sequence, payload_sha256,
+                                github_metadata=None):
         """Persist a terminal event before any wake; identical replay is inert.
 
         The caller verifies the terminal source separately. This storage API
@@ -1661,6 +1679,13 @@ class TaskStore:
         binding = dict(event_id=event_id, task_id=task_id, run_id=run_id,
                        session_id=session_id, source=source, source_sha=source_sha,
                        sequence=sequence, payload_sha256=payload_sha256)
+        if github_metadata is not None:
+            if (source != 'GITHUB' or type(github_metadata) is not dict or
+                    set(github_metadata) != _GITHUB_EVENT_FIELDS or
+                    type(github_metadata.get('issue_number')) is not int or
+                    not 1 <= github_metadata['issue_number'] <= 9999999):
+                _fail('COMPLETION_EVENT_INVALID')
+            binding.update(github_metadata)
         for _ in range(5):
             current = self.get(task_id)
             if current['schema_version'] != 2 or current['run_id'] != run_id:
