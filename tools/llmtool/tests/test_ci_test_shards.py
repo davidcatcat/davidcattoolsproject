@@ -64,6 +64,10 @@ class CiTestShardsTests(unittest.TestCase):
         self.assertIn("needs: shards", workflow)
         self.assertIn("always()", workflow)
         self.assertIn("ec2-self-runner-3) account=ghrunner3", workflow)
+        self.assertIn(
+            'unittest discover -s tools/llmtool/tests -p "$module" < /dev/null',
+            workflow,
+        )
 
 
 if __name__ == "__main__":

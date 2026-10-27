@@ -152,7 +152,7 @@ jobs:
           modules=$("$JOB_PYTHON" tools/llmtool/scripts/ci_test_shards.py 3 "${{ matrix.shard }}")
           while IFS= read -r module; do
             [ -n "$module" ] || continue
-            "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module"
+            "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module" < /dev/null
           done <<< "$modules"
       - name: Host admission checks
         if: matrix.shard == 1
