@@ -308,8 +308,19 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_auto_review_calls_next_version(self):
         seen = []
-        self.dispatch(auto_review=True, review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
+        self.dispatch(auto_review=True,
+                      current_head=lambda _task, _executor: 'f' * 40,
+                      review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
         self.assertEqual(seen[0]['version'], 2)
+
+    def test_auto_review_waits_until_repair_is_published(self):
+        seen = []
+        result = self.dispatch(auto_review=True,
+                               current_head=lambda _task, _executor: HEAD,
+                               review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
+        self.assertEqual(result['review'], {
+            'state': 'NOT_READY', 'reason': 'REPAIR_NOT_PUBLISHED'})
+        self.assertEqual(seen, [])
 
     def test_default_adapter_rebuilds_original_direct_developer_request(self):
         seen = []

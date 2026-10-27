@@ -143,6 +143,38 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(self.created, [])
         self.assertNotIn('review_dispatch_claim', self.store.get(TASK))
 
+    def test_dirty_executor_refuses_before_claim_or_adapter_calls(self):
+        task = {
+            'task_id': TASK, 'run_id': 'run',
+            'task_binding': {'contract_digest': 'd' * 64},
+            'completion': {'executor_task_id': 'executor-d6',
+                           'evidence': {'common_dir': '/repo/.git'}},
+        }
+        self.store.data = dict(task, record_sha256='c' * 64)
+        before = self.store.get(TASK)
+        executor = SimpleNamespace(
+            result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
+        snapshot = SimpleNamespace(
+            head=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task',
+            clean=False)
+        adapters = []
+        with patch.object(review_dispatch.task_completion, 'validate_task_binding'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=executor), \
+                patch.object(review_dispatch.task_completion, 'collect_git_snapshot',
+                             return_value=snapshot):
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch.dispatch_review(
+                    store=self.store, task_id=TASK, executor_task='executor-d6',
+                    pr_number=42,
+                    create_d6=lambda **kwargs: adapters.append(('create', kwargs)),
+                    dispatch_session=lambda **kwargs: adapters.append(('dispatch', kwargs)),
+                    bind_session=lambda **kwargs: adapters.append(('bind', kwargs)))
+        self.assertEqual(raised.exception.review_dispatch_code,
+                         'REVIEW_PROMPT_EXECUTOR_DIRTY')
+        self.assertEqual(adapters, [])
+        self.assertEqual(self.store.get(TASK), before)
+
 
     def test_cli_routes_review_dispatch_to_dispatcher(self):
         with patch('llmtool.source_freshness.require_fresh_source', return_value='OK'), \
