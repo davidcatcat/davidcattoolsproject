@@ -1195,6 +1195,19 @@ class OwnerPending:
     summary: str
 
 
+_MARKER_ROLES = {name.casefold(): name for name in ("PM", "Integrator", "Owner")}
+
+
+def _owner_settlement_valid(fields) -> bool:
+    """A waiting_owner marker settles only in a valid direction/status pairing (the same
+    check as typed Activity); other marker types keep their loose settlement."""
+    if fields.get("type", "").casefold() != "waiting_owner":
+        return True
+    actor = _MARKER_ROLES.get(fields.get("actor", ""), "")
+    target = _MARKER_ROLES.get(fields.get("target", ""), "")
+    return _marker_direction_ok("waiting_owner", actor, target, fields.get("status", ""))
+
+
 def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
     """Requests addressed to the Owner that nothing later has settled (pure).
     earlier: requests still open at the previous read; they stay open until
@@ -1231,8 +1244,11 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
         held = open_requests.get(number)
         if held is not None and when < held.when:
             continue   # older than the open request: neither asks nor settles again
-        if fields.get("actor") == "owner" or (fields.get("target") == "owner"
-                                              and status in OWNER_SETTLED):
+        settles = fields.get("actor") == "owner" or (fields.get("target") == "owner"
+                                                     and status in OWNER_SETTLED)
+        if settles and not _owner_settlement_valid(fields):
+            continue   # e.g. actor=Owner status=WAITING: not a typed answer, settles nothing
+        if settles:
             open_requests.pop(number, None)
         elif fields.get("target") == "owner" and when:
             open_requests[number] = OwnerPending(when, f"#{number}", status, _headline(body))

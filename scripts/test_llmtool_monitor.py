@@ -871,6 +871,28 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual([e.status for e in mon.github_events([integrator], [], NOW - 99)],
                          ["ANSWERED"])
 
+    def test_invalid_owner_waiting_owner_marker_does_not_settle(self):
+        ask = comment(304, NOW - 300, "<!-- activity: type=waiting_owner actor=PM target=Owner "
+                                      "status=WAITING -->\n## Decide")
+        for fields in ("actor=Owner target=PM status=WAITING",
+                       "actor=Owner target=Owner status=ANSWERED",
+                       "actor=Owner target=Reviewer status=ANSWERED",
+                       "actor=PM target=Owner status=ANSWERED",
+                       "actor=owner target=pm status=blocked"):
+            with self.subTest(fields=fields):
+                later = comment(304, NOW - 60, f"<!-- activity: type=waiting_owner {fields} -->")
+                self.assertEqual([p.reference for p in mon.owner_pending([ask, later], [])],
+                                 ["#304"])
+        for fields in ("actor=Owner target=PM status=ANSWERED",
+                       "actor=owner target=integrator status=answered"):   # case-insensitive
+            with self.subTest(fields=fields):
+                later = comment(304, NOW - 60, f"<!-- activity: type=waiting_owner {fields} -->")
+                self.assertEqual(mon.owner_pending([ask, later], []), [])
+        # Other marker types keep the loose settlement by any actor=Owner marker.
+        other = comment(304, NOW - 60, "<!-- activity: type=repair_authorization actor=Owner "
+                                       "target=R2 status=WAITING -->")
+        self.assertEqual(mon.owner_pending([ask, other], []), [])
+
     def test_waiting_owner_direction_and_status_must_match(self):
         bad = ("actor=Owner target=PM status=WAITING",       # the Owner does not wait on itself
                "actor=PM target=Owner status=ANSWERED",       # only the Owner answers
