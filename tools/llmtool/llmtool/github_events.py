@@ -7,7 +7,8 @@ from datetime import datetime, timedelta, timezone
 from .errors import LLMToolError
 from . import task_completion
 
-MARKER = re.compile(r'<!-- activity: type=([a-z][a-z0-9_]{0,63}) actor=([A-Za-z0-9-]{1,39}) status=([A-Z][A-Z0-9_]{0,31}) -->\Z')
+MARKER = re.compile(r'<!-- activity: type=([a-z][a-z0-9_]{0,63}) actor=([A-Za-z0-9-]{1,39}) target=([A-Za-z0-9-]{1,39}) status=([A-Z][A-Z0-9_]{0,31}) -->\Z')
+MAX_COMMENT_PAGES = 100
 
 
 def poll(store, pm_session, issues, *, since=None, github_get=None):
@@ -40,10 +41,19 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
             stamp = datetime.strptime(max(prior), '%Y-%m-%dT%H:%M:%SZ').replace(
                 tzinfo=timezone.utc) - timedelta(seconds=1)
             cursor = stamp.strftime('%Y-%m-%dT%H:%M:%SZ')
-        path = f'issues/{number}/comments?per_page=100' + ('&since=' + cursor if cursor else '')
-        comments = get(path)
-        if type(comments) is not list or len(comments) > 100:
-            raise LLMToolError('GitHub comments response is invalid')
+        comments = []
+        for page in range(1, MAX_COMMENT_PAGES + 1):
+            query = f'per_page=100&page={page}'
+            if cursor:
+                query += '&since=' + cursor
+            batch = get(f'issues/{number}/comments?{query}')
+            if type(batch) is not list or len(batch) > 100:
+                raise LLMToolError('GitHub comments response is invalid')
+            comments.extend(batch)
+            if len(batch) < 100:
+                break
+        else:
+            raise LLMToolError('GitHub comments pagination limit reached')
         for comment in comments:
             if type(comment) is not dict or type(comment.get('id')) is not int:
                 continue
@@ -54,7 +64,8 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
             lines = body.splitlines()
             marker = next((MARKER.fullmatch(line) for line in lines
                            if MARKER.fullmatch(line)), None)
-            if marker is None or marker.group(2) != 'Owner':
+            if (marker is None or marker.group(2) != 'Owner' or
+                    comment.get('author_association') != 'OWNER'):
                 continue
             edited = comment.get('updated_at') != comment.get('created_at')
             if edited:
@@ -63,7 +74,7 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
                 event_id = hashlib.sha256(
                     f'GITHUB\0comment\0{comment["id"]}'.encode()).hexdigest()[:32]
                 created.append(_record(store, task, stream_id, event_id,
-                    number, comment['id'], marker.group(1), marker.group(3), None))
+                    number, comment['id'], marker.group(1), marker.group(4), None))
         pr = get(f'pulls/{number}')
         if type(pr) is dict and pr.get('merged') is True:
             merge_sha = pr.get('merge_commit_sha')
@@ -77,6 +88,9 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
 
 
 def _record(store, task, session, event_id, issue_number, item_id, marker_type, status, sha):
+    # Each durable write changes the task digest and event list. Re-read before
+    # deriving the stream position so multiple events in one poll are sequential.
+    task = store.get(task['task_id'])
     known = task.get('completion_events', []) + task.get('completion_event_tombstones', [])
     if any(item.get('event_id') == event_id for item in known):
         return next(item for item in known if item.get('event_id') == event_id)
