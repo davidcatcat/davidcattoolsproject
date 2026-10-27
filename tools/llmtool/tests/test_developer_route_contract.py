@@ -183,6 +183,25 @@ class DeveloperRouteContractTests(unittest.TestCase):
                                boundary=FakeBoundary(), snapshot=capture_snapshot)
             self.assertEqual(result.changed_files, ('out.txt',))
 
+    def test_preexisting_ignored_directory_and_in_scope_edit_succeed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            request = self._real_git_request(root)
+            ignored = root / 'ignored'
+            ignored.mkdir()
+            (ignored / 'existing.txt').write_text('ignored\n')
+            exclude = root / '.git' / 'info' / 'exclude'
+            exclude.write_text(exclude.read_text() + '\nignored/\n')
+
+            def runner(*args):
+                (root / 'out.txt').write_text('after\n')
+                return 0, b'output', b''
+
+            result = run_route(self.route, request, gate=lambda: True, runner=runner,
+                               boundary=FakeBoundary(), snapshot=capture_snapshot)
+            self.assertEqual(result.changed_files, ('out.txt',))
+
     def test_real_git_untracked_out_of_scope_write_fails(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'repo'

@@ -2,13 +2,13 @@
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest import mock
 
 from llmtool.developer_routes import AgyRoute, RouteError, load_route_config
-from llmtool.developer_routes.base import run_route
-from llmtool import task_completion
+from llmtool.developer_routes.base import capture_snapshot, run_route
 
 
 class Boundary:
@@ -25,16 +25,25 @@ class Boundary:
 class AgyRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        self.log = self.root / 'agy.log'
+        self.temp_root = Path(self.temp.name)
+        self.root = self.temp_root / 'repo'
+        self.root.mkdir()
+        subprocess.run(['/usr/bin/git', 'init', str(self.root)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['/usr/bin/git', '-C', str(self.root), 'config', 'user.name', 'Test'], check=True)
+        subprocess.run(['/usr/bin/git', '-C', str(self.root), 'config', 'user.email',
+                        'test@example.invalid'], check=True)
+        (self.root / 'source.py').write_text('original\n')
+        subprocess.run(['/usr/bin/git', '-C', str(self.root), 'add', 'source.py'], check=True)
+        subprocess.run(['/usr/bin/git', '-C', str(self.root), 'commit', '-m', 'initial'], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.branch = subprocess.check_output(
+            ['/usr/bin/git', '-C', str(self.root), 'branch', '--show-current'], text=True).strip()
+        self.head = subprocess.check_output(
+            ['/usr/bin/git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
+        self.log = self.temp_root / 'agy.log'
         self.log.write_text('model_resolver: Resolving model gemini-4-argon-medium\n')
         self.route = AgyRoute({'executable': 'agy'})
-        self.git = task_completion.GitSnapshot(str(self.root), str(self.root / '.git'),
-                                                'task', 'a' * 40, True)
-        self.before = {'files': {'source.py': (0o600, 'old')},
-                       'git_state': {'head': 'a' * 40}}
-        self.after = {'files': {'source.py': (0o600, 'new')},
-                      'git_state': {'head': 'a' * 40}}
 
     def tearDown(self):
         self.temp.cleanup()
@@ -42,11 +51,12 @@ class AgyRouteTests(unittest.TestCase):
     def request(self):
         return {'root': str(self.root), 'prompt': 'bounded prompt',
                 'model': 'gemini-4-argon-medium', 'effort': 'medium',
-                'expected_branch': 'task', 'expected_head': 'a' * 40,
+                'expected_branch': self.branch, 'expected_head': self.head,
                 'write_paths': ['source.py'], 'executable': '/usr/bin/agy',
                 'log_path': 'agy.log'}
 
     def run_case(self, *, gate=True, verified=True, stdout=None, stderr=b'', code=0):
+        (self.root / 'source.py').write_text('original\n')
         argv_seen = []
         raw = stdout or json.dumps({'conversation_id': 'conv_12345678',
             'status': 'completed', 'response': 'done', 'usage': {
@@ -54,14 +64,13 @@ class AgyRouteTests(unittest.TestCase):
         def runner(argv, cwd, env, timeout):
             argv_seen.append(argv)
             Path(argv[argv.index('--log-file') + 1]).write_text(self.log.read_text())
+            (self.root / 'source.py').write_text('changed\n')
             return code, raw, stderr
-        with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
-                        return_value=self.git), \
-             mock.patch.object(self.route, 'verified_model',
+        with mock.patch.object(self.route, 'verified_model',
                                wraps=self.route.verified_model):
             result = run_route(self.route, self.request(), gate=lambda: gate,
                 runner=runner, boundary=Boundary(verified),
-                snapshot=lambda root: self.before if not argv_seen else self.after)
+                snapshot=capture_snapshot)
         return result, argv_seen
 
     def test_exact_argv_has_boundary_prefix(self):
@@ -82,12 +91,10 @@ class AgyRouteTests(unittest.TestCase):
     def test_owner_gate_and_unverified_boundary_start_nothing(self):
         for boundary, gate in ((Boundary(), False), (Boundary(False), True)):
             calls = []
-            with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
-                            return_value=self.git):
-                with self.assertRaises(RouteError):
-                    run_route(self.route, self.request(), gate=lambda: gate,
-                        runner=lambda *args: calls.append(args), boundary=boundary,
-                        snapshot=lambda root: self.before)
+            with self.assertRaises(RouteError):
+                run_route(self.route, self.request(), gate=lambda: gate,
+                    runner=lambda *args: calls.append(args), boundary=boundary,
+                    snapshot=capture_snapshot)
             self.assertEqual(calls, [])
 
     def test_output_duplicate_invalid_model_and_quota_fail_typed(self):

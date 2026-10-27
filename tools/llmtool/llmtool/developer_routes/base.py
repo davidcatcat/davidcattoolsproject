@@ -275,7 +275,7 @@ def _git_signature(snapshot):
 
 
 def _git_status_paths(root):
-    """Return every dirty path from porcelain v1, including ignored paths."""
+    """Return dirty and ignored paths from porcelain v1."""
     raw = task_completion._git(
         root, ('status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored'),
         limit=1024 * 1024)
@@ -329,6 +329,10 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         before = snapshot(value['root'])
     except Exception:
         raise RouteError(_route_code(route, 'SNAPSHOT_FAILED')) from None
+    try:
+        before_status_paths = set(_git_status_paths(value['root']))
+    except Exception:
+        raise RouteError(_route_code(route, 'GIT_STATE_CHANGED')) from None
     if boundary is None or not all(callable(getattr(boundary, method, None))
                                    for method in ('prepare', 'verify')):
         raise RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='UNSUPPORTED_BOUNDARY')
@@ -414,7 +418,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         after_git = task_completion.collect_git_snapshot(value['root'])
     except Exception:
         raise RouteError(_route_code(route, 'GIT_STATE_CHANGED')) from None
-    changed = _changed_files(before, after)[:200]
+    changed_paths = _changed_files(before, after)
+    changed = changed_paths[:200]
     # Git identity/state changes must be classified before cleanliness so a
     # newly-created commit is not mislabeled as ordinary D6 dirtiness.
     if (_git_signature(before_git) != _git_signature(after_git) or
@@ -422,12 +427,13 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         raise RouteError(_route_code(route, 'GIT_STATE_CHANGED'), facts={'changed_files': changed})
     allowed = set(value['write_paths'])
     try:
-        dirty_paths = _git_status_paths(value['root'])
+        after_status_paths = set(_git_status_paths(value['root']))
     except Exception:
         raise RouteError(_route_code(route, 'GIT_STATE_CHANGED'), facts={'changed_files': changed}) from None
-    scope_violation = (any(path not in allowed for path in dirty_paths) or
-                       any(path not in allowed for path in changed) or
-                       _changed_symlink(before, after, changed))
+    new_status_paths = after_status_paths - before_status_paths
+    scope_violation = (any(path not in allowed for path in new_status_paths) or
+                       any(path not in allowed for path in changed_paths) or
+                       _changed_symlink(before, after, changed_paths))
     try:
         parsed = route.parse_output(stdout, stderr, log_text)
     except RouteError:
