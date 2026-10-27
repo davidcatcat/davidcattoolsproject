@@ -143,11 +143,12 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(mismatch['result'], 'SHA_MISMATCH')
 
     def test_failure_excerpt_is_bounded_redacted_and_only_on_failures(self):
+        fake_credential = ''.join(['sk', '-']) + 'a' * 16
         output = ('FAIL: test_expected (test_remote_test.Case)\n'
                   'Traceback (most recent call last):\n'
                   '  File "/tmp/llmtool-remote-test.Abc123/test.py", line 9\n'
                   'AssertionError: expected value\n'
-                  'token=sk-abcdefghijklmnop\n'
+                  'token=' + fake_credential + '\n'
                   '----------------------------------------------------------------------\n'
                   'Ran 1 test in 0.1s\nFAILED (failures=1)')
         excerpt = self.failure_excerpt(output)
@@ -155,7 +156,13 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('AssertionError: expected value', excerpt)
         self.assertIn('<REMOTE_WORKDIR>/test.py', excerpt)
         self.assertNotIn('/tmp/llmtool-remote-test.Abc123', excerpt)
-        self.assertNotIn('sk-abcdefghijklmnop', excerpt)
+        self.assertNotIn(fake_credential, excerpt)
+        long_output = ('FAIL: test_expected (test_remote_test.Case)\n' +
+                       ('detail ' + 'x' * 120 + '\n') * 50 +
+                       '----------------------------------------------------------------------\n')
+        bounded = self.failure_excerpt(long_output)
+        self.assertLessEqual(len(bounded.encode('utf-8')), 4096)
+        self.assertLessEqual(len(bounded.splitlines()), 40)
 
         failed = self.run_it(self.receipt('FAIL', exit_code=1,
             final=('FAILED (failures=1)',), failure_excerpt=excerpt))
@@ -169,6 +176,11 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIsNone(remote_test._validate_remote_receipt(
             json.dumps(receipt, separators=(',', ':')).encode(),
             sha=SHA, modules=('test_remote_test',)))
+        capped = json.loads(self.receipt('FAIL', exit_code=1,
+            final=('FAILED (failures=1)',), failure_excerpt='x' * 4096))
+        self.assertIsNotNone(remote_test._validate_remote_receipt(
+            json.dumps(capped, separators=(',', ':')).encode(),
+            sha=SHA, modules=('test_remote_test',)))
 
     def test_timeout_unavailable_and_unknown_receipts(self):
         timed = self.run_it(error=__import__('subprocess').TimeoutExpired('ssh', 600))
@@ -177,7 +189,7 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(unavailable['result'], 'UNAVAILABLE')
         malformed = self.run_it(b'{not-json')
         self.assertEqual(malformed['result'], 'UNKNOWN')
-        oversize = self.run_it(b' ' * 4097)
+        oversize = self.run_it(b' ' * 8193)
         self.assertEqual(oversize['result'], 'UNKNOWN')
         self.assertEqual([item['code'] for item in self.store.task['remote_test_outcomes']],
                          ['SSH_TIMEOUT', 'SSH_UNAVAILABLE', 'RECEIPT_INVALID',
@@ -313,6 +325,12 @@ class RemoteTestTests(unittest.TestCase):
                                         'run_id': self.store.task['run_id'],
                                         'pm_session_id': self.store.task['pm_session_id'],
                                         'remote_test_receipts': [valid]})
+        valid_excerpt = stored_receipt(
+            result='FAIL', exit_code=1, failure_excerpt='FAIL: test_expected\nAssertionError')
+        _validate_remote_test_receipts({'task_id': self.store.task['task_id'],
+                                        'run_id': self.store.task['run_id'],
+                                        'pm_session_id': self.store.task['pm_session_id'],
+                                        'remote_test_receipts': [valid_excerpt]})
         for changes in ({'ran_total': 0}, {'identity': {'uid': 0}},
                         {'failures': ['test_remote_test']}):
             with self.subTest(changes=changes), self.assertRaises(Exception):

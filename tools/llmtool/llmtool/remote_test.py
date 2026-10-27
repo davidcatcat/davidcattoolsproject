@@ -19,8 +19,8 @@ _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
-_REMOTE_LIMIT = 4096
-_FAILURE_EXCERPT_LIMIT = 2048
+_REMOTE_LIMIT = 8192
+_FAILURE_EXCERPT_LIMIT = 4096
 _FAILURE_EXCERPT_LINES = 40
 _SSH_TIMEOUT = 600
 _MAX_REMOTE_MODULES = 8
@@ -64,7 +64,7 @@ def failure_excerpt(outputs,work,home):
     kept=[]; size=0
     for line in blocks:
         encoded=(line+"\n").encode("utf8")
-        if len(kept)>=40 or size+len(encoded)>2048: break
+        if len(kept)>=40 or size+len(encoded)>4096: break
         kept.append(line); size+=len(encoded)
     return "\n".join(kept)
 def run(argv,limit=None,cleanup=False,**kw):
