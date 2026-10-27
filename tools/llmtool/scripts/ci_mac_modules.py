@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Select Mac CI test modules from the committed baseline and changed paths."""
+"""Select Mac CI test modules from runtime discovery and changed paths."""
 
 from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import re
 import sys
 
 
@@ -16,24 +17,29 @@ MONITOR_PATHS = {
     "scripts/llmtool_monitor.py",
     "scripts/test_llmtool_monitor.py",
 }
+MAC_RELEVANT_TEST = re.compile(r"\bkillpg\b", re.IGNORECASE)
 
 
-def committed_modules() -> set[str]:
+def extra_modules() -> set[str]:
     return {
-        line.strip()
+        line.partition("#")[0].strip()
         for line in MODULE_LIST.read_text(encoding="utf-8").splitlines()
-        if line.strip()
+        if line.partition("#")[0].strip()
     }
 
 
 def scanned_test_modules(repo_root: Path = DEFAULT_REPO_ROOT) -> set[str]:
     tests = repo_root / "tools" / "llmtool" / "tests"
-    return {path.stem for path in tests.glob("test_*.py")}
+    return {
+        path.stem
+        for path in tests.glob("test_*.py")
+        if MAC_RELEVANT_TEST.search(path.read_text(encoding="utf-8"))
+    }
 
 
 def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> set[str] | None:
     """Return selected test names, or None when full coverage is required."""
-    selected = committed_modules()
+    selected = scanned_test_modules(repo_root) | extra_modules()
     test_dir = repo_root / "tools" / "llmtool" / "tests"
 
     for raw_path in changed_paths:
