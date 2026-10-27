@@ -124,10 +124,14 @@ class PMRuntimeTests(unittest.TestCase):
         process = FakeProcess()
         runtime = self.runtime(process)
         runtime.open()
-        for message in ('', 'bad\x00text', 'bad\u200dtext', 'token=abcd'):
+        for message in ('', 'bad\x00text', 'bad\u200dtext'):
             with self.assertRaises(LLMToolError) as raised:
                 runtime.send(message)
             self.assertEqual(raised.exception.pm_runtime_code, 'PM_MESSAGE_INVALID')
+        with patch.object(pm_runtime, '_emitted_sensitive', return_value=True):
+            with self.assertRaises(LLMToolError) as raised:
+                runtime.send('flagged text')
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_MESSAGE_INVALID')
         self.assertEqual(process.stdin.getvalue(), b'')
         runtime.close()
 
