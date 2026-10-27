@@ -67,7 +67,8 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     return invoke(args, store=store)
 
 
-def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_id=None):
+def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_id=None,
+                        record_pm=None):
     """Create the bounded continuation through the ordinary record-pm path."""
     from . import task_submission_cli
 
@@ -107,7 +108,8 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
         pm_session_id=provenance['pm_native_session_id'],
         pm_runtime='claude-code', pm_cwd=provenance['pm_cwd'],
     )
-    record = task_submission_cli.run_task_record_pm(
+    record_pm = task_submission_cli.run_task_record_pm if record_pm is None else record_pm
+    record = record_pm(
         args, store=store, task_id=repair_task_id,
         input_stream=io.StringIO(json.dumps({'request': request, 'response': response})),
         return_record=True)

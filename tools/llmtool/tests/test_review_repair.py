@@ -269,15 +269,16 @@ class ReviewRepairTests(unittest.TestCase):
                   'findings_count': 1}
         seen = []
         def record_pm(args, *, store, input_stream, return_record, task_id=None):
-            seen.append((args, store, json.loads(input_stream.getvalue()), return_record, task_id))
+            envelope = json.loads(input_stream.getvalue())
+            seen.append((args, store, envelope, return_record, task_id))
             return {'task_id': task_id}
-        with patch('llmtool.task_submission_cli.run_task_record_pm', side_effect=record_pm):
-            result = review_repair._record_repair_task(
-                task=task, developer=task['developer'], packet=packet,
-                attempt=1, store=self.store)
-        args, store, envelope, return_record = seen[0]
+        result = review_repair._record_repair_task(
+            task=task, developer=task['developer'], packet=packet,
+            attempt=1, store=self.store, record_pm=record_pm)
+        args, store, envelope, return_record, recorded_task_id = seen[0]
         self.assertIs(store, self.store)
         self.assertEqual(args.pm_session_id, task['pm_provenance']['pm_native_session_id'])
+        self.assertEqual(args.pm_cwd, task['pm_provenance']['pm_cwd'])
         self.assertEqual(envelope['request'], f'REPAIR 1/2 of {TASK}')
         assignment = json.loads(envelope['response'])['developer_assignment']
         self.assertEqual(assignment['route'], 'codex')
@@ -286,7 +287,7 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertIn(HEAD, assignment['acceptance'][-1])
         self.assertIn('findings count 1', assignment['acceptance'][-1])
         self.assertTrue(return_record)
-        self.assertEqual(result['task_id'], seen[0][4])
+        self.assertEqual(result['task_id'], recorded_task_id)
 
     def test_cli_route_reaches_handler(self):
         with patch.object(cli, 'run_task_repair', return_value=17) as handler:
