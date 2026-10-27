@@ -739,8 +739,10 @@ class ChatTUI:
             state = ("%d shown, %d unreadable; refreshed %s; auto every %ds"
                      % (len(self.list_records), self.list_unreadable, self.list_loaded[1],
                         chat_tui_status.REFRESH_SECONDS))
-        rows = [("class:menu.header", cut(" Tasks (TaskStore) — " + state
-                                          + " — Enter detail, F5/r refresh, Esc close"))]
+        rows = [("class:menu.header", cut(" Tasks (TaskStore records; stage derived by the TUI) — "
+                                          + state + " — Enter detail, F5/r refresh, Esc close")),
+                ("class:menu.header", cut("  " + "Task ID".ljust(8) + "  " + "Stage (derived)".ljust(26)
+                                          + "Updated (Core)".ljust(20) + "  Request (Core, first line)"))]
         if self.unseen_output:
             rows.append(("class:menu.header", cut(" new conversation output — Esc shows it")))
         if self.list_error is not None:

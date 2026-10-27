@@ -1455,9 +1455,14 @@ class TaskListTests(Base):
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
             rows = self.list_rows(ui)
             self.assertIn('2 shown, 0 unreadable', rows[0])
+            # The derived stage is labelled as derived in the pane itself (#510 review).
+            self.assertIn('stage derived by the TUI', rows[0])
+            self.assertIn('Stage (derived)', rows[1])
+            self.assertIn('Updated (Core)', rows[1])
+            self.assertNotIn('Next responsible', '\n'.join(rows))
             self.assertEqual(sum('已建立／待派工' in row for row in rows), 1)
             self.assertEqual(sum('UNAVAILABLE' in row for row in rows), 1)
-            self.assertTrue(rows[1].startswith('▶ '))
+            self.assertTrue(rows[2].startswith('▶ '))
 
         def detail_open(ui):
             self.assertTrue(ui.show_detail)
