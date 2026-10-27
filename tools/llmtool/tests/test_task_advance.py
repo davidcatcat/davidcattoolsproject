@@ -129,12 +129,6 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(result['result'], {'reviewer_task': 'reviewer-1',
                                             'reviewer_session_id': 'session-1'})
 
-    def test_finished_claim_without_verdict_is_actionable(self):
-        result = self._advance_dispatched_review(
-            claim_changes={'reviewer_session_state': 'FINISHED'})
-        self.assertEqual(result['step'], 'REVIEW_NOT_POSTED')
-        self.assertEqual(result['next'], 'resume the reviewer to post its verdict')
-
     def test_done_reviewer_with_current_head_pass_keeps_pass_path(self):
         result = self._advance_dispatched_review(reviewer_session_done=True, outcomes=[{
             'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
@@ -277,6 +271,56 @@ class TaskAdvanceTests(unittest.TestCase):
             result = task_advance.advance(task_id='1' * 32, store=store, pr_number=17,
                 run_task_complete_call=completion, github_get=lambda _path: [])
         self.assertEqual(result['result'], {'task_id': 'done'})
+
+    def test_review_result_checks_posted_pass_before_missing_verdict_mapping(self):
+        claim = {'executor_task': 'executor-1', 'pr': 17, 'head_sha': HEAD,
+                 'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer-1',
+                 'native_session_id': 'session-1'}
+        record = base_record(review_dispatch_claim=[claim], schema_version=2,
+            run_id='2' * 32, pm_session_id='pm-session', task_binding={
+                'contract_digest': 'd' * 64})
+        record['completion_events'] = []
+
+        class Store:
+            def __init__(self):
+                self.record = record
+            def get(self, _task_id):
+                return self.record
+            def record_completion_event(self, _task_id, **event):
+                self.record['completion_events'].append(event)
+                return {'created': True}
+
+        comment = {'id': 9, 'created_at': '2026-10-27T01:00:00Z',
+            'updated_at': '2026-10-27T01:00:00Z', 'body':
+            '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v1 | HEAD: {HEAD}\n'}
+        store = Store()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance.task_completion, 'is_formal_claude_pass',
+                          return_value=True):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, reviewer_session_done=True, github_get=lambda _url: [comment])
+        self.assertEqual(result['step'], 'RECORD_REVIEW_RESULT')
+        self.assertEqual(result['result']['state'], 'REVIEW_PASS')
+        self.assertEqual(len(store.record['completion_events']), 1)
+
+    def test_repair_action_captures_nested_json_output(self):
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
+        failed = base_record(review_dispatch_claim=[claim])
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_FAIL'}]):
+            def repair(**_kwargs):
+                print('{"repair_task_id":"repair-1"}')
+                return {'ignored': True}
+            result = task_advance.advance(task_id=failed['task_id'],
+                store=type('S', (), {'get': lambda self, _id: failed})(),
+                pr_number=17, cwd='/repo/task', repair_review_call=repair,
+                github_get=lambda _path: [])
+        self.assertEqual(result['result'], {'repair_task_id': 'repair-1'})
 
 
 if __name__ == '__main__':

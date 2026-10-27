@@ -20,15 +20,6 @@ def _claims(record):
     return value if type(value) is list else []
 
 
-def _reviewer_session_done(claim):
-    if type(claim) is not dict:
-        return False
-    if claim.get('reviewer_session_done') is True:
-        return True
-    return any(claim.get(key) in ('FINISHED', 'COMPLETED', 'DONE')
-               for key in ('reviewer_session_state', 'session_state'))
-
-
 def _events(related):
     if type(related) is dict:
         value = related.get('events', [])
@@ -285,12 +276,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             repair_state = 'UNKNOWN'
         repair_claims.append(dict(claim, repair_state=repair_state))
     related['repair_claims'] = repair_claims
-    review_outcomes_available = True
     try:
         review_outcomes = _review_outcomes(record, _claims(record), get)
         related['events'] = list(related['events']) + review_outcomes
     except Exception:
-        review_outcomes_available = False
         review_outcomes = []
     merged = _merged_review_target(record, _claims(record), related['events'], pr,
                                     integration_pr, get)
@@ -316,20 +305,6 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                 'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}
     step = decide(record, d6, pr, related)
     result, codes = None, []
-    if step in ('RECORD_REVIEW_RESULT', 'REVIEWER_ATTENTION', 'REVIEW_OUTCOME_UNKNOWN'):
-        claim = next((c for c in reversed(_claims(record)) if type(c) is dict and
-                      c.get('pr') == number and c.get('head_sha') == d6['result_head'] and
-                      c.get('state') == 'DISPATCHED'), None)
-        has_verdict = any(type(outcome) is dict and outcome.get('source') == 'REVIEWER' and
-                          outcome.get('source_sha') == d6['result_head'] and
-                          outcome.get('version') == claim.get('version') and
-                          outcome.get('outcome') in ('REVIEW_PASS', 'REVIEW_FAIL')
-                          for outcome in review_outcomes) if claim is not None else False
-        if (review_outcomes_available and claim is not None and
-                (reviewer_session_done or _reviewer_session_done(claim)) and not has_verdict):
-            step = 'REVIEW_NOT_POSTED'
-            result = {'reviewer_task': claim.get('reviewer_task'),
-                      'reviewer_session_id': claim.get('native_session_id')}
     if step == 'DISPATCH_REVIEW':
         claims = _claims(record)
         versions = [c.get('version', 0) for c in claims if type(c) is dict and
@@ -348,11 +323,18 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         try:
             result = invoke(store=store, task_id=task_id, executor_task=executor_task,
                             pr_number=number, version=claim['version'],
-                            reviewer_session_done=reviewer_session_done,
+                            # First check for a posted comment without creating a
+                            # REVIEW_BLOCKED event for a missing verdict.
+                            reviewer_session_done=False,
                             github_get=get)
             if type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
                 step = 'REVIEWER_ATTENTION'
                 codes.append('REVIEWER_ATTENTION')
+            elif (type(result) is dict and result.get('state') == 'NOT_READY' and
+                  reviewer_session_done):
+                step = 'REVIEW_NOT_POSTED'
+                result = {'reviewer_task': claim.get('reviewer_task'),
+                          'reviewer_session_id': claim.get('native_session_id')}
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
     elif step == 'REPAIR_REVIEW':
@@ -361,8 +343,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         else:
             invoke = repair_review_call or review_repair.repair_review
             try:
-                result = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                                pr_number=number, auto_review=False, github_get=get)
+                captured = io.StringIO()
+                with contextlib.redirect_stdout(captured):
+                    result_value = invoke(store=store, task_id=task_id,
+                        executor_task=executor_task, pr_number=number,
+                        auto_review=False, github_get=get)
+                emitted = captured.getvalue().strip()
+                try:
+                    result = json.loads(emitted) if emitted else result_value
+                except (TypeError, ValueError):
+                    result = result_value
             except Exception as exc:
                 code = _refusal(exc, 'review_repair_code')
                 codes.append(code)

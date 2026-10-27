@@ -100,8 +100,10 @@ class ReviewRepairTests(unittest.TestCase):
             return {'task_id': request['repair_task_id'], 'pm_assignment': {
                 'acceptance': list(developer['acceptance']) + [bounded]}}
         recorder = kwargs.pop('repair_task_recorder', default_recorder)
+        runtime_path = kwargs.pop('runtime_path', '/usr/bin/codex')
         with patch.object(review_repair.worker_dispatch, 'evaluate',
-                          return_value=decision):
+                          return_value=decision), \
+             patch.object(review_repair.shutil, 'which', return_value=runtime_path):
             return review_repair.repair_review(
                 store=self.store, task_id=TASK, executor_task=EXECUTOR,
                 pr_number=PR, github_get=github_get,
@@ -126,6 +128,18 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(result['repair_task_id'],
                          self.store.get(TASK)['review_repair_claims'][0]['repair_task_id'])
         self.assertEqual(len(self.calls), 1)
+
+    def test_failed_claim_starts_a_new_repair_attempt(self):
+        self.dispatch()
+        record = self.store.get(TASK)
+        record['review_repair_claims'][0]['state'] = 'FAILED'
+        self.store = TempTaskStore(self.temp.name, record)
+        result = self.dispatch()
+        claims = self.store.get(TASK)['review_repair_claims']
+        self.assertEqual(result['claim']['attempt'], 2)
+        self.assertEqual(claims[0]['state'], 'FAILED')
+        self.assertEqual(claims[1]['state'], 'DISPATCHED')
+        self.assertNotEqual(claims[0]['repair_task_id'], claims[1]['repair_task_id'])
 
     def test_third_attempt_without_report_requires_high_debug(self):
         result = self.dispatch()
@@ -252,6 +266,15 @@ class ReviewRepairTests(unittest.TestCase):
             self.dispatch(repair_task_recorder=lambda **kwargs: recorded.append(kwargs))
         self.assertEqual(getattr(raised.exception, 'review_repair_code'),
                          'REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
+        self.assertEqual(recorded, [])
+        self.assertNotIn('review_repair_claims', self.store.get(TASK))
+
+    def test_missing_provider_runtime_refused_before_claim(self):
+        recorded = []
+        with self.assertRaisesRegex(Exception, 'refused') as raised:
+            self.dispatch(runtime_path=None,
+                repair_task_recorder=lambda **kwargs: recorded.append(kwargs))
+        self.assertEqual(raised.exception.review_repair_code, 'RUNTIME_NOT_ON_PATH')
         self.assertEqual(recorded, [])
         self.assertNotIn('review_repair_claims', self.store.get(TASK))
 

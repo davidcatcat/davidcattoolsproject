@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 from argparse import Namespace
 
 from . import review_result, task_completion, worker_dispatch
@@ -248,6 +249,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile == 'company-gw':
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
+    if profile in ('codex', 'claude') and shutil.which(profile) is None:
+        _refuse('RUNTIME_NOT_ON_PATH')
     decision = worker_dispatch.evaluate(
         worker, developer.get('owner_assignment_ref'), task_id)
     if not decision.allowed:
@@ -267,7 +270,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     existing = next((claim for claim in attempts
                      if claim.get('pr') == pr_number and
                      claim.get('head_sha') == packet['failed_head'] and
-                     claim.get('version') == packet['version']), None)
+                     claim.get('version') == packet['version'] and
+                     claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')), None)
     if existing is not None:
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
