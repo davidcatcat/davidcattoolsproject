@@ -57,7 +57,7 @@ class MacFullDueTests(unittest.TestCase):
         self.assertIn("pull_request:", trigger)
         self.assertIn("workflow_dispatch:", trigger)
         self.assertNotIn("push:", trigger)
-        self.assertIn("workflow_dispatch should be used after re-enabling", workflow)
+        self.assertIn("Use workflow_dispatch after re-enabling", workflow)
         self.assertIn("actions: read", workflow)
         self.assertIn("GH_API_VALUE: ${{ github.token }}", workflow)
         self.assertNotIn("secrets.", workflow)
