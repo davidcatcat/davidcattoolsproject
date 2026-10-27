@@ -109,6 +109,14 @@ class MacModuleSelectionTests(unittest.TestCase):
         self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
         self.assertIn('[ -z "$selection" ] || [ "$selection" = FULL ]', workflow)
 
+    def test_subset_unittest_invocations_do_not_inherit_module_list_stdin(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml").read_text()
+        loop = workflow.split('while IFS= read -r module; do\n', 1)[1].split(
+            'done < "$RUNNER_TEMP/mac-modules"', 1
+        )[0]
+        invocation = next(line for line in loop.splitlines() if "-m unittest discover" in line)
+        self.assertTrue(invocation.rstrip().endswith("< /dev/null"), invocation)
+
 
 if __name__ == "__main__":
     unittest.main()

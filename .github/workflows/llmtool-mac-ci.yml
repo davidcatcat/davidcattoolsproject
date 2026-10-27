@@ -228,7 +228,7 @@ jobs:
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
             make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
             while IFS= read -r module; do
-              "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module.py" -v
+              "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module.py" -v < /dev/null
             done < "$RUNNER_TEMP/mac-modules"
           else
             make -C tools/llmtool check PYTHON="$JOB_PYTHON"
