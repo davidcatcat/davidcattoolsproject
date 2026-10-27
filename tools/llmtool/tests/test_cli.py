@@ -16,6 +16,8 @@ from unittest.mock import Mock, patch
 
 from test_provider import success
 from llmtool.context import format_context_packet, parse_context_packet
+from llmtool import task_submission_cli
+from llmtool.cli import TASK_ACTIONS, parser_for_cli
 
 ENTRYPOINT = Path(__file__).resolve().parents[1] / "llmtool.py"
 
@@ -95,6 +97,31 @@ class CLITests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(b"llmtool", result.stdout)
         self.assertEqual(self.server.requests, [])
+
+    def test_task_action_table_matches_parsers_and_freshness_policy(self):
+        self.assertEqual(list(TASK_ACTIONS), sorted(TASK_ACTIONS))
+        for function_name, _needs_fresh_source in TASK_ACTIONS.values():
+            self.assertTrue(callable(getattr(task_submission_cli, function_name)))
+
+        expected_freshness = {
+            'delegate', 'review-dispatch', 'high-debug', 'repair', 'remote-test',
+        }
+        self.assertEqual(
+            {action for action, (_function_name, fresh) in TASK_ACTIONS.items() if fresh},
+            expected_freshness,
+        )
+        self.assertEqual(
+            {action for action, (_function_name, fresh) in TASK_ACTIONS.items() if not fresh},
+            set(TASK_ACTIONS) - expected_freshness,
+        )
+
+        parser = parser_for_cli()
+        task_parser = parser._subparsers._group_actions[0].choices['task']
+        parsed_actions = set(task_parser._subparsers._group_actions[0].choices)
+        unchanged_actions = {
+            'inspect', 'review', 'review-request', 'review-wait', 'review-bundle',
+        }
+        self.assertEqual(parsed_actions - set(TASK_ACTIONS), unchanged_actions)
 
     def test_review_bundle_is_local_early_dispatch_and_sanitized_json(self):
         result = self.run_cli('task','review-bundle','--help')

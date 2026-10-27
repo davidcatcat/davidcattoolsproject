@@ -98,7 +98,7 @@ class SourceFreshnessTests(unittest.TestCase):
         for argv, handler_name in cases:
             with self.subTest(handler=handler_name), \
                     patch.object(freshness, 'source_freshness', return_value='STALE'), \
-                    patch(f'llmtool.cli.{handler_name}') as handler:
+                    patch(f'llmtool.task_submission_cli.{handler_name}') as handler:
                 self.assertEqual(main(argv), 1)
                 handler.assert_not_called()
 

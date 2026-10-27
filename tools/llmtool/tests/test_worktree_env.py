@@ -217,26 +217,103 @@ def _chmod_writable(path):
 class EnvironmentTempCase(unittest.TestCase):
     """Per-test workspaces backed by immutable class-level fixture templates."""
 
+    _shared_fixture_root = None
+
     @classmethod
-    def setUpClass(cls):
-        super().setUpClass()
-        cls._fixture_root = Path(tempfile.mkdtemp(prefix="llmtool-env-fixtures-"))
-        cls._wheel_template = cls._fixture_root / "wheels"
-        dep = make_wheel(cls._wheel_template, "tiny-dep", "1.0.0", marker="dep")
-        extra = make_wheel(cls._wheel_template, "tiny-extra", "1.0.0", marker="extra")
-        cls._wheel_hashes = {
+    def _ensure_shared_fixtures(cls):
+        if EnvironmentTempCase._shared_fixture_root is not None:
+            return
+        root = Path(tempfile.mkdtemp(prefix="llmtool-env-fixtures-"))
+        wheel_template = root / "wheels"
+        dep = make_wheel(wheel_template, "tiny-dep", "1.0.0", marker="dep")
+        extra = make_wheel(wheel_template, "tiny-extra", "1.0.0", marker="extra")
+        wheel_hashes = {
             "tiny-dep": [sha256_of(dep)],
             "tiny-extra": [sha256_of(extra)],
         }
-        for path in cls._wheel_template.iterdir():
+        for path in wheel_template.iterdir():
             path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
-        cls._wheel_template.chmod(0o555)
+        wheel_template.chmod(0o555)
+
+        if _bundled_pip_supports_editable():
+            environ = mock.patch.dict(os.environ)
+            environ.start()
+            try:
+                for key in we.INDEX_ENV_KEYS:
+                    os.environ.pop(key, None)
+                os.environ["PIP_CONFIG_FILE"] = os.devnull
+                template_wt_a = make_worktree(
+                    root / "template-wt-a", "source-A", wheel_hashes
+                )
+                template_cache_a = root / "template-cache-a"
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                    code = we.main([
+                        "bootstrap",
+                        "--worktree", str(template_wt_a),
+                        "--cache-root", str(template_cache_a),
+                        "--wheel-source", str(wheel_template),
+                        "--json",
+                    ])
+                if code != 0:
+                    raise AssertionError("template bootstrap failed: " + stderr.getvalue())
+                for dirpath, dirs, files in os.walk(str(template_wt_a), topdown=False):
+                    for name in files:
+                        path = Path(dirpath) / name
+                        if not path.is_symlink():
+                            path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+                    for name in dirs:
+                        path = Path(dirpath) / name
+                        if not path.is_symlink():
+                            path.chmod(0o555)
+                template_wt_a.chmod(0o555)
+            finally:
+                environ.stop()
+        else:
+            template_wt_a = None
+            template_cache_a = None
+
+        EnvironmentTempCase._shared_fixture_root = root
+        EnvironmentTempCase._wheel_template = wheel_template
+        EnvironmentTempCase._wheel_hashes = wheel_hashes
+        EnvironmentTempCase._template_wt_a = template_wt_a
+        EnvironmentTempCase._template_cache_a = template_cache_a
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._ensure_shared_fixtures()
+        cls._fixture_root = Path(tempfile.mkdtemp(prefix="llmtool-env-cls-fixtures-"))
 
     @classmethod
     def tearDownClass(cls):
         _chmod_writable(cls._fixture_root)
         shutil.rmtree(str(cls._fixture_root), ignore_errors=True)
         super().tearDownClass()
+
+    def copy_bootstrapped_worktree(self, destination, marker="source-A"):
+        destination = Path(destination)
+        shutil.copytree(str(self._template_wt_a), str(destination), symlinks=True)
+        _chmod_writable(destination)
+        old_root = str(self._template_wt_a.resolve())
+        new_root = str(destination.resolve())
+        venv_root = destination / "tools" / "llmtool" / ".venv"
+        marker_file = venv_root / ".worktree-env.json"
+        payload = json.loads(marker_file.read_text(encoding="utf-8"))
+        payload["worktree_root"] = new_root
+        marker_file.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        for pth in venv_root.rglob("llmtool_editable.pth"):
+            pth.write_text(pth.read_text(encoding="utf-8").replace(old_root, new_root), encoding="utf-8")
+        for direct_url in venv_root.rglob("llmtool-0.1.0.dist-info/direct_url.json"):
+            direct_url.write_text(
+                direct_url.read_text(encoding="utf-8").replace(old_root, new_root),
+                encoding="utf-8",
+            )
+        if marker != "source-A":
+            (destination / "tools" / "llmtool" / "llmtool" / "__init__.py").write_text(
+                "MARKER = %r\n" % marker, encoding="utf-8"
+            )
+        return destination
 
     def setUp(self):
         # Hermetic package-source configuration: no ambient PIP_* index
@@ -1132,9 +1209,7 @@ class CacheTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_non_editable_install_is_rejected(self):
-        worktree = self.make_worktree(self.tmp / "wt", "A")
-        code, out, err = self.bootstrap(worktree)
-        self.assertEqual(code, 0, err)
+        worktree = self.copy_bootstrapped_worktree(self.tmp / "wt", "A")
         venv = worktree / "tools" / "llmtool" / ".venv"
         direct_urls = list(venv.rglob("llmtool-0.1.0.dist-info/direct_url.json"))
         self.assertEqual(len(direct_urls), 1, direct_urls)
@@ -1148,9 +1223,7 @@ class CacheTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_marker_without_worktree_root_fails_closed(self):
-        worktree = self.make_worktree(self.tmp / "wt", "A")
-        code, out, err = self.bootstrap(worktree)
-        self.assertEqual(code, 0, err)
+        worktree = self.copy_bootstrapped_worktree(self.tmp / "wt", "A")
         marker = worktree / "tools" / "llmtool" / ".venv" / ".worktree-env.json"
         payload = json.loads(marker.read_text())
         for broken_value in (None, ""):
@@ -1415,10 +1488,8 @@ class IsolationTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_copied_venv_from_another_worktree_is_rejected(self):
-        first = self.make_worktree(self.tmp / "wt-a", "source-A")
+        first = self.copy_bootstrapped_worktree(self.tmp / "wt-a", "source-A")
         third = self.make_worktree(self.tmp / "wt-c", "source-C")
-        code, out, err = self.bootstrap(first)
-        self.assertEqual(code, 0, err)
 
         source_venv = first / "tools" / "llmtool" / ".venv"
         target_venv = third / "tools" / "llmtool" / ".venv"
@@ -1438,9 +1509,7 @@ class IsolationTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_symlinked_package_directory_is_rejected_as_foreign_source(self):
-        worktree = self.make_worktree(self.tmp / "wt", "source-A")
-        code, out, err = self.bootstrap(worktree)
-        self.assertEqual(code, 0, err)
+        worktree = self.copy_bootstrapped_worktree(self.tmp / "wt", "source-A")
         package_dir = worktree / "tools" / "llmtool" / "llmtool"
         foreign_package = self.tmp / "foreign-package"
         shutil.move(str(package_dir), str(foreign_package))
@@ -1453,9 +1522,7 @@ class IsolationTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_symlinked_package_init_is_rejected_as_foreign_source(self):
-        worktree = self.make_worktree(self.tmp / "wt", "source-A")
-        code, out, err = self.bootstrap(worktree)
-        self.assertEqual(code, 0, err)
+        worktree = self.copy_bootstrapped_worktree(self.tmp / "wt", "source-A")
         package_init = worktree / "tools" / "llmtool" / "llmtool" / "__init__.py"
         foreign_init = self.tmp / "foreign-init.py"
         shutil.move(str(package_init), str(foreign_init))
@@ -1468,10 +1535,8 @@ class IsolationTest(EnvironmentTempCase):
 
     @needs_editable_pip
     def test_symlinked_venv_is_rejected(self):
-        first = self.make_worktree(self.tmp / "wt-a", "source-A")
+        first = self.copy_bootstrapped_worktree(self.tmp / "wt-a", "source-A")
         second = self.make_worktree(self.tmp / "wt-b", "source-B")
-        code, out, err = self.bootstrap(first)
-        self.assertEqual(code, 0, err)
         os.symlink(
             str(first / "tools" / "llmtool" / ".venv"),
             str(second / "tools" / "llmtool" / ".venv"),
@@ -1515,6 +1580,13 @@ class IsolationTest(EnvironmentTempCase):
             (outside / "pyproject.toml").is_file(),
             "the symlink target must not be modified or removed",
         )
+
+
+def tearDownModule():
+    if EnvironmentTempCase._shared_fixture_root is not None:
+        _chmod_writable(EnvironmentTempCase._shared_fixture_root)
+        shutil.rmtree(str(EnvironmentTempCase._shared_fixture_root), ignore_errors=True)
+        EnvironmentTempCase._shared_fixture_root = None
 
 
 if __name__ == "__main__":

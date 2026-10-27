@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from llmtool import cli, review_result, task_store
+from llmtool import cli, review_result, task_store, task_submission_cli
 
 
 TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
@@ -113,7 +113,7 @@ class ReviewResultTests(unittest.TestCase):
         self.assertEqual(events[0]['source'], 'REVIEWER')
 
     def test_cli_route_reaches_handler(self):
-        with patch.object(cli, 'run_task_review_result', return_value=17) as handler:
+        with patch.object(task_submission_cli, 'run_task_review_result', return_value=17) as handler:
             self.assertEqual(cli.main(['task', 'review-result', TASK,
                                        '--executor-task', EXECUTOR, '--pr', str(PR)]), 17)
         handler.assert_called_once()
