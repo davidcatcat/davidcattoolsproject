@@ -4,6 +4,7 @@ import unittest
 import tempfile
 from pathlib import Path
 import subprocess
+import sys
 from unittest import mock
 
 from llmtool.developer_routes.write_boundary import (
@@ -25,9 +26,9 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
             root.mkdir()
             subprocess.run(['/usr/bin/git', 'init', str(root)], check=True,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            boundary = SandboxExecBoundary(executable='/bin/true', tmpdir=temp)
+            boundary = SandboxExecBoundary(executable=sys.executable, tmpdir=temp)
             prefix, digest = boundary.prepare(root, ['out.txt'])
-            self.assertEqual(prefix[0], '/bin/true')
+            self.assertEqual(prefix[0], sys.executable)
             self.assertEqual(len(digest), 64)
             git_dir = Path(subprocess.check_output(
                 ['/usr/bin/git', '-C', str(root), 'rev-parse', '--path-format=absolute', '--git-dir'],
@@ -73,8 +74,8 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
         boundary = SandboxExecBoundary(executable='/bin/true', tmpdir='/tmp')
         boundary._prepared = ('/tmp', ('out',), (), ('/tmp/out',), (),
                               SandboxExecBoundary._profile(['/tmp/out']), 'a' * 64)
-        with mock.patch.object(boundary, '_policy', return_value=(__import__('pathlib').Path('/tmp'),
-                           ['/tmp/out'], [])):
+        with mock.patch.object(boundary, '_policy', return_value=(Path('/tmp'),
+                           ('/tmp/out',), ())):
             calls = iter(((0, b'', b''), (1, b'', b''), (0, b'', b''), (0, b'', b'')))
             result = boundary.verify('/tmp', ['out'], (), runner=lambda *args: next(calls))
         self.assertFalse(result['verified'])
@@ -83,7 +84,8 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
         boundary = SandboxExecBoundary(executable='/bin/true', tmpdir='/tmp')
         boundary._prepared = ('/tmp', ('out',), (), ('/tmp/out',), (),
                               SandboxExecBoundary._profile(['/tmp/out']), 'a' * 64)
-        with mock.patch.object(boundary, '_policy', return_value=(Path('/tmp'), ['/tmp/out'], [])):
+        with mock.patch.object(boundary, '_policy', return_value=(Path('/tmp'),
+                           ('/tmp/out',), ())):
             calls = []
             def runner(argv, *args):
                 calls.append(argv)
