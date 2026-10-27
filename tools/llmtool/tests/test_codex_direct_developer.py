@@ -16,6 +16,7 @@ from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 from llmtool.worker_dispatch import WorkerDispatchDenied
 from llmtool.providers.codex_cli import CodexCLIProvider
+from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool.cli import parser_for_cli
 
 
@@ -175,13 +176,57 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_INTERRUPTED')
         self.assertEqual(caught.exception.process_exit_code, -15)
 
+    def test_host_keyboard_interrupt_propagates_from_run(self):
+        self.write_fake('', delay=10)
+        interrupt = KeyboardInterrupt()
+        original_selector = direct.selectors.DefaultSelector
+
+        class InterruptingSelector:
+            def __init__(self):
+                self.selector = original_selector()
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                raise interrupt
+
+        with patch.object(direct.selectors, 'DefaultSelector', InterruptingSelector), \
+                self.assertRaises(KeyboardInterrupt) as caught:
+            self.run_fake()
+
+        self.assertIs(caught.exception, interrupt)
+        self.assertTrue(getattr(interrupt, '_llmtool_direct_codex_execution', None))
+
+    def test_cli_host_termination_propagates_from_run(self):
+        self.write_fake('', delay=10)
+        termination = CLIHostTermination('host terminated')
+        original_selector = direct.selectors.DefaultSelector
+
+        class InterruptingSelector:
+            def __init__(self):
+                self.selector = original_selector()
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                raise termination
+
+        with patch.object(direct.selectors, 'DefaultSelector', InterruptingSelector), \
+                self.assertRaises(CLIHostTermination) as caught:
+            self.run_fake()
+
+        self.assertIs(caught.exception, termination)
+        self.assertTrue(getattr(termination, '_llmtool_direct_codex_execution', None))
+
     def test_timeout_kills_owned_process_group(self):
         marker = self.root / 'descendant-survived'
         self.write_fake('', delay=10, descendant_marker=marker)
         began = time.monotonic()
         with self.assertRaises(direct.DirectCodexError) as caught:
             self.run_fake(timeout=0.2)
-        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_INTERRUPTED')
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_TIMEOUT')
         self.assertEqual(caught.exception.cleanup_status, 'CONFIRMED')
         self.assertLess(time.monotonic() - began, 3)
         time.sleep(1.1)

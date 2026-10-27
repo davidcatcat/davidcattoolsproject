@@ -16,7 +16,7 @@ import time
 
 from . import worker_dispatch
 from .errors import LLMToolError
-from .providers.cli_lifecycle import CLIProcessLifecycle
+from .providers.cli_lifecycle import CLIHostTermination, CLIProcessLifecycle
 
 MAX_WALL_CLOCK_SECONDS = 600
 MAX_OUTPUT_BYTES = 1024 * 1024
@@ -443,27 +443,17 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         except BaseException as interrupt:
             # A host signal surfaces from cleanup: keep the observed facts on it.
             _attach_observed(interrupt, process, output, started, lifecycle)
-            if (process is not None and process.returncode is not None and
-                    process.returncode < 0 and
-                    not _has_valid_final_result(bytes(output))):
-                facts = getattr(interrupt, '_llmtool_direct_codex_execution', {})
-                error = DirectCodexError(
-                    'CODEX_INTERRUPTED', attempted=True,
-                    process_exit_code=facts.get('process_exit_code'),
-                    stdout_sha256=facts.get('stdout_sha256'),
-                    elapsed_ms=facts.get('elapsed_ms'),
-                    cleanup_status=facts.get('cleanup_status', 'UNKNOWN'),
-                    native_session_id=facts.get('native_session_id'),
-                    usage=_usage_from_events(bytes(output)))
-                raise error from None
+            raise
+        if isinstance(exc, CLIHostTermination):
+            _attach_observed(exc, process, output, started, lifecycle)
             raise
         # An unexpected exception still becomes a typed, fail-closed result
         # with the observed process facts, never a bare adapter UNKNOWN.
         error = (exc if isinstance(exc, DirectCodexError) else
                  DirectCodexError(adapter_error_code(exc)))
-        if (process is not None and
-                (process.returncode is not None and process.returncode < 0 or
-                 error.direct_codex_code == 'CODEX_TIMEOUT') and
+        if (process is not None and process.returncode is not None and
+                process.returncode < 0 and
+                error.direct_codex_code != 'CODEX_TIMEOUT' and
                 not _has_valid_final_result(bytes(output))):
             error.direct_codex_code = 'CODEX_INTERRUPTED'
         error.attempted = process is not None
@@ -480,19 +470,6 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
     except BaseException as exc:
         close_lifecycle(type(exc), exc, exc.__traceback__)
         _attach_observed(exc, process, output, started, lifecycle)
-        if (process is not None and process.returncode is not None and
-                process.returncode < 0 and
-                not _has_valid_final_result(bytes(output))):
-            facts = getattr(exc, '_llmtool_direct_codex_execution', {})
-            error = DirectCodexError(
-                'CODEX_INTERRUPTED', attempted=True,
-                process_exit_code=facts.get('process_exit_code'),
-                stdout_sha256=facts.get('stdout_sha256'),
-                elapsed_ms=facts.get('elapsed_ms'),
-                cleanup_status=facts.get('cleanup_status', 'UNKNOWN'),
-                native_session_id=facts.get('native_session_id'),
-                usage=_usage_from_events(bytes(output)))
-            raise error from None
         raise
 
 
