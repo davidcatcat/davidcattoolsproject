@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 
-from . import chat_tui_status, chat_tui_task
+from . import chat_tui_events, chat_tui_status, chat_tui_task
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
@@ -39,6 +39,8 @@ KEY_HELP = """Keys
   F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
                         detail, F5 or r refreshes, Esc closes; refreshes itself every
                         %d s while shown (local TaskStore read only, no AI call)
+  F4                    Toggle recent events across Tasks (/task events): newest first;
+                        F5 or r refreshes, Esc closes; never acknowledges or polls
   Ctrl-C, Ctrl-D        Exit (Ctrl-D only with empty input)
 A request in progress cannot be cancelled; exit waits for it to finish or time out.
 
@@ -51,6 +53,7 @@ Formal task commands (separate from ordinary chat; results come only from llmtoo
                         request Task mode refused as a repeat)
   /task show TASK_ID    Open a Task's detail
   /task list            Open the Task list (stage, update time, request) from TaskStore
+  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
 A Task receipt shows the PM provider, Task ID, Run ID and state recorded by Core;
 已建立／待派工 means no Developer has been dispatched. A chat reply is never a Task.
 Stage and next responsible are derived by the TUI from Core fields; values Core does
@@ -71,6 +74,7 @@ SLASH_COMMANDS = (
     ("/task show", "/task show ", "Show a task by TASK_ID"),
     ("/task mode", "/task mode ", "Task mode for drafts: PROFILE, or off"),
     ("/task list", "/task list", "Task list with status from TaskStore"),
+    ("/task events", "/task events", "Recent Task events from TaskStore"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
@@ -234,6 +238,7 @@ class ChatTUI:
         self.list_loaded = None  # (monotonic, local clock text) of the last finished read
         self.list_reader = None
         self.unseen_output = False
+        self.show_events = False
         self._loop = None
         self._received_signal = None
         self.conversation = TextArea(
@@ -261,6 +266,11 @@ class ChatTUI:
         showing_detail = Condition(lambda: self.show_detail and not self.show_help)
         showing_list = Condition(lambda: self.show_list and not self.show_detail
                                  and not self.show_help)
+        showing_events = Condition(lambda: self.show_events and not self.show_list
+                                   and not self.show_detail and not self.show_help)
+        self.events = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True,
+                               height=Dimension(min=1, weight=1))
+        events_focused = has_focus(self.events)
         self.list_window = Window(FormattedTextControl(self.list_text, focusable=True),
                                   wrap_lines=False, height=Dimension(min=1, weight=1))
         list_focused = has_focus(self.list_window)
@@ -278,10 +288,12 @@ class ChatTUI:
         self.status_window = Window(FormattedTextControl(self.status_text), style="class:status",
                                    height=Dimension.exact(1), wrap_lines=False)
         root = HSplit([ConditionalContainer(self.conversation,
-                                            filter=~showing_help & ~showing_detail & ~showing_list),
+                                            filter=~showing_help & ~showing_detail & ~showing_list
+                                            & ~showing_events),
                        ConditionalContainer(self.help, filter=showing_help),
                        ConditionalContainer(self.detail, filter=showing_detail),
                        ConditionalContainer(self.list_window, filter=showing_list),
+                       ConditionalContainer(self.events, filter=showing_events),
                        self.rule_window,
                        ConditionalContainer(self.menu_window, filter=picker_shown),
                        self.input, self.status_window],
@@ -371,8 +383,16 @@ class ChatTUI:
         def _list(event):
             self.toggle_list(not self.show_list)
 
-        @keys.add("f5", filter=showing_list)
-        @keys.add("r", filter=list_focused)
+        @keys.add("f4")
+        def _events(event):
+            self.toggle_events(not self.show_events)
+
+        @keys.add("escape", filter=events_focused & showing_events)
+        def _events_close(event):
+            self.toggle_events(False)
+
+        @keys.add("f5", filter=showing_list | showing_events)
+        @keys.add("r", filter=list_focused | events_focused)
         def _list_refresh(event):
             self.refresh_list()
 
@@ -547,7 +567,10 @@ class ChatTUI:
         if self.searching and not sum(self.picker_layout()):
             self.close_menu()  # Comes back here with searching off.
             return
-        shown = sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
+        # The detail and events panes are text areas with Esc-prefixed bindings, so a
+        # lone Esc (close) would otherwise wait the full default timeout.
+        shown = (sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
+                 or self.events_visible())
         self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
     def move_menu(self, direction):
@@ -612,8 +635,10 @@ class ChatTUI:
         """
         if self.show_detail:
             self.toggle_detail(False)
-        if self.show_list:
-            self.unseen_output = True  # The list header says so; the list stays for browsing.
+        if self.show_list or self.show_events:
+            self.unseen_output = True  # The pane header says so; it stays for browsing.
+            if self.show_events:
+                self.render_events()
         buffer = self.conversation.buffer
         safe = terminal_safe_text(text)
         old = buffer.text
@@ -639,13 +664,17 @@ class ChatTUI:
         self.close_menu()  # Also restores the default Esc timeout.
         layout = self.app.layout
         pane = (self.help if self.show_help else self.detail if self.show_detail
-                else self.list_window if self.show_list else self.conversation)
+                else self.list_window if self.show_list
+                else self.events if self.show_events else self.conversation)
         layout.focus(pane if layout.has_focus(self.input) else self.input)
 
     def toggle_help(self):
         self.show_help = not self.show_help
         # Never leave focus on a hidden pane; the help pane itself scrolls when focused.
-        self.app.layout.focus(self.input)
+        # Closing help over the list or events pane gives it focus back, so Esc closes it.
+        pane = (self.list_window if self.list_visible()
+                else self.events if self.events_visible() else self.input)
+        self.app.layout.focus(pane)
         self._sync_picker()
 
     def toggle_detail(self, show):
@@ -667,9 +696,39 @@ class ChatTUI:
             self.refresh_list()
             self.app.layout.focus(self.list_window)
         else:
+            self.unseen_output = self.unseen_output and self.show_events
+            self.app.layout.focus(self.events if self.show_events else self.input)
+        self._sync_picker()
+
+    def toggle_events(self, show):
+        """Recent events across Tasks; shares the list's TaskStore reader and interval."""
+        self.show_events = show
+        if show:
+            self.show_list = False
+            self.show_detail = False
+            self.show_help = False
+            self.render_events()
+            self.refresh_list()
+            self.app.layout.focus(self.events)
+        else:
             self.unseen_output = False
             self.app.layout.focus(self.input)
         self._sync_picker()
+
+    def render_events(self):
+        if self.list_loaded is None:
+            text = "Recent events: reading TaskStore…"
+        elif self.list_error is not None:
+            text = "Recent events: llmtool: " + self.list_error
+        else:
+            text = chat_tui_events.recent_text(self.list_records, self.list_unreadable,
+                                               self.list_loaded[1])
+        if self.unseen_output:
+            text = "new conversation output — Esc shows it\n" + text
+        buffer = self.events.buffer
+        position = min(buffer.cursor_position, len(text))
+        buffer.set_document(self._Document(terminal_safe_text(text), position),
+                            bypass_readonly=True)
 
     def refresh_list(self):
         """Start one TaskStore read unless one is already running."""
@@ -704,15 +763,23 @@ class ChatTUI:
         # Keep the selection on the same Task when it is still listed.
         self.list_index = ids.index(selected) if selected in ids else min(
             self.list_index, max(0, len(records) - 1))
+        if self.show_events:
+            self.render_events()
         self.app.invalidate()
 
     def list_visible(self):
         """The list is on screen: not hidden behind the detail or help pane."""
         return self.show_list and not self.show_detail and not self.show_help
 
+    def events_visible(self):
+        """The recent-events pane is on screen (the list, detail and help cover it)."""
+        return (self.show_events and not self.show_list and not self.show_detail
+                and not self.show_help)
+
     def _list_tick(self):
-        # Interval reads only while the list is actually visible (#510 review v2).
-        if (self.list_visible() and self.list_reader is None and self.list_loaded is not None
+        # Interval reads only while the list or events pane is actually visible (#510 review v2).
+        if ((self.list_visible() or self.events_visible()) and self.list_reader is None
+                and self.list_loaded is not None
                 and time.monotonic() - self.list_loaded[0] >= chat_tui_status.REFRESH_SECONDS):
             self.refresh_list()
 
@@ -861,13 +928,17 @@ class ChatTUI:
         if len(parts) == 2 and parts[1] == "list":
             self.toggle_list(True)
             return
+        if len(parts) == 2 and parts[1] == "events":
+            self.toggle_events(True)
+            return
         if len(parts) == 3 and parts[1] == "mode":
             self.set_task_mode(parts[2])
             return
         self.append("usage: /task submit --provider PROFILE REQUEST\n"
                     "       /task show TASK_ID\n"
                     "       /task mode PROFILE|off\n"
-                    "       /task list")
+                    "       /task list\n"
+                    "       /task events")
 
     def set_task_mode(self, profile):
         """Explicit chat/Task choice; the profile is checked by Core at submit time."""
@@ -944,7 +1015,8 @@ class ChatTUI:
             summary = "Status: " + chat_tui_task.UNKNOWN + " (TaskStore record unreadable)"
             extra = ""
         else:
-            summary = chat_tui_status.summary_text(record)
+            summary = (chat_tui_status.summary_text(record) + "\n\n"
+                       + chat_tui_events.timeline_text(record))
             extra = chat_tui_status.detail_extra(record)
         text = summary + "\n\n" + chat_tui_task.detail_text(view)
         return text + ("\n" + extra if extra else "")

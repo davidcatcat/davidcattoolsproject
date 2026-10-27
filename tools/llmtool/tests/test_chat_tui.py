@@ -436,7 +436,7 @@ class WidgetTests(Base):
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
-                                  '/exit', '/quit', '/task submit', '/task show', '/task mode', '/task list'])
+                                  '/exit', '/quit', '/task submit', '/task show', '/task mode', '/task list', '/task events'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
@@ -582,24 +582,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 12)
+            self.assertEqual(len(ui.menu_items), 13)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/help', rows[0])
-            self.assertIn('7 more (0 above, 7 below)', rows[-1])
+            self.assertIn('8 more (0 above, 8 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/help', ''.join(rows))
             self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('7 more (2 above, 5 below)', rows[-1])
+            self.assertIn('8 more (2 above, 6 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 11)
-            self.assertIn('/task list', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(7 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 12)
+            self.assertIn('/task events', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(8 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -1575,6 +1575,181 @@ class TaskListTests(Base):
                             '\x1b', self.esc_settled,
                             lambda ui: self.assertFalse(ui.unseen_output)], size=size)
         self.assertIn('late reply', ui.conversation.text)
+
+
+
+def _event_record():
+    sha = 'a' * 40
+    return _record(
+        developer=_developer(created_at='2026-10-28T01:00:00Z'),
+        completion_events=[
+            {'event_id': '1' * 32, 'source': 'GITHUB', 'state': 'ACKED', 'sequence': 3,
+             'source_sha': sha, 'received_at': '2026-10-28T05:00:00Z',
+             'consumed_at': '2026-10-28T05:01:00Z', 'acked_at': '2026-10-28T05:02:00Z',
+             'dispatch_intent': None, 'issue_number': 510, 'comment_id': 99,
+             'marker_type': 'review', 'marker_status': 'FAIL', 'merge_sha': None},
+            {'event_id': '2' * 32, 'source': 'REVIEWER', 'state': 'PENDING', 'sequence': 4,
+             'source_sha': sha, 'received_at': '2026-10-28T06:00:00Z', 'consumed_at': None,
+             'acked_at': None, 'dispatch_intent': None}],
+        completion_event_tombstones=[{'event_id': '0' * 32, 'source': 'HOST_WORKER',
+                                      'acked_at': '2026-10-28T02:00:00Z'}],
+        dispatch_audit=[{'at': '2026-10-28T00:30:00Z', 'action': 'DISPATCH',
+                         'decision': 'ALLOWED', 'worker_key': 'codex-developer',
+                         'reason_code': 'OWNER_ASSIGNMENT_MATCHED'}],
+        remote_test_receipts=[{'result': 'FAIL', 'exit_code': 1, 'ran_total': 40,
+                               'failures': ['tests.test_x'], 'source_sha': sha,
+                               'started_at': '2026-10-28T03:00:00Z',
+                               'ended_at': '2026-10-28T03:05:00Z'}],
+        remote_test_outcomes=[{'result': 'PASS', 'code': 'OK', 'sha': sha,
+                               'at': '2026-10-28T03:30:00Z'}],
+        review_dispatch_claim=[{'pr': 510, 'version': 1, 'state': 'DISPATCHED',
+                                'reviewer_task': 'rev-1', 'claimed_at': '2026-10-28T04:00:00Z',
+                                'updated_at': '2026-10-28T04:10:00Z'}],
+        review_repair_claims=[{'pr': 510, 'version': 1, 'attempt': 1, 'state': 'CLAIMED',
+                               'claimed_at': '2026-10-28T05:30:00Z'}],
+        high_debug=[{'status': 'RCA_CONFIRMED', 'family': 'pr-510', 'model_observed': 'gpt-6.1-sol',
+                     'recorded_at': '2026-10-28T07:00:00Z'}])
+
+
+class EventTimelineTests(unittest.TestCase):
+    """Timelines show only what the record stores; nothing is acked, consumed or polled."""
+
+    def setUp(self):
+        from llmtool import chat_tui_events
+        self.events = chat_tui_events
+
+    def test_all_recorded_sources_newest_first(self):
+        events = self.events.task_events(_event_record())
+        times = [e['time'] for e in events if e['time']]
+        self.assertEqual(times, sorted(times, reverse=True))
+        text = '\n'.join(self.events.format_event(e) for e in events)
+        for expected in (
+                '[HIGH DEBUG] High Debug RCA_CONFIRMED, family pr-510, model gpt-6.1-sol',
+                '[INBOX] REVIEWER event PENDING, sequence 4',
+                '[INBOX] GITHUB event ACKED, sequence 3, source sha aaaaaaaaaaaa — issue/PR #510, '
+                'comment 99, marker review/FAIL',
+                '[INBOX] GITHUB event consumed by the PM', '[INBOX] GITHUB event acknowledged',
+                '[INBOX] HOST_WORKER event acknowledged and compacted',
+                '[REPAIR] repair claim PR #510 v1 attempt 1 CLAIMED',
+                '[REVIEW] review claim PR #510 v1 DISPATCHED, reviewer task rev-1 (claimed)',
+                '(updated)', '[TEST] remote test outcome PASS (OK)',
+                '[TEST] remote test receipt FAIL, exit 1, ran 40, failed modules 1',
+                '[DISPATCH] dispatch gate DISPATCH ALLOWED for codex-developer (OWNER_ASSIGNMENT_MATCHED)',
+                '[DISPATCH] Developer assignment recorded: codex (model gpt-6-luna)',
+                '[TASK] Task recorded (PM state now PM_RESPONDED)'):
+            self.assertIn(expected, text)
+        self.assertTrue(text.splitlines()[0].startswith('2026-10-28T07:00:00Z'))
+        self.assertTrue(all(e['recorded'] for e in events))
+
+    def test_derivable_event_is_marked_not_yet_recorded(self):
+        record = _event_record()
+        with patch('llmtool.task_submission_cli._active_pm_handoff', return_value={'x': 1}), \
+                patch('llmtool.active_pm_inbox._handoff_event', return_value={'event_id': '9' * 32}):
+            events = self.events.task_events(record)
+        missing = [e for e in events if not e['recorded']]
+        self.assertEqual(len(missing), 1)
+        self.assertEqual(missing[0]['kind'], 'NOT YET RECORDED')
+        self.assertIsNone(missing[0]['time'])
+        self.assertIs(events[-1], missing[0])
+        self.assertIn('time UNKNOWN  [NOT YET RECORDED]', self.events.format_event(missing[0]))
+        with patch('llmtool.task_submission_cli._active_pm_handoff', return_value={'x': 1}), \
+                patch('llmtool.active_pm_inbox._handoff_event', return_value={'event_id': '2' * 32}):
+            self.assertTrue(all(e['recorded'] for e in self.events.task_events(record)))
+
+    def test_never_calls_inbox_writes_ack_or_poll(self):
+        boom = AssertionError('write path called')
+        with patch('llmtool.active_pm_inbox.read_inbox', side_effect=boom), \
+                patch('llmtool.active_pm_inbox.record_ready_event', side_effect=boom), \
+                patch('llmtool.active_pm_inbox.ack', side_effect=boom), \
+                patch('llmtool.github_events.poll', side_effect=boom):
+            self.events.timeline_text(_event_record())
+            self.events.recent_text([_event_record(), _record(task_id='b' * 32)], 0, 'now')
+
+    def test_odd_shapes_and_empty(self):
+        odd = _record(completion_events='bad', dispatch_audit=[1, {'at': 5}], high_debug={'status': None})
+        text = self.events.timeline_text(odd)
+        self.assertIn('[TASK] Task recorded', text)
+        self.assertIn('time UNKNOWN  [DISPATCH] dispatch gate UNKNOWN', text)
+        self.assertEqual(self.events.task_events('x'), [])
+        self.assertIn('no events in TaskStore', self.events.recent_text([], 0, 'now'))
+
+    def test_recent_events_across_tasks_limited_newest_first(self):
+        records = [_event_record(), _record(task_id='b' * 32, created_at='2026-10-29T00:00:00Z')]
+        lines = self.events.recent_text(records, 1, '10:00:00').splitlines()
+        self.assertIn('across 2 Tasks (1 unreadable; refreshed 10:00:00', lines[0])
+        self.assertTrue(lines[2].startswith('2026-10-29T00:00:00Z  bbbbbbbb  [TASK]'))
+        many = [_record(task_id='%032x' % i, created_at='2026-10-28T00:00:%02dZ' % (i % 60))
+                for i in range(150)]
+        self.assertEqual(len(self.events.recent_text(many, 0, 'now').splitlines()),
+                         2 + self.events.RECENT_LIMIT)
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class TaskEventsPaneTests(Base):
+    """F4 / /task events over the real isolated TaskStore; no inbox write path is used."""
+
+    drive = WidgetTests.drive
+    idle = staticmethod(WidgetTests.idle)
+    listed = TaskListTests.listed
+    esc_settled = staticmethod(TaskListTests.esc_settled)
+    def setUp(self):
+        super().setUp()
+        patch.dict(os.environ, {'HOME': str(self.temp_root.resolve())}).start()
+        self.pm = Mock()
+        self.pm.complete.return_value = Reply('PM plan', {})
+        patch('llmtool.task_submission_cli.create_client', return_value=self.pm).start()
+
+    def test_events_pane_keys_refresh_and_detail_timeline(self):
+        boom = AssertionError('inbox write path called')
+        from llmtool import chat_tui_status
+        original = chat_tui_status.load_records
+        reads = []
+
+        def counting(store):
+            reads.append(1)
+            return original(store)
+
+        async def stale_wait(ui):
+            ui.list_loaded = (ui.list_loaded[0] - chat_tui_status.REFRESH_SECONDS, 'old')
+            ui.app.invalidate()
+            await asyncio.sleep(0.8)
+
+        def unseen(ui):
+            ui.append('assistant:\nlate reply')
+            self.assertTrue(ui.show_events)
+            self.assertIn('new conversation output', ui.events.text)
+
+        def shown(ui):
+            self.assertTrue(ui.show_events)
+            self.assertTrue(ui.app.layout.has_focus(ui.events))
+            self.assertIn('Recent events across 1 Tasks (0 unreadable', ui.events.text)
+            self.assertIn('[TASK] Task recorded (PM state now PM_RESPONDED)', ui.events.text)
+            self.assertIn(ui.last_task_id[:8], ui.events.text)
+
+        with patch('llmtool.active_pm_inbox.read_inbox', side_effect=boom), \
+                patch('llmtool.active_pm_inbox.record_ready_event', side_effect=boom), \
+                patch('llmtool.active_pm_inbox.ack', side_effect=boom), \
+                patch('llmtool.chat_tui_status.load_records', side_effect=counting):
+            ui, _ = self.drive(['/task mode first\r', 'event task\r', self.idle,
+                                lambda ui: self.assertIn('Events (newest first', ui.detail.text),
+                                lambda ui: self.assertIn('[TASK] Task recorded', ui.detail.text),
+                                '/task events\r', self.listed, shown, unseen,
+                                lambda ui: self.assertEqual(len(reads), 1),
+                                'r', self.listed, lambda ui: self.assertEqual(len(reads), 2),
+                                # Help hides the pane: no interval read while it is hidden.
+                                '\x1bOP', lambda ui: self.assertFalse(ui.events_visible()),
+                                stale_wait, lambda ui: self.assertEqual(len(reads), 2),
+                                '\x1bOP', lambda ui: self.assertTrue(ui.events_visible()),
+                                lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.events)),
+                                self.listed,
+                                '\x1b', self.esc_settled,
+                                lambda ui: self.assertFalse(ui.show_events),
+                                lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
+                                '\x1bOS', self.listed,
+                                lambda ui: self.assertTrue(ui.show_events),
+                                '\x1bOS', lambda ui: self.assertFalse(ui.show_events)])
+        self.assertEqual(self.pm.complete.call_count, 1)
+        self.factory.assert_not_called()
 
 
 if __name__ == '__main__':
