@@ -32,6 +32,7 @@ class CodexCLIProviderTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.capture = self.root / "capture.json"
+        self.ready = self.root / "ready"
         self.executable = self.root / "fake-codex"
         self.provider = {
             "type": "codex-cli", "model": "test-model", "timeout_seconds": 5,
@@ -60,6 +61,7 @@ if mode == "mutation":
     capture["git_status"] = git.returncode
 Path(%r).write_text(json.dumps(capture))
 if mode == "timeout":
+    Path(%r).write_text("ready")
     time.sleep(60)
 elif mode == "descendant":
     subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
@@ -77,7 +79,7 @@ elif mode == "failure":
 else:
     sys.stderr.write("PRIVATE_DIAGNOSTIC SECRET_TOKEN hidden reasoning")
     sys.stdout.write("  CODEX_FINAL  \\n")
-''' % (sys.executable, mode, str(self.capture))
+''' % (sys.executable, mode, str(self.capture), str(self.ready))
         self.executable.write_text(script)
         self.executable.chmod(0o700)
 
@@ -309,12 +311,12 @@ else:
 
         worker = threading.Thread(target=invoke)
         worker.start()
-        # The capture is written by the child before it blocks. Waiting for it
-        # proves the fake reached its ready point before the timeout is tested.
-        deadline = time.monotonic() + 30
-        while not self.capture.exists() and worker.is_alive() and time.monotonic() < deadline:
+        # The child writes this marker immediately before waiting, so parent
+        # startup and capture construction cannot race the timeout assertion.
+        deadline = time.monotonic() + 20
+        while not self.ready.exists() and worker.is_alive() and time.monotonic() < deadline:
             time.sleep(0.01)
-        self.assertTrue(self.capture.exists(), "timed fake child did not signal ready")
+        self.assertTrue(self.ready.exists(), "timed fake child did not signal ready")
         worker.join(timeout=35)
         self.assertFalse(worker.is_alive(), "timed-out Codex CLI request did not finish")
         self.assertEqual(len(outcome), 1)
