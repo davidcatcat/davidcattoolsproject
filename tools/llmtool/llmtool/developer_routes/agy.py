@@ -54,7 +54,9 @@ class AgyRoute(DeveloperRoute):
         prompt = value.get('prompt')
         log_path = value.get('log_path')
         if (type(prompt) is not str or len(prompt.encode('utf-8')) > 65536 or
-                type(log_path) is not str or not os.path.isabs(log_path)):
+                type(log_path) is not str or not log_path or os.path.isabs(log_path) or
+                '\\' in log_path or any(part in ('', '.', '..') for part in log_path.split('/')) or
+                any(ord(char) < 32 or ord(char) == 127 for char in log_path)):
             raise RouteError('AGY_REQUEST_INVALID')
         if not isinstance(self.config.get('executable'), str):
             raise RouteError('AGY_CONFIG_INVALID')

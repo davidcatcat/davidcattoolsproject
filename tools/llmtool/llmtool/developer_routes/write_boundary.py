@@ -80,12 +80,18 @@ class SandboxExecBoundary(WriteBoundary):
                     'rev-parse', '--path-format=absolute', '--git-common-dir'],
                     stdin=__import__('subprocess').DEVNULL, stderr=__import__('subprocess').DEVNULL,
                     env={'PATH': '/usr/bin:/bin', 'GIT_CONFIG_NOSYSTEM': '1',
-                         'GIT_CONFIG_GLOBAL': '/dev/null'}))).resolve(strict=True)
+                         'GIT_CONFIG_GLOBAL': '/dev/null'})).strip()).resolve(strict=True)
             denied.append(common)
         except Exception:
             # A worktree whose Git metadata cannot be read cannot be isolated.
             raise ValueError('git common directory unavailable') from None
-        denied.extend(Path(item).resolve(strict=False) for item in self.denied_dirs)
+        home = Path.home().resolve(strict=True)
+        for item in self.denied_dirs:
+            if (type(item) is not str or not item or Path(item).is_absolute() or
+                    any(part in ('', '.', '..') for part in item.split('/')) or
+                    '\\' in item or any(ord(char) < 32 or ord(char) == 127 for char in item)):
+                raise ValueError('invalid denied directory')
+            denied.append((home / item).resolve(strict=False))
         allowed = []
         for item in write_paths:
             rel = _safe_relative(item)
@@ -136,6 +142,8 @@ class SandboxExecBoundary(WriteBoundary):
         rows.extend('(allow file-write* (literal ' + _sbpl_quote(path) + '))' for path in paths)
         rows.extend('(allow file-write* (subpath ' + _sbpl_quote(path) + '))'
                     for path in state_paths)
+        rows.extend('(allow file-write* (literal ' + _sbpl_quote(path) + '))'
+                    for path in ('/dev/null', '/dev/tty'))
         return '\n'.join(rows)
 
     def prepare(self, root, write_paths, state_dirs=()):
@@ -169,7 +177,8 @@ class SandboxExecBoundary(WriteBoundary):
         elif git.is_dir():
             denied.append(str(git / '.llmtool-boundary-probe'))
         denied.append(str(Path(root).resolve().parent / '.llmtool-task-parent-probe'))
-        denied.extend(str(Path(item).resolve() / '.llmtool-denied-probe') for item in self.denied_dirs)
+        denied.extend(str((Path.home() / item).resolve(strict=False) / '.llmtool-denied-probe')
+                      for item in self.denied_dirs)
         python = shutil.which('python3') or '/usr/bin/python3'
         for path, expected in [(p, True) for p in targets[:1]] + [(p, False) for p in denied]:
             program = ('from pathlib import Path\n'
@@ -190,6 +199,14 @@ class SandboxExecBoundary(WriteBoundary):
                 continue
             passed = (type(rc) is int and ((rc == 0) if expected else (rc != 0)))
             probes.append({'expected_write': expected, 'passed': passed})
+        code = 'from pathlib import Path\nPath("/dev/null").write_bytes(b"probe")\n'
+        try:
+            rc, out, err = runner([self.executable, '-p', profile, python, '-c', code],
+                                  str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                              'PYTHONDONTWRITEBYTECODE': '1'}, 10)
+            probes.append({'expected_write': True, 'passed': type(rc) is int and rc == 0})
+        except Exception:
+            probes.append({'expected_write': True, 'passed': False})
         return {'verified': bool(probes) and all(probe['passed'] for probe in probes),
                 'policy_sha256': digest, 'probes': probes}
 

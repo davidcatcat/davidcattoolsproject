@@ -44,7 +44,7 @@ class AgyRouteTests(unittest.TestCase):
                 'model': 'gemini-4-argon-medium', 'effort': 'medium',
                 'expected_branch': 'task', 'expected_head': 'a' * 40,
                 'write_paths': ['source.py'], 'executable': '/usr/bin/agy',
-                'log_path': str(self.log)}
+                'log_path': 'agy.log'}
 
     def run_case(self, *, gate=True, verified=True, stdout=None, stderr=b'', code=0):
         argv_seen = []
@@ -53,6 +53,7 @@ class AgyRouteTests(unittest.TestCase):
                 'input_tokens': 3, 'output_tokens': 2, 'ignored': 'x'}}).encode()
         def runner(argv, cwd, env, timeout):
             argv_seen.append(argv)
+            Path(argv[argv.index('--log-file') + 1]).write_text(self.log.read_text())
             return code, raw, stderr
         with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
                         return_value=self.git), \
@@ -65,10 +66,13 @@ class AgyRouteTests(unittest.TestCase):
 
     def test_exact_argv_has_boundary_prefix(self):
         result, calls = self.run_case()
-        self.assertEqual(calls[0], ['/verified-boundary', '/usr/bin/agy', '-p',
+        self.assertEqual(calls[0][:13], ['/verified-boundary', '/usr/bin/agy', '-p',
             'bounded prompt', '--model', 'gemini-4-argon-medium', '--effort',
             'medium', '--sandbox', '--output-format', 'json', '--print-timeout',
-            '0', '--log-file', str(self.log)])
+            '0'])
+        self.assertEqual(calls[0][13:15], ['--log-file', calls[0][-1]])
+        self.assertTrue(calls[0][-1].endswith('/agy.log'))
+        self.assertIn('llmtool-route-', calls[0][-1])
         self.assertNotIn('--add-dir', calls[0])
         self.assertNotIn('--mode', calls[0])
         self.assertEqual(result.model, 'gemini-4-argon-medium')
@@ -114,6 +118,12 @@ class AgyRouteTests(unittest.TestCase):
             path.write_text(json.dumps({'schema_version': 1, 'routes': {'agy': entry}}))
             with self.assertRaises(RouteError):
                 load_route_config(path)
+
+    def test_log_in_private_temp_is_read_for_model_verification(self):
+        self.log.write_text('model_resolver: Resolving model gemini-4-argon-medium\n')
+        result, calls = self.run_case()
+        self.assertEqual(result.model, 'gemini-4-argon-medium')
+        self.assertFalse(Path(calls[0][-1]).exists())
 
 
 if __name__ == '__main__':

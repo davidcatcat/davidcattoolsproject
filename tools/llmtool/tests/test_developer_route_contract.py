@@ -147,6 +147,27 @@ class DeveloperRouteContractTests(unittest.TestCase):
                           boundary=FakeBoundary(), snapshot=lambda root: self.before)
         self.assertEqual(caught.exception.code, 'FAKE_TIMEOUT')
 
+    def test_request_error_uses_uppercase_route_code(self):
+        request = dict(self.request, timeout=0)
+        with self.assertRaises(RouteError) as caught:
+            run_route(self.route, request, gate=lambda: True, runner=lambda *args: None,
+                      boundary=FakeBoundary(), snapshot=lambda root: self.before)
+        self.assertEqual(caught.exception.code, 'FAKE_REQUEST_INVALID')
+
+    def test_quota_skips_model_verification_and_keeps_progress(self):
+        with self.assertRaises(RouteError) as caught:
+            self.run_case(stderr=b'quota', verified=None)
+        self.assertEqual(caught.exception.code, 'FAKE_QUOTA_EXHAUSTED')
+        self.assertEqual(caught.exception.progress['state'], 'QUOTA_EXHAUSTED')
+
+    def test_write_scope_precedes_quota_and_keeps_quota_progress(self):
+        outside = {'files': {'other.txt': (0o600, 'new')},
+                   'git_state': {'head': 'a' * 40}}
+        with self.assertRaises(RouteError) as caught:
+            self.run_case(after=outside, stderr=b'quota', verified=None)
+        self.assertEqual(caught.exception.code, 'FAKE_WRITE_SCOPE_VIOLATION')
+        self.assertEqual(caught.exception.progress['state'], 'QUOTA_EXHAUSTED')
+
 
 if __name__ == '__main__':
     unittest.main()

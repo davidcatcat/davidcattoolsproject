@@ -132,7 +132,7 @@ class DeveloperRoute(ABC):
             raise RouteError(f'{self.name.upper()}_REQUEST_INVALID')
         timeout = value.get('timeout', MAX_TIMEOUT_SECONDS)
         if type(timeout) not in (int, float) or not 0 < timeout <= MAX_TIMEOUT_SECONDS:
-            raise RouteError(f'{self.name}_REQUEST_INVALID')
+            raise RouteError(f'{self.name.upper()}_REQUEST_INVALID')
         value.update(root=str(root), model=model, effort=effort, timeout=timeout,
                      write_paths=tuple(paths))
         return value
@@ -309,6 +309,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     private_tmp = tempfile.mkdtemp(prefix='llmtool-route-')
     os.chmod(private_tmp, 0o700)
     state_dirs = tuple(value.get('state_dirs', ())) + (private_tmp,)
+    if type(value.get('log_path')) is str and not os.path.isabs(value['log_path']):
+        value['log_path'] = str(Path(private_tmp) / value['log_path'])
     try:
         prefix, policy_sha256 = boundary.prepare(
             value['root'], value['write_paths'], state_dirs)
@@ -350,6 +352,19 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     except BaseException:
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise
+    log_text = ''
+    log_path = value.get('log_path')
+    if log_path is not None:
+        try:
+            raw_log = Path(log_path).read_bytes()
+            if len(raw_log) > 4 * 1024 * 1024:
+                raise RouteError(_route_code(route, 'MODEL_UNVERIFIED'))
+            log_text = raw_log.decode('utf-8')
+        except RouteError:
+            shutil.rmtree(private_tmp, ignore_errors=True)
+            raise
+        except (OSError, UnicodeError, TypeError):
+            log_text = ''
     shutil.rmtree(private_tmp, ignore_errors=True)
     if (type(code) is not int or type(stdout) is not bytes or type(stderr) is not bytes or
             len(stdout) > MAX_STDOUT_BYTES or len(stderr) > MAX_STDERR_BYTES):
@@ -368,18 +383,6 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     allowed = set(value['write_paths'])
     scope_violation = (not after_git.clean or any(path not in allowed for path in changed) or
                        _changed_symlink(before, after, changed))
-    log_text = ''
-    log_path = value.get('log_path')
-    if log_path is not None:
-        try:
-            raw_log = Path(log_path).read_bytes()
-            if len(raw_log) > 4 * 1024 * 1024:
-                raise RouteError(_route_code(route, 'MODEL_UNVERIFIED'))
-            log_text = raw_log.decode('utf-8')
-        except RouteError:
-            raise
-        except (OSError, UnicodeError, TypeError):
-            log_text = ''
     try:
         parsed = route.parse_output(stdout, stderr, log_text)
     except RouteError:
@@ -389,6 +392,20 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     if not isinstance(parsed, Mapping):
         raise RouteError(_route_code(route, 'OUTPUT_INVALID'))
     try:
+        quota = route.quota_exhausted(parsed, stderr)
+    except Exception:
+        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
+    quota_progress = {
+        'state': 'QUOTA_EXHAUSTED', 'head_sha': after_git.head or 'UNKNOWN',
+        'changed_files': list(changed), 'unfinished_checks': ['UNKNOWN'],
+        'session_id': parsed.get('session_id')}
+    if scope_violation:
+        raise RouteError(_route_code(route, 'WRITE_SCOPE_VIOLATION'),
+                         facts={'changed_files': changed},
+                         progress=quota_progress if quota else None)
+    if quota:
+        raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'), progress=quota_progress)
+    try:
         verified = route.verified_model(log_text, value['model'])
     except Exception:
         raise RouteError(_route_code(route, 'MODEL_UNVERIFIED')) from None
@@ -396,18 +413,6 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         raise RouteError(_route_code(route, 'MODEL_UNVERIFIED'))
     if verified != value['model']:
         raise RouteError(_route_code(route, 'MODEL_MISMATCH'))
-    try:
-        quota = route.quota_exhausted(parsed, stderr)
-    except Exception:
-        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
-    if quota:
-        raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'), progress={
-            'state': 'QUOTA_EXHAUSTED', 'head_sha': after_git.head or 'UNKNOWN',
-            'changed_files': list(changed), 'unfinished_checks': ['UNKNOWN'],
-            'session_id': parsed.get('session_id')})
-    if scope_violation:
-        raise RouteError(_route_code(route, 'WRITE_SCOPE_VIOLATION'),
-                         facts={'changed_files': changed})
     if code < 0:
         raise RouteError(_route_code(route, 'INTERRUPTED'))
     if code != 0:

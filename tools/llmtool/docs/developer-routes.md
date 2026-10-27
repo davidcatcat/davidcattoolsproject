@@ -16,8 +16,12 @@ branch, HEAD, and clean state. It prepares and probes the operating-system write
 boundary before starting the CLI. A failed or unsupported boundary stops the
 run. The route receives the boundary prefix before its argv, so its provider
 arguments cannot replace that boundary. The runner checks Git identity and the
-changed file set after execution, then parses output, verifies the model, handles
-quota, and returns the result.
+changed file set after execution. It reads the provider log from the run's
+private temporary directory before removing that directory, parses output, and
+checks write scope and quota before requiring model evidence. A write-scope
+violation takes precedence over quota; if both occur, the error retains quota
+progress fields. Quota exhaustion skips model verification and retains bounded
+progress details.
 
 AGY argv after the boundary prefix is exactly:
 
@@ -28,14 +32,20 @@ agy -p PROMPT --model MODEL --effort EFFORT --sandbox --output-format json --pri
 AGY does not receive `--add-dir` or `--mode`. The current verified write
 boundary uses Apple's `sandbox-exec` and is supported only on macOS. Other
 operating systems report an unsupported boundary and cannot start the provider.
+AGY's `--log-file` value is a validated relative name resolved inside the
+per-run private temporary directory. The boundary permits writes to that state
+directory and the literal device paths `/dev/null` and `/dev/tty`; it probes
+that a write to `/dev/null` succeeds. It grants no broader `/dev` access.
 
 ## Configuration
 
 `developer-routes.json` has schema version `1` and a `routes` map. The AGY entry
 contains only `executable`, `default_model`, `default_effort`, `denied_dirs`,
 and `state_dirs`. The executable is the command name `agy`; model and effort are
-validated tokens. `.gemini` is a home-relative denied directory name, never an
-absolute personal path. `state_dirs.policy` is `private-temp-only`; runtime
+validated tokens. Denied directory names are resolved relative to the current
+user's home directory and reject absolute paths, empty path components, `.` and
+`..`. `.gemini` is a home-relative denied directory name, never an absolute
+personal path. `state_dirs.policy` is `private-temp-only`; runtime
 state is confined to the private temporary directory created for the run.
 Unknown keys, unsupported values, malformed JSON, and invalid schema versions
 fail closed.
