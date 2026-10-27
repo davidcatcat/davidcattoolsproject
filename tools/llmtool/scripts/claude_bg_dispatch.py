@@ -46,6 +46,7 @@ if str(_PACKAGE_ROOT) not in sys.path:
 
 from llmtool.errors import LLMToolError  # noqa: E402
 from llmtool.task_completion import read_d6_registration  # noqa: E402
+from llmtool import worker_dispatch  # noqa: E402
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 SHORT_RE = re.compile(r"[0-9a-f]{8}\Z")
@@ -280,9 +281,17 @@ def _failure_reason(row):
 
 
 def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_interval,
-             new_session=False):
+             new_session=False, owner_assignment_ref=None):
     if not ROLE_RE.fullmatch(role or ""):
         raise DispatchError("ROLE_NAME_INVALID")
+    worker_key = {"claude-reviewer": "claude-reviewer",
+                  "claude-developer": "claude-developer",
+                  "codex-reviewer": "codex-reviewer"}.get(role)
+    if worker_key is None:
+        raise DispatchError("WORKER_UNKNOWN")
+    decision = worker_dispatch.evaluate(worker_key, owner_assignment_ref, task_id)
+    if not decision.allowed:
+        raise DispatchError(decision.reason_code)
     if not prompt or len(prompt.encode("utf-8")) > PROMPT_LIMIT or prompt.startswith("-"):
         raise DispatchError("PROMPT_INVALID")
     registration = _registration(task_id, repo_root)
@@ -479,6 +488,7 @@ def _main(argv=None):
     target.add_argument("--new", action="store_true", help="start a new session")
     start.add_argument("--name", required=True, help="role name passed as -n")
     start.add_argument("--task-id", required=True, help="registered D6 task id")
+    start.add_argument("--owner-assignment-ref", help="exact Owner assignment reference")
     prompt = start.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt")
     prompt.add_argument("--prompt-file")
@@ -504,7 +514,7 @@ def _main(argv=None):
                 claude=args.claude, target=args.session, role=args.name,
                 task_id=args.task_id, prompt=text, repo_root=args.repo_root,
                 timeout=_bounded(args.timeout, 1, 600, "--timeout"), poll_interval=poll,
-                new_session=args.new)
+                new_session=args.new, owner_assignment_ref=args.owner_assignment_ref)
             ok = result["result"] == "DELIVERED"
         else:
             since_ms = None
