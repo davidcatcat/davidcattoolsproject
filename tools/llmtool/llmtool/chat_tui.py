@@ -9,12 +9,13 @@ any UI starts. A UI failure never drops into, or replays input through, the REPL
 """
 
 import asyncio
+import os
 import signal
 import sys
 import threading
 import time
 
-from . import chat_tui_events, chat_tui_status, chat_tui_task
+from . import chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
@@ -54,6 +55,16 @@ Formal task commands (separate from ordinary chat; results come only from llmtoo
   /task show TASK_ID    Open a Task's detail
   /task list            Open the Task list (stage, update time, request) from TaskStore
   /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
+
+Real-time PM conversation (the dedicated PM session, through pm_runtime only)
+  /pm connect SESSION [CWD]  Connect to the dedicated PM session (Claude Code session UUID;
+                        CWD defaults to the current directory); "pm>" prompt, Enter sends
+  /pm disconnect        End the connection and return to chat mode
+  /pm history           Show the turns pm_runtime stored for this PM session
+  /pm                   Show the connected PM and its state
+  Esc (during a turn)   Interrupt the PM turn; Ctrl-C interrupts first, a second Ctrl-C exits
+PM replies stream in as pm_runtime reports them; tool use is one line per tool and never
+shows tool input or output. Chat replies are never sent to or shown as the PM.
 A Task receipt shows the PM provider, Task ID, Run ID and state recorded by Core;
 已建立／待派工 means no Developer has been dispatched. A chat reply is never a Task.
 Stage and next responsible are derived by the TUI from Core fields; values Core does
@@ -75,6 +86,9 @@ SLASH_COMMANDS = (
     ("/task mode", "/task mode ", "Task mode for drafts: PROFILE, or off"),
     ("/task list", "/task list", "Task list with status from TaskStore"),
     ("/task events", "/task events", "Recent Task events from TaskStore"),
+    ("/pm connect", "/pm connect ", "Real-time PM: connect to the dedicated PM session"),
+    ("/pm disconnect", "/pm disconnect", "End the PM connection"),
+    ("/pm history", "/pm history", "Turns pm_runtime stored for this PM"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
@@ -186,6 +200,11 @@ def run_chat_tui(session, stdin=None, stdout=None, stderr=None):
         session.active = False
 
 
+def _default_pm_factory(session_id, cwd):
+    from .pm_runtime import PMRuntime
+    return PMRuntime(session_id, cwd=cwd)
+
+
 def _tokens(usage):
     """Compact provider-reported usage for the status bar; UNKNOWN when absent."""
     if usage is None:
@@ -196,7 +215,7 @@ def _tokens(usage):
 class ChatTUI:
     """Conversation pane, persistent multiline input, help and status bar."""
 
-    def __init__(self, session, input=None, output=None):
+    def __init__(self, session, input=None, output=None, pm_factory=None):
         from prompt_toolkit.application import Application
         from prompt_toolkit.document import Document
         from prompt_toolkit.filters import Condition, has_focus
@@ -239,6 +258,19 @@ class ChatTUI:
         self.list_reader = None
         self.unseen_output = False
         self.show_events = False
+        # Real-time PM (pm_runtime). pm_factory(session_id, cwd) builds an unopened runtime.
+        self.pm_factory = pm_factory or _default_pm_factory
+        self.pm_runtime = None
+        self.pm_target = None        # (session_id, cwd) of the connected PM
+        self.pm_mode = False
+        self.pm_state = None         # connecting / idle / working / interrupting / error(CODE)
+        self.pm_pending = False      # a connect/disconnect/history worker is running
+        self.pm_turn_active = False
+        self.pm_turn_started = None
+        self.pm_interrupted = False
+        self.pm_block_open = False   # the last conversation block is the streaming PM reply
+        self.pm_deltas = False       # text deltas seen since the last assistant/tool boundary
+        self.pm_tools = {}
         self._loop = None
         self._received_signal = None
         self.conversation = TextArea(
@@ -250,7 +282,8 @@ class ChatTUI:
             height=Dimension(min=1, weight=1))
         self.conversation.buffer.cursor_position = len(self.conversation.text)
         self.input = TextArea(multiline=True, wrap_lines=True, focus_on_click=True,
-                              prompt=lambda: "task> " if self.task_profile else "> ",
+                              prompt=lambda: ("pm> " if self.pm_mode else
+                                              "task> " if self.task_profile else "> "),
                               height=lambda: Dimension(
                                   min=min(4, max(1, self.input.buffer.document.line_count)),
                                   max=min(4, max(1, self.input.buffer.document.line_count))),
@@ -325,6 +358,12 @@ class ChatTUI:
         @keys.add("escape", filter=input_focused & (menu_shown | searching))
         def _menu_close(event):
             self.close_menu()
+
+        pm_turn = Condition(lambda: self.pm_turn_active)
+
+        @keys.add("escape", filter=input_focused & pm_turn & ~picker_shown)
+        def _pm_interrupt(event):
+            self.interrupt_pm()
 
         @keys.add("escape", filter=showing_detail & ~picker_shown)
         def _detail_close(event):
@@ -463,7 +502,8 @@ class ChatTUI:
         # long names never expand the footer. When the terminal is too narrow, fields
         # drop in STATUS_DROP_ORDER; the state stays last and is cut only if alone too wide.
         fields = {
-            "mode": "TASK→PM:" + compact(self.task_profile or "", 12),
+            "mode": (self.pm_status_field(compact) if self.pm_mode
+                     else "TASK→PM:" + compact(self.task_profile or "", 12)),
             "provider": "p:" + compact(session.provider, 10),
             "model": "m:" + compact(reported or model or "default", 14),
             "state": compact(state, 14),
@@ -472,11 +512,16 @@ class ChatTUI:
         }
         width = max(1, self.app.output.get_size().columns)
         # The mode field appears only in Task mode, so the chat footer is unchanged.
-        shown = [key for key in STATUS_FIELDS if key != "mode" or self.task_profile]
+        shown = [key for key in STATUS_FIELDS
+                 if key != "mode" or self.task_profile or self.pm_mode]
+        if self.pm_mode:
+            # Chat provider/model/usage are not the PM's; in PM mode only the PM field shows.
+            shown = ["mode", "help"]
         for name in STATUS_DROP_ORDER:
             if self._get_cwidth(" | ".join(fields[key] for key in shown)) <= width:
                 break
-            shown.remove(name)
+            if name in shown:
+                shown.remove(name)
         return fit_width(" | ".join(fields[key] for key in shown), width, self._get_cwidth)
 
     def picker_entries(self):
@@ -570,7 +615,7 @@ class ChatTUI:
         # The detail and events panes are text areas with Esc-prefixed bindings, so a
         # lone Esc (close) would otherwise wait the full default timeout.
         shown = (sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
-                 or self.events_visible())
+                 or self.events_visible() or self.pm_turn_active)
         self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
     def move_menu(self, direction):
@@ -633,6 +678,7 @@ class ChatTUI:
 
         New output closes the Task detail so it is never hidden behind that pane.
         """
+        self.pm_block_open = False  # Any other output ends the streaming PM block.
         if self.show_detail:
             self.toggle_detail(False)
         if self.show_list or self.show_events:
@@ -855,6 +901,8 @@ class ChatTUI:
         if text.lstrip().startswith("/"):
             self.input.buffer.reset(append_to_history=True)
             self.run_command(text)
+        elif self.pm_mode:
+            self.submit_pm(text)
         elif self.task_profile is not None:
             self.submit_task_draft(text)
         else:
@@ -883,6 +931,9 @@ class ChatTUI:
 
     def run_command(self, text):
         self.append("> " + text.strip())
+        if text.strip().split(maxsplit=1)[0] == "/pm":
+            self.run_pm_command(text)
+            return
         if text.strip().split(maxsplit=1)[0] == "/task":
             self.run_task_command(text)
             return
@@ -942,6 +993,7 @@ class ChatTUI:
 
     def set_task_mode(self, profile):
         """Explicit chat/Task choice; the profile is checked by Core at submit time."""
+        self.pm_mode = False  # A PM connection stays open; /pm connect returns to it.
         if profile == "off":
             self.task_profile = None
             self.last_task_request = None
@@ -1101,8 +1153,247 @@ class ChatTUI:
         if self.quit_pending:
             self.app.exit(result=0)
 
+    # -- real-time PM (pm_runtime only; never ChatSession) ---------------------------
+    def pm_status_field(self, compact):
+        session_id = self.pm_target[0][:8] if self.pm_target else chat_tui_task.UNKNOWN
+        state = self.pm_state or chat_tui_task.UNKNOWN
+        if state == "working" and self.pm_turn_started is not None:
+            state = "working %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+        return "PM:" + compact(session_id, 8) + " " + compact(state, 18)
+
+    def run_pm_command(self, text):
+        parts = text.split()
+        if parts == ["/pm"]:
+            if self.pm_runtime is None:
+                self.append("PM: not connected. /pm connect SESSION [CWD] connects to the "
+                            "dedicated PM session.")
+            else:
+                self.append("PM: claude-code session " + self.pm_target[0] + " (cwd "
+                            + self.pm_target[1] + "), " + chat_tui_pm.binding_text(self.pm_runtime)
+                            + ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
+                            + ("; PM mode" if self.pm_mode else "; not in PM mode"))
+            return
+        if self.pm_pending:
+            self.append("llmtool: a PM connect/disconnect/history request is in progress")
+            return
+        if parts[1:2] == ["connect"] and len(parts) in (3, 4):
+            cwd = parts[3] if len(parts) == 4 else os.getcwd()
+            if self.pm_runtime is not None:
+                if self.pm_target[0] == parts[2]:
+                    self.pm_mode, self.task_profile = True, None
+                    self.append("PM mode: Enter sends to PM session " + parts[2])
+                else:
+                    self.append("llmtool: already connected to PM session " + self.pm_target[0]
+                                + "; /pm disconnect first")
+                return
+            self.pm_state = "connecting"
+            self._pm_worker(self._pm_connect, parts[2], cwd)
+            return
+        if parts == ["/pm", "disconnect"]:
+            if self.pm_runtime is None:
+                self.append("PM: not connected")
+                return
+            self.pm_state = "closing"
+            self._pm_worker(self._pm_disconnect, self.pm_runtime)
+            return
+        if parts == ["/pm", "history"]:
+            if self.pm_runtime is None:
+                self.append("PM: not connected")
+                return
+            self._pm_worker(self._pm_history, self.pm_target[0], self.pm_runtime)
+            return
+        self.append("usage: /pm connect SESSION [CWD]\n       /pm disconnect\n"
+                    "       /pm history\n       /pm")
+
+    def _pm_worker(self, target, *args):
+        self.pm_pending = True
+        self._loop = asyncio.get_running_loop()
+        threading.Thread(target=target, args=(*args, self._loop),
+                         name="llmtool-chat-pm", daemon=True).start()
+
+    def _post(self, loop, callback, *args):
+        try:
+            loop.call_soon_threadsafe(callback, *args)
+        except RuntimeError:
+            pass  # Loop closed: the TUI has exited.
+
+    @staticmethod
+    def _pm_read_history(session_id, runtime):
+        from .pm_runtime import read_history
+        try:
+            return read_history(session_id, after=0, limit=200,
+                                state_root=getattr(runtime, "state_root", None)), None
+        except LLMToolError as exc:
+            return None, chat_tui_pm.error_code(exc)
+
+    def _pm_connect(self, session_id, cwd, loop):
+        outcome = {"session": session_id, "cwd": cwd}
+        try:
+            runtime = self.pm_factory(session_id, cwd)
+            runtime.open()
+            outcome["runtime"] = runtime
+            outcome["history"], outcome["history_error"] = self._pm_read_history(session_id, runtime)
+        except LLMToolError as exc:
+            outcome["error"] = chat_tui_pm.error_code(exc)
+        except Exception:
+            outcome["error"] = chat_tui_task.UNKNOWN
+        self._post(loop, self.finish_pm_connect, outcome)
+
+    def finish_pm_connect(self, outcome):
+        self.pm_pending = False
+        if "error" in outcome:
+            self.pm_state = None
+            self.append("llmtool: PM not connected. " + chat_tui_pm.error_text(outcome["error"]))
+            return
+        if self._received_signal is not None or self.app.is_done:
+            self._close_runtime(outcome["runtime"])
+            return
+        self.pm_runtime = outcome["runtime"]
+        self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
+        self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
+        self.append("PM mode: Enter sends each draft in real time to the dedicated PM session "
+                    + self.pm_target[0] + " (claude-code, cwd " + str(self.pm_target[1])
+                    + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_runtime)
+                    + ". pm_runtime S1 cannot check that this session is not open in another "
+                    "process: connect only to the dedicated PM session. Esc interrupts a turn; "
+                    "/pm disconnect ends the connection. Chat replies are never the PM.")
+        if outcome["history_error"]:
+            self.append("llmtool: PM history unavailable. "
+                        + chat_tui_pm.error_text(outcome["history_error"]))
+        else:
+            self.append(chat_tui_pm.history_text(outcome["history"]))
+
+    @staticmethod
+    def _close_runtime(runtime):
+        try:
+            runtime.close(timeout=2)
+        except Exception:
+            pass
+
+    def _pm_disconnect(self, runtime, loop):
+        self._close_runtime(runtime)
+        self._post(loop, self.finish_pm_disconnect)
+
+    def finish_pm_disconnect(self):
+        self.pm_pending = False
+        self.pm_runtime, self.pm_target, self.pm_mode, self.pm_state = None, None, False, None
+        self.append("PM disconnected; chat mode (Enter sends to chat provider "
+                    + self.session.provider + ", not a PM)")
+
+    def _pm_history(self, session_id, runtime, loop):
+        history, code = self._pm_read_history(session_id, runtime)
+        self._post(loop, self.finish_pm_history, history, code)
+
+    def finish_pm_history(self, history, code):
+        self.pm_pending = False
+        self.append(("llmtool: PM history unavailable. " + chat_tui_pm.error_text(code)) if code
+                    else chat_tui_pm.history_text(history))
+
+    def submit_pm(self, text):
+        """Enter in PM mode: one pm_runtime turn at a time; the draft leaves the editor and
+        the turn is marked active in the same key handler, so nothing is sent twice."""
+        if self.pm_turn_active:
+            self.append("llmtool: a PM turn is in progress; input kept. Esc interrupts it.")
+            return
+        if self.pm_runtime is None or self.pm_pending:
+            self.append("llmtool: the PM is not connected; /pm connect SESSION [CWD]")
+            return
+        self.input.buffer.reset(append_to_history=True)
+        self.pm_turn_active, self.pm_turn_started = True, time.monotonic()
+        self.pm_interrupted, self.pm_deltas, self.pm_tools = False, False, {}
+        self.pm_state = "working"
+        self.append("owner → PM:\n" + text)
+        self._loop = asyncio.get_running_loop()
+        threading.Thread(target=self._pm_turn, args=(self.pm_runtime, text, self._loop),
+                         name="llmtool-chat-pm-turn", daemon=True).start()
+
+    def _pm_turn(self, runtime, text, loop):
+        """Worker thread: forward each pm_runtime event to the event loop as it arrives."""
+        try:
+            for event in runtime.send(text):
+                if type(event) is dict:
+                    self._post(loop, self.pm_event, event)
+        except LLMToolError as exc:
+            self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
+                                             "code": chat_tui_pm.error_code(exc)})
+        except BaseException:
+            self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
+                                             "code": chat_tui_task.UNKNOWN})
+        self._post(loop, self.finish_pm_turn)
+
+    def _pm_extend(self, text):
+        """Stream text into the current PM block, opening one when other output came between."""
+        if not text:
+            return
+        if not self.pm_block_open:
+            self.append("PM:\n" + text)
+            self.pm_block_open = True
+            return
+        buffer = self.conversation.buffer
+        old = buffer.text
+        follow = buffer.cursor_position >= len(old)
+        new = old + terminal_safe_text(text)
+        buffer.set_document(self._Document(new, len(new) if follow else buffer.cursor_position),
+                            bypass_readonly=True)
+        self.app.invalidate()
+
+    def pm_event(self, event):
+        kind = event.get("type")
+        if kind == "TEXT_DELTA" and type(event.get("text")) is str:
+            self._pm_extend(event["text"])
+            self.pm_deltas = True
+        elif kind == "ASSISTANT_TEXT" and type(event.get("text")) is str:
+            # The same text already streamed as deltas; show it only when it did not.
+            if not self.pm_deltas:
+                self._pm_extend(event["text"])
+            self.pm_deltas = False
+        elif kind == "TOOL_USE":
+            name = event.get("name") if type(event.get("name")) is str else None
+            self.pm_tools[event.get("tool_use_id")] = name
+            self.append("  · tool " + (name or chat_tui_task.UNKNOWN))
+            self.pm_deltas = False
+        elif kind == "TOOL_RESULT":
+            self.append(chat_tui_pm.tool_result_text(event, self.pm_tools.get(event.get("tool_use_id"))))
+        elif kind == "RUNTIME_ERROR":
+            code = event.get("code") if type(event.get("code")) is str else chat_tui_task.UNKNOWN
+            self.pm_state = "error(" + code + ")"
+            self.append("llmtool: " + chat_tui_pm.error_text(code))
+            if code == "PM_SESSION_FORKED":
+                # pm_runtime closed itself; the TUI no longer holds a usable connection.
+                self.pm_runtime, self.pm_mode = None, False
+        elif kind == "TURN_END":
+            elapsed = max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic()))
+            self.append(chat_tui_pm.turn_end_text(event, elapsed))
+
+    def finish_pm_turn(self):
+        self.pm_turn_active, self.pm_turn_started = False, None
+        if self.pm_state in ("working", "interrupting"):
+            self.pm_state = "idle"
+        self.app.invalidate()
+
+    def interrupt_pm(self):
+        if not self.pm_turn_active or self.pm_interrupted or self.pm_runtime is None:
+            return
+        self.pm_interrupted, self.pm_state = True, "interrupting"
+        self.append("llmtool: interrupt sent to the PM; waiting for the turn to end")
+        try:
+            self.pm_runtime.interrupt()
+        except LLMToolError as exc:
+            self.append("llmtool: " + chat_tui_pm.error_text(chat_tui_pm.error_code(exc)))
+        except Exception:
+            self.append("llmtool: " + chat_tui_pm.error_text(chat_tui_task.UNKNOWN))
+
+    def close_pm(self):
+        runtime, self.pm_runtime = self.pm_runtime, None
+        if runtime is not None:
+            self._close_runtime(runtime)
+
     def request_quit(self):
         self.close_menu()  # Ctrl-C/Ctrl-D: also restores the default Esc timeout.
+        if self.pm_turn_active and not self.pm_interrupted:
+            self.interrupt_pm()
+            self.append("llmtool: Ctrl-C again exits (the PM connection is closed on exit)")
+            return
         if self.busy:
             if not self.quit_pending:
                 self.quit_pending = True
@@ -1126,7 +1417,10 @@ class ChatTUI:
         with tui_cli_signal_scope(self._handle_signal):
             # The scope above owns signal routing so background CLI children
             # can be stopped before the process exits.
-            result = self.app.run(handle_sigint=False)
+            try:
+                result = self.app.run(handle_sigint=False)
+            finally:
+                self.close_pm()  # Never leave the pm_runtime child behind, signal or not.
         if self._received_signal == signal.SIGINT:
             raise KeyboardInterrupt() from None
         if self._received_signal is not None:
