@@ -1,0 +1,24 @@
+# Company gw deployment probe
+
+Run this only from the PM's authorized host after confirming the `company-gw` profile is configured. The probe sends synthetic prompts to the configured gateway. It does not read repository source or internal names. The API credential is read through llmtool configuration and kept in memory for request authorization; it is never intentionally written to output or printed.
+
+```sh
+python3 -I -B tools/llmtool/eval/gw_probe/probe.py --out-dir /private/tmp/gw-probe
+```
+
+Use `--only NAME` to run one probe, or repeat it for a selection. Names are `models`, `thinking`, `tools`, `determinism`, `context`, `output`, `concurrency`, and `quality`. Results go to `gw_probe.json` and `gw_probe.md` under `--out-dir`; without it, they go under the system temporary directory in `gw-probe`.
+
+`--dry-run` uses built-in canned responses and makes no network requests. `--base-url` and `--model` are intended for tests with a loopback fake server; endpoint and model overrides require a loopback base URL (or `--dry-run`). Network requests have a 30-second timeout and response bodies are bounded.
+
+The probes measure:
+
+- `models`: model IDs and reported context length fields.
+- `thinking`: the same small arithmetic prompt with thinking off, on, and unset, each at low and high reasoning effort; captures status, reasoning length, think tags, usage, latency, and answer.
+- `tools`: whether a one-function `tool_choice: auto` request returns tool calls.
+- `determinism`: four identical zero-temperature prompts and answer variation.
+- `context`: a needle at the beginning and question at the end of increasingly long prompts, from about 8K up to 300K tokens; stops at the first request error.
+- `output`: an open-ended count request with 4K, 16K, and 32K max token limits.
+- `concurrency`: batches of 1, 4, 8, 16, and 32 small requests, with success/error counts, wall time, and aggregate output tokens per second.
+- `quality`: 20 synthetic arithmetic, logic, and code-reading questions with thinking off and on, including accuracy, latency, and token usage.
+
+An HTTP or transport error is represented in that probe's result and does not stop later probes. The reported context size is approximate; gateway-reported token usage is recorded separately when available. This is a bounded deployment measurement, not a general model evaluation.
