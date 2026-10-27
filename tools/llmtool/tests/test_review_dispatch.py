@@ -181,9 +181,10 @@ def _real_store(tmp_path):
     }
     parsed = task_store.parse_task_contract(json.dumps(contract))
     record = {
-        'schema_version': 1, 'task_id': task_id, 'run_id': run_id,
+        'schema_version': 2, 'task_id': task_id, 'run_id': run_id,
         'pm_session_id': 'pm-test', 'pm_provider_profile': 'test',
-        'pm_provider_type': None, 'pm_model': None,
+        'pm_provider_type': 'test', 'pm_model': None,
+        'pm_route_binding': {'type': 'test', 'model': None, 'base_url': None},
         'backend_session_semantics': 'NOT_STARTED', 'native_session_id': None,
         'state': 'PM_PENDING', 'created_at': '2026-10-27T00:00:00Z',
         'updated_at': '2026-10-27T00:00:00Z', 'task_contract': contract,
@@ -192,7 +193,8 @@ def _real_store(tmp_path):
         'request_sha256': hashlib.sha256(
             b'test formal review dispatch claims').hexdigest(),
         'response': None, 'usage': None,
-        'error_code': None,
+        'error_code': None, 'developer': None, 'pm_assignment': None,
+        'completion': None,
     }
     store = task_store.TaskStore(Path(tmp_path).resolve())
     store.create(record)
