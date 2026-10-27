@@ -19,13 +19,24 @@ MONITOR_ONLY = ["scripts/llmtool_monitor.py", "scripts/test_llmtool_monitor.py"]
 
 
 class MacModuleSelectionTests(unittest.TestCase):
-    def test_runtime_scan_finds_synthetic_killpg_module(self):
+    def test_runtime_scan_finds_synthetic_macos_module(self):
         with tempfile.TemporaryDirectory() as temporary:
             tests = Path(temporary) / "tools" / "llmtool" / "tests"
             tests.mkdir(parents=True)
-            (tests / "test_synthetic_mac.py").write_text("import os\nos.killpg(1, 9)\n")
+            (tests / "test_synthetic_mac.py").write_text("import sys\nassert sys.platform == 'darwin'\n")
             (tests / "test_unrelated.py").write_text("def test_plain(): pass\n")
             self.assertEqual(ci_mac_modules.scanned_test_modules(Path(temporary)), {"test_synthetic_mac"})
+
+    def test_default_root_main_finds_real_baseline(self):
+        self.assertEqual(ci_mac_modules.DEFAULT_REPO_ROOT, REPO_ROOT)
+        self.assertIn("test_review_authority", ci_mac_modules.scanned_test_modules())
+        with tempfile.TemporaryDirectory() as temporary:
+            changed_paths = Path(temporary) / "changed-paths"
+            changed_paths.write_text("scripts/llmtool_monitor.py\n")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(ci_mac_modules.main(["--changed-paths", str(changed_paths)]), 0)
+            self.assertIn("test_review_authority", output.getvalue().splitlines())
 
     def test_extra_modules_are_included(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -43,13 +54,30 @@ class MacModuleSelectionTests(unittest.TestCase):
         )
 
     def test_single_source_change_adds_matching_test_modules(self):
-        selected = ci_mac_modules.select_modules(["tools/llmtool/llmtool/task_store.py"], REPO_ROOT)
-        matching = {path.stem for path in (REPO_ROOT / "tools/llmtool/tests").glob("test_task_store*.py")}
+        selected = ci_mac_modules.select_modules(["tools/llmtool/scripts/ci_mac_modules.py"], REPO_ROOT)
+        matching = {path.stem for path in (REPO_ROOT / "tools/llmtool/tests").glob("test_ci_mac_modules*.py")}
         self.assertEqual(selected, ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules() | matching)
 
     def test_test_only_change_adds_changed_module(self):
-        selected = ci_mac_modules.select_modules(["tools/llmtool/tests/test_new_feature.py"], REPO_ROOT)
-        self.assertEqual(selected, ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules() | {"test_new_feature"})
+        selected = ci_mac_modules.select_modules(["tools/llmtool/tests/test_ci_mac_modules.py"], REPO_ROOT)
+        self.assertEqual(selected, ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules() | {"test_ci_mac_modules"})
+
+    def test_deleted_test_change_requires_full(self):
+        self.assertIsNone(ci_mac_modules.select_modules(["tools/llmtool/tests/test_deleted.py"], REPO_ROOT))
+
+    def test_shared_modules_require_full(self):
+        for module in ("__init__", "cli", "task_store", "task_submission_cli"):
+            with self.subTest(module=module):
+                self.assertIsNone(ci_mac_modules.select_modules([f"tools/llmtool/llmtool/{module}.py"], REPO_ROOT))
+
+    def test_empty_selection_prints_full(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            changed_paths = Path(temporary) / "changed-paths"
+            changed_paths.write_text("tools/llmtool/tests/test_missing.py\n")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(ci_mac_modules.main(["--changed-paths", str(changed_paths)]), 0)
+            self.assertEqual(output.getvalue(), "FULL\n")
 
     def test_workflow_and_makefile_require_full(self):
         for path in (".github/workflows/other.yml", "tools/llmtool/Makefile"):
@@ -78,6 +106,8 @@ class MacModuleSelectionTests(unittest.TestCase):
         self.assertIn("mode=full", workflow)
         self.assertIn("make -C tools/llmtool check PYTHON=\"$JOB_PYTHON\"", workflow)
         self.assertIn("cancel-in-progress: true", workflow)
+        self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
+        self.assertIn('[ -z "$selection" ] || [ "$selection" = FULL ]', workflow)
 
 
 if __name__ == "__main__":

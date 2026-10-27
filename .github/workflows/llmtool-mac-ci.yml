@@ -103,9 +103,9 @@ jobs:
                 mode=full
               fi
               if [ "$mode" = mac-subset ]; then
-                selection=$(python3 tools/llmtool/scripts/ci_mac_modules.py --changed-paths "$paths") || mode=full
+                selection=$(python3 -I -B tools/llmtool/scripts/ci_mac_modules.py --changed-paths "$paths") || mode=full
                 if [ "$mode" = mac-subset ]; then
-                  if [ "$selection" = FULL ]; then
+                  if [ -z "$selection" ] || [ "$selection" = FULL ]; then
                     mode=full
                   else
                     printf '%s\n' "$selection" > "$RUNNER_TEMP/mac-modules"

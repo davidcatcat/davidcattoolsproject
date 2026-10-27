@@ -11,13 +11,23 @@ import sys
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 LLMTOOL_ROOT = SCRIPT_DIR.parent
-DEFAULT_REPO_ROOT = LLMTOOL_ROOT.parents[2]
+DEFAULT_REPO_ROOT = LLMTOOL_ROOT.parents[1]
 MODULE_LIST = LLMTOOL_ROOT / "ci" / "mac-modules.txt"
 MONITOR_PATHS = {
     "scripts/llmtool_monitor.py",
     "scripts/test_llmtool_monitor.py",
 }
-MAC_RELEVANT_TEST = re.compile(r"\bkillpg\b", re.IGNORECASE)
+MAC_RELEVANT_TEST = re.compile(
+    r"darwin|sys\.platform|platform\.system|macOS|launchctl|sandbox-exec|"
+    r"keychain|Keychain|/Applications|killpg|setsid|os\.setpgid|getpgid|start_new_session",
+    re.IGNORECASE,
+)
+SHARED_MODULES = {
+    "llmtool/__init__.py",
+    "llmtool/cli.py",
+    "llmtool/task_store.py",
+    "llmtool/task_submission_cli.py",
+}
 
 
 def extra_modules() -> set[str]:
@@ -59,7 +69,11 @@ def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT
 
         prefix = "tools/llmtool/"
         relative = path[len(prefix):]
+        if relative in SHARED_MODULES:
+            return None
         if relative.startswith("tests/test_") and relative.endswith(".py"):
+            if not (repo_root / path).is_file():
+                return None
             selected.add(Path(relative).stem)
             continue
 
@@ -86,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--changed-paths", required=True, help="file with one changed repo path per line")
     args = parser.parse_args(argv)
     selected = select_modules(_read_changed_paths(args.changed_paths))
-    if selected is None:
+    if not selected:
         print("FULL")
         return 0
     for module in sorted(selected):
