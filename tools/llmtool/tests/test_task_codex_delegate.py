@@ -233,6 +233,22 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(captured, raw)
         self.assertNotIn(raw, output.getvalue())
 
+    def test_direct_codex_persists_diff_with_sensitive_removed_line(self):
+        task = self._task()
+        raw = ('diff --git a/src.py b/src.py\n'
+               '--- a/src.py\n+++ b/src.py\n'
+               '@@ -1,1 +1,1 @@\n'
+               '-' + ('AK' + 'IA' + ('A' * 16)) + '\n'
+               '+VALUE = 2\n')
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, malformed_diff=raw)
+        self.assertEqual(result, 0)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(saved['developer']['artifact'], raw)
+        self.assertEqual(saved['developer']['artifact_sha256'],
+                         hashlib.sha256(raw.encode('utf-8')).hexdigest())
+        callback.assert_called_once()
+
     def test_dirty_registered_worktree_keeps_identity_and_runs_callback(self):
         task = self._task()
         result, saved, callback = self._dispatch(task)

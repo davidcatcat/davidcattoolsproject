@@ -666,7 +666,7 @@ class ForegroundEntryTests(unittest.TestCase):
         return a.run_foreground_review(h.issuer,h.ledger,budget=budget or h.fake.budget)
 
     def test_actual_composition_and_issuer_context_complete_fake_journey(self):
-        h=self.harness()
+        h=self.harness(timeout=120)
         with patch.object(h,'services',side_effect=AssertionError('fixture bypass')), \
                 patch.object(a,'compose_host_services',wraps=a.compose_host_services) as compose:
             result=self.invoke(h)

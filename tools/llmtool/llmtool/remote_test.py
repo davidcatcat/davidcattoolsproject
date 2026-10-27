@@ -13,19 +13,31 @@ from pathlib import Path
 from .active_pm_inbox import record_remote_test_event, record_remote_test_outcome_event
 from .errors import LLMToolError
 from .task_completion import read_d6_registration
-from .task_store import TaskStore, _json_bytes
+from .task_store import TaskStore, _emitted_sensitive, _json_bytes
 
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
-_REMOTE_LIMIT = 4096
+_REMOTE_LIMIT = 32768
+_FAILURE_EXCERPT_LIMIT = 4096
+_FAILURE_EXCERPT_LINES = 40
 _SSH_TIMEOUT = 600
 _MAX_REMOTE_MODULES = 8
 _RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
     'failures', 'log_bytes', 'log_sha256', 'remote_log_path'))
+_RECEIPT_FIELDS_WITH_EXCERPT = _RECEIPT_FIELDS | frozenset(('failure_excerpt',))
+
+
+def _valid_failure_excerpt(value):
+    if type(value) is not str or len(value.splitlines()) > _FAILURE_EXCERPT_LINES:
+        return False
+    try:
+        return len(value.encode('utf-8')) <= _FAILURE_EXCERPT_LIMIT
+    except UnicodeError:
+        return False
 
 # This is deliberately a fixed program. Dynamic values arrive as individually
 # validated argv words; no Task value becomes a command or script fragment.
@@ -33,8 +45,28 @@ _REMOTE_SCRIPT = r'''import fcntl,hashlib,json,math,os,re,shutil,stat,subprocess
 from datetime import datetime,timezone
 sha,ref,repo,python,*mods=sys.argv[1:]
 R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z"); M=re.compile(r"test_[a-z0-9_]{1,80}\Z")
+SENSITIVE=re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",re.I)
 if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or len(mods)>8 or any(not M.fullmatch(x) for x in mods): sys.exit(40)
 started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); work_deadline=begin+480; deadline=begin+540; log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None; work=None
+def failure_excerpt(outputs,work,home):
+    blocks=[]
+    for output in outputs:
+        lines=output.decode("utf8","replace").splitlines()
+        index=0
+        while index<len(lines):
+            if not re.match(r"^(?:FAIL|ERROR): ",lines[index]): index+=1; continue
+            block=[]
+            while index<len(lines) and not re.match(r"^-{10,}$",lines[index]):
+                line=lines[index].replace(work,"<REMOTE_WORKDIR>").replace(home,"<REMOTE_HOME>")
+                if not SENSITIVE.search(line): block.append(line)
+                index+=1
+            blocks.extend(block)
+    kept=[]; size=0
+    for line in blocks:
+        encoded=(line+"\n").encode("utf8")
+        if len(kept)>=40 or size+len(encoded)>4096: break
+        kept.append(line); size+=len(encoded)
+    return "\n".join(kept)
 def run(argv,limit=None,cleanup=False,**kw):
     end=deadline if cleanup else work_deadline
     left=end-time.monotonic()
@@ -88,7 +120,7 @@ for _,path,_ in owned_dirs[20:]:
  except OSError: pass"""
 def cleanup_stale():
     return nobody_cli([python,"-c",cleanup_source,log_path or ""],limit=20,cleanup=True)
-stage="workspace"
+stage="workspace"; failed_outputs=[]
 try:
     cleanup_stale()
     f=run(["git","-C",repo,"fetch","--no-tags","--end-of-options","origin",ref],limit=120)
@@ -137,7 +169,7 @@ try:
                     result="TIMEOUT"; code=124; failures.append(mod); break
                 if test.returncode or not final.endswith("OK"):
                     result="FAIL"; code=test.returncode or 1
-                    failures.append(mod)
+                    failures.append(mod); failed_outputs.append(test.stdout)
             if result!="TIMEOUT" and code==1 and len(failures)==0 and ran>0: result="PASS"; code=0
         finally:
             if work:
@@ -160,8 +192,9 @@ if saver is None or saver.returncode: result="UNKNOWN"; code=1
 cleanup_stale()
 ended=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals[-len(mods)*2:],"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
+if result!="PASS": receipt["failure_excerpt"]=failure_excerpt(failed_outputs,work or "<REMOTE_WORKDIR>",os.path.expanduser("~"))
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
-print(raw.decode() if len(raw)<=4096 else "{}")
+print(raw.decode() if len(raw)<=32768 else "{}")
 os.close(lock_fd)
 '''
 
@@ -220,8 +253,14 @@ def _validate_remote_receipt(raw, *, sha, modules):
         receipt = json.loads(raw.decode('utf-8'))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if type(receipt) is not dict or set(receipt) != _RECEIPT_FIELDS:
+    if (type(receipt) is not dict or
+            set(receipt) not in (_RECEIPT_FIELDS, _RECEIPT_FIELDS_WITH_EXCERPT)):
         return None
+    if 'failure_excerpt' in receipt:
+        excerpt = receipt['failure_excerpt']
+        if (receipt['result'] == 'PASS' or not _valid_failure_excerpt(excerpt) or
+                _emitted_sensitive(excerpt)):
+            return None
     if (receipt['result'] not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH') or
             type(receipt['exit_code']) is not int or
             receipt['source_sha'] != sha or

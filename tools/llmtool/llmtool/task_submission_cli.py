@@ -508,6 +508,11 @@ def add_task_submission_parsers(actions):
                        help='block until an event exists or the timeout passes')
     inbox.add_argument('--timeout', type=int, default=540,
                        help='seconds to wait with --wait (0-3600, default 540)')
+    github_events = actions.add_parser(
+        'github-events', help='Poll tracked GitHub activity into this PM session inbox')
+    github_events.add_argument('--pm-session', required=True)
+    github_events.add_argument('--issue', type=int, action='append', required=True)
+    github_events.add_argument('--since')
     ack = actions.add_parser('ack', help='Acknowledge one completion event; repeating is inert')
     ack.add_argument('event_id', help='32-character event ID from task inbox')
     ack.add_argument('--pm-session', required=True,
@@ -851,6 +856,28 @@ def _patch_paths(patch):
     return paths
 
 
+def _added_diff_content(value):
+    """Return added hunk lines, excluding unified-diff file headers."""
+    lines = value.splitlines()
+    added = []
+    in_hunk = False
+    previous = None
+    for line in lines:
+        if line.startswith('diff --git '):
+            in_hunk = False
+        elif line.startswith('@@ '):
+            in_hunk = True
+        elif (not in_hunk and line.startswith('+++ ') and previous is not None and
+              previous.startswith('--- ')):
+            # The file header is metadata, while a line beginning with '+' in
+            # a hunk is always source content (including lines beginning '++').
+            pass
+        elif in_hunk and line.startswith('+'):
+            added.append(line[1:])
+        previous = line
+    return '\n'.join(added)
+
+
 def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=False):
     """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
@@ -865,7 +892,7 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Fa
            127 <= ord(char) <= 159 or unicodedata.category(char) == 'Cf'
            for char in value):
         return 'DEVELOPER_OUTPUT_INVALID_TEXT'
-    if _emitted_sensitive(value):
+    if _emitted_sensitive(_added_diff_content(value)):
         return 'DEVELOPER_OUTPUT_SENSITIVE'
     if not value.startswith('diff --git '):
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
@@ -2562,6 +2589,15 @@ def run_task_inbox(args, *, store=None, stdout=None, sleep=None):
     kwargs = {} if sleep is None else {'sleep': sleep}
     _print(active_pm_inbox.wait_inbox(store, key, wait=args.wait, timeout=args.timeout,
                                       **kwargs), stdout=stdout)
+    return 0
+
+
+def run_task_github_events(args, *, store=None, stdout=None, github_get=None):
+    from .github_events import poll
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    result = poll(store, key, args.issue, since=args.since, github_get=github_get)
+    _print(result, stdout=stdout)
     return 0
 
 
