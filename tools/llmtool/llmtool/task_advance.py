@@ -185,6 +185,58 @@ def _review_outcomes(record, claims, github_get):
     return outcomes
 
 
+def _merged_review_target(record, claims, events, pr, integration_pr, github_get):
+    """Return a verified merged PR tuple for a completed review, if present."""
+    completion = record.get('completion')
+    evidence = completion.get('evidence') if type(completion) is dict else None
+    result = evidence.get('result') if type(evidence) is dict else None
+    review_ci = evidence.get('review_pr_ci') if type(evidence) is dict else None
+    if (type(completion) is not dict or completion.get('state') != 'PM_EVIDENCE_READY' or
+            type(result) is not dict or type(review_ci) is not dict):
+        return None
+    for claim in reversed(claims):
+        if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
+            continue
+        head = claim.get('head_sha')
+        number = claim.get('pr')
+        version = claim.get('version')
+        if (type(head) is not str or re.fullmatch(r'[0-9a-f]{40}', head) is None or
+                result.get('result_head') != head or
+                type(number) is not int or type(version) is not int):
+            continue
+        if not any(type(event) is dict and event.get('source') == 'REVIEWER' and
+                   event.get('source_sha') == head and event.get('version') == version and
+                   (event.get('outcome') or event.get('state')) == 'REVIEW_PASS'
+                   for event in events):
+            continue
+
+        if type(pr) is dict and pr.get('number', number) == number and pr.get('merged') is True:
+            pr_head = pr.get('head')
+            merge_sha = pr.get('merge_commit_sha')
+            if (type(pr_head) is dict and pr_head.get('sha') == head and
+                    type(merge_sha) is str and re.fullmatch(r'[0-9a-f]{40}', merge_sha)):
+                return number, merge_sha
+
+        if integration_pr is None:
+            continue
+        try:
+            integration = _pr_snapshot(integration_pr, github_get)
+            integration_head = integration.get('head') if type(integration) is dict else None
+            merge_sha = integration.get('merge_commit_sha') if type(integration) is dict else None
+            if (type(integration) is not dict or integration.get('merged') is not True or
+                    type(integration_head) is not dict or
+                    type(integration_head.get('sha')) is not str or
+                    type(merge_sha) is not str or
+                    re.fullmatch(r'[0-9a-f]{40}', merge_sha) is None):
+                continue
+            compare = github_get(f'compare/{head}...{integration_head["sha"]}')
+            if type(compare) is dict and compare.get('status') in ('ahead', 'identical'):
+                return integration_pr, merge_sha
+        except Exception:
+            continue
+    return None
+
+
 def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None,
@@ -222,6 +274,22 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         related['events'] = list(related['events']) + _review_outcomes(record, _claims(record), get)
     except Exception:
         pass
+    merged = _merged_review_target(record, _claims(record), related['events'], pr,
+                                    integration_pr, get)
+    if merged is not None:
+        merge_number, merge_sha = merged
+        import hashlib
+        event_id = hashlib.sha256(
+            f'GITHUB\0merge\0{merge_number}\0{merge_sha}'.encode()).hexdigest()[:32]
+        invoke = record_github_event_call or github_events._record
+        try:
+            invoke(store, record, 'github-task-advance', event_id,
+                   merge_number, None, 'merge', 'MERGED', merge_sha)
+            return {'task_id': task_id, 'step': 'CLOSED', 'result': None,
+                    'next': 'CLOSED', 'codes': []}
+        except Exception as exc:
+            return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+                    'next': 'REFUSED', 'codes': [_refusal(exc, 'task_store_error_code')]}
     step = decide(record, d6, pr, related)
     result, codes = None, []
     if step == 'DISPATCH_REVIEW':
