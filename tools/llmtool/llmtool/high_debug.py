@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,117 @@ REPORT_SECTIONS = ('Identity and source', 'Symptom and reproduction', 'Root Caus
                    'Exactly what to modify', 'Verification', 'Risks and handoff',
                    'Outcome/cost')
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
+_SESSION_READ_LIMIT = 2 * 1024 * 1024
+
+
+def _thread_id_from_events(events_raw):
+    thread_id = None
+    for line in events_raw.decode('utf-8', 'replace').splitlines():
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if type(event) is dict and event.get('type') == 'thread.started':
+            candidate = event.get('thread_id')
+            if type(candidate) is str and candidate:
+                if thread_id is not None and thread_id != candidate:
+                    return None
+                thread_id = candidate
+    return thread_id
+
+
+def _usage_from_events(events_raw):
+    last_usage = None
+    for line in events_raw.decode('utf-8', 'replace').splitlines():
+        try:
+            event = json.loads(line)
+        except (TypeError, ValueError):
+            continue
+        if type(event) is dict and event.get('type') == 'turn.completed':
+            last_usage = event.get('usage')
+    if type(last_usage) is not dict:
+        return 'UNKNOWN'
+    fields = {
+        'input': last_usage.get('input_tokens'),
+        'cached': last_usage.get('cached_input_tokens'),
+        'output': last_usage.get('output_tokens'),
+        'reasoning': last_usage.get('reasoning_output_tokens'),
+    }
+    if any(type(value) is not int or value < 0 for value in fields.values()):
+        return 'UNKNOWN'
+    return fields
+
+
+def _session_observed(thread_id, sessions_dir=None):
+    """Read only model/effort metadata from bounded, regular rollout files."""
+    if type(thread_id) is not str or not thread_id:
+        return 'UNKNOWN', 'UNKNOWN'
+    root = Path(sessions_dir) if sessions_dir is not None else Path.home() / '.codex' / 'sessions'
+    try:
+        root_stat = root.lstat()
+        if root.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
+            return 'UNKNOWN', 'UNKNOWN'
+    except OSError:
+        return 'UNKNOWN', 'UNKNOWN'
+
+    models, efforts = set(), set()
+    matched = False
+    try:
+        for current, dirs, files in os.walk(root, followlinks=False):
+            dirs[:] = [name for name in dirs
+                       if not (Path(current) / name).is_symlink()]
+            for name in files:
+                if not (name.startswith('rollout-') and
+                        name.endswith('-' + thread_id + '.jsonl')):
+                    continue
+                path = Path(current) / name
+                try:
+                    if path.is_symlink():
+                        return 'UNKNOWN', 'UNKNOWN'
+                    fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+                    try:
+                        info = os.fstat(fd)
+                        if not stat.S_ISREG(info.st_mode) or info.st_size > _SESSION_READ_LIMIT:
+                            return 'UNKNOWN', 'UNKNOWN'
+                        chunks = []
+                        remaining = _SESSION_READ_LIMIT + 1
+                        while remaining:
+                            chunk = os.read(fd, min(65536, remaining))
+                            if not chunk:
+                                break
+                            chunks.append(chunk)
+                            remaining -= len(chunk)
+                        raw = b''.join(chunks)
+                    finally:
+                        os.close(fd)
+                except OSError:
+                    return 'UNKNOWN', 'UNKNOWN'
+                if len(raw) > _SESSION_READ_LIMIT:
+                    return 'UNKNOWN', 'UNKNOWN'
+                matched = True
+                for line in raw.decode('utf-8', 'replace').splitlines():
+                    try:
+                        record = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if type(record) is not dict:
+                        continue
+                    containers = [record]
+                    if type(record.get('payload')) is dict:
+                        containers.append(record['payload'])
+                    for container in containers:
+                        model = container.get('model')
+                        effort = container.get('effort', container.get('reasoning_effort'))
+                        if type(model) is str:
+                            models.add(model)
+                        if type(effort) is str:
+                            efforts.add(effort)
+    except OSError:
+        return 'UNKNOWN', 'UNKNOWN'
+    if not matched:
+        return 'UNKNOWN', 'UNKNOWN'
+    return (next(iter(models)) if len(models) == 1 else 'UNKNOWN',
+            next(iter(efforts)) if len(efforts) == 1 else 'UNKNOWN')
 
 
 def _refuse(code):
@@ -49,7 +161,7 @@ def _run_codex(*, prompt, cwd, output_path):
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
-                   read_registration=None):
+                   read_registration=None, sessions_dir=None):
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('HIGH_DEBUG_TASK_INVALID')
@@ -120,16 +232,9 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         if len(events_raw) > 1024 * 1024 or len(result.stderr) > 65536:
             _refuse('HIGH_DEBUG_RUN_FAILED')
         raw = Path(output_path).read_bytes()
-        for line in events_raw.decode('utf-8', 'replace').splitlines():
-            try: event=json.loads(line)
-            except Exception: continue
-            if type(event.get('model')) is str: observed=event['model']
-            if type(event.get('effort')) is str: effort=event['effort']
-            if type(event.get('model_reasoning_effort')) is str: effort=event['model_reasoning_effort']
-            usage_candidate = event.get('usage')
-            if type(usage_candidate) is dict: usage=usage_candidate
-            turn = event.get('turn')
-            if type(turn) is dict and type(turn.get('usage')) is dict: usage=turn['usage']
+        thread_id = _thread_id_from_events(events_raw)
+        observed, effort = _session_observed(thread_id, sessions_dir)
+        usage = _usage_from_events(events_raw)
         report = raw.decode('utf-8')
         status_result = subprocess.run(['git', 'status', '--porcelain'], cwd=diagnosis_root or d6,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -142,13 +247,6 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         try: os.unlink(output_path)
         except Exception: pass
     if len(report.encode('utf-8')) > 16384 or _emitted_sensitive(report): _refuse('HIGH_DEBUG_REPORT_INVALID')
-    if type(usage) is dict:
-        usage = {'input': usage.get('input_tokens', usage.get('input')),
-                 'cached': usage.get('cached_input_tokens', usage.get('cached')),
-                 'output': usage.get('output_tokens', usage.get('output')),
-                 'reasoning': usage.get('reasoning_tokens', usage.get('reasoning'))}
-        if any(type(value) is not int or value < 0 for value in usage.values()):
-            usage = 'UNKNOWN'
     tokens=[x for x in ('RCA_CONFIRMED','RCA_UNCONFIRMED','BLOCKED') if x in report]
     status=tokens[0] if len(tokens)==1 else 'REPORT_INVALID'
     if any(('## ' + h) not in report for h in REPORT_SECTIONS): status='REPORT_INVALID'
