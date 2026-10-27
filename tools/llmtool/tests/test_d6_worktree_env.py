@@ -4,6 +4,7 @@ import json
 import os
 import platform
 from pathlib import Path
+import shutil
 import stat
 import subprocess
 import sys
@@ -28,21 +29,21 @@ def _actual_cache_fingerprint():
 
 
 class D6WorktreeEnvironmentTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory(prefix="d6-env-preflight-")
-        self.addCleanup(self.temp.cleanup)
-        self.source = Path(self.temp.name) / "source"
-        self.source.mkdir(mode=0o700)
-        self.root = Path(self.temp.name) / "tasks" / "task-root"
-        self.root.parent.mkdir(mode=0o700)
-        self.registry = None
-        self.task_id = "issue267-test-task"
-        self._git_at(self.source, "init", "-b", "main")
-        self._git_at(self.source, "config", "user.name", "D6 Test")
-        self._git_at(self.source, "config", "user.email", "d6-test@example.invalid")
-        self._git_at(self.source, "remote", "add", "origin",
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._fixture_temp = tempfile.TemporaryDirectory(prefix="d6-env-fixture-src-")
+        cls._template_base = Path(cls._fixture_temp.name)
+        cls._template_source = cls._template_base / "source"
+        cls._template_source.mkdir(mode=0o700)
+        cls._template_root = cls._template_base / "tasks" / "task-root"
+        cls._template_root.parent.mkdir(mode=0o700)
+        cls._git_run(cls._template_source, "init", "-b", "main")
+        cls._git_run(cls._template_source, "config", "user.name", "D6 Test")
+        cls._git_run(cls._template_source, "config", "user.email", "d6-test@example.invalid")
+        cls._git_run(cls._template_source, "remote", "add", "origin",
                      "git@github.com:davidcatcat/davidcattoolsproject.git")
-        makefile_dir = self.source / "tools" / "llmtool"
+        makefile_dir = cls._template_source / "tools" / "llmtool"
         (makefile_dir / "scripts").mkdir(parents=True)
         (makefile_dir / "Makefile").write_text("env-bootstrap:\n\t@true\n", encoding="utf-8")
         (makefile_dir / "scripts" / "worktree_env.py").write_text(
@@ -58,21 +59,54 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             "[build-system]\nrequires = ['setuptools>=68']\n"
             "build-backend = 'setuptools.build_meta'\n",
             encoding="utf-8")
-        (self.source / ".gitignore").write_text(
+        (cls._template_source / ".gitignore").write_text(
             "/tools/llmtool/.venv/\n/tools/llmtool/build/\n",
             encoding="utf-8")
-        (self.source / "README").write_text("test\n", encoding="utf-8")
-        self._git_at(self.source, "add", ".")
-        self._git_at(self.source, "commit", "-m", "fixture")
-        self._git_at(self.source, "worktree", "add", "-b", "feat/test-d6-env",
-                     str(self.root), "HEAD")
-        self.root = Path(os.path.realpath(self.root))
+        (cls._template_source / "README").write_text("test\n", encoding="utf-8")
+        cls._git_run(cls._template_source, "add", ".")
+        cls._git_run(cls._template_source, "commit", "-m", "fixture")
+        cls._git_run(cls._template_source, "worktree", "add", "-b", "feat/test-d6-env",
+                     str(cls._template_root), "HEAD")
+        cls._template_root = Path(os.path.realpath(cls._template_root))
+        os.chmod(cls._template_root, 0o700)
+        cls._git_run(cls._template_source, "worktree", "lock", str(cls._template_root),
+                     "--reason", "test lock")
+        cls._template_head_sha = cls._git_run(cls._template_source, "rev-parse", "HEAD")
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._fixture_temp.cleanup()
+        super().tearDownClass()
+
+    @classmethod
+    def _git_run(cls, root, *args):
+        result = subprocess.run(["/usr/bin/git", "-C", str(root), *args],
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                check=False)
+        if result.returncode:
+            raise AssertionError("git fixture setup failed: " + result.stderr.decode(errors="replace"))
+        return result.stdout.decode().strip()
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="d6-env-preflight-")
+        self.addCleanup(self.temp.cleanup)
+        base = Path(os.path.realpath(self.temp.name))
+        self.source = base / "source"
+        self.root = base / "tasks" / "task-root"
+        shutil.copytree(str(self._template_source), str(self.source))
+        shutil.copytree(str(self._template_root), str(self.root))
+        os.chmod(self.source, 0o700)
+        os.chmod(self.root.parent, 0o700)
         os.chmod(self.root, 0o700)
-        self._git_at(self.source, "worktree", "lock", str(self.root), "--reason", "test lock")
-        self._git("config", "user.name", "D6 Test")
-        self._git("config", "user.email", "d6-test@example.invalid")
-        self.common = Path(self._git("rev-parse", "--path-format=absolute",
-                                     "--git-common-dir"))
+        self.common = self.source / ".git"
+        os.chmod(self.common, 0o700)
+        wt_admin = self.common / "worktrees" / self.root.name
+        (self.root / ".git").write_text(f"gitdir: {wt_admin}\n", encoding="utf-8")
+        (wt_admin / "gitdir").write_text(f"{self.root / '.git'}\n", encoding="utf-8")
+        self.registry = None
+        self.task_id = "issue267-test-task"
+        self._branch = "feat/test-d6-env"
+        self._head_sha = self._template_head_sha
         self.registry = self.common / "llmtool-worktrees"
         self.registry.mkdir(mode=0o700)
         os.chmod(self.registry, 0o700)
@@ -83,12 +117,7 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         self._write_record()
 
     def _git_at(self, root, *args):
-        result = subprocess.run(["/usr/bin/git", "-C", str(root), *args],
-                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                check=False)
-        if result.returncode:
-            self.fail("git fixture setup failed: " + result.stderr.decode(errors="replace"))
-        return result.stdout.decode().strip()
+        return self._git_run(root, *args)
 
     def _git(self, *args):
         return self._git_at(self.root, *args)
@@ -106,9 +135,9 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
                                   "uid": stat_result.st_uid,
                                   "mode": oct(stat.S_IMODE(stat_result.st_mode))},
             "git_common_dir": str(self.common),
-            "branch": self._git("branch", "--show-current"),
-            "base_sha": self._git("rev-parse", "HEAD"),
-            "head_sha": self._git("rev-parse", "HEAD"),
+            "branch": self._branch,
+            "base_sha": self._head_sha,
+            "head_sha": self._head_sha,
             "state": "ACTIVE",
             "lock_state": "LOCKED",
             "retention_paths": ["tools/llmtool/.venv/", "tools/llmtool/build/",
