@@ -36,7 +36,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: true
 
 jobs:
   check:
@@ -77,9 +77,9 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
-      # Only an exact PR base-to-head change confined to monitor files may
-      # omit the unrelated llmtool suite. A rename lists both old and new
-      # paths; empty, unknown, failed, and non-PR comparisons use full checks.
+      # PRs use the committed Mac baseline plus tests for changed modules.
+      # Monitor-only changes retain their existing lightweight path. Empty,
+      # unknown, failed, and non-PR comparisons use full checks.
       - name: Coverage mode
         id: coverage
         env:
@@ -96,11 +96,21 @@ jobs:
                 count=$((count + 1))
                 case "$path" in
                   scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py) ;;
-                  *) mode=full ;;
+                  *) mode=mac-subset ;;
                 esac
               done < "$paths"
               if [ "$count" -eq 0 ]; then
                 mode=full
+              fi
+              if [ "$mode" = mac-subset ]; then
+                selection=$(python3 tools/llmtool/scripts/ci_mac_modules.py --changed-paths "$paths") || mode=full
+                if [ "$mode" = mac-subset ]; then
+                  if [ "$selection" = FULL ]; then
+                    mode=full
+                  else
+                    printf '%s\n' "$selection" > "$RUNNER_TEMP/mac-modules"
+                  fi
+                fi
               fi
             fi
           fi
@@ -214,7 +224,15 @@ jobs:
           PY
       - name: Offline canonical checks
         if: steps.coverage.outputs.mode != 'monitor-only'
-        run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
+        run: |
+          if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
+            make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
+            while IFS= read -r module; do
+              "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module.py" -v
+            done < "$RUNNER_TEMP/mac-modules"
+          else
+            make -C tools/llmtool check PYTHON="$JOB_PYTHON"
+          fi
       - name: Monitor script checks
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s scripts
