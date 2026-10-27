@@ -9,7 +9,7 @@ providers:
     api_key: null
     api_key_env: null
     provider_options:
-      enable_thinking: false
+      enable_thinking: true
 generation:
   temperature: 0
   max_tokens: 2000
