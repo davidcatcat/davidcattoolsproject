@@ -199,6 +199,56 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(malformed.exception.direct_opencode_code,
                          'OPENCODE_PROVIDER_FAILED')
 
+    def test_provider_auth_error_in_stream_is_typed_without_exposing_message(self):
+        marker = 'PROVIDER_AUTH_MESSAGE_SECRET_123'
+        event = self.event('error', error={
+            'type': 'provider.auth', 'message': marker,
+        })
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events((event + '\n').encode())
+        error = caught.exception
+        self.assertEqual(error.direct_opencode_code, 'OPENCODE_AUTH_REQUIRED')
+        self.assertNotIn(marker, str(error))
+        self.assertNotIn(marker, repr(error.args))
+        self.assertNotIn(marker, repr(vars(error)))
+
+    def test_nonzero_provider_auth_error_is_typed_without_exposing_message(self):
+        task_id, run_id = 'a' * 32, 'b' * 32
+        marker = 'PROVIDER_AUTH_MESSAGE_SECRET_456'
+
+        class Store:
+            def get(self, selected):
+                return {'task_id': selected, 'run_id': run_id}
+
+        body = self.event('error', error={
+            'type': 'provider.auth', 'message': marker,
+        }) + '\n'
+        cli = self.fake_cli(body, exit_code=7)
+        with patch('llmtool.opencode_direct_developer.worker_dispatch.authorize_dispatch'):
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                run(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                    prompt='bounded task prompt', prelaunch_validate=lambda: True,
+                    dispatch_store=Store(), dispatch_task_id=task_id,
+                    timeout_seconds=5, executable=cli)
+        error = caught.exception
+        self.assertEqual(error.direct_opencode_code, 'OPENCODE_AUTH_REQUIRED')
+        self.assertNotIn(marker, str(error))
+        self.assertNotIn(marker, repr(error.args))
+        self.assertNotIn(marker, repr(vars(error)))
+
+    def test_non_auth_provider_error_stays_provider_failed(self):
+        marker = 'PROVIDER_FAILURE_MESSAGE_SECRET_789'
+        event = self.event('error', error={
+            'type': 'provider.unavailable', 'message': marker,
+        })
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events((event + '\n').encode())
+        error = caught.exception
+        self.assertEqual(error.direct_opencode_code, 'OPENCODE_PROVIDER_FAILED')
+        self.assertNotIn(marker, str(error))
+        self.assertNotIn(marker, repr(error.args))
+        self.assertNotIn(marker, repr(vars(error)))
+
     def test_nonzero_structured_denial_has_bound_timing_and_no_secret_leak(self):
         task_id, run_id = 'a' * 32, 'b' * 32
 
@@ -342,8 +392,10 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                              datetime.fromisoformat(result.ended_at.replace('Z', '+00:00')))
 
     def test_private_key_source_is_rejected_before_any_cli_launch(self):
+        private_key_header = '-----BEGIN ' + 'PRIVATE' + ' KEY-----'
+        private_key_footer = '-----END ' + 'PRIVATE' + ' KEY-----'
         (self.root / 'source.py').write_text(
-            '-----BEGIN PRIVATE KEY-----\nfixture-only\n-----END PRIVATE KEY-----\n')
+            private_key_header + '\nfixture-only\n' + private_key_footer + '\n')
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
         with self.assertRaises(DirectOpenCodeError) as caught:

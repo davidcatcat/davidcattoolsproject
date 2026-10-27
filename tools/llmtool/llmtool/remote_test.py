@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .active_pm_inbox import record_remote_test_event, record_remote_test_outcome_event
 from .errors import LLMToolError
-from .task_completion import read_d6_registration
+from .task_completion import _github_get, read_d6_registration
 from .task_store import TaskStore, _emitted_sensitive, _json_bytes
 
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
@@ -232,7 +232,11 @@ def _admitted_modules(task):
     evidence = completion.get('evidence') if type(completion) is dict else None
     callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
     callback_evidence = callback.get('evidence') if type(callback) is dict else None
-    if type(callback) is dict and callback.get('state') == 'PM_EVIDENCE_READY' and type(callback_evidence) is dict:
+    if (type(callback) is dict and type(callback_evidence) is dict and
+            (callback.get('state') == 'PM_EVIDENCE_READY' or
+             (callback.get('state') == 'WAITING_EXECUTOR' and
+              callback.get('missing_gates') == ['TEST_FAILED'] and
+              callback_evidence.get('verification_state') == 'FAILED'))):
         evidence = callback_evidence
     tests = evidence.get('tests') if type(evidence) is dict else None
     if type(tests) is not list:
@@ -352,19 +356,37 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     evidence = task.get('completion', {}).get('evidence', {}) if type(task.get('completion')) is dict else {}
     common_dir = evidence.get('common_dir') if type(evidence) is dict else None
     expected = evidence.get('result', {}).get('result_head') if type(evidence.get('result')) is dict else None
+    review = evidence.get('review_pr_ci') if type(evidence) is dict else None
     if pr is not None:
-        review = evidence.get('review_pr_ci') if type(evidence) is dict else None
-        if (type(pr) is not int or not 1 <= pr <= 9999999 or type(review) is not dict or
-                review.get('pr_number') != pr or type(review.get('head_sha')) is not str):
+        if type(pr) is not int or not 1 <= pr <= 9999999:
             return denied('PR_HEAD_NOT_TASK_RESULT')
-        expected = review['head_sha']
+        if type(review) is dict and 'pr_number' in review:
+            if (review.get('pr_number') != pr or
+                    type(review.get('head_sha')) is not str):
+                return denied('PR_HEAD_NOT_TASK_RESULT')
+            expected = review['head_sha']
     try:
         registration = read_d6_registration(executor_task, common_dir)
         if expected is not None and expected != registration.result_sha:
             return denied('D6_RESULT_BINDING_MISMATCH')
         expected = registration.result_sha
     except (LLMToolError, TypeError):
+        if pr is not None:
+            return denied('PR_HEAD_NOT_TASK_RESULT')
         expected = None
+    if pr is not None and not (type(review) is dict and 'pr_number' in review):
+        try:
+            pr_data = _github_get(f'pulls/{pr}')
+        except Exception:
+            return denied('PR_HEAD_NOT_TASK_RESULT')
+        head = pr_data.get('head') if type(pr_data) is dict else None
+        if (type(pr_data) is not dict or type(pr_data.get('number')) is not int or
+                pr_data['number'] != pr or
+                type(head) is not dict or
+                type(head.get('sha')) is not str or
+                head['sha'] != registration.result_sha):
+            return denied('PR_HEAD_NOT_TASK_RESULT')
+        expected = registration.result_sha
     if expected != sha:
         return denied('SHA_NOT_TASK_RESULT')
     try:

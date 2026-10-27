@@ -147,6 +147,22 @@ def _has_structured_tool_denial(raw):
     return False
 
 
+def _has_provider_auth_error(raw):
+    """Recognize the provider auth error type without retaining provider prose."""
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line)
+            error = event.get('error') if type(event) is dict else None
+            if (type(event) is dict and event.get('type') == 'error' and
+                    type(error) is dict and error.get('type') == 'provider.auth'):
+                return True
+    except (UnicodeError, ValueError, RecursionError):
+        return False
+    return False
+
+
 def _observed_native_session(raw):
     """Return a single syntactically valid CLI session ID, or UNKNOWN."""
     sid = None
@@ -417,7 +433,9 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
         if _tool_denied(event):
             _reject('TOOL_DENIED')
         if event.get('type') == 'error':
-            _reject('OPENCODE_PROVIDER_FAILED')
+            error = event.get('error')
+            _reject('OPENCODE_AUTH_REQUIRED' if type(error) is dict and
+                    error.get('type') == 'provider.auth' else 'OPENCODE_PROVIDER_FAILED')
         event_type = event.get('type')
         event_sid = event.get('sessionID')
         if (event_type not in ('step_start', 'step_finish', 'text', 'tool_use') or
@@ -715,9 +733,12 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   started_at=started_at, ended_at=ended_at,
                                   native_session_id=_observed_native_session(raw))
     if process.returncode != 0:
+        denied = _has_structured_tool_denial(raw)
+        auth_required = _has_provider_auth_error(raw)
         raise DirectOpenCodeError(
-                                  'TOOL_DENIED' if _has_structured_tool_denial(raw)
-                                  else 'OPENCODE_PROVIDER_FAILED', attempted=True,
+                                  'TOOL_DENIED' if denied else
+                                  'OPENCODE_AUTH_REQUIRED' if auth_required else
+                                  'OPENCODE_PROVIDER_FAILED', attempted=True,
                                   cleanup_status=cleanup, process_exit_code=process.returncode,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,

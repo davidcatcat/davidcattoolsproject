@@ -30,16 +30,36 @@ from .retrieval_cli import add_retrieval_parser, run_retrieval
 from .diagnostics_cli import add_diagnostics_parser, run_diagnostics
 from .action_contract_cli import add_action_contract_parsers, run_action_contract
 from .task_lifecycle_cli import add_task_parser, run_task_inspect
-from .task_submission_cli import (add_task_submission_parsers, run_task_ack,
-                                 run_task_complete, run_task_delegate, run_task_inbox,
-                                 run_task_github_events,
-                                 run_task_record_pm, run_task_review_prompt,
-                                 run_task_remote_test, run_task_review_dispatch,
-                                 run_task_review_result, run_task_repair, run_task_high_debug,
-                                 run_task_show, run_task_status, run_task_submit)
+from . import task_submission_cli
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
 from .dispatch_check import add_dispatch_check_parser, run_dispatch_check
+
+
+TASK_ACTIONS = {
+    'ack': ('run_task_ack', False),
+    'complete': ('run_task_complete', False),
+    'delegate': ('run_task_delegate', True),
+    'github-events': ('run_task_github_events', False),
+    'high-debug': ('run_task_high_debug', True),
+    'inbox': ('run_task_inbox', False),
+    'record-pm': ('run_task_record_pm', False),
+    'remote-test': ('run_task_remote_test', True),
+    'repair': ('run_task_repair', True),
+    'review-dispatch': ('run_task_review_dispatch', True),
+    'review-prompt': ('run_task_review_prompt', False),
+    'review-result': ('run_task_review_result', False),
+    'show': ('run_task_show', False),
+    'status': ('run_task_status', False),
+    'submit': ('run_task_submit', False),
+}
+
+TASK_REFUSAL_ATTRIBUTES = {
+    'high-debug': 'high_debug_code',
+    'repair': 'review_repair_code',
+    'review-dispatch': 'review_dispatch_code',
+    'review-result': 'review_dispatch_code',
+}
 
 
 def _validation_packet(filename):
@@ -136,7 +156,7 @@ def parser_for_cli():
     add_action_contract_parsers(sub)
     add_task_parser(sub)
     task_actions = sub.choices['task']._subparsers._group_actions[0]
-    add_task_submission_parsers(task_actions)
+    task_submission_cli.add_task_submission_parsers(task_actions)
     add_review_parser(task_actions)
     add_review_authority_parser(sub)
     add_dispatch_check_parser(sub)
@@ -498,46 +518,13 @@ def main(argv=None):
         if args.command == 'dispatch-check':
             return run_dispatch_check(args)
         if args.command == 'task':
-            if args.action == 'status':
-                return run_task_status(args)
-            if args.action == 'submit':
-                return run_task_submit(args)
-            if args.action == 'record-pm':
-                return run_task_record_pm(args)
-            if args.action == 'show':
-                return run_task_show(args)
-            if args.action == 'inbox':
-                return run_task_inbox(args)
-            if args.action == 'github-events':
-                return run_task_github_events(args)
-            if args.action == 'ack':
-                return run_task_ack(args)
-            if args.action == 'delegate':
-                from .source_freshness import require_fresh_source
-                require_fresh_source()
-                return run_task_delegate(args)
-            if args.action == 'complete':
-                return run_task_complete(args)
-            if args.action == 'review-prompt':
-                return run_task_review_prompt(args)
-            if args.action == 'review-dispatch':
-                from .source_freshness import require_fresh_source
-                require_fresh_source()
-                return run_task_review_dispatch(args)
-            if args.action == 'review-result':
-                return run_task_review_result(args)
-            if args.action == 'high-debug':
-                from .source_freshness import require_fresh_source
-                require_fresh_source()
-                return run_task_high_debug(args)
-            if args.action == 'repair':
-                from .source_freshness import require_fresh_source
-                require_fresh_source()
-                return run_task_repair(args)
-            if args.action == 'remote-test':
-                from .source_freshness import require_fresh_source
-                require_fresh_source()
-                return run_task_remote_test(args)
+            task_action = TASK_ACTIONS.get(args.action)
+            if task_action is not None:
+                function_name, needs_fresh_source = task_action
+                if needs_fresh_source:
+                    from .source_freshness import require_fresh_source
+                    require_fresh_source()
+                return getattr(task_submission_cli, function_name)(args)
             if args.action in ('review-request','review-wait'):
                 from .review_exchange import run_exchange
                 return run_exchange(args)
@@ -656,13 +643,10 @@ def main(argv=None):
         return 0
     except LLMToolError as exc:
         refusal_code = getattr(exc, 'completion_code', None)
-        if getattr(args, 'command', None) == 'task' and getattr(args, 'action', None) in ('review-dispatch', 'review-result', 'repair', 'high-debug'):
-            refusal_code = (getattr(exc, 'review_repair_code', None) if args.action == 'repair'
-                            else getattr(exc, 'high_debug_code', None) if args.action == 'high-debug'
-                            else getattr(exc, 'review_dispatch_code', None))
-            refusal_label = {'review-result': 'review-result',
-                             'review-dispatch': 'review-dispatch',
-                             'repair': 'repair', 'high-debug': 'high-debug'}[args.action]
+        if (getattr(args, 'command', None) == 'task' and
+                getattr(args, 'action', None) in TASK_REFUSAL_ATTRIBUTES):
+            refusal_code = getattr(exc, TASK_REFUSAL_ATTRIBUTES[args.action], None)
+            refusal_label = args.action
         else:
             refusal_label = 'review-prompt'
         if (getattr(args, 'command', None) == 'task' and
