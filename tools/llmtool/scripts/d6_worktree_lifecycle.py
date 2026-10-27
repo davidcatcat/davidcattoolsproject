@@ -948,10 +948,12 @@ def _uncommitted_file(root, root_dev, relative):
 def _worktree_listing(canonical_root, root):
     """The canonical checkout's porcelain entry for exactly this root, or None."""
     raw = _task_git(canonical_root, "worktree", "list", "--porcelain").stdout
+    root_real = os.path.realpath(root)
     matches = []
     for stanza in raw.split("\n\n"):
         fields = stanza.splitlines()
-        if fields and fields[0] == "worktree " + str(root):
+        if (fields and fields[0].startswith("worktree ") and
+                os.path.realpath(fields[0][9:]) == root_real):
             matches.append(fields[1:])
     if len(matches) != 1:
         return None
@@ -1510,7 +1512,7 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=TASKS_RO
         for stanza in raw.split("\n\n"):
             first = stanza.splitlines()[:1]
             if first and first[0].startswith("worktree "):
-                listed.add(first[0][9:])
+                listed.add(os.path.realpath(first[0][9:]))
         candidates = []
         for record_path in sorted(registry.glob("*.json")):
             try:
@@ -1518,15 +1520,18 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=TASKS_RO
             except LifecycleError:
                 continue
             task_id = record.get("task_id")
+            expected_root = workspace_root / task_id if type(task_id) is str else None
             if (type(task_id) is not str or not TASK_ID_RE.fullmatch(task_id) or
                     record_path.name != task_id + ".json" or
                     record.get("schema_version") != 1 or
                     record.get("state") in ("RETAIN_BLOCKED", "REMOVED",
                                              "RETIRED_EXTERNALLY") or
-                    record.get("root_realpath") != str(workspace_root / task_id)):
+                    type(record.get("root_realpath")) is not str or
+                    os.path.realpath(record["root_realpath"]) !=
+                    os.path.realpath(expected_root)):
                 continue
             root = workspace_root / task_id
-            if os.path.lexists(root) or str(root) in listed:
+            if os.path.lexists(root) or os.path.realpath(root) in listed:
                 continue
             candidates.append((task_id, record_path, record))
         results = []
@@ -1539,7 +1544,9 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=TASKS_RO
                                            "--porcelain").stdout
                 latest_paths = {line[9:] for line in latest_listing.splitlines()
                                 if line.startswith("worktree ")}
-                if os.path.lexists(workspace_root / task_id) or str(workspace_root / task_id) in latest_paths:
+                if (os.path.lexists(workspace_root / task_id) or
+                        os.path.realpath(workspace_root / task_id) in
+                        {os.path.realpath(path) for path in latest_paths}):
                     result["result"] = "SKIPPED_EXISTS"
                 elif _read_registry_record(record_path) != record:
                     result["result"] = "BLOCKED"
