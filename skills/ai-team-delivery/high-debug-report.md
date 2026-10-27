@@ -1,5 +1,7 @@
 # High Debug report — Codex CLI `gpt-6.1-sol`
 
+**Normative Owner decision: 2026-10-27** ([Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6437493012)).
+
 This report is mandatory for a PM-assigned High Debug Task. Follow the [PM Continuation Contract](pm-continuation.md), [Defect Triage](defect-triage.md) and [AGENTS.md](../../AGENTS.md). Do not claim a live `gpt-6.1-sol` invocation unless model/version and runtime evidence are verified.
 
 ## Trigger, identity and authority
