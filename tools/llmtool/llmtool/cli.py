@@ -35,7 +35,7 @@ from .task_submission_cli import (add_task_submission_parsers, run_task_ack,
                                  run_task_github_events,
                                  run_task_record_pm, run_task_review_prompt,
                                  run_task_remote_test, run_task_review_dispatch,
-                                 run_task_review_result,
+                                 run_task_review_result, run_task_repair,
                                  run_task_show, run_task_submit)
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
@@ -524,6 +524,10 @@ def main(argv=None):
                 return run_task_review_dispatch(args)
             if args.action == 'review-result':
                 return run_task_review_result(args)
+            if args.action == 'repair':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
+                return run_task_repair(args)
             if args.action == 'remote-test':
                 from .source_freshness import require_fresh_source
                 require_fresh_source()
@@ -646,13 +650,16 @@ def main(argv=None):
         return 0
     except LLMToolError as exc:
         refusal_code = getattr(exc, 'completion_code', None)
-        if getattr(args, 'command', None) == 'task' and getattr(args, 'action', None) in ('review-dispatch', 'review-result'):
-            refusal_code = getattr(exc, 'review_dispatch_code', None)
-            refusal_label = 'review-result' if args.action == 'review-result' else 'review-dispatch'
+        if getattr(args, 'command', None) == 'task' and getattr(args, 'action', None) in ('review-dispatch', 'review-result', 'repair'):
+            refusal_code = (getattr(exc, 'review_repair_code', None) if args.action == 'repair'
+                            else getattr(exc, 'review_dispatch_code', None))
+            refusal_label = {'review-result': 'review-result',
+                             'review-dispatch': 'review-dispatch',
+                             'repair': 'repair'}[args.action]
         else:
             refusal_label = 'review-prompt'
         if (getattr(args, 'command', None) == 'task' and
-                getattr(args, 'action', None) in ('review-prompt', 'review-dispatch', 'review-result') and
+                getattr(args, 'action', None) in ('review-prompt', 'review-dispatch', 'review-result', 'repair') and
                 type(refusal_code) is str and
                 re.fullmatch(r'[A-Z0-9_]{1,64}', refusal_code)):
             print('llmtool: ' + refusal_label + ' refused: ' + refusal_code, file=sys.stderr)
