@@ -801,6 +801,23 @@ _INDEX_METADATA = 'index '
 _MODE_METADATA = ('old mode ', 'new mode ', 'new file mode ', 'deleted file mode ')
 
 
+class _DeveloperOutputUnsupported(ValueError):
+    """A recognized file operation that the text-diff contract does not support."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+class _DeveloperSourceFiles(dict):
+    """Source text plus the set of paths that existed at the bound revision."""
+
+    def __init__(self):
+        super().__init__()
+        self.existing_paths = set()
+        self.regular_paths = set()
+
+
 def _assignment_paths(read_paths, write_paths):
     def valid(path):
         return (type(path) is str and 0 < len(path) <= 512 and
@@ -833,7 +850,7 @@ def _patch_paths(patch):
     if type(patch) is not str or not patch or not patch.startswith('diff --git '):
         raise ValueError
     lines = patch.splitlines()
-    paths = set()
+    paths = {}
     index = 0
     while index < len(lines):
         match = _DIFF_HEADER.fullmatch(lines[index])
@@ -849,14 +866,22 @@ def _patch_paths(patch):
             raise ValueError
         if path in paths:
             raise ValueError
-        paths.add(path)
         index += 1
 
         # Accept only ordinary index metadata for tracked files. A newly
         # created file has the exact no-index shape emitted by our capture
         # helper; other mode changes remain rejected.
-        new_file = (index < len(lines) and lines[index] == 'new file mode 100644')
-        if new_file:
+        new_file = False
+        deleted_file = False
+        if index < len(lines) and lines[index].startswith('new file mode '):
+            if lines[index] != 'new file mode 100644':
+                raise _DeveloperOutputUnsupported('DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+            new_file = True
+            index += 1
+        elif index < len(lines) and lines[index].startswith('deleted file mode '):
+            if lines[index] != 'deleted file mode 100644':
+                raise _DeveloperOutputUnsupported('DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+            deleted_file = True
             index += 1
         elif index < len(lines) and lines[index].startswith(_MODE_METADATA):
             raise ValueError
@@ -865,8 +890,10 @@ def _patch_paths(patch):
         if index + 2 >= len(lines):
             raise ValueError
         expected_old = '--- /dev/null' if new_file else '--- a/' + path
-        if lines[index] != expected_old or lines[index + 1] != '+++ b/' + path:
+        expected_new = '+++ /dev/null' if deleted_file else '+++ b/' + path
+        if lines[index] != expected_old or lines[index + 1] != expected_new:
             raise ValueError
+        paths[path] = 'new' if new_file else 'deleted' if deleted_file else 'modified'
         index += 2
         hunks = 0
         changed = False
@@ -876,6 +903,9 @@ def _patch_paths(patch):
                 raise ValueError
             old_remaining = int(hunk.group(2) or '1')
             new_remaining = int(hunk.group(4) or '1')
+            if ((new_file and old_remaining != 0) or
+                    (deleted_file and new_remaining != 0)):
+                raise ValueError
             index += 1
             old_seen = new_seen = 0
             while (index < len(lines) and
@@ -887,10 +917,10 @@ def _patch_paths(patch):
                 if line.startswith(' '):
                     old_seen += 1
                     new_seen += 1
-                elif line.startswith('-'):
+                elif line.startswith('-') and not new_file:
                     old_seen += 1
                     changed = True
-                elif line.startswith('+'):
+                elif line.startswith('+') and not deleted_file:
                     new_seen += 1
                     changed = True
                 else:
@@ -932,7 +962,7 @@ def _added_diff_content(value):
     return '\n'.join(added)
 
 
-def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=False):
+def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=True):
     """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
@@ -952,13 +982,15 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Fa
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
     try:
         paths = _patch_paths(value)
+    except _DeveloperOutputUnsupported as exc:
+        return exc.code
     except ValueError:
         return 'DEVELOPER_OUTPUT_INVALID_DIFF'
-    if not paths.issubset(set(write_paths)):
+    if not set(paths).issubset(set(write_paths)):
         return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
-    if not allow_new_files and any(
-            line.startswith('new file mode ') for line in value.splitlines()):
-        return 'DEVELOPER_OUTPUT_INVALID_DIFF'
+    if not allow_new_files and any(operation == 'new'
+                                   for operation in paths.values()):
+        return 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
     return None
 
 
@@ -978,6 +1010,34 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
     if source_files is None and normalized_rejection is not None:
         return None, (), normalized_rejection
     if source_files is not None:
+        try:
+            operations = _patch_paths(normalized)
+        except _DeveloperOutputUnsupported as exc:
+            return None, (), exc.code
+        except ValueError:
+            return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
+        special = {path: operation for path, operation in operations.items()
+                   if operation in ('new', 'deleted')}
+        for path, operation in special.items():
+            source = source_files.get(path)
+            if operation == 'new' and source != '':
+                return None, (), 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
+            existing_paths = getattr(source_files, 'existing_paths', None)
+            if (operation == 'deleted' and existing_paths is not None and
+                    path not in existing_paths):
+                return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
+            regular_paths = getattr(source_files, 'regular_paths', None)
+            if (operation == 'deleted' and regular_paths is not None and
+                    path not in regular_paths):
+                return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
+        if special and len(special) != len(operations):
+            return None, (), ('DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
+                               if 'new' in special.values() else
+                               'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+        if special:
+            # The source-pinned apply check validates deletion content and the
+            # empty source side of additions below.
+            return normalized, tuple(tokens), None
         anchored, anchor_tokens, valid_anchor = reanchor_developer_output(
             normalized, write_paths, source_files, return_valid=True)
         if not valid_anchor:
@@ -991,7 +1051,7 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
 
 
 def _developer_output_rejection(value, write_paths, *, normalize=False,
-                                allow_new_files=False):
+                                allow_new_files=True):
     """Classify output strictly unless a text-proposal route opts into salvage."""
     if not normalize:
         return _strict_developer_output_rejection(value, write_paths,
@@ -1237,9 +1297,23 @@ def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
 
 def _text_developer_source_files(root, source_sha, write_paths):
     """Read only allowed source blobs from the bound D6 revision."""
-    files = {}
+    files = _DeveloperSourceFiles()
     for path in write_paths:
         try:
+            entry = task_completion._git(
+                root, ('ls-tree', '-z', source_sha, '--', path), limit=4096)
+            if not entry:
+                files[path] = ''
+                continue
+            metadata, listed_path = entry.rstrip(b'\0').split(b'\t', 1)
+            mode, object_type, _object_id = metadata.decode('ascii').split(' ')
+            if listed_path.decode('utf-8', 'strict') != path:
+                return None
+            if object_type != 'blob' or mode not in ('100644', '100755'):
+                return None
+            files.existing_paths.add(path)
+            if mode == '100644':
+                files.regular_paths.add(path)
             raw = task_completion._git(
                 root, ('show', f'{source_sha}:{path}'), limit=8 * 1024 * 1024)
             files[path] = raw.decode('utf-8', 'strict')

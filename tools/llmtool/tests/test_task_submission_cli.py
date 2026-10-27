@@ -2171,7 +2171,7 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
             'closing fence after the diff': (good + '```\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'deleted file': (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
                              f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n',
-                             'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                             None),
             'rename': (f'diff --git a/{target} b/tools/llmtool/renamed.py\nrename from {target}\n'
                        'rename to tools/llmtool/renamed.py\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'path outside write_paths': (good.replace(target, 'tools/llmtool/other.py'),
@@ -2185,14 +2185,39 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
                 header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', None),
             'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
                          f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
-                         'DEVELOPER_OUTPUT_INVALID_DIFF'),
-            'new executable file': (f'diff --git a/dev/null b/{target}\nnew file mode 100755\n'
+                         None),
+            'new executable file': (f'diff --git a/{target} b/{target}\nnew file mode 100755\n'
                                     f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
-                                    'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                                    'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'),
+            'new symlink': (f'diff --git a/{target} b/{target}\nnew file mode 120000\n'
+                            f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+target\n',
+                            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'),
+            'deleted executable file': (
+                f'diff --git a/{target} b/{target}\ndeleted file mode 100755\n'
+                f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n',
+                'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'),
         }
         for label, (text, expected) in shapes.items():
             with self.subTest(label):
                 self.assertEqual(rejection(text, [target]), expected)
+
+    def test_file_operation_scope_and_source_existence(self):
+        target = 'tools/llmtool/new.py'
+        outside = 'tools/llmtool/outside.py'
+        new_file = (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
+                    f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n')
+        deletion = (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
+                    f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n')
+        outside_new = new_file.replace(target, outside)
+        self.assertEqual(submission_cli._developer_output_rejection(
+            outside_new, [target]), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files={target: ''})[2], None)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files={target: 'already exists\n'})[2],
+            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+        self.assertEqual(submission_cli._developer_normalized_output(
+            deletion, [target], source_files={target: 'old\n'})[2], None)
 
     def test_unsafe_shapes_remain_rejected(self):
         target = 'tools/llmtool/example.py'
@@ -2271,14 +2296,6 @@ class ModeMetadataRejectionTests(unittest.TestCase):
                 metadata=('old mode 100644\n', 'new mode 100755\n'), hunk=False),
             'solo old mode': self._section(metadata=('old mode 100644\n',)),
             'solo new mode': self._section(metadata=('new mode 100755\n',)),
-            'new file mode': (
-                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
-                'new file mode 100644\n'
-                f'--- /dev/null\n+++ b/{self.TARGET}\n@@ -0,0 +1 @@\n+new\n'),
-            'deleted file mode': (
-                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
-                'deleted file mode 100644\n'
-                f'--- a/{self.TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'),
             'mode change in a later section': clean + self._section(
                 path=self.SECOND, metadata=('old mode 100644\n', 'new mode 100755\n')),
             'mode change in an earlier section': self._section(

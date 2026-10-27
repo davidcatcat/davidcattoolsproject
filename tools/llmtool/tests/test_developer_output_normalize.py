@@ -35,6 +35,13 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertEqual(artifact, valid)
         self.assertEqual(tokens, ())
 
+    def test_missing_final_newline_keeps_normalization_behavior(self):
+        raw = self.HEADER + '@@ -1,8 +1,8 @@\n-old\n+new'
+        normalized, tokens = normalize_developer_output(raw, [self.PATH])
+        self.assertEqual(normalized, self.HEADER + '@@ -1,1 +1,1 @@\n-old\n+new')
+        self.assertIn('HUNK_COUNTS_RECOUNTED', tokens)
+        self.assertIsNone(_developer_output_rejection(normalized, [self.PATH]))
+
     def test_opencode_strict_mode_does_not_normalize(self):
         missing_header = (f'--- a/{self.PATH}\n+++ b/{self.PATH}\n'
                           '@@ -1,9 +1,9 @@\n-old\n+new\n')
