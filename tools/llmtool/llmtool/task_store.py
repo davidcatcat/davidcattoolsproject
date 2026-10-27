@@ -584,7 +584,9 @@ def _validate(record):
             _fail('REVIEW_REPAIR_CLAIM_INVALID')
         identities = set()
         for item in claims:
-            if (type(item) is not dict or set(item) != _REVIEW_REPAIR_CLAIM_FIELDS or
+            if (type(item) is not dict or
+                    set(item) not in (_REVIEW_REPAIR_CLAIM_FIELDS,
+                                      _REVIEW_REPAIR_CLAIM_FIELDS | {'repair_task_id'}) or
                     type(item.get('executor_task')) is not str or
                     not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
                     type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
@@ -599,7 +601,10 @@ def _validate(record):
                     re.fullmatch(r'[0-9a-f]{64}', item['packet_sha256']) is None or
                     type(item.get('claimed_at')) is not str or
                     re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ',
-                                 item['claimed_at']) is None):
+                                 item['claimed_at']) is None or
+                    ('repair_task_id' in item and
+                     (type(item['repair_task_id']) is not str or
+                      not re.fullmatch(r'[0-9a-f]{32}', item['repair_task_id'])))):
                 _fail('REVIEW_REPAIR_CLAIM_INVALID')
             identity = (item['pr'], item['head_sha'], item['version'], item['attempt'])
             if identity in identities:
@@ -2292,6 +2297,8 @@ class TaskStore:
                     _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                 added = new_claims[-1]
                 if (type(added) is not dict or
+                        type(added.get('repair_task_id')) is not str or
+                        re.fullmatch(r'[0-9a-f]{32}', added['repair_task_id']) is None or
                         sum(1 for item in old_claims if item.get('pr') == added.get('pr')) >= 2):
                     _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
             from . import worker_dispatch
