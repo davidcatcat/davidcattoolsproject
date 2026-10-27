@@ -65,7 +65,7 @@ def _session_observed(thread_id, sessions_dir=None):
     root = Path(sessions_dir) if sessions_dir is not None else Path.home() / '.codex' / 'sessions'
     try:
         root_stat = root.lstat()
-        if root.is_symlink() or not root_stat.is_dir():
+        if root.is_symlink() or not stat.S_ISDIR(root_stat.st_mode):
             return 'UNKNOWN', 'UNKNOWN'
     except OSError:
         return 'UNKNOWN', 'UNKNOWN'
