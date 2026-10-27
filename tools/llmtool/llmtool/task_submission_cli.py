@@ -2669,6 +2669,82 @@ def run_task_show(args, *, store=None, stdout=None):
     return 0
 
 
+def _completion_repair_artifact_segments(task, store, *, executor_task, common_dir,
+                                         root, branch, source_sha):
+    """Bind the original and repair proposals to consecutive D6 heads."""
+    claims = task.get('review_repair_claims')
+    if claims is None:
+        return None
+
+    def invalid():
+        error = LLMToolError('developer artifact repair chain is invalid')
+        error.completion_code = 'DEVELOPER_ARTIFACT_CHAIN_INVALID'
+        raise error
+
+    try:
+        if type(claims) is not list or not claims:
+            invalid()
+        ordered = sorted(claims, key=lambda claim: claim.get('attempt', 0)
+                         if type(claim) is dict else 0)
+        if [claim.get('attempt') for claim in ordered] != list(range(1, len(ordered) + 1)):
+            invalid()
+        original = task.get('developer')
+        if type(original) is not dict or original.get('source_sha') != source_sha:
+            invalid()
+        write_paths = original.get('write_paths')
+        if type(write_paths) is not list:
+            invalid()
+        registration = task_completion.read_d6_registration(
+            executor_task, common_dir, allowed_states=task_completion._D6_EVIDENCE_STATES)
+        if (registration.root != root or registration.branch != branch or
+                registration.source_sha != source_sha):
+            invalid()
+        artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
+                      source_sha, ordered[0].get('head_sha'))]
+        for index, claim in enumerate(ordered):
+            if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
+                invalid()
+            repair_id = claim.get('repair_task_id')
+            if type(repair_id) is not str:
+                invalid()
+            try:
+                repair = store.get(repair_id)
+            except Exception:
+                invalid()
+            developer = repair.get('developer') if type(repair) is dict else None
+            if (type(developer) is not dict or
+                    developer.get('state') != 'DEVELOPER_RESPONDED' or
+                    developer.get('source_sha') != claim.get('head_sha')):
+                invalid()
+            next_head = (ordered[index + 1].get('head_sha')
+                         if index + 1 < len(ordered) else registration.result_sha)
+            artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
+                              claim.get('head_sha'), next_head))
+        for segment_artifact, segment_digest, _, _ in artifacts:
+            if (type(segment_artifact) is not str or not segment_artifact or
+                    type(segment_digest) is not str or
+                    hashlib.sha256(segment_artifact.encode('utf-8')).hexdigest() !=
+                    segment_digest):
+                invalid()
+            paths = []
+            for line in segment_artifact.splitlines():
+                if line.startswith('diff --git '):
+                    match = re.fullmatch(r'diff --git a/([^\s]+) b/([^\s]+)', line)
+                    if match is None or match.group(1) != match.group(2):
+                        invalid()
+                    paths.append(match.group(1))
+            if not paths or len(paths) != len(set(paths)) or not set(paths).issubset(
+                    set(write_paths)):
+                invalid()
+    except LLMToolError as exc:
+        if getattr(exc, 'completion_code', None) == 'DEVELOPER_ARTIFACT_CHAIN_INVALID':
+            raise
+        invalid()
+    except Exception:
+        invalid()
+    return artifacts
+
+
 def run_task_complete(args, *, store=None, reviewer_adapter=None):
     """Verify an Executor result and make one non-replayable original-profile PM call.
 
@@ -2748,6 +2824,10 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             error = LLMToolError('Executor admission source does not match Developer source')
             error.completion_code = 'D6_ADMISSION_SOURCE_MISMATCH'
             raise error
+        artifact_segments = _completion_repair_artifact_segments(
+            task, store, executor_task=args.executor_task,
+            common_dir=initial.get('common_dir'), root=initial.get('root'),
+            branch=initial.get('branch'), source_sha=developer['source_sha'])
         git_evidence = task_completion.collect_executor_result(
             task_id=args.executor_task, expected_common_dir=initial.get('common_dir'),
             expected_root=initial.get('root'), expected_branch=initial.get('branch'),
@@ -2756,7 +2836,9 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             expected_session_ref=initial.get('executor_session_ref'),
             expected_native_session_id=initial.get('executor_native_session_id'),
             write_paths=developer['write_paths'], artifact=developer['artifact'],
-            artifact_sha256=developer['artifact_sha256'])
+            artifact_sha256=developer['artifact_sha256'],
+            **({'artifact_segments': artifact_segments}
+               if artifact_segments is not None else {}))
         direct_callback = developer.get('direct_result_callback')
         callback_evidence = (direct_callback.get('evidence')
                              if type(direct_callback) is dict else None)
