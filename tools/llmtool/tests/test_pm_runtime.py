@@ -2,8 +2,10 @@
 
 import io
 import json
+import os
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -51,11 +53,15 @@ class PMRuntimeTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'state'
+        pm_runtime._ensure_state_dir(self.root)
         self.cwd = self.temp.name
         self.observe = patch.object(pm_runtime.active_pm_inbox,
                                     'observe_claude_session', return_value=self.cwd)
         self.observe.start()
         self.addCleanup(self.observe.stop)
+        pm_runtime._write_json_atomic(self.root, pm_runtime._binding_path(self.root, SESSION), {
+            'runtime': 'claude-code', 'native_session_id': SESSION, 'cwd': self.cwd,
+            'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1)})
 
     def runtime(self, process=None, **kwargs):
         self.process = process or FakeProcess()
@@ -183,6 +189,121 @@ class PMRuntimeTests(unittest.TestCase):
         with self.assertRaises(LLMToolError) as raised:
             self.runtime(runtime='codex').open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
+
+    def test_create_and_read_dedicated_binding(self):
+        calls = []
+
+        def starter(argv, cwd, env):
+            calls.append((argv, cwd, env))
+            return FakeProcess()
+
+        binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
+                                                 environ={'HOME': self.temp.name},
+                                                 clock=lambda: 1000, runner=starter)
+        self.assertEqual(calls[0][0][:1], ['claude'])
+        self.assertEqual(calls[0][0][1], '--session-id')
+        self.assertEqual(calls[0][0][2], binding['native_session_id'])
+        self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
+
+    def test_open_refuses_non_dedicated_session(self):
+        (self.root / (SESSION + '.binding.json')).unlink()
+        with self.assertRaises(LLMToolError) as raised:
+            self.runtime().open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_NOT_DEDICATED')
+        self.assertIn('create', str(raised.exception))
+
+    def test_open_refuses_external_live_session_process(self):
+        with patch.object(pm_runtime.subprocess, 'check_output',
+                          return_value=f'123 claude --resume {SESSION}'.encode()):
+            with self.assertRaises(LLMToolError) as raised:
+                self.runtime().open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_LIVE_ELSEWHERE')
+
+    def test_open_refuses_fresh_transcript_without_runtime_lock(self):
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text('{}', encoding='utf-8')
+        now = time.time()
+        os.utime(transcript, (now, now))
+        with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
+            runtime = self.runtime(clock=lambda: now)
+            with self.assertRaises(LLMToolError) as raised:
+                runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_LIVE_ELSEWHERE')
+
+    def test_stream_metadata_and_text_rebuild_without_duplication(self):
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 3,
+             'delta': {'type': 'text_delta', 'text': 'Hel'}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 3,
+             'delta': {'type': 'text_delta', 'text': 'lo'}}},
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': 'Hello'}]}},
+            {'type': 'result', 'result': 'Hello'}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send('request'))
+        self.assertTrue(all(e['turn_id'] and type(e['seq']) is int for e in events))
+        self.assertEqual([e['seq'] for e in events], list(range(len(events))))
+        deltas = ''.join(e['text'] for e in events if e['type'] == 'TEXT_DELTA')
+        final = next(e for e in events if e['type'] == 'ASSISTANT_TEXT')
+        rebuilt = final['text'] if final.get('final') else deltas + final['text']
+        self.assertEqual(rebuilt, 'Hello')
+        self.assertEqual([e['block_index'] for e in events if e['type'] == 'TEXT_DELTA'], [3, 3])
+        runtime.close()
+
+    def test_tool_result_reason_is_fixed_and_does_not_expose_payload(self):
+        process = FakeProcess(encoded(
+            {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': 'a', 'content': 'secret output'}]}},
+            {'type': 'user', 'message': {'content': [
+                {'type': 'tool_result', 'tool_use_id': 'b', 'is_error': True,
+                 'permission_denial': 'private reason', 'content': 'private'}]}},
+            {'type': 'result', 'result': 'done'}))
+        runtime = self.runtime(process)
+        runtime.open()
+        results = [event for event in runtime.send('request') if event['type'] == 'TOOL_RESULT']
+        self.assertEqual([event['reason'] for event in results], ['OK', 'PERMISSION_DENIED'])
+        self.assertNotIn('private', repr(results))
+        runtime.close()
+
+    def test_stderr_is_bounded_screened_and_process_alive_is_exposed(self):
+        class StderrProcess(FakeProcess):
+            stderr = io.BytesIO(b'quota exceeded')
+
+        process = StderrProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        self.assertTrue(runtime.is_alive())
+        events = list(runtime.send('request'))
+        error = next(event for event in events if event['type'] == 'RUNTIME_ERROR')
+        self.assertEqual(error['code'], 'PM_QUOTA_EXHAUSTED')
+        self.assertEqual(error['stderr'], 'quota exceeded')
+        runtime.close()
+        self.assertFalse(runtime.is_alive())
+
+    def test_repeated_idempotency_key_reuses_persisted_turn(self):
+        first_process = FakeProcess(encoded({'type': 'result', 'result': 'done'}))
+        runtime = self.runtime(first_process)
+        runtime.open()
+        first = list(runtime.send('request', idempotency_key='request-1'))
+        runtime.close()
+        second_process = FakeProcess()
+        runtime = self.runtime(second_process)
+        runtime.open()
+        replay = list(runtime.send('request', idempotency_key='request-1'))
+        self.assertEqual(len(first_process.stdin.getvalue().splitlines()), 1)
+        self.assertEqual(second_process.stdin.getvalue(), b'')
+        self.assertEqual(replay[0]['type'], 'TURN_REPLAY')
+        self.assertEqual(replay[0]['turn_id'], first[-1]['turn_id'])
+        runtime.close()
+
+    def test_close_terminates_child(self):
+        process = FakeProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        runtime.close()
+        self.assertTrue(process.terminated)
 
 
 if __name__ == '__main__':
