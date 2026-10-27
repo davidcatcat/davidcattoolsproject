@@ -268,7 +268,13 @@ class ChatTUI:
         self.pm_turn_active = False
         self.pm_turn_started = None
         self.pm_interrupted = False
-        self.pm_block_open = False   # the last conversation block is the streaming PM reply
+        self.pm_block_raw = None     # raw text of the streaming PM block (None: no block open)
+        self.pm_block_start = 0      # where that block's displayed text starts in the pane
+        # Exit/connect hand-off: a runtime opened by the connect worker but not yet adopted
+        # is closed by whichever side sees the other first (close_pm or the worker).
+        self._pm_lock = threading.Lock()
+        self._pm_exiting = False
+        self._pm_unadopted = None
         self.pm_deltas = False       # text deltas seen since the last assistant/tool boundary
         self.pm_tools = {}
         self._loop = None
@@ -678,7 +684,7 @@ class ChatTUI:
 
         New output closes the Task detail so it is never hidden behind that pane.
         """
-        self.pm_block_open = False  # Any other output ends the streaming PM block.
+        self._pm_finalize()  # Any other output ends the streaming PM block (shown in full).
         if self.show_detail:
             self.toggle_detail(False)
         if self.show_list or self.show_events:
@@ -1214,8 +1220,9 @@ class ChatTUI:
     def _post(self, loop, callback, *args):
         try:
             loop.call_soon_threadsafe(callback, *args)
+            return True
         except RuntimeError:
-            pass  # Loop closed: the TUI has exited.
+            return False  # Loop closed: the TUI has exited.
 
     @staticmethod
     def _pm_read_history(session_id, runtime):
@@ -1228,16 +1235,35 @@ class ChatTUI:
 
     def _pm_connect(self, session_id, cwd, loop):
         outcome = {"session": session_id, "cwd": cwd}
+        runtime = None
         try:
             runtime = self.pm_factory(session_id, cwd)
             runtime.open()
+            with self._pm_lock:
+                if self._pm_exiting:
+                    exiting = True
+                else:
+                    exiting, self._pm_unadopted = False, runtime
+            if exiting:  # The TUI exited while open() ran: nothing will adopt it.
+                self._close_runtime(runtime)
+                return
             outcome["runtime"] = runtime
             outcome["history"], outcome["history_error"] = self._pm_read_history(session_id, runtime)
         except LLMToolError as exc:
             outcome["error"] = chat_tui_pm.error_code(exc)
         except Exception:
             outcome["error"] = chat_tui_task.UNKNOWN
-        self._post(loop, self.finish_pm_connect, outcome)
+        if not self._post(loop, self.finish_pm_connect, outcome) and "runtime" in outcome:
+            self._drop_unadopted(runtime)
+
+    def _drop_unadopted(self, runtime):
+        """Close a runtime nobody adopted (completion could not be delivered)."""
+        with self._pm_lock:
+            mine = self._pm_unadopted is runtime
+            if mine:
+                self._pm_unadopted = None
+        if mine:
+            self._close_runtime(runtime)
 
     def finish_pm_connect(self, outcome):
         self.pm_pending = False
@@ -1245,8 +1271,12 @@ class ChatTUI:
             self.pm_state = None
             self.append("llmtool: PM not connected. " + chat_tui_pm.error_text(outcome["error"]))
             return
-        if self._received_signal is not None or self.app.is_done:
-            self._close_runtime(outcome["runtime"])
+        with self._pm_lock:
+            adopted = self._pm_unadopted is outcome["runtime"] and not self._pm_exiting
+            if self._pm_unadopted is outcome["runtime"]:
+                self._pm_unadopted = None
+        if not adopted or self._received_signal is not None or self.app.is_done:
+            self._close_runtime(outcome["runtime"])   # Closing twice is a no-op in pm_runtime.
             return
         self.pm_runtime = outcome["runtime"]
         self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
@@ -1322,20 +1352,34 @@ class ChatTUI:
         self._post(loop, self.finish_pm_turn)
 
     def _pm_extend(self, text):
-        """Stream text into the current PM block, opening one when other output came between."""
+        """Stream text into the current PM block; every update is screened (see
+        chat_tui_pm.screen_stream), so the pane shows only redacted, settled text."""
         if not text:
             return
-        if not self.pm_block_open:
-            self.append("PM:\n" + text)
-            self.pm_block_open = True
-            return
+        if self.pm_block_raw is None:
+            self.append("PM:")
+            self.pm_block_raw = ""
+            self.pm_block_start = len(self.conversation.buffer.text) + 1   # after "\n"
+        self.pm_block_raw += text
+        self._pm_render(final=False)
+
+    def _pm_render(self, final):
         buffer = self.conversation.buffer
         old = buffer.text
         follow = buffer.cursor_position >= len(old)
-        new = old + terminal_safe_text(text)
-        buffer.set_document(self._Document(new, len(new) if follow else buffer.cursor_position),
-                            bypass_readonly=True)
+        head = old[:self.pm_block_start - 1]
+        shown = terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final))
+        new = head + "\n" + shown
+        position = len(new) if follow else min(buffer.cursor_position, len(new))
+        buffer.set_document(self._Document(new, position), bypass_readonly=True)
         self.app.invalidate()
+
+    def _pm_finalize(self):
+        """End the streaming block: show its full screened text, held-back tail included."""
+        if self.pm_block_raw is None:
+            return
+        self._pm_render(final=True)
+        self.pm_block_raw = None
 
     def pm_event(self, event):
         kind = event.get("type")
@@ -1346,11 +1390,12 @@ class ChatTUI:
             # The same text already streamed as deltas; show it only when it did not.
             if not self.pm_deltas:
                 self._pm_extend(event["text"])
+            self._pm_finalize()
             self.pm_deltas = False
         elif kind == "TOOL_USE":
             name = event.get("name") if type(event.get("name")) is str else None
             self.pm_tools[event.get("tool_use_id")] = name
-            self.append("  · tool " + (name or chat_tui_task.UNKNOWN))
+            self.append("  · tool " + chat_tui_pm.safe_name(name))
             self.pm_deltas = False
         elif kind == "TOOL_RESULT":
             self.append(chat_tui_pm.tool_result_text(event, self.pm_tools.get(event.get("tool_use_id"))))
@@ -1384,9 +1429,15 @@ class ChatTUI:
             self.append("llmtool: " + chat_tui_pm.error_text(chat_tui_task.UNKNOWN))
 
     def close_pm(self):
-        runtime, self.pm_runtime = self.pm_runtime, None
-        if runtime is not None:
-            self._close_runtime(runtime)
+        """Exit path: close the adopted runtime and any one a connect worker opened but has
+        not handed over yet; a connect still inside open() closes its own (see _pm_connect)."""
+        with self._pm_lock:
+            self._pm_exiting = True
+            runtimes = [self.pm_runtime, self._pm_unadopted]
+            self.pm_runtime, self._pm_unadopted = None, None
+        for runtime in runtimes:
+            if runtime is not None:
+                self._close_runtime(runtime)
 
     def request_quit(self):
         self.close_menu()  # Ctrl-C/Ctrl-D: also restores the default Esc timeout.

@@ -10,10 +10,18 @@ read through the small functions below; while S1 does not report them, the TUI
 shows "not reported" instead of guessing.
 """
 
+import re
+
 from .chat_tui_task import UNKNOWN
+from .test_output_excerpts import _emitted_sensitive
 
 NOT_REPORTED = "not reported by pm_runtime S1"
 HISTORY_SHOWN = 20  # Most recent stored turns rendered on connect.
+WITHHELD = "[PM text withheld: it contains credential-like text]"
+# While a PM reply streams, the ASCII token still growing at the end (any run of
+# non-space ASCII) is not shown until it ends, so a credential split across deltas is
+# complete, and redacted, before any part of it is shown. CJK text streams at once.
+_OPEN_RUN = re.compile(r"[!-~]+$")
 
 # Recovery guidance per pm_runtime error code (TUI text; pm_runtime returns codes only).
 _RECOVERY = {
@@ -68,7 +76,7 @@ def event_ids(event):
 
 def tool_result_text(event, name):
     """One line for a TOOL_RESULT; never claims a permission denial S1 cannot report."""
-    label = "  · tool " + (name or UNKNOWN)
+    label = "  · tool " + safe_name(name)
     if not event.get("is_error"):
         return label + ": done"
     reason = event.get("reason")
@@ -78,6 +86,40 @@ def tool_result_text(event, name):
         return label + ": error (" + reason + ")"
     return (label + ": error (an auto-denied permission is possible; pm_runtime does not "
             "report the reason)")
+
+
+# -- streamed text screening (pm_runtime S1 screens only the stored result) ----------
+def screen_stream(raw, final):
+    """Display text for one streamed PM block.
+
+    The whole block is redacted with the existing credential patterns every time, so
+    a secret split across deltas is matched once it is complete. While streaming, the
+    ASCII token still growing at the end and an unterminated private-key block are
+    not shown yet. If anything credential-like remains unclassified, the block is
+    withheld entirely.
+    """
+    from .task_submission_cli import _redact_rejected_output
+    if type(raw) is not str:
+        return WITHHELD
+    shown = _redact_rejected_output(raw)
+    if shown.startswith("[REDACTED_SENSITIVE_OUTPUT]") or _emitted_sensitive(shown):
+        return WITHHELD
+    if final:
+        return shown
+    cut = len(shown)
+    begin = shown.rfind("-----BEGIN")
+    if begin != -1 and "-----END" not in shown[begin:]:
+        cut = min(cut, begin)
+    run = _OPEN_RUN.search(shown)
+    if run is not None:
+        cut = min(cut, run.start())
+    return shown[:cut]
+
+
+def safe_name(name):
+    if type(name) is not str or not name:
+        return UNKNOWN
+    return "[withheld]" if _emitted_sensitive(name) else name
 
 
 # -- display helpers -----------------------------------------------------------------
