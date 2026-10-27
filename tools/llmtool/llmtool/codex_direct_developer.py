@@ -16,7 +16,7 @@ import time
 
 from . import worker_dispatch
 from .errors import LLMToolError
-from .providers.cli_lifecycle import CLIProcessLifecycle
+from .providers.cli_lifecycle import CLIHostTermination, CLIProcessLifecycle
 
 MAX_WALL_CLOCK_SECONDS = 600
 MAX_OUTPUT_BYTES = 1024 * 1024
@@ -24,6 +24,9 @@ MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
 _THREAD_ID = re.compile(r'[0-9a-fA-F-]{16,64}\Z')
 _EFFORT = re.compile(r'(?:minimal|low|medium|high|xhigh)\Z')
+_TOOL_CALL_ITEM_TYPES = frozenset((
+    'command_execution', 'tool_call', 'function_call', 'mcp_tool_call',
+))
 
 
 class DirectCodexError(LLMToolError):
@@ -120,6 +123,8 @@ def _result_from_events(raw):
     thread_id = None
     final = None
     usage = None
+    tool_calls = 0
+    tool_calls_recognized = False
     first = True
     try:
         for line in raw.decode('utf-8').splitlines():
@@ -137,6 +142,11 @@ def _result_from_events(raw):
                 if type(current) is not str or not _THREAD_ID.fullmatch(current) or (thread_id and current != thread_id):
                     _fail('CODEX_THREAD_ID_INVALID')
                 thread_id = current
+            elif event.get('type') == 'item.started':
+                item = event.get('item')
+                if type(item) is dict and item.get('type') in _TOOL_CALL_ITEM_TYPES:
+                    tool_calls += 1
+                    tool_calls_recognized = True
             elif event.get('type') == 'item.completed':
                 item = event.get('item')
                 if type(item) is dict and item.get('type') == 'agent_message':
@@ -163,6 +173,8 @@ def _result_from_events(raw):
         raise
     except (UnicodeError, ValueError, RecursionError):
         _fail('CODEX_EVENT_INVALID')
+    if usage is not None and tool_calls_recognized:
+        usage['tool_calls'] = tool_calls
     if thread_id is None:
         _fail('CODEX_THREAD_ID_MISSING')
     if final is None:
@@ -194,6 +206,8 @@ def _result_from_events(raw):
 def _usage_from_events(raw):
     """Retain valid usage observations even when the CLI turn times out."""
     usage = None
+    tool_calls = 0
+    tool_calls_recognized = False
     try:
         for line in raw.decode('utf-8').splitlines():
             if not line:
@@ -201,6 +215,11 @@ def _usage_from_events(raw):
             event = json.loads(line, object_pairs_hook=_unique_keys,
                                parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
             if type(event) is not dict or event.get('type') != 'turn.completed':
+                item = event.get('item') if type(event) is dict else None
+                if (type(event) is dict and event.get('type') == 'item.started' and
+                        type(item) is dict and item.get('type') in _TOOL_CALL_ITEM_TYPES):
+                    tool_calls += 1
+                    tool_calls_recognized = True
                 continue
             candidate = event.get('usage')
             if type(candidate) is not dict:
@@ -220,7 +239,17 @@ def _usage_from_events(raw):
                     usage['reasoning_tokens'] = reasoning_tokens
     except (UnicodeError, ValueError, RecursionError):
         return usage
+    if usage is not None and tool_calls_recognized:
+        usage['tool_calls'] = tool_calls
     return usage
+
+
+def _has_valid_final_result(raw):
+    try:
+        _result_from_events(raw)
+    except DirectCodexError:
+        return False
+    return True
 
 
 def _unique_keys(pairs):
@@ -393,6 +422,11 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                 # Keep TMPDIR alive until the owned child has stopped using it.
                 close_lifecycle(type(exc), exc, exc.__traceback__)
                 raise
+        # A signalled child may have emitted no JSON, or only a partial JSONL
+        # record. Preserve the more useful interruption outcome before any
+        # event/final-message parser can classify that output as malformed.
+        if process.returncode is not None and process.returncode < 0:
+            _fail('CODEX_INTERRUPTED')
         if process.returncode != 0:
             _fail('CODEX_EXIT_NONZERO')
         thread_id, result, usage = _result_from_events(bytes(output))
@@ -410,10 +444,18 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
             # A host signal surfaces from cleanup: keep the observed facts on it.
             _attach_observed(interrupt, process, output, started, lifecycle)
             raise
+        if isinstance(exc, CLIHostTermination):
+            _attach_observed(exc, process, output, started, lifecycle)
+            raise
         # An unexpected exception still becomes a typed, fail-closed result
         # with the observed process facts, never a bare adapter UNKNOWN.
         error = (exc if isinstance(exc, DirectCodexError) else
                  DirectCodexError(adapter_error_code(exc)))
+        if (process is not None and process.returncode is not None and
+                process.returncode < 0 and
+                error.direct_codex_code != 'CODEX_TIMEOUT' and
+                not _has_valid_final_result(bytes(output))):
+            error.direct_codex_code = 'CODEX_INTERRUPTED'
         error.attempted = process is not None
         error.process_exit_code = process.returncode if process is not None else None
         error.stdout_sha256 = hashlib.sha256(output).hexdigest() if output else None
