@@ -8,8 +8,11 @@
 - **可觀察 Reasoning Effort：** UNKNOWN（執行環境未向模型揭露此設定）。
 - **審查工具與限制：** 唯讀 `git`、`gh` API、本機 TaskStore 與 D6 registry 的**彙總統計**（只讀取狀態欄位，不讀取 prompt／diff 內容）、GitHub Actions run 紀錄。**本機測試執行：NOT_RUN**（Owner 於審查中拒絕在 Mac 上執行測試，改以 CI 紀錄為證據）。未存取任何私人對話、憑證或客戶資料。
 - **姊妹報告：** [Report B — Project Evolution & Decision Retrospective](project-evolution-decision-retrospective-20261028.md)、[Report C — Product Owner Playbook](product-owner-playbook-ai-development-20261028.md)、[Executive Decision Brief](executive-decision-brief-20261028.md)。
+- **版本：** v2（2026-10-28 Audit Quality Review 自我校正；修正 Finding 計數、統計適用範圍、worktree 清理方案、建議與授權的區分，並新增第 26 章 Post-Snapshot Status Update）。原始 Snapshot 的歷史事實未改寫。
 
-> 證據標記：**FACT**（有直接證據）、**INFERENCE**（由證據推論）、**OPINION**（專業判斷）、**UNKNOWN**（資料不足）。所有「本機統計」指 2026-10-28 於 Owner Mac 上以唯讀方式彙總的 `~/.local/state/llmtool/tasks`（279 筆）與 `.git/llmtool-worktrees`（489 筆）。
+> 證據標記：**FACT**（有直接證據）、**INFERENCE**（由證據推論）、**OPINION**（專業判斷）、**UNKNOWN**（資料不足）。所有「本機統計」指 2026-10-28 於 Owner Mac 上以唯讀方式彙總的 `~/.local/state/llmtool/tasks`（279 筆）與 `.git/llmtool-worktrees`（489 筆）；其適用範圍與限制見 2.4。
+>
+> 建議標記：**OWNER_DECISION_REQUIRED** — 該建議涉及既有 Gate、Security、Reviewer 配對、Dispatch 政策或 Roadmap 的改變，只是技術建議，**不取代 AGENTS.md 或 Owner 決策**，也不授權任何人執行。未標記者為可在現行授權內由 PM／Developer 評估的工程建議。
 
 ---
 
@@ -18,21 +21,22 @@
 **核心問題的回答：** 以 Snapshot 的程式碼與本機 Runtime 證據判斷，這個專案目前**不是**一套使用者可以直接操作、可靠完成 AI 協作開發的產品；它是一套**為了管理 AI 開發而持續擴張的流程與框架**，其中「內部開發流程」的完整度遠高於「使用者功能」。這不是推測，而是三組可核對的事實：
 
 1. **使用者入口只有 intake。** `llmtool chat --tui` 的 `/task submit` 只做一次 PM provider 呼叫並存檔，程式本身印出「task intake only; Developer dispatch is not implied」（`tools/llmtool/llmtool/chat_tui.py:889`）。從 TUI 輸入需求後，**沒有任何程式路徑**會啟動 Developer、Reviewer、測試或整合。
-2. **WP3 自動閉環的 runtime 已合併但未被使用。** 本機 279 個 Task 中，`task review-dispatch` 的 claim 數為 **0**、`task repair` 的 claim 數為 **0**、`REVIEWER` 事件為 **0**、GITHUB 事件為 **0**；105 個 Developer 完成事件中只有 14 個被 ACK；`task status` 推導狀態 RUNNING 234、COMPLETED 1。所有真實的 Reviewer 派工、修復與合併都由 PM 以手動或 `claude_bg_dispatch.py` 執行。
-3. **資源與流程成本已經反噬。** 本機有 374 個 Git worktree（其中 189 個是 Reviewer 用）、D6 registry 489 筆（330 ACTIVE），佔 15 GB，Mac 根磁碟僅剩 13 GB；Mac CI 成功平均 31 分鐘，最近 100 次有 21 次失敗、20 次取消；31 天內 437 個 PR、517 個 Issue、899 個 commit，其中 docs 類 PR（121）多於 feat（100）。
+2. **WP3 自動閉環的 runtime 已合併但未被使用（以本機 TaskStore 為範圍）。** Owner Mac 上單一 TaskStore 的 279 個 Task 中，`task review-dispatch` 的 claim 數為 **0**、`task repair` 的 claim 數為 **0**、`REVIEWER` 事件為 **0**、GITHUB 事件為 **0**；105 個 Developer 完成事件中只有 14 個被 ACK；`task status` 推導狀態 RUNNING 234、COMPLETED 1。**這代表這些子命令在本機沒有被使用，不代表專案沒有審查或修復發生**：GitHub 上有大量 Reviewer verdict 留言，它們是 PM 以 `claude_bg_dispatch.py`、`codex exec` 或手動方式完成的（INFERENCE，由 PR 描述與 verdict 留言推得）。
+3. **資源與流程成本已經反噬。** 本機有 374 個 Git worktree（其中 189 個分支名以 `review/` 開頭）、D6 registry 489 筆（330 筆 state 為 ACTIVE；ACTIVE 不等於可刪除，見 AUDIT-003），佔 15 GB，Mac 根磁碟僅剩 13 GB；Mac CI 成功平均 31 分鐘（最近 100 次取樣），其中 21 次失敗、20 次取消；31 天內 437 個 PR、517 個 Issue、899 個 commit，其中標題前綴為 docs 的 PR（121）多於 feat（100）。
 
 **值得肯定的部分**（同樣有證據）：Provider／行程生命週期、TaskStore 原子寫入、D6 身份綁定、Mac／EC2 runner 隔離、exact-head CI 與敏感資料篩選，是嚴謹且有大量離線測試（116 個測試檔、約 5 萬行）的工程；`nlf` 是一個已完成、跨三平台 CI 的獨立產品；Owner 於 2026-10-21 定義的產品定位（llmtool 無 AI 智能、只做介面／授權／狀態／交接）是正確的架構原則。
 
 **總體判斷（OPINION）：** 方向正確、原則正確，但執行順序倒置：先建了約 3.4 萬行的「管理 AI 的確定性框架」，才在第 28 天開始做使用者入口。最短可用路徑不是再加 runtime 切片，而是**凍結新路線、把現有 record-pm → Codex direct → EC2 receipt → review → complete 這條已經有 runtime 的鏈真正接成一條由 TUI 驅動、可重啟恢復的閉環**，並以一個真實 Owner 任務做 E2E 驗收。
 
-| 指標 | 數值（FACT） |
+| 指標 | 數值（FACT，v2 重新核對） |
 |---|---|
-| Finding 總數 | 37（Critical 2、High 9、Medium 18、Low 5、Info 3） |
-| Confirmed Defect | 12 |
-| Architecture Risk | 11 |
-| Documentation Mismatch | 6 |
-| Optimization Opportunity | 6 |
-| Unverified Concern | 2 |
+| Finding 總數 | 37 個不同的 `AUDIT-001`～`AUDIT-037`（v1 文字遺漏 AUDIT-035 的獨立條目，v2 已補；Severity：Critical 2、High 9、Medium 18、Low 5、Info 3） |
+| Confirmed Defect | 11（001、002、003、013、014、017、027、030、034、035、037） |
+| Architecture Risk | 9（005、006、007、008、016、022、023、024、031） |
+| Documentation Mismatch | 4（011、020、028、036） |
+| Optimization Opportunity | 8（004、010、012、015、018、019、026、032） |
+| Unverified Concern | 2（009、021） |
+| Info | 3（025、029、033） |
 
 ---
 
@@ -56,7 +60,22 @@
 
 ### 2.3 Snapshot 固定原則
 
-分析以 `139a62c` 為準。審查期間觀察到 21 個 OPEN PR（含 #505 TUI Task mode、#506 pm_runtime、#510／#512 TUI panes、#514、#518、#519 task advance、#500 developer_routes）；它們**不在 snapshot 內**，本報告在相關章節標示「in-flight, NOT MERGED」，不把它們當成已有能力。
+分析以 `139a62c` 為準。審查期間觀察到 21 個 OPEN PR（含 #505 TUI Task mode、#506 pm_runtime、#510／#512 TUI panes、#514、#518、#519 task advance、#500 developer_routes）；它們**不在 snapshot 內**，本報告在相關章節標示「in-flight, NOT MERGED」，不把它們當成已有能力。報告撰寫後 main 已前進（merge train 11，#513），其對各 Finding 的影響整理於第 26 章，不回頭改寫 Snapshot 事實。
+
+### 2.4 量化統計的範圍、取樣與可重現方法（v2 新增）
+
+| 統計 | 範圍 | 取樣／時間 | 限制 | 可重現方法 |
+|---|---|---|---|---|
+| TaskStore 279 Task、developer／callback／claim／event 狀態 | **Owner Mac 上單一本機 store** `~/.local/state/llmtool/tasks`（PM 帳號 `claude2` 與同一 OS 使用者共用） | 2026-10-28 約 04:00 UTC；Task 建立日期 10-21～10-27 | 只涵蓋經 llmtool `task submit`／`record-pm` 建立的 Task；不含 Codex Cloud、直接 CLI session、ai-loop、PM 手動派審等 llmtool 之外的工作；另一台機器或另一帳號的 store 未檢查；只讀狀態欄位，未讀 prompt／diff | 以 Python 讀取每個 `*.json` 的 `state`、`developer.state`、`developer.direct_result_callback.state`、`completion.state`、`review_dispatch_claim`、`review_repair_claims`、`high_debug`、`completion_events[].source/state`，並以 `llmtool.task_status.derive_state` 推導 |
+| 「COMPLETED 1」 | 同上 | 同上 | 是 `task_status.derive_state` 的推導值，受 AUDIT-014（無終態）影響，**不代表只有 1 個工作完成**；GitHub 上同期有 100+ 個 merged PR | 同上 |
+| 「review claims 0／repair claims 0」 | 同上 | 同上 | 代表 `task review-dispatch`／`task repair` 在本機 store 未被呼叫；審查與修復實際發生於 GitHub（verdict 留言）與 PM 手動流程 | 同上 |
+| 374 worktree、189 `review/` | `git worktree list` 於 Owner Mac canonical repo | 2026-10-28 | 包含所有狀態的 worktree；數字不等於可刪除數 | `git worktree list` |
+| D6 registry 489／ACTIVE 330／REMOVED 115／RETAIN_BLOCKED 34 | canonical `.git/llmtool-worktrees/*.json` 的 `state` 欄位 | 2026-10-28 | `ACTIVE` 是登錄狀態，可能仍有 live session、未提交修改、未合併 PR 或保留證據；見 AUDIT-003 的清理前置檢查 | 讀取每個 registry JSON 的 `state` |
+| Mac／Linux CI 成功平均、失敗／取消數 | GitHub Actions 最近 100 個 run（每個 workflow） | 2026-10-27 20:00 UTC 前後 | 取樣僅 100 run，含 PR 更新造成的取消；wall-clock 含排隊；只抽樣 4＋5 個失敗 run 看原因 | `gh run list --workflow=<file> --limit 100 --json conclusion,createdAt,updatedAt` |
+| Codex prompt tokens 1.27 億 | 本機 store 內 `developer.usage`（229 個 Codex Task） | 同 TaskStore | 只含 Codex CLI 回報的用量；不含 cache 折扣、PM／Reviewer（Claude）用量 | 加總 `developer.usage.prompt_tokens` |
+| PR／Issue／commit 計數 | `gh pr list --state all`、`gh issue list --state all`、`git log` | 2026-10-28 | PR 類型以標題前綴粗分類 | 同左 |
+
+**結論適用性：** 第 1 章第 2 點與第 9 章的「IMPLEMENTED_ONLY」判斷，是對「llmtool runtime 子命令在本機是否被使用」的判斷，不是對專案整體產出的判斷。
 
 ---
 
@@ -436,9 +455,9 @@ sequenceDiagram
 | Background task | 請求在執行緒中；**無法取消**；Ctrl-C 等待完成 |
 | 非 TTY fallback | 有（line chat） |
 
-### 10.3 最小可用 TUI MVP（OPINION）
+### 10.3 最小可用 TUI MVP（OPINION；涉及入口與 PM 通道的取捨為 OWNER_DECISION_REQUIRED）
 
-1. **單一 PM 通道**：TUI 以 `pm_runtime`（PR #506 概念）綁定一個專屬 PM session；去掉 provider-PM intake 作為產品入口（保留為開發用）。
+1. **單一 PM 通道**：TUI 以 `pm_runtime`（PR #506 概念）綁定一個專屬 PM session；去掉 provider-PM intake 作為產品入口（保留為開發用）。（OWNER_DECISION_REQUIRED：改變 10-21 會議定義的「指定 PM AI」實作方式）
 2. **三個畫面**：Chat／Tasks（來自 `task status`，須先有終態）／Task detail（events、claims、receipts、PR、CI）。
 3. **兩個動作**：Submit（record-pm by PM）與 Approve（Owner 核准 PM 提出的需要權限的動作，#304 S3）。
 4. **一個驅動器**：背景 `task advance`（PR #519 概念）每 N 秒推進每個 Task；TUI 只顯示。
@@ -490,11 +509,11 @@ sequenceDiagram
 | 問題 | 證據 | 建議 |
 |---|---|---|
 | 重複傳送 Context | Codex 229 個 Task 共 1.27 億 prompt tokens（平均 55.5 萬）；PR #519 單一 Task 258 萬（249 萬 cached） | 每個 Task 傳 `--read-path` 限縮；避免 Codex 自行讀全 repo；共用 cache 已生效（10-27 cache 命中 92%） |
-| 過度呼叫高階模型 | Reviewer 用 Claude（Opus 級）審 2–3 行文件 PR；High Debug 用 `gpt-6.1-sol` | 文件 PR 改 docs check 自動通過＋抽樣審；High Debug 僅在 RCA 不明時 |
-| 重複審查 | 每次 rereview 重新建 Reviewer D6（189 個）並重讀整個 PR | Reviewer 復用同一 D6，只讀 delta |
+| 過度呼叫高階模型 | Reviewer 用 Claude（Opus 級）審 2–3 行文件 PR；High Debug 用 `gpt-6.1-sol` | 文件 PR 改 docs check 自動通過＋抽樣審（OWNER_DECISION_REQUIRED：變更 AGENTS.md 文件 PR 需正式審查的規則）；High Debug 僅在 RCA 不明時 |
+| 重複審查 | 每次 rereview 重新建 Reviewer D6（189 個）並重讀整個 PR | Reviewer 復用同一 D6，只讀 delta（OWNER_DECISION_REQUIRED：D6 lifecycle 規範要求每個 Reviewer 有自己的 D6 record） |
 | 全文 Repo 掃描 | PM 每次 session 讀 AGENTS／ROADMAP／WORKFLOW／README（約 15 萬 tokens） | 文件瘦身（第 15 章） |
 | 低價模型失敗後增加成本 | gw 10/11 拒絕、OpenCode 1/8 成功，之後改派 Codex | 低價路線只做合成題或離線批次 |
-| 無價值交接 | 「merge train」PR 再開一次 PR（#441／#443／#444 三個相同 PR；#451／#464／#469 三次） | 直接合併已 PASS 的 PR；train 只在 CI 排隊時 |
+| 無價值交接 | 「merge train」PR 再開一次 PR（#441／#443／#444 三個相同 PR；#451／#464／#469 三次） | 直接合併已 PASS 的 PR；train 只在 CI 排隊時（OWNER_DECISION_REQUIRED：合併流程屬 Integrator 授權範圍） |
 | AI 做確定性工作 | PM 手打 `task inbox`／`remote-test`／`review-dispatch`／merge | `task advance` 驅動器（PR #519 方向正確） |
 
 可量測指標：每個 merged PR 的「Codex prompt tokens + Reviewer 輪數 + Mac CI 分鐘 + PM 手動指令數」，以 10-26／10-27 為基準。
@@ -560,11 +579,11 @@ sequenceDiagram
 
 **資源數據 UNKNOWN：** Mac CPU／RAM 使用率、EC2 排隊時間分佈、Token 總額（Claude 端無 usage 紀錄）。
 
-### 13.3 建議（量化目標）
+### 13.3 建議（量化目標為「待驗證目標」，非硬性要求）
 
-- Mac PR job 只跑 Mac 專屬模組（目標 < 5 分鐘）；全套交 EC2；Mac full 保留 6 小時排程。
-- 以 `test-module-seconds.json` 做 EC2 三 shard 平衡（已做）；把 `test_worktree_env` 的真實 pip 改為 fixture 重用（PR #448／#481 方向，未合併）。
-- 關閉 merge train 的雙重 CI：直接 merge 已 PASS 的 PR，或 train 只在 CI 排隊 > N 分鐘時使用。
+- Mac PR job 只跑 Mac 專屬模組；全套交 EC2；Mac full 保留 6 小時排程。**OWNER_DECISION_REQUIRED**（縮小 Owner #425 決策定義的 Mac 合併 gate 範圍；#466 報告已提出同一提案待 Owner 決定）。待驗證目標：Mac PR job 時間明顯低於現行中位數 23 分（依據：準備步驟 < 40 s、`Offline canonical checks` 占 858 s；真正 Mac 專屬模組數量 INFERENCE < 20，需以實際選測結果驗證）。
+- 以 `test-module-seconds.json` 做 EC2 三 shard 平衡（已做）；把 `test_worktree_env` 的真實 pip 改為 fixture 重用（PR #448／#481 方向，未合併）。工程建議，現行授權內可評估。
+- 減少 merge train 的雙重 CI：直接 merge 已 PASS 的 PR，或 train 只在 CI 排隊時使用。**OWNER_DECISION_REQUIRED**（合併流程）。
 
 ---
 
@@ -626,10 +645,11 @@ sequenceDiagram
 | A12 Telegram／Web | 未開始 | — | — | 全部 | 延後 | 依賴 A11c 與 pm_runtime |
 | A13 安裝／發布 | DEFERRED | — | — | 全部 | 是（開源前提） | 依賴硬編碼移除 |
 
-### 15.4 文件負擔與瘦身方案（OPINION）
+### 15.4 文件負擔與瘦身方案（OPINION；修改 AGENTS.md／ROADMAP 為 OWNER_DECISION_REQUIRED）
 
-- 現況：AI 每個 session 讀約 15 萬 tokens 政策文字；三份大文件混合「現行規則／歷史契約／驗收紀錄」。
-- 方案：(1) ROADMAP 只留「現況表 + 下一步」≤ 300 行，其餘移 `docs/history/`；(2) README 拆為 `USER.md`（安裝／設定／四個命令／TUI）與 `DEVELOPER.md`（task 子命令契約）；(3) WORKFLOW 中 S1b／B contract／Codex Cloud 段落封存；(4) AGENTS.md 改為條列、每條標「授權來源／適用模式／阻擋什麼／誰處理」（10-21 會議 6.5 已同意方向）；(5) 新報告放 `docs/reports/`，`reports/` 封存為唯讀歷史。
+- 現況：AI 每個 session 讀約 15 萬 tokens 政策文字（以 4 bytes/token 粗估，未實測）；三份大文件混合「現行規則／歷史契約／驗收紀錄」。
+- 方案：(1) ROADMAP 只留「現況表 + 下一步」，其餘移 `docs/history/`；(2) README 拆為 `USER.md`（安裝／設定／四個命令／TUI）與 `DEVELOPER.md`（task 子命令契約）；(3) WORKFLOW 中 S1b／B contract／Codex Cloud 段落封存；(4) AGENTS.md 改為條列、每條標「授權來源／適用模式／阻擋什麼／誰處理」（10-21 會議 6.5 已同意方向，實施仍需 Owner 授權）；(5) 新報告放 `docs/reports/`，`reports/` 封存為唯讀歷史。
+- 待驗證目標：政策核心文件合計體積顯著低於現行 598 KB（v1 寫的「60 KB」是審查者估計，無實證依據；合理上限應由 PM 以「一個 session 開頭必讀的 tokens」實測後提出）。
 
 ---
 
@@ -658,15 +678,15 @@ sequenceDiagram
 - PM 的 10 分鐘 loop、Owner decision marker、monitor marker 詞彙表（`llmtool_monitor.py` 4,667 行）都是為了管理流程而生的工具。
 - 「為了修復工具而增加工具」循環：#352 列 G1–G8 缺口 → 修 llmtool → 發現 #378／#379／#388／#394／#400／#402／#404／#407／#411／#413 → 修 → #517 再四項。這是正常試錯，但發生在**沒有使用者**的情況下，驗收者是 PM 自己。
 
-### 16.3 精簡替代流程（OPINION）
+### 16.3 精簡替代流程（OPINION；每列標示授權層級）
 
-| 現況 | 替代 |
-|---|---|
-| 每個 PR：D6 + Task + 正式審查 + Mac CI + EC2 CI + docs CI + merge train | 分級：docs-only → docs CI + 抽樣審；test-only／小修 → EC2 CI + 自審；runtime → 正式審 + EC2 + Mac subset |
-| Reviewer 每輪新 D6 | 一個 Reviewer D6 per PR，rereview 只讀 delta |
-| PM 手動串接 8 個子命令 | `task advance` 驅動器 + TUI 顯示 |
-| 4 條 Developer 路線 | 1 條主路線（Codex direct）+ 1 條實驗（gw 合成題）；其餘凍結 |
-| Owner 決策靠 PM 代記 73 則留言 | 每週一次決策清單；日常技術選擇不上 GitHub |
+| 現況 | 替代 | 授權 |
+|---|---|---|
+| 每個 PR：D6 + Task + 正式審查 + Mac CI + EC2 CI + docs CI + merge train | 分級：docs-only → docs CI + 抽樣審；test-only／小修 → EC2 CI + 自審；runtime → 正式審 + EC2 + Mac subset | **OWNER_DECISION_REQUIRED**（AGENTS.md 要求文件 PR 亦須正式審查；Mac gate 為 Owner #425 決策） |
+| Reviewer 每輪新 D6 | 一個 Reviewer D6 per PR，rereview 只讀 delta | **OWNER_DECISION_REQUIRED**（D6 lifecycle 規範） |
+| PM 手動串接 8 個子命令 | `task advance` 驅動器 + TUI 顯示 | 工程建議（PR #519 方向） |
+| 4 條 Developer 路線 | 1 條主路線（Codex direct）+ 1 條實驗（gw 合成題）；其餘暫停 | **OWNER_DECISION_REQUIRED**（`worker-dispatch.json` 只能由 Owner 指示變更） |
+| Owner 決策靠 PM 代記 73 則留言 | 每週一次決策清單；日常技術選擇不上 GitHub | **OWNER_DECISION_REQUIRED**（Owner 10-28 決策紀錄規則） |
 
 ---
 
@@ -732,6 +752,8 @@ flowchart LR
   ADV -. merge request .-> GHX
   GHX -. events .-> TS
 ```
+
+下表為審查者建議；「延後」「合併」「取消」三欄全部為 **OWNER_DECISION_REQUIRED**（涉及 Roadmap、Dispatch 政策或既有 Gate），「現在」「下一階段」為工程排序建議，仍以 Owner 確認的 Roadmap 為準。
 
 | 項目 | 現在 | 下一階段 | 延後 | 合併 | 取消 |
 |---|---|---|---|---|---|
@@ -799,11 +821,14 @@ flowchart LR
 
 ### High
 
-**AUDIT-003 — D6 worktree 堆積（Confirmed Defect／Resource）**：374 worktree／489 registry（330 ACTIVE、34 RETAIN_BLOCKED、115 REMOVED）／15 GB／根磁碟剩 13 GB；189 個 `review/` worktree。Root Cause：Reviewer 每輪新建；retire 需逐一人工核准。修復：Reviewer 復用；`retire --merged` 批次；監控磁碟。驗證：ACTIVE < 20。P0。
+**AUDIT-003 — D6 worktree 堆積（Confirmed Defect／Resource）**：374 worktree／489 registry（330 ACTIVE、34 RETAIN_BLOCKED、115 REMOVED）／15 GB／根磁碟剩 13 GB；189 個 `review/` worktree。Root Cause（INFERENCE）：Reviewer 每輪新建；retire 需逐一人工核准且 10-26 才有工具（#391）。
+- **ACTIVE 數量不等於可安全刪除數量。** 每個候選都必須通過 D6 lifecycle（`skills/safe-git/worktree-lifecycle.md`）的退場 gate：PR 已合併且 Task 已接受／關閉（或有明確 keep／discard disposition）；registry 的 session／lease 已釋放且無 live 行程（`lsof`／process cwd 檢查）；無 staged／unstaged／untracked 修改；無未發布 commit（squash 合併需 PR 最終 head SHA 等於本機 HEAD）；ignored 內容逐一分類為 `DISCARD_REGENERABLE` 或 `KEEP/EXPORT`；保留證據已存於 tree 之外；任何不確定即 `RETAIN_BLOCKED`。現有 `d6_worktree_lifecycle.py` retire 已實作這些檢查（第 1058–1313 行），**不得為了達到某個數字而繞過**。
+- 修復方向：(a) 以現有 retire 工具對「PR 已合併且 Task 關閉」的候選批次執行，保留 RETAIN_BLOCKED 清單給 PM 逐一處理；(b) 將 Reviewer 的 `review/` worktree 在 verdict 發布且 session 結束後列為第一批候選；(c) 未來 Reviewer 復用 D6（OWNER_DECISION_REQUIRED）；(d) 加入磁碟與 worktree 數量的監控告警（工程建議）。
+- 驗證：**待驗證目標**，不是硬性門檻：安全退場後 ACTIVE 數量與磁碟用量明顯下降；RETAIN_BLOCKED 清單有 PM 逐筆處置紀錄；根磁碟可用空間回到不影響 CI 與 D6 bootstrap 的水位（具體數值待 PM 依 Mac 實測提出）。v1 寫的「ACTIVE < 20」為審查者估計，無實證依據。P0（容量風險），但執行方式受 D6 gate 約束。
 
-**AUDIT-004 — Mac CI 瓶頸（Optimization／CI）**：平均 31 分、41% 非成功；`SHARED_MODULES` 退化為 FULL。修復：Mac 只跑 Mac 專屬模組。驗證：PR Mac job < 8 分。P1。
+**AUDIT-004 — Mac CI 瓶頸（Optimization／CI）**：平均 31 分、41% 非成功；`SHARED_MODULES` 退化為 FULL。修復：Mac 只跑 Mac 專屬模組（OWNER_DECISION_REQUIRED：#425 Mac 合併 gate 範圍）。驗證（待驗證目標）：PR Mac job 時間明顯低於現行中位數 23 分；具體門檻待實測選測結果後設定。P1。
 
-**AUDIT-005 — God module 與 store 內嵌狀態機（Architecture Risk）**：`task_submission_cli.py` 3,826 行／49 commits 8 天；`task_store._update` 含 claim 轉移。修復：拆模組；claim 規則移到 `review_*`。驗證：單檔 < 1,200 行；Mac CI importer 選測縮小。P1。
+**AUDIT-005 — God module 與 store 內嵌狀態機（Architecture Risk）**：`task_submission_cli.py` 3,826 行／49 commits 8 天；`task_store._update` 含 claim 轉移。修復：拆模組；claim 規則移到 `review_*`。驗證（待驗證目標）：單檔行數明顯下降、改一個子命令不再同時改三個共用檔；Mac CI importer 選測縮小。P1。
 
 **AUDIT-006 — 硬編碼 Owner 身份（Architecture Risk／Open-source）**：見 18 章 12 處。修復：config。驗證：在另一 repo 名稱下 `dispatch-check` 可通過。P1。
 
@@ -834,8 +859,9 @@ flowchart LR
 **AUDIT-028** PR #505 TUI Task mode CI 全紅（Doc／Status）— P0 追蹤。
 **AUDIT-030** 事件上限阻擋（Confirmed Defect）— 自動 ACK 已消費或 advance 消費；P1。
 **AUDIT-031** 帳號耦合（Architecture Risk）— P2。
-**AUDIT-034** Reviewer 自動派工僅 Codex 家族；`task complete` 僅認 Claude PASS（Confirmed Defect／Doc mismatch with cross-family rule）— P1。
-**AUDIT-036** 修復上限三套（Documentation Mismatch）— 統一為一處常數；P1。
+**AUDIT-034** `task review-dispatch` 只為 Codex／OpenCode／gw 作者派 `claude-reviewer`；Claude 作者路線回 `REVIEWER_ROUTE_UNIMPLEMENTED`（`review_dispatch.py:84-90`）（Confirmed Defect；與 AGENTS.md cross-family 規則只實作一半）— P1。
+**AUDIT-035** `task complete` 只接受 exact-form 的 Claude 正式 PASS，Codex PASS 視為 advisory（`task_completion.is_formal_claude_pass`、`review_result._comment_verdict`），因此 Claude 作者的 Task 無法經 llmtool 結案；AGENTS.md 已自述此為 future work（Confirmed Defect／Documentation 一致但功能缺口）— P1。v1 文字把本條併入 AUDIT-034 導致 ID 缺號，v2 還原為獨立條目。
+**AUDIT-036** 修復上限三套（Documentation Mismatch）— 統一為一處常數；P1（上限數值本身為 Owner #92 決策，變更需 OWNER_DECISION_REQUIRED）。
 
 ### Low
 
@@ -861,18 +887,20 @@ flowchart LR
 |---|---|---|---|---|---|---|---|---|---|---|
 | P0-1 | 合併並修正 TUI Task mode（#505）+ Tasks／detail（#510／#512） | AUDIT-001 | TUI 可提交、看任務 | chat_tui*、tests | CI 修綠 | 低 | M | 34 項 PTY 實測 + CI 綠 | 否 | 1 |
 | P0-2 | `task advance` 驅動器（#519）+ 終態（AUDIT-014） | AUDIT-002／014 | 無人工串接 | task_advance、task_status | #519 審查 | 中 | M | 10 個 Task 自動推進 | 否 | 2 |
-| P0-3 | D6 批次 retire + Reviewer D6 復用 | AUDIT-003 | ACTIVE < 20、釋放 10 GB | d6 scripts、review_dispatch | — | 中（誤刪） | S | 磁碟 > 40 GB 可用 | 否 | 1 |
-| P0-4 | 一個真實 Owner 任務 E2E（TUI → merge → COMPLETED） | 產品驗收 | 第一次真正閉環 | — | P0-1～3 | — | S | Owner 操作錄影／紀錄 | — | 3 |
-| P0-5 | 凍結新路線（AGY、OpenCode、gw 真實題、Telegram、Web、CliNest） | 聚焦 | 釋放 PM／Reviewer 容量 | 政策 | Owner 決策 | 低 | — | 兩週內無新路線 PR | — | 0 |
+| P0-3 | 以現有 retire 工具對通過 D6 退場 gate 的候選批次退場（Reviewer D6 復用為 OWNER_DECISION_REQUIRED） | AUDIT-003 | ACTIVE 與磁碟用量明顯下降（待驗證目標） | d6 scripts | — | 中（誤刪；靠 gate 防範） | S | RETAIN_BLOCKED 有逐筆處置；可用空間回到 PM 實測的安全水位 | 否 | 1 |
+| P0-4 | 一個真實 Owner 任務 E2E（TUI → merge → COMPLETED） | 產品驗收 | 第一次真正閉環 | — | P0-1～3 | — | S | Owner 操作紀錄 | — | 3 |
+| P0-5 | 暫停新路線（AGY、OpenCode、gw 真實題、Telegram、Web、CliNest） | 聚焦 | 釋放 PM／Reviewer 容量 | 政策 | **OWNER_DECISION_REQUIRED**（Roadmap 與 dispatch 切換） | 低 | — | 期間內無新路線 PR | — | 0 |
+
+**P0–P3 中凡涉及 `worker-dispatch.json`、AGENTS.md Gate、Reviewer 配對、Mac CI 合併 gate、Roadmap 順序者，皆為 OWNER_DECISION_REQUIRED；本報告不授權執行。**
 
 ### P1 — Architecture / Reliability（4 週）
 
 - 拆 `task_submission_cli.py`；claim 狀態機移出 TaskStore（AUDIT-005）。
 - `task retry` 恢復路徑（AUDIT-037）；Codex 上限可設、envelope 放寬（AUDIT-017／027）。
-- 統一 PM 通道為 record-pm／pm_runtime（AUDIT-022）；Claude-author Reviewer 路線與 `task complete` 接受 Codex 正式 PASS（AUDIT-034）。
+- 統一 PM 通道為 record-pm／pm_runtime（AUDIT-022；OWNER_DECISION_REQUIRED）；Claude-author Reviewer 路線（AUDIT-034）與 `task complete` 接受 Codex 正式 PASS（AUDIT-035；AGENTS.md 已列為 future work，實作仍需 Owner 確認接受條件）。
 - 硬編碼 → config（AUDIT-006／024）；Claude Code adapter（AUDIT-007）。
-- Mac CI 只跑 Mac 專屬（AUDIT-004）；事件自動 ACK（AUDIT-030）；修復上限單一化（AUDIT-036）。
-- 文件瘦身（AUDIT-010／011）。
+- Mac CI 只跑 Mac 專屬（AUDIT-004；OWNER_DECISION_REQUIRED）；事件自動 ACK（AUDIT-030）；修復上限單一化（AUDIT-036）。
+- 文件瘦身（AUDIT-010／011；AGENTS.md／ROADMAP 部分 OWNER_DECISION_REQUIRED）。
 
 ### P2 — Efficiency / DX（持續）
 
@@ -886,10 +914,12 @@ flowchart LR
 
 ## 23. Proposed 30 / 60 / 90 Day Roadmap
 
-| 期間 | 目標 | 驗收 |
+本表為審查者建議，Roadmap 順序的變更為 OWNER_DECISION_REQUIRED；數字驗收為待驗證目標。
+
+| 期間 | 目標 | 驗收（待驗證目標） |
 |---|---|---|
-| **30 天** | P0 全部；一條鏈 E2E；D6 清理；文件瘦身第一輪 | Owner 用 TUI 完成 3 個真實任務；ACTIVE D6 < 20；政策文 < 60 KB |
-| **60 天** | P1：模組拆分、retry、PM 通道統一、硬編碼移除、Mac CI 縮短 | Mac PR job < 8 分；COMPLETED／Task > 70%；在第二台 Mac（或另一使用者帳號）跑通 |
+| **30 天** | P0 全部；一條鏈 E2E；D6 安全退場；文件瘦身第一輪 | Owner 用 TUI 完成 3 個真實任務；ACTIVE D6 與磁碟用量明顯下降（通過 gate 的退場）；政策文件體積明顯下降 |
+| **60 天** | P1：模組拆分、retry、PM 通道統一、硬編碼移除、Mac CI 縮短 | Mac PR job 時間明顯低於現行中位數 23 分；Task 終態比例以實測基準比較；在第二台 Mac（或另一使用者帳號）跑通 |
 | **90 天** | P2 + A13 前置：wheel、LICENSE、USER.md、可選 EC2；重新評估 AGY／gw／Web | 外部使用者依 USER.md 安裝並完成一個任務（本機模式，無 EC2） |
 
 ---
@@ -916,9 +946,11 @@ flowchart LR
 **錯誤後排：** TUI Task mode、`task status` 終態、D6 retire。
 **可延後：** AGY、gw 真實題、OpenCode、Telegram、Web、CliNest、High Debug 自動化、GitHub events inbox。
 
-**四週計畫：** 第 1 週 D6 清理 + TUI PR 修綠合併；第 2 週 advance + 終態 + retry；第 3 週 E2E ×3 + 修 bug；第 4 週 拆模組 + 文件瘦身 + 硬編碼 config。
-**一名 Developer + 一名 Reviewer：** Developer = Codex direct（唯一路線）；Reviewer = Claude（唯一路線）；PM = Claude Code session（Owner 對話）；Reviewer 只審 runtime PR，docs／test-only PR 由 EC2 CI + 自審放行。
-**減少 Token／CI：** Mac 只跑 Mac 專屬；merge train 取消雙 CI；Reviewer 復用 D6 只讀 delta；PM 政策文 < 60 KB；gw 只做合成評測；Codex `--read-path` 限縮。
+**四週計畫：** 第 1 週 D6 安全退場 + TUI PR 修綠合併；第 2 週 advance + 終態 + retry；第 3 週 E2E ×3 + 修 bug；第 4 週 拆模組 + 文件瘦身 + 硬編碼 config。
+**一名 Developer + 一名 Reviewer：** Developer = Codex direct（唯一路線）；Reviewer = Claude（唯一路線）；PM = Claude Code session（Owner 對話）；Reviewer 只審 runtime PR，docs／test-only PR 由 EC2 CI + 自審放行（**OWNER_DECISION_REQUIRED**：與 AGENTS.md 現行審查規則不同）。
+**減少 Token／CI：** Mac 只跑 Mac 專屬（OWNER_DECISION_REQUIRED）；減少 merge train 雙 CI（OWNER_DECISION_REQUIRED）；Reviewer 復用 D6 只讀 delta（OWNER_DECISION_REQUIRED）；政策文件瘦身；gw 只做合成評測（OWNER_DECISION_REQUIRED：#290 取樣計畫為 Owner 決策）；Codex `--read-path` 限縮（工程建議）。
+
+**本章為審查者個人技術判斷（OPINION），不是 Roadmap、不是授權。**
 
 ---
 
@@ -926,4 +958,24 @@ flowchart LR
 
 這個 Repository 在 31 天內以極高速度建出一套嚴謹的確定性執行層與治理層，但**沒有把它們接成使用者可操作的產品**；本機證據顯示 WP3 自動閉環的 runtime 幾乎未被使用，流程與資源成本（worktree、CI、文件、PR 數）已經成為主要瓶頸。方向與原則是對的；需要的是**停止擴張、組裝已有零件、以真實任務驗收**。最重要的十項結論與五項建議見 [Executive Decision Brief](executive-decision-brief-20261028.md)。
 
-**無法確認的重大問題：** PM／Reviewer 的 Claude token 總量；EC2 sudoers 範圍；Linux runner `Set up runner` 失敗原因；本機未執行測試套件（NOT_RUN）；in-flight PR（#505／#506／#519）實際品質。
+**無法確認的重大問題：** PM／Reviewer 的 Claude token 總量；EC2 sudoers 範圍；Linux runner `Set up runner` 失敗原因；本機未執行測試套件（NOT_RUN）；in-flight PR（#519／#514／#518）實際品質；另一台機器或另一帳號的 TaskStore 是否存在。
+
+---
+
+## 26. Post-Snapshot Status Update（main `3621aa4`，2026-10-27 20:25 UTC，merge train 11 #513）
+
+本章記錄 Snapshot `139a62c` 之後 main 的變化對各 Finding 的影響，**不改寫前面各章以 Snapshot 為準的事實**。依據：`git diff --stat 139a62c..3621aa4`（24 檔、+4,810／−59）與 #513 合併的 PR 清單（#505 #510 #512 #506 #508 #509 #511 #500）。未重新做完整程式閱讀；以下為檔案層級核對（FACT）加判斷（INFERENCE）。
+
+| Finding | Snapshot 狀態 | Post-snapshot 狀態 | 依據 |
+|---|---|---|---|
+| AUDIT-001 使用者入口止於 intake | Critical | **部分改善，仍存在。** `chat_tui.py` 由 732 行增為 1,134 行，新增 `chat_tui_task.py`（Task 回執／詳情顯示）、`chat_tui_status.py`（Task list，F3／`/task list`）、`chat_tui_events.py`（事件時間軸）；`pm_runtime.py` 已合併（PM session 驅動的 API）。但 `chat_tui.py` 未引用 `pm_runtime`，TUI 仍無派工、審查、整合動作；`task advance`（#519）仍 OPEN | 檔案清單；grep `pm_runtime` 於 main 的 `chat_tui.py` 無結果 |
+| AUDIT-028 PR #505 CI 全紅 | Medium | **已解決**（經 train 11 合併） | #513 MERGED |
+| AUDIT-002 WP3 runtime 未使用 | Critical | **未變**（本機 store 未重新統計；#519 未合併） | — |
+| AUDIT-014 無終態 | Medium | **未變**（#519 未合併） | — |
+| AUDIT-006／007 硬編碼與 Claude Code 耦合 | High | **未變**；另新增 `developer_routes/`（#500 provider-neutral 契約、`sandbox-exec` write boundary、AGY 參考實作），方向符合第 18 章建議，但仍未接入 `task delegate`（Slice B 未派） | #352 留言 |
+| AUDIT-003 D6 堆積 | High | **未變**（未重新計數） | — |
+| AUDIT-017 Codex 契約過嚴 | High | **未變**；#517 四項缺陷仍 OPEN；#518（failure_excerpt）OPEN | — |
+| AUDIT-029 gw | Info | thinking 預設開（#509）、probe／stress 工具（#508／#511）已合併；真實題成功率未更新 | — |
+| 第 9 章狀態表 | — | TUI 相關列：「Task list／progress」由「無」改為「有（顯示層）」；其餘不變 | — |
+
+**結論：** Post-snapshot 變化主要是 TUI 顯示層與 PM runtime API 零件到位，沒有改變「從 TUI 提交後不會自動進入開發流程」的核心判斷；#519 合併並接上 TUI 後才需要重新評估 AUDIT-001／002／014。
