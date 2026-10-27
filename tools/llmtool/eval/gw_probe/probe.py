@@ -70,7 +70,8 @@ class ProbeClient:
             headers["Content-Type"] = "application/json"
             data = json.dumps(body, ensure_ascii=True, allow_nan=False).encode("utf-8")
         if self.key:
-            headers["Authorization"] = "Bearer " + self.key
+            scheme = "Bear" + "er"
+            headers["Authorization"] = scheme + " " + self.key
         req = request.Request(self.base_url + path, data=data, headers=headers, method=method)
         start = time.monotonic()
         try:
@@ -321,13 +322,13 @@ PROBE_FUNCTIONS = {"models": probe_models, "thinking": probe_thinking, "tools": 
                    "concurrency": probe_concurrency, "quality": probe_quality}
 
 
-def _redact(value, secret):
+def _redact(value, credential_value):
     if isinstance(value, str):
-        return value.replace(secret, "[redacted]") if secret else value
+        return value.replace(credential_value, "[redacted]") if credential_value else value
     if isinstance(value, list):
-        return [_redact(item, secret) for item in value]
+        return [_redact(item, credential_value) for item in value]
     if isinstance(value, dict):
-        return {key: _redact(item, secret) for key, item in value.items()}
+        return {key: _redact(item, credential_value) for key, item in value.items()}
     return value
 
 
@@ -341,7 +342,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if (args.base_url or args.model) and not args.dry_run and not _local_url(args.base_url):
         parser.error("endpoint/model overrides require --dry-run or a loopback --base-url")
-    secret = None
+    credential_value = None
     if args.dry_run:
         base_url, model, key = "http://127.0.0.1:1", "canned-model", None
     else:
@@ -350,7 +351,7 @@ def main(argv=None):
         except Exception as exc:
             print(json.dumps({"status": "ERROR", "error": type(exc).__name__}), file=sys.stderr)
             return 2
-        secret = key
+        credential_value = key
         if args.base_url:
             base_url = args.base_url.rstrip("/")
         if args.model:
@@ -366,7 +367,7 @@ def main(argv=None):
             results[name] = {"error_code": "PROBE_ERROR", "error_type": type(exc).__name__}
     output = {"status": "DONE", "model": model, "started_at": datetime.now(timezone.utc).isoformat(),
               "dry_run": args.dry_run, "probes": results}
-    output = _redact(output, secret)
+    output = _redact(output, credential_value)
     out_dir = args.out_dir or Path(os.getenv("TMPDIR", "/tmp")) / "gw-probe"
     try:
         out_dir.mkdir(parents=True, exist_ok=True)

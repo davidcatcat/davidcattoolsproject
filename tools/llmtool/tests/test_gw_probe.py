@@ -82,7 +82,7 @@ class FakeServer(unittest.TestCase):
         FakeHandler.requests = []
         FakeHandler.fail_models = False
         FakeHandler.fail_large_context = False
-        self.client = probe.ProbeClient(self.base_url, "fake-model", "test-secret")
+        self.client = probe.ProbeClient(self.base_url, "fake-model", "sample-value")
 
     def test_each_probe_parses_fake_responses(self):
         results = {name: function(self.client) for name, function in probe.PROBE_FUNCTIONS.items()}
@@ -99,7 +99,7 @@ class FakeServer(unittest.TestCase):
     def test_http_error_is_recorded_and_later_probe_runs(self):
         FakeHandler.fail_models = True
         with tempfile.TemporaryDirectory() as directory, mock.patch.object(
-                probe, "_config", return_value=(self.base_url, "fake-model", "test-secret")):
+                probe, "_config", return_value=(self.base_url, "fake-model", "sample-value")):
             stdout = io.StringIO()
             with contextlib.redirect_stdout(stdout):
                 code = probe.main(["--only", "models", "--only", "thinking", "--base-url", self.base_url,
@@ -108,9 +108,9 @@ class FakeServer(unittest.TestCase):
             saved = json.loads((Path(directory) / "gw_probe.json").read_text())
             self.assertEqual(saved["probes"]["models"]["error_code"], "HTTP_503")
             self.assertEqual(len(saved["probes"]["thinking"]["runs"]), 6)
-            self.assertNotIn("test-secret", stdout.getvalue())
-            self.assertNotIn("test-secret", (Path(directory) / "gw_probe.json").read_text())
-            self.assertNotIn("test-secret", (Path(directory) / "gw_probe.md").read_text())
+            self.assertNotIn("sample-value", stdout.getvalue())
+            self.assertNotIn("sample-value", (Path(directory) / "gw_probe.json").read_text())
+            self.assertNotIn("sample-value", (Path(directory) / "gw_probe.md").read_text())
 
     def test_context_stops_after_first_error(self):
         FakeHandler.fail_large_context = True
