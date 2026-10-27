@@ -95,6 +95,13 @@ class TaskStatusTests(unittest.TestCase):
             'state': 'PM_PENDING', 'completion': {'state': 'FUTURE_COMPLETION_STATE'}}),
             'UNKNOWN')
 
+    def test_merged_github_event_completes_task(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = record(root)
+        base['completion_events'] = [{
+            'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED'}]
+        self.assertEqual(task_status.derive_state(base), 'COMPLETED')
+
     def test_responded_developer_uses_completion_state(self):
         with tempfile.TemporaryDirectory() as root:
             base = record(root)

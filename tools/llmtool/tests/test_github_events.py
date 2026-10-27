@@ -35,6 +35,33 @@ def github_responder(responses):
 
 
 class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
+    def test_review_dispatch_claim_binds_pr_for_merge_poll(self):
+        task = self._ready_task()
+        task['review_dispatch_claim'] = {
+            'executor_task': 'executor-one', 'pr': 84, 'head_sha': 'a' * 40,
+            'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer-one',
+            'native_session_id': 'session-one', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+            'claimed_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:00:00Z'}
+        class ClaimBoundStore:
+            def task_ids(inner):
+                return self.store.task_ids()
+            def get(inner, task_id):
+                value = self.store.get(task_id)
+                if task_id == task['task_id']:
+                    value['review_dispatch_claim'] = task['review_dispatch_claim']
+                return value
+            def record_completion_event(inner, task_id, **kwargs):
+                return self.store.record_completion_event(task_id, **kwargs)
+        responses = {('issues/84/comments', '100'): [],
+                     ('pulls/84', None): {'merged': True, 'merge_commit_sha': 'b' * 40,
+                                          'head': {'sha': 'c' * 40}},
+                     ('compare/' + 'a' * 40 + '...' + 'c' * 40, None):
+                         {'status': 'ahead'}}
+        result = github_events.poll(ClaimBoundStore(), task['pm_session_id'], [84],
+                                    github_get=github_responder(responses))
+        self.assertEqual(len(result['events']), 1)
+        self.assertEqual(result['events'][0]['marker_status'], 'MERGED')
+
     def test_owner_comment_once_restart_and_inbox(self):
         task = self._ready_task()
         task['completion']['evidence']['review_pr_ci'] = {
@@ -91,9 +118,9 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                      ('pulls/81', None): {'merged': True, 'merge_commit_sha': 'b' * 40}}
         out = github_events.poll(self.store, task['pm_session_id'], [81],
                                  github_get=github_responder(responses))
-        self.assertEqual(len(out['events']), 3)
+        self.assertEqual(len(out['events']), 2)
         saved = self.store.get(task['task_id'])['completion_events']
-        self.assertEqual([event['sequence'] for event in saved], [0, 1, 2])
+        self.assertEqual([event['sequence'] for event in saved], [0, 1])
 
     def test_owner_marker_requires_github_owner_attribution(self):
         task = self._ready_task()
@@ -138,7 +165,7 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                      ('pulls/79', None): {'merged': True, 'merge_commit_sha': 'a' * 40}}
         out = github_events.poll(self.store, task['pm_session_id'], [79],
                                  github_get=github_responder(responses))
-        self.assertEqual(out['events'][0]['source_sha'], 'a' * 40)
+        self.assertEqual(out['events'], [])
         with patch.object(task_submission_cli, 'run_task_github_events', return_value=23) as handler:
             self.assertEqual(main(['task', 'github-events', '--pm-session', self.session,
                                    '--issue', '79']), 23)
