@@ -57,13 +57,13 @@ If a formal Reviewer is unavailable, do **not** replace it with an unapproved mo
 
 ## Queue and IDLE
 
-After a work package completes, or after a Task is isolated, the PM checks:
+Work packages come only from the Owner's instructions (Owner 2026-10-27: 「工作範圍都以我給你的提示為準,不要自己去repo找工作」). The PM keeps a written list of the Owner's work packages for the session, adds each new Owner instruction to it, and does not add work it found on its own in the Roadmap, Issues or the repository. The Roadmap, open A11c Issues and PRs and registered D6 Tasks are read only to find the state and next step of a listed package.
 
-- the Roadmap;
-- open A11c Issues and PRs;
-- registered D6 Tasks.
+After a work package completes, or after a Task is isolated, the PM picks the next listed package or step that is executable and authorized, and has a Worker permitted by worker-dispatch.json with freshly confirmed live availability. The PM reports **IDLE** only when no such package or step exists. The IDLE report lists every remaining item and the reason it cannot run.
 
-It then picks the next work package that is executable and authorized, and has a Worker permitted by worker-dispatch.json with freshly confirmed live availability. The PM reports **IDLE** only when no such work package exists. The IDLE report lists every remaining item and the reason it cannot run.
+### Parallel dispatch check (Owner 2026-10-27)
+
+The PM does not wait on CI, a review or a single Worker while other listed work can move. About every 10 minutes (a recurring schedule in the PM session, for example `/loop 10m`), and after every result, the PM re-reads the work-package list and the state of each in-flight Task, then dispatches every package or next step (formal review, repair, merge, the next slice after a dependency lands) that is unblocked and writes no file another in-flight Task writes. It repeats until nothing more can run in parallel, then reports what is running and what each waiting item waits for. A check that finds nothing reports "no new dispatch". The schedule never authorizes work outside the list, a Worker the policy does not allow, or a merge without its gates.
 
 ## Transition record
 
