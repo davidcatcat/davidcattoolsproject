@@ -1,6 +1,10 @@
 import json
+import os
+import re
+import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -61,9 +65,71 @@ class CiTestShardsTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("check (Linux ${{ matrix.python }})", workflow)
-        self.assertIn("needs: shards", workflow)
+        self.assertIn("needs: [changes, shards]", workflow)
+        self.assertIn("needs.shards.result", workflow)
         self.assertIn("always()", workflow)
         self.assertIn("ec2-self-runner-3) account=ghrunner3", workflow)
+        self.assertIn("name: check (docs)", workflow)
+        self.assertIn("needs: changes", workflow)
+        self.assertIn("tools/llmtool/scripts/docs_check.py", workflow)
+        self.assertIn("needs.changes.outputs.code == 'true'", workflow)
+        classify_match = re.search(
+            r"(?ms)^      - name: Classify changed paths\n.*?^        run: \|\n"
+            r"(?P<script>(?:^          [^\n]*\n|^          \n)*)",
+            workflow,
+        )
+        self.assertIsNotNone(classify_match)
+        classify_script = textwrap.dedent(classify_match.group("script"))
+        cases = [
+            (["tools/llmtool/README.md"], (False, True)),
+            (["tools/llmtool/x/y.md"], (True, True)),
+            (["tools/llmtool/llmtool/cli.py"], (True, False)),
+            (["AGENTS.md"], (False, True)),
+            (
+                ["tools/llmtool/README.md", "tools/llmtool/llmtool/cli.py"],
+                (True, True),
+            ),
+            (
+                ["tools/llmtool/llmtool/cli.py", "tools/llmtool/README.md"],
+                (True, True),
+            ),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            temp = Path(directory)
+            bin_dir = temp / "bin"
+            bin_dir.mkdir()
+            git_stub = bin_dir / "git"
+            git_stub.write_text("#!/bin/sh\ncat \"$CLASSIFY_PATHS\"\n", encoding="utf-8")
+            git_stub.chmod(0o755)
+            for paths, expected in cases:
+                with self.subTest(paths=paths):
+                    paths_file = temp / "input-paths"
+                    paths_file.write_bytes(b"".join(path.encode() + b"\0" for path in paths))
+                    output_file = temp / "github-output"
+                    env = os.environ.copy()
+                    env.update(
+                        {
+                            "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}",
+                            "GITHUB_EVENT_NAME": "pull_request",
+                            "GITHUB_OUTPUT": str(output_file),
+                            "RUNNER_TEMP": directory,
+                            "CLASSIFY_PATHS": str(paths_file),
+                            "BASE_SHA": "base",
+                            "EXPECTED_SHA": "head",
+                        }
+                    )
+                    subprocess.run(
+                        ["bash", "-c", classify_script],
+                        env=env,
+                        check=True,
+                        capture_output=True,
+                        text=True,
+                    )
+                    result = dict(
+                        line.split("=", 1)
+                        for line in output_file.read_text(encoding="utf-8").splitlines()
+                    )
+                    self.assertEqual((result["code"] == "true", result["docs"] == "true"), expected)
         self.assertIn(
             'unittest discover -s tools/llmtool/tests -p "$module" < /dev/null',
             workflow,

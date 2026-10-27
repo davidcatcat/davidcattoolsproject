@@ -17,19 +17,31 @@ on:
   push:
     branches:
       - main
-    # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
+    # Top-level llmtool Markdown triggers docs validation only; deeper paths remain included.
     paths:
       - 'tools/llmtool/**'
       - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'skills/**'
+      - 'docs/**'
+      - 'tools/llmtool/*.md'
+      - '*.md'
   pull_request:
-    # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
+    # Top-level llmtool Markdown triggers docs validation only; deeper paths remain included.
     paths:
       - 'tools/llmtool/**'
       - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
+      - 'AGENTS.md'
+      - 'CLAUDE.md'
+      - 'skills/**'
+      - 'docs/**'
+      - 'tools/llmtool/*.md'
+      - '*.md'
   workflow_dispatch:
     inputs:
       python39:
@@ -45,12 +57,56 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  changes:
+    name: classify changed paths
+    if: >-
+      vars.LINUX_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && github.actor == 'davidcatcat'
+    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    outputs:
+      code: ${{ steps.classify.outputs.code }}
+      docs: ${{ steps.classify.outputs.docs }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed paths
+        id: classify
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          code=false
+          docs=false
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            paths="$RUNNER_TEMP/changed-paths"
+            git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"
+            while IFS= read -r -d '' path; do
+              case "$path" in
+                tools/llmtool/*/*.md) code=true; docs=true ;;
+                tools/llmtool/*.md) docs=true ;;
+                tools/llmtool/*) code=true ;;
+                *.md|AGENTS.md|CLAUDE.md|skills/*|docs/*|tools/llmtool/*.md) docs=true ;;
+                *) code=true ;;
+              esac
+            done < "$paths"
+          else
+            code=true
+            docs=true
+          fi
+          printf 'code=%s\ndocs=%s\n' "$code" "$docs" >> "$GITHUB_OUTPUT"
+
   shards:
     name: linux shard ${{ matrix.shard }}/3 (${{ matrix.python }})
     if: >-
       vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && github.actor == 'davidcatcat'
+      && (needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch')
+    needs: changes
     strategy:
       fail-fast: false
       matrix:
@@ -171,12 +227,13 @@ jobs:
 
   check:
     name: check (Linux ${{ matrix.python }})
-    needs: shards
+    needs: [changes, shards]
     if: >-
       always()
       && vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
       && github.actor == 'davidcatcat'
+      && (needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
       matrix:
@@ -192,3 +249,81 @@ jobs:
             exit 1
           fi
           echo "all Linux shards passed"
+
+  docs:
+    name: check (docs)
+    needs: changes
+    if: >-
+      needs.changes.outputs.docs == 'true'
+      && vars.LINUX_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && github.actor == 'davidcatcat'
+    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    steps:
+      # Trusted inline checks before checkout, identical to the shards.
+      - name: Check EC2 runner boundary
+        shell: bash
+        run: |
+          fail() { echo "::error::EC2 runner boundary failed: $1"; exit 1; }
+          case "$RUNNER_NAME" in
+            ec2-self-runner) account=ghrunner ;;
+            ec2-self-runner-2) account=ghrunner2 ;;
+            ec2-self-runner-3) account=ghrunner3 ;;
+            *) fail "unexpected runner" ;;
+          esac
+          user=$(id -un) || fail "cannot identify job user"
+          test "$user" = "$account" || fail "runner $RUNNER_NAME runs as $user, expected $account"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          groups=$(id -nG) || fail "cannot identify job groups"
+          test "$groups" = "$account" || fail "job user has extra groups: $groups"
+          python=/usr/bin/python3.14
+          test -x "$python" || fail "no $python on this host"
+          "$python" -B - <<'PY'
+          import os
+          from pathlib import Path
+          import socket
+          import sys
+          if '%d.%d' % sys.version_info[:2] != '3.14':
+              raise SystemExit('EC2 runner boundary failed: wrong Python')
+          credential_names = ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+                              'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE')
+          if any(name in os.environ for name in credential_names) or (Path.home() / '.aws').exists():
+              raise SystemExit('EC2 runner boundary failed: AWS credential configuration present')
+          for address in ('169.254.169.254', 'fd00:ec2::254'):
+              try:
+                  with socket.create_connection((address, 80), timeout=2):
+                      raise SystemExit('EC2 runner boundary failed: instance metadata reachable')
+              except OSError:
+                  pass
+          print('EC2_RUNNER_BOUNDARY_PASS Python ' + sys.version.split()[0])
+          PY
+          echo "Runner: $RUNNER_NAME; account: $user; architecture: $(uname -m)"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Source revision
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+            fi
+          fi
+      - name: Check changed Markdown
+        run: python3 -I -B tools/llmtool/scripts/docs_check.py --base "${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}" --head "${{ github.event.pull_request.head.sha || github.sha }}"
