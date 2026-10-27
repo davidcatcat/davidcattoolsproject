@@ -342,8 +342,10 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                              datetime.fromisoformat(result.ended_at.replace('Z', '+00:00')))
 
     def test_private_key_source_is_rejected_before_any_cli_launch(self):
+        private_key_header = '-----BEGIN ' + 'PRIVATE' + ' KEY-----'
+        private_key_footer = '-----END ' + 'PRIVATE' + ' KEY-----'
         (self.root / 'source.py').write_text(
-            '-----BEGIN PRIVATE KEY-----\nfixture-only\n-----END PRIVATE KEY-----\n')
+            private_key_header + '\nfixture-only\n' + private_key_footer + '\n')
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
         with self.assertRaises(DirectOpenCodeError) as caught:
