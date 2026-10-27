@@ -5,7 +5,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -32,7 +31,6 @@ class CodexCLIProviderTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.capture = self.root / "capture.json"
-        self.ready = self.root / "ready"
         self.executable = self.root / "fake-codex"
         self.provider = {
             "type": "codex-cli", "model": "test-model", "timeout_seconds": 5,
@@ -61,8 +59,7 @@ if mode == "mutation":
     capture["git_status"] = git.returncode
 Path(%r).write_text(json.dumps(capture))
 if mode == "timeout":
-    Path(%r).write_text("ready")
-    time.sleep(60)
+    time.sleep(5)
 elif mode == "descendant":
     subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
 elif mode == "large":
@@ -79,7 +76,7 @@ elif mode == "failure":
 else:
     sys.stderr.write("PRIVATE_DIAGNOSTIC SECRET_TOKEN hidden reasoning")
     sys.stdout.write("  CODEX_FINAL  \\n")
-''' % (sys.executable, mode, str(self.capture), str(self.ready))
+''' % (sys.executable, mode, str(self.capture))
         self.executable.write_text(script)
         self.executable.chmod(0o700)
 
@@ -301,29 +298,8 @@ else:
 
     def test_timeout_is_normalized_and_resources_cleaned(self):
         self.fake("timeout")
-        outcome = []
-
-        def invoke():
-            try:
-                self.complete(timeout_seconds=120)
-            except BaseException as exc:
-                outcome.append(exc)
-
-        worker = threading.Thread(target=invoke)
-        worker.start()
-        # The fake embeds this absolute marker path in its script, independent
-        # of the provider's isolated cwd/TMPDIR and environment. Allow the
-        # child ample startup time on a loaded runner; the request still has a
-        # bounded timeout and must pass all normalization and cleanup checks.
-        deadline = time.monotonic() + 90
-        while not self.ready.exists() and worker.is_alive() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertTrue(self.ready.exists(), "timed fake child did not signal ready")
-        worker.join(timeout=130)
-        self.assertFalse(worker.is_alive(), "timed-out Codex CLI request did not finish")
-        self.assertEqual(len(outcome), 1)
-        self.assertIsInstance(outcome[0], LLMToolError)
-        self.assertEqual(str(outcome[0]), "Codex CLI timed out")
+        with self.assertRaisesRegex(LLMToolError, "^Codex CLI timed out$"):
+            self.complete(timeout_seconds=1)
         self.assertFalse(Path(self.captured()["cwd"]).exists())
 
     def test_descendant_pipe_handles_are_bounded_by_timeout(self):
