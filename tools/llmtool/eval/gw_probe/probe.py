@@ -216,13 +216,16 @@ def probe_context(client):
             break
         filler = "alpha beta gamma delta " * ((size * 4 // 24) + 1)
         prompt = needle + "\n" + filler[:size * 4] + "\nQuestion: What exact needle appeared at the beginning? Reply with only the needle."
-        result = _chat(client, [{"role": "user", "content": prompt}], max_tokens=64, timeout=300)
-        response, _, message = _response(result)
+        result = _chat(client, [{"role": "user", "content": prompt}], thinking="off", max_tokens=256, timeout=300)
+        response, choice, message = _response(result)
         usage = _usage(response)
+        content = message.get("content")
+        answer = content[:200] if isinstance(content, str) else None
         observation = {"approx_prompt_tokens": size, "status": result.get("status"),
                        "error_code": result.get("error_code"),
                        "prompt_tokens": usage.get("prompt_tokens") if usage else None,
-                       "needle_found": needle in str(message.get("content", "")),
+                       "needle_found": needle in str(content or ""),
+                       "answer": answer, "finish_reason": choice.get("finish_reason"),
                        "latency_seconds": result.get("latency_seconds")}
         observations.append(observation)
         if result.get("error_code") or not isinstance(result.get("status"), int) or result["status"] >= 400:
