@@ -43,13 +43,11 @@ def _comment_verdict(comment, *, head, version, task):
     if type(comment_id) is not int or comment_id < 0:
         _refuse('REVIEW_RESULT_INVALID')
 
-    binding = task_completion._review_binding_line(
-        task['task_id'], task['run_id'], task['task_binding']['contract_digest'], head)
     formal_pass = (marker_matches and marker.group(1) == 'Claude' and status == 'PASS' and
-                   task_completion._FORMAL_ACCEPT in {line.strip() for line in lines} and
-                   binding in {line.strip() for line in lines} and
-                   lines[0] == task_completion._REVIEW_VERDICT_ACTIVITY_LINE and
-                   task_completion._VERDICT_STATUS.fullmatch(lines[1]) is not None)
+                   task_completion.is_formal_claude_pass(
+                       body, task_id=task['task_id'], run_id=task['run_id'],
+                       contract_digest=task['task_binding']['contract_digest'],
+                       result_sha=head))
     # Match the strict formal PASS shape used by task_completion. All other
     # bound verdicts are non-passing dispositions, including malformed PASSes.
     outcome = 'REVIEW_PASS' if formal_pass else 'REVIEW_FAIL'
