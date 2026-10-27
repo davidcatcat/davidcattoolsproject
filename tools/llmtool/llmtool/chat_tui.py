@@ -222,7 +222,9 @@ class ChatTUI:
         self._received_signal = None
         self.conversation = TextArea(
             text=terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
-                                    + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."),
+                                    + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."
+                                    + "\nChat mode talks to the chat provider directly; it is not a PM."
+                                    + " /task mode PROFILE sends drafts to a PM as formal Tasks."),
             read_only=True, scrollbar=True, wrap_lines=True, focus_on_click=True,
             height=Dimension(min=1, weight=1))
         self.conversation.buffer.cursor_position = len(self.conversation.text)
@@ -391,7 +393,7 @@ class ChatTUI:
         # long names never expand the footer. When the terminal is too narrow, fields
         # drop in STATUS_DROP_ORDER; the state stays last and is cut only if alone too wide.
         fields = {
-            "mode": "TASK:" + compact(self.task_profile or "", 12),
+            "mode": "TASK→PM:" + compact(self.task_profile or "", 12),
             "provider": "p:" + compact(session.provider, 10),
             "model": "m:" + compact(reported or model or "default", 14),
             "state": compact(state, 14),
@@ -705,13 +707,14 @@ class ChatTUI:
             self.task_profile = None
             self.last_task_request = None
             self.append("chat mode: Enter sends drafts to chat provider " + self.session.provider
-                        + "; chat replies are never Tasks")
+                        + " (not a PM); chat replies are never Tasks")
             return
         self.task_profile = profile
         self.last_task_request = None
         self.append("Task mode: Enter submits each draft as a formal PM Task to PM provider "
                     "profile " + profile + " through llmtool Core (task submit). Nothing is sent "
-                    "to the chat provider. /task mode off returns to chat.")
+                    "to the chat provider. The PM type, model and session are shown from the "
+                    "Core record after each submit. /task mode off returns to chat.")
 
     def start_task(self, action, first, request, from_mode=False):
         self.busy = True

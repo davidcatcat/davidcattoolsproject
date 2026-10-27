@@ -134,6 +134,8 @@ def receipt_text(code, view, profile, raw=None, error=None):
         + " (llmtool Core task submit, exit " + str(code) + ")",
         "  PM provider: " + value(view, "pm_provider_profile") + " (type "
         + value(view, "pm_provider_type") + ", model " + value(view, "pm_model") + ")",
+        "  PM session: " + value(view, "pm_session_id") + " (backend "
+        + value(view, "backend_session_semantics") + ")",
         "  Task ID: " + value(view, "task_id"),
         "  Run ID: " + value(view, "run_id"),
         "  PM state: " + value(view, "state") + "; error: " + error_text(view),

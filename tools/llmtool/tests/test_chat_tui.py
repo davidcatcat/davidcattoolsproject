@@ -1038,11 +1038,11 @@ class TaskModeTests(Base):
     def test_mode_is_explicit_and_plain_text_stays_chat_until_chosen(self):
         def task_mode_on(ui):
             self.assertEqual(ui.task_profile, 'first')
-            self.assertIn('TASK:first', ui.status_text())
+            self.assertIn('TASK→PM:first', ui.status_text())
             self.assertIn('Task mode: Enter submits', ui.conversation.text)
 
         ui, _ = self.drive(['hello\r', self.idle,
-                            lambda ui: self.assertNotIn('TASK:', ui.status_text()),
+                            lambda ui: self.assertNotIn('TASK→PM:', ui.status_text()),
                             '/task mode first\r', task_mode_on,
                             '/task mode off\r', 'again\r', self.idle])
         self.assertEqual([t['content'] for t in self.session.history],
@@ -1065,6 +1065,8 @@ class TaskModeTests(Base):
         self.assertIn('PM provider: first (type openai-compatible, model test)', text)
         self.assertIn('Task ID: ' + record['task_id'], text)
         self.assertIn('Run ID: ' + record['run_id'], text)
+        self.assertIn('PM session: ' + record['pm_session_id'] + ' (backend NO_NATIVE_SESSION_ID_EXPOSED)', text)
+        self.assertIn('it is not a PM', text)
         self.assertIn('Dispatch: 已建立／待派工', text)
         self.assertNotIn('development is running', text.lower())
         self.assertTrue(ui.show_detail)
