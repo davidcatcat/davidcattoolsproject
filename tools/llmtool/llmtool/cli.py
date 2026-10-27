@@ -35,7 +35,7 @@ from .task_submission_cli import (add_task_submission_parsers, run_task_ack,
                                  run_task_github_events,
                                  run_task_record_pm, run_task_review_prompt,
                                  run_task_remote_test, run_task_review_dispatch,
-                                 run_task_review_result,
+                                 run_task_review_result, run_task_high_debug,
                                  run_task_show, run_task_submit)
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
@@ -524,6 +524,10 @@ def main(argv=None):
                 return run_task_review_dispatch(args)
             if args.action == 'review-result':
                 return run_task_review_result(args)
+            if args.action == 'high-debug':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
+                return run_task_high_debug(args)
             if args.action == 'remote-test':
                 from .source_freshness import require_fresh_source
                 require_fresh_source()

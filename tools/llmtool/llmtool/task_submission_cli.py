@@ -570,6 +570,15 @@ def add_task_submission_parsers(actions):
                                help='review verdict version (1-9999; default 1)')
     review_result.add_argument('--reviewer-session-done', action='store_true',
                                help='record REVIEW_BLOCKED when no verdict exists')
+    high_debug = actions.add_parser('high-debug', help='Run one read-only Codex diagnosis of an Executor D6')
+    high_debug.add_argument('task_id')
+    high_debug.add_argument('--executor-task', required=True)
+    high_debug.add_argument('--pr', required=True, type=int)
+    high_debug.add_argument('--family', required=True)
+    choice = high_debug.add_mutually_exclusive_group(required=True)
+    choice.add_argument('--failed-corrections', type=int)
+    choice.add_argument('--early')
+    high_debug.add_argument('--evidence-file')
     remote_test = actions.add_parser(
         'remote-test', help='Run admitted Task tests once on the configured EC2 host')
     remote_test.add_argument('task_id', help='existing durable Task ID')
@@ -708,6 +717,15 @@ def run_task_review_result(args, *, store=None, github_get=None):
         reviewer_session_done=getattr(args, 'reviewer_session_done', False),
         github_get=github_get)
     return _print(result)
+
+
+def run_task_high_debug(args, *, store=None, runner=None, create_d6=None):
+    from .high_debug import run_high_debug
+    return run_high_debug(store=TaskStore() if store is None else store,
+        task_id=args.task_id, executor_task=args.executor_task, pr_number=args.pr,
+        family=args.family, failed_corrections=getattr(args, 'failed_corrections', None),
+        early_reason=getattr(args, 'early', None), evidence=getattr(args, 'evidence_file', None),
+        runner=runner, create_d6=create_d6)
 
 
 _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
