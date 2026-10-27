@@ -45,6 +45,7 @@ The installer symlinks the skills into:
 ```text
 ~/.claude/skills
 ~/.agents/skills
+~/.gemini/config/skills   # AGY (Antigravity CLI) global skills
 ```
 
 Because they are symlinks, updating this repository with `git pull` also updates the installed skill contents.
