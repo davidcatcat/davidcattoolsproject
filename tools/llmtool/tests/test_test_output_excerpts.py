@@ -675,8 +675,10 @@ class TestOutputExcerptsTests(unittest.TestCase):
 
     def test_content_growth_rewrite_and_path_swap_during_read_are_rejected(self):
         real_read = os.read
+        past = 1_000_000_000 * 10**9
         for mutation in ('grow', 'rewrite', 'swap'):
             self.path.write_bytes(UNIT_FAILURE)
+            os.utime(self.path, ns=(past, past))
             replacement = self.root / 'replacement.log'
             replacement.write_bytes(UNIT_FAILURE)
             changed = []
@@ -690,6 +692,8 @@ class TestOutputExcerptsTests(unittest.TestCase):
                     else:
                         self.path.write_bytes(UNIT_FAILURE + b'extra' if mutation == 'grow'
                                               else UNIT_FAILURE.replace(b'evidence', b'modified'))
+                        if mutation == 'rewrite':
+                            self.assertNotEqual(os.stat(self.path).st_mtime_ns, past)
                 return raw
 
             with self.subTest(mutation=mutation), patch('llmtool.test_output_excerpts.os.read', side_effect=changed_read):

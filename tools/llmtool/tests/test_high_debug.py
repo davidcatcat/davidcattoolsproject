@@ -13,7 +13,13 @@ from llmtool.errors import LLMToolError
 
 class HighDebugTests(unittest.TestCase):
     def test_dispatch_refusal_has_stable_code(self):
-        store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
+        store = SimpleNamespace(get=lambda _task: {
+            'task_id': 'a' * 32,
+            'review_repair_claims': [
+                {'family': 'family', 'pr': 17},
+                {'family': 'family', 'pr': 17},
+            ],
+        })
         with patch.object(high_debug.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=False)):
             with self.assertRaises(LLMToolError) as caught:
@@ -85,6 +91,21 @@ class HighDebugTests(unittest.TestCase):
                     failed_corrections=1)
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_ARGUMENT_INVALID')
 
+    def test_overstated_correction_count_uses_stored_family_claims(self):
+        store = SimpleNamespace(get=lambda _task: {
+            'task_id': 'a' * 32,
+            'review_repair_claims': [{'family': 'family', 'pr': 17},
+                                     {'family': 'family', 'pr': 17}],
+        })
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(store=store, task_id='a' * 32,
+                    executor_task='executor', pr_number=17, family='family',
+                    failed_corrections=3)
+        self.assertEqual(caught.exception.high_debug_code,
+                         'HIGH_DEBUG_ARGUMENT_INVALID')
+
     def test_neither_and_both_reason_forms_are_refused(self):
         store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
         with patch.object(high_debug.worker_dispatch, 'evaluate',
@@ -98,7 +119,13 @@ class HighDebugTests(unittest.TestCase):
                                      'HIGH_DEBUG_ARGUMENT_INVALID')
 
     def test_sensitive_evidence_is_refused(self):
-        store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
+        store = SimpleNamespace(get=lambda _task: {
+            'task_id': 'a' * 32,
+            'review_repair_claims': [
+                {'family': 'family', 'pr': 17},
+                {'family': 'family', 'pr': 17},
+            ],
+        })
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / 'evidence.txt'
             evidence.write_text('Bear' + 'er ' + 'a' * 40, encoding='utf-8')
@@ -117,6 +144,9 @@ class _Store:
         self.events = []
     def get(self, task_id):
         return {'task_id': task_id, 'run_id': 'b' * 32,
+                'review_repair_claims': [
+                    {'family': 'family', 'pr': 17},
+                    {'family': 'family', 'pr': 17}],
                 'completion': {'executor_task_id': 'executor',
                                'evidence': {'common_dir': '/tmp/ignored'}},
                 'high_debug': list(self.entries)}
