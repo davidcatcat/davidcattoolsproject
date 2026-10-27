@@ -86,6 +86,7 @@ class ReviewRepairTests(unittest.TestCase):
         def adapter(**request):
             self.calls.append(request)
             return {'status': 'DISPATCHED', 'head': HEAD}
+        adapter = kwargs.pop('dispatch_adapter', adapter)
         current_head = kwargs.pop('current_head', lambda _task, _executor: HEAD)
         github_get = kwargs.pop('github_get', lambda _path: [_comment()])
         decision = kwargs.pop('decision', type('Decision', (), {'allowed': True})())
