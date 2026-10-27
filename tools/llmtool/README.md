@@ -564,7 +564,7 @@ providers:
     base_url: "http://10.29.7.58:4000"
     model: "gw"
     provider_options:
-      enable_thinking: false
+      enable_thinking: true
   home-vllm:
     type: openai-compatible
     base_url: "http://192.168.1.20:8000"
@@ -1030,20 +1030,21 @@ excerpt selection is not a token/cost benchmark; company-only Phase 0 on real
 48 KiB+ captures and any paired premium-token measurement are future, separately
 authorized work described in [the C1 plan](NATIVE_SELF_DEV_MVP.md).
 
-## OpenAI-compatible no-thinking 與共用輸出契約
+## OpenAI-compatible thinking 與共用輸出契約
 
 `enable_thinking` 是 OpenAI-compatible 實作的**可選 provider-specific 行為**，
 不是 generic generation 的共同能力。Generic template 的 `provider_options` 是空的。
-公司 Qwen deployment example 明確設定 `provider_options.enable_thinking: false`，
-手動採用該設定後，其 request 仍包含已驗證有效的：
+依 Owner 2026-10-28 決策，公司 Qwen profile 預設
+`provider_options.enable_thinking: true`。需要關閉 thinking 時可明確設為 `false`；
+一般相容伺服器若不支援此擴充，可設為 `null` 或使用空的 `provider_options: {}`。
+設定 true 或 false 時，request 會帶上對應的已驗證欄位，例如：
 
 ```json
-"chat_template_kwargs": {"enable_thinking": false}
+"chat_template_kwargs": {"enable_thinking": true}
 ```
 
-一般相容伺服器若不支援此擴充，在 user profile 設 `provider_options: {}`，
-或 `enable_thinking: null`，即可完全省略 `chat_template_kwargs`。
-新 profile 預設省略。此選項只接受 boolean 或 null；true 會要求相應伺服器啟用 thinking，
+新 profile 的通用預設仍省略此擴充，不繼承公司 profile 的設定。此選項只接受 boolean 或 null；
+true 會要求相應伺服器啟用 thinking，
 但 reasoning 欄位仍不輸出，也可能更快用完 completion budget。
 Core／CLI 不生成此 wire 欄位，未來 provider 不必實作它。
 
