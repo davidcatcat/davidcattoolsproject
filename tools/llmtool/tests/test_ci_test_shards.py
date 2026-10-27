@@ -61,9 +61,21 @@ class CiTestShardsTests(unittest.TestCase):
             encoding="utf-8"
         )
         self.assertIn("check (Linux ${{ matrix.python }})", workflow)
-        self.assertIn("needs: shards", workflow)
+        self.assertIn("needs: [changes, shards]", workflow)
+        self.assertIn("needs.shards.result", workflow)
         self.assertIn("always()", workflow)
         self.assertIn("ec2-self-runner-3) account=ghrunner3", workflow)
+        self.assertIn("name: check (docs)", workflow)
+        self.assertIn("needs: changes", workflow)
+        self.assertIn("tools/llmtool/scripts/docs_check.py", workflow)
+        self.assertIn("needs.changes.outputs.code == 'true'", workflow)
+        llmtool_classification = """tools/llmtool/*)
+                  code=true
+                  case "$path" in
+                    *.md) docs=true ;;
+                  esac
+                  ;;"""
+        self.assertIn(llmtool_classification, workflow)
         self.assertIn(
             'unittest discover -s tools/llmtool/tests -p "$module" < /dev/null',
             workflow,
