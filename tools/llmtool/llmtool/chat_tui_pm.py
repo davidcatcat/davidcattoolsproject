@@ -50,11 +50,11 @@ _RECOVERY = {
 
 def error_code(exc):
     """The typed pm_runtime code of an exception, else UNKNOWN (never message text)."""
-    code = getattr(exc, "pm_runtime_code", None)
-    return code if type(code) is str and code.isupper() and len(code) <= 64 else UNKNOWN
+    return safe_code(getattr(exc, "pm_runtime_code", None))
 
 
 def error_text(code):
+    code = safe_code(code)
     hint = _RECOVERY.get(code)
     return ("PM runtime error " + code + "; retry when (TUI guidance): "
             + (hint or UNKNOWN + " — pm_runtime gives no recovery for this code"))
@@ -71,7 +71,8 @@ def event_ids(event):
     """(turn_id, seq) when pm_runtime reports them on the event, else (None, None)."""
     turn = event.get("turn_id")
     seq = event.get("seq")
-    return (turn if type(turn) is str else None, seq if type(seq) is int else None)
+    return (turn if type(turn) is str and _HEX_ID.fullmatch(turn) else None,
+            seq if type(seq) is int and type(seq) is not bool else None)
 
 
 def tool_result_text(event, name):
@@ -82,8 +83,8 @@ def tool_result_text(event, name):
     reason = event.get("reason")
     if reason == "PERMISSION_DENIED":
         return label + ": auto-denied (permission prompts are off until S3)"
-    if type(reason) is str and reason:
-        return label + ": error (" + reason + ")"
+    if reason is not None:
+        return label + ": error (" + safe_code(reason) + ")"
     return (label + ": error (an auto-denied permission is possible; pm_runtime does not "
             "report the reason)")
 
@@ -116,10 +117,29 @@ def screen_stream(raw, final):
     return shown[:cut]
 
 
+# Every value a PM path shows passes one of these three (live events, history, codes).
+_CODE = re.compile(r"[A-Z][A-Z0-9_]{0,63}")
+_HEX_ID = re.compile(r"[0-9a-f]{1,64}")
+
+
+def safe_text(value, missing=UNKNOWN):
+    """Free text from pm_runtime or its stored history: recognisable credentials are
+    redacted, and text that stays credential-like is withheld."""
+    if type(value) is not str:
+        return missing
+    return screen_stream(value, final=True)
+
+
 def safe_name(name):
+    """A tool or other short name; withheld when credential-like."""
     if type(name) is not str or not name:
         return UNKNOWN
     return "[withheld]" if _emitted_sensitive(name) else name
+
+
+def safe_code(value):
+    """A typed code (error, status, reason) shown only when it has the code shape."""
+    return value if type(value) is str and _CODE.fullmatch(value) else UNKNOWN
 
 
 # -- display helpers -----------------------------------------------------------------
@@ -136,7 +156,7 @@ def usage_text(usage):
 
 
 def turn_end_text(event, elapsed):
-    status = event.get("status") if type(event.get("status")) is str else UNKNOWN
+    status = safe_code(event.get("status"))
     turn_id, _seq = event_ids(event)
     return ("  — PM turn " + status + " in %.1fs (measured locally); usage: " % elapsed
             + usage_text(event.get("usage")) + "; turn " + (turn_id[:8] if turn_id else UNKNOWN))
@@ -150,12 +170,12 @@ def history_text(result):
     shown = [t for t in turns if type(t) is dict][-HISTORY_SHOWN:]
     lines = ["PM history (stored by pm_runtime; last %d of %d turns)" % (len(shown), len(turns))]
     for turn in shown:
-        owner = turn.get("owner_text") if type(turn.get("owner_text")) is str else UNKNOWN
-        result_text = turn.get("result_text") if type(turn.get("result_text")) is str else ""
+        # Stored history is not validated by pm_runtime: every shown field is screened.
         tools = turn.get("tool_names") if type(turn.get("tool_names")) is list else []
-        lines.append("(history) %s  owner → PM:\n%s" % (turn.get("started_at") or UNKNOWN, owner))
+        lines.append("(history) %s  owner → PM:\n%s" % (
+            safe_text(turn.get("started_at")), safe_text(turn.get("owner_text"))))
         lines.append("(history) PM [%s]%s:\n%s" % (
-            turn.get("status") or UNKNOWN,
-            (" tools: " + ", ".join(str(t) for t in tools)) if tools else "",
-            result_text or "(no stored reply text)"))
+            safe_code(turn.get("status")),
+            (" tools: " + ", ".join(safe_name(t) for t in tools)) if tools else "",
+            safe_text(turn.get("result_text"), "") or "(no stored reply text)"))
     return "\n".join(lines)
