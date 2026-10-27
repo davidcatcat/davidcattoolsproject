@@ -205,28 +205,48 @@ class ClaudeBgDispatchTests(unittest.TestCase):
     def test_dispatch_gate_allows_pauses_assignment_and_unknown_roles_before_launch(self):
         valid_ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-1'
         cases = [
-            ('claude-developer', 'executor-task', None, True, 'OWNER_POLICY_ALLOWED'),
-            ('claude-reviewer', 'executor-task', None, False, 'OWNER_PAUSED'),
-            ('claude-developer', 'executor-task', None, False, 'OWNER_ASSIGNMENT_REQUIRED'),
-            ('claude-developer', 'executor-task', valid_ref, True, 'OWNER_ASSIGNMENT_MATCHED'),
-            ('unknown-role', 'executor-task', None, False, 'WORKER_UNKNOWN'),
+            ('claude-developer', 'claude-developer', 'executor-task', None, True,
+             'OWNER_POLICY_ALLOWED'),
+            ('claude-developer-ui', 'claude-developer', 'executor-task', None, True,
+             'OWNER_POLICY_ALLOWED'),
+            ('claude-developer-ui-tools', 'claude-developer', 'executor-task', None, True,
+             'OWNER_POLICY_ALLOWED'),
+            ('claude-reviewer', 'claude-reviewer', 'executor-task', None, False, 'OWNER_PAUSED'),
+            ('claude-developer', 'claude-developer', 'executor-task', None, False,
+             'OWNER_ASSIGNMENT_REQUIRED'),
+            ('claude-developer', 'claude-developer', 'executor-task', valid_ref, True,
+             'OWNER_ASSIGNMENT_MATCHED'),
+            ('unknown-role', 'unknown', 'executor-task', None, False, 'WORKER_UNKNOWN'),
         ]
-        for role, task, ref, allowed, reason in cases:
+        for role, worker, task, ref, allowed, reason in cases:
             with self.subTest(role=role, allowed=allowed):
                 self.reset()
                 self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)], before=[], after=[[]])
                 decision = dispatch_tool.worker_dispatch.PolicyDecision(
-                    role if role in dispatch_tool.worker_dispatch.WORKERS else 'unknown',
-                    allowed, reason, 'b' * 64)
+                    worker, allowed, reason, 'b' * 64)
                 with patch.object(dispatch_tool.worker_dispatch, 'evaluate', return_value=decision) as gate:
                     code, receipt = self.dispatch(name=role, task=task, owner_ref=ref)
                 if allowed:
-                    gate.assert_called_once_with(role, ref, task)
+                    gate.assert_called_once_with(worker, ref, task)
                     self.assertEqual(len(self.launches()), 1)
                 else:
                     self.assertEqual(code, 2)
                     self.assertEqual(receipt['reason'], reason)
                     self.assertEqual(self.launches(), [])
+
+    def test_invalid_developer_name_variants_are_refused_before_gate_or_launch(self):
+        for name, reason in (
+                ('claude-developerx', 'WORKER_UNKNOWN'),
+                ('claude-developer-UI', 'ROLE_NAME_INVALID'),
+                ('claude-developer-', 'WORKER_UNKNOWN')):
+            with self.subTest(name=name):
+                self.reset()
+                self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)])
+                with patch.object(dispatch_tool.worker_dispatch, 'evaluate') as gate:
+                    code, receipt = self.dispatch(name=name)
+                self.assertEqual((code, receipt['reason']), (2, reason))
+                gate.assert_not_called()
+                self.assertEqual(self.launches(), [])
 
     def test_dispatch_unknown_role_is_refused_without_evaluating_or_launching(self):
         with patch.object(dispatch_tool.worker_dispatch, 'evaluate') as gate:
