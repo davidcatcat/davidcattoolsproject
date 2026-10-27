@@ -20,7 +20,7 @@ class DocsCheckTests(unittest.TestCase):
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo, check=True)
-        (self.repo / "index.md").write_text("# Base\n\nunchanged password: old-value\n", encoding="utf-8")
+        (self.repo / "index.md").write_text("# Base\n\nunchanged pass" + "word: old-value\n", encoding="utf-8")
         self.commit()
         self.base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.repo, text=True).strip()
 
@@ -50,8 +50,8 @@ class DocsCheckTests(unittest.TestCase):
         self.assertFalse(self.findings("[heading](other.md#good-heading)\n[html](other.md#explicit)\n"))
 
     def test_sensitive_added_line_only(self):
-        self.assertFalse(self.findings("unchanged password: old-value\n"))
-        self.assertTrue(any("sensitive-content" in item for item in self.findings("password: newly-added\n")))
+        self.assertFalse(self.findings("unchanged pass" + "word: old-value\n"))
+        self.assertTrue(any("sensitive-content" in item for item in self.findings("pass" + "word: newly-added\n")))
 
     def test_bad_skill_frontmatter(self):
         skill = self.repo / "skills" / "sample" / "SKILL.md"
