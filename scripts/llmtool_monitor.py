@@ -20,7 +20,8 @@ row each with a live state such as
 labels, titles and verdict words (see the office view section); a role is
 named only when a record binds it, never guessed. A session untouched for 6 hours is left out,
 and finished subagent work for 30 minutes; office data is rebuilt at most every
-5 seconds.
+5 seconds. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
+running `llmtool task remote-test`, else its newest local receipt or outcome.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -76,6 +77,7 @@ class Process:
     role: str
     name: str = "?"   # executable basename only, never arguments
     owner: str = ""   # nearest agent this process belongs to / was started by
+    job: tuple = ()   # a remote-test run: (task, sha, modules), validated tokens only
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -215,6 +217,49 @@ def _host_job(command: str) -> tuple[str, str] | None:
     return None
 
 
+HEX_SHA = re.compile(r"[0-9a-f]{40}")
+TEST_MODULE = re.compile(r"test_[a-z0-9_]{1,80}")
+
+
+def _remote_test_job(command: str) -> tuple:
+    """(short task, short SHA, modules) of an `llmtool task remote-test` run or
+    of the ssh it starts. Only tokens matching their strict shape are kept, so
+    the host, user and paths in the command line are never returned."""
+    parts = command.split()
+    if not parts or (_base(parts[0]) != "ssh" and "remote-test" not in parts):
+        return ()
+    if _base(parts[0]) == "ssh":
+        # ssh ... python3 - <sha> <ref> <repo> <python> <module>...
+        for i in range(1, len(parts) - 1):
+            if (parts[i] == "-" and _base(parts[i - 1]).startswith("python")
+                    and HEX_SHA.fullmatch(parts[i + 1])):
+                modules = tuple(m for m in parts[i + 2:] if TEST_MODULE.fullmatch(m))
+                return ("?", parts[i + 1][:7], modules)
+        return ()
+    if classify(command) != "llmtool CLI":
+        return ()
+    for i in range(len(parts) - 1):
+        if parts[i] == "task" and parts[i + 1] == "remote-test":
+            args = parts[i + 2:]
+            break
+    else:
+        return ()
+    task, sha, modules, j = "?", "?", [], 0
+    while j < len(args):
+        arg = args[j]
+        name, eq, value = arg.partition("=")
+        if arg.startswith("--") and not eq and j + 1 < len(args):
+            value, j = args[j + 1], j + 1
+        if name == "--sha" and HEX_SHA.fullmatch(value):
+            sha = value[:7]
+        elif name == "--module" and TEST_MODULE.fullmatch(value):
+            modules.append(value)
+        elif not arg.startswith("-") and task == "?" and re.fullmatch(r"[0-9a-f]{8,64}", arg):
+            task = arg[:8]
+        j += 1
+    return (task, sha, tuple(modules))
+
+
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
     """remembered: {pgid: member PIDs} of agent-led groups seen in earlier polls.
 
@@ -242,7 +287,7 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
         rows[pid] = (ppid, pgid,
                      elapsed if len(elapsed) <= 18 else "UNKNOWN",
                      stat if ALLOWED_STATE.fullmatch(stat) else "?",
-                     role, safe_name(found.group(6)))
+                     role, safe_name(found.group(6)), _remote_test_job(found.group(6)))
     matched = {pid for pid, row in rows.items()
                if row[4] is not None and row[4] not in NO_EXPAND}
     # Expand a whole process group only when the agent leads it (as llmtool's
@@ -266,7 +311,7 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
         return None
 
     result = []
-    for pid, (ppid, pgid, elapsed, stat, role, name) in rows.items():
+    for pid, (ppid, pgid, elapsed, stat, role, name, job) in rows.items():
         ancestor = agent_ancestor(pid)
         if role is None:
             if ancestor is not None:
@@ -275,13 +320,15 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
                 role, owner = "  group member", label(pgid)
             elif pid in orphans.get(pgid, ()):
                 role, owner = "  orphaned group member", f"group {pgid} (leader gone)"
+            elif job:
+                role, owner = "  remote-test ssh", "llmtool remote-test (gone)"
             else:
                 continue
         else:
             owner = label(ancestor) if ancestor is not None else ""
         if stat.startswith("Z"):
             role += " (zombie)"
-        result.append(Process(pid, ppid, pgid, elapsed, stat, role, name, owner))
+        result.append(Process(pid, ppid, pgid, elapsed, stat, role, name, owner, job))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -317,7 +364,8 @@ def describe(p: Process) -> str:
         return f"{p.role.replace(' (zombie)', '')}{zombie}  PID {p.pid}{started}"
     kind = p.role.strip().replace(" (zombie)", "")
     relation = {"child": "child of", "group member": "in process group of",
-                "orphaned group member": "left behind in"}.get(kind, kind)
+                "orphaned group member": "left behind in",
+                "remote-test ssh": "ssh of"}.get(kind, kind)
     return f"{p.name}{zombie}  PID {p.pid}  ({relation} {p.owner})"
 
 
@@ -3446,6 +3494,89 @@ def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[floa
     return sorted(found, reverse=True)
 
 
+REMOTE_TEST_RESULTS = frozenset({"PASS", "FAIL", "TIMEOUT", "SHA_MISMATCH"})
+REMOTE_TEST_OUTCOMES = frozenset({"ADMISSION_DENIED", "UNAVAILABLE", "TIMEOUT", "UNKNOWN"})
+REMOTE_TEST_FILES = 32        # newest task files read per office rebuild
+REMOTE_TEST_READ = 4 << 20    # a Task holds up to 32 receipts of up to 64 result lines
+REMOTE_TEST_SKEW = 300.0      # receipts carry the EC2 clock; file times the local one
+
+
+def _remote_test_time(value) -> float:
+    if type(value) is not str:
+        return 0.0
+    return _github_time(re.sub(r"\.\d{6}Z$", "Z", value))
+
+
+def remote_test_latest(root: str | None = None) -> tuple[float, str] | None:
+    """(when, words) of the newest EC2 remote-test receipt or receipt-less
+    outcome in llmtool's local task records. Only result words, codes, the
+    Task id, the SHA and the test count are read; the remote config, host,
+    paths and logs are never touched. At most REMOTE_TEST_FILES files are read,
+    newest first, stopping once a file is older than the newest entry found."""
+    root = LLMTOOL_TASKS if root is None else root
+    stamped = []
+    for path in glob.glob(os.path.join(root, "*.json")):
+        try:
+            stamped.append((os.path.getmtime(path), path))
+        except OSError:
+            continue
+    best = None
+    for mtime, path in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
+        if best is not None and mtime < best[0] - REMOTE_TEST_SKEW:
+            break   # any entry in an older file was written before it
+        try:
+            with open(path, "rb") as handle:
+                record = json.loads(handle.read(REMOTE_TEST_READ))
+        except (OSError, ValueError):
+            continue
+        if type(record) is not dict:
+            continue
+        task = str(record.get("task_id") or "")
+        task = task[:8] if re.fullmatch(r"[0-9a-f]{8,64}", task) else "?"
+        receipts, outcomes = record.get("remote_test_receipts"), record.get("remote_test_outcomes")
+        for item in receipts if type(receipts) is list else []:
+            if type(item) is not dict or item.get("result") not in REMOTE_TEST_RESULTS:
+                continue
+            when = _remote_test_time(item.get("ended_at"))
+            sha, ran = item.get("source_sha"), item.get("ran_total")
+            words = f"task {task} {item['result']}"
+            words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
+            words += f"，跑了 {ran} 個測試" if type(ran) is int and ran >= 0 else ""
+            if when and (best is None or when > best[0]):
+                best = (when, words)
+        for item in outcomes if type(outcomes) is list else []:
+            if type(item) is not dict or item.get("result") not in REMOTE_TEST_OUTCOMES:
+                continue
+            when, sha, code = _remote_test_time(item.get("at")), item.get("sha"), item.get("code")
+            words = f"task {task} {item['result']}"
+            words += f"（{code}）" if type(code) is str and CODE_TEXT.fullmatch(code) else ""
+            words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
+            if when and (best is None or when > best[0]):
+                best = (when, words)
+    return best
+
+
+def remote_test_row(processes: list[Process], now: float, root: str | None = None) -> OfficeRow:
+    """The EC2 remote-test worker: the run the process table shows, else the
+    newest local record. It says only what the process or record says."""
+    runs = [p for p in processes if p.job]
+    parents = {p.pid for p in runs if p.job[0] != "?"}
+    runs = [p for p in runs if p.ppid not in parents]   # an ssh under its own llmtool run
+    if runs:
+        task, sha, modules = runs[0].job
+        detail = f"執行中：task {task} @{sha}" + (f"；{', '.join(modules)}" if modules else "")
+        if len(runs) > 1:
+            detail += f"；另有 {len(runs) - 1} 個執行中"
+        return OfficeRow("EC2 遠端測試", WORKING, detail, _elapsed_seconds(runs[0].elapsed),
+                         80, kind="worker", evidence="程序")
+    latest = remote_test_latest(root)
+    if latest is None:
+        return OfficeRow("EC2 遠端測試", IDLE, "尚無遠端測試紀錄", None, 80, kind="worker",
+                         evidence="llmtool 紀錄")
+    return OfficeRow("EC2 遠端測試", IDLE, f"最近一次：{latest[1]}", max(0.0, now - latest[0]),
+                     80, kind="worker", evidence="llmtool 紀錄")
+
+
 # Codex reviewers are not a standing Worker: they run as sessions the PM starts
 # and appear under it. The `codex-reviewer` dispatch switch (Owner 2026-10-25)
 # gates them but gets no roster row of its own.
@@ -3871,6 +4002,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
     mac = runner_rows(processes, now, runner_root, cwd_of, ci=ci)
     rows += agy + mac + github_runner_rows(ci_view, now, {row.key for row in mac}, ci)
+    rows.append(remote_test_row(processes, now, llmtool_tasks))
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:

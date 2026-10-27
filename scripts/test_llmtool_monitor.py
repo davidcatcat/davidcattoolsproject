@@ -2448,7 +2448,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((live.name, live.state, live.kind, live.group),
                          ("claude", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows)
-        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 7 位")
+        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 8 位")   # incl. the EC2 worker
         live = lines.index(f"── {mon.LIVE_SECTION} ──")
         pm = next(i for i, line in enumerate(lines) if "codex 主對話" in line)
         self.assertLess(live, pm)
@@ -2937,6 +2937,106 @@ class OfficeViewTests(unittest.TestCase):
         text = "\n".join(mon.office_lines(list(rows.values())))
         for secret in SECRETS:
             self.assertNotIn(secret, text)
+
+    SHA = "0123456789abcdef0123456789abcdef01234567"
+    TASK = "abcdef0123456789abcdef0123456789"
+
+    def _ec2(self, processes=(), tasks="/nonexistent"):
+        rows = self.by_name(mon.office_rows(list(processes), self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None, llmtool_tasks=tasks))
+        return rows["EC2 遠端測試"], "\n".join(mon.office_lines(list(rows.values())))
+
+    def _remote_tasks(self, *records):
+        tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        for i, (name, body, age) in enumerate(records):
+            path = tasks / f"{name}.json"
+            path.write_text(body if type(body) is str else json.dumps(body), encoding="utf-8")
+            os.utime(path, (self.NOW - age, self.NOW - age))
+        return str(tasks)
+
+    def _stamp(self, age, micro=False):
+        return datetime.fromtimestamp(self.NOW - age, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%S" + (".000000Z" if micro else "Z"))
+
+    def test_ec2_worker_running_remote_test_shows_task_sha_and_modules_from_argv(self):
+        host_words = ("ec2-user", "52.221.189.89", "example-host", "/srv/repo", "RAW-ARGV-SECRET")
+        snap = mon.parse_processes(ps(
+            f"  10     1    10   02:05 S    python3 -I -m llmtool task remote-test {self.TASK} "
+            f"--executor-task wp-1 --sha {self.SHA} --ref RAW-ARGV-SECRET "
+            "--module test_remote_test --module=test_task_store",
+            f"  11    10    10   02:04 S    ssh -o BatchMode=yes ec2-user@52.221.189.89 python3 - "
+            f"{self.SHA} refs/RAW-ARGV-SECRET /srv/repo /usr/bin/python3 test_remote_test"), 999)
+        row, text = self._ec2(snap.processes)
+        self.assertEqual((row.state, row.kind, row.age), (mon.WORKING, "worker", 125.0))
+        self.assertEqual(row.detail, "執行中：task abcdef01 @0123456；test_remote_test, test_task_store")
+        for word in host_words:
+            self.assertNotIn(word, text)
+        # the ssh alone, its llmtool parent gone: still working, no task claimed
+        orphan = mon.parse_processes(ps(
+            f"  11     1    10   00:09 S    /usr/bin/ssh ec2-user@example-host python3 - "
+            f"{self.SHA} main /srv/repo /usr/bin/python3 test_remote_test"), 999)
+        self.assertEqual(mon.describe(orphan.processes[0]),
+                         "ssh  PID 11  (ssh of llmtool remote-test (gone))")
+        row, text = self._ec2(orphan.processes)
+        self.assertEqual((row.state, row.detail), (mon.WORKING, "執行中：task ? @0123456；test_remote_test"))
+        for word in host_words:
+            self.assertNotIn(word, text)
+        # other llmtool commands are not remote-test runs
+        other = mon.parse_processes(ps(f"  12     1    12   00:09 S    python3 -m llmtool task inspect {self.TASK}"), 999)
+        self.assertEqual(self._ec2(other.processes)[0].state, mon.IDLE)
+
+    def test_ec2_worker_idle_shows_newest_receipt_and_skips_malformed_files(self):
+        def receipt(result, age, ran):
+            return {"result": result, "source_sha": self.SHA, "ran_total": ran,
+                    "ended_at": self._stamp(age), "final": ["TOOL-OUTPUT-SECRET"],
+                    "remote_log_path": "/tmp/llmtool-remote-log.x/remote-test.log",
+                    "failures": [], "modules": ["test_remote_test"]}
+        tasks = self._remote_tasks(
+            ("old", {"task_id": "1" * 32, "remote_test_receipts": [receipt("FAIL", 7200, 3)]}, 7200),
+            ("new", {"task_id": self.TASK, "request": "PROMPT-SECRET",
+                     "remote_test_receipts": [receipt("FAIL", 900, 40), receipt("PASS", 600, 42)]}, 600),
+            ("broken", "{not json", 10),
+            ("list", "[1, 2]", 20),
+            ("odd", {"task_id": "2" * 32, "remote_test_receipts": "PASS",
+                     "remote_test_outcomes": [{"result": "MADE_UP", "at": self._stamp(5)}]}, 5))
+        row, text = self._ec2(tasks=tasks)
+        self.assertEqual((row.state, row.age), (mon.IDLE, 600.0))
+        self.assertEqual(row.detail, "最近一次：task abcdef01 PASS @0123456，跑了 42 個測試")
+        for secret in SECRETS + ("remote-log",):
+            self.assertNotIn(secret, text)
+
+    def test_ec2_worker_shows_outcome_code_and_keeps_unknown(self):
+        tasks = self._remote_tasks(
+            ("a", {"task_id": self.TASK, "remote_test_receipts": [
+                {"result": "PASS", "source_sha": self.SHA, "ran_total": 5, "ended_at": self._stamp(3600)}],
+                "remote_test_outcomes": [{"result": "UNKNOWN", "code": "RECEIPT_INVALID",
+                                          "sha": self.SHA, "modules": [], "executor_task": "wp-1",
+                                          "at": self._stamp(120, micro=True)}]}, 120))
+        row, _ = self._ec2(tasks=tasks)
+        self.assertEqual((row.state, row.age), (mon.IDLE, 120.0))
+        self.assertEqual(row.detail, "最近一次：task abcdef01 UNKNOWN（RECEIPT_INVALID） @0123456")
+        only = self._remote_tasks(("b", {"task_id": self.TASK, "remote_test_outcomes": [
+            {"result": "ADMISSION_DENIED", "code": "CONFIG_INVALID", "sha": None, "modules": [],
+             "executor_task": None, "at": self._stamp(30)}]}, 30))
+        self.assertEqual(self._ec2(tasks=only)[0].detail,
+                         "最近一次：task abcdef01 ADMISSION_DENIED（CONFIG_INVALID）")
+
+    def test_ec2_worker_without_records_never_reads_the_remote_config(self):
+        home = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        (home / ".config" / "llmtool").mkdir(parents=True)
+        (home / ".config" / "llmtool" / "remote-test.json").write_text(json.dumps(
+            {"host": "example-host", "user": "ec2-user", "repo_path": "/srv/repo",
+             "python": "/usr/bin/python3"}), encoding="utf-8")
+        tasks = self._remote_tasks(("plain", {"task_id": self.TASK, "state": "WAITING_PM"}, 60))
+        with patch.dict(os.environ, {"HOME": str(home)}):
+            row, text = self._ec2(tasks=tasks)
+            empty, _ = self._ec2()
+        self.assertEqual((row.state, row.detail, row.age), (mon.IDLE, "尚無遠端測試紀錄", None))
+        self.assertEqual(empty.detail, "尚無遠端測試紀錄")
+        for word in ("example-host", "ec2-user", "/srv/repo"):
+            self.assertNotIn(word, text)
 
     def _runner(self, *logs):
         # The log path is shown with the home as "~"; a temp folder can sit in
