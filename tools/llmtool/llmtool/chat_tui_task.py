@@ -13,6 +13,25 @@ UNKNOWN = "UNKNOWN"
 NOT_AVAILABLE = "NOT_AVAILABLE"
 PENDING_DISPATCH = "已建立／待派工"
 _TASK_ID = re.compile(r"[0-9a-f]{32}")
+_SHA256 = re.compile(r"[0-9a-f]{64}")
+_STR, _OPT_STR, _DICT, _OPT_DICT = (str,), (str, type(None)), (dict,), (dict, type(None))
+# Keys task_submission_cli._task_view always emits for a stored record, with types.
+_VIEW_REQUIRED = {
+    "schema_version": (int,), "task_id": _STR, "run_id": _STR, "pm_session_id": _STR,
+    "pm_provider_profile": _STR, "pm_provider_type": _OPT_STR, "pm_model": _OPT_STR,
+    "backend_session_semantics": _STR, "native_session_id": _OPT_STR, "state": _STR,
+    "created_at": _STR, "updated_at": _STR, "task_contract": _DICT, "task_binding": _DICT,
+    "request": _OPT_STR, "request_sha256": _OPT_STR, "response": _OPT_STR,
+    "usage": _OPT_DICT, "error_code": _OPT_STR, "record_sha256": _STR, "usage_status": _STR,
+}
+# Keys _task_view adds only for some records.
+_VIEW_OPTIONAL = {
+    "pm_route_binding": _OPT_DICT, "pm_provenance": _OPT_DICT, "completion": _OPT_DICT,
+    "pm_assignment": _OPT_DICT, "developer": _OPT_DICT, "active_pm_handoff": _DICT,
+    "completion_events": (list,), "pm_recovery": _DICT,
+}
+_STATES = frozenset(("PM_PENDING", "PM_RESPONDED", "PM_UNAVAILABLE", "INPUT_REJECTED",
+                     "PM_RESPONSE_REJECTED"))
 # States in which Core accepted the request for PM intake (task_store.STATES).
 _INTAKE_OK = frozenset(("PM_PENDING", "PM_RESPONDED"))
 # TUI guidance for Core error codes; Core itself returns no PM retry hint.
@@ -49,11 +68,29 @@ _RETRY = {
 _FAILED_STATES = frozenset(("PM_UNAVAILABLE", "INPUT_REJECTED", "PM_RESPONSE_REJECTED"))
 
 
+def is_core_view(value):
+    """True only for an object shaped like the Task view Core's task submit/show print."""
+    if type(value) is not dict or not set(_VIEW_REQUIRED).issubset(value):
+        return False
+    if set(value) - set(_VIEW_REQUIRED) - set(_VIEW_OPTIONAL):
+        return False
+    for key, item in value.items():
+        types = _VIEW_REQUIRED.get(key) or _VIEW_OPTIONAL[key]
+        if type(item) not in types:
+            return False
+    return (_TASK_ID.fullmatch(value["task_id"]) is not None
+            and _TASK_ID.fullmatch(value["run_id"]) is not None
+            and _SHA256.fullmatch(value["record_sha256"]) is not None
+            and value["state"] in _STATES
+            and value["usage_status"] in ("UNKNOWN", "REPORTED"))
+
+
 def parse_core_view(text):
-    """The one Task view dict Core printed, else None.
+    """The one Task view Core printed, else None.
 
     Every line is checked, so output before or after the view does not hide it.
-    Two different Task views are ambiguous and yield None; nothing is guessed.
+    Only objects with the full Core Task view shape count; other JSON (logs, partial
+    objects) is ignored. Two different Task views are ambiguous and yield None.
     """
     views = []
     for line in (text or "").splitlines():
@@ -61,8 +98,7 @@ def parse_core_view(text):
             value = json.loads(line)
         except ValueError:
             continue
-        if (type(value) is dict and type(value.get("task_id")) is str
-                and _TASK_ID.fullmatch(value["task_id"]) and value not in views):
+        if is_core_view(value) and value not in views:
             views.append(value)
     return views[0] if len(views) == 1 else None
 

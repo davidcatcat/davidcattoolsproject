@@ -42,6 +42,22 @@ providers:
 '''
 
 
+def core_view_json(task_id, **fields):
+    """One line shaped like the Task view Core's task submit/show print."""
+    import json
+    view = {'schema_version': 2, 'task_id': task_id, 'run_id': 'f' * 32,
+            'pm_session_id': 'pm-' + 'e' * 32, 'pm_provider_profile': 'codex-pm',
+            'pm_provider_type': 'openai-compatible', 'pm_model': None,
+            'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+            'native_session_id': None, 'state': 'PM_RESPONDED',
+            'created_at': '2026-10-28T00:00:00Z', 'updated_at': '2026-10-28T00:00:00Z',
+            'task_contract': {}, 'task_binding': {}, 'request': 'r', 'request_sha256': None,
+            'response': None, 'usage': None, 'error_code': None, 'record_sha256': '0' * 64,
+            'usage_status': 'UNKNOWN', 'developer': None, 'pm_assignment': None}
+    view.update(fields)
+    return json.dumps(view, sort_keys=True)
+
+
 class TTY(io.StringIO):
     def isatty(self):
         return True
@@ -792,7 +808,7 @@ class WidgetTests(Base):
 
         def submit(args, *, stdout=None):
             called.append((args.provider, args.request, threading.current_thread()))
-            stdout.write('{"task_id":"' + 'a' * 32 + '","state":"PM_RESPONDED"}\n')
+            stdout.write(core_view_json('a' * 32) + '\n')
             stdout.flush()
             return 0
 
@@ -811,7 +827,7 @@ class WidgetTests(Base):
 
         def show(args, *, stdout=None):
             called.append(args.task_id)
-            stdout.write('{"task_id":"' + args.task_id + '","state":"PM_UNAVAILABLE"}\n')
+            stdout.write(core_view_json(args.task_id, state='PM_UNAVAILABLE') + '\n')
             return 0
 
         with patch('llmtool.task_submission_cli.run_task_show', side_effect=show):
@@ -992,18 +1008,36 @@ class TaskReceiptTextTests(unittest.TestCase):
         self.assertIsNone(text.parse_core_view('assistant says task_id 0123'))
         self.assertIsNone(text.parse_core_view('{"task_id":"not-an-id"}'))
         self.assertIsNone(text.parse_core_view('[1]'))
-        self.assertEqual(text.parse_core_view('{"task_id":"' + 'c' * 32 + '"}\n')['task_id'], 'c' * 32)
+        self.assertEqual(text.parse_core_view(core_view_json('c' * 32) + '\n')['task_id'], 'c' * 32)
 
     def test_core_view_found_among_other_output_and_conflicts_refused(self):
         from llmtool import chat_tui_task as text
-        view = '{"task_id":"' + 'c' * 32 + '","state":"PM_RESPONDED"}'
-        other = '{"task_id":"' + 'd' * 32 + '","state":"PM_RESPONDED"}'
+        view = core_view_json('c' * 32)
+        other = core_view_json('d' * 32)
         for raw in (view + '\nllmtool: trailing note\n{"note":1}\n',
                     'leading noise\n[1]\n' + view,
                     view + '\n' + view):
             with self.subTest(raw=raw):
                 self.assertEqual(text.parse_core_view(raw)['task_id'], 'c' * 32)
         self.assertIsNone(text.parse_core_view(view + '\n' + other))
+
+    def test_json_noise_shaped_like_a_task_is_not_a_core_view(self):
+        from llmtool import chat_tui_task as text
+        import json
+        noise = '{"task_id":"' + 'd' * 32 + '","state":"PM_RESPONDED"}'
+        self.assertIsNone(text.parse_core_view(noise))
+        view = core_view_json('c' * 32)
+        for raw in (noise + '\n' + view, view + '\n' + noise):
+            with self.subTest(raw=raw):
+                self.assertEqual(text.parse_core_view(raw)['task_id'], 'c' * 32)
+        good = json.loads(view)
+        for broken in (dict(good, extra=1), {k: v for k, v in good.items() if k != 'run_id'},
+                       dict(good, run_id=None), dict(good, state='RUNNING'),
+                       dict(good, record_sha256='x'), dict(good, usage_status='SOME'),
+                       dict(good, developer='x'), dict(good, schema_version='2')):
+            with self.subTest(keys=sorted(set(broken) ^ set(good))):
+                self.assertFalse(text.is_core_view(broken))
+                self.assertIsNone(text.parse_core_view(json.dumps(broken)))
 
     def test_no_view_means_no_receipt(self):
         from llmtool import chat_tui_task as text
