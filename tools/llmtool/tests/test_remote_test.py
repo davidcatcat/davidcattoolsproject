@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import remote_test
-from llmtool.task_store import _json_bytes
+from llmtool.task_store import _json_bytes, _validate_remote_test_receipts
 
 
 SHA = 'a' * 40
@@ -161,6 +161,76 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIsNotNone(remote_test._validate_remote_receipt(
             json.dumps(receipt, separators=(',', ':')).encode(),
             sha=SHA, modules=('test_remote_test',)))
+
+    def test_pass_receipt_requires_tests_nonroot_identity_and_no_failures(self):
+        for field, value in (
+                ('ran_total', 0), ('identity', {'uid': 0}),
+                ('failures', ['test_remote_test'])):
+            with self.subTest(field=field):
+                receipt = json.loads(self.receipt().decode())
+                receipt[field] = value
+                raw = json.dumps(receipt, separators=(',', ':')).encode()
+                self.assertIsNone(remote_test._validate_remote_receipt(
+                    raw, sha=SHA, modules=('test_remote_test',)))
+
+    def test_remote_script_has_deadline_kill_lock_and_bounded_cleanup(self):
+        script = remote_test._REMOTE_SCRIPT
+        self.assertIn('deadline=begin+540', script)
+        self.assertIn('flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)', script)
+        self.assertIn('"--kill-after=2s"', script)
+        self.assertIn('info.st_uid!=nobody_uid', script)
+        self.assertIn('now-info.st_mtime>86400', script)
+        self.assertIn('owned_logs[20:]', script)
+
+    def test_module_admission_is_bounded(self):
+        modules = tuple(f'test_module{i}' for i in range(9))
+        self.store.task['developer']['direct_result_callback']['evidence']['tests'] = [
+            {'path': f'tools/llmtool/tests/{module}.py'} for module in modules]
+        denied = self.run_it(modules=modules)
+        self.assertEqual(denied, {'result': 'ADMISSION_DENIED', 'code': 'MODULE_NOT_ADMITTED'})
+        self.assertEqual(self.calls, [])
+
+    def test_remote_script_recognizes_unittest_failure_summary(self):
+        self.assertIn('line.startswith("FAILED (")', remote_test._REMOTE_SCRIPT)
+
+    def test_task_store_rejects_invalid_pass_receipts(self):
+        def stored_receipt(**changes):
+            receipt = json.loads(self.receipt().decode())
+            receipt.update(changes)
+            receipt.update(task_id=self.store.task['task_id'],
+                           run_id=self.store.task['run_id'], executor_task='d6-task',
+                           pm_session=self.store.task['pm_session_id'],
+                           command_digest='e' * 64)
+            receipt.pop('receipt_digest', None)
+            receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
+            return receipt
+
+        valid = stored_receipt()
+        _validate_remote_test_receipts({'task_id': self.store.task['task_id'],
+                                        'run_id': self.store.task['run_id'],
+                                        'pm_session_id': self.store.task['pm_session_id'],
+                                        'remote_test_receipts': [valid]})
+        for changes in ({'ran_total': 0}, {'identity': {'uid': 0}},
+                        {'failures': ['test_remote_test']}):
+            with self.subTest(changes=changes), self.assertRaises(Exception):
+                bad = stored_receipt(**changes)
+                _validate_remote_test_receipts({'task_id': self.store.task['task_id'],
+                                                'run_id': self.store.task['run_id'],
+                                                'pm_session_id': self.store.task['pm_session_id'],
+                                                'remote_test_receipts': [bad]})
+
+    def test_remote_busy_exit_maps_to_busy_without_receipt(self):
+        def transport(argv, script, timeout):
+            return SimpleNamespace(stdout=b'', stderr=b'', returncode=75)
+
+        with patch.object(remote_test, 'read_d6_registration',
+                          return_value=SimpleNamespace(result_sha=SHA)):
+            result = remote_test.run_remote_test(
+                self.store.task['task_id'], executor_task='d6-task', sha=SHA,
+                ref='refs/pull/425/head', modules=('test_remote_test',), store=self.store,
+                config_path=self.config, transport=transport)
+        self.assertEqual(result, {'result': 'UNAVAILABLE', 'code': 'REMOTE_BUSY'})
+        self.assertEqual(self.store.task['remote_test_receipts'], [])
 
     def test_identical_call_deduplicates_remote_run_receipt_and_event(self):
         first = self.run_it()

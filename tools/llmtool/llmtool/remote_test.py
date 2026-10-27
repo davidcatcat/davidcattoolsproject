@@ -21,6 +21,7 @@ _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
 _REMOTE_LIMIT = 4096
 _SSH_TIMEOUT = 600
+_MAX_REMOTE_MODULES = 8
 _RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
@@ -28,83 +29,136 @@ _RECEIPT_FIELDS = frozenset((
 
 # This is deliberately a fixed program. Dynamic values arrive as individually
 # validated argv words; no Task value becomes a command or script fragment.
-_REMOTE_SCRIPT = r'''import hashlib,json,os,re,subprocess,sys,tempfile,time
+_REMOTE_SCRIPT = r'''import fcntl,hashlib,json,math,os,re,shutil,stat,subprocess,sys,tempfile,time
 from datetime import datetime,timezone
 sha,ref,repo,python,*mods=sys.argv[1:]
 R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z"); M=re.compile(r"test_[a-z0-9_]{1,80}\Z")
-if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or any(not M.fullmatch(x) for x in mods): sys.exit(40)
-started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None
-def run(argv,**kw): return subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,check=False,**kw)
+if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or len(mods)>8 or any(not M.fullmatch(x) for x in mods): sys.exit(40)
+started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); work_deadline=begin+480; deadline=begin+540; log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None; work=None
+def run(argv,limit=None,cleanup=False,**kw):
+    end=deadline if cleanup else work_deadline
+    left=end-time.monotonic()
+    if left<=0: raise subprocess.TimeoutExpired(argv,0)
+    seconds=min(left,limit) if limit is not None else left
+    return subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,check=False,timeout=max(.1,seconds),**kw)
 def nobody(work,argv,env=None):
     values={"PATH":"/usr/bin:/bin","HOME":work,"TMPDIR":work,"PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1"}
     values.update(env or {})
     return ["sudo","-n","-u","nobody","env","-i","-C",work]+[k+"="+v for k,v in values.items()]+argv
+def nobody_run(work,argv,limit=None,env=None,cleanup=False,**kw):
+    end=deadline if cleanup else work_deadline
+    left=end-time.monotonic()
+    if left<=4: raise subprocess.TimeoutExpired(argv,0)
+    seconds=min(left-1,limit) if limit is not None else left-1
+    command_seconds=max(1,math.floor(seconds)-2)
+    wrapped=nobody(work,["/usr/bin/timeout","--signal=TERM","--kill-after=2s",str(command_seconds),*argv],env)
+    return run(wrapped,limit=command_seconds+4,cleanup=cleanup,**kw)
+def nobody_cli(argv,limit=10,cleanup=False):
+    end=deadline if cleanup else work_deadline
+    left=end-time.monotonic()
+    if left<=4: raise subprocess.TimeoutExpired(argv,0)
+    command_seconds=max(1,math.floor(min(left-1,limit))-2)
+    return run(["sudo","-n","-u","nobody","/usr/bin/timeout","--signal=TERM","--kill-after=2s",str(command_seconds),*argv],limit=command_seconds+4,cleanup=cleanup)
+lock_create='import os; p="/tmp/llmtool-remote-test.lock"; fd=os.open(p,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o666); os.fchmod(fd,0o666); os.close(fd)'
+nobody_uid=int(nobody_cli(["id","-u"],limit=5).stdout.strip())
+created=nobody_cli([python,"-c",lock_create],limit=5)
+if created.returncode and not os.path.exists("/tmp/llmtool-remote-test.lock"): sys.exit(1)
+lock_info=os.lstat("/tmp/llmtool-remote-test.lock")
+if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=nobody_uid or lock_info.st_mode&0o777!=0o666: sys.exit(1)
+lock_fd=os.open("/tmp/llmtool-remote-test.lock",os.O_RDWR|os.O_NOFOLLOW)
+try: fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+except BlockingIOError: os.close(lock_fd); sys.exit(75)
+cleanup_source="""import os,re,shutil,stat,sys,time
+uid=os.getuid(); now=time.time(); keep=sys.argv[1] if len(sys.argv)>1 else ""; test=re.compile(r"llmtool-remote-test\\.[A-Za-z0-9]+\\Z"); logs=re.compile(r"llmtool-remote-log\\.[A-Za-z0-9]+\\Z"); owned=[]
+for entry in os.scandir("/tmp"):
+ if not (test.fullmatch(entry.name) or logs.fullmatch(entry.name)): continue
+ try:
+  info=entry.stat(follow_symlinks=False)
+  if not stat.S_ISDIR(info.st_mode) or info.st_uid!=uid or info.st_mode&0o777!=0o700: continue
+  if logs.fullmatch(entry.name): owned.append((info.st_mtime,entry.path))
+  if now-info.st_mtime>86400: shutil.rmtree(entry.path)
+ except OSError: pass
+owned.sort(key=lambda item:(item[0],item[1]==keep),reverse=True)
+for _,path in owned[20:]:
+ try: shutil.rmtree(path)
+ except OSError: pass"""
+def cleanup_stale():
+    return nobody_cli([python,"-c",cleanup_source,log_path or ""],limit=20,cleanup=True)
 stage="workspace"
 try:
-    f=run(["git","-C",repo,"fetch","--no-tags","--end-of-options","origin",ref],timeout=120)
+    cleanup_stale()
+    f=run(["git","-C",repo,"fetch","--no-tags","--end-of-options","origin",ref],limit=120)
     log+=f.stdout
-    q=run(["git","-C",repo,"rev-parse","--verify","FETCH_HEAD"],timeout=10)
+    q=run(["git","-C",repo,"rev-parse","--verify","FETCH_HEAD"],limit=10)
     fetch=q.stdout.decode("ascii","replace").strip() if q.returncode==0 else None
     if fetch != sha:
         result="SHA_MISMATCH"; code=41
     else:
-        t=run(["git","-C",repo,"rev-parse",sha+"^{tree}"],timeout=10); log+=t.stdout
+        t=run(["git","-C",repo,"rev-parse",sha+"^{tree}"],limit=10); log+=t.stdout
         tree=t.stdout.decode("ascii","replace").strip() if t.returncode==0 else None
-        made=run(["sudo","-n","-u","nobody","mktemp","-d","/tmp/llmtool-remote-test.XXXXXX"],timeout=10)
+        made=nobody_cli(["mktemp","-d","/tmp/llmtool-remote-test.XXXXXX"])
         log+=made.stdout; work=made.stdout.decode("utf8","replace").strip()
-        if made.returncode or not work.startswith("/tmp/llmtool-remote-test."): raise RuntimeError("workspace")
-        uidrun=run(["sudo","-n","-u","nobody","id","-u"],timeout=5); uid=int(uidrun.stdout.strip())
+        if made.returncode or not re.fullmatch(r"/tmp/llmtool-remote-test\.[A-Za-z0-9]+",work): raise RuntimeError("workspace")
+        uidrun=nobody_cli(["id","-u"],limit=5); uid=int(uidrun.stdout.strip())
         info=os.stat(work)
         if info.st_uid!=uid or info.st_mode&0o777!=0o700: raise RuntimeError("workspace")
         try:
             stage="archive"
-            archive=run(["git","-C",repo,"archive",sha],timeout=30)
+            archive=run(["git","-C",repo,"archive",sha],limit=30)
             log+=archive.stdout[:0]
-            extracted=run(nobody(work,["tar","-xf","-","-C",work]),input=archive.stdout,timeout=30)
+            extracted=nobody_run(work,["tar","-xf","-","-C",work],limit=30,input=archive.stdout)
             log+=extracted.stdout
             if archive.returncode or extracted.returncode: raise RuntimeError("archive")
             stage="venv"
-            v=run(nobody(work,[python,"-m","venv",work+"/venv"]),timeout=60); log+=v.stdout
+            v=nobody_run(work,[python,"-m","venv",work+"/venv"],limit=60); log+=v.stdout
             if v.returncode: raise RuntimeError("venv")
             stage="requirements"
-            pip=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","-r","tools/llmtool/requirements-ci.txt"]),timeout=180); log+=pip.stdout
+            pip=nobody_run(work,[work+"/venv/bin/python","-m","pip","install","-r","tools/llmtool/requirements-ci.txt"],limit=180); log+=pip.stdout
             if pip.returncode: raise RuntimeError("requirements")
             stage="package"
-            package=run(nobody(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"]),timeout=180); log+=package.stdout
+            package=nobody_run(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"],limit=180); log+=package.stdout
             if package.returncode: raise RuntimeError("package")
             stage="tests"
-            for mod in mods:
-                test=run(nobody(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"]),timeout=180); log+=test.stdout
+            for index,mod in enumerate(mods):
+                allowance=(deadline-time.monotonic())/(len(mods)-index)-3
+                if allowance<=1: raise subprocess.TimeoutExpired(mod,0)
+                test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance)); log+=test.stdout
                 lines=[x.decode("utf8","replace").strip() for x in test.stdout.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
-                finals.append(next((line for line in reversed(lines)
-                                    if line.endswith("OK") or line.endswith("FAILED") or
-                                    line.endswith("ERROR")), "NO_FINAL"))
+                final=next((line for line in reversed(lines)
+                            if line.endswith("OK") or line.startswith("FAILED (") or
+                            line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
+                finals.append(final)
                 ran+=int(re.search(rb"Ran (\d+) tests?",test.stdout).group(1)) if re.search(rb"Ran (\d+) tests?",test.stdout) else 0
-                if test.returncode or not any(x.endswith("OK") for x in lines):
+                if test.returncode==124:
+                    result="TIMEOUT"; code=124; failures.append(mod); break
+                if test.returncode or not final.endswith("OK"):
                     result="FAIL"; code=test.returncode or 1
                     failures.append(mod)
-            if code==1 and len(failures)==0: result="PASS"; code=0
+            if result!="TIMEOUT" and code==1 and len(failures)==0 and ran>0: result="PASS"; code=0
         finally:
-            gone=run(["sudo","-n","-u","nobody","rm","-rf","--",work],timeout=10); log+=gone.stdout
+            if work:
+                gone=nobody_cli(["rm","-rf","--",work],cleanup=True); log+=gone.stdout
 except subprocess.TimeoutExpired as exc:
     result="TIMEOUT"; code=124; log+=exc.stdout or b""; log+=f"REMOTE_STAGE_FAILED {stage} {type(exc).__name__}\n".encode()
 except Exception as exc:
     if result not in ("SHA_MISMATCH","TIMEOUT"): result="FAIL"
     code=code or 1; log+=f"REMOTE_STAGE_FAILED {stage} {type(exc).__name__}\n".encode()
-log_dir_run=run(["sudo","-n","-u","nobody","mktemp","-d","/tmp/llmtool-remote-log.XXXXXX"],timeout=10)
+log_dir_run=nobody_cli(["mktemp","-d","/tmp/llmtool-remote-log.XXXXXX"],cleanup=True)
 log_dir=log_dir_run.stdout.decode("utf8","replace").strip()
 if log_dir_run.returncode==0:
-    nobody_uid=int(run(["sudo","-n","-u","nobody","id","-u"],timeout=5).stdout.strip())
+    nobody_uid=int(nobody_cli(["id","-u"],limit=5,cleanup=True).stdout.strip())
     log_info=os.stat(log_dir)
     if log_info.st_uid!=nobody_uid or log_info.st_mode&0o777!=0o700: log_dir_run.returncode=1
 log_path=log_dir+"/remote-test.log" if log_dir_run.returncode==0 else None
 # Full output remains on EC2 in a private, unique directory owned by nobody.
-saver=run(nobody(log_dir,[python,"-c","import sys; open(sys.argv[1], 'wb').write(sys.stdin.buffer.read())",log_path],{"HOME":log_dir,"TMPDIR":log_dir}),input=log,timeout=10) if log_path and re.fullmatch(r"/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log",log_path) else None
+saver=nobody_run(log_dir,[python,"-c","import sys; open(sys.argv[1], 'wb').write(sys.stdin.buffer.read())",log_path],limit=10,env={"HOME":log_dir,"TMPDIR":log_dir},cleanup=True,input=log) if log_path and re.fullmatch(r"/tmp/llmtool-remote-log\.[A-Za-z0-9]+/remote-test\.log",log_path) else None
 if saver is None or saver.returncode: result="UNKNOWN"; code=1
+cleanup_stale()
 ended=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
 receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals[-len(mods)*2:],"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
 print(raw.decode() if len(raw)<=4096 else "{}")
+os.close(lock_fd)
 '''
 
 
@@ -194,6 +248,8 @@ def _validate_remote_receipt(raw, *, sha, modules):
         if type(receipt[stamp]) is not str or re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', receipt[stamp]) is None:
             return None
     if receipt['result'] == 'PASS' and (receipt['exit_code'] != 0 or
+            type(receipt['identity']['uid']) is not int or receipt['identity']['uid'] == 0 or
+            receipt['ran_total'] <= 0 or receipt['failures'] or
             receipt['tree'] is None or len(receipt['final']) < len(modules) or
             any(not line.endswith('OK') for line in receipt['final'])):
         return None
@@ -213,7 +269,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return {'result': 'ADMISSION_DENIED', 'code': 'ARGUMENT_INVALID'}
     admitted = _admitted_modules(task)
     selected = tuple(sorted(set(modules or admitted)))
-    if not selected or any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected):
+    if (not selected or len(selected) > _MAX_REMOTE_MODULES or
+            any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
         return {'result': 'ADMISSION_DENIED', 'code': 'MODULE_NOT_ADMITTED'}
     evidence = task.get('completion', {}).get('evidence', {}) if type(task.get('completion')) is dict else {}
     common_dir = evidence.get('common_dir') if type(evidence) is dict else None
@@ -262,6 +319,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return {'result': 'UNAVAILABLE', 'code': 'SSH_UNAVAILABLE'}
     stdout = result.stdout if type(result.stdout) is bytes else str(result.stdout).encode()
     if result.returncode != 0 and not stdout:
+        if result.returncode == 75:
+            return {'result': 'UNAVAILABLE', 'code': 'REMOTE_BUSY'}
         return {'result': 'UNAVAILABLE', 'code': 'SSH_FAILED'}
     parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
     if parsed is None:
