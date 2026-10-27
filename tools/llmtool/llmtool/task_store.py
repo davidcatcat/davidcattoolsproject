@@ -86,7 +86,7 @@ _V2_REMOTE_RECEIPT_OUTCOME_SHAPES = tuple(shape | frozenset((
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
     'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
-    'review_repair_claims'))
+    'review_repair_claims', 'high_debug'))
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
@@ -109,6 +109,11 @@ _V2_REPAIR_OPTIONAL_BASES = (
 )
 _V2_REPAIR_SHAPES = tuple(shape | frozenset(('review_repair_claims',))
                           for shape in _V2_REPAIR_OPTIONAL_BASES)
+_HIGH_DEBUG_VALID_SHAPES = tuple(shape | frozenset(('high_debug',)) for shape in (
+    *_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES))
+_HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 'examined_sha',
+    'd6', 'model_requested', 'model_observed', 'effort_observed', 'status',
+    'report_sha256', 'report', 'usage', 'recorded_at'))
 MAX_COMPLETION_EVENTS = 32
 # Retention: when the event list is full, the oldest ACKED event is compacted
 # into a tombstone that keeps its identity and stream position, so an acked
@@ -132,7 +137,7 @@ _COMPLETION_INTENT_FIELDS = frozenset((
     'receipt_sha256', 'confirmed_at',
 ))
 _COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER',
-                                 'EC2_REMOTE_TEST', 'GITHUB'))
+                                 'EC2_REMOTE_TEST', 'GITHUB', 'HIGH_DEBUG'))
 _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
@@ -584,7 +589,7 @@ def _validate(record):
                 for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                               *_V2_REMOTE_OUTCOME_SHAPES,
                               *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *_V2_REPAIR_SHAPES)) or
+             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -597,6 +602,30 @@ def _validate(record):
     if 'completion_events' in record:
         _validate_completion_events(record)
         _validate_completion_tombstones(record)
+    if 'high_debug' in record:
+        entries = record['high_debug']
+        if type(entries) is not list or len(entries) > 8:
+            _fail('HIGH_DEBUG_INVALID')
+        for item in entries:
+            if (type(item) is not dict or set(item) != _HIGH_DEBUG_FIELDS or
+                type(item.get('family')) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', item['family']) is None or
+                type(item.get('examined_sha')) is not str or re.fullmatch(r'[0-9a-f]{40}', item['examined_sha']) is None or
+                type(item.get('d6')) is not str or re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['d6']) is None or
+                type(item.get('model_requested')) is not str or type(item.get('model_observed')) is not str or
+                type(item.get('effort_observed')) is not str or
+                (item.get('failed_corrections') is not None and
+                 (type(item['failed_corrections']) is not int or item['failed_corrections'] < 2)) or
+                (item.get('early_reason') is not None and
+                 (type(item['early_reason']) is not str or not 1 <= len(item['early_reason']) <= 300)) or
+                ((item.get('failed_corrections') is None) == (item.get('early_reason') is None)) or
+                type(item.get('report')) is not str or
+                len(item['report'].encode('utf-8')) > 16384 or _emitted_sensitive(item['report']) or
+                type(item.get('report_sha256')) is not str or re.fullmatch(r'[0-9a-f]{64}', item['report_sha256']) is None or
+                hashlib.sha256(item['report'].encode('utf-8')).hexdigest() != item['report_sha256'] or
+                (item.get('usage') != 'UNKNOWN' and type(item.get('usage')) is not dict) or
+                type(item.get('recorded_at')) is not str or
+                item.get('status') not in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')):
+                _fail('HIGH_DEBUG_INVALID')
     if 'review_dispatch_claim' in record:
         claim = record['review_dispatch_claim']
         claims = [claim] if type(claim) is dict else claim
@@ -1737,6 +1766,19 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
+    def append_high_debug(self, task_id, entry):
+        for _ in range(5):
+            current = self.get(task_id)
+            entries = current.get('high_debug', [])
+            if len(entries) >= 8:
+                _fail('HIGH_DEBUG_LIMIT')
+            try:
+                return self.compare_and_update(task_id, expected={'high_debug': current.get('high_debug')},
+                                               high_debug=entries + [entry])
+            except TaskStoreConflict:
+                continue
+        _fail('HIGH_DEBUG_BUSY')
+
     @staticmethod
     def _completion_now():
         return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace(
@@ -2379,6 +2421,12 @@ class TaskStore:
                             any(old.get(key) != new.get(key) for key in
                                 old.keys() - {'state'})):
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+            if 'high_debug' in changes:
+                old_entries = current.get('high_debug', [])
+                new_entries = changes['high_debug']
+                if (type(new_entries) is not list or len(new_entries) != len(old_entries) + 1 or
+                        new_entries[:-1] != old_entries):
+                    _fail('HIGH_DEBUG_IMMUTABLE')
             from . import worker_dispatch
             if trusted_dispatch_audit:
                 prior_audit = list(current.get('dispatch_audit', []))

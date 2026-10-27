@@ -55,6 +55,23 @@ class TaskStoreTests(unittest.TestCase):
         self.root = Path(self.temp.name).resolve() / 'tasks'
         self.store = TaskStore(self.root)
 
+    def test_high_debug_entries_are_append_only(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        entry = {
+            'family': 'test-family', 'failed_corrections': 2, 'early_reason': None,
+            'examined_sha': 'a' * 40, 'd6': 'executor-hd1-aaaaaaa',
+            'model_requested': 'gpt-6.1-sol', 'model_observed': 'UNKNOWN',
+            'effort_observed': 'UNKNOWN', 'status': 'REPORT_INVALID',
+            'report_sha256': hashlib.sha256(b'').hexdigest(), 'report': '', 'usage': 'UNKNOWN',
+            'recorded_at': '2026-10-27T00:00:00Z',
+        }
+        saved = self.store.append_high_debug(task['task_id'], entry)
+        changed = dict(entry, status='RCA_CONFIRMED')
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], high_debug=[changed])
+        self.assertEqual(self.store.get(task['task_id'])['high_debug'], [entry])
+
     def test_remote_test_receipt_is_appended_idempotently_to_same_task(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
