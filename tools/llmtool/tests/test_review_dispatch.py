@@ -8,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool import cli, review_dispatch, task_store
+from llmtool import cli, review_dispatch, task_store, task_submission_cli
 from llmtool.errors import LLMToolError
 
 
@@ -146,7 +146,7 @@ class ReviewDispatchTests(unittest.TestCase):
 
     def test_cli_routes_review_dispatch_to_dispatcher(self):
         with patch('llmtool.source_freshness.require_fresh_source', return_value='OK'), \
-                patch.object(cli, 'run_task_review_dispatch', return_value=17) as dispatch, \
+                patch.object(task_submission_cli, 'run_task_review_dispatch', return_value=17) as dispatch, \
                 patch.object(cli, 'run_task_inspect', side_effect=AssertionError('inspector called')):
             self.assertEqual(cli.main(['task', 'review-dispatch', TASK,
                                        '--executor-task', 'executor-d6', '--pr', '42']), 17)
@@ -163,7 +163,7 @@ class ReviewDispatchTests(unittest.TestCase):
             with self.subTest(code=code), \
                     patch('llmtool.source_freshness.require_fresh_source', return_value='OK'), \
                     patch.object(
-                    cli, 'run_task_review_dispatch', side_effect=error), \
+                    task_submission_cli, 'run_task_review_dispatch', side_effect=error), \
                     redirect_stderr(output):
                 self.assertEqual(cli.main(['task', 'review-dispatch', TASK,
                                            '--executor-task', 'executor-d6', '--pr', '42']), 1)

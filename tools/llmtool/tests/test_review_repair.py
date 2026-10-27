@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from llmtool import cli, review_repair
+from llmtool import cli, review_repair, task_submission_cli
 
 TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
 EXECUTOR, PR, EVENT_ID = 'executor-d6', 42, 'e' * 32
@@ -388,7 +388,7 @@ class ReviewRepairTests(unittest.TestCase):
                          'REPAIR_TASK_RECORD_UNAVAILABLE')
 
     def test_cli_route_reaches_handler(self):
-        with patch.object(cli, 'run_task_repair', return_value=17) as handler:
+        with patch.object(task_submission_cli, 'run_task_repair', return_value=17) as handler:
             with patch('llmtool.source_freshness.require_fresh_source'):
                 self.assertEqual(cli.main(['task', 'repair', TASK, '--executor-task', EXECUTOR,
                                            '--pr', str(PR)]), 17)
