@@ -77,7 +77,7 @@ class Process:
     role: str
     name: str = "?"   # executable basename only, never arguments
     owner: str = ""   # nearest agent this process belongs to / was started by
-    job: tuple = ()   # a remote-test run: (task, sha, modules), validated tokens only
+    job: tuple = ()   # a remote-test run: (source, task, sha, modules), validated tokens only
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -222,19 +222,21 @@ TEST_MODULE = re.compile(r"test_[a-z0-9_]{1,80}")
 
 
 def _remote_test_job(command: str) -> tuple:
-    """(short task, short SHA, modules) of an `llmtool task remote-test` run or
-    of the ssh it starts. Only tokens matching their strict shape are kept, so
-    the host, user and paths in the command line are never returned."""
+    """(source, short task, short SHA, modules) of an `llmtool task remote-test`
+    run ("cli") or of the ssh it starts ("ssh"); "" where unknown. Only tokens
+    matching their strict shape and position are kept, so the host, user, ref
+    and paths in the command line are never returned."""
     parts = command.split()
     if not parts or (_base(parts[0]) != "ssh" and "remote-test" not in parts):
         return ()
     if _base(parts[0]) == "ssh":
-        # ssh ... python3 - <sha> <ref> <repo> <python> <module>...
-        for i in range(1, len(parts) - 1):
+        # ssh ... python3 - <sha> <ref> <repo> <python> <module>...: the
+        # modules start after the python path; the ref and paths are skipped.
+        for i in range(1, len(parts) - 4):
             if (parts[i] == "-" and _base(parts[i - 1]).startswith("python")
                     and HEX_SHA.fullmatch(parts[i + 1])):
-                modules = tuple(m for m in parts[i + 2:] if TEST_MODULE.fullmatch(m))
-                return ("?", parts[i + 1][:7], modules)
+                modules = tuple(m for m in parts[i + 5:] if TEST_MODULE.fullmatch(m))
+                return ("ssh", "", parts[i + 1][:7], modules)
         return ()
     if classify(command) != "llmtool CLI":
         return ()
@@ -244,7 +246,7 @@ def _remote_test_job(command: str) -> tuple:
             break
     else:
         return ()
-    task, sha, modules, j = "?", "?", [], 0
+    task, sha, modules, j = "", "", [], 0
     while j < len(args):
         arg = args[j]
         name, eq, value = arg.partition("=")
@@ -254,10 +256,10 @@ def _remote_test_job(command: str) -> tuple:
             sha = value[:7]
         elif name == "--module" and TEST_MODULE.fullmatch(value):
             modules.append(value)
-        elif not arg.startswith("-") and task == "?" and re.fullmatch(r"[0-9a-f]{8,64}", arg):
+        elif not arg.startswith("-") and not task and re.fullmatch(r"[0-9a-f]{8,64}", arg):
             task = arg[:8]
         j += 1
-    return (task, sha, tuple(modules))
+    return ("cli", task, sha, tuple(modules))
 
 
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
@@ -567,6 +569,7 @@ class Monitor:
 # rendered or logged. A database is opened only when its state root provably
 # belongs to the evidence directory (see _verified_db); otherwise UNKNOWN.
 import glob
+import heapq
 import json
 import sqlite3
 
@@ -3499,6 +3502,39 @@ REMOTE_TEST_OUTCOMES = frozenset({"ADMISSION_DENIED", "UNAVAILABLE", "TIMEOUT", 
 REMOTE_TEST_FILES = 32        # newest task files read per office rebuild
 REMOTE_TEST_READ = 4 << 20    # a Task holds up to 32 receipts of up to 64 result lines
 REMOTE_TEST_SKEW = 300.0      # receipts carry the EC2 clock; file times the local one
+REMOTE_TEST_RELIST = 60.0     # seconds a task-file listing is reused while the folder is unchanged
+_remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths)
+
+
+def _remote_test_paths(root: str) -> list:
+    """Up to REMOTE_TEST_FILES newest *.json paths in root. The folder is
+    listed again only when its mtime changes (TaskStore writes by rename, which
+    changes it) or after REMOTE_TEST_RELIST seconds; otherwise only the kept
+    paths are looked at again."""
+    try:
+        folder = os.stat(root).st_mtime_ns
+    except OSError:
+        return []
+    kept = _remote_test_listing.get(root)
+    if kept and kept[0] == folder and time.monotonic() - kept[1] < REMOTE_TEST_RELIST:
+        return kept[2]
+    stamped = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    stamped.append((entry.stat().st_mtime, entry.path))
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    paths = [path for _, path in heapq.nlargest(REMOTE_TEST_FILES, stamped)]
+    if len(_remote_test_listing) >= 8:
+        _remote_test_listing.clear()   # one root in use; tests pass many
+    _remote_test_listing[root] = (folder, time.monotonic(), paths)
+    return paths
 
 
 def _remote_test_time(value) -> float:
@@ -3512,10 +3548,11 @@ def remote_test_latest(root: str | None = None) -> tuple[float, str] | None:
     outcome in llmtool's local task records. Only result words, codes, the
     Task id, the SHA and the test count are read; the remote config, host,
     paths and logs are never touched. At most REMOTE_TEST_FILES files are read,
-    newest first, stopping once a file is older than the newest entry found."""
+    newest first, stopping once a file is older than the newest entry found.
+    Every field is type-checked before use; anything else is skipped."""
     root = LLMTOOL_TASKS if root is None else root
     stamped = []
-    for path in glob.glob(os.path.join(root, "*.json")):
+    for path in _remote_test_paths(root):
         try:
             stamped.append((os.path.getmtime(path), path))
         except OSError:
@@ -3531,24 +3568,26 @@ def remote_test_latest(root: str | None = None) -> tuple[float, str] | None:
             continue
         if type(record) is not dict:
             continue
-        task = str(record.get("task_id") or "")
-        task = task[:8] if re.fullmatch(r"[0-9a-f]{8,64}", task) else "?"
+        task = record.get("task_id")
+        task = task[:8] if type(task) is str and re.fullmatch(r"[0-9a-f]{8,64}", task) else "未知"
         receipts, outcomes = record.get("remote_test_receipts"), record.get("remote_test_outcomes")
         for item in receipts if type(receipts) is list else []:
-            if type(item) is not dict or item.get("result") not in REMOTE_TEST_RESULTS:
+            result = item.get("result") if type(item) is dict else None
+            if type(result) is not str or result not in REMOTE_TEST_RESULTS:
                 continue
             when = _remote_test_time(item.get("ended_at"))
             sha, ran = item.get("source_sha"), item.get("ran_total")
-            words = f"task {task} {item['result']}"
+            words = f"task {task} {result}"
             words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
             words += f"，跑了 {ran} 個測試" if type(ran) is int and ran >= 0 else ""
             if when and (best is None or when > best[0]):
                 best = (when, words)
         for item in outcomes if type(outcomes) is list else []:
-            if type(item) is not dict or item.get("result") not in REMOTE_TEST_OUTCOMES:
+            result = item.get("result") if type(item) is dict else None
+            if type(result) is not str or result not in REMOTE_TEST_OUTCOMES:
                 continue
             when, sha, code = _remote_test_time(item.get("at")), item.get("sha"), item.get("code")
-            words = f"task {task} {item['result']}"
+            words = f"task {task} {result}"
             words += f"（{code}）" if type(code) is str and CODE_TEXT.fullmatch(code) else ""
             words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
             if when and (best is None or when > best[0]):
@@ -3560,11 +3599,13 @@ def remote_test_row(processes: list[Process], now: float, root: str | None = Non
     """The EC2 remote-test worker: the run the process table shows, else the
     newest local record. It says only what the process or record says."""
     runs = [p for p in processes if p.job]
-    parents = {p.pid for p in runs if p.job[0] != "?"}
+    parents = {p.pid for p in runs if p.job[0] == "cli"}
     runs = [p for p in runs if p.ppid not in parents]   # an ssh under its own llmtool run
     if runs:
-        task, sha, modules = runs[0].job
-        detail = f"執行中：task {task} @{sha}" + (f"；{', '.join(modules)}" if modules else "")
+        source, task, sha, modules = runs[0].job
+        # ssh argv carries no Task id: without its llmtool parent the Task is unknown.
+        detail = "執行中：task " + (task or ("未知（只剩 ssh）" if source == "ssh" else "未知"))
+        detail += (f" @{sha}" if sha else "") + (f"；{', '.join(modules)}" if modules else "")
         if len(runs) > 1:
             detail += f"；另有 {len(runs) - 1} 個執行中"
         return OfficeRow("EC2 遠端測試", WORKING, detail, _elapsed_seconds(runs[0].elapsed),

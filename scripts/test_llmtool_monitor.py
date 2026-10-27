@@ -2973,15 +2973,17 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(row.detail, "執行中：task abcdef01 @0123456；test_remote_test, test_task_store")
         for word in host_words:
             self.assertNotIn(word, text)
-        # the ssh alone, its llmtool parent gone: still working, no task claimed
+        # the ssh alone, its llmtool parent gone: still working, the Task is
+        # unknown, and a test_-shaped ref or path is never taken for a module
         orphan = mon.parse_processes(ps(
             f"  11     1    10   00:09 S    /usr/bin/ssh ec2-user@example-host python3 - "
-            f"{self.SHA} main /srv/repo /usr/bin/python3 test_remote_test"), 999)
+            f"{self.SHA} test_private_branch test_repo_dir test_python test_remote_test"), 999)
         self.assertEqual(mon.describe(orphan.processes[0]),
                          "ssh  PID 11  (ssh of llmtool remote-test (gone))")
         row, text = self._ec2(orphan.processes)
-        self.assertEqual((row.state, row.detail), (mon.WORKING, "執行中：task ? @0123456；test_remote_test"))
-        for word in host_words:
+        self.assertEqual((row.state, row.detail),
+                         (mon.WORKING, "執行中：task 未知（只剩 ssh） @0123456；test_remote_test"))
+        for word in host_words + ("test_private_branch", "test_repo_dir", "test_python", "task ?"):
             self.assertNotIn(word, text)
         # other llmtool commands are not remote-test runs
         other = mon.parse_processes(ps(f"  12     1    12   00:09 S    python3 -m llmtool task inspect {self.TASK}"), 999)
@@ -3022,6 +3024,53 @@ class OfficeViewTests(unittest.TestCase):
              "executor_task": None, "at": self._stamp(30)}]}, 30))
         self.assertEqual(self._ec2(tasks=only)[0].detail,
                          "最近一次：task abcdef01 ADMISSION_DENIED（CONFIG_INVALID）")
+
+    def test_ec2_worker_skips_fields_of_the_wrong_type_without_breaking(self):
+        wrong = ([], {}, ["PASS"], {"PASS": 1}, 7, None, True, 1.5)
+        receipts = [{"result": bad, "source_sha": self.SHA, "ran_total": 1,
+                     "ended_at": self._stamp(10)} for bad in wrong]
+        receipts += [{"result": "PASS", "source_sha": bad, "ran_total": bad,
+                      "ended_at": self._stamp(300)} for bad in wrong]
+        receipts += [{"result": "FAIL", "ended_at": bad} for bad in wrong]
+        outcomes = [{"result": bad, "code": "X", "at": self._stamp(5)} for bad in wrong]
+        outcomes += [{"result": "UNKNOWN", "code": bad, "sha": bad, "at": self._stamp(200)}
+                     for bad in wrong]
+        outcomes += [{"result": "UNKNOWN", "code": "Y", "at": bad} for bad in wrong]
+        tasks = self._remote_tasks(
+            ("a", {"task_id": {"x": 1}, "remote_test_receipts": receipts + ["PASS", None],
+                   "remote_test_outcomes": outcomes + [[1], 2]}, 10),
+            ("b", {"task_id": ["abcdef0123"], "remote_test_receipts": {"result": "PASS"},
+                   "remote_test_outcomes": "UNKNOWN"}, 20))
+        row, _ = self._ec2(tasks=tasks)
+        # the only well-typed entries left are newest-first: UNKNOWN (200 s) then PASS (300 s)
+        self.assertEqual((row.state, row.age, row.detail),
+                         (mon.IDLE, 200.0, "最近一次：task 未知 UNKNOWN"))
+
+    def test_ec2_worker_reuses_its_task_listing_and_reads_a_bounded_number(self):
+        root = Path(self._remote_tasks(*[(f"t{i:02}", {"task_id": self.TASK}, 1000 + i)
+                                          for i in range(mon.REMOTE_TEST_FILES + 8)]))
+        newest = {"task_id": self.TASK, "remote_test_receipts": [
+            {"result": "PASS", "source_sha": self.SHA, "ran_total": 3, "ended_at": self._stamp(1)}]}
+        listed, opened = [], []
+        real_scandir, real_open = os.scandir, open
+        with patch.object(mon.os, "scandir", side_effect=lambda p: listed.append(p) or real_scandir(p)), \
+                patch("builtins.open", side_effect=lambda *a, **k: opened.append(a[0]) or real_open(*a, **k)):
+            self.assertIsNone(mon.remote_test_latest(str(root)))
+            self.assertIsNone(mon.remote_test_latest(str(root)))
+            self.assertEqual(len(listed), 1)   # folder unchanged: the listing is reused
+            self.assertLessEqual(len(opened), 2 * mon.REMOTE_TEST_FILES)
+            # TaskStore writes by rename, which changes the folder: listed again
+            temp = root / "new.tmp"
+            temp.write_text(json.dumps(newest), encoding="utf-8")
+            os.replace(temp, root / "new.json")
+            os.utime(root / "new.json", (self.NOW - 1, self.NOW - 1))
+            self.assertEqual(mon.remote_test_latest(str(root))[1], "task abcdef01 PASS @0123456，跑了 3 個測試")
+            self.assertEqual(len(listed), 2)
+            # an unchanged folder is still listed again after REMOTE_TEST_RELIST
+            later = time.monotonic() + mon.REMOTE_TEST_RELIST + 1
+            with patch.object(mon.time, "monotonic", return_value=later):
+                mon.remote_test_latest(str(root))
+            self.assertEqual(len(listed), 3)
 
     def test_ec2_worker_without_records_never_reads_the_remote_config(self):
         home = Path(tempfile.mkdtemp(dir=self.tmp.name))
