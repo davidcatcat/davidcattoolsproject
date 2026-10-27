@@ -20,8 +20,9 @@ from .config import api_key, resolve_profile_config, selected_provider, yaml_mod
 from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
-from .task_store import TaskStore, TaskStoreConflict, new_id
+from .task_store import TaskStore, TaskStoreConflict, new_id, _json_bytes
 from . import active_pm_inbox
+from . import remote_test
 from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
@@ -390,6 +391,9 @@ def _direct_result_packet(task, developer, executor_task_id, evidence):
 
 
 def _test_packet(item):
+    if item.get('status') == 'DEFERRED_REMOTE_RECEIPT':
+        return {'status': item['status'], 'path': item['path'],
+                'source_sha': item['source_sha']}
     if item.get('status') == 'NOT_APPLICABLE_DOCS_ONLY' and item.get('docs_only') is True:
         return {'status': item['status'], 'docs_only': True,
                 'changed_paths': item['changed_paths'], 'source_sha': item['source_sha'],
@@ -398,6 +402,14 @@ def _test_packet(item):
             'source_sha': item['source_sha'],
             **({'diff_sha256': item['diff_sha256']} if 'diff_sha256' in item else {}),
             'output_sha256': item['output_sha256']}
+
+
+def _deferred_remote_test(path, source_sha, *, diff_sha256=None, result_head=None):
+    """Persist an explicit pending status in the existing zero-exit evidence shape."""
+    return {'status': 'DEFERRED_REMOTE_RECEIPT', 'path': path,
+            'source_sha': source_sha, 'exit_code': 0,
+            'output_sha256': hashlib.sha256(b'').hexdigest(),
+            'result_head': result_head, 'diff_sha256': diff_sha256}
 
 
 def _active_pm_handoff(record):
@@ -1128,7 +1140,107 @@ def _direct_execution(result, *, status='SUCCEEDED'):
     }
 
 
-def _direct_result_callback(task, registration, source_sha):
+def _remote_task_test_paths(task, *, read_paths=()):
+    contract = task.get('task_contract') if type(task) is dict else None
+    commands = contract.get('test_commands') if type(contract) is dict else None
+    if not commands:
+        commands = [
+            {'argv': ['python3', '-m', 'unittest', 'discover', '-s',
+                      'tools/llmtool/tests', '-p', Path(path).name], 'cwd': '.'}
+            for path in read_paths
+            if type(path) is str and
+            path.startswith('tools/llmtool/tests/test_') and path.endswith('.py') and
+            '/' not in path[len('tools/llmtool/tests/'):]
+        ]
+    if type(commands) is not list or not commands:
+        return ()
+    paths = []
+    for command in commands:
+        argv = command.get('argv') if type(command) is dict else None
+        if (type(command) is not dict or command.get('cwd') != '.' or
+                type(argv) is not list or len(argv) < 7 or argv[0] not in ('python', 'python3') or
+                argv[1:5] != ['-m', 'unittest', 'discover', '-s'] or
+                argv[5] != 'tools/llmtool/tests' or argv[6] != '-p' or
+                len(argv) != 8 or type(argv[7]) is not str or
+                re.fullmatch(r'test_[a-z0-9_]{1,80}\.py', argv[7]) is None):
+            return ()
+        paths.append('tools/llmtool/tests/' + argv[7])
+    if read_paths:
+        task_test_paths = {path for path in read_paths if type(path) is str and
+                           path.startswith('tools/llmtool/tests/test_') and
+                           path.endswith('.py') and
+                           '/' not in path[len('tools/llmtool/tests/'): ]}
+        if task_test_paths and task_test_paths != set(paths):
+            return ()
+    if len({Path(path).stem for path in paths}) > remote_test._MAX_REMOTE_MODULES:
+        return ()
+    admitted_task = dict(task)
+    admitted_task['completion'] = {'evidence': {'tests': [{'path': path} for path in paths]}}
+    if set(remote_test._admitted_modules(admitted_task)) != {
+            Path(path).stem for path in paths}:
+        return ()
+    return tuple(sorted(set(paths)))
+
+
+def _remote_receipt_test_policy(task, *, read_paths=(), config_loader=None):
+    """Select remote testing only for configured Tasks with fully admitted modules."""
+    if not _remote_task_test_paths(task, read_paths=read_paths):
+        return 'LOCAL'
+    try:
+        (remote_test._config if config_loader is None else config_loader)()
+    except LLMToolError:
+        return 'LOCAL'
+    return 'REMOTE_RECEIPT'
+
+
+def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
+    modules = tuple(sorted({Path(path).stem for path in paths}))
+    if not modules:
+        return None, 'REMOTE_TEST_RECEIPT_MISSING'
+    skipped = False
+    for receipt in task.get('remote_test_receipts', []):
+        if (type(receipt) is not dict or receipt.get('result') != 'PASS' or
+                receipt.get('task_id') != task.get('task_id') or
+                receipt.get('run_id') != task.get('run_id') or
+                receipt.get('executor_task') != executor_task or
+                receipt.get('source_sha') != source_sha or
+                type(receipt.get('modules')) is not list or
+                any(type(module) is not str for module in receipt['modules']) or
+                not set(modules).issubset(receipt['modules']) or
+                type(receipt.get('ran_total')) is not int or receipt['ran_total'] <= 0 or
+                receipt.get('failures') != [] or
+                type(receipt.get('final')) is not list or
+                len(receipt['final']) < len(receipt['modules']) or
+                type(receipt.get('receipt_digest')) is not str):
+            continue
+        digest_input = dict(receipt)
+        claimed = digest_input.pop('receipt_digest')
+        if claimed != hashlib.sha256(_json_bytes(digest_input)).hexdigest():
+            continue
+        if any(type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
+               for line in receipt['final']):
+            skipped = True
+            continue
+        if any(type(line) is not str or not line.strip().endswith('OK')
+               for line in receipt['final']):
+            continue
+        return receipt, None
+    return None, ('MAC_EVIDENCE_REQUIRED' if skipped else 'REMOTE_TEST_RECEIPT_MISSING')
+
+
+def _direct_result_tests(task, evidence, result, developer):
+    if evidence.get('test_policy') == 'REMOTE_RECEIPT':
+        return [_deferred_remote_test(
+            path, evidence['source_sha'], diff_sha256=result['diff_sha256'])
+                for path in _remote_task_test_paths(
+                    task, read_paths=developer['read_paths'])]
+    return task_completion.run_bounded_worktree_tests(
+        root=evidence['root'], source_sha=evidence['source_sha'],
+        diff_sha256=result['diff_sha256'], changed_paths=result['changed_paths'],
+        read_paths=developer['read_paths'], write_paths=developer['write_paths'])
+
+
+def _direct_result_callback(task, registration, source_sha, *, test_policy=None):
     binding = task['task_binding']
     evidence = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
@@ -1141,6 +1253,8 @@ def _direct_result_callback(task, registration, source_sha):
         'execution_mode': 'DIRECT_D6', 'root': registration.root,
         'common_dir': registration.common_dir, 'branch': registration.branch,
         'source_sha': source_sha, 'verification_state': 'NOT_STARTED',
+        'test_policy': (test_policy if test_policy in ('REMOTE_RECEIPT', 'LOCAL')
+                        else _remote_receipt_test_policy(task)),
     }
     return {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
@@ -1468,7 +1582,7 @@ def run_task_opencode_delegate(args, *, store):
         'artifact_sha256': None, 'usage': None, 'error_code': None,
         'execution': None, 'created_at': _timestamp(),
         'direct_result_callback': _direct_result_callback(
-            task, registration, snapshot.head),
+            task, registration, snapshot.head, test_policy='LOCAL'),
     }
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
@@ -1655,6 +1769,7 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
             if (path.startswith('tools/llmtool/tests/test_') and
                 path.endswith('.py') and '/' not in path[len('tools/llmtool/tests/'):])
         ]
+    test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
     packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'contract_digest': task['task_binding']['contract_digest'],
@@ -1664,13 +1779,14 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
         'allowed_read_paths': read_paths, 'allowed_write_paths': write_paths,
         'acceptance': acceptance,
         'test_commands': test_commands,
+        'test_policy': test_policy,
         'budget': {'wall_clock_seconds': codex_direct_developer.MAX_WALL_CLOCK_SECONDS,
                    'stdout_bytes': codex_direct_developer.MAX_OUTPUT_BYTES,
                    'stderr_bytes': codex_direct_developer.MAX_STDERR_BYTES,
                    'repair_attempts': 1},
         'model': model, 'reasoning_effort': reasoning_effort,
     }
-    return (
+    instructions = (
         'You are the Codex Developer for this bounded llmtool Task. Work in the '
         'current registered D6 worktree. The task_contract is only the digest-bound '
         'PM intake record; it is not your scope. Your development goal is '
@@ -1685,9 +1801,17 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
         '"summary":"...","tests":[...],"self_review":"...",'
         '"blocked_reason":null|string}; include no Markdown or text outside JSON. '
         'Report BLOCKED when you cannot complete the requested work safely.\n'
-        'TASK_CONTRACT_JSON=' + json.dumps(packet, ensure_ascii=True, sort_keys=True,
-                                           separators=(',', ':'))
     )
+    if test_policy == 'REMOTE_RECEIPT':
+        instructions = instructions.replace(
+            'Run the test_commands listed in the Task Contract; when no commands are '
+            'listed, report that no tests were provided and do not invent commands. ',
+            'Do not run unittest suites in the sandbox. EC2 will run the admitted test '
+            'modules after commit through llmtool task remote-test. You may run '
+            'python3 -m py_compile on changed files only. Report only commands actually '
+            'run in tests[]. ')
+    return (instructions + 'TASK_CONTRACT_JSON=' +
+            json.dumps(packet, ensure_ascii=True, sort_keys=True, separators=(',', ':')))
 
 
 def _codex_developer_profile():
@@ -1766,6 +1890,7 @@ def run_task_codex_delegate(args, *, store):
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > codex_direct_developer.MAX_PROMPT_BYTES:
         raise LLMToolError('Codex Developer task prompt exceeds the supported size')
+    test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'codex',
@@ -1780,7 +1905,8 @@ def run_task_codex_delegate(args, *, store):
         'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
         'artifact_sha256': None, 'usage': None, 'error_code': None,
         'execution': None, 'created_at': _timestamp(),
-        'direct_result_callback': _direct_result_callback(task, registration, snapshot.head),
+        'direct_result_callback': _direct_result_callback(
+            task, registration, snapshot.head, test_policy=test_policy),
     }
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
@@ -2446,14 +2572,30 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
             expected_native_session_id=initial.get('executor_native_session_id'),
             write_paths=developer['write_paths'], artifact=developer['artifact'],
             artifact_sha256=developer['artifact_sha256'])
-        tests = task_completion.run_bounded_tests(root=git_evidence['root'],
-            source_sha=developer['source_sha'],
-            result_sha=git_evidence['result_head'], read_paths=developer['read_paths'],
-            write_paths=developer['write_paths'])
+        direct_callback = developer.get('direct_result_callback')
+        callback_evidence = (direct_callback.get('evidence')
+                             if type(direct_callback) is dict else None)
+        if (type(callback_evidence) is dict and
+                callback_evidence.get('test_policy') == 'REMOTE_RECEIPT'):
+            paths = _remote_task_test_paths(task, read_paths=developer['read_paths'])
+            receipt, receipt_gate = _matching_remote_test_receipt(
+                task, executor_task=args.executor_task,
+                source_sha=git_evidence['result_head'], paths=paths)
+            tests = [_deferred_remote_test(path, git_evidence['result_head'],
+                                           result_head=git_evidence['result_head'])
+                     for path in paths]
+            if receipt_gate is not None:
+                missing.append(receipt_gate)
+        else:
+            tests = task_completion.run_bounded_tests(root=git_evidence['root'],
+                source_sha=developer['source_sha'],
+                result_sha=git_evidence['result_head'], read_paths=developer['read_paths'],
+                write_paths=developer['write_paths'])
         evidence['result'] = git_evidence
         evidence['tests'] = tests
-        if any(item.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
-               item['exit_code'] != 0 for item in tests):
+        if any(item.get('status') not in
+               ('NOT_APPLICABLE_DOCS_ONLY', 'DEFERRED_REMOTE_RECEIPT') and
+               item.get('exit_code') != 0 for item in tests):
             missing.append('TEST_FAILED')
         elif evidence['execution_mode'] == 'HOST_WORKER' and not task_completion.validate_host_worker_receipt(
                 evidence.get('host_worker_receipt'), task_binding=task['task_binding'],
@@ -3128,7 +3270,11 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
                     admission.get('executor_native_session_id') != registration.native_session_id or
                     registration.result_sha != developer['source_sha']):
                 raise LLMToolError('D6 callback admission mismatch')
-            callback = _direct_result_callback(task, registration, developer['source_sha'])
+            policy = (_remote_receipt_test_policy(
+                task, read_paths=developer['read_paths'])
+                if developer.get('provider_profile') == 'codex' else 'LOCAL')
+            callback = _direct_result_callback(
+                task, registration, developer['source_sha'], test_policy=policy)
         except Exception:
             raise LLMToolError('direct Executor admission evidence is unavailable') from None
         developer_with_callback = dict(developer)
@@ -3177,10 +3323,7 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
                 expected_native_session_id=evidence['executor_native_session_id'],
                 read_paths=developer['read_paths'], write_paths=developer['write_paths'],
                 artifact=developer['artifact'], artifact_sha256=developer['artifact_sha256'])
-            tests = task_completion.run_bounded_worktree_tests(
-                root=evidence['root'], source_sha=evidence['source_sha'],
-                diff_sha256=result['diff_sha256'], changed_paths=result['changed_paths'],
-                read_paths=developer['read_paths'], write_paths=developer['write_paths'])
+            tests = _direct_result_tests(task, evidence, result, developer)
             # Tests can run long enough for the D6 record or files to change.
             # Recollect the full registration and worktree snapshot before READY.
             _recollect_direct_worktree(task, developer, callback, result)
@@ -3189,8 +3332,9 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
                 'review_pr_ci': {'stage': 'EXECUTOR_RESULT',
                     'formal_review_state': 'NOT_STARTED', 'ci_state': 'NOT_STARTED'},
             })
-            if any(test.get('status') != 'NOT_APPLICABLE_DOCS_ONLY' and
-                   test['exit_code'] != 0 for test in tests):
+            if any(test.get('status') not in
+                   ('NOT_APPLICABLE_DOCS_ONLY', 'DEFERRED_REMOTE_RECEIPT') and
+                   test.get('exit_code') != 0 for test in tests):
                 evidence['verification_state'] = 'FAILED'
                 waiting = {**callback, 'state': 'WAITING_EXECUTOR',
                            'evidence': evidence, 'missing_gates': ['TEST_FAILED']}
