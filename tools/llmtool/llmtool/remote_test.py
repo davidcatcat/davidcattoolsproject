@@ -56,7 +56,14 @@ def failure_excerpt(outputs,work,home):
         while index<len(lines):
             if not re.match(r"^(?:FAIL|ERROR): ",lines[index]): index+=1; continue
             block=[]
-            while index<len(lines) and not re.match(r"^-{10,}$",lines[index]):
+            block.append(lines[index])
+            index+=1
+            # unittest places a dashed separator between the failure header
+            # and its traceback. Skip it, then retain the traceback up to the
+            # next report separator (or the closing dashes before the summary).
+            if index<len(lines) and re.match(r"^(?:={10,}|-{10,})$",lines[index]):
+                index+=1
+            while index<len(lines) and not re.match(r"^(?:={10,}|-{10,})$",lines[index]):
                 line=lines[index].replace(work,"<REMOTE_WORKDIR>").replace(home,"<REMOTE_HOME>")
                 if not SENSITIVE.search(line): block.append(line)
                 index+=1

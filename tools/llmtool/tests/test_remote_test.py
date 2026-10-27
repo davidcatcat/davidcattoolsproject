@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -160,24 +162,33 @@ class RemoteTestTests(unittest.TestCase):
         self.assertNotIn('/tmp/llmtool-remote-test.Abc123', excerpt)
         self.assertNotIn(cred_value, excerpt)
         self.assertEqual(self.failure_excerpt(''), '')
-        stdout = 'F.E\nRan 2 tests in 0.1s\nFAILED (failures=1, errors=1)\n'
-        stderr = ('======================================================================\n'
-                  'FAIL: test_expected (test_remote_test.Case)\n'
-                  'Traceback (most recent call last):\n'
-                  '  File "/home/runner/test_remote_test.py", line 12\n'
-                  'AssertionError: expected value\n'
-                  '======================================================================\n'
-                  'ERROR: test_broken (test_remote_test.Case)\n'
-                  'Traceback (most recent call last):\n'
-                  '  File "/home/runner/test_remote_test.py", line 20\n'
-                  'RuntimeError: broken\n'
-                  '----------------------------------------------------------------------\n')
+        with tempfile.TemporaryDirectory() as test_dir:
+            fixture = Path(test_dir) / 'test_excerpt_fixture.py'
+            fixture.write_text(
+                'import unittest\n'
+                'class ExcerptFailures(unittest.TestCase):\n'
+                '    def test_assertion(self):\n'
+                "        self.assertEqual(1, 2, 'expected value')\n"
+                '    def test_error(self):\n'
+                "        raise RuntimeError('broken')\n")
+            generated = subprocess.run(
+                [sys.executable, '-m', 'unittest', 'discover', '-s', test_dir,
+                 '-p', fixture.name], capture_output=True, check=False)
+        self.assertNotEqual(generated.returncode, 0)
+        stdout = generated.stdout.decode('utf-8', 'replace')
+        stderr = generated.stderr.decode('utf-8', 'replace')
         combined = self.failure_excerpt(stdout, stderr)
-        self.assertIn('FAIL: test_expected (test_remote_test.Case)', combined)
-        self.assertIn('ERROR: test_broken (test_remote_test.Case)', combined)
-        self.assertIn('AssertionError: expected value', combined)
-        self.assertIn('<REMOTE_HOME>/test_remote_test.py', combined)
-        self.assertNotIn('/home/runner', combined)
+        self.assertIn('FAIL: test_assertion (test_excerpt_fixture.ExcerptFailures)', combined)
+        self.assertIn('ERROR: test_error (test_excerpt_fixture.ExcerptFailures)', combined)
+        self.assertIn('AssertionError:', combined)
+        self.assertIn('expected value', combined)
+        self.assertIn('RuntimeError: broken', combined)
+        self.assertEqual(self.failure_excerpt(''), '')
+        home_path = self.failure_excerpt(
+            'FAIL: test_home\n  File "/home/runner/test.py", line 1\n'
+            'AssertionError: failed\n----------------------------------------------------------------------\n')
+        self.assertIn('<REMOTE_HOME>/test.py', home_path)
+        self.assertNotIn('/home/runner', home_path)
         url_value = ''.join(('https', '://', 'user', ':', 'value', '@',
                              'example.test/path'))
         jwt_value = '.'.join(('a' * 12, 'b' * 12, 'c' * 12))
