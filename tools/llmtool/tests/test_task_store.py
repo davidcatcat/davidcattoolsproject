@@ -167,6 +167,7 @@ class TaskStoreTests(unittest.TestCase):
         policy_path = Path(worker_dispatch._POLICY_PATH)
         policy = json.loads(policy_path.read_text(encoding='utf-8'))
         policy['workers']['codex-developer']['dispatch'] = 'ALLOWED'
+        policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
         temporary_policy = Path(self.temp.name) / 'worker-dispatch.json'
         temporary_policy.write_text(json.dumps(policy), encoding='utf-8')
         patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
@@ -241,6 +242,7 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['developer']['usage']['total_tokens'], 21)
 
     def test_native_session_binding_rejected_for_opencode_and_invalid_values(self):
+        self._allow_codex_dispatch()  # also allows OpenCode; the live policy may pause it
         artifact = ('diff --git a/src.py b/src.py\n'
                     '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
         opencode_execution = {
