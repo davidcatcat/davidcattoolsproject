@@ -97,6 +97,19 @@ _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
     'failures', 'log_bytes', 'log_sha256', 'remote_log_path', 'task_id',
     'run_id', 'executor_task', 'pm_session', 'command_digest', 'receipt_digest'))
+_REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT = (
+    _REMOTE_TEST_RECEIPT_FIELDS | frozenset(('failure_excerpt',)))
+_REMOTE_TEST_FAILURE_EXCERPT_LIMIT = 4096
+_REMOTE_TEST_FAILURE_EXCERPT_LINES = 40
+
+
+def _valid_remote_test_failure_excerpt(value):
+    if type(value) is not str or len(value.splitlines()) > _REMOTE_TEST_FAILURE_EXCERPT_LINES:
+        return False
+    try:
+        return len(value.encode('utf-8')) <= _REMOTE_TEST_FAILURE_EXCERPT_LIMIT
+    except UnicodeError:
+        return False
 MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
@@ -392,7 +405,12 @@ def _validate_remote_test_receipts(record):
     if type(receipts) is not list or len(receipts) > 32:
         _fail('REMOTE_TEST_RECEIPT_INVALID')
     for receipt in receipts:
-        if (type(receipt) is not dict or set(receipt) != _REMOTE_TEST_RECEIPT_FIELDS or
+        if (type(receipt) is not dict or set(receipt) not in (
+                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT) or
+                ('failure_excerpt' in receipt and
+                 (receipt.get('result') == 'PASS' or
+                  not _valid_remote_test_failure_excerpt(
+                      receipt['failure_excerpt']))) or
                 receipt.get('result') not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH',
                                               'ADMISSION_DENIED', 'UNAVAILABLE', 'UNKNOWN') or
                 type(receipt.get('exit_code')) not in (int, type(None)) or
@@ -1724,7 +1742,8 @@ class TaskStore:
 
     def append_remote_test_receipt(self, task_id, receipt):
         """Append one validated remote test receipt idempotently to its Task."""
-        if type(receipt) is not dict or set(receipt) != _REMOTE_TEST_RECEIPT_FIELDS:
+        if type(receipt) is not dict or set(receipt) not in (
+                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT):
             _fail('REMOTE_TEST_RECEIPT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
