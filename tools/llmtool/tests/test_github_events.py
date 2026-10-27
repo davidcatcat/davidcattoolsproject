@@ -4,11 +4,31 @@ import json
 from argparse import Namespace
 from contextlib import redirect_stdout
 from io import StringIO
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 import test_active_pm_inbox as inbox_fixture
 from llmtool import github_events
 from llmtool.cli import main
+
+
+def github_responder(responses):
+    """Match fake responses by endpoint and stable parsed query fields."""
+    def get(url):
+        parsed = urlsplit(url)
+        query = parse_qs(parsed.query)
+        if parsed.path.endswith('/comments'):
+            # The since value is derived from a wall-clock event timestamp.
+            # Validate its presence/format, while routing on the endpoint and
+            # stable per_page parameter.
+            if 'since' in query:
+                assert len(query['since']) == 1
+                assert query['since'][0].endswith('Z')
+            key = (parsed.path, query.get('per_page', [None])[0])
+        else:
+            key = (parsed.path, None)
+        return responses[key]
+    return get
 
 
 class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
@@ -19,12 +39,12 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
             'ci_state': 'NOT_STARTED', 'pr_number': 77}
         self.store.update(task['task_id'], completion=task['completion'])
         responses = {
-            'issues/77/comments?per_page=100': [
+            ('issues/77/comments', '100'): [
                 {'id': 9, 'body': '<!-- activity: type=decision actor=Owner status=GO -->\nsecret body',
                  'user': {'login': 'Owner'}, 'created_at': '2026-01-01T00:00:00Z',
                  'updated_at': '2026-01-01T00:00:00Z'}],
-            'pulls/77': {'merged': False}}
-        get = lambda path: responses[path]
+            ('pulls/77', None): {'merged': False}}
+        get = github_responder(responses)
         first = github_events.poll(self.store, task['pm_session_id'], [77], github_get=get)
         again = github_events.poll(TaskStoreProxy(self.store), task['pm_session_id'], [77], github_get=get)
         self.assertEqual(len(first['events']), 1)
@@ -40,14 +60,14 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
             'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
             'ci_state': 'NOT_STARTED', 'pr_number': 78}
         self.store.update(task['task_id'], completion=task['completion'])
-        responses = {'issues/78/comments?per_page=100': [
+        responses = {('issues/78/comments', '100'): [
             {'id': 1, 'body': '<!-- activity: type=decision actor=Contributor status=GO -->',
              'user': {'login': 'Someone'}, 'created_at': 'x', 'updated_at': 'x'},
             {'id': 2, 'body': '<!-- activity: type=decision actor=Owner status=GO -->',
              'user': {'login': 'Owner'}, 'created_at': 'x', 'updated_at': 'y'}],
-            'pulls/78': {'merged': False}}
+            ('pulls/78', None): {'merged': False}}
         self.assertEqual(github_events.poll(self.store, task['pm_session_id'], [78],
-            github_get=lambda path: responses[path])['events'], [])
+            github_get=github_responder(responses))['events'], [])
 
     def test_merged_pr_records_sha_and_cli_routes(self):
         task = self._ready_task()
@@ -55,10 +75,10 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
             'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
             'ci_state': 'NOT_STARTED', 'pr_number': 79}
         self.store.update(task['task_id'], completion=task['completion'])
-        responses = {'issues/79/comments?per_page=100': [],
-                     'pulls/79': {'merged': True, 'merge_commit_sha': 'a' * 40}}
+        responses = {('issues/79/comments', '100'): [],
+                     ('pulls/79', None): {'merged': True, 'merge_commit_sha': 'a' * 40}}
         out = github_events.poll(self.store, task['pm_session_id'], [79],
-                                 github_get=lambda path: responses[path])
+                                 github_get=github_responder(responses))
         self.assertEqual(out['events'][0]['source_sha'], 'a' * 40)
         with patch('llmtool.cli.run_task_github_events', return_value=23) as handler:
             self.assertEqual(main(['task', 'github-events', '--pm-session', self.session,
