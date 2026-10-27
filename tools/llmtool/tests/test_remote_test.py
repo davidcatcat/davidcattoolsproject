@@ -32,7 +32,7 @@ class Store:
                     'tests': [{'path': 'tools/llmtool/tests/test_remote_test.py'}]},
             }},
             'remote_test_receipts': [], 'completion_events': [],
-            'completion_event_tombstones': [],
+            'completion_event_tombstones': [], 'remote_test_outcomes': [],
         }
 
     def get(self, task_id):
@@ -43,6 +43,14 @@ class Store:
     def append_remote_test_receipt(self, task_id, receipt):
         self.task['remote_test_receipts'].append(receipt)
         return receipt
+
+    def append_remote_test_outcome(self, task_id, outcome):
+        if outcome in self.task['remote_test_outcomes']:
+            index = self.task['remote_test_outcomes'].index(outcome)
+            return {'outcome': outcome, 'counter': index, 'created': False}
+        counter = len(self.task['remote_test_outcomes'])
+        self.task['remote_test_outcomes'].append(outcome)
+        return {'outcome': outcome, 'counter': counter, 'created': True}
 
     def record_completion_event(self, task_id, **event):
         saved = dict(event, task_id=task_id, pm_session_id=self.task['pm_session_id'],
@@ -121,6 +129,31 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(malformed['result'], 'UNKNOWN')
         oversize = self.run_it(b' ' * 4097)
         self.assertEqual(oversize['result'], 'UNKNOWN')
+        self.assertEqual([item['code'] for item in self.store.task['remote_test_outcomes']],
+                         ['SSH_TIMEOUT', 'SSH_UNAVAILABLE', 'RECEIPT_INVALID',
+                          'RECEIPT_INVALID'])
+        self.assertEqual(len(self.store.task['completion_events']), 4)
+        self.assertTrue(all(event['source'] == 'EC2_REMOTE_TEST'
+                            for event in self.store.task['completion_events']))
+
+    def test_admission_denials_are_persisted_and_have_events(self):
+        result = self.run_it(modules=('test_remote_test;id',))
+        self.assertEqual(result['code'], 'MODULE_NOT_ADMITTED')
+        self.assertTrue(result['persisted'])
+        self.assertIsNotNone(result['event_id'])
+        self.assertEqual(len(self.store.task['remote_test_outcomes']), 1)
+        self.assertEqual(len(self.store.task['completion_events']), 1)
+
+    def test_outcome_event_replay_is_idempotent_but_retry_gets_new_event(self):
+        first = self.run_it(error=OSError('offline'))
+        replay = remote_test._record_outcome(
+            self.store, self.store.task['task_id'], self.store.task,
+            result='UNAVAILABLE', code='SSH_UNAVAILABLE', executor_task='d6-task',
+            sha=SHA, modules=['test_remote_test'])
+        second = self.run_it(error=OSError('offline'))
+        self.assertEqual(replay['event_id'], first['event_id'])
+        self.assertNotEqual(second['event_id'], first['event_id'])
+        self.assertEqual(len(self.store.task['completion_events']), 2)
 
     def test_admission_and_argv_injection_attempts_never_call_transport(self):
         denied = self.run_it(modules=('test_remote_test;id',))

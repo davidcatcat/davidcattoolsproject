@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .active_pm_inbox import record_remote_test_event
+from .active_pm_inbox import record_remote_test_event, record_remote_test_outcome_event
 from .errors import LLMToolError
 from .task_completion import read_d6_registration
 from .task_store import TaskStore, _json_bytes
@@ -202,19 +202,53 @@ def _validate_remote_receipt(raw, *, sha, modules):
     return receipt
 
 
+def _record_outcome(store, task_id, task, *, result, code, executor_task, sha, modules):
+    safe_executor = executor_task if type(executor_task) is str and _TASK.fullmatch(executor_task) else None
+    safe_sha = sha if type(sha) is str and _SHA.fullmatch(sha) else None
+    safe_modules = sorted({item for item in modules
+                           if type(item) is str and _MODULE.fullmatch(item)})[:32]
+    outcome = {'result': result, 'code': code, 'executor_task': safe_executor,
+               'sha': safe_sha, 'modules': safe_modules,
+               'at': datetime.now(timezone.utc).isoformat(timespec='microseconds').replace(
+                   '+00:00', 'Z')}
+    try:
+        persisted = store.append_remote_test_outcome(task_id, outcome)
+    except (KeyError, LLMToolError):
+        return dict(result=result, code=code, outcome=outcome,
+                    persisted=False, delivery='NOT_DELIVERED_TASK_UNREADABLE', event_id=None)
+    saved = persisted['outcome']
+    try:
+        event = record_remote_test_outcome_event(
+            store, task_id, saved, persisted['counter'])
+        return dict(result=result, code=code, outcome=saved,
+                    persisted=True, event_id=event['event_id'])
+    except (KeyError, LLMToolError):
+        return dict(result=result, code=code, outcome=outcome,
+                    persisted=True, delivery='NOT_DELIVERED_INBOX_UNAVAILABLE', event_id=None)
+
+
 def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
                     store=None, config_path=None, transport=None):
     """Run one SSH session after local Task, D6, module and config admission."""
     store = TaskStore() if store is None else store
-    task = store.get(task_id)
+    try:
+        task = store.get(task_id)
+    except (KeyError, LLMToolError):
+        return {'result': 'UNKNOWN', 'code': 'TASK_UNREADABLE',
+                'persisted': False, 'delivery': 'NOT_DELIVERED_TASK_UNREADABLE',
+                'event_id': None}
+    def denied(code):
+        return _record_outcome(store, task_id, task, result='ADMISSION_DENIED',
+                               code=code, executor_task=executor_task, sha=sha,
+                               modules=modules if type(modules) in (tuple, list, set) else ())
     if (type(executor_task) is not str or not _TASK.fullmatch(executor_task) or
             type(sha) is not str or not _SHA.fullmatch(sha) or
             type(ref) is not str or not _REF.fullmatch(ref)):
-        return {'result': 'ADMISSION_DENIED', 'code': 'ARGUMENT_INVALID'}
+        return denied('ARGUMENT_INVALID')
     admitted = _admitted_modules(task)
     selected = tuple(sorted(set(modules or admitted)))
     if not selected or any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected):
-        return {'result': 'ADMISSION_DENIED', 'code': 'MODULE_NOT_ADMITTED'}
+        return denied('MODULE_NOT_ADMITTED')
     evidence = task.get('completion', {}).get('evidence', {}) if type(task.get('completion')) is dict else {}
     common_dir = evidence.get('common_dir') if type(evidence) is dict else None
     expected = evidence.get('result', {}).get('result_head') if type(evidence.get('result')) is dict else None
@@ -222,21 +256,21 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         review = evidence.get('review_pr_ci') if type(evidence) is dict else None
         if (type(pr) is not int or not 1 <= pr <= 9999999 or type(review) is not dict or
                 review.get('pr_number') != pr or type(review.get('head_sha')) is not str):
-            return {'result': 'ADMISSION_DENIED', 'code': 'PR_HEAD_NOT_TASK_RESULT'}
+            return denied('PR_HEAD_NOT_TASK_RESULT')
         expected = review['head_sha']
     try:
         registration = read_d6_registration(executor_task, common_dir)
         if expected is not None and expected != registration.result_sha:
-            return {'result': 'ADMISSION_DENIED', 'code': 'D6_RESULT_BINDING_MISMATCH'}
+            return denied('D6_RESULT_BINDING_MISMATCH')
         expected = registration.result_sha
     except (LLMToolError, TypeError):
         expected = None
     if expected != sha:
-        return {'result': 'ADMISSION_DENIED', 'code': 'SHA_NOT_TASK_RESULT'}
+        return denied('SHA_NOT_TASK_RESULT')
     try:
         config = _config(config_path)
     except LLMToolError:
-        return {'result': 'ADMISSION_DENIED', 'code': 'CONFIG_INVALID'}
+        return denied('CONFIG_INVALID')
     argv = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
             config['user'] + '@' + config['host'], 'python3', '-', sha, ref,
             config['repo_path'], config['python'], *selected]
@@ -257,15 +291,19 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     try:
         result = transport(argv, _REMOTE_SCRIPT, _SSH_TIMEOUT)
     except subprocess.TimeoutExpired:
-        return {'result': 'TIMEOUT', 'code': 'SSH_TIMEOUT'}
+        return _record_outcome(store, task_id, task, result='TIMEOUT', code='SSH_TIMEOUT',
+                               executor_task=executor_task, sha=sha, modules=selected)
     except (OSError, ConnectionError):
-        return {'result': 'UNAVAILABLE', 'code': 'SSH_UNAVAILABLE'}
+        return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_UNAVAILABLE',
+                               executor_task=executor_task, sha=sha, modules=selected)
     stdout = result.stdout if type(result.stdout) is bytes else str(result.stdout).encode()
     if result.returncode != 0 and not stdout:
-        return {'result': 'UNAVAILABLE', 'code': 'SSH_FAILED'}
+        return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_FAILED',
+                               executor_task=executor_task, sha=sha, modules=selected)
     parsed = _validate_remote_receipt(stdout, sha=sha, modules=selected)
     if parsed is None:
-        return {'result': 'UNKNOWN', 'code': 'RECEIPT_INVALID'}
+        return _record_outcome(store, task_id, task, result='UNKNOWN', code='RECEIPT_INVALID',
+                               executor_task=executor_task, sha=sha, modules=selected)
     receipt = dict(parsed, task_id=task_id, run_id=task['run_id'],
                    executor_task=executor_task, pm_session=task['pm_session_id'],
                    command_digest=command_digest)
