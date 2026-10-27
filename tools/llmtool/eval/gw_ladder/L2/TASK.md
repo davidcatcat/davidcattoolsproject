@@ -1,0 +1,1 @@
+In `target.py`, implement `clamp(value, lower, upper)`. Return `value` when it is within the inclusive bounds, `lower` when it is below them, and `upper` when it is above them. Inputs are integers and `lower <= upper`.

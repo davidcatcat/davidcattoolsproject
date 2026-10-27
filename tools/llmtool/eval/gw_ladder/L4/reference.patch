@@ -1,0 +1,25 @@
+--- a/helper.py
++++ b/helper.py
+@@ -1,2 +1,6 @@
+ def band_for_score(score):
+-    raise NotImplementedError
++    if score < 50:
++        return "low"
++    if score < 80:
++        return "mid"
++    return "high"
+--- a/target.py
++++ b/target.py
+@@ -2,4 +2,11 @@
+ 
+ 
+ def summarize_scores(scores):
+-    raise NotImplementedError
++    bands = {"low": 0, "mid": 0, "high": 0}
++    total = 0
++    for score in scores:
++        bands[band_for_score(score)] += 1
++        total += score
++    count = sum(bands.values())
++    return {"count": count, "average": total / count if count else 0.0,
++            "bands": bands}

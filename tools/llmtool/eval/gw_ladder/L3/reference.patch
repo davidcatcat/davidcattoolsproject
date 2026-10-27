@@ -1,0 +1,11 @@
+--- a/target.py
++++ b/target.py
+@@ -9,7 +9,7 @@
+ def insert_before(items, marker, value):
+     result = list(items)
+     index = _index_of(result, marker)
+-    if index:
++    if index >= 0:
+         result.insert(index, value)
+     else:
+         result.append(value)
