@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "purpose": "Informational static execution-resource inventory only; never grants AI dispatch, CI job execution, remote SSH or credentials",
+  "as_of": "2026-10-27",
+  "hosts": [
+    {
+      "id": "local-mac",
+      "kind": "owner-local",
+      "os": "macOS",
+      "reported_memory_gib": 8,
+      "capabilities": [
+        "macos-native-validation",
+        "self-hosted-ci"
+      ],
+      "reference": "tools/mac-runner/README.md",
+      "runners": [
+        {
+          "name": "davidproject-self-action",
+          "runner_label": "local-mac-ci",
+          "role": "macOS 3.13 CI"
+        },
+        {
+          "name": "davidproject-self-action-2",
+          "runner_label": "local-mac-ci",
+          "role": "macOS 3.13 CI"
+        }
+      ]
+    },
+    {
+      "id": "aws-ec2",
+      "kind": "owner-cloud",
+      "os": "CentOS Stream 9",
+      "arch": "x86_64",
+      "reported_vcpu": 4,
+      "reported_memory_gib": 8,
+      "capabilities": [
+        "self-hosted-linux-ci"
+      ],
+      "reference": "tools/ec2-runner/README.md",
+      "runners": [
+        {
+          "name": "ec2-self-runner",
+          "runner_label": "local-ec2-linux-ci",
+          "service_account": "ghrunner",
+          "role": "Linux CI"
+        },
+        {
+          "name": "ec2-self-runner-2",
+          "runner_label": "local-ec2-linux-ci",
+          "service_account": "ghrunner2",
+          "role": "Linux CI"
+        }
+      ]
+    }
+  ],
+  "live_online_state": "UNKNOWN",
+  "live_busy_state": "UNKNOWN",
+  "remote_development_authority": "NOT_GRANTED"
+}
