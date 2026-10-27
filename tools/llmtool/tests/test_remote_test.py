@@ -159,6 +159,17 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(len(self.store.task['remote_test_receipts']), 1)
         self.assertEqual(len(self.store.task['completion_events']), 1)
 
+    def test_stored_fail_allows_retry_and_appends_second_receipt(self):
+        failed = self.run_it(
+            self.receipt('FAIL', exit_code=1, final=('FAILED (failures=1)',)))
+        self.assertEqual(failed['result'], 'FAIL')
+
+        retried = self.run_it()
+
+        self.assertEqual(retried['result'], 'PASS')
+        self.assertEqual(len(self.calls), 2)
+        self.assertEqual(len(self.store.task['remote_test_receipts']), 2)
+
 
 if __name__ == '__main__':
     unittest.main()

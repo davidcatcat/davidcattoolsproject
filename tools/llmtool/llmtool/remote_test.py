@@ -245,7 +245,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     for known in task.get('remote_test_receipts', []):
         if (known.get('executor_task') == executor_task and known.get('source_sha') == sha and
                 known.get('modules') == list(selected) and
-                known.get('command_digest') == command_digest):
+                known.get('command_digest') == command_digest and
+                known.get('result') in ('PASS', 'SHA_MISMATCH')):
             record_remote_test_event(store, task_id, known)
             return known
     if transport is None:
