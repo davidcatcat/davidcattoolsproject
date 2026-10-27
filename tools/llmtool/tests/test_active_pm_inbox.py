@@ -182,10 +182,14 @@ class ActivePMInboxTests(unittest.TestCase):
 
     def test_peek_reports_ready_event_without_writing_then_sees_recorded_event(self):
         task = self._ready_task()
-        self._complete(task)
+        # Keep this READY handoff in the crash window before event recording.
+        # Normal completion records it as part of run_task_complete.
+        with patch('llmtool.active_pm_inbox.record_ready_event', return_value=None):
+            self._complete(task)
         path = self.store.root / (task['task_id'] + '.json')
         before_bytes = path.read_bytes()
         before = self.store.get(task['task_id'])
+        self.assertEqual(before.get('completion_events', []), [])
         with patch('llmtool.active_pm_inbox.record_ready_event',
                    side_effect=AssertionError('peek must not record events')):
             peek = active_pm_inbox.peek_inbox(self.store, 'pm-' + self.session)
