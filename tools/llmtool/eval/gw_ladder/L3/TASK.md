@@ -1,0 +1,1 @@
+In `target.py`, fix `insert_before(items, marker, value)`. Return a new list with `value` inserted immediately before the first item equal to `marker`; if no item matches, append `value`. Do not mutate `items`. The private `_index_of` helper returns the matching index or `-1` when absent. Preserve duplicate items and their order.
