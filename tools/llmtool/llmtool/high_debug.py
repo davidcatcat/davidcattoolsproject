@@ -153,7 +153,8 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task):
 def _run_codex(*, prompt, cwd, output_path):
     with open(output_path, 'wb') as output:
         return subprocess.run(['codex', 'exec', '-m', 'gpt-6.1-sol', '-c',
-            'model_reasoning_effort=high', '-s', 'read-only', '--json', '-o', output_path, '-'],
+            'model_reasoning_effort=high', '-c', 'web_search="live"',
+            '-s', 'read-only', '--json', '-o', output_path, '-'],
             input=prompt.encode('utf-8'), cwd=cwd, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=1800)
 

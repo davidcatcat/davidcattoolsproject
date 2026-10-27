@@ -294,7 +294,7 @@ def _argv(executable, root, model, effort, *, pycache_prefix, command_path=None)
             '-c', 'model_reasoning_effort=' + effort,
             '--sandbox', 'workspace-write', '--cd', str(root), '-']
     settings = (
-        'web_search="disabled"', 'features.multi_agent=false', 'features.hooks=false',
+        'web_search="live"', 'features.multi_agent=false', 'features.hooks=false',
         'features.apps=false', 'features.memories=false', 'features.remote_plugin=false',
         'features.code_mode.enabled=false', 'shell_environment_policy.inherit="none"',
         'shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"',

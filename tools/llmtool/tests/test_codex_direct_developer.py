@@ -94,6 +94,12 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('workspace-write', argv)
         self.assertIn('model_reasoning_effort=high', argv)
         self.assertIn('features.remote_plugin=false', argv)
+        self.assertIn('web_search="live"', argv)
+        for control in ('features.multi_agent=false', 'features.hooks=false',
+                        'features.apps=false', 'features.memories=false',
+                        'features.remote_plugin=false', 'features.code_mode.enabled=false',
+                        'shell_environment_policy.inherit="none"', 'allow_login_shell=false'):
+            self.assertIn(control, argv)
         self.assertIn('shell_environment_policy.inherit="none"', argv)
         self.assertIn('shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"', argv)
         self.assertIn('shell_environment_policy.set.PYTHONPYCACHEPREFIX="/tmp/codex-direct-cache"',
