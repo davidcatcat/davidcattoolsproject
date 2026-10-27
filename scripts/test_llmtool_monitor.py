@@ -842,6 +842,53 @@ class GitHubActivityTests(unittest.TestCase):
         narrow = mon.office_view([], width=3, pending=many[:1])
         self.assertTrue(narrow[1][0].startswith("★"))
 
+    def test_owner_answer_marker_is_typed_and_settles_the_waiting_ask(self):
+        ask = ("<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\n"
+               "## Decide G1")
+        answer = ("<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->\n"
+                  "Owner chose option (a)")
+        waiting = [comment(304, NOW - 300, ask)]
+        # Only the ask: a typed pending event and a ★ request.
+        events = mon.github_events(waiting, [], NOW - 3600)
+        self.assertEqual([(e.event_type, e.actor, e.target, e.status) for e in events],
+                         [("waiting_owner", "PM", "Owner", "WAITING")])
+        self.assertIn("PM → Owner：等你決定", mon.render_activity(events)[0])
+        self.assertEqual([p.reference for p in mon.owner_pending(waiting, [])], ["#304"])
+        # A later Owner answer on the same thread is a typed event and settles it.
+        both = waiting + [comment(304, NOW - 60, answer)]
+        events = mon.github_events(both, [], NOW - 3600)
+        self.assertEqual([(e.event_type, e.actor, e.target, e.status) for e in events],
+                         [("waiting_owner", "PM", "Owner", "WAITING"),
+                          ("waiting_owner", "Owner", "PM", "ANSWERED")])
+        lines = mon.render_activity(events)
+        answered = next(line for line in lines if "Owner → PM" in line)
+        self.assertIn("已回覆，這項決定不再等你（#304・自述）", answered)
+        self.assertIn("Owner chose option (a)", answered)
+        self.assertEqual(mon.owner_pending(both, []), [])
+        # Integrator is the PM's other name in markers, as for the ask.
+        integrator = comment(5, NOW - 9, "<!-- activity: type=waiting_owner actor=Owner "
+                                         "target=Integrator status=ANSWERED -->")
+        self.assertEqual([e.status for e in mon.github_events([integrator], [], NOW - 99)],
+                         ["ANSWERED"])
+
+    def test_waiting_owner_direction_and_status_must_match(self):
+        bad = ("actor=Owner target=PM status=WAITING",       # the Owner does not wait on itself
+               "actor=PM target=Owner status=ANSWERED",       # only the Owner answers
+               "actor=Owner target=Owner status=ANSWERED",
+               "actor=Owner target=Reviewer status=ANSWERED",
+               "actor=Reviewer target=Owner status=WAITING")
+        for fields in bad:
+            with self.subTest(fields=fields):
+                body = f"<!-- activity: type=waiting_owner {fields} -->"
+                events = mon.github_events([comment(6, NOW - 9, body)], [], NOW - 99)
+                self.assertNotIn("waiting_owner", [e.event_type for e in events])
+                actor = fields.split()[0].split("=")[1]
+                target = fields.split()[1].split("=")[1]
+                status = fields.split()[2].split("=")[1]
+                forged = mon.ActivityEvent(NOW - 9, "waiting_owner", "", "", status, "#6",
+                                           actor=actor, target=target)
+                self.assertEqual(mon._activity_line(forged), "")
+
     def test_owner_requests_outlive_the_comment_window_until_settled(self):
         ask = "<!-- activity: type=repair_gate actor=PM target=Owner status=AUTHORIZATION_REQUESTED -->\nplease"
         answer = "<!-- activity: type=repair_authorization actor=Owner target=R2 status=APPROVED -->\nok"

@@ -891,7 +891,7 @@ ACTIVITY_STATUS = {
     "review_dispatch": frozenset({"DISPATCHED", "UNKNOWN"}),
     "review_verdict": frozenset({"PASS", "FAIL", "FIX", "UNKNOWN"}),
     "undelivered_reply": frozenset({"NOT_DELIVERED", "UNKNOWN"}),
-    "waiting_owner": frozenset({"BLOCKED", "WAITING", "UNKNOWN"}),
+    "waiting_owner": frozenset({"BLOCKED", "WAITING", "UNKNOWN", "ANSWERED"}),
     "worker_result": None,
     "stage_attempt": frozenset({"OBSERVED"}),
     "stage_live": frozenset({"RUNNING"}),
@@ -1002,7 +1002,8 @@ MARKER_ACTOR_TARGETS = {
                        frozenset({"PM", "Integrator"})),
     "undelivered_reply": (frozenset({"Reviewer", "Claude", "Codex", "OpenCode", "AGY"}),
                           frozenset({"PM", "Integrator"})),
-    "waiting_owner": (frozenset({"Integrator", "PM"}), frozenset({"Owner"})),
+    "waiting_owner": (frozenset({"Integrator", "PM", "Owner"}),
+                      frozenset({"Owner", "PM", "Integrator"})),
     "developer_dispatch": (frozenset({"PM", "Integrator"}),
                            frozenset({"Codex", "OpenCode", "CompanyGW"})),
     "developer_progress": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
@@ -1011,6 +1012,20 @@ MARKER_ACTOR_TARGETS = {
                     frozenset({"Tests", "CI"})),
 }
 MARKER_NAMES = {"CompanyGW": "company gw", "Tests": "tests"}
+# waiting_owner runs both ways: the PM/Integrator asks the Owner (BLOCKED, WAITING,
+# UNKNOWN) and the Owner's answer comes back to them as ANSWERED. Any other pairing
+# of direction and status is not a typed event.
+_WAITING_ASK = frozenset({"BLOCKED", "WAITING", "UNKNOWN"})
+WAITING_OWNER_DIRECTIONS = {
+    ("Integrator", "Owner"): _WAITING_ASK, ("PM", "Owner"): _WAITING_ASK,
+    ("Owner", "PM"): frozenset({"ANSWERED"}), ("Owner", "Integrator"): frozenset({"ANSWERED"}),
+}
+
+
+def _marker_direction_ok(kind: str, actor: str, target: str, status: str) -> bool:
+    if kind != "waiting_owner":
+        return True
+    return status in WAITING_OWNER_DIRECTIONS.get((actor, target), frozenset())
 # Redact every POSIX absolute path, including mounted volumes and system paths.
 # URLs are removed first, so their scheme slashes do not reach this pattern.
 PRIVATE_PATH = re.compile(r"(?<![\w])/(?:[^\s/]+/)*[^\s/]*")
@@ -1113,6 +1128,8 @@ def _marker_events(body: str, when: float, number: str) -> list[ActivityEvent]:
         if actor not in allowed_actors or target not in allowed_targets:
             return []
         if kind == "review_dispatch" and actor not in {"PM", "Integrator"}:
+            return []
+        if not _marker_direction_ok(kind, actor, target, status):
             return []
         if actor == target:
             return []
@@ -1416,7 +1433,8 @@ def _activity_line(event: ActivityEvent) -> str:
         "undelivered_reply": ("Reviewer", "PM", {"NOT_DELIVERED": "回覆沒送到（改看 GitHub）",
                                                  "UNKNOWN": "回覆有沒有送到：未知"}),
         "waiting_owner": ("Integrator", "Owner", {"BLOCKED": "卡住，等你決定", "WAITING": "等你決定",
-                                                  "UNKNOWN": "狀態未知"}),
+                                                  "UNKNOWN": "狀態未知",
+                                                  "ANSWERED": "已回覆，這項決定不再等你"}),
         "developer_dispatch": ("PM", "Codex", {"ASSIGNED": "自述已指派 Developer 任務",
                                                   "UNKNOWN": "任務指派狀態未知"}),
         "developer_progress": ("Codex", "PM", {"ACTIVE": "回報進度：處理中（不代表模型正在生成）",
@@ -1446,7 +1464,9 @@ def _activity_line(event: ActivityEvent) -> str:
         allowed_actors, allowed_targets = MARKER_ACTOR_TARGETS[event.event_type]
         if (event.actor not in allowed_actors or event.target not in allowed_targets
                 or event.actor == event.target
-                or event.status not in ACTIVITY_STATUS[event.event_type]):
+                or event.status not in ACTIVITY_STATUS[event.event_type]
+                or not _marker_direction_ok(event.event_type, event.actor, event.target,
+                                            event.status)):
             return ""
         if not re.fullmatch(r"#\d{1,7}", event.reference or ""):
             return ""
