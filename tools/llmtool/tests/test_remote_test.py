@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import tempfile
@@ -7,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import remote_test
+from llmtool.task_store import _json_bytes
 
 
 SHA = 'a' * 40
@@ -93,6 +95,15 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(len(self.store.task['remote_test_receipts']), 1)
         self.assertEqual(len(self.store.task['completion_events']), 1)
         self.assertEqual(self.store.task['completion_events'][0]['source'], 'EC2_REMOTE_TEST')
+
+    def test_non_ascii_final_line_receipt_digest_matches_store_encoding(self):
+        result = self.run_it(self.receipt(final=('é OK',)))
+
+        self.assertEqual(result['result'], 'PASS')
+        stored = self.store.task['remote_test_receipts'][0]
+        digest_input = dict(stored)
+        claimed = digest_input.pop('receipt_digest')
+        self.assertEqual(claimed, hashlib.sha256(_json_bytes(digest_input)).hexdigest())
 
     def test_fail_and_sha_mismatch_are_not_pass(self):
         failed = self.run_it(self.receipt('FAIL', exit_code=1, final=('FAILED (failures=1)',)))

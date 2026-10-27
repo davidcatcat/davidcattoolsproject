@@ -13,7 +13,7 @@ from pathlib import Path
 from .active_pm_inbox import record_remote_test_event
 from .errors import LLMToolError
 from .task_completion import read_d6_registration
-from .task_store import TaskStore
+from .task_store import TaskStore, _json_bytes
 
 _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
@@ -269,8 +269,7 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     receipt = dict(parsed, task_id=task_id, run_id=task['run_id'],
                    executor_task=executor_task, pm_session=task['pm_session_id'],
                    command_digest=command_digest)
-    receipt['receipt_digest'] = hashlib.sha256(json.dumps(
-        receipt, sort_keys=True, separators=(',', ':')).encode() + b'\n').hexdigest()
+    receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
     saved = store.append_remote_test_receipt(task_id, receipt)
     record_remote_test_event(store, task_id, saved)
     return saved
