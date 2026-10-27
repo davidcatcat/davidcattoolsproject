@@ -996,7 +996,6 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': 2, 'name': 'check (3.9)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
         api = self._github_response_sequence(result_sha, {}, [], legacy_checks)
-        api[5]['jobs'][0]['name'] = 'check (3.9)'
         with patch('llmtool.task_completion._github_get', side_effect=api[3:]):
             evidence = task_completion._collect_ci_evidence(
                 pr_number=pr_number, result_sha=result_sha)
