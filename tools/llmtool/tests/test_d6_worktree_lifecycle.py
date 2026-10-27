@@ -193,14 +193,24 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         missing_root, missing_path = self._registered_result_fixture("missing-record")
         retained_root, retained_path = self._registered_result_fixture("retained-record")
         existing_root, existing_path = self._registered_result_fixture("existing-record")
+        locked_root, locked_path = self._registered_result_fixture("locked-missing-record")
         retained = lifecycle._read_registry_record(retained_path)
         retained["state"] = "RETAIN_BLOCKED"
         lifecycle._replace_record(retained_path, retained)
         existing_before = lifecycle._read_registry_record(existing_path)
         for root in (missing_root, retained_root):
+            subprocess.run(["/usr/bin/git", "worktree", "unlock", str(root)],
+                           cwd=self.source, check=True, capture_output=True)
+        for root in (missing_root, retained_root):
             shutil.rmtree(root)
+        shutil.rmtree(locked_root)
         subprocess.run(["/usr/bin/git", "worktree", "prune"], cwd=self.source,
                        check=True, capture_output=True)
+
+        listed_worktrees = subprocess.check_output(
+            ["/usr/bin/git", "worktree", "list", "--porcelain"],
+            cwd=self.source, text=True)
+        self.assertIn("worktree " + str(locked_root), listed_worktrees)
 
         dry_output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
@@ -209,8 +219,11 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                 canonical_root=self.source, workspace_root=self.tasks))
         dry = json.loads(dry_output.getvalue())
         self.assertEqual([item["task_id"] for item in dry["records"]], ["missing-record"])
+        self.assertNotIn("locked-missing-record",
+                         [item["task_id"] for item in dry["records"]])
         self.assertTrue(existing_root.is_dir())
         self.assertEqual(lifecycle._read_registry_record(missing_path)["state"], "ACTIVE")
+        self.assertEqual(lifecycle._read_registry_record(locked_path)["state"], "ACTIVE")
 
         execute_output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
