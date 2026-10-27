@@ -27,7 +27,7 @@ Machine-readable **informational** inventory: [execution-resources.json](../../t
 | Local Mac | Intel macOS, limited 8 GiB memory | `davidproject-self-action`, `davidproject-self-action-2` | `llmtool Mac CI`, macOS 3.13 check/native gates. |
 | AWS EC2 | CentOS Stream 9, x86_64, 4 vCPU / 8 GiB | `ec2-self-runner`, `ec2-self-runner-2` | `llmtool Linux CI`, Python 3.14 PR/main checks; Python 3.9 manually started before release. |
 
-Two hosts, four runners. Runner names, installation accounts and platform capabilities reflect committed documentation, not a live online/busy probe. [Mac runner guide](../../tools/mac-runner/README.md) and [EC2 runner guide](../../tools/ec2-runner/README.md) contain isolation and admission requirements.
+See [execution-resources.json](../../tools/llmtool/execution-resources.json) for the current host and runner inventory. Runner names, installation accounts and platform capabilities reflect committed documentation, not a live online/busy probe. [Mac runner guide](../../tools/mac-runner/README.md) and [EC2 runner guide](../../tools/ec2-runner/README.md) contain isolation and admission requirements.
 
 ## Routing and operational boundaries
 
