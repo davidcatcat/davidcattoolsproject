@@ -15,7 +15,8 @@ AGY is `OWNER_ASSIGNMENT_ONLY` in [worker-dispatch.json](../../tools/llmtool/wor
    Start only on `allowed: true` / `OWNER_ASSIGNMENT_MATCHED`.
 3. **Preflight.** `agy models` lists the models and doubles as an authentication check, and a trivial `agy -p "reply OK" --output-format json` must return SUCCESS. `agy -p "/usage"` shows the weekly and five-hour quota remaining. Never print, copy or edit AGY credentials or config.
 4. **D6.** Register the Task's D6 from the approved base with the Integrator-controlled procedure in [worktree lifecycle](../safe-git/worktree-lifecycle.md) (agent id such as `agy-argon-medium`). Run AGY only with that D6 root as its working directory.
-5. **Run.** One non-interactive turn:
+5. **Write controls, before the run.** AGENTS.md requires the writable-path controls to be validated **before** execution. AGY has no per-file write allowlist, so confirm the controls it does have: the working directory is the D6 root, no `--add-dir`, and `--sandbox` is on. Record the missing per-file allowlist on the PR. Do not assign AGY a Task whose safety depends on per-file write enforcement. Save a baseline of the D6, including ignored files: `git -C <D6> status --porcelain --untracked-files=all --ignored > <scratchpad>/agy-before.txt`.
+6. **Run.** One non-interactive turn:
 
    ```sh
    agy -p "<prompt>" --model <model> --effort <effort> --sandbox \
@@ -23,13 +24,13 @@ AGY is `OWNER_ASSIGNMENT_ONLY` in [worker-dispatch.json](../../tools/llmtool/wor
    ```
 
    The model name comes from `agy models` (for example "argon" is `gemini-4-argon-medium`). `--mode auto` may be unavailable for the account, and print mode still edits and runs commands without prompting. The JSON reports `conversation_id`, status, `duration_seconds` and token usage, but not the model, so record the model and effort as requested values with observed `UNKNOWN`.
-6. **Repair.** Repair bounds and quota handling follow the [PM Continuation Contract](../ai-team-delivery/pm-continuation.md#reviewer-and-developer-quota-continuation-owner-2026-10-27). A repair goes to the same AGY conversation with `--conversation <conversation_id>`.
-7. **Check the result yourself.** AGENTS.md requires the writable-path controls to be validated **before** execution. AGY has no per-file write allowlist, so before the run confirm the controls it does have: the working directory is the D6 root, no `--add-dir`, and `--sandbox` is on. Record the missing per-file allowlist on the PR. Do not assign AGY a Task whose safety depends on per-file write enforcement. After the run, enforce the file list:
-   - `git -C <D6> status --porcelain --untracked-files=all` must list only the assigned files. It also shows new untracked files, which `git diff --stat` would miss.
+7. **Repair.** Repair bounds and quota handling follow the [PM Continuation Contract](../ai-team-delivery/pm-continuation.md#reviewer-and-developer-quota-continuation-owner-2026-10-27). A repair goes to the same AGY conversation with `--conversation <conversation_id>`.
+8. **Check the result yourself.** Enforce the file list after every run:
+   - Run `git -C <D6> status --porcelain --untracked-files=all --ignored` again and compare it with the baseline. Every changed, new untracked or new ignored entry must be an assigned file. `git diff --stat` alone misses untracked and ignored files.
    - Compare the `def test_` counts before and after, and look for new skip decorators and new `patch`/mock of the production code under test.
    - Run the focused test modules from the D6 yourself.
    - Reject any result that makes tests faster or greener by removing, mocking or bypassing the behavior they check. On 2026-10-27 AGY's first attempt did exactly that and was rejected.
-8. **Hand back.** The PM commits from the D6 with an authorship note (AGY, model, Owner assignment ref, attempts) and opens the PR. Formal review and merge gates follow [ai-team-delivery](../ai-team-delivery/SKILL.md); AGY's model family is Gemini, so a Claude or Codex Reviewer qualifies.
+9. **Hand back.** The PM commits from the D6 with an authorship note (AGY, model, Owner assignment ref, attempts) and opens the PR. Formal review and merge gates follow [ai-team-delivery](../ai-team-delivery/SKILL.md); AGY's model family is Gemini, so a Claude or Codex Reviewer qualifies.
 
 ## Part 2: AGY — working rules
 
