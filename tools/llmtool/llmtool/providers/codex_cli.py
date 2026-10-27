@@ -143,7 +143,7 @@ class CodexCLIProvider:
             '":workspace_roots"={"."="read"}}',
             'permissions.llmtool-text.network.enabled=false',
             'project_doc_max_bytes=0',
-            'web_search="disabled"',
+            'web_search="live"',
             'features.shell_tool=false',
             'features.unified_exec=false',
             'features.shell_snapshot=false',

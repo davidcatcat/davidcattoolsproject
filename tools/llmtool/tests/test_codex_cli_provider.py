@@ -196,8 +196,9 @@ else:
         for control in ('features.shell_tool=false', 'features.unified_exec=false',
                         'features.multi_agent=false', 'features.hooks=false',
                         'features.apps=false', 'features.shell_snapshot=false',
-                        'project_doc_max_bytes=0', 'web_search="disabled"'):
+                        'project_doc_max_bytes=0'):
             self.assertIn(control, settings)
+        self.assertIn('web_search="live"', settings)
         self.assertNotIn("--sandbox", argv)  # Would override restricted reads.
         self.assertNotIn("--json", argv)
         self.assertNotIn("private prompt", repr(argv))

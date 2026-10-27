@@ -12,6 +12,20 @@ from llmtool.errors import LLMToolError
 
 
 class HighDebugTests(unittest.TestCase):
+    def test_codex_invocation_enables_search_and_keeps_read_only_sandbox(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = str(Path(directory) / 'report.md')
+            with patch.object(high_debug.subprocess, 'run') as run:
+                high_debug._run_codex(prompt='diagnosis', cwd=directory,
+                                      output_path=output_path)
+
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[0:2], ['codex', 'exec'])
+        self.assertIn('web_search="live"', argv)
+        self.assertIn('-s', argv)
+        self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
+        self.assertIn('model_reasoning_effort=high', argv)
+
     def test_dispatch_refusal_has_stable_code(self):
         store = SimpleNamespace(get=lambda _task: {
             'task_id': 'a' * 32,
