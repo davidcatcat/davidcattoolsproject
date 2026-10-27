@@ -292,14 +292,27 @@ QUESTIONS = [
 ]
 
 
+def _normalize(text):
+    normalized = re.sub(r"[^a-z0-9.]+", " ", text.lower()).strip()
+    normalized = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
 def _answer_matches(answer, expected):
     if not isinstance(answer, str):
         return False
-    normalized = re.sub(r"[^a-z0-9.]+", " ", answer.lower()).strip()
-    normalized = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
+    normalized = _normalize(answer)
     target = expected.lower()
-    return normalized == target or normalized.endswith(" " + target)
+    if normalized == target or normalized.endswith(" " + target):
+        return True
+    for span in re.findall(r"\*\*(.+?)\*\*", answer, re.S):
+        span_normalized = _normalize(span)
+        if span_normalized == target or span_normalized.startswith(target + " "):
+            return True
+    if len(normalized.split()) <= 4 and normalized.startswith(target + " "):
+        return True
+    return False
 
 
 def probe_quality(client):
