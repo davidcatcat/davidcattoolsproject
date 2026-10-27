@@ -22,6 +22,8 @@ security sign-off, QA verdict, or merge authority.
 
 ## Before delegation
 
+- **Web search for gw (Owner 2026-10-28, [AGENTS.md](../../AGENTS.md)):** gw has no tools of its own. The PM or a Developer may search the web for the Task and add the relevant, non-sensitive results to gw's context (`--context-stdin`), labelled as untrusted reference material with their source URLs. Keep the excerpt short. The data rules below apply to it.
+
 - Work from the canonical Mac repository and identify the exact revision under test.
 - The company VPN/provider must already be configured and available. Use an explicit
   configured profile name; do not rewrite active provider settings just for delegation.
@@ -47,7 +49,7 @@ security sign-off, QA verdict, or merge authority.
 This classification applies to the triage use above and to the company `gw` Developer
 route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
 layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
-[Worker availability table](../../tools/llmtool/ROADMAP.md#worker-availability--live-status):
+[Worker dispatch authority and live technical state](../../tools/llmtool/ROADMAP.md#worker-dispatch-authority-and-live-technical-state):
 
 1. **TCP:** can a connection to the configured endpoint open? Example: a bounded
    `nc -z` connect, with no request body.
