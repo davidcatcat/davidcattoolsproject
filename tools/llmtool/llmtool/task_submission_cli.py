@@ -829,6 +829,28 @@ def _patch_paths(patch):
     return paths
 
 
+def _added_diff_content(value):
+    """Return added hunk lines, excluding unified-diff file headers."""
+    lines = value.splitlines()
+    added = []
+    in_hunk = False
+    previous = None
+    for line in lines:
+        if line.startswith('diff --git '):
+            in_hunk = False
+        elif line.startswith('@@ '):
+            in_hunk = True
+        elif (not in_hunk and line.startswith('+++ ') and previous is not None and
+              previous.startswith('--- ')):
+            # The file header is metadata, while a line beginning with '+' in
+            # a hunk is always source content (including lines beginning '++').
+            pass
+        elif in_hunk and line.startswith('+'):
+            added.append(line[1:])
+        previous = line
+    return '\n'.join(added)
+
+
 def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=False):
     """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
@@ -843,7 +865,7 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Fa
            127 <= ord(char) <= 159 or unicodedata.category(char) == 'Cf'
            for char in value):
         return 'DEVELOPER_OUTPUT_INVALID_TEXT'
-    if _emitted_sensitive(value):
+    if _emitted_sensitive(_added_diff_content(value)):
         return 'DEVELOPER_OUTPUT_SENSITIVE'
     if not value.startswith('diff --git '):
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'

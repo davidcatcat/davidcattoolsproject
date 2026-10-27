@@ -28,6 +28,25 @@ from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
 from .task_completion import validate_host_worker_receipt
 
+
+def _added_diff_content(value):
+    """Return added unified-diff hunk lines, excluding file headers."""
+    added = []
+    in_hunk = False
+    previous = None
+    for line in value.splitlines():
+        if line.startswith('diff --git '):
+            in_hunk = False
+        elif line.startswith('@@ '):
+            in_hunk = True
+        elif (not in_hunk and line.startswith('+++ ') and previous is not None and
+                previous.startswith('--- ')):
+            pass
+        elif in_hunk and line.startswith('+'):
+            added.append(line[1:])
+        previous = line
+    return '\n'.join(added)
+
 SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
@@ -992,7 +1011,7 @@ def _validate(record):
                 if (type(artifact) is not str or len(artifact.encode('utf-8')) > 64 * 1024 or
                         type(artifact_sha) is not str or
                         hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha or
-                        _emitted_sensitive(artifact)):
+                        _emitted_sensitive(_added_diff_content(artifact))):
                     _fail()
             elif artifact_sha is not None:
                 _fail()
