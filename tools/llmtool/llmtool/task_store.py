@@ -101,7 +101,7 @@ MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
-_OPTIONAL_USAGE_FIELDS = frozenset(('cached_prompt_tokens', 'reasoning_tokens'))
+_OPTIONAL_USAGE_FIELDS = frozenset(('cached_prompt_tokens', 'reasoning_tokens', 'tool_calls'))
 _DISPATCH_AUDIT_FIELDS = frozenset((
     'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
     'policy_sha256', 'at',

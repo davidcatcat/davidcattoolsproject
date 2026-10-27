@@ -16,6 +16,7 @@ from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 from llmtool.worker_dispatch import WorkerDispatchDenied
 from llmtool.providers.codex_cli import CodexCLIProvider
+from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool.cli import parser_for_cli
 
 
@@ -47,7 +48,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             '',
         ))
 
-    def write_fake(self, body, *, delay=0, delay_after_output=0, descendant_marker=None):
+    def write_fake(self, body, *, delay=0, delay_after_output=0,
+                   descendant_marker=None, signal_number=None):
         script = "#!/usr/bin/env python3\nimport json,os,sys,time\n"
         script += f"open({str(self.invoked)!r},'w').write('yes')\n"
         script += (
@@ -64,6 +66,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         if delay:
             script += f'time.sleep({delay!r})\n'
         script += f"sys.stdout.write({body!r});sys.stdout.flush()\n"
+        if signal_number is not None:
+            script += f'os.kill(os.getpid(), {signal_number})\n'
         if delay_after_output:
             script += f'time.sleep({delay_after_output!r})\n'
         self.fake.write_text(script, encoding='utf-8')
@@ -160,6 +164,61 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             self.run_fake()
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_FINAL_JSON_INVALID')
         self.assertEqual(caught.exception.native_session_id, self.THREAD)
+
+    def test_signal_ended_run_without_final_message_is_interrupted(self):
+        # Emit malformed partial output before the signal. The interruption
+        # outcome must take precedence over JSONL/final-message validation.
+        self.write_fake('{partial', signal_number=15)
+
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_INTERRUPTED')
+        self.assertEqual(caught.exception.process_exit_code, -15)
+
+    def test_host_keyboard_interrupt_propagates_from_run(self):
+        self.write_fake('', delay=10)
+        interrupt = KeyboardInterrupt()
+        original_selector = direct.selectors.DefaultSelector
+
+        class InterruptingSelector:
+            def __init__(self):
+                self.selector = original_selector()
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                raise interrupt
+
+        with patch.object(direct.selectors, 'DefaultSelector', InterruptingSelector), \
+                self.assertRaises(KeyboardInterrupt) as caught:
+            self.run_fake()
+
+        self.assertIs(caught.exception, interrupt)
+        self.assertTrue(getattr(interrupt, '_llmtool_direct_codex_execution', None))
+
+    def test_cli_host_termination_propagates_from_run(self):
+        self.write_fake('', delay=10)
+        termination = CLIHostTermination('host terminated')
+        original_selector = direct.selectors.DefaultSelector
+
+        class InterruptingSelector:
+            def __init__(self):
+                self.selector = original_selector()
+
+            def __getattr__(self, name):
+                return getattr(self.selector, name)
+
+            def select(self, wait=None):
+                raise termination
+
+        with patch.object(direct.selectors, 'DefaultSelector', InterruptingSelector), \
+                self.assertRaises(CLIHostTermination) as caught:
+            self.run_fake()
+
+        self.assertIs(caught.exception, termination)
+        self.assertTrue(getattr(termination, '_llmtool_direct_codex_execution', None))
 
     def test_timeout_kills_owned_process_group(self):
         marker = self.root / 'descendant-survived'
