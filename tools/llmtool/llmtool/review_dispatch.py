@@ -140,18 +140,23 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task)
-    prior = task.get('review_dispatch_claim')
+    stored_claims = task.get('review_dispatch_claim')
+    claims = ([stored_claims] if type(stored_claims) is dict else
+              list(stored_claims) if type(stored_claims) is list else [])
+    identity = (pr_number, head, version)
+    prior = next((claim for claim in claims if
+                  (claim.get('pr'), claim.get('head_sha'), claim.get('version')) == identity), None)
     if prior is not None:
-        if (prior.get('executor_task'), prior.get('pr'), prior.get('head_sha'),
-                prior.get('version')) != (executor_task, pr_number, head, version):
+        if prior.get('executor_task') != executor_task:
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
+            updated_claims = [unknown if claim is prior else claim for claim in claims]
             try:
                 saved = store.compare_and_update(
-                    task_id, expected={'review_dispatch_claim': prior},
-                    review_dispatch_claim=unknown)
-                return saved.get('review_dispatch_claim', unknown)
+                    task_id, expected={'review_dispatch_claim': stored_claims},
+                    review_dispatch_claim=updated_claims)
+                return unknown
             except Exception:
                 _refuse('REVIEW_DISPATCH_OUTCOME_UNKNOWN')
         return prior
@@ -167,7 +172,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
              'claimed_at': _now(), 'updated_at': _now()}
     try:
         store.compare_and_update(task_id, expected={'record_sha256': task['record_sha256']},
-                                 review_dispatch_claim=claim)
+                                 review_dispatch_claim=claims + [claim])
     except Exception:
         _refuse('REVIEW_DISPATCH_CLAIM_UNAVAILABLE')
 
@@ -208,16 +213,19 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
         dispatched = dict(claim, state='DISPATCHED', reviewer_task=reviewer_task,
                           native_session_id=session_id, updated_at=_now())
-        store.compare_and_update(task_id, expected={'review_dispatch_claim': claim},
-                                 review_dispatch_claim=dispatched)
+        updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
+        store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
+                                 review_dispatch_claim=updated_claims)
         return dispatched
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
         if session_id is not None:
             unknown['native_session_id'] = session_id
         try:
-            store.compare_and_update(task_id, expected={'review_dispatch_claim': claim},
-                                     review_dispatch_claim=unknown)
+            claimed = claims + [claim]
+            updated_claims = [unknown if item is claim else item for item in claimed]
+            store.compare_and_update(task_id, expected={'review_dispatch_claim': claimed},
+                                     review_dispatch_claim=updated_claims)
         except Exception:
             pass
         if getattr(exc, 'review_dispatch_code', None):

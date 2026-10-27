@@ -479,30 +479,39 @@ def _validate(record):
         _validate_completion_tombstones(record)
     if 'review_dispatch_claim' in record:
         claim = record['review_dispatch_claim']
-        if (type(claim) is not dict or set(claim) != _REVIEW_DISPATCH_CLAIM_FIELDS or
-                type(claim.get('executor_task')) is not str or
-                not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', claim['executor_task']) or
-                type(claim.get('pr')) is not int or not 1 <= claim['pr'] <= 999999999 or
-                type(claim.get('head_sha')) is not str or
-                re.fullmatch(r'[0-9a-f]{40}', claim['head_sha']) is None or
-                type(claim.get('version')) is not int or not 1 <= claim['version'] <= 9999 or
-                claim.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
-                (claim.get('reviewer_task') is not None and
-                 (type(claim['reviewer_task']) is not str or
-                  not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', claim['reviewer_task']))) or
-                (claim.get('native_session_id') is not None and
-                 (type(claim['native_session_id']) is not str or
-                  not 1 <= len(claim['native_session_id']) <= 256 or
-                  any(ord(c) < 0x20 or ord(c) == 0x7f for c in claim['native_session_id']))) or
-                claim.get('account_mode') not in ('EXPLICIT_CLAUDE_CONFIG_DIR',
-                                                   'DEFAULT_SECOND_ACCOUNT') or
-                type(claim.get('claimed_at')) is not str or
-                type(claim.get('updated_at')) is not str or
-                (claim['state'] == 'CLAIMED' and
-                 (claim['reviewer_task'] is None or claim['native_session_id'] is not None)) or
-                (claim['state'] == 'DISPATCHED' and
-                 (claim['reviewer_task'] is None or claim['native_session_id'] is None))):
+        claims = [claim] if type(claim) is dict else claim
+        if type(claims) is not list or not claims:
             _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+        identities = set()
+        for item in claims:
+            if (type(item) is not dict or set(item) != _REVIEW_DISPATCH_CLAIM_FIELDS or
+                    type(item.get('executor_task')) is not str or
+                    not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
+                    type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
+                    type(item.get('head_sha')) is not str or
+                    re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
+                    type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
+                    (item.get('reviewer_task') is not None and
+                     (type(item['reviewer_task']) is not str or
+                      not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['reviewer_task']))) or
+                    (item.get('native_session_id') is not None and
+                     (type(item['native_session_id']) is not str or
+                      not 1 <= len(item['native_session_id']) <= 256 or
+                      any(ord(c) < 0x20 or ord(c) == 0x7f for c in item['native_session_id']))) or
+                    item.get('account_mode') not in ('EXPLICIT_CLAUDE_CONFIG_DIR',
+                                                      'DEFAULT_SECOND_ACCOUNT') or
+                    type(item.get('claimed_at')) is not str or
+                    type(item.get('updated_at')) is not str or
+                    (item['state'] == 'CLAIMED' and
+                     (item['reviewer_task'] is None or item['native_session_id'] is not None)) or
+                    (item['state'] == 'DISPATCHED' and
+                     (item['reviewer_task'] is None or item['native_session_id'] is None))):
+                _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            identity = (item['pr'], item['head_sha'], item['version'])
+            if identity in identities:
+                _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            identities.add(identity)
     if 'remote_test_receipts' in record:
         _validate_remote_test_receipts(record)
     for key in ('created_at', 'updated_at'):
@@ -2129,16 +2138,28 @@ class TaskStore:
             if 'review_dispatch_claim' in changes:
                 old_claim = current.get('review_dispatch_claim')
                 new_claim = changes['review_dispatch_claim']
-                allowed_claim_transition = (
-                    old_claim is None and type(new_claim) is dict and
-                    new_claim.get('state') == 'CLAIMED' or
-                    type(old_claim) is dict and type(new_claim) is dict and
-                    old_claim.get('state') == 'CLAIMED' and
-                    new_claim.get('state') in ('UNKNOWN', 'DISPATCHED') and
-                    all(old_claim.get(key) == new_claim.get(key) for key in (
-                        'executor_task', 'pr', 'head_sha', 'version', 'account_mode',
-                        'claimed_at', 'reviewer_task'))
-                )
+                old_claims = ([] if old_claim is None else
+                              [old_claim] if type(old_claim) is dict else old_claim)
+                new_claims = ([new_claim] if type(new_claim) is dict else new_claim)
+                allowed_claim_transition = False
+                if type(old_claims) is list and type(new_claims) is list:
+                    if len(new_claims) == len(old_claims) + 1 and new_claims[:-1] == old_claims:
+                        allowed_claim_transition = (type(new_claims[-1]) is dict and
+                                                    new_claims[-1].get('state') == 'CLAIMED')
+                    elif len(new_claims) == len(old_claims):
+                        changed = [index for index, (before, after) in
+                                   enumerate(zip(old_claims, new_claims)) if before != after]
+                        if len(changed) == 1:
+                            index = changed[0]
+                            before, after = old_claims[index], new_claims[index]
+                            allowed_claim_transition = (
+                                before.get('state') == 'CLAIMED' and
+                                after.get('state') in ('UNKNOWN', 'DISPATCHED') and
+                                all(before.get(key) == after.get(key) for key in (
+                                    'executor_task', 'pr', 'head_sha', 'version',
+                                    'account_mode', 'claimed_at', 'reviewer_task')) and
+                                all(old == new for i, (old, new) in
+                                    enumerate(zip(old_claims, new_claims)) if i != index))
                 if not allowed_claim_transition:
                     _fail('REVIEW_DISPATCH_CLAIM_TRANSITION_INVALID')
             from . import worker_dispatch
