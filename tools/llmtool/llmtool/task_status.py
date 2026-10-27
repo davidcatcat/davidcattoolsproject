@@ -65,8 +65,7 @@ def derive_state(record):
     completion = record.get('completion')
     if type(completion) is dict:
         mapped = _COMPLETION_STATES.get(completion.get('state'))
-        if mapped is not None:
-            return mapped
+        return mapped if mapped is not None else 'UNKNOWN'
     mapped = _TASK_STATES.get(record.get('state'))
     if mapped is None:
         return 'UNKNOWN'
