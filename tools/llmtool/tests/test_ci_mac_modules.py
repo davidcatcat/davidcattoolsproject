@@ -65,10 +65,54 @@ class MacModuleSelectionTests(unittest.TestCase):
     def test_deleted_test_change_requires_full(self):
         self.assertIsNone(ci_mac_modules.select_modules(["tools/llmtool/tests/test_deleted.py"], REPO_ROOT))
 
-    def test_shared_modules_require_full(self):
-        for module in ("__init__", "cli", "task_store", "task_submission_cli"):
-            with self.subTest(module=module):
-                self.assertIsNone(ci_mac_modules.select_modules([f"tools/llmtool/llmtool/{module}.py"], REPO_ROOT))
+    def test_init_and_workflow_changes_require_full(self):
+        self.assertIsNone(ci_mac_modules.select_modules(["tools/llmtool/llmtool/__init__.py"], REPO_ROOT))
+        self.assertIsNone(ci_mac_modules.select_modules([".github/workflows/llmtool-mac-ci.yml"], REPO_ROOT))
+
+    def test_shared_module_changes_select_ast_importers(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tests = root / "tools" / "llmtool" / "tests"
+            tests.mkdir(parents=True)
+            (tests / "test_cli_user.py").write_text("from llmtool import cli\n")
+            (tests / "test_store_user.py").write_text("from llmtool.task_store import TaskStore\n")
+            (tests / "test_submission_user.py").write_text(
+                "from llmtool import (\n    unrelated, task_submission_cli,\n)\n"
+            )
+            with patch.object(ci_mac_modules, "extra_modules", return_value=set()):
+                for path, expected in (
+                    ("cli.py", "test_cli_user"),
+                    ("task_store.py", "test_store_user"),
+                    ("task_submission_cli.py", "test_submission_user"),
+                ):
+                    with self.subTest(path=path):
+                        self.assertEqual(
+                            ci_mac_modules.select_modules([f"tools/llmtool/llmtool/{path}"], root),
+                            {expected},
+                        )
+
+    def test_shared_module_scan_ignores_comments_and_strings(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tests = Path(temporary) / "tools" / "llmtool" / "tests"
+            tests.mkdir(parents=True)
+            (tests / "test_mention.py").write_text(
+                "# from llmtool import cli\ntext = 'from llmtool import cli'\n"
+            )
+            with patch.object(ci_mac_modules, "extra_modules", return_value=set()):
+                self.assertEqual(
+                    ci_mac_modules.select_modules(["tools/llmtool/llmtool/cli.py"], Path(temporary)),
+                    set(),
+                )
+
+    def test_unparsable_test_forces_full_for_shared_module(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            tests = Path(temporary) / "tools" / "llmtool" / "tests"
+            tests.mkdir(parents=True)
+            (tests / "test_broken.py").write_text("from llmtool import cli\nif\n")
+            with patch.object(ci_mac_modules, "extra_modules", return_value=set()):
+                self.assertIsNone(
+                    ci_mac_modules.select_modules(["tools/llmtool/llmtool/cli.py"], Path(temporary))
+                )
 
     def test_empty_selection_prints_full(self):
         with tempfile.TemporaryDirectory() as temporary:

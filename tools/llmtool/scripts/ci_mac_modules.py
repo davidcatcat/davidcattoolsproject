@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 from pathlib import Path
 import re
 import sys
@@ -22,8 +23,9 @@ MAC_RELEVANT_TEST = re.compile(
     r"keychain|Keychain|/Applications|killpg|setsid|os\.setpgid|getpgid|start_new_session",
     re.IGNORECASE,
 )
+# Importers are enough here because every PR also runs the full suite on EC2 Linux,
+# and the Mac full suite runs on the main schedule (#461).
 SHARED_MODULES = {
-    "llmtool/__init__.py",
     "llmtool/cli.py",
     "llmtool/task_store.py",
     "llmtool/task_submission_cli.py",
@@ -45,6 +47,28 @@ def scanned_test_modules(repo_root: Path = DEFAULT_REPO_ROOT) -> set[str]:
         for path in tests.glob("test_*.py")
         if MAC_RELEVANT_TEST.search(path.read_text(encoding="utf-8"))
     }
+
+
+def importing_test_modules(module_name: str, repo_root: Path) -> set[str] | None:
+    """Return tests importing an llmtool module, or None if any test cannot parse."""
+    tests = repo_root / "tools" / "llmtool" / "tests"
+    importing: set[str] = set()
+    leaf = Path(module_name).stem
+    for path in tests.glob("test_*.py"):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        except (SyntaxError, UnicodeDecodeError):
+            return None
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                if any(alias.name == f"llmtool.{leaf}" for alias in node.names):
+                    importing.add(path.stem)
+            elif isinstance(node, ast.ImportFrom):
+                if node.module == f"llmtool.{leaf}":
+                    importing.add(path.stem)
+                elif node.module == "llmtool" and any(alias.name == leaf for alias in node.names):
+                    importing.add(path.stem)
+    return importing
 
 
 def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> set[str] | None:
@@ -69,8 +93,14 @@ def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT
 
         prefix = "tools/llmtool/"
         relative = path[len(prefix):]
-        if relative in SHARED_MODULES:
+        if relative == "llmtool/__init__.py":
             return None
+        if relative in SHARED_MODULES:
+            importers = importing_test_modules(Path(relative).stem, repo_root)
+            if importers is None:
+                return None
+            selected.update(importers)
+            continue
         if relative.startswith("tests/test_") and relative.endswith(".py"):
             if not (repo_root / path).is_file():
                 return None
