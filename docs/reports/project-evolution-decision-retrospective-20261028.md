@@ -4,7 +4,7 @@
 - **審查者：** Independent Auditor（Claude Fable 5.1）。本報告與 [Report A（技術稽核）](full-repository-technical-audit-20261028.md) 共用證據索引；管理方法建議見 [Report C（Product Owner Playbook）](product-owner-playbook-ai-development-20261028.md)；精簡結論見 [Executive Decision Brief](executive-decision-brief-20261028.md)。
 - **證據來源：** Git 歷史（899 commits）、GitHub PR（437）與 Issues（517）、Owner 決策留言（#120 31 則、#289 22 則、#352 12 則、#290 9 則、#304 7 則、#425 5 則，皆為 PM 代記）、`docs/meetings`、`docs/decisions`、`docs/history`、ROADMAP 124 個版本、AGENTS.md 30 個版本、`reports/` 186 份。
 - **HISTORY_INCOMPLETE 聲明：** Owner 與 ChatGPT Coordinator、Codex PM、Claude PM 之間的私人對話**無法存取**。所有「Owner 決策」皆來自 PM／Coordinator 在 GitHub 或文件中的轉述（部分含 verbatim 引述）。凡未見 verbatim 引述者，本報告標為 INFERENCE 或 HISTORY_INCOMPLETE，不補故事。**Owner 在 GitHub 與 TaskStore 之外的個人操作（例如是否親手在本機試用 TUI）同樣無法觀察；凡以「紀錄中沒有」推得的 Owner 行為結論，一律標 INFERENCE（缺席證據），不當作已確認事實。**
-- **版本：** v2（2026-10-28 自我校正：Owner 評估改以 FACT／INFERENCE／OPINION 逐項標示；涉及 Gate／Reviewer／Dispatch／Roadmap 的建議標 OWNER_DECISION_REQUIRED；數字型建議改為待驗證目標；新增 Post-Snapshot 註記）。
+- **版本：** v3（2026-10-28 Owner 身份重判：新增 5.1 決策責任重判、第 6 章改以 Sponsor 標準、新增 9A AI Management Failure Register、第 15／16／19 章改寫）；v2（2026-10-28 自我校正：Owner 評估改以 FACT／INFERENCE／OPINION 逐項標示；涉及 Gate／Reviewer／Dispatch／Roadmap 的建議標 OWNER_DECISION_REQUIRED；數字型建議改為待驗證目標；新增 Post-Snapshot 註記）。
 - 證據標記：**FACT**／**INFERENCE**／**COUNTERFACTUAL**／**OPINION**／**UNKNOWN**；建議標記 **OWNER_DECISION_REQUIRED**（不取代 AGENTS.md 或 Owner 決策）。
 
 ---
@@ -13,9 +13,9 @@
 
 這個專案從 2026-09-27 的「個人工具箱 + Agent skills」開始，31 天內經歷四次產品定位轉向：**公司 LLM 唯讀 CLI（09-28）→ 通用 LLM CLI 與 orchestration 基礎（09-28 Roadmap）→ llmtool 自我開發、以 Codex／Claude 為 Worker 並節省 token（10-08 PR #50）→ 使用者直接操作的通用 AI 協作工具（10-21 會議）**。每一次轉向都在前一輪基礎設施完成後發生，而不是在開始前釐清，於是累積了大量為舊定位服務的程式與文件（F1 Git 容器化、S1b fake-only、ai-loop、token benchmark 30 份報告、A7–A9）。
 
-最關鍵的管理模式（FACT）：Owner 以「一句話決策」驅動（「開放 worktree 吧」「opencode 先停用吧」「agy 納入 llmtool 吧」），由 AI（ChatGPT／Codex／Claude）展開成數千字的契約、gate 與 Roadmap。Owner 對**方向**的判斷多數正確且誠實（堅持真實證據、拒絕假 PASS、及時關掉 Web-first），但對**規模與順序**缺乏停損：授權 AI 建設治理框架的速度，遠超過驗證框架是否被使用的速度。
+最關鍵的管理模式（FACT）：Owner 以需求方的方式表達（「開放 worktree 吧」「opencode 先停用吧」「agy 納入 llmtool 吧」），由 AI（ChatGPT／Codex／Claude）展開成數千字的契約、gate 與 Roadmap，而**沒有任何紀錄顯示 AI 同時提出更簡單的替代方案、停損條件或影響分析**（第 5.1 節）。Owner 對**方向**的判斷多數正確且誠實（堅持真實證據、拒絕假 PASS、關掉 Web-first、三次先於 AI 發現偏離，見 6.1），Owner 在 10-09 就明確要求 AI 自行協調、不要把技術判斷丟回來；AI 在同一天診斷出「AI 自製 gate、把 Owner 拉進迴圈」的模式，之後仍重複三次。
 
-結論（OPINION）：整體方向正確；最嚴重的錯誤不是任何單一技術選擇，而是「**先建框架、後定 MVP、從未由使用者角度驗收**」這個反覆出現的模式，以及由額度與 CLI 可用性驅動的角色反覆切換。
+結論（OPINION）：整體方向正確；最嚴重的錯誤不是任何單一技術選擇，而是「**先建框架、後定 MVP、沒有人負責使用者驗收**」這個反覆出現的模式。以 Sponsor 標準衡量，這主要是 AI PM／CTO／QA 的專業責任（第 6、9A 章）；Owner 的責任限於目標先後未定、委託模式切換、未要求定期 demo（第 15 章）。
 
 ---
 
@@ -230,36 +230,79 @@
 
 - **QUESTIONABLE。** 每個 milestone 由 AI 自審自驗；之後 A7／A8／A9（feedback、benchmark、orchestrate）幾乎無使用紀錄（FACT：WP3 不用 `orchestrate`）。分類 3：需求未定義就實作。
 
+### 5.1 決策責任重判：提案者、核准者與失敗環節（v3，Owner 2026-10-28 要求）
+
+以下以「誰最初提需求／誰提方案／誰比較選項／誰向 Owner 解釋風險／Owner 是否取得足夠資訊／失敗環節／主要改進責任」重新檢視十二項關鍵決策。原則：**Owner 最終同意，不等於 Owner 應事先知道方案不合理；只有在 AI 明確警告後 Owner 仍堅持，責任才歸 Owner。**
+
+| 決策 | 最初需求 | 方案提出 | 選項比較 | 風險解釋 | Owner 資訊足夠？ | 失敗環節 | 主要改進責任 |
+|---|---|---|---|---|---|---|---|
+| F1 Git 容器化（DEC-009） | Owner「llmtool 自我開發」（PR #50 轉述，HISTORY_INCOMPLETE） | AI（Coordinator／Codex） | **無紀錄**（「Worker 自行 Git」選項到 10-17 #174 才出現，且是 Owner 追問後） | 無 | 否 | 方案選擇 | AI CTO／Architect |
+| Fake-only 架構（DEC-014） | AI（#120 S1a／S1b／B contract） | AI | 無 | 無；無停損 | 否 | 方案選擇＋無停損 | AI CTO／PM |
+| ai-loop（DEC-010） | AI（Coordinator） | AI | 無 | Claude 10-09 回顧已指出 E1–E6 | 否 | 建了第二套編排器 | AI Coordinator |
+| D6 Worktree（DEC-019） | Owner 一句話（verbatim） | AI（13 KB 規範、3 腳本） | 無 | 無 | 否 | 「做完刪除」未同步交付；容量無人管 | AI PM／Developer |
+| PM 自動接續（R1–R5） | Owner 10-09「你們 AI 自行協調好就好」（verbatim） | AI（文件先行，runtime 分片） | 無 | 無 | 有（Owner 已明示需求） | 文件≠runtime；PM 自己不用 | AI PM |
+| 多 Developer 路線（DEC-018／032） | Owner 提出 OpenCode／AGY／gw 想法；額度事件觸發切換 | AI 展開為政策與 adapter | 無影響分析 | 無「主鏈未通先不加」的提醒 | 否 | PM 未做影響分析；Owner 同日多項新路線 | AI PM（主）／Owner（次） |
+| Company LLM（DEC-008） | Owner「省高階模型費用」（轉述） | AI（benchmark 三輪、30 份報告） | 有（round 1–3 量測） | 有（+104%、−39.8%） | 有 | 投入規模；量測後仍作為路線 | AI PM／CTO（規模控制） |
+| EC2 Offload P0（DEC-029） | Owner（#417／#425，省 token、Mac 慢） | AI | 無（未提「先縮 Mac CI 範圍」） | 「省 token NOT VERIFIED」事後才報 | 部分 | 無量測指標即 P0 | AI PM／CTO（主）／Owner（P0 插隊，次） |
+| TUI 優先級（DEC-005／023） | Owner 10-21 定 CLI 優先 | AI 寫 A3.5 延後 TUI | 無 | 無 | — | 10-21 前無 AI 提出入口優先 | AI PM |
+| High Debug（DEC-030） | Owner 10-27 指定模型 | AI 展開為規則＋runtime | 無「閉環未通先不做」 | 無 | 否 | 順序 | AI PM／CTO |
+| 大量 Policy／Gate | AI（各階段） | AI | 無 | Owner 10-09、10-20、10-21 三次反映過多 | 有（Owner 反映） | AI 未執行瘦身（§6.5 未實施） | 所有 AI |
+| Merge Train（DEC-031） | AI PM | AI PM | 無 | 無 | — | 雙 CI、重複 PR | AI PM |
+
+**分類 7（Owner 在已知風險下仍錯誤決策）：審查未找到符合的案例。** 沒有一筆紀錄顯示 AI 明確警告後 Owner 仍堅持。
+
 ---
 
-## 6. Product Owner Assessment
+## 6. Product Owner Assessment（v3 重判）
 
-> 本章直接評估 Owner。所有判斷附證據；Owner 私下對話無法取得，凡 PM 代記皆標明。
+> **v3 前提修正：** v1／v2 的十項評分中，Requirements Clarity、Technical Decision Discipline、Priority Management、Scope Control、Acceptance Discipline 五項用了 PM／CTO 的專業標準評價一位 Sponsor。Owner 的身份是需求方、出資者與最終決策者；需求分析、方案比較、風險提醒、MVP、驗收標準、過度工程預警是 AI 團隊的專業責任。本章改以 Sponsor 標準評 Owner，並把原屬 AI 的責任改評 AI 角色。Owner 私下對話仍 HISTORY_INCOMPLETE；凡缺席證據一律標 INFERENCE。
 
-### 6.1 十項能力
+### 6.1 Owner 先於 AI 發現問題的紀錄（FACT）
 
-| 能力 | 評分（0–10） | 優點 | 缺點 | 案例 | 影響 | 改進 |
-|---|---|---|---|---|---|---|
-| Requirements Clarity | 5 | 10-21 會議六項需求清楚；verbatim 決策留言可追溯 | 前 24 天需求以一句話＋AI 擴寫；「省 token」「做完刪除」無驗收標準 | DEC-011、DEC-019、DEC-029 | AI 填補規格 → 過度工程 | 需求範本（Report C） |
-| Product Vision | 7 | 方向一致：本機、唯讀安全、他人可裝、llmtool 無 AI | 定位四次轉向才定稿 | 第 2 章 | 舊定位程式堆積 | 一頁 vision 固定 |
-| Technical Decision Discipline | 4 | 要求真實證據、拒絕假 PASS、問「放別人電腦會怎樣」 | 接受 AI 的 fake-first／容器化／五套授權而未問替代方案 | DEC-009、014 | 封存一週工作 | 「三個選項」規則 |
-| Priority Management | 4 | 能止損（關 Web-first、封存、瘦身） | 額度驅動反覆；EC2 P0 插隊；High Debug 先於閉環 | DEC-018、028、029、030 | 主線（TUI／E2E）延到第 28 天 | 單一「現在只做一件事」 |
-| Scope Control | 3 | A13 延後、Telegram 延後 | 4 條 Developer 路線、AGY 納入、CliNest、web search、Web UI、monitor 擴張 | DEC-032、034 | 第 31 天 6 個 OPEN 核心 PR | 凍結規則 |
-| Risk Management | 6 | 安全邊界堅持、no paid fallback、D8a 憑證規範 | 磁碟／CI 容量風險無人管；流程風險未視為風險 | AUDIT-003、004 | 13 GB 剩餘 | 每週資源檢查 |
-| Cost Awareness | 6 | 早期量測 token；停 GitHub-hosted；EC2 | 只看 provider token，不看 PM／Reviewer／CI 分鐘／PR 數；省 token 未驗證即 P0 | DEC-008、029 | 隱形成本未量測 | 成本看板 |
-| AI Team Delegation | 5 | D8 取消 per-call 核准；Owner 退出 relay；PM 可自派 | 仍有 73 則 #289 代記；角色切換靠 Owner 一句話；驗收者是 PM 自己 | #289、#120 | Owner 成為決策快遞 | 週決策批次 |
-| Acceptance Discipline | 2（INFERENCE，以缺席證據為主） | 堅持「MERGED ≠ VERIFIED」文字（FACT） | **審查未找到任何 Owner 親手走完「提需求 → 看到結果」流程的紀錄**（Issues、PR、TaskStore、會議紀錄皆無；Owner 私下操作 HISTORY_INCOMPLETE）。可確認的 FACT 只有：流程文件中沒有「使用者操作」這個驗收 gate；snapshot 的 TUI 本身也沒有可供驗收的閉環功能。「以 PR／CI 判斷進度」為 INFERENCE（可見的進度來源皆以 PR／CI／MERGED 為單位） | 本機 store 推導 COMPLETED 1/279（受 AUDIT-014 影響，見 Report A 2.4）；TUI Task mode 到第 31 天才合併（#513） | INFERENCE：若 Owner 未親手操作，就無法在早期察覺入口缺失 | 每週一次 Owner E2E（建議） |
-| Long-Term Product Thinking | 6 | 開源、provider-neutral、他人可裝 | 在主鏈未通時啟動 | DEC-032 | 分散 | 順序鎖定 |
+| 日期 | Owner 原話或行動 | AI 當時的反應 |
+|---|---|---|
+| 10-09 | 「我不要又再給我看技術性判斷的approve, 你們AI自行協調好就好」「明明就是你們ai自己寫出來的東西,難道還要人來維護」「停下來要人審查什麼我也不懂, 我也不知道風險」（`reports/ai-loop/owner-out-of-loop-optimization-20261009.md`） | Claude 寫回顧報告，Coordinator 採 P1–P6（#77）；同一模式在 fake-only、D4 per-call 核准、High Debug 重複 |
+| 10-17 | 追問「為什麼接受的新架構沒有實質改變交付計畫」（#172 留言） | Coordinator 才修正 #174 關鍵路徑，提出「Worker 自行 Git、F2 非前提」 |
+| 10-20 | 問「放到別人電腦會怎樣」 | AI（PR #237）建議「先維持個人工具」；Owner 10-21 否決，堅持可供他人安裝 |
+| 10-20 | 關閉 AI PM 寫的 Web-first Roadmap（PR #249） | 10-21 改為 CLI 優先 |
+| 10-20 | D8：「AI-written follow-up gates turned that into repeated per-call Owner questions and stalled work for hours」（AGENTS.md 原文） | Owner 移除 per-call 核准 |
+| 10-21 | 會議 §6.5：規則散在不同文件擋住開發 | PM 同意，標「整合提案，尚未實施」；至 snapshot 未實施 |
+| 10-28 | 「ui agent改為跟其他worker一樣指派,因為要推tui進度了」 | 第 28 天 TUI 才成為優先 |
 
-> 評分為 OPINION，證據等級已逐列標示；「Acceptance Discipline」一列的低分主要來自**沒有找到驗收紀錄**，不是來自觀察到 Owner 拒絕驗收。
+### 6.2 Sponsor 標準下的 Owner 評分（OPINION，附證據）
 
-### 6.2 A–E 問題直接回答（摘要）
+| 能力（Sponsor 層級） | 評分 | 證據 | 說明 |
+|---|---|---|---|
+| Product Vision 與方向判斷 | 7 | 6.1 表；10-21 產品定義 | 方向一致且三次先於 AI 發現偏離；定位四次轉向中有兩次是 AI 提案（PR #50、#249） |
+| 目標一致性（「省錢」vs「可用」的先後） | 5 | PR #50、#290、#417／#425 | 兩個目標並列未定先後，驅動 gw 三輪、EC2 P0；AI PM 應追問，但 Owner 可更早定序（Owner 責任之一） |
+| 委託方式的一致性 | 5 | 10-09「原則上以需求方我一定會approve」與 10-19～10-27 的逐條暫停／恢復指令 | 在全權委託與逐條指令間切換，PM 難以建立穩定自主規則（Owner 責任之二） |
+| 要求可用交付物的檢查點 | 4 | 10-28 才要求「推 TUI 進度」 | Sponsor 通常會要求定期看能用的東西；但 PM 未主動安排 demo 是更主要的失職（Owner 責任之三，次要） |
+| 在資訊不足下的決策品質 | 6 | 5.1 表：多數決策無選項比較、無風險說明 | 在 AI 未提供替代方案的情況下，Owner 的核准屬合理信任專業建議 |
+| 風險與安全底線 | 7 | no paid fallback、D8a、runner 隔離、拒絕假 PASS | 保留 |
+| 成本意識 | 6 | 早期 benchmark、self-hosted 止費 | 保留；成本看板缺失是 AI 責任 |
+| 對 AI 團隊的授權 | 6 | D8、#77、10-28 決策紀錄規則 | 授權充分；問題在 AI 未善用 |
+| 使用者驗收 | NOT_RATED | 至 snapshot 沒有可驗收的交付物 | 原 v1「Acceptance Discipline 2」撤銷；改評 AI QA／Reviewer 的「可用性驗收」為 1（從未驗過使用者能否使用） |
+| 長期產品思考 | 6 | 開源、provider-neutral、他人可裝 | 保留 |
 
-**A 需求表達：** 通常是「想要什麼」而非「情境＋驗收」；10-21 之後明顯改善。前後矛盾的例子：10-19「因 token 消耗暫停 Codex」與 10-20「恢復 Codex」；10-20 Web-first 與 10-21 CLI-first。容易誤解的需求：「省 token」（gw、EC2 兩次被解讀為 P0 工程）。過度依賴 AI 補規格：是（S1b／B contract 數千字無 Owner 原文）。
-**B 優先順序：** 經常改變；多數由額度／CLI 可用性／短期問題驅動；主線 TUI 因 F1、#120、EC2、High Debug 延後；過早開發非 MVP：A7–A9、F1、fake-only、High Debug、AGY route、gw 壓測。
-**C 決策方法：** 證據意識強，但替代方案評估弱；過度相信 AI 的「安全契約」提案；低估複雜度（D6「做完刪除」）；缺停損條件（fake-only 一週、benchmark 30 份）。
-**D AI 管理：** PM 職責文件化但分散於 5 份；PM 自主權在 10-20 D8 後充足；高低階模型配置：Reviewer 用高階審 2 行文件、gw 做真實題失敗後再派 Codex；缺客觀 Developer 品質指標（Report A 11.4 首次量化）。
-**E 完整性：** 無 MVP 定義到 10-21（FACT：10-21 前無任何文件定義使用者行為）；無使用者驗收流程（FACT：文件中無此流程；Owner 私下是否操作 HISTORY_INCOMPLETE）；「以 PR 數／CI 判斷進度」是 INFERENCE：Owner 可見的進度來源（PM 週報、Roadmap 表、#466 狀態報告）皆以 PR／CI／MERGED 為單位，審查未找到以使用者操作結果為單位的進度紀錄；把 runtime 切片 MERGED 當進度（FACT：Roadmap R1–R5 標 MERGED）。
+### 6.3 原屬 AI 的責任改評（OPINION）
+
+| AI 角色責任 | 評分 | 證據 |
+|---|---|---|
+| AI PM 需求釐清（情境／驗收／不做） | 3 | 10-21 前無任何 User Story／驗收標準；Owner 一句話直接展開為實作（D6、AGY） |
+| AI CTO 方案比較與風險說明 | 3 | 5.1 表：12 項關鍵決策中 11 項無選項比較紀錄 |
+| AI PM 優先序與影響分析 | 3 | 新想法直接排程（10-28 AGY 當天排 Slice）；TUI 延後；EC2 P0 無指標 |
+| AI CTO 過度工程預警與停損 | 2 | 無任何提案附停損；10-09 已診斷的模式重複三次 |
+| AI PM 容量與成本管理 | 2 | PR #322 容量警告被關閉不處理；四天後 registry 125→489 |
+| AI QA／Reviewer 可用性驗收 | 1 | 只審 diff；「MERGED ≠ VERIFIED」無人負責 VERIFIED |
+| AI 主動提醒（有提醒且被採納） | 5 | PR #69（採納）、#244（部分）、#313（部分）、#315（修復） |
+
+### 6.4 A–E 問題的重新回答
+
+**A 需求表達：** Owner 的需求是正常的需求方表達（想法、情境、不滿）。缺少情境與驗收標準是 AI PM 應補足而未補足的工作（F1、F8、F13）。前後矛盾的案例（10-19 暫停 Codex、10-20 恢復）是 AI 把技術狀態呈現為 Owner 決策所致。
+**B 優先順序：** 優先順序反覆主要由額度事件與 AI 的呈現方式驅動；Owner 真正主動的優先變更是 EC2 P0（10-27）與同日多項新路線（10-28），這兩項 Owner 負次要責任，PM 未做影響分析負主要責任。
+**C 決策方法：** Owner 在無替代方案與無風險說明的情況下核准，屬合理信任；「過度相信 AI」的另一面是 AI 未提供可供不信任的資訊。
+**D AI 管理：** Owner 的授權充分（D8、#77）；問題是 AI 未把授權轉成自主流程，反而把每句話變成 policy PR。Owner 的責任是委託方式切換。
+**E 完整性：** MVP 定義晚是 AI PM 未提出；沒有驗收流程是 AI QA 未建立；「以 PR／CI 判斷」是 AI 報告給 Owner 的單位。Owner 可改進的是要求定期 demo。
 
 ---
 
@@ -302,19 +345,19 @@
 
 | # | 錯誤 | 時間 | 原始需求 | 決策 | 錯在哪 | 責任 | 為何沒發現 | 影響 | 重複？ | 避免 | Owner 學到 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| M1 | MVP 定義太晚 | 09-28～10-21 | 「編排基礎」 | A0–A12 全景 | 無使用者驗收標準 | Owner＋AI | 每個 milestone CI 綠 | 舊定位程式堆積 | 是（C 路線、#120） | 先一頁 MVP | 「DONE」要我親手驗 |
-| M2 | 內部框架先於入口 | 10-05～10-16 | 安全自我開發 | F1、fake-only | 建了之後封存 | AI 提案／Owner 未停損 | 看起來「安全」 | 一週工作封存 | 是（High Debug、AGY route） | PoC 停損 | 「安全契約」也要期限 |
+| M1 | MVP 定義太晚 | 09-28～10-21 | 「編排基礎」 | A0–A12 全景 | 無使用者驗收標準 | AI PM／Coordinator（Owner 未要求 demo 為次要） | 每個 milestone CI 綠 | 舊定位程式堆積 | 是（C 路線、#120） | 先一頁 MVP | 「DONE」要我親手驗 |
+| M2 | 內部框架先於入口 | 10-05～10-16 | 安全自我開發 | F1、fake-only | 建了之後封存 | AI CTO／Coordinator（提案、無替代方案、無停損） | 看起來「安全」 | 一週工作封存 | 是（High Debug、AGY route） | PoC 停損 | 「安全契約」也要期限 |
 | M3 | 缺使用者實測（INFERENCE：紀錄中無 Owner 操作驗收；私下操作 HISTORY_INCOMPLETE） | 全程 | — | — | 文件中的驗收者是 PM／Reviewer，沒有「使用者操作」這個 gate（FACT） | 流程設計（Owner 與 PM 共同） | 可見的進度單位是 PR／CI | 入口缺失到第 28 天才被當成優先事項 | 是 | 每週 E2E | 自己用產品 |
 | M4 | 重要入口落後 | 10-01→10-27 | TUI | chat 記憶體版 | TUI Task mode 第 31 天仍 OPEN | PM 排程＋Owner 優先 | 其他事更「急」 | 產品不可用 | 是 | 入口第一 | 入口優先於優化 |
 | M5 | 過早複雜框架 | 10-06 起 | 安全 | 五套授權、三套上限 | 無單一真實來源 | AI | 每個都有測試 | 維護成本 | 是 | 單一模組 | 問「哪個是唯一的」 |
-| M6 | 同一功能多套實作 | 10-21 起 | Developer 路線 | Codex／OpenCode／gw／AGY | 4 條都半成 | Owner（開新路線）＋PM | 每條都「快好了」 | 分散 | 是 | 一條通再加 | 一次一條 |
+| M6 | 同一功能多套實作 | 10-21 起 | Developer 路線 | Codex／OpenCode／gw／AGY | 4 條都半成 | AI PM（未做影響分析）；Owner 提出新路線為次要 | 每條都「快好了」 | 分散 | 是 | 一條通再加 | 一次一條 |
 | M7 | PR 碎分與重複 | 10-26～27 | 快速合併 | merge train | 雙 CI、83 CLOSED | PM | CI 排隊 | Mac CI 更擠 | 是 | 分級流程 | 流程是成本 |
 | M8 | 只有文件沒 runtime | 10-11～10-22 | 接續 | PM Continuation 文件 | R1–R5 手動 | PM | 文件完成感 | Owner 仍轉述 | 是 | 文件附 runtime DoD | 文件≠能力 |
-| M9 | 決策資訊不足 | 10-19、10-26 | 額度 | 角色切換 | 無規則 | Owner | 當下有效 | PR／文件風暴 | 是 | 自動技術狀態 | 技術狀態不是決策 |
-| M10 | 無停損 | 10-05 benchmark、10-12 fake | 省 token／安全 | 持續投入 | 30 份報告、20 PR | Owner | 進度感 | 浪費 | 是 | 期限＋指標 | 兩週無真實證據即停 |
+| M9 | 決策資訊不足 | 10-19、10-26 | 額度 | 角色切換 | 無規則 | AI PM（把技術狀態呈現為 Owner 決策） | 當下有效 | PR／文件風暴 | 是 | 自動技術狀態 | 技術狀態不是決策 |
+| M10 | 無停損 | 10-05 benchmark、10-12 fake | 省 token／安全 | 持續投入 | 30 份報告、20 PR | AI CTO／PM（未設停損） | 進度感 | 浪費 | 是 | 期限＋指標 | 兩週無真實證據即停 |
 | M11 | 高階模型做低價值工作 | 10-23 起 | 審查 | Claude 審 docs PR | 每個 PR 完整審 | 流程 | 規則一刀切 | token | 是 | 分級 | 審查也分級 |
 | M12 | 重複測試 | 10-25 起 | CI | Mac subset + EC2 full + train | Mac 退化 FULL | PM／CI 設計 | 「安全」 | 31 分 | 是 | Mac 只跑 Mac | 量測後再加 gate |
-| M13 | 未量測 ROI | 全程 | 省 token | 多路線 | 只有 Codex 用量 | Owner | 無看板 | 不知道省了沒 | 是 | 成本看板 | 沒量測就沒省 |
+| M13 | 未量測 ROI | 全程 | 省 token | 多路線 | 只有 Codex 用量 | AI PM／CTO | 無看板 | 不知道省了沒 | 是 | 成本看板 | 沒量測就沒省 |
 | M14 | 資源容量無人管 | 10-19 起 | 並行 | D6 開放 | 374 worktree、13 GB | PM／llmtool | 看不見 | 風險 | 是 | 自動 retire＋告警 | 容量是功能 |
 
 ---
@@ -327,6 +370,36 @@
 4. **「文件先行、runtime 後補、兩者脫節」**：PM Continuation、High Debug、D6 retire、Roadmap DONE 標記。
 5. **「以 PR／CI 綠為進度」**：437 PR、COMPLETED 1。
 6. **「修工具的工具」**：monitor 4.7k 行、dispatch-check、bg dispatch receipt、marker 詞彙表。
+
+## 9A. AI Management Failure Register（v3 新增）
+
+分類：1 AI 技術能力不足；2 AI 缺少 Context；3 AI 未被授權；4 AI 提出錯誤建議；5 AI 未主動提醒；6 AI PM 管理失職；7 Owner 在已知風險下仍錯誤決策。
+
+| # | 日期 | 發生了什麼 | 負責角色 | 原本應做 | 實際做了 | 有提醒 Owner？ | Owner 資訊足夠？ | 後果 | 分類 | 未來防止者 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| F1 | 09-28～10-01 | 四天內 A1–A10 標 DONE，無使用者驗收 | AI PM／Coordinator | 定義 MVP 與驗收 | 自驗自標 | 否 | 否 | DONE 失去意義 | 6 | AI PM |
+| F2 | 10-06～09 | 提案並建造 F1 Git 容器化 | Coordinator／Architect | 先問「誰做 Git」，提簡單選項 | 直接建 | 未提替代方案 | 否 | 封存 | 4、5 | AI CTO |
+| F3 | 10-09 | 診斷出「AI 製造 gate、Owner 被拉進迴圈」（Claude 回顧 E1–E6） | Claude／Coordinator | 改流程 | 寫報告、P1–P6 文件 | 有 | 有 | 模式重複三次 | 6 | AI PM／CTO |
+| F4 | 10-12～16 | 20 個 fake-only PR，無真實呼叫 | Coordinator／Codex | PoC 停損 | 持續建 | 否 | 否 | 10-20 封存 | 4、6 | AI CTO |
+| F5 | 10-19～27 | 每次額度事件都變成 Owner 決策與 policy PR | AI PM | 定義為技術狀態自動處理 | 代記、改 JSON、改文件 | 否（反而問 Owner） | 否 | 8 次反覆 | 5、6 | AI PM |
+| F6 | 10-19 | 「做完刪除」只做了一半 | AI PM／Developer | 自動 retire 與開放同步交付 | 規範 13 KB，工具 10-26 | 否 | — | 489 registry | 6 | AI PM |
+| F7 | 10-24 | PR #322 容量警告（125 筆、3.2 GB、2.4 GB tmp、文件 token 成本）被關閉不處理 | AI PM | 執行清理或排程 | 因算術錯誤關閉 | 有（報告） | 有 | 15 GB、13 GB 剩餘 | 6 | AI PM |
+| F8 | 10-20 前 | 無人提出 TUI MVP 優先 | AI PM／CTO | 入口第一 | TUI 延後（A3.5） | 否 | 否 | 入口到第 28 天 | 5、6 | AI PM |
+| F9 | 10-21～27 | WP3 runtime 一片片建，PM 自己不用 | AI PM | 建驅動器、用自己的工具 | 手動串接 | 否 | 否 | 本機 0 使用 | 1、6 | AI PM／Engineering |
+| F10 | 10-26～27 | gw、AGY、EC2 P0、High Debug 同時推進 | AI PM／CTO | 影響分析、建議延後 | 「安排進 Roadmap」 | 否 | 部分 | 主鏈分散 | 5 | AI PM |
+| F11 | 全程 | 沒有 Reviewer 驗「可用性」 | AI QA／Reviewer | 使用者流程驗收 | 只審 diff | 否 | — | 不知道產品不可用 | 2、6 | AI QA |
+| F12 | 全程 | 文件當記憶體用，長到 598 KB | 所有 AI | 瘦身並執行 §6.5 | 持續累加 | Owner 三次反映 | — | 每 session 約 15 萬 tokens | 1、6 | AI CTO |
+| F13 | 10-28 | 「agy 納入」當天排 Slice A/B，未分析延誤 | AI PM | 影響分析再排 | 直接派 | 否 | 否 | 第四條路線 | 5 | AI PM |
+| F14 | 全程 | Codex 31% 無可用產出、gw 真實題 4/5→0/1，未早期量化告知 | AI Developer／PM | 量化能力限制並報告 | 持續派工 | 部分（#290、#466） | 部分 | 重複派工成本 | 1、5 | AI PM |
+
+**分類 7：無符合案例。** 審查未找到 AI 明確警告後 Owner 仍堅持的紀錄。
+
+### 9A.1 AI 能力限制（坦白說明）
+
+- **沒有跨 session 的持續記憶與情境感。** AI 用規則文件當記憶，這是文件膨脹到 598 KB 的根本原因；解法是確定性驅動器保存狀態，不是更多規則。
+- **預設傾向是順從與擴寫。** Owner 一句話會被展開成數千字；需要硬性輸出格式（三選項＋最小版本＋停損）抵消。
+- **無人值守連續運作目前不可靠。** PM session 中斷、額度、CLI 版本變動都會中斷流程；需要每週一次人類檢查點（看 demo），但那不是當 PM。
+- **AI Reviewer 只能審給它的輸入。** 沒有「使用者操作」這個輸入時，它無法驗可用性；需要把 E2E 操作紀錄列為審查輸入。
 
 ---
 
@@ -411,56 +484,25 @@
 
 ---
 
-## 15. Owner Weaknesses（附證據）
+## 15. Owner Weaknesses（v3 重判：以 Sponsor 標準）
 
-1. **沒有建立使用者操作驗收的環節**（FACT：流程文件中無此 gate；Owner 是否私下操作為 HISTORY_INCOMPLETE，本報告不主張「從未」）。可觀察的結果是入口缺失到第 28 天才成為優先事項、TUI Task mode 第 31 天才合併（#513）。
-2. **讓 AI 把一句話放大成框架而不要求最小版本。** D6「做完刪除」→ 13 KB 規範；「安全交接」→ 20 個 fake-only PR。（FACT）
-3. **額度驅動的反覆決策。** 10-19～10-27 至少 8 次角色切換。（FACT，PM 代記）
-4. **開新路線而非修舊路線。** gw → OpenCode → AGY → provider-neutral，主鏈未通。（FACT）
-5. **可見的進度單位是 PR 與 CI，對流程成本不敏感。**（INFERENCE：437 PR、83 CLOSED、merge train 皆未被任何紀錄視為問題）
+1. **「省錢」與「可用」兩個目標並列未定先後**（FACT：PR #50、#290、#417 皆以省 token 為目標）。這驅動了 gw 三輪、EC2 P0、多路線；AI PM 應追問，但 Owner 可以更早定序。
+2. **全權委託與逐條指令之間切換**（FACT：10-09「原則上以需求方我一定會approve」；10-19～10-27 多次具體暫停／恢復指令）。PM 因此無法建立穩定的自主規則。
+3. **沒有要求定期的「可用交付物」檢查點**（INFERENCE：10-28 才明確要求推 TUI 進度）。這是 Sponsor 可做而未做的，但 PM 未主動安排 demo 是更主要的失職。
+
+**撤銷的 v1 批評：** 「需求缺驗收標準」「讓 AI 把一句話放大成框架」「沒有停損」「沒親手驗收」「以 PR 數判斷進度」。這些是 AI PM／CTO／QA 的專業責任，已移至 6.3 與 9A。
 
 ---
 
-## 16. Five Changes the Product Owner Should Make
+## 16. Five Changes the Product Owner Should Make（v3：Owner 的最小集合）
 
-### 1. 每週親自用產品做一件真實的事，並以此定義「完成」
-- 目前（INFERENCE）：可見的進度來源是 PM 報告、PR、CI；沒有「Owner 操作結果」這個驗收單位。
-- 問題：產品入口缺失卻看似持續前進。
-- 案例：snapshot 的 `/task submit` 只做 intake（AUDIT-001）；本機 store 推導 COMPLETED 1/279（範圍限制見 Report A 2.4）。
-- 原因：流程中的驗收者是 PM／Reviewer，與開發者同為 AI。
-- 新做法：每週一個「Owner 任務」：從 TUI 提交到 merge；失敗即為當週 P0。
-- 決策時：任何功能「DONE」前問「我親手跑過嗎？」
-- 判準（待驗證目標）：連續數週 Owner 任務多數成功；具體比例由前兩週實測後設定。
+原則：Owner 只做 Sponsor 的事，其餘由 AI 承擔（分工見 [Report C](product-owner-playbook-ai-development-20261028.md)）。
 
-### 2. 一次只開一條路線；新路線必須等主鏈 E2E 通過
-- 目前：Codex／OpenCode／gw／AGY／Claude dev 五條半成。
-- 問題：PM、Reviewer、CI 容量被分散。
-- 案例：10-28 AGY 納入 + provider-neutral + web search + UI Agent 同日。
-- 新做法（OWNER_DECISION_REQUIRED：Roadmap 與 dispatch 切換屬 Owner）：Roadmap 只允許一個「NOW」；其餘「FROZEN until E2E」。
-- 決策時：「這條路線解決的問題，主鏈通了之後還存在嗎？」
-- 判準（待驗證目標）：OPEN 核心 PR 數與「服務 NOW 的 merged PR 比例」逐週改善；具體門檻由實測基準後設定（v1 的 ≤ 3／≥ 60% 為審查者估計）。
-
-### 3. 把額度／CLI 可用性從決策降為自動狀態
-- 目前：每次 5 小時上限 → Owner 一句話 → policy PR。
-- 問題：PR／文件風暴、角色反覆。
-- 案例：10-26 同日暫停／全停／恢復。
-- 新做法（OWNER_DECISION_REQUIRED：改變 `worker-dispatch.json` 的使用方式與 Owner 決策紀錄規則）：monitor 判定技術不可用 → PM 在已 ALLOWED 的路線內改派；Owner 只在每週設定「允許的路線集合」。pm-continuation.md 10-27 已有「quota 是技術觀察，不是 dispatch authority」的規則，此建議是把它落實到不再產生 policy PR。
-- 判準（待驗證目標）：因額度而修改 `worker-dispatch.json` 的次數趨近於零。
-
-### 4. 對 AI 的「契約／安全框架」提案要求最小版本與期限
-- 目前：接受完整契約（S1b／B、High Debug 報告格式、D6 13 KB）。
-- 問題：建了不用、封存。
-- 案例：DEC-009、DEC-014、DEC-030。
-- 新做法：任何治理提案必須附「短期 PoC 版本 + 真實呼叫證據 + 若無證據即停」。
-- 決策時：「最小能證明可行的版本是什麼？什麼時候可以看到真實執行？」
-- 判準（待驗證目標）：上線後持續 0 使用的 runtime 功能應被列為檢討候選；「兩週」是審查者建議的觀察窗，實際窗口由 PM 依任務週期設定；是否移除為 OWNER_DECISION_REQUIRED。
-
-### 5. 把成本看板從「provider token」擴到「PM／Reviewer／CI／Owner 時間」
-- 目前：只有 Codex usage；省 token 宣稱無量測。
-- 問題：EC2 P0、gw、merge train 的 ROI 不可知。
-- 案例：#466「NOT VERIFIED」；Mac CI 31 分。
-- 新做法：每 merged PR 記 Codex tokens、Reviewer 輪數、Mac／EC2 分鐘、PM 手動命令數、Owner 決策數；每週看趨勢。
-- 判準：每個優化決策附前後數據。
+1. **一次只宣告一個 NOW。** 目前：多個目標並列（省錢、可用、開源、多路線）。新做法：一句話「現在只做一條鏈 E2E」；其餘由 AI PM 標 FROZEN 並在你提新想法時回影響分析。判準：週報的第一行是 NOW 的可用進度。（Roadmap 順序為 OWNER_DECISION_REQUIRED，本項正是該決策）
+2. **設預算上限，而不是逐次決定額度。** 目前：每次額度事件都要你說話。新做法：每月 token／CI／雲預算一個數字；額度用盡由 AI 在 ALLOWED 路線內改派，超過預算才通知你。
+3. **每週看一次 demo，說「符合／不符合」。** 目前：進度以 PR 與 CI 呈現。新做法：AI PM 每週交一個可操作的東西；你只需操作並回答符合與否；做不到 demo 是 PM 的失敗。
+4. **只接受決策單格式。** 目前：技術細節直接丟給你。新做法：AI 給你的任何決策請求必須用 Report C 的決策單（要決定什麼／為什麼需要你／推薦／替代／風險／不決定的後果）；不符格式直接退回。
+5. **明說委託模式。** 目前：全權委託與逐條指令切換。新做法：對每類事情明說「你們決定」或「問我」；AI PM 把它寫成分工表（Report C A–E），之後不再逐條問。
 
 ---
 
@@ -500,14 +542,15 @@ Snapshot 之後 merge train 11 合併了 TUI Task mode／Task list／事件時�
 
 ---
 
-## 19. Final Conclusions
+## 19. Final Conclusions（v3）
 
 - **方向正確，順序錯誤。** 原則與零件品質高；入口與組裝最晚。
-- **最嚴重的五個錯誤：** M1 MVP 太晚（FACT）、M2／M5 框架先於入口並封存（FACT）、M6 多路線分散（FACT）、M9 額度驅動反覆（FACT）、M3 流程中沒有使用者驗收環節（FACT 為流程缺口；Owner 個人行為為 INFERENCE）。
-- **責任分佈（OPINION，依可見紀錄）：** 技術問題（God module、契約過嚴、無終態）屬 AI 實作；流程問題（merge train、每輪 D6、docs 全 gate）屬 PM 在既有規則下的選擇與規則本身；順序與範圍（新路線、P0 override、驗收環節缺失）與 Owner 的決策方式相關，但多數決策是在 AI 提案基礎上做出的，責任為共同。
-- **本章所有「應停止／應優先」為建議；涉及 Gate、Reviewer、Dispatch、Roadmap 者為 OWNER_DECISION_REQUIRED。**
-- **過度工程：** 是，集中在授權／治理／文件；核心執行層不過度。
+- **最嚴重的五個錯誤：** M1 MVP 太晚（AI PM）、M2／M5 框架先於入口並封存（AI CTO）、M6 多路線分散（AI PM 未做影響分析；Owner 同日多項新路線為次要）、M9 額度驅動反覆（AI PM 把技術狀態呈現為 Owner 決策）、M3 流程中沒有使用者驗收環節（AI QA／PM）。
+- **責任分佈（OPINION，依可見紀錄）：** 技術問題（God module、契約過嚴、無終態、容量）屬 AI 實作與 AI PM；方案選擇問題（F1、fake-only、五套授權、多路線）屬 AI CTO／Coordinator，且無紀錄顯示曾向 Owner 提出替代方案或停損；流程問題（merge train、每輪 D6、docs 全 gate、policy PR）屬 AI PM。Owner 的責任限於三項：目標先後未定、委託模式切換、未要求定期 demo。**沒有找到 Owner 在明確警告後仍堅持錯誤方案的案例。**
+- **過度工程：** 是，集中在治理層；由 AI 提案、AI 建造、AI 未叫停。
 - **絕對不會再做：** F1 容器化、fake-only 契約、ai-loop 第二編排器、30 份 benchmark 報告、五套授權。
 - **最有價值的成果：** TaskStore＋D6＋Codex direct＋EC2 receipt＋CI 隔離＋nlf。
-- **最該停止：** 開新路線、merge train、每輪新 Reviewer D6、docs PR 正式審、額度 policy PR。
-- **最該優先：** 一條鏈 E2E，由 Owner 親手驗收。
+- **最該停止／最該優先：** 見 Report A 第 22 章與 Brief；涉及 Gate、Reviewer、Dispatch、Roadmap 者為 OWNER_DECISION_REQUIRED。
+
+---
+
