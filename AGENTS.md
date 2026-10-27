@@ -14,7 +14,7 @@
 
 ## Team and execution-resource inventory
 
-The [AI team roster](docs/architecture/ai-team-roster.md) describes human/AI roles and independent reviewers; [execution resources](tools/llmtool/execution-resources.json) inventories two execution hosts and four CI runners without granting any dispatch or SSH authority. `worker-dispatch.json` remains **AI Worker authorization only**; do not add hosts/runners to its strict v1 `workers` map. Runner technical health comes from live runner/CI evidence, never from this static inventory. See [dispatch-token and GitHub identity guidance](docs/governance/dispatch-token-and-identity-20261027.md) for the no-LLM policy-gate design and current one-login review workflow.
+The [AI team roster](docs/architecture/ai-team-roster.md) describes human/AI roles and independent reviewers; [execution resources](tools/llmtool/execution-resources.json) provides the informational host and runner inventory without granting any dispatch or SSH authority. `worker-dispatch.json` remains **AI Worker authorization only**; do not add hosts/runners to its strict v1 `workers` map. Runner technical health comes from live runner/CI evidence, never from this static inventory. See [dispatch-token and GitHub identity guidance](docs/governance/dispatch-token-and-identity-20261027.md) for the no-LLM policy-gate design and current one-login review workflow.
 
 ## Repository scope and changes
 

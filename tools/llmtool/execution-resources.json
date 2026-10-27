@@ -49,6 +49,12 @@
           "runner_label": "local-ec2-linux-ci",
           "service_account": "ghrunner2",
           "role": "Linux CI"
+        },
+        {
+          "name": "ec2-self-runner-3",
+          "runner_label": "local-ec2-linux-ci-pending until #446 merges",
+          "service_account": "ghrunner3",
+          "role": "Linux CI shard"
         }
       ]
     }
