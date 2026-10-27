@@ -80,7 +80,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(worker_dispatch.evaluate('claude-developer').reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
         self.assertEqual(worker_dispatch.evaluate('opencode-developer').reason_code,
-                         'OWNER_POLICY_ALLOWED')
+                         'OWNER_PAUSED')
         self.assertFalse(worker_dispatch.evaluate('unknown-worker').allowed)
 
     def test_owner_assignment_only_stays_blocked_without_explicit_policy_row(self):
@@ -281,11 +281,11 @@ class WorkerDispatchTests(unittest.TestCase):
             os.chdir(previous)
 
     def test_policy_is_reloaded_after_each_change(self):
-        self.assertTrue(worker_dispatch.evaluate('opencode-developer').allowed)
-        self._set_state('opencode-developer', 'PAUSED')
         self.assertFalse(worker_dispatch.evaluate('opencode-developer').allowed)
         self._set_state('opencode-developer', 'ALLOWED')
         self.assertTrue(worker_dispatch.evaluate('opencode-developer').allowed)
+        self._set_state('opencode-developer', 'PAUSED')
+        self.assertFalse(worker_dispatch.evaluate('opencode-developer').allowed)
 
     def test_missing_malformed_duplicate_and_unknown_policy_fail_closed(self):
         self.policy_path.unlink()

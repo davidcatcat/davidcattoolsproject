@@ -26,11 +26,11 @@
       ]
     },
     "opencode-developer": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-24",
-      "reason": "Owner restored OpenCode direct Developer candidate dispatch; verify free model, auth, D6 and task gates before dispatch",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6385528952"
+      "decided_at": "2026-10-27",
+      "reason": "Owner paused OpenCode: free model quota exhausted (provider.free-limit) and llmtool route unreliable; work reassigned to Codex until the Owner re-enables",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6441947023"
     },
     "agy": {
       "dispatch": "OWNER_ASSIGNMENT_ONLY",
