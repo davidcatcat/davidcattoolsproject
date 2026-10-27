@@ -2812,7 +2812,8 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 executor_session_ref=initial.get('executor_session_ref'),
                 executor_native_session_id=reviewer_independence_session,
                 reviewer_task_id=args.reviewer_task,
-                common_dir=git_evidence['common_dir'])
+                common_dir=git_evidence['common_dir'],
+                changed_paths=git_evidence.get('changed_paths'))
             if (developer.get('provider_profile') == 'codex' and
                     type(direct_execution) is dict and
                     direct_execution.get('status') == 'DONE' and
