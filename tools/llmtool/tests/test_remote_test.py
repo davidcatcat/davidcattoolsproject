@@ -158,6 +158,15 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('<REMOTE_WORKDIR>/test.py', excerpt)
         self.assertNotIn('/tmp/llmtool-remote-test.Abc123', excerpt)
         self.assertNotIn(cred_value, excerpt)
+        url_value = ''.join(('https', '://', 'user', ':', 'value', '@',
+                             'example.test/path'))
+        jwt_value = '.'.join(('a' * 12, 'b' * 12, 'c' * 12))
+        screened_output = ('FAIL: test_expected\n' + url_value + '\n' +
+                           jwt_value + '\n' +
+                           '----------------------------------------------------------------------\n')
+        screened_excerpt = self.failure_excerpt(screened_output)
+        self.assertNotIn(url_value, screened_excerpt)
+        self.assertNotIn(jwt_value, screened_excerpt)
         long_output = ('FAIL: test_expected (test_remote_test.Case)\n' +
                        ('detail ' + 'x' * 120 + '\n') * 50 +
                        '----------------------------------------------------------------------\n')
@@ -189,6 +198,20 @@ class RemoteTestTests(unittest.TestCase):
             json.dumps(passed_with_excerpt, separators=(',', ':')).encode(),
             sha=SHA, modules=('test_remote_test',)))
 
+        screened_label = ''.join(('to', 'ken', '='))
+        cred_value = ''.join(['sk', '-']) + 'a' * 16
+        screened = json.loads(self.receipt('FAIL', exit_code=1,
+            final=('FAILED (failures=1)',),
+            failure_excerpt=screened_label + cred_value).decode())
+        self.assertIsNone(remote_test._validate_remote_receipt(
+            json.dumps(screened, separators=(',', ':')).encode(),
+            sha=SHA, modules=('test_remote_test',)))
+
+    def test_remote_excerpt_screen_is_self_contained(self):
+        script = remote_test._REMOTE_SCRIPT
+        self.assertNotIn('import llmtool', script)
+        self.assertNotIn('sys.path', script)
+
     def test_timeout_unavailable_and_unknown_receipts(self):
         timed = self.run_it(error=__import__('subprocess').TimeoutExpired('ssh', 600))
         self.assertEqual(timed['result'], 'TIMEOUT')
@@ -196,7 +219,7 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(unavailable['result'], 'UNAVAILABLE')
         malformed = self.run_it(b'{not-json')
         self.assertEqual(malformed['result'], 'UNKNOWN')
-        oversize = self.run_it(b' ' * 8193)
+        oversize = self.run_it(b' ' * 32769)
         self.assertEqual(oversize['result'], 'UNKNOWN')
         self.assertEqual([item['code'] for item in self.store.task['remote_test_outcomes']],
                          ['SSH_TIMEOUT', 'SSH_UNAVAILABLE', 'RECEIPT_INVALID',

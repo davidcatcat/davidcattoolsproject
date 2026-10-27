@@ -45,7 +45,7 @@ _REMOTE_SCRIPT = r'''import fcntl,hashlib,json,math,os,re,shutil,stat,subprocess
 from datetime import datetime,timezone
 sha,ref,repo,python,*mods=sys.argv[1:]
 R=re.compile(r"[0-9a-f]{40}\Z"); F=re.compile(r"(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z"); M=re.compile(r"test_[a-z0-9_]{1,80}\Z")
-SENSITIVE=re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",re.I)
+SENSITIVE=re.compile(r"-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|\bxox[abprs]-[A-Za-z0-9-]{20,}|\b(?:bearer|basic)\s+\S+|\b[A-Za-z][A-Za-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@|\b[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b|[\"']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|client[_-]?secret|aws_secret_access_key)[\"']?\s*[:=]",re.I)
 if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or len(mods)>8 or any(not M.fullmatch(x) for x in mods): sys.exit(40)
 started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); work_deadline=begin+480; deadline=begin+540; log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None; work=None
 def failure_excerpt(outputs,work,home):
@@ -58,7 +58,7 @@ def failure_excerpt(outputs,work,home):
             block=[]
             while index<len(lines) and not re.match(r"^-{10,}$",lines[index]):
                 line=lines[index].replace(work,"<REMOTE_WORKDIR>").replace(home,"<REMOTE_HOME>")
-                if not SENSITIVE.search(line) and not _emitted_sensitive(line): block.append(line)
+                if not SENSITIVE.search(line): block.append(line)
                 index+=1
             blocks.extend(block)
     kept=[]; size=0
@@ -154,8 +154,6 @@ try:
             stage="package"
             package=nobody_run(work,[work+"/venv/bin/python","-m","pip","install","--no-deps","-e","tools/llmtool"],limit=180); log+=package.stdout
             if package.returncode: raise RuntimeError("package")
-            sys.path.insert(0,work+"/tools/llmtool")
-            from llmtool.test_output_excerpts import _emitted_sensitive
             stage="tests"
             for index,mod in enumerate(mods):
                 allowance=(deadline-time.monotonic())/(len(mods)-index)-3
@@ -260,7 +258,8 @@ def _validate_remote_receipt(raw, *, sha, modules):
         return None
     if 'failure_excerpt' in receipt:
         excerpt = receipt['failure_excerpt']
-        if receipt['result'] == 'PASS' or not _valid_failure_excerpt(excerpt):
+        if (receipt['result'] == 'PASS' or not _valid_failure_excerpt(excerpt) or
+                _emitted_sensitive(excerpt)):
             return None
     if (receipt['result'] not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH') or
             type(receipt['exit_code']) is not int or
