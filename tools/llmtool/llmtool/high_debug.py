@@ -63,6 +63,15 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         pass
     else:
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+    if failed_corrections is not None:
+        claims = task.get('review_repair_claims', [])
+        if type(claims) is not list:
+            _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
+        family_claims = [claim for claim in claims
+                         if type(claim) is dict and
+                         claim.get('family', f"pr-{claim.get('pr')}") == family]
+        if len(family_claims) < failed_corrections:
+            _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:
