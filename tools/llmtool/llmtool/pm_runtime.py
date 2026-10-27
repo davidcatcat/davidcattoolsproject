@@ -4,6 +4,7 @@ import fcntl
 import atexit
 import json
 import os
+import shlex
 import signal
 import stat
 import subprocess
@@ -27,6 +28,8 @@ _LIVE_WINDOW_SECONDS = 20
 _STDERR_LIMIT = 65536
 _active_runtimes = set()
 _signal_handlers_installed = False
+_previous_signal_handlers = {}
+_atexit_registered = False
 
 
 def _error(code, message):
@@ -206,41 +209,75 @@ def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runne
     return binding
 
 
-def _session_live_elsewhere(native_id, transcript, now, created_at=None):
+def _session_live_elsewhere(native_id, transcript, now, created_at=None,
+                            *, ignore_recent_transcript=False):
     try:
         listing = subprocess.check_output(['ps', '-axo', 'pid=,command='],
                                           stderr=subprocess.DEVNULL, timeout=2)
         for line in listing.decode('utf-8', 'replace').splitlines():
-            if native_id in line and ('claude' in line.lower()):
+            try:
+                _, command = line.strip().split(None, 1)
+                argv = shlex.split(command)
+            except (ValueError, IndexError):
+                continue
+            if (argv and os.path.basename(argv[0]).lower() == 'claude' and
+                    native_id in argv[1:]):
                 return True
     except (OSError, subprocess.SubprocessError):
         pass
     try:
         modified = transcript.stat().st_mtime
         is_newer_than_binding = created_at is None or modified > created_at
+        if ignore_recent_transcript:
+            return False
         return is_newer_than_binding and 0 <= now - modified <= _LIVE_WINDOW_SECONDS
     except OSError:
         return False
 
 
 def _terminate_all(signum=None, frame=None):
+    previous = _previous_signal_handlers.get(signum, signal.SIG_DFL)
     for runtime in tuple(_active_runtimes):
         runtime.close()
-    if signum is not None:
-        raise SystemExit(128 + signum)
+    if signum is None or previous is signal.SIG_IGN:
+        return
+    if callable(previous):
+        previous(signum, frame)
+        return
+    # The old disposition is now restored by the final runtime close. Re-sending
+    # the signal lets the operating system apply its original default action.
+    os.kill(os.getpid(), signum)
+
+
+def _restore_signal_handlers():
+    global _signal_handlers_installed
+    if not _signal_handlers_installed:
+        return
+    for signum, handler in tuple(_previous_signal_handlers.items()):
+        try:
+            signal.signal(signum, handler)
+        except (ValueError, OSError):
+            pass
+    _previous_signal_handlers.clear()
+    _signal_handlers_installed = False
 
 
 def _register_lifecycle(runtime):
-    global _signal_handlers_installed
+    global _signal_handlers_installed, _atexit_registered
     _active_runtimes.add(runtime)
     if not _signal_handlers_installed:
+        installed = []
         for signum in (signal.SIGTERM, signal.SIGHUP):
             try:
+                _previous_signal_handlers[signum] = signal.getsignal(signum)
                 signal.signal(signum, _terminate_all)
+                installed.append(signum)
             except (ValueError, OSError):
-                pass
-        atexit.register(_terminate_all)
-        _signal_handlers_installed = True
+                _previous_signal_handlers.pop(signum, None)
+        _signal_handlers_installed = bool(installed)
+        if not _atexit_registered:
+            atexit.register(_terminate_all)
+            _atexit_registered = True
 
 
 class PMRuntime:
@@ -262,6 +299,7 @@ class PMRuntime:
         self._state_lock = threading.RLock()
         self._turn = None
         self._closed = False
+        self._has_owned_session = False
         self._was_interrupted = False
         self._unknown_lines = 0
         self._stderr_buffer = bytearray()
@@ -378,7 +416,9 @@ class PMRuntime:
                 created_at = datetime.fromisoformat(binding['created_at']).timestamp()
             except (ValueError, TypeError, OverflowError):
                 created_at = None
-            if _session_live_elsewhere(self.pm_session_id, transcript, now, created_at):
+            if _session_live_elsewhere(
+                    self.pm_session_id, transcript, now, created_at,
+                    ignore_recent_transcript=self._has_owned_session):
                 raise _error('PM_SESSION_LIVE_ELSEWHERE',
                              'PM session appears active elsewhere; close it before using pm_runtime')
             env = dict(os.environ if self.environ is None else self.environ)
@@ -399,6 +439,7 @@ class PMRuntime:
             self.cwd = cwd
             self._closed = False
             _register_lifecycle(self)
+            self._has_owned_session = True
             return self
         except LLMToolError:
             self._release_lock()
@@ -685,6 +726,8 @@ class PMRuntime:
                             pass
         finally:
             _active_runtimes.discard(self)
+            if not _active_runtimes:
+                _restore_signal_handlers()
             self._release_lock()
             self._child = None
 

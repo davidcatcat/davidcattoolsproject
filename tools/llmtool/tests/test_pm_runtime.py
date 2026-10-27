@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
@@ -222,6 +223,50 @@ class PMRuntimeTests(unittest.TestCase):
             with self.assertRaises(LLMToolError) as raised:
                 self.runtime().open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_LIVE_ELSEWHERE')
+
+    def test_ps_match_requires_claude_executable_and_session_argument(self):
+        for listing in (f'123 python worker-claude {SESSION}'.encode(),
+                        f'123 /tmp/not-claude {SESSION}'.encode(),
+                        f'123 claude --resume other-{SESSION}'.encode()):
+            with self.subTest(listing=listing), patch.object(
+                    pm_runtime.subprocess, 'check_output', return_value=listing):
+                runtime = self.runtime()
+                runtime.open()
+                runtime.close()
+
+    def test_close_then_reopen_ignores_own_recent_transcript(self):
+        runtime = self.runtime(clock=time.time)
+        runtime.open()
+        runtime.close()
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{}', encoding='utf-8')
+        now = time.time()
+        os.utime(transcript, (now, now))
+        with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
+            runtime.open()
+        runtime.close()
+
+    def test_runtime_signal_handlers_restore_and_chain_previous_handler(self):
+        signum = signal.SIGTERM
+        previous = signal.getsignal(signum)
+        received = []
+
+        def handler(received_signum, frame):
+            received.append(received_signum)
+
+        try:
+            signal.signal(signum, handler)
+            runtime = self.runtime()
+            runtime.open()
+            self.assertIs(signal.getsignal(signum), pm_runtime._terminate_all)
+            runtime.close()
+            self.assertIs(signal.getsignal(signum), handler)
+            os.kill(os.getpid(), signum)
+            self.assertEqual(received, [signum])
+        finally:
+            signal.signal(signum, previous)
 
     def test_open_refuses_fresh_transcript_without_runtime_lock(self):
         transcript = pm_runtime.active_pm_inbox.claude_session_file(
