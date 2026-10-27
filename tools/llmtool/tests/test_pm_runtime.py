@@ -139,6 +139,12 @@ class PMRuntimeTests(unittest.TestCase):
             list(runtime.send('hello'))
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_FORKED')
         self.assertTrue(process.terminated)
+        self.assertGreater(process.wait_calls, 0)
+        self.assertIsNone(runtime._child)
+        self.assertIsNone(runtime._lock_fd)
+        self.assertNotIn(runtime, pm_runtime._active_runtimes)
+        for signum, handler in self.original_signal_handlers.items():
+            self.assertIs(signal.getsignal(signum), handler)
         other = self.runtime()
         other.open()
         other.close()
@@ -239,14 +245,15 @@ class PMRuntimeTests(unittest.TestCase):
             register(runtime)
             raise LLMToolError('synthetic lifecycle registration failure')
 
-        runtime = self.runtime()
+        process = FakeProcess()
+        runtime = self.runtime(process)
         with patch.object(pm_runtime, '_register_lifecycle', side_effect=register_then_fail):
             with self.assertRaises(LLMToolError):
                 runtime.open()
         self.assertFalse(pm_runtime._active_runtimes)
         for signum, handler in self.original_signal_handlers.items():
             self.assertIs(signal.getsignal(signum), handler)
-        self.assertTrue(runtime.process.terminated)
+        self.assertTrue(process.terminated)
 
     def test_open_refuses_external_live_session_process(self):
         with patch.object(pm_runtime.subprocess, 'check_output',
@@ -386,6 +393,27 @@ class PMRuntimeTests(unittest.TestCase):
         runtime.open()
         runtime.close()
         self.assertTrue(process.terminated)
+
+    def test_close_persistence_failure_still_cleans_and_can_be_repeated(self):
+        process = FakeProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        runtime.send('pending request')
+        persist = runtime._persist_turn
+        failure = LLMToolError('synthetic persistence failure')
+        with patch.object(runtime, '_persist_turn', side_effect=[failure, persist]):
+            with self.assertRaisesRegex(LLMToolError, 'synthetic persistence failure'):
+                runtime.close(timeout=0)
+            self.assertTrue(process.terminated)
+            self.assertGreater(process.wait_calls, 0)
+            self.assertIsNone(runtime._child)
+            self.assertIsNone(runtime._lock_fd)
+            self.assertNotIn(runtime, pm_runtime._active_runtimes)
+            for signum, handler in self.original_signal_handlers.items():
+                self.assertIs(signal.getsignal(signum), handler)
+            runtime.close(timeout=0)
+            runtime.close(timeout=0)
+        self.assertIsNone(runtime._turn)
 
 
 if __name__ == '__main__':

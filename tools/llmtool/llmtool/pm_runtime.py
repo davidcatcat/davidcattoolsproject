@@ -612,11 +612,19 @@ class PMRuntime:
                     yield emit('TURN_END', status='ERROR', result_text='', usage={})
                     return
                 if _contains_different_session(line, self.pm_session_id):
-                    self._terminate_child()
-                    self._finish(record, 'ERROR')
-                    self._release_lock()
-                    self._closed = True
-                    raise _error('PM_SESSION_FORKED', 'Claude Code started a different PM session')
+                    fork_error = _error(
+                        'PM_SESSION_FORKED', 'Claude Code started a different PM session')
+                    try:
+                        self._finish(record, 'ERROR')
+                    except Exception:
+                        with self._state_lock:
+                            if self._turn is record:
+                                self._turn = None
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+                    raise fork_error
                 kind = line.get('type')
                 if kind == 'stream_event':
                     event = line.get('event') or {}
@@ -708,13 +716,18 @@ class PMRuntime:
 
     def close(self, timeout=5):
         with self._state_lock:
-            if self._closed and self._lock_fd is None:
+            if (self._closed and self._lock_fd is None and self._child is None and
+                    self not in _active_runtimes and self._turn is None):
                 return
             self._closed = True
             child = self._child
             active_turn = self._turn
+        error = None
         if active_turn is not None:
-            self._finish(active_turn, 'INTERRUPTED')
+            try:
+                self._finish(active_turn, 'INTERRUPTED')
+            except Exception as exc:
+                error = exc
         try:
             if child is not None:
                 try:
@@ -744,9 +757,19 @@ class PMRuntime:
                         except Exception:
                             pass
         finally:
-            _unregister_lifecycle(self)
-            self._release_lock()
             self._child = None
+            try:
+                _unregister_lifecycle(self)
+            except Exception as exc:
+                if error is None:
+                    error = exc
+            try:
+                self._release_lock()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
 
 
 def read_history(pm_session_id, *, after=0, limit=50, state_root=None):
