@@ -3115,6 +3115,33 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((row().state, row().detail),
                          (mon.IDLE, "最近一次：task abcdef01 PASS @0123456，跑了 3 個測試"))
 
+    def test_ec2_worker_never_follows_a_linked_task_file_to_the_config(self):
+        home = Path(tempfile.mkdtemp(dir=self.tmp.name))
+        config = home / "remote-test.json"
+        # shaped like a task record, so it would be shown if it were ever read
+        config.write_text(json.dumps({
+            "host": "example-host", "user": "ec2-user", "repo_path": "/srv/repo",
+            "task_id": self.TASK, "remote_test_receipts": [
+                {"result": "PASS", "source_sha": self.SHA, "ran_total": 9,
+                 "ended_at": self._stamp(5)}]}), encoding="utf-8")
+        tasks = Path(self._remote_tasks())
+        (tasks / "x.json").symlink_to(config)
+        opened, real_open = [], os.open
+        with patch.object(mon.os, "open", side_effect=lambda p, *a: opened.append(p) or real_open(p, *a)):
+            row, text = self._ec2(tasks=str(tasks))
+        self.assertEqual((row.state, row.detail), (mon.IDLE, "尚無遠端測試紀錄"))
+        self.assertEqual([p for p in opened if str(p).endswith("x.json")], [])
+        for word in ("example-host", "ec2-user", "/srv/repo", "跑了 9"):
+            self.assertNotIn(word, text)
+        # a listed file swapped for a link before it is opened is refused too
+        self.assertIsNone(mon._remote_test_record(str(tasks / "x.json")))
+        self.assertEqual(mon._remote_test_record(str(config))["host"], "example-host")
+        # a hard link to the config is refused as well
+        os.link(config, tasks / "y.json")
+        row, text = self._ec2(tasks=str(tasks))
+        self.assertEqual(row.detail, "尚無遠端測試紀錄")
+        self.assertNotIn("example-host", text)
+
     def test_ec2_worker_without_records_never_reads_the_remote_config(self):
         home = Path(tempfile.mkdtemp(dir=self.tmp.name))
         (home / ".config" / "llmtool").mkdir(parents=True)

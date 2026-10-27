@@ -3530,8 +3530,10 @@ def _remote_test_paths(root: str) -> tuple[list, bool]:
                 seen += 1
                 if not entry.name.endswith(".json"):
                     continue
-                try:
-                    stamped.append((entry.stat().st_mtime, entry.path))
+                try:   # never follow a link: it could point at the remote-test config
+                    info = entry.stat(follow_symlinks=False)
+                    if not entry.is_symlink() and stat.S_ISREG(info.st_mode):
+                        stamped.append((info.st_mtime, entry.path))
                 except OSError:
                     continue
     except OSError:
@@ -3541,6 +3543,30 @@ def _remote_test_paths(root: str) -> tuple[list, bool]:
         _remote_test_listing.clear()   # one root in use; tests pass many
     _remote_test_listing[root] = (folder, time.monotonic(), paths, capped)
     return paths, capped
+
+
+def _remote_test_record(path: str):
+    """The JSON of one regular task file, opened without following a link or
+    blocking on a FIFO and checked again on the open descriptor, so a file
+    swapped after the listing is refused too. A hard link (TaskStore writes by
+    rename, so its files have one) could name the remote-test config and is
+    refused. None when unreadable or refused."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            return None
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return json.loads(handle.read(REMOTE_TEST_READ))
+    except (OSError, ValueError):
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
 
 
 def _remote_test_time(value) -> float:
@@ -3562,18 +3588,16 @@ def remote_test_latest(root: str | None = None) -> tuple[tuple[float, str] | Non
     listed, capped = _remote_test_paths(root)
     for path in listed:
         try:
-            stamped.append((os.path.getmtime(path), path))
+            info = os.lstat(path)
         except OSError:
             continue
+        if stat.S_ISREG(info.st_mode):
+            stamped.append((info.st_mtime, path))
     best = None
     for mtime, path in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
         if best is not None and mtime < best[0] - REMOTE_TEST_SKEW:
             break   # any entry in an older file was written before it
-        try:
-            with open(path, "rb") as handle:
-                record = json.loads(handle.read(REMOTE_TEST_READ))
-        except (OSError, ValueError):
-            continue
+        record = _remote_test_record(path)
         if type(record) is not dict:
             continue
         task = record.get("task_id")
