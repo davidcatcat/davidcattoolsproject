@@ -178,8 +178,10 @@ class RemoteTestTests(unittest.TestCase):
         stdout = generated.stdout.decode('utf-8', 'replace')
         stderr = generated.stderr.decode('utf-8', 'replace')
         combined = self.failure_excerpt(stdout, stderr)
-        self.assertIn('FAIL: test_assertion (test_excerpt_fixture.ExcerptFailures)', combined)
-        self.assertIn('ERROR: test_error (test_excerpt_fixture.ExcerptFailures)', combined)
+        self.assertRegex(combined, r'FAIL: test_assertion '
+            r'\(test_excerpt_fixture\.ExcerptFailures(?:\.test_assertion)?\)')
+        self.assertRegex(combined, r'ERROR: test_error '
+            r'\(test_excerpt_fixture\.ExcerptFailures(?:\.test_error)?\)')
         self.assertIn('AssertionError:', combined)
         self.assertIn('expected value', combined)
         self.assertIn('RuntimeError: broken', combined)
