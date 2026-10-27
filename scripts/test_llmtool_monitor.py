@@ -2950,7 +2950,7 @@ class OfficeViewTests(unittest.TestCase):
 
     def _remote_tasks(self, *records):
         tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
-        for i, (name, body, age) in enumerate(records):
+        for name, body, age in records:
             path = tasks / f"{name}.json"
             path.write_text(body if type(body) is str else json.dumps(body), encoding="utf-8")
             os.utime(path, (self.NOW - age, self.NOW - age))
@@ -2973,18 +2973,28 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(row.detail, "執行中：task abcdef01 @0123456；test_remote_test, test_task_store")
         for word in host_words:
             self.assertNotIn(word, text)
-        # the ssh alone, its llmtool parent gone: still working, the Task is
-        # unknown, and a test_-shaped ref or path is never taken for a module
-        orphan = mon.parse_processes(ps(
-            f"  11     1    10   00:09 S    /usr/bin/ssh ec2-user@example-host python3 - "
-            f"{self.SHA} test_private_branch test_repo_dir test_python test_remote_test"), 999)
-        self.assertEqual(mon.describe(orphan.processes[0]),
-                         "ssh  PID 11  (ssh of llmtool remote-test (gone))")
-        row, text = self._ec2(orphan.processes)
+        # a CLI without --module: its own ssh (through a shell) names them, by
+        # position only, so a test_-shaped ref or path is never a module
+        ssh = (f"/usr/bin/ssh ec2-user@example-host python3 - {self.SHA} test_private_branch "
+               "test_repo_dir test_python test_remote_test")
+        bare = mon.parse_processes(ps(
+            f"  10     1    10   00:30 S    python3 -m llmtool task remote-test {self.TASK} "
+            f"--executor-task wp-1 --sha {self.SHA} --ref test_private_branch",
+            "  20    10    10   00:29 S    /bin/sh -c x",
+            f"  21    20    10   00:29 S    {ssh}"), 999)
+        row, text = self._ec2(bare.processes)
         self.assertEqual((row.state, row.detail),
-                         (mon.WORKING, "執行中：task 未知（只剩 ssh） @0123456；test_remote_test"))
+                         (mon.WORKING, "執行中：task abcdef01 @0123456；test_remote_test"))
         for word in host_words + ("test_private_branch", "test_repo_dir", "test_python", "task ?"):
             self.assertNotIn(word, text)
+        # the same ssh without a remote-test CLI in its parent chain is not this
+        # worker, whether its parent is gone or something else
+        for line in (f"  21     1    21   00:09 S    {ssh}",
+                     f"  21    30    21   00:09 S    {ssh}"):
+            alone = mon.parse_processes(ps("  30     1    30   01:00 S    codex", line), 999)
+            row, text = self._ec2(alone.processes)
+            self.assertEqual((row.state, row.detail), (mon.IDLE, "尚無遠端測試紀錄"))
+            self.assertNotIn("0123456", text)
         # other llmtool commands are not remote-test runs
         other = mon.parse_processes(ps(f"  12     1    12   00:09 S    python3 -m llmtool task inspect {self.TASK}"), 999)
         self.assertEqual(self._ec2(other.processes)[0].state, mon.IDLE)
@@ -3052,13 +3062,14 @@ class OfficeViewTests(unittest.TestCase):
         newest = {"task_id": self.TASK, "remote_test_receipts": [
             {"result": "PASS", "source_sha": self.SHA, "ran_total": 3, "ended_at": self._stamp(1)}]}
         listed, opened = [], []
-        real_scandir, real_open = os.scandir, open
+        real_scandir, real_open = os.scandir, os.open
         with patch.object(mon.os, "scandir", side_effect=lambda p: listed.append(p) or real_scandir(p)), \
-                patch("builtins.open", side_effect=lambda *a, **k: opened.append(a[0]) or real_open(*a, **k)):
-            self.assertEqual(mon.remote_test_latest(str(root)), (None, False))
-            self.assertEqual(mon.remote_test_latest(str(root)), (None, False))
+                patch.object(mon.os, "open", side_effect=lambda p, *a: opened.append(p) or real_open(p, *a)):
+            self.assertEqual(mon.remote_test_latest(str(root)), (None, ""))
+            self.assertEqual(len(opened), mon.REMOTE_TEST_FILES)
+            self.assertEqual(mon.remote_test_latest(str(root)), (None, ""))
             self.assertEqual(len(listed), 1)   # folder unchanged: the listing is reused
-            self.assertLessEqual(len(opened), 2 * mon.REMOTE_TEST_FILES)
+            self.assertEqual(len(opened), mon.REMOTE_TEST_FILES)   # unchanged files: not read again
             # TaskStore writes by rename, which changes the folder: listed again
             temp = root / "new.tmp"
             temp.write_text(json.dumps(newest), encoding="utf-8")
@@ -3071,6 +3082,46 @@ class OfficeViewTests(unittest.TestCase):
             with patch.object(mon.time, "monotonic", return_value=later):
                 mon.remote_test_latest(str(root))
             self.assertEqual(len(listed), 3)
+
+    def test_ec2_worker_reads_at_most_its_budget_per_rebuild_and_says_unchecked(self):
+        pad = "x" * 1000
+        root = Path(self._remote_tasks(*[(f"t{i}", {"task_id": self.TASK, "pad": pad, "remote_test_receipts": [
+            {"result": "PASS", "source_sha": self.SHA, "ran_total": i, "ended_at": self._stamp(100 + i)}]},
+            100 + i) for i in range(6)]))
+        size = (root / "t0.json").stat().st_size
+        read, real_open = [], mon._remote_test_open
+
+        def counted(path, budget):
+            opened = real_open(path, budget)
+            read.append(len(opened[1]) if opened and opened[1] else 0)
+            return opened
+
+        with patch.object(mon, "REMOTE_TEST_BUDGET", 2 * size + 10), \
+                patch.object(mon, "REMOTE_TEST_SKEW", 1e9), \
+                patch.object(mon, "_remote_test_open", side_effect=counted):
+            first = mon.remote_test_row([], self.NOW, str(root))
+            self.assertLessEqual(sum(read), 2 * size + 10)
+            self.assertEqual(first.state, mon.UNCHECKED)
+            self.assertEqual(first.detail, "已讀到的一次：task abcdef01 PASS @0123456，跑了 0 個測試；"
+                                           + mon.REMOTE_TEST_OVER_BUDGET)
+            # the files already read are reused; the rest are read on later rebuilds
+            read.clear()
+            mon.remote_test_row([], self.NOW, str(root))
+            self.assertLessEqual(sum(read), 2 * size + 10)
+            mon.remote_test_row([], self.NOW, str(root))
+            done = mon.remote_test_row([], self.NOW, str(root))
+        self.assertEqual((done.state, done.detail),
+                         (mon.IDLE, "最近一次：task abcdef01 PASS @0123456，跑了 0 個測試"))
+
+    def test_ec2_worker_skips_a_deeply_nested_record(self):
+        deep = "[" * 200000 + "]" * 200000
+        tasks = self._remote_tasks(("deep", deep, 5), ("ok", {"task_id": self.TASK, "remote_test_receipts": [
+            {"result": "FAIL", "source_sha": self.SHA, "ran_total": 2, "ended_at": self._stamp(60)}]}, 60))
+        raw = mon._remote_test_open(os.path.join(tasks, "deep.json"), mon.REMOTE_TEST_BUDGET)[1]
+        self.assertIsNone(mon._remote_test_json(raw))
+        row, _ = self._ec2(tasks=tasks)
+        self.assertEqual((row.state, row.detail),
+                         (mon.IDLE, "最近一次：task abcdef01 FAIL @0123456，跑了 2 個測試"))
 
     def test_ec2_worker_listing_stops_at_the_entry_cap_and_says_unchecked(self):
         receipt = {"task_id": self.TASK, "remote_test_receipts": [
@@ -3134,8 +3185,8 @@ class OfficeViewTests(unittest.TestCase):
         for word in ("example-host", "ec2-user", "/srv/repo", "跑了 9"):
             self.assertNotIn(word, text)
         # a listed file swapped for a link before it is opened is refused too
-        self.assertIsNone(mon._remote_test_record(str(tasks / "x.json")))
-        self.assertEqual(mon._remote_test_record(str(config))["host"], "example-host")
+        self.assertIsNone(mon._remote_test_open(str(tasks / "x.json"), mon.REMOTE_TEST_BUDGET))
+        self.assertIn(b"example-host", mon._remote_test_open(str(config), mon.REMOTE_TEST_BUDGET)[1])
         # a hard link to the config is refused as well
         os.link(config, tasks / "y.json")
         row, text = self._ec2(tasks=str(tasks))

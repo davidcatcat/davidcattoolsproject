@@ -322,8 +322,6 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
                 role, owner = "  group member", label(pgid)
             elif pid in orphans.get(pgid, ()):
                 role, owner = "  orphaned group member", f"group {pgid} (leader gone)"
-            elif job:
-                role, owner = "  remote-test ssh", "llmtool remote-test (gone)"
             else:
                 continue
         else:
@@ -366,8 +364,7 @@ def describe(p: Process) -> str:
         return f"{p.role.replace(' (zombie)', '')}{zombie}  PID {p.pid}{started}"
     kind = p.role.strip().replace(" (zombie)", "")
     relation = {"child": "child of", "group member": "in process group of",
-                "orphaned group member": "left behind in",
-                "remote-test ssh": "ssh of"}.get(kind, kind)
+                "orphaned group member": "left behind in"}.get(kind, kind)
     return f"{p.name}{zombie}  PID {p.pid}  ({relation} {p.owner})"
 
 
@@ -3417,7 +3414,7 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
                 continue
             with open(path, "rb") as handle:
                 record = json.loads(handle.read(1 << 20))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         developer = record.get("developer") if type(record) is dict else None
         if type(developer) is not dict:
@@ -3460,7 +3457,7 @@ def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[floa
                 continue
             with open(path, "rb") as handle:
                 record = json.loads(handle.read(1 << 20))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         if type(record) is not dict:
             continue
@@ -3504,8 +3501,11 @@ REMOTE_TEST_READ = 4 << 20    # a Task holds up to 32 receipts of up to 64 resul
 REMOTE_TEST_SKEW = 300.0      # receipts carry the EC2 clock; file times the local one
 REMOTE_TEST_RELIST = 60.0     # seconds a task-file listing is reused while the folder is unchanged
 REMOTE_TEST_SCAN = 4096       # folder entries looked at per listing, at most
+REMOTE_TEST_BUDGET = 4 << 20  # bytes of task files read per office rebuild, in total
 REMOTE_TEST_CAPPED = "task 目錄超過上限，結果可能不是最新"
+REMOTE_TEST_OVER_BUDGET = "task 紀錄超過讀取上限，結果可能不是最新"
 _remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths, capped)
+_remote_test_parsed: dict = {}    # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
 
 
 def _remote_test_paths(root: str) -> tuple[list, bool]:
@@ -3545,28 +3545,40 @@ def _remote_test_paths(root: str) -> tuple[list, bool]:
     return paths, capped
 
 
-def _remote_test_record(path: str):
-    """The JSON of one regular task file, opened without following a link or
-    blocking on a FIFO and checked again on the open descriptor, so a file
-    swapped after the listing is refused too. A hard link (TaskStore writes by
-    rename, so its files have one) could name the remote-test config and is
-    refused. None when unreadable or refused."""
+def _remote_test_open(path: str, budget: int):
+    """(file key, raw bytes) of one regular task file, opened without following
+    a link or blocking on a FIFO and checked again on the open descriptor, so a
+    file swapped after the listing is refused too. A hard link (TaskStore
+    writes by rename, so its files have one) could name the remote-test config
+    and is refused. (key, None) for a refused or oversized file, (key, False)
+    when it does not fit the remaining budget, None when unreadable."""
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
-            return None
+        key = (info.st_ino, info.st_mtime_ns, info.st_size)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > REMOTE_TEST_READ:
+            return key, None
+        if info.st_size > budget:
+            return key, False
         with os.fdopen(fd, "rb") as handle:
             fd = -1
-            return json.loads(handle.read(REMOTE_TEST_READ))
-    except (OSError, ValueError):
+            return key, handle.read(info.st_size)
+    except OSError:
         return None
     finally:
         if fd >= 0:
             os.close(fd)
+
+
+def _remote_test_json(raw: bytes):
+    """Parsed JSON, or None when malformed or nested too deeply."""
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
 
 
 def _remote_test_time(value) -> float:
@@ -3575,14 +3587,44 @@ def _remote_test_time(value) -> float:
     return _github_time(re.sub(r"\.\d{6}Z$", "Z", value))
 
 
-def remote_test_latest(root: str | None = None) -> tuple[tuple[float, str] | None, bool]:
-    """((when, words) or None, capped): the newest EC2 remote-test receipt or
-    receipt-less outcome in llmtool's local task records; capped means the
-    folder listing stopped early, so a newer one may exist unseen. Only result words, codes, the
-    Task id, the SHA and the test count are read; the remote config, host,
-    paths and logs are never touched. At most REMOTE_TEST_FILES files are read,
-    newest first, stopping once a file is older than the newest entry found.
-    Every field is type-checked before use; anything else is skipped."""
+def _remote_test_entries(record) -> tuple:
+    """((when, words), ...) for each well-typed receipt and outcome of a record.
+    Only result words, codes, the Task id, the SHA and the test count are kept."""
+    if type(record) is not dict:
+        return ()
+    task = record.get("task_id")
+    task = task[:8] if type(task) is str and re.fullmatch(r"[0-9a-f]{8,64}", task) else "未知"
+    found = []
+    receipts, outcomes = record.get("remote_test_receipts"), record.get("remote_test_outcomes")
+    for item in receipts if type(receipts) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        if type(result) is not str or result not in REMOTE_TEST_RESULTS:
+            continue
+        sha, ran = item.get("source_sha"), item.get("ran_total")
+        words = f"task {task} {result}"
+        words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
+        words += f"，跑了 {ran} 個測試" if type(ran) is int and ran >= 0 else ""
+        found.append((_remote_test_time(item.get("ended_at")), words))
+    for item in outcomes if type(outcomes) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        if type(result) is not str or result not in REMOTE_TEST_OUTCOMES:
+            continue
+        sha, code = item.get("sha"), item.get("code")
+        words = f"task {task} {result}"
+        words += f"（{code}）" if type(code) is str and CODE_TEXT.fullmatch(code) else ""
+        words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
+        found.append((_remote_test_time(item.get("at")), words))
+    return tuple(entry for entry in found if entry[0])
+
+
+def remote_test_latest(root: str | None = None) -> tuple[tuple[float, str] | None, str]:
+    """((when, words) or None, problem): the newest EC2 remote-test receipt or
+    receipt-less outcome in llmtool's local task records. problem is "" or why
+    a newer one may exist unseen (the listing or the read budget stopped early).
+    The remote config, host, paths and logs are never touched. At most
+    REMOTE_TEST_FILES files are looked at, newest first, stopping once a file is
+    older than the newest entry found; an unchanged file (same inode, mtime and
+    size) is not read again, and at most REMOTE_TEST_BUDGET bytes are read."""
     root = LLMTOOL_TASKS if root is None else root
     stamped = []
     listed, capped = _remote_test_paths(root)
@@ -3592,59 +3634,70 @@ def remote_test_latest(root: str | None = None) -> tuple[tuple[float, str] | Non
         except OSError:
             continue
         if stat.S_ISREG(info.st_mode):
-            stamped.append((info.st_mtime, path))
-    best = None
-    for mtime, path in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
+            stamped.append((info.st_mtime, path, (info.st_ino, info.st_mtime_ns, info.st_size)))
+    best, budget, short, kept = None, REMOTE_TEST_BUDGET, False, {}
+    parsed = _remote_test_parsed.get(root, {})
+    for mtime, path, key in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
         if best is not None and mtime < best[0] - REMOTE_TEST_SKEW:
             break   # any entry in an older file was written before it
-        record = _remote_test_record(path)
-        if type(record) is not dict:
+        cached = parsed.get(path)
+        if cached and cached[0] == key:
+            entries = cached[1]
+        else:
+            opened = _remote_test_open(path, budget)
+            if opened is None:
+                continue
+            key, raw = opened
+            if raw is False:
+                short = True   # read the rest on a later rebuild
+                continue
+            budget -= len(raw or b"")
+            entries = _remote_test_entries(_remote_test_json(raw)) if raw else ()
+        kept[path] = (key, entries)
+        for entry in entries:
+            if best is None or entry[0] > best[0]:
+                best = entry
+    # Keep only files looked at this time, so the cache is no larger than the listing.
+    if root not in _remote_test_parsed and len(_remote_test_parsed) >= 8:
+        _remote_test_parsed.clear()   # one root in use; tests pass many
+    _remote_test_parsed[root] = kept
+    return best, REMOTE_TEST_CAPPED if capped else REMOTE_TEST_OVER_BUDGET if short else ""
+
+
+def _remote_test_runs(processes: list[Process]) -> list:
+    """[(process, modules)] for each live `llmtool task remote-test` CLI. An ssh
+    counts only through a CLI in its parent chain (it may name the modules the
+    CLI argv left out); any other ssh of the same shape is not this worker."""
+    by_pid = {p.pid: p for p in processes}
+    clis = {p.pid: p for p in processes if p.job and p.job[0] == "cli"}
+    modules = {pid: p.job[3] for pid, p in clis.items()}
+    for p in processes:
+        if not p.job or p.job[0] != "ssh":
             continue
-        task = record.get("task_id")
-        task = task[:8] if type(task) is str and re.fullmatch(r"[0-9a-f]{8,64}", task) else "未知"
-        receipts, outcomes = record.get("remote_test_receipts"), record.get("remote_test_outcomes")
-        for item in receipts if type(receipts) is list else []:
-            result = item.get("result") if type(item) is dict else None
-            if type(result) is not str or result not in REMOTE_TEST_RESULTS:
-                continue
-            when = _remote_test_time(item.get("ended_at"))
-            sha, ran = item.get("source_sha"), item.get("ran_total")
-            words = f"task {task} {result}"
-            words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
-            words += f"，跑了 {ran} 個測試" if type(ran) is int and ran >= 0 else ""
-            if when and (best is None or when > best[0]):
-                best = (when, words)
-        for item in outcomes if type(outcomes) is list else []:
-            result = item.get("result") if type(item) is dict else None
-            if type(result) is not str or result not in REMOTE_TEST_OUTCOMES:
-                continue
-            when, sha, code = _remote_test_time(item.get("at")), item.get("sha"), item.get("code")
-            words = f"task {task} {result}"
-            words += f"（{code}）" if type(code) is str and CODE_TEXT.fullmatch(code) else ""
-            words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
-            if when and (best is None or when > best[0]):
-                best = (when, words)
-    return best, capped
+        parent, seen = by_pid.get(p.ppid), 0
+        while parent is not None and parent.pid not in clis and seen < MAX_ANCESTRY:
+            parent, seen = by_pid.get(parent.ppid), seen + 1
+        if parent is not None and parent.pid in clis and not modules[parent.pid]:
+            if clis[parent.pid].job[2] in ("", p.job[2]):
+                modules[parent.pid] = p.job[3]
+    return [(p, modules[pid]) for pid, p in sorted(clis.items())]
 
 
 def remote_test_row(processes: list[Process], now: float, root: str | None = None) -> OfficeRow:
     """The EC2 remote-test worker: the run the process table shows, else the
     newest local record. It says only what the process or record says."""
-    runs = [p for p in processes if p.job]
-    parents = {p.pid for p in runs if p.job[0] == "cli"}
-    runs = [p for p in runs if p.ppid not in parents]   # an ssh under its own llmtool run
+    runs = _remote_test_runs(processes)
     if runs:
-        source, task, sha, modules = runs[0].job
-        # ssh argv carries no Task id: without its llmtool parent the Task is unknown.
-        detail = "執行中：task " + (task or ("未知（只剩 ssh）" if source == "ssh" else "未知"))
-        detail += (f" @{sha}" if sha else "") + (f"；{', '.join(modules)}" if modules else "")
+        (proc, modules), (_, task, sha, _) = runs[0], runs[0][0].job
+        detail = f"執行中：task {task or '未知'}" + (f" @{sha}" if sha else "")
+        detail += f"；{', '.join(modules)}" if modules else ""
         if len(runs) > 1:
             detail += f"；另有 {len(runs) - 1} 個執行中"
-        return OfficeRow("EC2 遠端測試", WORKING, detail, _elapsed_seconds(runs[0].elapsed),
+        return OfficeRow("EC2 遠端測試", WORKING, detail, _elapsed_seconds(proc.elapsed),
                          80, kind="worker", evidence="程序")
-    latest, capped = remote_test_latest(root)
-    if capped:   # only part of the folder was read: never claim the newest
-        detail = (f"已讀到的一次：{latest[1]}；" if latest else "") + REMOTE_TEST_CAPPED
+    latest, problem = remote_test_latest(root)
+    if problem:   # only part of the records was read: never claim the newest
+        detail = (f"已讀到的一次：{latest[1]}；" if latest else "") + problem
         return OfficeRow("EC2 遠端測試", UNCHECKED, detail,
                          max(0.0, now - latest[0]) if latest else None, 80, kind="worker",
                          evidence="llmtool 紀錄")
