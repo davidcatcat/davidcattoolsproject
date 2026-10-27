@@ -1938,6 +1938,49 @@ class StreamScreeningTests(unittest.TestCase):
         self.assertEqual(self.pm.safe_name('tool ' + _fake_key()), '[withheld]')
 
 
+def _crafted_turn(**fields):
+    turn = {'turn_id': 'a' * 32, 'seq': 1, 'started_at': '2026-10-28T00:00:00+00:00',
+            'ended_at': None, 'owner_text': 'hi', 'status': 'COMPLETED', 'result_text': 'ok',
+            'tool_names': ['Read'], 'usage': {}}
+    turn.update(fields)
+    return turn
+
+
+class PMDisplayScreeningTests(unittest.TestCase):
+    """Every PM value shown on screen (live, stored history, codes) is screened."""
+
+    def setUp(self):
+        from llmtool import chat_tui_pm
+        self.pm = chat_tui_pm
+        self.key = _fake_key()
+
+    def test_history_fields_are_screened(self):
+        turn = _crafted_turn(tool_names=['Read', 'tool ' + self.key, 7],
+                             owner_text='mine ' + self.key, result_text='theirs ' + self.key,
+                             status='done ' + self.key, started_at='at ' + self.key)
+        text = self.pm.history_text({'turns': [turn]})
+        self.assertNotIn(self.key[3:9], text)
+        self.assertIn('tools: Read, [withheld], UNKNOWN', text)
+        self.assertIn('PM [UNKNOWN]', text)
+        self.assertIn('mine [REDACTED]', text)
+        self.assertIn('theirs [REDACTED]', text)
+        clean = self.pm.history_text({'turns': [_crafted_turn()]})
+        self.assertIn('(history) PM [COMPLETED] tools: Read:\nok', clean)
+
+    def test_codes_ids_and_reasons_are_shape_checked(self):
+        self.assertEqual(self.pm.safe_code('PM_PROCESS_EXITED'), 'PM_PROCESS_EXITED')
+        for bad in ('bad code', 'x' + self.key, None, 7, 'A' * 65):
+            self.assertEqual(self.pm.safe_code(bad), 'UNKNOWN')
+        self.assertIn('PM runtime error UNKNOWN', self.pm.error_text('leak ' + self.key))
+        self.assertEqual(self.pm.event_ids({'turn_id': self.key, 'seq': True}), (None, None))
+        line = self.pm.tool_result_text({'is_error': True, 'reason': self.key}, 'Read')
+        self.assertEqual(line, '  · tool Read: error (UNKNOWN)')
+        end = self.pm.turn_end_text({'status': 'x ' + self.key, 'usage': {}}, 1.0)
+        self.assertNotIn(self.key[3:9], end)
+        self.assertIn('PM turn UNKNOWN', end)
+        self.assertEqual(self.pm.safe_text(None), 'UNKNOWN')
+
+
 class PMAdapterTests(unittest.TestCase):
     """S2-dependent fields are read through the adapter; absent means not reported."""
 
@@ -2154,6 +2197,31 @@ class PMConversationTests(Base):
         for text in seen + [ui.conversation.text]:
             self.assertNotIn(key[3:9], text)
         self.assertIn('your key is [REDACTED] — rotate it', ui.conversation.text)
+
+    def test_crafted_history_file_is_screened_on_connect_and_history(self):
+        import json
+        key = _fake_key()
+        root = self.state
+        root.mkdir(parents=True, exist_ok=True)
+        (root / ('pm-' + PM_SESSION + '.history.json')).write_text(json.dumps(
+            {'pm_session_id': PM_SESSION, 'turns': [_crafted_turn(
+                tool_names=['tool ' + key], owner_text='o ' + key, result_text='r ' + key,
+                status='s ' + key)]}))
+        ui, _ = self.drive([self.connect(), self.connected, '/pm history\r',
+                            lambda ui: self.until(ui, lambda ui: ui.conversation.text.count(
+                                'PM history (stored') == 2)])
+        text = ui.conversation.text
+        self.assertNotIn(key[3:9], text)
+        self.assertIn('tools: [withheld]', text)
+
+    def test_runtime_error_code_from_events_is_shape_checked(self):
+        key = _fake_key()
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: ui.pm_event({'type': 'RUNTIME_ERROR', 'code': 'x ' + key}),
+                            lambda ui: ui.pm_event({'type': 'TOOL_USE', 'tool_use_id': 't',
+                                                    'name': 'tool ' + key})])
+        self.assertNotIn(key[3:9], ui.conversation.text + ui.status_text())
+        self.assertEqual(ui.pm_state, 'error(UNKNOWN)')
 
     def lock_is_free(self):
         probe = self.make_runtime(PM_SESSION, str(self.temp_root)).open()   # raises if still locked

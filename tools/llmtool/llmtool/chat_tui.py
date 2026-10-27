@@ -1175,7 +1175,8 @@ class ChatTUI:
                             "dedicated PM session.")
             else:
                 self.append("PM: claude-code session " + self.pm_target[0] + " (cwd "
-                            + self.pm_target[1] + "), " + chat_tui_pm.binding_text(self.pm_runtime)
+                            + chat_tui_pm.safe_text(str(self.pm_target[1])) + "), "
+                            + chat_tui_pm.binding_text(self.pm_runtime)
                             + ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
                             + ("; PM mode" if self.pm_mode else "; not in PM mode"))
             return
@@ -1282,7 +1283,8 @@ class ChatTUI:
         self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
         self.append("PM mode: Enter sends each draft in real time to the dedicated PM session "
-                    + self.pm_target[0] + " (claude-code, cwd " + str(self.pm_target[1])
+                    + self.pm_target[0] + " (claude-code, cwd "
+                    + chat_tui_pm.safe_text(str(self.pm_target[1]))
                     + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_runtime)
                     + ". pm_runtime S1 cannot check that this session is not open in another "
                     "process: connect only to the dedicated PM session. Esc interrupts a turn; "
@@ -1332,7 +1334,7 @@ class ChatTUI:
         self.pm_turn_active, self.pm_turn_started = True, time.monotonic()
         self.pm_interrupted, self.pm_deltas, self.pm_tools = False, False, {}
         self.pm_state = "working"
-        self.append("owner → PM:\n" + text)
+        self.append("owner → PM:\n" + chat_tui_pm.safe_text(text))
         self._loop = asyncio.get_running_loop()
         threading.Thread(target=self._pm_turn, args=(self.pm_runtime, text, self._loop),
                          name="llmtool-chat-pm-turn", daemon=True).start()
@@ -1400,7 +1402,7 @@ class ChatTUI:
         elif kind == "TOOL_RESULT":
             self.append(chat_tui_pm.tool_result_text(event, self.pm_tools.get(event.get("tool_use_id"))))
         elif kind == "RUNTIME_ERROR":
-            code = event.get("code") if type(event.get("code")) is str else chat_tui_task.UNKNOWN
+            code = chat_tui_pm.safe_code(event.get("code"))
             self.pm_state = "error(" + code + ")"
             self.append("llmtool: " + chat_tui_pm.error_text(code))
             if code == "PM_SESSION_FORKED":
