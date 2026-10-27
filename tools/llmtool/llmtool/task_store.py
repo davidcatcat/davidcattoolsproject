@@ -60,9 +60,16 @@ _V2_SHAPES = (_FIELDS_V2, _FIELDS_V2_COMPLETION, _FIELDS_V2_ROUTE,
               *_FIELDS_V2_WITH_DISPATCH_AUDIT)
 _V2_REMOTE_TEST_SHAPES = tuple(shape | frozenset(('remote_test_receipts',))
                                for shape in _V2_SHAPES)
+_V2_REMOTE_OUTCOME_SHAPES = tuple(shape | frozenset(('remote_test_outcomes',))
+                                  for shape in _V2_SHAPES)
+_V2_REMOTE_RECEIPT_OUTCOME_SHAPES = tuple(shape | frozenset((
+    'remote_test_receipts', 'remote_test_outcomes')) for shape in _V2_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
-    'remote_test_receipts'))
+    'remote_test_receipts', 'remote_test_outcomes'))
+MAX_REMOTE_TEST_OUTCOMES = 32
+_REMOTE_TEST_OUTCOME_FIELDS = frozenset((
+    'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
 MAX_COMPLETION_EVENTS = 32
 # Retention: when the event list is full, the oldest ACKED event is compacted
 # into a tombstone that keeps its identity and stream position, so an acked
@@ -448,15 +455,43 @@ def _validate_remote_test_receipts(record):
             _fail('REMOTE_TEST_RECEIPT_INVALID')
 
 
+def _validate_remote_test_outcomes(record):
+    outcomes = record.get('remote_test_outcomes', [])
+    if type(outcomes) is not list or len(outcomes) > MAX_REMOTE_TEST_OUTCOMES:
+        _fail('REMOTE_TEST_OUTCOME_INVALID')
+    for outcome in outcomes:
+        if (type(outcome) is not dict or set(outcome) != _REMOTE_TEST_OUTCOME_FIELDS or
+                outcome.get('result') not in ('ADMISSION_DENIED', 'TIMEOUT', 'UNAVAILABLE', 'UNKNOWN') or
+                type(outcome.get('code')) is not str or
+                re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', outcome['code']) is None or
+                (outcome.get('executor_task') is not None and
+                 (type(outcome['executor_task']) is not str or
+                  D6_TASK_ID.fullmatch(outcome['executor_task']) is None)) or
+                (outcome.get('sha') is not None and
+                 (type(outcome['sha']) is not str or
+                  re.fullmatch(r'[0-9a-f]{40}', outcome['sha']) is None)) or
+                type(outcome.get('modules')) is not list or len(outcome['modules']) > 32 or
+                any(type(module) is not str or
+                    re.fullmatch(r'test_[a-z0-9_]{1,80}', module) is None
+                    for module in outcome['modules']) or
+                outcome['modules'] != sorted(set(outcome['modules'])) or
+                type(outcome.get('at')) is not str or
+                re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{6})?Z', outcome['at']) is None):
+            _fail('REMOTE_TEST_OUTCOME_INVALID')
 def _validate(record):
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
             (record.get('schema_version') == 2 and set(record) not in
              (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
+              *_V2_REMOTE_OUTCOME_SHAPES, *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
               *(shape | frozenset(('completion_events',))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES)),
+                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
+                              *_V2_REMOTE_OUTCOME_SHAPES,
+                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
               *(shape | frozenset(('completion_events', 'completion_event_tombstones'))
-                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES)))) or
+                for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
+                              *_V2_REMOTE_OUTCOME_SHAPES,
+                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)))) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -471,6 +506,8 @@ def _validate(record):
         _validate_completion_tombstones(record)
     if 'remote_test_receipts' in record:
         _validate_remote_test_receipts(record)
+    if 'remote_test_outcomes' in record:
+        _validate_remote_test_outcomes(record)
     for key in ('created_at', 'updated_at'):
         try:
             stamp = datetime.strptime(record[key], '%Y-%m-%dT%H:%M:%SZ')
@@ -1654,6 +1691,29 @@ class TaskStore:
                 self._update(task_id, expected={'record_sha256': current['record_sha256']},
                              changes={'remote_test_receipts': receipts + [receipt]})
                 return receipt
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def append_remote_test_outcome(self, task_id, outcome):
+        """Persist one bounded no-receipt result; exact replays are idempotent."""
+        if type(outcome) is not dict or set(outcome) != _REMOTE_TEST_OUTCOME_FIELDS:
+            _fail('REMOTE_TEST_OUTCOME_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            if outcome['result'] not in ('ADMISSION_DENIED', 'TIMEOUT', 'UNAVAILABLE', 'UNKNOWN'):
+                _fail('REMOTE_TEST_OUTCOME_INVALID')
+            outcomes = list(current.get('remote_test_outcomes', []))
+            existing = next((item for item in outcomes if item == outcome), None)
+            if existing is not None:
+                return {'outcome': existing, 'counter': outcomes.index(existing), 'created': False}
+            if len(outcomes) >= MAX_REMOTE_TEST_OUTCOMES:
+                _fail('REMOTE_TEST_OUTCOME_LIMIT')
+            counter = len(outcomes)
+            try:
+                self._update(task_id, expected={'record_sha256': current['record_sha256']},
+                             changes={'remote_test_outcomes': outcomes + [outcome]})
+                return {'outcome': outcome, 'counter': counter, 'created': True}
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')

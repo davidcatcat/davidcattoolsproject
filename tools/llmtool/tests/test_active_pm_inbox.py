@@ -243,6 +243,24 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(remote_events[0]['task_id'], task['task_id'])
         self.assertEqual(remote_events[0]['source_sha'], receipt['source_sha'])
 
+    def test_remote_test_outcome_event_is_durable_and_reaches_original_pm(self):
+        task = self._ready_task()
+        outcome = {'result': 'UNKNOWN', 'code': 'RECEIPT_INVALID',
+                   'executor_task': self.task_id, 'sha': 'a' * 40,
+                   'modules': ['test_remote_test'], 'at': '2026-10-27T00:00:00Z'}
+        saved = self.store.append_remote_test_outcome(task['task_id'], outcome)
+        first = active_pm_inbox.record_remote_test_outcome_event(
+            self.store, task['task_id'], saved['outcome'], saved['counter'])
+        replay = active_pm_inbox.record_remote_test_outcome_event(
+            self.store, task['task_id'], saved['outcome'], saved['counter'])
+        self.assertEqual(first['event_id'], replay['event_id'])
+        later = TaskStore(self.store.root)
+        events = self._inbox(store=later)['events']
+        remote = [event for event in events if event['source'] == 'EC2_REMOTE_TEST']
+        self.assertEqual(len(remote), 1)
+        self.assertEqual(remote[0]['event_id'], first['event_id'])
+        self.assertNotEqual(outcome['result'], 'PASS')
+
     def test_crash_between_ready_state_and_event_is_reconciled_by_inbox(self):
         task = self._ready_task()
         with patch('llmtool.active_pm_inbox.record_ready_event',
