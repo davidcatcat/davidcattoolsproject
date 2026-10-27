@@ -95,6 +95,48 @@ class TaskStatusTests(unittest.TestCase):
             'state': 'PM_PENDING', 'completion': {'state': 'FUTURE_COMPLETION_STATE'}}),
             'UNKNOWN')
 
+    def test_responded_developer_uses_completion_state(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = record(root)
+        outcomes = {
+            'PM_RETURNED': 'COMPLETED',
+            'PM_RESPONSE_REJECTED': 'FAILED',
+            'PM_UNAVAILABLE': 'UNAVAILABLE',
+            'PM_OUTCOME_UNKNOWN': 'UNKNOWN',
+            'WAITING_EXECUTOR': 'RUNNING',
+            'WAITING_REVIEW': 'RUNNING',
+            'WAITING_CI': 'RUNNING',
+            'WAITING_PM': 'RUNNING',
+            'PM_EVIDENCE_READY': 'RUNNING',
+            'PM_DISPATCHING': 'RUNNING',
+        }
+        for completion_state, expected in outcomes.items():
+            value = {
+                **base,
+                'developer': {'state': 'DEVELOPER_RESPONDED'},
+                'completion': {'state': completion_state},
+            }
+            with self.subTest(completion=completion_state):
+                self.assertEqual(task_status.derive_state(value), expected)
+
+    def test_terminal_developer_state_precedes_completion(self):
+        with tempfile.TemporaryDirectory() as root:
+            base = record(root)
+        cases = (
+            ({'state': 'DEVELOPER_UNAVAILABLE'}, 'UNAVAILABLE'),
+            ({'state': 'DEVELOPER_OUTPUT_REJECTED'}, 'FAILED'),
+            ({'state': 'DEVELOPER_OUTCOME_UNKNOWN'}, 'UNKNOWN'),
+            ({'state': 'DEVELOPER_OUTCOME_UNKNOWN', 'error_code': 'CODEX_BLOCKED'}, 'BLOCKED'),
+        )
+        for developer, expected in cases:
+            value = {
+                **base,
+                'developer': developer,
+                'completion': {'state': 'PM_RETURNED'},
+            }
+            with self.subTest(developer=developer):
+                self.assertEqual(task_status.derive_state(value), expected)
+
     def test_temp_store_limit_filter_unreadable_and_read_only(self):
         with tempfile.TemporaryDirectory() as root:
             rows = [record(root, pm_session_id='pm-one' if i != 2 else 'pm-two')

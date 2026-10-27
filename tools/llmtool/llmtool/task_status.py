@@ -59,9 +59,11 @@ def derive_state(record):
         if mapped is not None:
             if state == 'DEVELOPER_OUTCOME_UNKNOWN' and developer.get('error_code') == 'CODEX_BLOCKED':
                 return 'BLOCKED'
-            return mapped
+            if state != 'DEVELOPER_RESPONDED':
+                return mapped
         if state is not None:
-            return 'UNKNOWN'
+            if state != 'DEVELOPER_RESPONDED':
+                return 'UNKNOWN'
     completion = record.get('completion')
     if type(completion) is dict:
         mapped = _COMPLETION_STATES.get(completion.get('state'))
