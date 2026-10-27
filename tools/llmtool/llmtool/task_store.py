@@ -91,7 +91,7 @@ _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'failures', 'log_bytes', 'log_sha256', 'remote_log_path', 'task_id',
     'run_id', 'executor_task', 'pm_session', 'command_digest', 'receipt_digest'))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
-_OPTIONAL_USAGE_FIELDS = frozenset(('cached_prompt_tokens', 'reasoning_tokens'))
+_OPTIONAL_USAGE_FIELDS = frozenset(('cached_prompt_tokens', 'reasoning_tokens', 'tool_calls'))
 _DISPATCH_AUDIT_FIELDS = frozenset((
     'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
     'policy_sha256', 'at',

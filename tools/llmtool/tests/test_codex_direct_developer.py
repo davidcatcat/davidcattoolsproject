@@ -161,13 +161,22 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_FINAL_JSON_INVALID')
         self.assertEqual(caught.exception.native_session_id, self.THREAD)
 
+    def test_signal_ended_run_without_final_message_is_interrupted(self):
+        self.write_fake('os.kill(os.getpid(), 15)\n')
+
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_INTERRUPTED')
+        self.assertEqual(caught.exception.process_exit_code, -15)
+
     def test_timeout_kills_owned_process_group(self):
         marker = self.root / 'descendant-survived'
         self.write_fake('', delay=10, descendant_marker=marker)
         began = time.monotonic()
         with self.assertRaises(direct.DirectCodexError) as caught:
             self.run_fake(timeout=0.2)
-        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_TIMEOUT')
+        self.assertEqual(caught.exception.direct_codex_code, 'CODEX_INTERRUPTED')
         self.assertEqual(caught.exception.cleanup_status, 'CONFIRMED')
         self.assertLess(time.monotonic() - began, 3)
         time.sleep(1.1)
