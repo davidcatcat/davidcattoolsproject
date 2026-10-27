@@ -263,7 +263,7 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         with self.assertRaises(LLMToolError) as raised:
             self.update_claims(saved, [claim1, claim2, dict(claim1)])
         self.assertEqual(getattr(raised.exception, 'task_store_error_code', None),
-                         'REVIEW_DISPATCH_CLAIM_TRANSITION_INVALID')
+                         'REVIEW_DISPATCH_CLAIM_INVALID')
 
 
 if __name__ == '__main__':
