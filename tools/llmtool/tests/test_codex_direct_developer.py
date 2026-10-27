@@ -47,7 +47,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             '',
         ))
 
-    def write_fake(self, body, *, delay=0, delay_after_output=0, descendant_marker=None):
+    def write_fake(self, body, *, delay=0, delay_after_output=0,
+                   descendant_marker=None, signal_number=None):
         script = "#!/usr/bin/env python3\nimport json,os,sys,time\n"
         script += f"open({str(self.invoked)!r},'w').write('yes')\n"
         script += (
@@ -64,6 +65,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         if delay:
             script += f'time.sleep({delay!r})\n'
         script += f"sys.stdout.write({body!r});sys.stdout.flush()\n"
+        if signal_number is not None:
+            script += f'os.kill(os.getpid(), {signal_number})\n'
         if delay_after_output:
             script += f'time.sleep({delay_after_output!r})\n'
         self.fake.write_text(script, encoding='utf-8')
@@ -162,7 +165,9 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.native_session_id, self.THREAD)
 
     def test_signal_ended_run_without_final_message_is_interrupted(self):
-        self.write_fake('os.kill(os.getpid(), 15)\n')
+        # Emit malformed partial output before the signal. The interruption
+        # outcome must take precedence over JSONL/final-message validation.
+        self.write_fake('{partial', signal_number=15)
 
         with self.assertRaises(direct.DirectCodexError) as caught:
             self.run_fake()

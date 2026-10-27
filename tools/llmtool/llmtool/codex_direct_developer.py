@@ -422,6 +422,11 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                 # Keep TMPDIR alive until the owned child has stopped using it.
                 close_lifecycle(type(exc), exc, exc.__traceback__)
                 raise
+        # A signalled child may have emitted no JSON, or only a partial JSONL
+        # record. Preserve the more useful interruption outcome before any
+        # event/final-message parser can classify that output as malformed.
+        if process.returncode is not None and process.returncode < 0:
+            _fail('CODEX_INTERRUPTED')
         if process.returncode != 0:
             _fail('CODEX_EXIT_NONZERO')
         thread_id, result, usage = _result_from_events(bytes(output))
@@ -438,6 +443,19 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         except BaseException as interrupt:
             # A host signal surfaces from cleanup: keep the observed facts on it.
             _attach_observed(interrupt, process, output, started, lifecycle)
+            if (process is not None and process.returncode is not None and
+                    process.returncode < 0 and
+                    not _has_valid_final_result(bytes(output))):
+                facts = getattr(interrupt, '_llmtool_direct_codex_execution', {})
+                error = DirectCodexError(
+                    'CODEX_INTERRUPTED', attempted=True,
+                    process_exit_code=facts.get('process_exit_code'),
+                    stdout_sha256=facts.get('stdout_sha256'),
+                    elapsed_ms=facts.get('elapsed_ms'),
+                    cleanup_status=facts.get('cleanup_status', 'UNKNOWN'),
+                    native_session_id=facts.get('native_session_id'),
+                    usage=_usage_from_events(bytes(output)))
+                raise error from None
             raise
         # An unexpected exception still becomes a typed, fail-closed result
         # with the observed process facts, never a bare adapter UNKNOWN.
@@ -462,6 +480,19 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
     except BaseException as exc:
         close_lifecycle(type(exc), exc, exc.__traceback__)
         _attach_observed(exc, process, output, started, lifecycle)
+        if (process is not None and process.returncode is not None and
+                process.returncode < 0 and
+                not _has_valid_final_result(bytes(output))):
+            facts = getattr(exc, '_llmtool_direct_codex_execution', {})
+            error = DirectCodexError(
+                'CODEX_INTERRUPTED', attempted=True,
+                process_exit_code=facts.get('process_exit_code'),
+                stdout_sha256=facts.get('stdout_sha256'),
+                elapsed_ms=facts.get('elapsed_ms'),
+                cleanup_status=facts.get('cleanup_status', 'UNKNOWN'),
+                native_session_id=facts.get('native_session_id'),
+                usage=_usage_from_events(bytes(output)))
+            raise error from None
         raise
 
 
