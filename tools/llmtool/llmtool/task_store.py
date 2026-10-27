@@ -66,10 +66,30 @@ _V2_REMOTE_RECEIPT_OUTCOME_SHAPES = tuple(shape | frozenset((
     'remote_test_receipts', 'remote_test_outcomes')) for shape in _V2_SHAPES)
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
-    'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim'))
+    'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
+    'review_repair_claims'))
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
+_REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
+    'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
+    'comment_id', 'packet_sha256', 'claimed_at'))
+_V2_REPAIR_BASES = (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
+                    *_V2_REMOTE_OUTCOME_SHAPES,
+                    *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)
+_V2_REPAIR_OPTIONAL_BASES = (
+    *_V2_REPAIR_BASES,
+    *(shape | frozenset(('completion_events',)) for shape in _V2_REPAIR_BASES),
+    *(shape | frozenset(('completion_events', 'completion_event_tombstones'))
+      for shape in _V2_REPAIR_BASES),
+    *(shape | frozenset(('review_dispatch_claim',)) for shape in _V2_REPAIR_BASES),
+    *(shape | frozenset(('completion_events', 'review_dispatch_claim'))
+      for shape in _V2_REPAIR_BASES),
+    *(shape | frozenset(('completion_events', 'completion_event_tombstones',
+                         'review_dispatch_claim')) for shape in _V2_REPAIR_BASES),
+)
+_V2_REPAIR_SHAPES = tuple(shape | frozenset(('review_repair_claims',))
+                          for shape in _V2_REPAIR_OPTIONAL_BASES)
 MAX_COMPLETION_EVENTS = 32
 # Retention: when the event list is full, the oldest ACKED event is compacted
 # into a tombstone that keeps its identity and stream position, so an acked
@@ -509,7 +529,8 @@ def _validate(record):
                                   'review_dispatch_claim'))
                 for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                               *_V2_REMOTE_OUTCOME_SHAPES,
-                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)))) or
+                              *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
+             *_V2_REPAIR_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -557,6 +578,36 @@ def _validate(record):
             if identity in identities:
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
             identities.add(identity)
+    if 'review_repair_claims' in record:
+        claims = record['review_repair_claims']
+        if type(claims) is not list or not 1 <= len(claims) <= 64:
+            _fail('REVIEW_REPAIR_CLAIM_INVALID')
+        identities = set()
+        for item in claims:
+            if (type(item) is not dict or set(item) != _REVIEW_REPAIR_CLAIM_FIELDS or
+                    type(item.get('executor_task')) is not str or
+                    not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
+                    type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
+                    type(item.get('head_sha')) is not str or
+                    re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
+                    type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
+                    type(item.get('attempt')) is not int or item['attempt'] not in (1, 2) or
+                    item.get('state') != 'CLAIMED' or
+                    (item.get('comment_id') is not None and
+                     (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
+                    type(item.get('packet_sha256')) is not str or
+                    re.fullmatch(r'[0-9a-f]{64}', item['packet_sha256']) is None or
+                    type(item.get('claimed_at')) is not str or
+                    re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ',
+                                 item['claimed_at']) is None):
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
+            identity = (item['pr'], item['head_sha'], item['version'], item['attempt'])
+            if identity in identities:
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
+            identities.add(identity)
+        if any(sum(1 for item in claims if item['pr'] == pr) > 2
+               for pr in {item['pr'] for item in claims}):
+            _fail('REVIEW_REPAIR_CLAIM_INVALID')
     if 'remote_test_receipts' in record:
         _validate_remote_test_receipts(record)
     if 'remote_test_outcomes' in record:
@@ -2232,6 +2283,17 @@ class TaskStore:
                                     enumerate(zip(old_claims, new_claims)) if i != index))
                 if not allowed_claim_transition:
                     _fail('REVIEW_DISPATCH_CLAIM_TRANSITION_INVALID')
+            if 'review_repair_claims' in changes:
+                old_claims = current.get('review_repair_claims', [])
+                new_claims = changes['review_repair_claims']
+                if (type(old_claims) is not list or type(new_claims) is not list or
+                        len(new_claims) != len(old_claims) + 1 or
+                        new_claims[:-1] != old_claims or len(new_claims) > 64):
+                    _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
+                added = new_claims[-1]
+                if (type(added) is not dict or
+                        sum(1 for item in old_claims if item.get('pr') == added.get('pr')) >= 2):
+                    _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
             from . import worker_dispatch
             if trusted_dispatch_audit:
                 prior_audit = list(current.get('dispatch_audit', []))

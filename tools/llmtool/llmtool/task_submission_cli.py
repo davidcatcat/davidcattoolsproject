@@ -565,6 +565,15 @@ def add_task_submission_parsers(actions):
                                help='review verdict version (1-9999; default 1)')
     review_result.add_argument('--reviewer-session-done', action='store_true',
                                help='record REVIEW_BLOCKED when no verdict exists')
+    repair = actions.add_parser(
+        'repair', help='Dispatch one bounded repair for the newest failed formal review')
+    repair.add_argument('task_id', help='existing durable Task ID')
+    repair.add_argument('--executor-task', required=True,
+                        help='registered D6 Executor task id bound to the Task')
+    repair.add_argument('--pr', required=True, type=int,
+                        help='GitHub pull request number')
+    repair.add_argument('--auto-review', action='store_true',
+                        help='dispatch the next formal review after a successful repair')
     remote_test = actions.add_parser(
         'remote-test', help='Run admitted Task tests once on the configured EC2 host')
     remote_test.add_argument('task_id', help='existing durable Task ID')
@@ -702,6 +711,20 @@ def run_task_review_result(args, *, store=None, github_get=None):
         version=getattr(args, 'version', 1),
         reviewer_session_done=getattr(args, 'reviewer_session_done', False),
         github_get=github_get)
+    return _print(result)
+
+
+def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
+                    current_head=None, review_dispatcher=None):
+    """Thin CLI adapter for a bounded review-triggered Developer repair."""
+    from .review_repair import repair_review
+    result = repair_review(
+        store=TaskStore() if store is None else store, task_id=args.task_id,
+        executor_task=args.executor_task, pr_number=args.pr,
+        github_get=github_get, dispatch_adapter=dispatch_adapter,
+        current_head=current_head,
+        auto_review=getattr(args, 'auto_review', False),
+        review_dispatcher=review_dispatcher)
     return _print(result)
 
 
