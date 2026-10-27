@@ -23,6 +23,16 @@ def task_with_tests():
     }
 
 
+def task_with_module_count(count):
+    modules = [f'test_gate_sample_{index}' for index in range(count)]
+    task = task_with_tests()
+    task['task_contract']['test_commands'] = [
+        {'argv': ['python3', '-m', 'unittest', 'discover', '-s',
+                  'tools/llmtool/tests', '-p', module + '.py'], 'cwd': '.'}
+        for module in modules]
+    return task, ['tools/llmtool/tests/' + module + '.py' for module in modules]
+
+
 def sealed_receipt(**changes):
     value = {
         'task_id': '1' * 32, 'run_id': '2' * 32,
@@ -53,6 +63,17 @@ class RemoteTestGateTests(unittest.TestCase):
         non_unittest['task_contract']['test_commands'][0]['argv'] = ['python3', 'script.py']
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
             non_unittest, read_paths=[PATH], config_loader=lambda: {}), 'LOCAL')
+
+    def test_eligibility_caps_remote_modules_at_executor_limit(self):
+        eight_module_task, eight_module_paths = task_with_module_count(8)
+        self.assertEqual(task_submission_cli._remote_receipt_test_policy(
+            eight_module_task, read_paths=eight_module_paths,
+            config_loader=lambda: {}), 'REMOTE_RECEIPT')
+
+        nine_module_task, nine_module_paths = task_with_module_count(9)
+        self.assertEqual(task_submission_cli._remote_receipt_test_policy(
+            nine_module_task, read_paths=nine_module_paths,
+            config_loader=lambda: {}), 'LOCAL')
 
     def test_prompt_includes_remote_instruction_and_preserves_local_instruction(self):
         task = task_with_tests()

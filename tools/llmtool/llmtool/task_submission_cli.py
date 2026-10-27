@@ -1154,6 +1154,8 @@ def _remote_task_test_paths(task, *, read_paths=()):
                            '/' not in path[len('tools/llmtool/tests/'): ]}
         if task_test_paths and task_test_paths != set(paths):
             return ()
+    if len({Path(path).stem for path in paths}) > remote_test._MAX_REMOTE_MODULES:
+        return ()
     admitted_task = dict(task)
     admitted_task['completion'] = {'evidence': {'tests': [{'path': path} for path in paths]}}
     if set(remote_test._admitted_modules(admitted_task)) != {
