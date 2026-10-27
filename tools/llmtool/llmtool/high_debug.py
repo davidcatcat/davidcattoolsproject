@@ -48,34 +48,21 @@ def _run_codex(*, prompt, cwd, output_path):
 
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                    failed_corrections=None, early_reason=None, evidence=None,
-                   runner=None, create_d6=None, repo_root=None):
+                   runner=None, create_d6=None, repo_root=None,
+                   read_registration=None):
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('HIGH_DEBUG_TASK_INVALID')
-    policy = worker_dispatch.evaluate('codex-developer', None, task_id)
-    if not policy.allowed:
-        _refuse('HIGH_DEBUG_DISPATCH_REFUSED')
-    if type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None:
+    if (type(executor_task) is not str or
+            re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', executor_task) is None or
+            type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
+            type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None):
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     if ((type(failed_corrections) is int and failed_corrections >= 2 and early_reason is None) or
         (failed_corrections is None and type(early_reason) is str and 1 <= len(early_reason) <= 300)):
         pass
     else:
         _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
-    completion = task.get('completion')
-    ev = completion.get('evidence') if type(completion) is dict else None
-    if type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
-        _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
-    try:
-        registration = task_completion.read_d6_registration(executor_task, ev['common_dir'],
-            allowed_states=task_completion._D6_EVIDENCE_STATES)
-        head = registration.result_sha
-        snap = task_completion.collect_git_snapshot(registration.root)
-        if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
-            _refuse('HIGH_DEBUG_HEAD_MISMATCH')
-        root = str(registration.root)
-    except Exception:
-        _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:
@@ -86,6 +73,24 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         except LLMToolError: raise
         except Exception: _refuse('HIGH_DEBUG_EVIDENCE_INVALID')
     else: evidence_text = ''
+    policy = worker_dispatch.evaluate('codex-developer', None, task_id)
+    if not policy.allowed:
+        _refuse('HIGH_DEBUG_DISPATCH_REFUSED')
+    completion = task.get('completion')
+    ev = completion.get('evidence') if type(completion) is dict else None
+    if type(ev) is not dict or completion.get('executor_task_id') != executor_task or type(ev.get('common_dir')) is not str:
+        _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+    try:
+        reader = read_registration or task_completion.read_d6_registration
+        registration = reader(executor_task, ev['common_dir'],
+            allowed_states=task_completion._D6_EVIDENCE_STATES)
+        head = registration.result_sha
+        snap = task_completion.collect_git_snapshot(registration.root)
+    except Exception:
+        _refuse('HIGH_DEBUG_D6_UNAVAILABLE')
+    if not isinstance(head, str) or _HEX40.fullmatch(head) is None or snap.head != head:
+        _refuse('HIGH_DEBUG_HEAD_MISMATCH')
+    root = str(registration.root)
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
     d6 = f'{executor_task}-hd{len(entries)+1}-{head[:7]}'

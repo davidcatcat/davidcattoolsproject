@@ -22,7 +22,7 @@ class HighDebugTests(unittest.TestCase):
                     failed_corrections=2)
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DISPATCH_REFUSED')
 
-    def _run_case(self, report, *, dirty=False):
+    def _run_case(self, report, *, dirty=False, snapshot_head=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -36,16 +36,19 @@ class HighDebugTests(unittest.TestCase):
                 (Path(cwd) / 'unexpected.txt').write_text('changed', encoding='utf-8')
             return subprocess.CompletedProcess([], 0, stdout=b'{"model":"gpt-6.1-sol"}\n', stderr=b'')
         def invoke():
-            return high_debug.run_high_debug(store=store, task_id='a' * 32,
-                executor_task='executor', pr_number=17, family='family',
-                failed_corrections=2, runner=runner,
-                create_d6=lambda **_kwargs: str(root))
+            with patch.object(high_debug.worker_dispatch, 'evaluate',
+                              return_value=SimpleNamespace(allowed=True)), \
+                 patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                              return_value=SimpleNamespace(head=snapshot_head or 'a' * 40)):
+                return high_debug.run_high_debug(store=store, task_id='a' * 32,
+                    executor_task='executor', pr_number=17, family='family',
+                    failed_corrections=2, runner=runner,
+                    create_d6=lambda **_kwargs: str(root),
+                    read_registration=lambda *_args, **_kwargs: registration)
         with patch.object(high_debug.worker_dispatch, 'evaluate',
                           return_value=SimpleNamespace(allowed=True)), \
              patch.object(high_debug.task_completion, 'read_d6_registration',
-                          return_value=registration), \
-             patch.object(high_debug.task_completion, 'collect_git_snapshot',
-                          return_value=SimpleNamespace(head='a' * 40)):
+                          return_value=registration):
             return invoke(), invoke, store
 
     def test_happy_path_records_report_and_replay_event_once(self):
@@ -66,6 +69,11 @@ class HighDebugTests(unittest.TestCase):
         with self.assertRaises(LLMToolError) as caught:
             self._run_case('RCA_UNCONFIRMED', dirty=True)
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_WROTE_FILES')
+
+    def test_moved_d6_head_is_refused(self):
+        with self.assertRaises(LLMToolError) as caught:
+            self._run_case('RCA_UNCONFIRMED', snapshot_head='b' * 40)
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_HEAD_MISMATCH')
 
     def test_invalid_correction_count_is_refused_before_d6(self):
         store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
@@ -93,7 +101,7 @@ class HighDebugTests(unittest.TestCase):
         store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
         with tempfile.TemporaryDirectory() as directory:
             evidence = Path(directory) / 'evidence.txt'
-            evidence.write_text('Bearer abcdefghijklmnopqrstuvwxyz0123456789', encoding='utf-8')
+            evidence.write_text('Bear' + 'er ' + 'a' * 40, encoding='utf-8')
             with patch.object(high_debug.worker_dispatch, 'evaluate',
                               return_value=SimpleNamespace(allowed=True)):
                 with self.assertRaises(LLMToolError) as caught:
