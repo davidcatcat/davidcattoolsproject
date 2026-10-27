@@ -508,16 +508,22 @@ def main(argv=None):
             if args.action == 'ack':
                 return run_task_ack(args)
             if args.action == 'delegate':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
                 return run_task_delegate(args)
             if args.action == 'complete':
                 return run_task_complete(args)
             if args.action == 'review-prompt':
                 return run_task_review_prompt(args)
             if args.action == 'review-dispatch':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
                 return run_task_review_dispatch(args)
             if args.action == 'review-result':
                 return run_task_review_result(args)
             if args.action == 'remote-test':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
                 return run_task_remote_test(args)
             if args.action in ('review-request','review-wait'):
                 from .review_exchange import run_exchange
