@@ -208,7 +208,8 @@ def _chmod_writable(path):
             if entry.is_symlink():
                 continue
             try:
-                os.chmod(str(entry), 0o755 if entry.is_dir() else 0o644)
+                mode = 0o755 if entry.is_dir() else stat.S_IMODE(entry.stat().st_mode) | 0o200
+                os.chmod(str(entry), mode)
             except OSError:
                 pass
 
