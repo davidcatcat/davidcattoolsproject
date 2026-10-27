@@ -220,7 +220,7 @@ class ClaudeCLIProvider:
             raise LLMToolError("invalid conversation input") from None
         argv = [
             executable, "--print", "--output-format", "text",
-            "--no-session-persistence", "--safe-mode", "--tools", "",
+            "--no-session-persistence", "--safe-mode", "--tools", "WebSearch,WebFetch",
         ]
         model = self.provider.get("model")
         if model:
@@ -422,7 +422,7 @@ class ClaudeCLIProvider:
                     environment = self._child_environment()
                     environment['HOME'] = auth_home
                     argv = [executable, '--print', '--output-format', 'json',
-                            '--no-session-persistence', '--safe-mode', '--tools', '',
+                            '--no-session-persistence', '--safe-mode', '--tools', 'WebSearch,WebFetch',
                             '--model', self.provider['model']]
                     process = subprocess.Popen(argv, stdin=subprocess.PIPE,
                         stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
