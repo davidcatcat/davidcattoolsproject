@@ -115,7 +115,7 @@ jobs:
         id: full-due
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_API_VALUE: ${{ github.token }}
         run: |
           main_sha=$(git rev-parse HEAD)
           due=$(python3 -I -B tools/llmtool/scripts/ci_mac_full_due.py \

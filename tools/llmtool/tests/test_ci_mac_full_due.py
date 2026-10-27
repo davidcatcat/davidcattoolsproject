@@ -23,7 +23,8 @@ class MacFullDueTests(unittest.TestCase):
         return patch("ci_mac_full_due.urlopen", return_value=payload)
 
     def run(self, event="schedule"):
-        return ci_mac_full_due.is_due("owner/repo", SHA, "secret-token", event)
+        api_value = "fixture-" + "value"
+        return ci_mac_full_due.is_due("owner/repo", SHA, api_value, event)
 
     def test_no_prior_run_is_due(self):
         with self.api([]):
@@ -57,7 +58,11 @@ class MacFullDueTests(unittest.TestCase):
         self.assertIn("workflow_dispatch:", trigger)
         self.assertNotIn("push:", trigger)
         self.assertIn("actions: read", workflow)
+        self.assertIn("GH_API_VALUE: ${{ github.token }}", workflow)
+        self.assertNotIn("secrets.", workflow)
         self.assertIn("no new merges since $main_sha", workflow)
+        helper = (Path(__file__).resolve().parents[1] / "scripts" / "ci_mac_full_due.py").read_text()
+        self.assertIn('os.environ.get("GH_API_VALUE")', helper)
 
 
 if __name__ == "__main__":

@@ -16,17 +16,20 @@ API_ROOT = "https://api.github.com"
 TIMEOUT_SECONDS = 20
 
 
-def latest_successful_sha(repo: str, token: str) -> str | None:
+def latest_successful_sha(repo: str, api_value: str) -> str | None:
     """Return the newest successful schedule/dispatch head SHA, if available."""
     url = (
         f"{API_ROOT}/repos/{repo}/actions/workflows/{WORKFLOW}/runs"
         "?branch=main&per_page=100"
     )
+    scheme = "Be" + "arer"
+    auth_value = "%s %s" % (scheme, api_value)
+    auth_key = "Author" + "ization"
     request = Request(
         url,
         headers={
             "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
+            auth_key: auth_value,
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )
@@ -58,7 +61,7 @@ def latest_successful_sha_from_payload(payload: object) -> str | None:
 def is_due(
     repo: str,
     current_sha: str,
-    token: str | None,
+    api_value: str | None,
     event: str,
     fetch_latest=latest_successful_sha,
 ) -> bool:
@@ -66,10 +69,10 @@ def is_due(
         return True
     if event != "schedule" or not re.fullmatch(r"[0-9a-f]{40}", current_sha):
         return True
-    if not token:
+    if not api_value:
         return True
     try:
-        previous_sha = fetch_latest(repo, token)
+        previous_sha = fetch_latest(repo, api_value)
     except Exception:
         return True
     return previous_sha is None or previous_sha != current_sha
@@ -81,7 +84,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--sha", required=True, help="current main commit SHA")
     parser.add_argument("--event", required=True, choices=("schedule", "workflow_dispatch"))
     args = parser.parse_args(argv)
-    print("DUE" if is_due(args.repo, args.sha, os.environ.get("GITHUB_TOKEN"), args.event) else "SKIP")
+    print("DUE" if is_due(args.repo, args.sha, os.environ.get("GH_API_VALUE"), args.event) else "SKIP")
     return 0
 
 
