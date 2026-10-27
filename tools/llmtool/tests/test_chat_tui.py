@@ -1879,8 +1879,8 @@ def _result(text='done', **extra):
 
 
 def _full_turn(hold=False):
-    return ([_delta('Hel')] + (['HOLD'] if hold else []) +
-            [_delta('lo 老闆'),
+    return ([_delta('Hello ')] + (['HOLD'] if hold else []) +
+            [_delta('老闆'),
              _assistant({'type': 'text', 'text': 'Hello 老闆'},
                         {'type': 'tool_use', 'id': 't1', 'name': 'Read', 'input': {'path': 'SECRET_PATH'}}),
              {'type': 'user', 'message': {'content': [
@@ -1888,6 +1888,54 @@ def _full_turn(hold=False):
                   'is_error': True}]}},
              _assistant({'type': 'text', 'text': 'after tool'}),
              _result('Hello 老闆 after tool')])
+
+
+def _fake_key():
+    """A credential-shaped literal built at runtime (diffs must not carry one)."""
+    return 's' + 'k-' + ''.join('A1b2C3d4E5f6G7h8J9')
+
+
+class StreamScreeningTests(unittest.TestCase):
+    """Streamed PM text is redacted before display, including secrets split over deltas."""
+
+    def setUp(self):
+        from llmtool import chat_tui_pm
+        self.pm = chat_tui_pm
+
+    def progressive(self, pieces):
+        raw, shown = '', []
+        for piece in pieces:
+            raw += piece
+            shown.append(self.pm.screen_stream(raw, final=False))
+        return raw, shown
+
+    def test_key_split_over_deltas_is_never_shown(self):
+        key = _fake_key()
+        raw, shown = self.progressive(['status ok: ', key[:1], key[1:7], key[7:], ' done'])
+        for text in shown + [self.pm.screen_stream(raw, final=True)]:
+            self.assertNotIn(key[3:9], text)
+            self.assertNotIn(key[:6], text)
+        self.assertIn('[REDACTED]', self.pm.screen_stream(raw, final=True))
+
+    def test_bearer_and_private_key_blocks(self):
+        header_value = 'Bea' + 'rer ' + 'x' * 30
+        raw, shown = self.progressive(['auth: ', header_value[:3], header_value[3:12],
+                                       header_value[12:], ' end'])
+        self.assertTrue(all('xxxxxx' not in text for text in shown))
+        header = '-----' + 'BEGIN ' + 'PRIVATE KEY' + '-----'
+        footer = '-----' + 'END ' + 'PRIVATE KEY' + '-----'
+        body = 'MII' + 'q' * 40
+        raw, shown = self.progressive(['key below\n', header + '\n', body + '\n', footer, '\nafter'])
+        self.assertTrue(all('qqqqqq' not in text and 'BEGIN' not in text for text in shown))
+        final = self.pm.screen_stream(raw, final=True)
+        self.assertNotIn('qqqqqq', final)
+
+    def test_cjk_streams_at_once_and_unclassified_is_withheld(self):
+        self.assertEqual(self.pm.screen_stream('你好，進度正常', final=False), '你好，進度正常')
+        self.assertEqual(self.pm.screen_stream('see the ' + 'pass' + 'word: ', final=True),
+                         self.pm.WITHHELD)
+        self.assertEqual(self.pm.safe_name('Read'), 'Read')
+        self.assertEqual(self.pm.safe_name('tool ' + _fake_key()), '[withheld]')
 
 
 class PMAdapterTests(unittest.TestCase):
@@ -1995,7 +2043,7 @@ class PMConversationTests(Base):
             self.assertIn('--include-partial-messages', argv)
 
         async def partial(ui):
-            await self.until(ui, lambda ui: 'PM:\nHel' in ui.conversation.text, 'first delta')
+            await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text, 'first delta')
             self.assertTrue(ui.pm_turn_active)
             self.assertIn('working', ui.status_text())
             self.assertNotIn('Hello 老闆', ui.conversation.text)   # streamed, not yet complete
@@ -2028,7 +2076,7 @@ class PMConversationTests(Base):
             ui.app.renderer.render(ui.app, ui.app.layout)
 
         async def busy(ui):
-            await self.until(ui, lambda ui: 'PM:\nHel' in ui.conversation.text)
+            await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text)
             self.assertIn('a PM turn is in progress; input kept', ui.conversation.text)
             self.assertEqual(ui.input.text, 'second')
             ui.input.buffer.reset()
@@ -2052,7 +2100,7 @@ class PMConversationTests(Base):
                 processor.process_keys()
 
         async def streaming(ui):
-            await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_open)
+            await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_raw is not None)
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
 
         def interrupted(ui):
@@ -2086,6 +2134,80 @@ class PMConversationTests(Base):
             self.assertTrue(text.startswith('PM:'))
 
         self.drive([self.connect(), self.connected, narrow], size=size)
+
+    def test_split_secret_in_a_real_turn_is_never_displayed(self):
+        key = _fake_key()
+        self.turns = [[_delta('your key is '), _delta(key[:5]), _delta(key[5:]), _delta(' — rotate it'),
+                       _result('')]]
+        seen = []
+
+        def watch(ui):
+            original = ui._pm_render
+
+            def render(final):
+                original(final)
+                seen.append(ui.conversation.text)
+            ui._pm_render = render
+
+        ui, _ = self.drive([self.connect(), self.connected, watch, 'show key\r', self.turn_done])
+        self.assertTrue(seen)
+        for text in seen + [ui.conversation.text]:
+            self.assertNotIn(key[3:9], text)
+        self.assertIn('your key is [REDACTED] — rotate it', ui.conversation.text)
+
+    def lock_is_free(self):
+        probe = self.make_runtime(PM_SESSION, str(self.temp_root)).open()   # raises if still locked
+        probe.close()
+
+    def test_exit_while_open_runs_closes_the_runtime_it_opens(self):
+        entered, release = threading.Event(), threading.Event()
+        make = self.make_runtime
+
+        def slow_runtime(session_id, cwd):
+            runtime = make(session_id, cwd)
+            runner = runtime.runner
+
+            def blocking(argv, run_cwd, env):
+                entered.set()
+                release.wait(5)
+                return runner(argv, run_cwd, env)
+            runtime.runner = blocking
+            return runtime
+
+        self.make_runtime = slow_runtime
+        ui, _ = self.drive([self.connect(), lambda ui: self.until(ui, lambda ui: entered.is_set()),
+                            lambda ui: ui.app.exit(result=0)])
+        self.make_runtime = make
+        release.set()
+        for thread in threading.enumerate():
+            if thread.name == 'llmtool-chat-pm':
+                thread.join(5)
+        self.assertIsNone(ui.pm_runtime)
+        self.assertTrue(self.fakes[0].closed_stdin)
+        self.lock_is_free()
+
+    def test_exit_before_connect_completion_is_delivered_closes_the_runtime(self):
+        opened, release = threading.Event(), threading.Event()
+
+        def stuck_history(session_id, runtime):
+            opened.set()
+            release.wait(5)
+            return {'turns': []}, None
+
+        def install(ui):
+            ui._pm_read_history = stuck_history
+
+        ui, _ = self.drive([install, self.connect(),
+                            lambda ui: self.until(ui, lambda ui: opened.is_set()),
+                            lambda ui: ui.app.exit(result=0)])
+        # close_pm ran on exit and closed the opened-but-unadopted runtime.
+        self.assertTrue(self.fakes[0].closed_stdin)
+        self.lock_is_free()
+        release.set()   # the worker's late completion cannot reach the closed loop
+        for thread in threading.enumerate():
+            if thread.name == 'llmtool-chat-pm':
+                thread.join(5)
+        self.assertIsNone(ui.pm_runtime)
 
     def test_esc_enter_is_still_a_newline_when_no_turn_runs(self):
         ui, _ = self.drive([self.connect(), self.connected, 'a', '\x1b\r', 'b',
