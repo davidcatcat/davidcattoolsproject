@@ -2,24 +2,15 @@ name: llmtool Mac CI
 
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
-# main keeps its post-merge run; workflow_dispatch is the manual check for a
-# ref without a PR. Jobs run on the Owner's Mac as the dedicated non-admin
+# main gets a scheduled full-suite safety net; workflow_dispatch is the manual
+# check for main. Jobs run on the Owner's Mac as the dedicated non-admin
 # account from tools/mac-runner (installed outside the repo, so a PR cannot
 # turn it off); its job-started hook fails any job from a runner running as
 # the Owner, a fork or an untrusted actor. MAC_CI_ENABLED is the kill switch:
 # anything but 'true' skips the job, and a skipped job is NOT_RUN, not PASS.
 on:
-  push:
-    branches:
-      - main
-    # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
-    paths:
-      - 'tools/llmtool/**'
-      - '!tools/llmtool/*.md'
-      - 'scripts/llmtool_monitor.py'
-      - 'scripts/test_llmtool_monitor.py'
-      - '.github/workflows/llmtool-mac-ci.yml'
-      - 'tools/mac-runner/**'
+  schedule:
+    - cron: '0 */6 * * *'
   pull_request:
     # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
     paths:
@@ -33,10 +24,11 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
 
 jobs:
   check:
@@ -49,7 +41,7 @@ jobs:
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.event.pull_request.head.sha || 'main' }}
           fetch-depth: 0
           persist-credentials: false
       # Without the merge ref, merge coverage holds only if the head already
@@ -58,10 +50,13 @@ jobs:
       # live main and bind to this head (Issue #99 / PR #100).
       - name: Source revision
         env:
-          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || '' }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            EXPECTED_SHA=$(git rev-parse HEAD) || fail "cannot read checked-out main SHA"
+          fi
           [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
           head=$(git rev-parse HEAD) || fail "cannot read HEAD"
           test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
@@ -116,10 +111,30 @@ jobs:
           fi
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
           echo "coverage mode: $mode"
+      - name: Full main suite due gate
+        id: full-due
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          main_sha=$(git rev-parse HEAD)
+          due=$(python3 -I -B tools/llmtool/scripts/ci_mac_full_due.py \
+            --repo "$GITHUB_REPOSITORY" --sha "$main_sha" --event "$GITHUB_EVENT_NAME")
+          if [ "$due" = DUE ]; then
+            echo 'run=true' >> "$GITHUB_OUTPUT"
+            echo "full main suite due at $main_sha"
+          elif [ "$due" = SKIP ]; then
+            echo 'run=false' >> "$GITHUB_OUTPUT"
+            echo "no new merges since $main_sha"
+          else
+            echo "::error::unexpected full-suite gate result"
+            exit 1
+          fi
       # Use the Mac's Python 3.13 in a job-owned venv with a copied executable.
       # The trusted-runtime check refuses a group/other-writable interpreter;
       # the copy is checked byte-for-byte without changing the shared Python.
       - name: Job-owned verified Python
+        if: steps.full-due.outputs.run != 'false'
         run: |
           python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
           src_exe="$(python3 -c 'import os,sys; print(os.path.realpath(sys.executable))')"
@@ -146,10 +161,12 @@ jobs:
             || fail "copy does not run from RUNNER_TEMP"
           echo "JOB_PYTHON=$exe" >> "$GITHUB_ENV"
       - name: Install llmtool
+        if: steps.full-due.outputs.run != 'false'
         run: |
           "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
           "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
       - name: Verifier failure-path checks
+        if: steps.full-due.outputs.run != 'false'
         run: |
           "$JOB_PYTHON" -B - <<'PY'
           import os
@@ -223,7 +240,7 @@ jobs:
           print('Verifier checks: 12/12 PASS; no skips')
           PY
       - name: Offline canonical checks
-        if: steps.coverage.outputs.mode != 'monitor-only'
+        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only'
         run: |
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
             make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
@@ -234,6 +251,7 @@ jobs:
             make -C tools/llmtool check PYTHON="$JOB_PYTHON"
           fi
       - name: Monitor script checks
+        if: steps.full-due.outputs.run != 'false'
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s scripts
       - name: Working tree is clean

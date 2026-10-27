@@ -100,12 +100,14 @@ class MacModuleSelectionTests(unittest.TestCase):
             self.assertEqual(output[0], output[1])
             self.assertEqual(output[0].splitlines(), sorted(output[0].splitlines()))
 
-    def test_workflow_keeps_job_name_and_full_main_push(self):
+    def test_workflow_keeps_job_name_and_full_suite(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml").read_text()
         self.assertIn("name: check (macOS 3.13)", workflow)
         self.assertIn("mode=full", workflow)
         self.assertIn("make -C tools/llmtool check PYTHON=\"$JOB_PYTHON\"", workflow)
-        self.assertIn("cancel-in-progress: true", workflow)
+        self.assertIn("cron: '0 */6 * * *'", workflow)
+        self.assertIn("pull_request:", workflow)
+        self.assertNotIn("  push:\n", workflow)
         self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
         self.assertIn('[ -z "$selection" ] || [ "$selection" = FULL ]', workflow)
 
