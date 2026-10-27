@@ -71,9 +71,10 @@ class PMRuntimeTests(unittest.TestCase):
             self.calls.append((argv, cwd, env))
             return self.process
 
+        kwargs.setdefault('clock', lambda: 1000)
         return pm_runtime.PMRuntime(SESSION, cwd=self.cwd, runner=runner,
                                     state_root=self.root, environ={'HOME': self.temp.name},
-                                    clock=lambda: 1000, **kwargs)
+                                    **kwargs)
 
     def test_argv_cwd_stream_events_and_history(self):
         process = FakeProcess(encoded(
@@ -160,7 +161,10 @@ class PMRuntimeTests(unittest.TestCase):
             runtime = self.runtime(FakeProcess(lines))
             runtime.open()
             events = list(runtime.send('request'))
-            self.assertEqual(events[0], {'type': 'RUNTIME_ERROR', 'code': code})
+            self.assertEqual(events[0]['type'], 'RUNTIME_ERROR')
+            self.assertEqual(events[0]['code'], code)
+            self.assertTrue(events[0]['turn_id'])
+            self.assertEqual(events[0]['seq'], 0)
             self.assertEqual(events[-1]['status'], 'ERROR')
             runtime.close()
 
@@ -287,12 +291,13 @@ class PMRuntimeTests(unittest.TestCase):
         runtime = self.runtime(first_process)
         runtime.open()
         first = list(runtime.send('request', idempotency_key='request-1'))
+        captured_input = first_process.stdin.getvalue()
         runtime.close()
         second_process = FakeProcess()
         runtime = self.runtime(second_process)
         runtime.open()
         replay = list(runtime.send('request', idempotency_key='request-1'))
-        self.assertEqual(len(first_process.stdin.getvalue().splitlines()), 1)
+        self.assertEqual(len(captured_input.splitlines()), 1)
         self.assertEqual(second_process.stdin.getvalue(), b'')
         self.assertEqual(replay[0]['type'], 'TURN_REPLAY')
         self.assertEqual(replay[0]['turn_id'], first[-1]['turn_id'])
