@@ -51,6 +51,11 @@ class FakeProcess:
 
 class PMRuntimeTests(unittest.TestCase):
     def setUp(self):
+        self.original_signal_handlers = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGTERM, signal.SIGHUP)
+        }
+        self.runtimes = set()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'state'
@@ -64,6 +69,13 @@ class PMRuntimeTests(unittest.TestCase):
             'runtime': 'claude-code', 'native_session_id': SESSION, 'cwd': self.cwd,
             'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1)})
 
+    def tearDown(self):
+        for runtime in tuple(self.runtimes):
+            runtime.close(timeout=0)
+        self.assertFalse(pm_runtime._active_runtimes)
+        for signum, handler in self.original_signal_handlers.items():
+            self.assertIs(signal.getsignal(signum), handler)
+
     def runtime(self, process=None, **kwargs):
         self.process = process or FakeProcess()
         self.calls = []
@@ -73,9 +85,12 @@ class PMRuntimeTests(unittest.TestCase):
             return self.process
 
         kwargs.setdefault('clock', lambda: 1000)
-        return pm_runtime.PMRuntime(SESSION, cwd=self.cwd, runner=runner,
-                                    state_root=self.root, environ={'HOME': self.temp.name},
-                                    **kwargs)
+        runtime = pm_runtime.PMRuntime(SESSION, cwd=self.cwd, runner=runner,
+                                       state_root=self.root, environ={'HOME': self.temp.name},
+                                       **kwargs)
+        self.runtimes.add(runtime)
+        self.addCleanup(runtime.close)
+        return runtime
 
     def test_argv_cwd_stream_events_and_history(self):
         process = FakeProcess(encoded(
@@ -217,6 +232,22 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_NOT_DEDICATED')
         self.assertIn('create', str(raised.exception))
 
+    def test_open_failure_after_lifecycle_registration_unregisters(self):
+        register = pm_runtime._register_lifecycle
+
+        def register_then_fail(runtime):
+            register(runtime)
+            raise LLMToolError('synthetic lifecycle registration failure')
+
+        runtime = self.runtime()
+        with patch.object(pm_runtime, '_register_lifecycle', side_effect=register_then_fail):
+            with self.assertRaises(LLMToolError):
+                runtime.open()
+        self.assertFalse(pm_runtime._active_runtimes)
+        for signum, handler in self.original_signal_handlers.items():
+            self.assertIs(signal.getsignal(signum), handler)
+        self.assertTrue(runtime.process.terminated)
+
     def test_open_refuses_external_live_session_process(self):
         with patch.object(pm_runtime.subprocess, 'check_output',
                           return_value=f'123 claude --resume {SESSION}'.encode()):
@@ -258,6 +289,7 @@ class PMRuntimeTests(unittest.TestCase):
 
         try:
             signal.signal(signum, handler)
+            self.assertIs(signal.getsignal(signum), handler)
             runtime = self.runtime()
             runtime.open()
             self.assertIs(signal.getsignal(signum), pm_runtime._terminate_all)

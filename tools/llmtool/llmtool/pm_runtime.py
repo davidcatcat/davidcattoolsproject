@@ -251,33 +251,42 @@ def _terminate_all(signum=None, frame=None):
 
 def _restore_signal_handlers():
     global _signal_handlers_installed
-    if not _signal_handlers_installed:
-        return
     for signum, handler in tuple(_previous_signal_handlers.items()):
         try:
-            signal.signal(signum, handler)
+            # Do not overwrite a handler installed by another owner while this
+            # runtime was open. The cache can be stale if that owner replaced
+            # our handler, so the live disposition is authoritative.
+            if signal.getsignal(signum) is _terminate_all:
+                signal.signal(signum, handler)
         except (ValueError, OSError):
             pass
     _previous_signal_handlers.clear()
     _signal_handlers_installed = False
 
 
+def _unregister_lifecycle(runtime):
+    _active_runtimes.discard(runtime)
+    if not _active_runtimes:
+        _restore_signal_handlers()
+
+
 def _register_lifecycle(runtime):
     global _signal_handlers_installed, _atexit_registered
     _active_runtimes.add(runtime)
-    if not _signal_handlers_installed:
-        installed = []
-        for signum in (signal.SIGTERM, signal.SIGHUP):
-            try:
-                _previous_signal_handlers[signum] = signal.getsignal(signum)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            current = signal.getsignal(signum)
+            if current is not _terminate_all:
+                _previous_signal_handlers[signum] = current
                 signal.signal(signum, _terminate_all)
-                installed.append(signum)
-            except (ValueError, OSError):
-                _previous_signal_handlers.pop(signum, None)
-        _signal_handlers_installed = bool(installed)
-        if not _atexit_registered:
-            atexit.register(_terminate_all)
-            _atexit_registered = True
+        except (ValueError, OSError):
+            pass
+    _signal_handlers_installed = any(
+        signal.getsignal(signum) is _terminate_all
+        for signum in (signal.SIGTERM, signal.SIGHUP))
+    if _signal_handlers_installed and not _atexit_registered:
+        atexit.register(_terminate_all)
+        _atexit_registered = True
 
 
 class PMRuntime:
@@ -442,12 +451,22 @@ class PMRuntime:
             self._has_owned_session = True
             return self
         except LLMToolError:
-            self._release_lock()
+            try:
+                self.close(timeout=0)
+            except Exception:
+                _unregister_lifecycle(self)
+                self._release_lock()
+                self._child = None
             self._key = self._root = None
             raise
         except Exception:
-            self._release_lock()
-            self._child = None
+            try:
+                self.close(timeout=0)
+            except Exception:
+                _unregister_lifecycle(self)
+                self._release_lock()
+                self._child = None
+            self._key = self._root = None
             raise _error('PM_PROCESS_START_FAILED', 'PM runtime process could not be started') from None
 
     def _release_lock(self):
@@ -725,9 +744,7 @@ class PMRuntime:
                         except Exception:
                             pass
         finally:
-            _active_runtimes.discard(self)
-            if not _active_runtimes:
-                _restore_signal_handlers()
+            _unregister_lifecycle(self)
             self._release_lock()
             self._child = None
 
