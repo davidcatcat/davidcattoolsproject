@@ -28,6 +28,25 @@ from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
 from .task_completion import validate_host_worker_receipt
 
+
+def _added_diff_content(value):
+    """Return added unified-diff hunk lines, excluding file headers."""
+    added = []
+    in_hunk = False
+    previous = None
+    for line in value.splitlines():
+        if line.startswith('diff --git '):
+            in_hunk = False
+        elif line.startswith('@@ '):
+            in_hunk = True
+        elif (not in_hunk and line.startswith('+++ ') and previous is not None and
+                previous.startswith('--- ')):
+            pass
+        elif in_hunk and line.startswith('+'):
+            added.append(line[1:])
+        previous = line
+    return '\n'.join(added)
+
 SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 1024 * 1024
 TASK_ID = re.compile(r'[0-9a-f]{32}')
@@ -86,17 +105,32 @@ _COMPLETION_EVENT_FIELDS = frozenset((
     'sequence', 'payload_sha256', 'state', 'received_at', 'consumed_at',
     'pm_decision_sha256', 'acked_at', 'dispatch_intent',
 ))
+_GITHUB_EVENT_FIELDS = frozenset(('issue_number', 'comment_id', 'marker_type',
+                                  'marker_status', 'merge_sha'))
 _COMPLETION_INTENT_FIELDS = frozenset((
     'intent_id', 'intent_sha256', 'state', 'persisted_at',
     'receipt_sha256', 'confirmed_at',
 ))
 _COMPLETION_SOURCES = frozenset(('DIRECT_D6_DEVELOPER', 'HOST_WORKER', 'REVIEWER',
-                                 'EC2_REMOTE_TEST'))
+                                 'EC2_REMOTE_TEST', 'GITHUB'))
 _REMOTE_TEST_RECEIPT_FIELDS = frozenset((
     'result', 'exit_code', 'source_sha', 'tree', 'fetch_head', 'modules',
     'identity', 'started_at', 'ended_at', 'elapsed_s', 'ran_total', 'final',
     'failures', 'log_bytes', 'log_sha256', 'remote_log_path', 'task_id',
     'run_id', 'executor_task', 'pm_session', 'command_digest', 'receipt_digest'))
+_REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT = (
+    _REMOTE_TEST_RECEIPT_FIELDS | frozenset(('failure_excerpt',)))
+_REMOTE_TEST_FAILURE_EXCERPT_LIMIT = 4096
+_REMOTE_TEST_FAILURE_EXCERPT_LINES = 40
+
+
+def _valid_remote_test_failure_excerpt(value):
+    if type(value) is not str or len(value.splitlines()) > _REMOTE_TEST_FAILURE_EXCERPT_LINES:
+        return False
+    try:
+        return len(value.encode('utf-8')) <= _REMOTE_TEST_FAILURE_EXCERPT_LIMIT
+    except UnicodeError:
+        return False
 MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
@@ -283,7 +317,11 @@ def _validate_completion_events(record):
         _fail('COMPLETION_EVENT_INVALID')
     ids, sequences, last_sequence = set(), set(), {}
     for event in events:
-        if (type(event) is not dict or set(event) != _COMPLETION_EVENT_FIELDS or
+        github_fields = set(event) - _COMPLETION_EVENT_FIELDS if type(event) is dict else set()
+        if (type(event) is not dict or
+                (set(event) != _COMPLETION_EVENT_FIELDS and
+                 not (set(event) == _COMPLETION_EVENT_FIELDS | _GITHUB_EVENT_FIELDS and
+                      event.get('source') == 'GITHUB')) or
                 not _safe_identifier(event['event_id'], TASK_ID) or
                 event['event_id'] in ids or
                 event['task_id'] != record['task_id'] or
@@ -301,6 +339,17 @@ def _validate_completion_events(record):
                 type(event['payload_sha256']) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', event['payload_sha256']) is None or
                 event['state'] not in ('PENDING', 'PM_CONSUMED', 'ACKED')):
+            _fail('COMPLETION_EVENT_INVALID')
+        if github_fields and (type(event.get('issue_number')) is not int or
+                not 1 <= event['issue_number'] <= 9999999 or
+                (event.get('comment_id') is not None and
+                 (type(event['comment_id']) is not int or event['comment_id'] <= 0)) or
+                type(event.get('marker_type')) is not str or
+                re.fullmatch(r'[a-z][a-z0-9_]{0,63}', event['marker_type']) is None or
+                type(event.get('marker_status')) is not str or
+                re.fullmatch(r'[A-Z][A-Z0-9_]{0,31}', event['marker_status']) is None or
+                (event.get('merge_sha') is not None and
+                 re.fullmatch(r'[0-9a-f]{40}', event['merge_sha']) is None)):
             _fail('COMPLETION_EVENT_INVALID')
         ids.add(event['event_id'])
         sequence_key = (event['source'], event['session_id'], event['sequence'])
@@ -392,7 +441,12 @@ def _validate_remote_test_receipts(record):
     if type(receipts) is not list or len(receipts) > 32:
         _fail('REMOTE_TEST_RECEIPT_INVALID')
     for receipt in receipts:
-        if (type(receipt) is not dict or set(receipt) != _REMOTE_TEST_RECEIPT_FIELDS or
+        if (type(receipt) is not dict or set(receipt) not in (
+                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT) or
+                ('failure_excerpt' in receipt and
+                 (receipt.get('result') == 'PASS' or
+                  not _valid_remote_test_failure_excerpt(
+                      receipt['failure_excerpt']))) or
                 receipt.get('result') not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH',
                                               'ADMISSION_DENIED', 'UNAVAILABLE', 'UNKNOWN') or
                 type(receipt.get('exit_code')) not in (int, type(None)) or
@@ -957,7 +1011,7 @@ def _validate(record):
                 if (type(artifact) is not str or len(artifact.encode('utf-8')) > 64 * 1024 or
                         type(artifact_sha) is not str or
                         hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha or
-                        _emitted_sensitive(artifact)):
+                        _emitted_sensitive(_added_diff_content(artifact))):
                     _fail()
             elif artifact_sha is not None:
                 _fail()
@@ -1643,7 +1697,8 @@ class TaskStore:
         return {'event': json.loads(json.dumps(event)), 'created': created}
 
     def record_completion_event(self, task_id, *, event_id, run_id, session_id,
-                                source, source_sha, sequence, payload_sha256):
+                                source, source_sha, sequence, payload_sha256,
+                                github_metadata=None):
         """Persist a terminal event before any wake; identical replay is inert.
 
         The caller verifies the terminal source separately. This storage API
@@ -1661,6 +1716,13 @@ class TaskStore:
         binding = dict(event_id=event_id, task_id=task_id, run_id=run_id,
                        session_id=session_id, source=source, source_sha=source_sha,
                        sequence=sequence, payload_sha256=payload_sha256)
+        if github_metadata is not None:
+            if (source != 'GITHUB' or type(github_metadata) is not dict or
+                    set(github_metadata) != _GITHUB_EVENT_FIELDS or
+                    type(github_metadata.get('issue_number')) is not int or
+                    not 1 <= github_metadata['issue_number'] <= 9999999):
+                _fail('COMPLETION_EVENT_INVALID')
+            binding.update(github_metadata)
         for _ in range(5):
             current = self.get(task_id)
             if current['schema_version'] != 2 or current['run_id'] != run_id:
@@ -1724,7 +1786,8 @@ class TaskStore:
 
     def append_remote_test_receipt(self, task_id, receipt):
         """Append one validated remote test receipt idempotently to its Task."""
-        if type(receipt) is not dict or set(receipt) != _REMOTE_TEST_RECEIPT_FIELDS:
+        if type(receipt) is not dict or set(receipt) not in (
+                _REMOTE_TEST_RECEIPT_FIELDS, _REMOTE_TEST_RECEIPT_FIELDS_WITH_EXCERPT):
             _fail('REMOTE_TEST_RECEIPT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
