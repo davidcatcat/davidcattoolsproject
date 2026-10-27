@@ -3,7 +3,7 @@
 Dispatches a single bound review request through the existing reviewed
 `ProductionReviewIssuer` + `ReceiptLedger(kind='PROVIDER_REVIEW')` +
 `run_foreground_review` pipeline (`claude --print --output-format json
---no-session-persistence --safe-mode --tools ''`), closing `stdin` on EOF so no
+--no-session-persistence --safe-mode --tools WebSearch,WebFetch`), closing `stdin` on EOF so no
 interactive terminal, AppleScript paste, or manual Enter keypress is ever used.
 
 No new controller, daemon, scheduler, database, or second authority ledger is

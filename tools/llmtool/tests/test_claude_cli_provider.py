@@ -116,8 +116,10 @@ else:
         argv = json.loads(self.args_file.read_text(encoding="utf-8"))
         self.assertEqual(argv, [
             "--print", "--output-format", "text", "--no-session-persistence",
-            "--safe-mode", "--tools", "", "--model", "sonnet",
+            "--safe-mode", "--tools", "WebSearch,WebFetch", "--model", "sonnet",
         ])
+        tools = argv[argv.index("--tools") + 1].split(",")
+        self.assertFalse({"Read", "Write", "Edit", "Bash"}.intersection(tools))
         self.assertEqual(self.input_file.read_text(encoding="utf-8"),
                          "SYSTEM:\nFollow instruction.\n\nUSER:\nReply with marker.")
         self.assertEqual(reply.content, "CLAUDE_FINAL")

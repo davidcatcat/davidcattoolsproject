@@ -255,8 +255,9 @@ composition (test_only=false on its real components); that flag is not Live
 evidence. Runtime stays NOT_VERIFIED and production handoff NOT_DELIVERED.
 
 The opt-in provider invocation is foreground `--print --output-format json
---no-session-persistence --safe-mode --tools "" --model <pinned model>`, with
-shell disabled, isolated empty cwd, sanitized environment and pinned auth HOME.
+--no-session-persistence --safe-mode --tools "WebSearch,WebFetch" --model <pinned model>`;
+only WebSearch and WebFetch are allowed. Shell remains disabled, with isolated
+empty cwd, sanitized environment and pinned auth HOME.
 The syntax basis is the previously inspected installed **2.1.301 help** (with
 installed **2.1.303** version/telemetry codec fixture support), plus
 Anthropic's [CLI reference](https://code.claude.com/docs/en/cli-reference) and
@@ -843,10 +844,11 @@ This round grants no such wiring or smoke permission. No explicit verdict file
 write is in v1; adding one requires its own scope/permission review.
 
 Invoke only approved `claude-cli` via its existing provider and CLIProcessLifecycle:
-`--print --output-format text --no-session-persistence --safe-mode --tools ""`,
+`--print --output-format text --no-session-persistence --safe-mode --tools "WebSearch,WebFetch"`,
 stdin packet, argv/no shell, isolated non-repository runtime cwd, existing minimal
-child environment and approved auth-home provenance. Never start an interactive
-peer session or enable tools/MCP/repo access. Attest the independently assigned
+child environment and approved auth-home provenance. Only WebSearch and WebFetch
+are allowed; do not enable other tools, MCP or repo access. Never start an interactive
+peer session. Attest the independently assigned
 reviewer role/logical invocation Session through the trusted host and owned-child
 launch record; provider brand/model text does not establish non-authorship.
 Both reviewer agent ID and Session ID differ from **every** pinned author.
