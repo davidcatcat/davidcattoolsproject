@@ -4,8 +4,8 @@ name: llmtool Linux CI
 # version, runs the full offline suite on every PR and main push. 3.9, the
 # oldest pyproject.toml declares (requires-python >=3.9), runs only before a
 # release: start this workflow by hand on main with `python39` (Owner
-# 2026-10-25). Both runners carry the same label, so either takes a job and
-# two jobs run at the same time. Each runner runs under its own non-admin
+# 2026-10-25). All three runners carry the same label, so each can take a job
+# and three jobs run at the same time. Each runner runs under its own non-admin
 # account with the instance metadata service blocked for its service; the
 # root-owned job-started hook on the host
 # (tools/ec2-runner, installed in /opt/llmtool-ci) refuses any job that is
@@ -159,7 +159,6 @@ jobs:
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s tools/ec2-runner -p 'test_*.py'
       - name: Working tree is clean
-        if: matrix.shard == 1
         shell: bash
         run: |
           status=$(git status --porcelain)
