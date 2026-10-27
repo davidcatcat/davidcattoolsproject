@@ -554,8 +554,6 @@ def add_task_submission_parsers(actions):
 
 
 def run_task_remote_test(args, *, store=None, stdout=None):
-    from .source_freshness import require_fresh_source
-    require_fresh_source()
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
                              sha=args.sha, ref=args.ref, modules=args.module,
@@ -665,8 +663,6 @@ def run_task_review_prompt(args, *, store=None):
 
 def run_task_review_dispatch(args, *, store=None):
     """Thin CLI adapter for the one-shot Reviewer dispatcher."""
-    from .source_freshness import require_fresh_source
-    require_fresh_source()
     from .review_dispatch import dispatch_review
     result = dispatch_review(store=TaskStore() if store is None else store,
                              task_id=args.task_id, executor_task=args.executor_task,
@@ -2002,8 +1998,6 @@ def run_task_codex_delegate(args, *, store):
 
 
 def run_task_delegate(args, *, store=None):
-    from .source_freshness import require_fresh_source
-    require_fresh_source()
     store = TaskStore() if store is None else store
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':

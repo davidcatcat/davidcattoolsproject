@@ -4,11 +4,11 @@ import subprocess
 import tempfile
 import unittest
 import warnings
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import llmtool.source_freshness as freshness
 from llmtool import task_submission_cli
+from llmtool.cli import main
 from llmtool.errors import LLMToolError
 
 
@@ -83,25 +83,24 @@ class SourceFreshnessTests(unittest.TestCase):
         self.assertTrue(caught)
         self.assertIn('LLMTOOL_SOURCE_STALE', str(caught[0].message))
 
-    def test_handlers_refuse_before_side_effects_when_stale(self):
+    def test_cli_refuses_before_handlers_when_source_is_stale(self):
         cases = (
-            (task_submission_cli.run_task_delegate,
-             (SimpleNamespace(mode='proposal'),),
-             {'store': object()}),
-            (task_submission_cli.run_task_remote_test,
-             (SimpleNamespace(task_id='t', executor_task='e', sha='s',
-                              ref='r', module=[], pr=None),), {}),
-            (task_submission_cli.run_task_review_dispatch,
-             (SimpleNamespace(task_id='t', executor_task='e', pr=1,
-                              version=1),), {}),
+            (['task', 'delegate', 't', '--provider', 'codex',
+              '--selection-source', 'PM', '--executor-task', 'e',
+              '--read-path', 'a.txt', '--write-path', 'a.txt',
+              '--acceptance', 'done', '--egress-basis', 'fixture'],
+             'run_task_delegate'),
+            (['task', 'remote-test', 't', '--executor-task', 'e', '--sha', 's',
+              '--ref', 'r'], 'run_task_remote_test'),
+            (['task', 'review-dispatch', 't', '--executor-task', 'e', '--pr', '1'],
+             'run_task_review_dispatch'),
         )
-        with patch.object(freshness, 'source_freshness', return_value='STALE'):
-            for handler, args, kwargs in cases:
-                with self.subTest(handler=handler.__name__):
-                    with self.assertRaises(LLMToolError) as caught:
-                        handler(*args, **kwargs)
-                    self.assertEqual(caught.exception.completion_code,
-                                     'LLMTOOL_SOURCE_STALE')
+        for argv, handler_name in cases:
+            with self.subTest(handler=handler_name), \
+                    patch.object(freshness, 'source_freshness', return_value='STALE'), \
+                    patch(f'llmtool.cli.{handler_name}') as handler:
+                self.assertEqual(main(argv), 1)
+                handler.assert_not_called()
 
     def test_assignment_scope_errors_have_stable_codes_without_paths(self):
         cases = (
