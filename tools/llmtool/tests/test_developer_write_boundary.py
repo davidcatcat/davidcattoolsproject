@@ -70,6 +70,16 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     boundary._policy(root, ['.git/config'], [])
 
+    def test_rejects_state_directory_equal_to_temp_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            subprocess.run(['/usr/bin/git', 'init', str(root)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            boundary = SandboxExecBoundary(executable='/bin/true', tmpdir=temp)
+            with self.assertRaises(ValueError):
+                boundary._policy(root, ['out.txt'], [temp])
+
     def test_any_failed_probe_makes_policy_unverified(self):
         boundary = SandboxExecBoundary(executable='/bin/true', tmpdir='/tmp')
         boundary._prepared = ('/tmp', ('out',), (), ('/tmp/out',), (),
@@ -91,10 +101,17 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
                 calls.append(argv)
                 if 'Path("/dev/null").write_bytes' in argv[-1]:
                     return 0, b'', b''
+                if 'os.link' in argv[-1]:
+                    return 0, b'', b''
                 return (0 if len(calls) == 1 else 1), b'', b''
             result = boundary.verify('/tmp', ['out'], (), runner=runner)
         self.assertTrue(result['verified'])
         self.assertIn('Path("/dev/null").write_bytes', calls[-1][-1])
+        hardlink_probes = [probe for probe in result['probes']
+                           if probe.get('operation') == 'hardlink']
+        self.assertEqual(len(hardlink_probes), 1)
+        self.assertTrue(hardlink_probes[0]['passed'])
+        self.assertTrue(any('os.link' in argv[-1] for argv in calls))
 
     def test_non_darwin_platform_is_unsupported(self):
         self.assertIsInstance(for_platform('linux'), UnsupportedBoundary)

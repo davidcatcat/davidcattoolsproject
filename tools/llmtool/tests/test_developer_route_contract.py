@@ -2,9 +2,14 @@
 
 import unittest
 from unittest import mock
+from pathlib import Path
+import subprocess
+import tempfile
 
 from llmtool import task_completion
-from llmtool.developer_routes.base import DeveloperRoute, RouteError, run_route
+from llmtool.developer_routes.base import (
+    DeveloperRoute, RouteError, capture_snapshot, run_route,
+)
 
 _DEFAULT_MODEL = object()
 
@@ -57,7 +62,7 @@ class DeveloperRouteContractTests(unittest.TestCase):
         self.git = task_completion.GitSnapshot('/root', '/git', 'task', 'a' * 40, True)
         self.before = {'files': {'out.txt': (0o600, 'old')},
                        'git_state': {'head': 'a' * 40}}
-        self.after = {'files': {'out.txt': (0o600, 'new')},
+        self.after = {'files': {'out.txt': (0o600, 'old')},
                       'git_state': {'head': 'a' * 40}}
 
     def run_case(self, *, decision=True, git=None, proof=True, after=None,
@@ -67,12 +72,13 @@ class DeveloperRouteContractTests(unittest.TestCase):
         snapshots = iter((self.before, self.after if after is None else after))
         with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
                         return_value=self.git if git is None else git):
-            with mock.patch.object(self.route, 'verified_model',
-                                   side_effect=lambda text, requested:
-                                   requested if verified is _DEFAULT_MODEL else verified):
-                result = run_route(self.route, self.request,
-                               gate=lambda: decision, runner=runner,
-                               boundary=FakeBoundary(proof), snapshot=lambda root: next(snapshots))
+            with mock.patch('llmtool.developer_routes.base._git_status_paths', return_value=()):
+                with mock.patch.object(self.route, 'verified_model',
+                                       side_effect=lambda text, requested:
+                                       requested if verified is _DEFAULT_MODEL else verified):
+                    result = run_route(self.route, self.request,
+                                   gate=lambda: decision, runner=runner,
+                                   boundary=FakeBoundary(proof), snapshot=lambda root: next(snapshots))
         return result, calls
 
     def test_gate_refusal_starts_no_runner(self):
@@ -146,6 +152,62 @@ class DeveloperRouteContractTests(unittest.TestCase):
                 run_route(self.route, self.request, gate=lambda: True, runner=timeout,
                           boundary=FakeBoundary(), snapshot=lambda root: self.before)
         self.assertEqual(caught.exception.code, 'FAKE_TIMEOUT')
+
+    def _real_git_request(self, root):
+        subprocess.run(['/usr/bin/git', 'init', str(root)], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.run(['/usr/bin/git', '-C', str(root), 'config', 'user.name', 'Test'], check=True)
+        subprocess.run(['/usr/bin/git', '-C', str(root), 'config', 'user.email', 'test@example.invalid'], check=True)
+        (root / 'out.txt').write_text('before\n')
+        subprocess.run(['/usr/bin/git', '-C', str(root), 'add', 'out.txt'], check=True)
+        subprocess.run(['/usr/bin/git', '-C', str(root), 'commit', '-m', 'initial'], check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        branch = subprocess.check_output(['/usr/bin/git', '-C', str(root), 'branch', '--show-current'],
+                                         text=True).strip()
+        head = subprocess.check_output(['/usr/bin/git', '-C', str(root), 'rev-parse', 'HEAD'],
+                                       text=True).strip()
+        return dict(self.request, root=str(root), expected_branch=branch,
+                    expected_head=head, write_paths=['out.txt'])
+
+    def test_real_git_authorized_tracked_edit_succeeds(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            request = self._real_git_request(root)
+
+            def runner(*args):
+                (root / 'out.txt').write_text('after\n')
+                return 0, b'output', b''
+
+            result = run_route(self.route, request, gate=lambda: True, runner=runner,
+                               boundary=FakeBoundary(), snapshot=capture_snapshot)
+            self.assertEqual(result.changed_files, ('out.txt',))
+
+    def test_real_git_untracked_out_of_scope_write_fails(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            request = self._real_git_request(root)
+
+            def runner(*args):
+                (root / 'other.txt').write_text('outside\n')
+                return 0, b'output', b''
+
+            with self.assertRaises(RouteError) as caught:
+                run_route(self.route, request, gate=lambda: True, runner=runner,
+                           boundary=FakeBoundary(), snapshot=capture_snapshot)
+            self.assertEqual(caught.exception.code, 'FAKE_WRITE_SCOPE_VIOLATION')
+
+    def test_request_state_dirs_must_be_private_temp_descendants(self):
+        with tempfile.TemporaryDirectory() as outside:
+            request = dict(self.request, state_dirs=[outside])
+            with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
+                            return_value=self.git):
+                with self.assertRaises(RouteError) as caught:
+                    run_route(self.route, request, gate=lambda: True,
+                              runner=lambda *args: self.fail('runner must not start'),
+                              boundary=FakeBoundary(), snapshot=lambda root: self.before)
+            self.assertEqual(caught.exception.code, 'FAKE_REQUEST_INVALID')
 
     def test_request_error_uses_uppercase_route_code(self):
         request = dict(self.request, timeout=0)

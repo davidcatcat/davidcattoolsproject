@@ -114,7 +114,7 @@ class SandboxExecBoundary(WriteBoundary):
                 raise ValueError('state path must be absolute')
             path = path.resolve(strict=False)
             temp_root = Path(self.tmpdir or os.environ.get('TMPDIR') or tempfile.gettempdir()).resolve()
-            if path != temp_root and temp_root not in path.parents:
+            if path == temp_root or temp_root not in path.parents:
                 raise ValueError('state path outside private temporary directory')
             if any(path == blocked or blocked in path.parents or path in blocked.parents
                    for blocked in denied):
@@ -167,7 +167,8 @@ class SandboxExecBoundary(WriteBoundary):
                 current_states) != (prepared_root, prepared_paths, prepared_states, paths, states):
             return {'verified': False, 'policy_sha256': digest, 'probes': []}
         # The same kernel wrapper must allow a write at an authorized target
-        # and deny root, Git, sibling-task, and configured denied locations.
+        # and deny root, Git, sibling-task, configured denied locations, and
+        # hard links from outside the boundary into an allowed literal path.
         probes = []
         targets = [str(Path(root).resolve() / item) for item in write_paths]
         denied = [str(Path(root).resolve() / '.llmtool-boundary-probe')]
@@ -199,6 +200,41 @@ class SandboxExecBoundary(WriteBoundary):
                 continue
             passed = (type(rc) is int and ((rc == 0) if expected else (rc != 0)))
             probes.append({'expected_write': expected, 'passed': passed})
+        if targets:
+            target = targets[0]
+            source = None
+            try:
+                fd, source = tempfile.mkstemp(prefix='llmtool-hardlink-probe-')
+                os.write(fd, b'probe-source')
+                os.close(fd)
+                program = (
+                    'import os,stat,sys\n'
+                    'from pathlib import Path\n'
+                    'p=Path(' + repr(target) + ')\n'
+                    's=Path(' + repr(source) + ')\n'
+                    'old=p.read_bytes() if p.is_file() else None\n'
+                    'mode=stat.S_IMODE(p.stat().st_mode) if old is not None else None\n'
+                    'if old is not None: p.unlink()\n'
+                    'linked=False\n'
+                    'try:\n os.link(s,p); linked=True\n'
+                    'except OSError:\n pass\n'
+                    'finally:\n'
+                    ' if p.exists(): p.unlink()\n'
+                    ' if old is not None:\n  p.write_bytes(old); p.chmod(mode)\n'
+                    'sys.exit(7 if linked else 0)\n')
+                rc, out, err = runner([self.executable, '-p', profile, python, '-c', program],
+                                      str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                                  'PYTHONDONTWRITEBYTECODE': '1'}, 10)
+                probes.append({'expected_write': False, 'operation': 'hardlink',
+                               'passed': type(rc) is int and rc == 0})
+            except Exception:
+                probes.append({'expected_write': False, 'operation': 'hardlink', 'passed': False})
+            finally:
+                if source is not None:
+                    try:
+                        os.unlink(source)
+                    except OSError:
+                        pass
         code = 'from pathlib import Path\nPath("/dev/null").write_bytes(b"probe")\n'
         try:
             rc, out, err = runner([self.executable, '-p', profile, python, '-c', code],

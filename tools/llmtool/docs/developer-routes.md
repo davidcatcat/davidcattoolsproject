@@ -29,13 +29,17 @@ AGY argv after the boundary prefix is exactly:
 agy -p PROMPT --model MODEL --effort EFFORT --sandbox --output-format json --print-timeout 0 --log-file LOG
 ```
 
+AGY receives the prompt in argv through `-p`. Local users may see it in process
+arguments (for example, with `ps`), so prompts must not contain restricted data.
+
 AGY does not receive `--add-dir` or `--mode`. The current verified write
 boundary uses Apple's `sandbox-exec` and is supported only on macOS. Other
 operating systems report an unsupported boundary and cannot start the provider.
 AGY's `--log-file` value is a validated relative name resolved inside the
 per-run private temporary directory. The boundary permits writes to that state
 directory and the literal device paths `/dev/null` and `/dev/tty`; it probes
-that a write to `/dev/null` succeeds. It grants no broader `/dev` access.
+that a write to `/dev/null` succeeds and that a hard link from outside the
+boundary to an allowed literal path fails. It grants no broader `/dev` access.
 
 ## Configuration
 

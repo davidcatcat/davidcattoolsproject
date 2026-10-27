@@ -274,6 +274,32 @@ def _git_signature(snapshot):
     return tuple(state.get(key) for key in ('root', 'common_dir', 'branch', 'head'))
 
 
+def _git_status_paths(root):
+    """Return every dirty path from porcelain v1, including ignored paths."""
+    raw = task_completion._git(
+        root, ('status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored'),
+        limit=1024 * 1024)
+    records = raw.split(b'\0')
+    paths = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if not record:
+            continue
+        if len(record) < 4 or record[2:3] != b' ':
+            raise RouteError('ROUTE_GIT_STATUS_INVALID')
+        paths.append(os.fsdecode(record[3:]))
+        # Porcelain -z emits the original path in a second NUL record for a
+        # rename/copy. Both ends are potentially outside the authorized set.
+        if record[:2] in (b'R ', b'C ', b' R', b' C'):
+            if index >= len(records) or not records[index]:
+                raise RouteError('ROUTE_GIT_STATUS_INVALID')
+            paths.append(os.fsdecode(records[index]))
+            index += 1
+    return tuple(paths)
+
+
 def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
               runner=None, boundary, snapshot):
     """Run one route only after dispatch, D6, and OS write-boundary checks."""
@@ -308,7 +334,21 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         raise RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='UNSUPPORTED_BOUNDARY')
     private_tmp = tempfile.mkdtemp(prefix='llmtool-route-')
     os.chmod(private_tmp, 0o700)
-    state_dirs = tuple(value.get('state_dirs', ())) + (private_tmp,)
+    requested_states = value.get('state_dirs', ())
+    try:
+        if type(requested_states) not in (tuple, list):
+            raise ValueError
+        private_root = Path(private_tmp).resolve(strict=True)
+        for item in requested_states:
+            if type(item) is not str or not os.path.isabs(item):
+                raise ValueError
+            state_path = Path(item).resolve(strict=False)
+            if state_path == private_root or private_root not in state_path.parents:
+                raise ValueError
+    except (OSError, RuntimeError, ValueError):
+        shutil.rmtree(private_tmp, ignore_errors=True)
+        raise RouteError(_route_code(route, 'REQUEST_INVALID')) from None
+    state_dirs = tuple(requested_states) + (private_tmp,)
     if type(value.get('log_path')) is str and not os.path.isabs(value['log_path']):
         value['log_path'] = str(Path(private_tmp) / value['log_path'])
     try:
@@ -381,7 +421,12 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
             _git_signature(before) != _git_signature(after)):
         raise RouteError(_route_code(route, 'GIT_STATE_CHANGED'), facts={'changed_files': changed})
     allowed = set(value['write_paths'])
-    scope_violation = (not after_git.clean or any(path not in allowed for path in changed) or
+    try:
+        dirty_paths = _git_status_paths(value['root'])
+    except Exception:
+        raise RouteError(_route_code(route, 'GIT_STATE_CHANGED'), facts={'changed_files': changed}) from None
+    scope_violation = (any(path not in allowed for path in dirty_paths) or
+                       any(path not in allowed for path in changed) or
                        _changed_symlink(before, after, changed))
     try:
         parsed = route.parse_output(stdout, stderr, log_text)
