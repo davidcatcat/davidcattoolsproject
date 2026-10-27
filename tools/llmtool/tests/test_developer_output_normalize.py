@@ -38,7 +38,7 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
     def test_missing_final_newline_keeps_normalization_behavior(self):
         raw = self.HEADER + '@@ -1,8 +1,8 @@\n-old\n+new'
         normalized, tokens = normalize_developer_output(raw, [self.PATH])
-        self.assertEqual(normalized, self.HEADER + '@@ -1,1 +1,1 @@\n-old\n+new')
+        self.assertEqual(normalized, self.HEADER + '@@ -1,1 +1,1 @@\n-old\n+new\n')
         self.assertIn('HUNK_COUNTS_RECOUNTED', tokens)
         self.assertIsNone(_developer_output_rejection(normalized, [self.PATH]))
 

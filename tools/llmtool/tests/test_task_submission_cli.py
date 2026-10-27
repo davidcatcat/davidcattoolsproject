@@ -1373,6 +1373,22 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
 
+    def test_captured_source_files_allow_an_ordinary_modify_proposal(self):
+        source_files = submission_cli._text_developer_source_files(
+            self.executor_root, self.executor_head, ['sample.py'])
+        self.assertIsInstance(source_files, submission_cli._DeveloperSourceFiles)
+        self.assertIn('sample.py', source_files.existing_paths)
+        source = source_files['sample.py']
+        old_line = source.splitlines()[0]
+        new_line = old_line + '  # updated'
+        proposal = ('diff --git a/sample.py b/sample.py\n'
+                    '--- a/sample.py\n+++ b/sample.py\n'
+                    f'@@ -1 +1 @@\n-{old_line}\n+{new_line}\n')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            proposal, ['sample.py'], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, proposal)
+
     def test_codex_delegate_missing_developer_profile_fails_closed_without_pm_fallback(self):
         task = self._pm_task_with_codex_assignment()
         output = io.StringIO()
@@ -2218,6 +2234,34 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
             'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
         self.assertEqual(submission_cli._developer_normalized_output(
             deletion, [target], source_files={target: 'old\n'})[2], None)
+
+        existing_empty = submission_cli._DeveloperSourceFiles()
+        existing_empty[target] = ''
+        existing_empty.existing_paths.add(target)
+        existing_empty.regular_paths.add(target)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files=existing_empty)[2],
+            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+
+    def test_proposal_can_mix_new_files_with_existing_file_modifications(self):
+        target = 'tools/llmtool/existing.py'
+        added = 'tools/llmtool/new.py'
+        mixed = (
+            f'diff --git a/{target} b/{target}\n'
+            f'--- a/{target}\n+++ b/{target}\n'
+            '@@ -1 +1 @@\n-old\n+updated\n'
+            f'diff --git a/{added} b/{added}\nnew file mode 100644\n'
+            f'--- /dev/null\n+++ b/{added}\n'
+            '@@ -0,0 +1 @@\n+new file\n')
+        source_files = submission_cli._DeveloperSourceFiles()
+        source_files[target] = 'old\n'
+        source_files.existing_paths.add(target)
+        source_files.regular_paths.add(target)
+        source_files[added] = ''
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            mixed, [target, added], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, mixed)
 
     def test_unsafe_shapes_remain_rejected(self):
         target = 'tools/llmtool/example.py'

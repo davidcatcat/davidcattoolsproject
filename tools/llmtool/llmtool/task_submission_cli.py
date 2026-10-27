@@ -1020,9 +1020,11 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
                    if operation in ('new', 'deleted')}
         for path, operation in special.items():
             source = source_files.get(path)
-            if operation == 'new' and source != '':
-                return None, (), 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
             existing_paths = getattr(source_files, 'existing_paths', None)
+            if (operation == 'new' and
+                    ((existing_paths is not None and path in existing_paths) or
+                     (existing_paths is None and source != ''))):
+                return None, (), 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
             if (operation == 'deleted' and existing_paths is not None and
                     path not in existing_paths):
                 return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
@@ -1030,16 +1032,12 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
             if (operation == 'deleted' and regular_paths is not None and
                     path not in regular_paths):
                 return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
-        if special and len(special) != len(operations):
-            return None, (), ('DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
-                               if 'new' in special.values() else
-                               'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
         if special:
             # The source-pinned apply check validates deletion content and the
             # empty source side of additions below.
             return normalized, tuple(tokens), None
         anchored, anchor_tokens, valid_anchor = reanchor_developer_output(
-            normalized, write_paths, source_files, return_valid=True)
+            normalized, write_paths, dict(source_files), return_valid=True)
         if not valid_anchor:
             return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
         anchored_rejection = _strict_developer_output_rejection(anchored, write_paths)
