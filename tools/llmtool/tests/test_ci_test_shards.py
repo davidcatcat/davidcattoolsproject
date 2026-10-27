@@ -75,7 +75,7 @@ class CiTestShardsTests(unittest.TestCase):
         self.assertIn("needs.changes.outputs.code == 'true'", workflow)
         classify_match = re.search(
             r"(?ms)^      - name: Classify changed paths\n.*?^        run: \|\n"
-            r"(?P<script>(?:^          .*\n|^          \n)*)",
+            r"(?P<script>(?:^          [^\n]*\n|^          \n)*)",
             workflow,
         )
         self.assertIsNotNone(classify_match)
@@ -103,7 +103,7 @@ class CiTestShardsTests(unittest.TestCase):
             git_stub.chmod(0o755)
             for paths, expected in cases:
                 with self.subTest(paths=paths):
-                    paths_file = temp / "changed-paths"
+                    paths_file = temp / "input-paths"
                     paths_file.write_bytes(b"".join(path.encode() + b"\0" for path in paths))
                     output_file = temp / "github-output"
                     env = os.environ.copy()
