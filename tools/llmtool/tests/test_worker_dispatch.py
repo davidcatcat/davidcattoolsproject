@@ -114,6 +114,30 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(worker_dispatch.evaluate('opencode-developer', ref, task_id).reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
 
+
+    def test_agy_requires_owner_assignment_and_exact_task_binding(self):
+        # Owner 2026-10-27: AGY is not an autonomous fallback.
+        decision = worker_dispatch.evaluate('agy')
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
+        ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+               'issues/289#issuecomment-6433940134')
+        task_id = self.task['task_id']
+        self.assertEqual(
+            worker_dispatch.evaluate('agy', ref, task_id).reason_code,
+            'OWNER_ASSIGNMENT_REQUIRED')
+        self.policy['workers']['agy']['owner_assignments'] = [
+            {'task_id': task_id, 'owner_assignment_ref': ref}
+        ]
+        self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+        self.assertTrue(worker_dispatch.evaluate('agy', ref, task_id).allowed)
+        self.assertEqual(
+            worker_dispatch.evaluate('agy', ref, 'a' * 32).reason_code,
+            'OWNER_ASSIGNMENT_REQUIRED')
+        self.assertEqual(
+            worker_dispatch.evaluate('agy', None, task_id).reason_code,
+            'OWNER_ASSIGNMENT_REQUIRED')
+
     def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
         assignments = [{'task_id': self.task['task_id'], 'owner_assignment_ref': ref}]
