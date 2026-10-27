@@ -4,6 +4,7 @@
 - **對象：** 本專案的 Product Owner。
 - **依據：** [Report A（技術稽核）](full-repository-technical-audit-20261028.md)、[Report B（演變與決策回顧）](project-evolution-decision-retrospective-20261028.md)。本文只寫方法與範本，不重複證據；每條建議後括號標註對應的歷史教訓（M1–M14、DEC-xxx）。
 - **原則：** 輕量、可直接用於 llmtool、不官僚。整份 Playbook 的核心只有一句話：**你親手驗收，一次只做一條線，AI 的提案先要最小版本。**
+- **版本：** v2（2026-10-28 自我校正）。本文全部為建議；凡標 **OWNER_DECISION_REQUIRED** 者涉及既有 Gate、Reviewer 配對、Dispatch 政策或 Roadmap，採用與否由 Owner 決定，PM 不得直接執行。文中數字（週期、門檻）皆為**待驗證目標**，應先量測基準再設定。
 
 ---
 
@@ -142,11 +143,11 @@ BLOCKED：<項目、原因、需要我的決定（是/否）>
 
 | 不該管 | 改成 |
 |---|---|
-| 額度暫停／恢復（10-19～10-27 至少 8 次） | monitor 判定；PM 自動改派 |
-| 每個 AGY／gw 的參數（thinking、max_tokens、模型名） | PM 在預算內決定；只回報結果 |
-| Reviewer 用哪個帳號 | PM 決定；獨立性靠 session 與 D6 紀錄 |
-| 每則決策的 GitHub 代記 | 每週一則決策批次留言；日常決策不上 GitHub |
-| merge 順序、merge train | PM；且預設直接合併已 PASS 的 PR |
+| 額度暫停／恢復（10-19～10-27 至少 8 次） | monitor 判定；PM 在已 ALLOWED 路線內改派（OWNER_DECISION_REQUIRED：dispatch 切換規則） |
+| 每個 AGY／gw 的參數（thinking、max_tokens、模型名） | PM 在預算內決定；只回報結果（AGY 的 Owner-only 指派為現行 AGENTS.md 規則，改變需 OWNER_DECISION_REQUIRED） |
+| Reviewer 用哪個帳號 | PM 決定；獨立性靠 session 與 D6 紀錄（現行規則已如此） |
+| 每則決策的 GitHub 代記 | 每週一則決策批次留言；日常決策不上 GitHub（OWNER_DECISION_REQUIRED：Owner 10-28 決策紀錄規則） |
+| merge 順序、merge train | PM；預設直接合併已 PASS 的 PR（OWNER_DECISION_REQUIRED：合併流程） |
 | 看 CI log、diff | 永遠不 |
 
 ---
@@ -182,17 +183,17 @@ BLOCKED：<項目、原因、需要我的決定（是/否）>
 - 成本 = provider tokens + Reviewer 輪數 + CI 分鐘 + PM 手動命令數 + 我的決策數。只看第一項會誤判（DEC-008、DEC-029）。
 - 每個優化決策附「前／後」兩個數字；沒有數字不准標「已節省」。
 - 低價模型規則：只做合成評測或離線批次；真實任務失敗兩次即不再派（#290 歷史）。
-- 審查分級：docs／test-only 不用高階模型正式審（M11）。
-- 預算上限：每週 Codex prompt tokens、Mac CI 分鐘各設一個數字；超過即停新派工，PM 回報原因。
+- 審查分級：docs／test-only 不用高階模型正式審（M11）。（OWNER_DECISION_REQUIRED：AGENTS.md 現行要求文件 PR 亦須正式審查）
+- 預算上限：每週 Codex prompt tokens、Mac CI 分鐘各設一個數字（先量兩週基準再設）；超過即停新派工，PM 回報原因。
 
 ---
 
 ## 11. 如何避免需求膨脹
 
-- 新路線／新 UI／新產品（CliNest）一律 FROZEN，直到 MVP 驗收三次。
-- 每個新機制上線兩週後看使用計數；0 使用 → 移除候選。
+- 新路線／新 UI／新產品（CliNest）一律 FROZEN，直到 MVP 驗收三次。（OWNER_DECISION_REQUIRED：Roadmap）
+- 每個新機制上線後看使用計數；持續 0 使用 → 檢討候選（移除為 OWNER_DECISION_REQUIRED；觀察窗由 PM 依任務週期設定）。
 - 「順便」禁止：一個需求一個 PR 範圍；PM 發現相鄰問題開 Issue，不擴 PR。
-- 文件上限：政策核心文件合計 < 60 KB；超過先刪再加。（AUDIT-010）
+- 文件上限：政策核心文件合計體積設一個上限，先刪再加（AUDIT-010；具體 KB 數待 PM 實測「一個 session 必讀 tokens」後提出，v1 的 60 KB 為審查者估計）。
 
 ---
 
@@ -252,20 +253,20 @@ BLOCKED：<項目、原因、需要我的決定（是/否）>
 - [ ] 技術債與文件已回報
 - [ ] 使用計數已開始記錄
 
-### 14.5 何時停止或重新評估
-- 兩週沒有真實執行證據。
-- 同一 root cause 第三次修復（#92 規則）。
-- 一條路線真實任務成功率 < 50%（兩次以上樣本）。
-- 一個機制上線兩週使用 0 次。
+### 14.5 何時停止或重新評估（數字為待驗證的起始建議，先量基準再定）
+- 一段觀察期（建議兩週）沒有真實執行證據。
+- 同一 root cause 第三次修復（#92 規則，現行政策）。
+- 一條路線真實任務成功率明顯偏低（需兩次以上樣本；門檻待定）。
+- 一個機制上線後持續 0 使用。
 - NOW 連續兩週無 Owner 可驗收進展。
-- 磁碟 < 20 GB、Mac CI > 15 分、OPEN 核心 PR > 3。
+- 磁碟可用空間低於 PM 實測的 D6 bootstrap／CI 安全水位；Mac CI 時間高於實測基準；OPEN 核心 PR 數持續上升。（v1 的 20 GB／15 分／3 個為審查者估計）
 
 ---
 
 ## 15. 建議我立即實施的五項管理改變
 
-1. **本週起每週一個 Owner 任務**，從 TUI 到 merge，結果寫進週報；失敗即下週 P0。
-2. **宣告 NOW = 一條鏈 E2E；其餘全部 FROZEN**（含 AGY、gw 真實題、OpenCode、Telegram、Web、CliNest、High Debug 自動化）。
-3. **額度與 CLI 可用性交給 monitor 與 PM**，兩週內零次因額度改 `worker-dispatch.json`。
-4. **對 AI 提案一律要求最小版本 + 真實執行日期 + 停損**；用第 4 章範本。
-5. **建立一頁成本與容量看板**（Codex tokens、Reviewer 輪數、Mac／EC2 分鐘、PM 手動命令、ACTIVE worktree、磁碟），每週看一次；沒有數字的「節省」不採信。
+1. **本週起每週一個 Owner 任務**，從 TUI 到 merge，結果寫進週報；失敗即下週 P0。（Owner 自身做法，無需政策變更）
+2. **宣告 NOW = 一條鏈 E2E；其餘全部 FROZEN**（含 AGY、gw 真實題、OpenCode、Telegram、Web、CliNest、High Debug 自動化）。（OWNER_DECISION_REQUIRED：Roadmap 與 dispatch 切換）
+3. **額度與 CLI 可用性交給 monitor 與 PM**，目標是不再因額度修改 `worker-dispatch.json`。（OWNER_DECISION_REQUIRED：dispatch 規則）
+4. **對 AI 提案一律要求最小版本 + 真實執行日期 + 停損**；用第 4 章範本。（Owner 自身做法）
+5. **建立一頁成本與容量看板**（Codex tokens、Reviewer 輪數、Mac／EC2 分鐘、PM 手動命令、ACTIVE worktree、磁碟），每週看一次；沒有數字的「節省」不採信。（工程建議，可由 PM 在現行授權內建立）
