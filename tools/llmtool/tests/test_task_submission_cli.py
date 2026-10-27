@@ -1520,6 +1520,54 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
         self.assertIsNone(saved['developer']['usage'])
 
+    def test_task_complete_passes_executor_changed_paths_to_github_collector(self):
+        task = self._pm_task_with_assignment()
+        target = 'sample.py'
+        patch_text = (f'diff --git a/{target} b/{target}\n'
+                      f'--- a/{target}\n+++ b/{target}\n'
+                      '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n')
+        client = FakeClient(Reply(patch_text, {
+            'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
+        }))
+        store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.resolve_profile_config',
+                      return_value=config('openai-compatible', 'gw')), \
+                patch('llmtool.task_submission_cli.api_key', return_value='not-persisted'), \
+                patch('llmtool.task_submission_cli.create_client', return_value=client), \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(run_task_delegate(self._delegate_args(
+                task, read_path=[target], write_path=[target], context='VALUE = 1\n'),
+                store=store), 0)
+
+        changed_paths = [target]
+        result_sha = '4' * 40
+        git_evidence = {
+            'root': str(self.executor_root), 'common_dir': self.executor_common_dir,
+            'branch': 'feat/test-executor', 'source_sha': self.executor_head,
+            'result_head': result_sha, 'changed_paths': changed_paths,
+            'diff_sha256': '5' * 64, 'executor_identity': 'executor-agent-1',
+        }
+        github_result = {
+            'evidence': {'pr_number': 10, 'head_sha': result_sha,
+                         'formal_review_state': 'UNVERIFIED', 'required_checks': [],
+                         'successful_checks': [], 'ci_head_sha': result_sha},
+            'missing_gates': ['CI_REQUIRED_CHECKS_MISSING'],
+        }
+        args = Namespace(task_id=task['task_id'], executor_task='executor-task-1',
+                         reviewer_task='reviewer-task-1', pr=10)
+        with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
+                   return_value=git_evidence), \
+                patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
+                      return_value=[{'path': target, 'source_sha': result_sha,
+                                     'exit_code': 0, 'output_sha256': '6' * 64}]), \
+                patch('llmtool.task_submission_cli.task_completion.collect_github_evidence',
+                      return_value=github_result) as github, \
+                redirect_stdout(io.StringIO()):
+            self.assertEqual(run_task_complete(args, store=store), 1)
+
+        self.assertEqual(github.call_args.kwargs['changed_paths'], changed_paths)
+
     def test_company_gw_patch_is_persisted_with_separate_logical_session_and_usage(self):
         acceptance = ['new test passes']
         pm_response = json.dumps({
