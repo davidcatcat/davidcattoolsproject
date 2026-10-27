@@ -53,7 +53,10 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
             def record_completion_event(inner, task_id, **kwargs):
                 return self.store.record_completion_event(task_id, **kwargs)
         responses = {('issues/84/comments', '100'): [],
-                     ('pulls/84', None): {'merged': True, 'merge_commit_sha': 'b' * 40}}
+                     ('pulls/84', None): {'merged': True, 'merge_commit_sha': 'b' * 40,
+                                          'head': {'sha': 'c' * 40}},
+                     ('compare/' + 'a' * 40 + '...' + 'c' * 40, None):
+                         {'status': 'ahead'}}
         result = github_events.poll(ClaimBoundStore(), task['pm_session_id'], [84],
                                     github_get=github_responder(responses))
         self.assertEqual(len(result['events']), 1)
@@ -115,9 +118,9 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                      ('pulls/81', None): {'merged': True, 'merge_commit_sha': 'b' * 40}}
         out = github_events.poll(self.store, task['pm_session_id'], [81],
                                  github_get=github_responder(responses))
-        self.assertEqual(len(out['events']), 3)
+        self.assertEqual(len(out['events']), 2)
         saved = self.store.get(task['task_id'])['completion_events']
-        self.assertEqual([event['sequence'] for event in saved], [0, 1, 2])
+        self.assertEqual([event['sequence'] for event in saved], [0, 1])
 
     def test_owner_marker_requires_github_owner_attribution(self):
         task = self._ready_task()
@@ -162,7 +165,7 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                      ('pulls/79', None): {'merged': True, 'merge_commit_sha': 'a' * 40}}
         out = github_events.poll(self.store, task['pm_session_id'], [79],
                                  github_get=github_responder(responses))
-        self.assertEqual(out['events'][0]['source_sha'], 'a' * 40)
+        self.assertEqual(out['events'], [])
         with patch.object(task_submission_cli, 'run_task_github_events', return_value=23) as handler:
             self.assertEqual(main(['task', 'github-events', '--pm-session', self.session,
                                    '--issue', '79']), 23)

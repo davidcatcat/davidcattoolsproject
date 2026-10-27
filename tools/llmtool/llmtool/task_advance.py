@@ -2,6 +2,9 @@
 
 import os
 import re
+import contextlib
+import io
+import json
 from argparse import Namespace
 
 from . import github_events, review_dispatch, review_repair, review_result
@@ -40,8 +43,7 @@ def decide(record, d6, pr, related):
         return 'NEEDS_PUBLISH'
     result_head = d6.get('result_head')
     if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
-            d6.get('recorded_result_head') != result_head or
-            d6.get('registered_result_head') != result_head):
+            d6.get('recorded_result_head') != result_head):
         return 'NEEDS_PUBLISH'
     claims = _claims(record)
     chosen_pr = (pr.get('number') if type(pr) is dict else None)
@@ -110,14 +112,15 @@ def _d6_snapshot(record, executor_task):
     evidence = completion.get('evidence') or {}
     common_dir = evidence.get('common_dir')
     if type(common_dir) is not str:
-        return None
+        return {'state': 'D6_BINDING_UNAVAILABLE', 'code': 'D6_BINDING_UNAVAILABLE'}
     try:
         registration = task_completion.read_d6_registration(
             executor_task, common_dir,
             allowed_states=task_completion._D6_EVIDENCE_STATES)
         snapshot = task_completion.collect_git_snapshot(registration.root)
-    except Exception:
-        return None
+    except Exception as exc:
+        return {'state': 'D6_BINDING_UNAVAILABLE',
+                'code': _refusal(exc, 'completion_code')}
     clean = bool(getattr(snapshot, 'clean', False))
     recorded = registration.result_sha
     return {'root': registration.root, 'common_dir': registration.common_dir,
@@ -229,7 +232,10 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
                     type(merge_sha) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', merge_sha) is None):
                 continue
-            compare = github_get(f'compare/{head}...{integration_head["sha"]}')
+            integration_sha = integration_head.get('sha')
+            if type(integration_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', integration_sha) is None:
+                continue
+            compare = github_get(f'compare/{head}...{integration_sha}')
             if type(compare) is dict and compare.get('status') in ('ahead', 'identical'):
                 return integration_pr, merge_sha
         except Exception:
@@ -289,7 +295,13 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                     'next': 'CLOSED', 'codes': []}
         except Exception as exc:
             return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
-                    'next': 'REFUSED', 'codes': [_refusal(exc, 'task_store_error_code')]}
+                    'next': 'REFUSED', 'codes': [_refusal(exc, 'completion_code') if
+                        getattr(exc, 'completion_code', None) else
+                        _refusal(exc, 'task_store_error_code')]}
+    if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
+        code = d6.get('code') if type(d6.get('code')) is str else 'D6_BINDING_UNAVAILABLE'
+        return {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
+                'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}
     step = decide(record, d6, pr, related)
     result, codes = None, []
     if step == 'DISPATCH_REVIEW':
@@ -337,7 +349,14 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         try:
             args = Namespace(task_id=task_id, executor_task=executor_task,
                              reviewer_task=claim.get('reviewer_task'), pr=number)
-            result = invoke(args, store=store)
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                return_code = invoke(args, store=store)
+            emitted = captured.getvalue().strip()
+            try:
+                result = json.loads(emitted) if emitted else {'code': return_code}
+            except (TypeError, ValueError):
+                result = {'code': return_code}
             fresh = store.get(task_id)
             completion = fresh.get('completion') or {}
             missing = completion.get('missing_gates', [])
@@ -354,12 +373,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             integration = _pr_snapshot(integration_pr, get) if integration_pr is not None else pr
             merged = type(integration) is dict and integration.get('merged') is True
             merge_sha = integration.get('merge_commit_sha') if merged else None
-            if merged and integration_pr is not None:
+            if merged:
                 integration_head = integration.get('head')
-                compare = (get(f'compare/{d6["result_head"]}...{integration_head.get("sha")}')
-                           if type(integration_head) is dict and
-                           type(integration_head.get('sha')) is str else None)
-                merged = type(compare) is dict and compare.get('status') in ('ahead', 'identical')
+                integration_sha = integration_head.get('sha') if type(integration_head) is dict else None
+                if integration_pr is None:
+                    merged = integration_sha == d6['result_head']
+                else:
+                    compare = (get(f'compare/{d6["result_head"]}...{integration_sha}')
+                               if type(integration_sha) is str and
+                               re.fullmatch(r'[0-9a-f]{40}', integration_sha) else None)
+                    merged = type(compare) is dict and compare.get('status') in ('ahead', 'identical')
             if merged and type(merge_sha) is str and re.fullmatch(r'[0-9a-f]{40}', merge_sha):
                 import hashlib
                 event_id = hashlib.sha256(
@@ -371,7 +394,9 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             else:
                 codes.append('WAITING_INTEGRATION')
         except Exception as exc:
-            step, codes = 'REFUSED', [_refusal(exc, 'task_store_error_code')]
+            step, codes = 'REFUSED', [_refusal(exc, 'completion_code') if
+                getattr(exc, 'completion_code', None) else
+                _refusal(exc, 'task_store_error_code')]
     elif step == 'REVIEWER_ATTENTION':
         codes.append('REVIEWER_ATTENTION')
     elif step == 'NEEDS_PUBLISH':

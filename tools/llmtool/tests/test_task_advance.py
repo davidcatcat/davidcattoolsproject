@@ -177,6 +177,57 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0][-2:], ('MERGED', 'd' * 40))
 
+    def test_integration_compare_uses_real_github_path_validator(self):
+        from llmtool.task_completion import _GITHUB_API_PATH
+        ready = base_record(review_dispatch_claim=[{
+            'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}],
+            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
+                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+        integration = {'number': 27, 'merged': True,
+                       'head': {'sha': 'c' * 40}, 'merge_commit_sha': 'd' * 40}
+        def get(path):
+            self.assertTrue(_GITHUB_API_PATH.fullmatch(path), path)
+            return {'status': 'ahead'}
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', side_effect=lambda n, _: PR if n == 17 else integration), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}]):
+            result = task_advance.advance(task_id=ready['task_id'], store=type('S', (), {
+                'get': lambda self, _id: ready})(), pr_number=17, integration_pr=27, github_get=get,
+                record_github_event_call=lambda *args, **kwargs: None)
+        self.assertEqual(result['step'], 'CLOSED')
+
+    def test_d6_snapshot_failure_is_typed(self):
+        record = base_record()
+        record['completion']['evidence']['common_dir'] = '/invalid'
+        with patch.object(task_advance.task_completion, 'read_d6_registration',
+                          side_effect=RuntimeError('unavailable')):
+            snapshot = task_advance._d6_snapshot(record, 'executor-1')
+        self.assertEqual(snapshot['state'], 'D6_BINDING_UNAVAILABLE')
+        self.assertEqual(snapshot['code'], 'TASK_ADVANCE_REFUSED')
+
+    def test_completion_action_captures_nested_json_output(self):
+        class Store:
+            def get(self, _task_id):
+                return base_record(completion={'executor_task_id': 'executor-1',
+                    'state': 'WAITING_REVIEW', 'evidence': {'result': {'result_head': HEAD}}},
+                    review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD,
+                        'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer'}])
+        store = Store()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}]):
+            # Exercise advance's capture around the production completion adapter.
+            def completion(*_args, **_kwargs):
+                print('{"task_id":"done"}')
+                return 0
+            result = task_advance.advance(task_id='1' * 32, store=store, pr_number=17,
+                run_task_complete_call=completion, github_get=lambda _path: [])
+        self.assertEqual(result['result'], {'task_id': 'done'})
+
 
 if __name__ == '__main__':
     unittest.main()
