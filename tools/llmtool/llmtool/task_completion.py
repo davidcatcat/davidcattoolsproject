@@ -46,6 +46,7 @@ _TEST_TIMEOUT = 180
 _TEST_OUTPUT_LIMIT = 256 * 1024
 _MAC_CHECK = 'check (macOS 3.13)'
 _LINUX_CHECK = 'check (Linux 3.14)'
+_DOCS_CHECK = 'check (docs)'
 _REQUIRED_CHECKS = frozenset((_MAC_CHECK, _LINUX_CHECK))
 _NOT_RUN_CHECKS = ('Linux Python 3.9', 'Windows CI')
 # The Owner's Mac self-hosted runners (Issue #99); no other runner is trusted.
@@ -1378,6 +1379,31 @@ def _docs_only(paths):
             for path in paths))
 
 
+def _docs_only_ci(paths):
+    """Classify the exact D6 result paths using Linux CI's `classify` step."""
+    # Keep this aligned with the classify step in .github/workflows/llmtool-linux-ci.yml.
+    if type(paths) is not list or not paths:
+        return False
+    for path in paths:
+        if type(path) is not str or not path or path.startswith('/') or '\\' in path:
+            return False
+        parts = path.split('/')
+        if any(part in ('', '.', '..') for part in parts):
+            return False
+        if path.startswith('tools/llmtool/'):
+            relative_parts = parts[2:]
+            if (len(relative_parts) == 1 and path.endswith('.md')):
+                continue
+            if (len(relative_parts) == 2 and path.endswith('.md')):
+                return False
+            return False
+        if (path.endswith('.md') or path in ('AGENTS.md', 'CLAUDE.md') or
+                path.startswith(('skills/', 'docs/'))):
+            continue
+        return False
+    return True
+
+
 def _committed_changed_paths(root, source_sha, result_sha):
     """Read all paths changed between the task source and exact result."""
     raw = _git(root, ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
@@ -1718,27 +1744,39 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             'check_ids': check_ids}
 
 
-def _collect_ci_evidence(*, pr_number, result_sha):
-    mac = _collect_one_ci_workflow(
-        pr_number=pr_number, result_sha=result_sha, workflow_path=_CI_WORKFLOW_PATH,
-        workflow_name=_CI_WORKFLOW_NAME, check_name=_MAC_CHECK, runner_names=_CI_RUNNER_NAMES)
+def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None):
+    docs_only = _docs_only_ci(changed_paths)
+    if docs_only:
+        mac = {'workflow_id': None, 'run_id': None, 'run_attempt': None,
+               'run_number': None, 'successful_checks': [], 'check_ids': {}}
+        linux_check = _DOCS_CHECK
+    else:
+        mac = _collect_one_ci_workflow(
+            pr_number=pr_number, result_sha=result_sha, workflow_path=_CI_WORKFLOW_PATH,
+            workflow_name=_CI_WORKFLOW_NAME, check_name=_MAC_CHECK,
+            runner_names=_CI_RUNNER_NAMES)
+        linux_check = _LINUX_CHECK
     linux = _collect_one_ci_workflow(
         pr_number=pr_number, result_sha=result_sha, workflow_path=_LINUX_CI_WORKFLOW_PATH,
-        workflow_name=_LINUX_CI_WORKFLOW_NAME, check_name=_LINUX_CHECK,
+        workflow_name=_LINUX_CI_WORKFLOW_NAME, check_name=linux_check,
         runner_names=_LINUX_CI_RUNNER_NAMES)
     successful = set(mac['successful_checks']) | set(linux['successful_checks'])
     check_ids = dict(mac['check_ids'])
     check_ids.update(linux['check_ids'])
-    return {'workflow_id': mac['workflow_id'], 'run_id': mac['run_id'],
-            'run_attempt': mac['run_attempt'], 'run_number': mac['run_number'],
+    primary = linux if docs_only else mac
+    return {'workflow_id': primary['workflow_id'], 'run_id': primary['run_id'],
+            'run_attempt': primary['run_attempt'], 'run_number': primary['run_number'],
             'successful_checks': sorted(successful), 'check_ids': check_ids,
-            'linux_required': True}
+            'linux_required': True, 'docs_only': docs_only,
+            'required_checks': [_DOCS_CHECK] if docs_only else sorted(_REQUIRED_CHECKS),
+            'workflow_path': _LINUX_CI_WORKFLOW_PATH if docs_only else _CI_WORKFLOW_PATH,
+            'workflow_name': _LINUX_CI_WORKFLOW_NAME if docs_only else _CI_WORKFLOW_NAME}
 
 
 def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                             contract_digest, executor_identity,
                             executor_session_ref, executor_native_session_id,
-                            reviewer_task_id, common_dir):
+                            reviewer_task_id, common_dir, changed_paths=None):
     """Read a public PR, formal review marker and exact-head required check runs."""
     if (type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
             type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None or
@@ -1907,9 +1945,11 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     reviewer_bound = (review is not None and review.get('state') in accepting_states and
                       bool(formal_marker.search(review_body)) and review_binding_verified and
                       not reviewer_gates.intersection(missing))
-    ci = _collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
+    ci = _collect_ci_evidence(pr_number=pr_number, result_sha=result_sha,
+                              changed_paths=changed_paths)
     successful = set(ci['successful_checks'])
-    if not _REQUIRED_CHECKS.issubset(successful):
+    required_checks = set(ci['required_checks'])
+    if not required_checks.issubset(successful):
         missing.append('REQUIRED_CI_MISSING')
     return {'evidence': {'pr_number': pr_number, 'head_sha': result_sha,
             'formal_review_state': 'ACCEPTED' if reviewer_bound else 'UNVERIFIED',
@@ -1925,12 +1965,13 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'review_task_id': task_id, 'review_run_id': run_id,
             'review_contract_digest': contract_digest,
             'review_binding_verified': review_binding_verified,
-            'required_checks': sorted(_REQUIRED_CHECKS),
+            'required_checks': sorted(required_checks),
             'successful_checks': sorted(successful), 'ci_head_sha': result_sha,
             'not_run_checks': [{'name': name, 'status': 'NOT_RUN'}
-                               for name in _NOT_RUN_CHECKS],
-            'ci_workflow_path': _CI_WORKFLOW_PATH,
-            'ci_workflow_name': _CI_WORKFLOW_NAME,
+                               for name in (_NOT_RUN_CHECKS +
+                                   ((_MAC_CHECK, _LINUX_CHECK) if ci['docs_only'] else ()))],
+            'ci_workflow_path': ci['workflow_path'],
+            'ci_workflow_name': ci['workflow_name'],
             'ci_workflow_id': ci['workflow_id'], 'ci_run_id': ci['run_id'],
             'ci_run_attempt': ci['run_attempt'], 'ci_run_number': ci['run_number'],
             'ci_check_ids': ci['check_ids']},

@@ -1108,6 +1108,61 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(evidence['successful_checks'], ['check (Linux 3.14)'])
         self.assertEqual(evidence['check_ids'], {'check (Linux 3.14)': 61})
 
+    def test_docs_only_ci_uses_docs_check_and_fails_closed_when_missing(self):
+        result_sha = 'a' * 40
+        docs_paths = ['README.md', 'docs/guide.md']
+        self.assertTrue(task_completion._docs_only_ci(docs_paths))
+        self.assertFalse(task_completion._docs_only_ci([]))
+        self.assertFalse(task_completion._docs_only_ci(['docs/guide.md', 'src/code.py']))
+        self.assertFalse(task_completion._docs_only_ci(['tools/llmtool/x/y.md']))
+        self.assertTrue(task_completion._docs_only_ci(['tools/llmtool/README.md']))
+        self.assertFalse(task_completion._docs_only_ci(['tools/llmtool/x.py']))
+        self.assertFalse(task_completion._docs_only_ci(None))
+
+        checks = {'total_count': 1, 'check_runs': [{
+            'id': 61, 'name': 'check (docs)', 'head_sha': result_sha,
+            'status': 'completed', 'conclusion': 'success',
+            'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}]}
+        api = self._github_response_sequence(result_sha, {}, [], checks)
+        api[9]['jobs'][0]['name'] = 'check (docs)'
+        api[9]['jobs'][0]['check_run_url'] = (
+            'https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/61')
+        api[10] = checks
+        with patch('llmtool.task_completion._github_get', side_effect=api[7:]) as github_get:
+            evidence = task_completion._collect_ci_evidence(
+                pr_number=10, result_sha=result_sha, changed_paths=docs_paths)
+        self.assertEqual(github_get.call_count, 4)
+        self.assertEqual(evidence['required_checks'], ['check (docs)'])
+        self.assertEqual(evidence['successful_checks'], ['check (docs)'])
+        self.assertTrue(evidence['docs_only'])
+
+        missing_api = self._github_response_sequence(result_sha, {}, [], {
+            'total_count': 0, 'check_runs': []})
+        with patch('llmtool.task_completion._github_get',
+                   side_effect=missing_api[7:]) as github_get:
+            missing = task_completion._collect_ci_evidence(
+                pr_number=10, result_sha=result_sha, changed_paths=docs_paths)
+        self.assertEqual(github_get.call_count, 3)
+        self.assertEqual(missing['required_checks'], ['check (docs)'])
+        self.assertEqual(missing['successful_checks'], [])
+
+    def test_mixed_or_empty_paths_keep_full_code_ci_requirements(self):
+        result_sha = 'a' * 40
+        for changed_paths in (['docs/guide.md', 'src/code.py'], []):
+            with self.subTest(changed_paths=changed_paths):
+                self.assertFalse(task_completion._docs_only_ci(changed_paths))
+                api = self._github_response_sequence(result_sha, {}, [], {
+                    'total_count': 0, 'check_runs': []})
+                with patch('llmtool.task_completion._github_get',
+                           side_effect=api[3:]) as github_get:
+                    evidence = task_completion._collect_ci_evidence(
+                        pr_number=10, result_sha=result_sha,
+                        changed_paths=changed_paths)
+                self.assertEqual(github_get.call_count, 8)
+                self.assertEqual(evidence['required_checks'], [
+                    'check (Linux 3.14)', 'check (macOS 3.13)'])
+                self.assertFalse(evidence['docs_only'])
+
     def test_newer_failed_workflow_run_defeats_older_success(self):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'
