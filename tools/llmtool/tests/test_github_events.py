@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
 import test_active_pm_inbox as inbox_fixture
-from llmtool import github_events
+from llmtool import github_events, task_submission_cli
 from llmtool.cli import main
 
 
@@ -139,7 +139,7 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
         out = github_events.poll(self.store, task['pm_session_id'], [79],
                                  github_get=github_responder(responses))
         self.assertEqual(out['events'][0]['source_sha'], 'a' * 40)
-        with patch('llmtool.cli.run_task_github_events', return_value=23) as handler:
+        with patch.object(task_submission_cli, 'run_task_github_events', return_value=23) as handler:
             self.assertEqual(main(['task', 'github-events', '--pm-session', self.session,
                                    '--issue', '79']), 23)
         handler.assert_called_once()
