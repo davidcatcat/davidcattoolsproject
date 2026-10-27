@@ -706,8 +706,13 @@ class ChatTUI:
             self.list_index, max(0, len(records) - 1))
         self.app.invalidate()
 
+    def list_visible(self):
+        """The list is on screen: not hidden behind the detail or help pane."""
+        return self.show_list and not self.show_detail and not self.show_help
+
     def _list_tick(self):
-        if (self.show_list and self.list_reader is None and self.list_loaded is not None
+        # Interval reads only while the list is actually visible (#510 review v2).
+        if (self.list_visible() and self.list_reader is None and self.list_loaded is not None
                 and time.monotonic() - self.list_loaded[0] >= chat_tui_status.REFRESH_SECONDS):
             self.refresh_list()
 

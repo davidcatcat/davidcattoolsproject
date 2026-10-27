@@ -1517,6 +1517,44 @@ class TaskListTests(Base):
                                 age, self.listed, lambda ui: self.assertEqual(len(reads), 4)])
         self.assertEqual(self.pm.complete.call_count, 1)
 
+    @staticmethod
+    async def settle(ui):
+        ui.app.invalidate()
+        await asyncio.sleep(0.8)
+
+    def test_no_interval_read_while_detail_or_help_hides_the_list(self):
+        from llmtool import chat_tui_status
+        original = chat_tui_status.load_records
+        reads = []
+
+        def counting(store):
+            reads.append(1)
+            return original(store)
+
+        async def stale_wait(ui):
+            ui.list_loaded = (ui.list_loaded[0] - chat_tui_status.REFRESH_SECONDS, 'old')
+            ui.app.invalidate()
+            await asyncio.sleep(0.8)
+
+        def hidden(ui):
+            self.assertTrue(ui.show_list)
+            self.assertFalse(ui.list_visible())
+
+        with patch('llmtool.chat_tui_status.load_records', side_effect=counting):
+            ui, _ = self.drive(['/task mode first\r', 'a task\r', self.idle,
+                                '/task list\r', self.listed,
+                                lambda ui: self.assertEqual(len(reads), 1),
+                                '\r', self.idle, hidden, stale_wait,
+                                lambda ui: self.assertEqual(len(reads), 1),  # detail open
+                                '\x1bOP', hidden, stale_wait,
+                                lambda ui: self.assertEqual(len(reads), 1),  # help open
+                                '\x1bOP', lambda ui: self.assertTrue(ui.show_detail),
+                                # Visible again and already stale: one read, then none until stale.
+                                '\x1bOQ', lambda ui: self.assertTrue(ui.list_visible()),
+                                self.settle, self.listed,
+                                lambda ui: self.assertEqual(len(reads), 2),
+                                self.settle, lambda ui: self.assertEqual(len(reads), 2)])
+
     def test_empty_store_resize_and_unseen_output(self):
         size = [Size(rows=24, columns=80)]
 
