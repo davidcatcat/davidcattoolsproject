@@ -49,7 +49,7 @@ security sign-off, QA verdict, or merge authority.
 This classification applies to the triage use above and to the company `gw` Developer
 route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
 layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
-[Worker availability table](../../tools/llmtool/ROADMAP.md#worker-availability--live-status):
+[Worker dispatch authority and live technical state](../../tools/llmtool/ROADMAP.md#worker-dispatch-authority-and-live-technical-state):
 
 1. **TCP:** can a connection to the configured endpoint open? Example: a bounded
    `nc -z` connect, with no request body.
