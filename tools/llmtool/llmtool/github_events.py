@@ -28,7 +28,11 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
         for task in tasks:
             evidence = (task.get('completion') or {}).get('evidence') or {}
             review = evidence.get('review_pr_ci') or {}
-            if review.get('pr_number') == number or task.get('issue_number') == number:
+            claims = task.get('review_dispatch_claim')
+            claims = [claims] if type(claims) is dict else claims if type(claims) is list else []
+            claim_bound = any(type(claim) is dict and claim.get('pr') == number
+                              for claim in claims)
+            if review.get('pr_number') == number or task.get('issue_number') == number or claim_bound:
                 bound.append(task)
         if not bound:
             continue
