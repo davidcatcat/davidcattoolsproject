@@ -143,12 +143,13 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(mismatch['result'], 'SHA_MISMATCH')
 
     def test_failure_excerpt_is_bounded_redacted_and_only_on_failures(self):
-        fake_credential = ''.join(['sk', '-']) + 'a' * 16
+        cred_value = ''.join(['sk', '-']) + 'a' * 16
+        screened_label = ''.join(('to', 'ken', '='))
         output = ('FAIL: test_expected (test_remote_test.Case)\n'
                   'Traceback (most recent call last):\n'
                   '  File "/tmp/llmtool-remote-test.Abc123/test.py", line 9\n'
                   'AssertionError: expected value\n'
-                  'token=' + fake_credential + '\n'
+                  + screened_label + cred_value + '\n'
                   '----------------------------------------------------------------------\n'
                   'Ran 1 test in 0.1s\nFAILED (failures=1)')
         excerpt = self.failure_excerpt(output)
@@ -156,13 +157,14 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('AssertionError: expected value', excerpt)
         self.assertIn('<REMOTE_WORKDIR>/test.py', excerpt)
         self.assertNotIn('/tmp/llmtool-remote-test.Abc123', excerpt)
-        self.assertNotIn(fake_credential, excerpt)
+        self.assertNotIn(cred_value, excerpt)
         long_output = ('FAIL: test_expected (test_remote_test.Case)\n' +
                        ('detail ' + 'x' * 120 + '\n') * 50 +
                        '----------------------------------------------------------------------\n')
         bounded = self.failure_excerpt(long_output)
         self.assertLessEqual(len(bounded.encode('utf-8')), 4096)
         self.assertLessEqual(len(bounded.splitlines()), 40)
+        self.assertIn('len(raw)<=32768', remote_test._REMOTE_SCRIPT)
 
         failed = self.run_it(self.receipt('FAIL', exit_code=1,
             final=('FAILED (failures=1)',), failure_excerpt=excerpt))
@@ -180,6 +182,11 @@ class RemoteTestTests(unittest.TestCase):
             final=('FAILED (failures=1)',), failure_excerpt='x' * 4096))
         self.assertIsNotNone(remote_test._validate_remote_receipt(
             json.dumps(capped, separators=(',', ':')).encode(),
+            sha=SHA, modules=('test_remote_test',)))
+        passed_with_excerpt = json.loads(self.receipt().decode())
+        passed_with_excerpt['failure_excerpt'] = ''
+        self.assertIsNone(remote_test._validate_remote_receipt(
+            json.dumps(passed_with_excerpt, separators=(',', ':')).encode(),
             sha=SHA, modules=('test_remote_test',)))
 
     def test_timeout_unavailable_and_unknown_receipts(self):

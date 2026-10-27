@@ -19,7 +19,7 @@ _SHA = re.compile(r'[0-9a-f]{40}\Z')
 _REF = re.compile(r'(?:refs/pull/[0-9]+/head|[A-Za-z0-9][A-Za-z0-9._/-]{0,99})\Z')
 _MODULE = re.compile(r'test_[a-z0-9_]{1,80}\Z')
 _TASK = re.compile(r'[a-z0-9][a-z0-9-]{0,95}\Z')
-_REMOTE_LIMIT = 8192
+_REMOTE_LIMIT = 32768
 _FAILURE_EXCERPT_LIMIT = 4096
 _FAILURE_EXCERPT_LINES = 40
 _SSH_TIMEOUT = 600
@@ -196,7 +196,7 @@ ended=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00
 receipt={"result":result,"exit_code":code,"source_sha":sha,"tree":tree,"fetch_head":fetch,"modules":mods,"identity":{"uid":uid},"started_at":started,"ended_at":ended,"elapsed_s":round(time.monotonic()-begin,3),"ran_total":ran,"final":finals[-len(mods)*2:],"failures":failures[:10],"log_bytes":len(log),"log_sha256":hashlib.sha256(log).hexdigest(),"remote_log_path":log_path}
 if result!="PASS": receipt["failure_excerpt"]=failure_excerpt(failed_outputs,work or "<REMOTE_WORKDIR>",os.path.expanduser("~"))
 raw=json.dumps(receipt,separators=(",",":"),sort_keys=True).encode()
-print(raw.decode() if len(raw)<=4096 else "{}")
+print(raw.decode() if len(raw)<=32768 else "{}")
 os.close(lock_fd)
 '''
 
