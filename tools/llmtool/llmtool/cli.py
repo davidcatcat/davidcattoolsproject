@@ -34,7 +34,7 @@ from .task_submission_cli import (add_task_submission_parsers, run_task_ack,
                                  run_task_complete, run_task_delegate, run_task_inbox,
                                  run_task_record_pm, run_task_review_prompt,
                                  run_task_remote_test, run_task_review_dispatch,
-                                 run_task_show, run_task_submit)
+                                 run_task_show, run_task_status, run_task_submit)
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
 
@@ -492,6 +492,8 @@ def main(argv=None):
         if args.command == 'review-authority':
             return run_review_authority_check(args)
         if args.command == 'task':
+            if args.action == 'status':
+                return run_task_status(args)
             if args.action == 'submit':
                 return run_task_submit(args)
             if args.action == 'record-pm':

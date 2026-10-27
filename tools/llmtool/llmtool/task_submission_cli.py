@@ -474,6 +474,10 @@ def _task_view(record):
 
 
 def add_task_submission_parsers(actions):
+    status = actions.add_parser('status', help='Read a bounded summary of durable Tasks')
+    status.add_argument('--pm-session', help='filter by stored PM session ID')
+    status.add_argument('--limit', type=int, default=20, help='maximum Tasks to list (1-200)')
+    status.add_argument('--json', action='store_true', help='output JSON')
     submit = actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
     submit.add_argument('--provider', required=True, help='configured PM provider profile; no implicit default')
     submit.add_argument('request', nargs='+', help='development request text')
@@ -551,6 +555,18 @@ def add_task_submission_parsers(actions):
     remote_test.add_argument('--module', action='append', default=[],
                              help='admitted test module; repeat to select more than one')
     remote_test.add_argument('--pr', type=int, help='PR whose recorded head is the expected SHA')
+
+
+def run_task_status(args, *, store=None, stdout=None):
+    from .task_status import format_status, task_status
+    try:
+        result = task_status(pm_session=args.pm_session, limit=args.limit, store=store)
+    except ValueError as exc:
+        raise LLMToolError(str(exc)) from None
+    stream = sys.stdout if stdout is None else stdout
+    stream.write(format_status(result, as_json=args.json) + '\n')
+    stream.flush()
+    return 0
 
 
 def run_task_remote_test(args, *, store=None, stdout=None):
