@@ -54,6 +54,10 @@ def _record():
         'task_id': TASK, 'run_id': RUN,
         'developer': {'assignment_id': 'f' * 32, 'provider_profile': 'codex',
                       'model': 'gpt-test', 'owner_assignment_ref': None,
+                      'selection_source': 'PM', 'read_paths': ['tools/llmtool/llmtool'],
+                      'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
+                      'acceptance': ['Repair the reported issue.'],
+                      'egress_basis': 'Task authorized source files only.',
                       'state': 'DEVELOPER_RESPONDED'},
         'completion': {'executor_task_id': EXECUTOR, 'evidence': {'common_dir': '/tmp/git'}},
         'review_dispatch_claim': [claim], 'completion_events': [event],
@@ -79,11 +83,13 @@ class ReviewRepairTests(unittest.TestCase):
             self.calls.append(request)
             return {'status': 'DISPATCHED', 'head': HEAD}
         current_head = kwargs.pop('current_head', lambda _task, _executor: HEAD)
+        github_get = kwargs.pop('github_get', lambda _path: [_comment()])
+        decision = kwargs.pop('decision', type('Decision', (), {'allowed': True})())
         with patch.object(review_repair.worker_dispatch, 'evaluate',
-                          return_value=type('Decision', (), {'allowed': True})()):
+                          return_value=decision):
             return review_repair.repair_review(
                 store=self.store, task_id=TASK, executor_task=EXECUTOR,
-                pr_number=PR, github_get=lambda _path: [_comment()],
+                pr_number=PR, github_get=github_get,
                 dispatch_adapter=adapter, current_head=current_head, **kwargs)
 
     def test_happy_path_packet_and_next_action(self):
@@ -121,7 +127,7 @@ class ReviewRepairTests(unittest.TestCase):
         decision = type('Decision', (), {'allowed': False, 'reason_code': 'PAUSED'})()
         with patch.object(review_repair.worker_dispatch, 'evaluate', return_value=decision):
             with self.assertRaisesRegex(Exception, 'refused') as raised:
-                self.dispatch()
+                self.dispatch(decision=decision)
         self.assertEqual(getattr(raised.exception, 'review_repair_code'), 'PAUSED')
 
     def test_pass_event_does_not_dispatch(self):
@@ -137,6 +143,28 @@ class ReviewRepairTests(unittest.TestCase):
         seen = []
         self.dispatch(auto_review=True, review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
         self.assertEqual(seen[0]['version'], 2)
+
+    def test_default_adapter_rebuilds_original_direct_developer_request(self):
+        seen = []
+        with patch.object(review_repair.worker_dispatch, 'evaluate',
+                          return_value=type('Decision', (), {'allowed': True})()):
+            result = review_repair.repair_review(
+                store=self.store, task_id=TASK, executor_task=EXECUTOR,
+                pr_number=PR, github_get=lambda _path: [_comment()],
+                current_head=lambda _task, _executor: HEAD,
+                delegate_callable=lambda args, store: seen.append((args, store)) or 0)
+        args, passed_store = seen[0]
+        self.assertIs(passed_store, self.store)
+        self.assertEqual((args.provider, args.mode, args.executor_task),
+                         ('codex', 'direct', EXECUTOR))
+        self.assertEqual(args.read_path, ['tools/llmtool/llmtool'])
+        self.assertEqual(args.write_path, ['tools/llmtool/llmtool/review_repair.py'])
+        self.assertEqual(args.acceptance[0], 'Repair the reported issue.')
+        self.assertIn('comment id 9', args.acceptance[1])
+        self.assertIn(HEAD, args.acceptance[1])
+        self.assertIn('findings count 1', args.acceptance[1])
+        self.assertEqual(args.repair_packet['verdict_comment_id'], 9)
+        self.assertEqual(result['result'], 0)
 
     def test_cli_route_reaches_handler(self):
         with patch.object(cli, 'run_task_repair', return_value=17) as handler:

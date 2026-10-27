@@ -715,7 +715,8 @@ def run_task_review_result(args, *, store=None, github_get=None):
 
 
 def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
-                    current_head=None, review_dispatcher=None):
+                    current_head=None, review_dispatcher=None,
+                    delegate_callable=None):
     """Thin CLI adapter for a bounded review-triggered Developer repair."""
     from .review_repair import repair_review
     result = repair_review(
@@ -724,7 +725,8 @@ def run_task_repair(args, *, store=None, github_get=None, dispatch_adapter=None,
         github_get=github_get, dispatch_adapter=dispatch_adapter,
         current_head=current_head,
         auto_review=getattr(args, 'auto_review', False),
-        review_dispatcher=review_dispatcher)
+        review_dispatcher=review_dispatcher,
+        delegate_callable=delegate_callable)
     return _print(result)
 
 
