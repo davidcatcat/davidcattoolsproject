@@ -3043,8 +3043,9 @@ The separate trusted-host Worker entry is
 `llmtool.review_handoff.dispatch_review_handoff(issuer, ledger, budget=budget)`).
 It uses the issuer's existing pinned context and actual `compose_host_services`
 with the `llmtool-worker/claude-cli` role (`claude --print --output-format json
---no-session-persistence --safe-mode --tools ''` and `stdin` EOF closure, never
-interactive terminal paste or manual `Enter`); legacy Reviewer routes are rejected
+--no-session-persistence --safe-mode --tools 'WebSearch,WebFetch'` and `stdin`
+EOF closure; only WebSearch and WebFetch are allowed, never interactive terminal
+paste or manual `Enter`); legacy Reviewer routes are rejected
 before consumption/spawn. There is no new CLI flag, default Host path, grant
 file, ledger creation or enabled public factory. Only already authorized trusted
 host code with permitted Host/route/runtime/auth/ledger pins may call it.

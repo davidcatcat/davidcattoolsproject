@@ -293,8 +293,10 @@ class ReviewHandoffTests(unittest.TestCase):
         self.assertEqual(
             argv,
             ['--print', '--output-format', 'json', '--no-session-persistence',
-             '--safe-mode', '--tools', '', '--model', 'fake-model'],
+             '--safe-mode', '--tools', 'WebSearch,WebFetch', '--model', 'fake-model'],
         )
+        tools = argv[argv.index('--tools') + 1].split(',')
+        self.assertFalse({'Read', 'Write', 'Edit', 'Bash'}.intersection(tools))
         self.assertNotIn('--bare', argv)
         audit = json.loads(stdin_audit.read_text())
         self.assertTrue(audit['eof'])
