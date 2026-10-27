@@ -22,29 +22,29 @@ class MacFullDueTests(unittest.TestCase):
         payload = io.BytesIO(json.dumps({"workflow_runs": runs}).encode("utf-8"))
         return patch("ci_mac_full_due.urlopen", return_value=payload)
 
-    def run(self, event="schedule"):
+    def _is_due(self, event="schedule"):
         api_value = "fixture-" + "value"
         return ci_mac_full_due.is_due("owner/repo", SHA, api_value, event)
 
     def test_no_prior_run_is_due(self):
         with self.api([]):
-            self.assertTrue(self.run())
+            self.assertTrue(self._is_due())
 
     def test_same_sha_skips(self):
         runs = [{"event": "schedule", "head_branch": "main", "conclusion": "success",
                  "head_sha": SHA, "created_at": "2026-10-27T00:00:00Z"}]
         with self.api(runs):
-            self.assertFalse(self.run())
+            self.assertFalse(self._is_due())
 
     def test_new_sha_is_due(self):
         runs = [{"event": "workflow_dispatch", "head_branch": "main", "conclusion": "success",
                  "head_sha": OTHER_SHA, "created_at": "2026-10-27T00:00:00Z"}]
         with self.api(runs):
-            self.assertTrue(self.run())
+            self.assertTrue(self._is_due())
 
     def test_api_error_fails_toward_due(self):
         with patch("ci_mac_full_due.urlopen", side_effect=OSError("unavailable")):
-            self.assertTrue(self.run())
+            self.assertTrue(self._is_due())
 
     def test_dispatch_is_always_due_without_api_call(self):
         with patch("ci_mac_full_due.urlopen", side_effect=AssertionError("unexpected API call")):
@@ -57,6 +57,7 @@ class MacFullDueTests(unittest.TestCase):
         self.assertIn("pull_request:", trigger)
         self.assertIn("workflow_dispatch:", trigger)
         self.assertNotIn("push:", trigger)
+        self.assertIn("workflow_dispatch should be used after re-enabling", workflow)
         self.assertIn("actions: read", workflow)
         self.assertIn("GH_API_VALUE: ${{ github.token }}", workflow)
         self.assertNotIn("secrets.", workflow)

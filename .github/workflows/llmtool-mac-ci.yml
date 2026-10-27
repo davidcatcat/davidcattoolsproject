@@ -8,6 +8,7 @@ name: llmtool Mac CI
 # turn it off); its job-started hook fails any job from a runner running as
 # the Owner, a fork or an untrusted actor. MAC_CI_ENABLED is the kill switch:
 # anything but 'true' skips the job, and a skipped job is NOT_RUN, not PASS.
+# Use workflow_dispatch after re-enabling the switch so the full suite runs.
 on:
   schedule:
     - cron: '0 */6 * * *'
