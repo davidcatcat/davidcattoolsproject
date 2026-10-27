@@ -9,7 +9,7 @@ AGY is `OWNER_ASSIGNMENT_ONLY` in [worker-dispatch.json](../../tools/llmtool/wor
 
 ## Part 1: PM — dispatch one Task
 
-1. **Owner assignment.** Post the Owner's instruction on [#289](https://github.com/davidcatcat/davidcattoolsproject/issues/289) with a 32-hex Task id, then add `{task_id, owner_assignment_ref}` to `workers.agy.owner_assignments` through a reviewed, merged PR. Nothing else authorizes AGY.
+1. **Owner assignment.** The Owner instructs only through the PM conversation. Record the assignment on [#289](https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6449480487), quoting the Owner verbatim and naming the PM session id and date, worker (`agy`), 32-hex Task id, and exact Task scope. A comment without the verbatim quote and PM session id is not an Owner record. Then add `{task_id, owner_assignment_ref}` to `workers.agy.owner_assignments` through a reviewed, merged PR. Nothing else authorizes AGY.
 2. **Gate.** From the canonical checkout, fast-forwarded to `origin/main`:
    `tools/llmtool/.venv/bin/python -B -m llmtool dispatch-check agy --owner-ref <#289 comment URL> --task <task id>`.
    Start only on `allowed: true` / `OWNER_ASSIGNMENT_MATCHED`.
