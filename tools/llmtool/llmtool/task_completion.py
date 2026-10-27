@@ -44,13 +44,19 @@ _PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
 _TIMEOUT = 10
 _TEST_TIMEOUT = 180
 _TEST_OUTPUT_LIMIT = 256 * 1024
-_REQUIRED_CHECKS = frozenset(('check (macOS 3.13)',))
-_NOT_RUN_CHECKS = ('Linux Python 3.9', 'Linux Python 3.14', 'Windows CI')
+_MAC_CHECK = 'check (macOS 3.13)'
+_LINUX_CHECK = 'check (Linux 3.14)'
+_REQUIRED_CHECKS = frozenset((_MAC_CHECK, _LINUX_CHECK))
+_NOT_RUN_CHECKS = ('Linux Python 3.9', 'Windows CI')
 # The Owner's Mac self-hosted runners (Issue #99); no other runner is trusted.
 _CI_RUNNER_NAMES = frozenset(('davidproject-self-action', 'davidproject-self-action-2'))
 _D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
 _CI_WORKFLOW_PATH = '.github/workflows/llmtool-mac-ci.yml'
 _CI_WORKFLOW_NAME = 'llmtool Mac CI'
+_LINUX_CI_WORKFLOW_PATH = '.github/workflows/llmtool-linux-ci.yml'
+_LINUX_CI_WORKFLOW_NAME = 'llmtool Linux CI'
+_LINUX_CI_RUNNER_NAMES = frozenset((
+    'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3'))
 _GITHUB_ACTIONS_APP_ID = 15368
 _TEST_REGISTRY = (
     (re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
@@ -1620,11 +1626,12 @@ def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha)
             _FORMAL_ACCEPT in lines and binding_line in lines)
 
 
-def _collect_ci_evidence(*, pr_number, result_sha):
-    workflow = _github_get('actions/workflows/llmtool-mac-ci.yml')
+def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
+                             workflow_name, check_name, runner_names):
+    workflow = _github_get('actions/workflows/' + workflow_path.rsplit('/', 1)[-1])
     if (type(workflow) is not dict or type(workflow.get('id')) is not int or
-            workflow['id'] <= 0 or workflow.get('path') != _CI_WORKFLOW_PATH or
-            workflow.get('name') != _CI_WORKFLOW_NAME or workflow.get('state') != 'active'):
+            workflow['id'] <= 0 or workflow.get('path') != workflow_path or
+            workflow.get('name') != workflow_name or workflow.get('state') != 'active'):
         _stop('CI_WORKFLOW_MISMATCH')
     workflow_id = workflow['id']
     runs = _github_get(
@@ -1639,7 +1646,7 @@ def _collect_ci_evidence(*, pr_number, result_sha):
         if type(run) is not dict:
             _stop('CI_WORKFLOW_RUNS_INVALID')
         pull_requests = run.get('pull_requests')
-        if (run.get('workflow_id') != workflow_id or run.get('path') != _CI_WORKFLOW_PATH or
+        if (run.get('workflow_id') != workflow_id or run.get('path') != workflow_path or
                 run.get('event') != 'pull_request' or run.get('head_sha') != result_sha or
                 type(pull_requests) is not list or
                 not any(type(item) is dict and item.get('number') == pr_number and
@@ -1653,7 +1660,7 @@ def _collect_ci_evidence(*, pr_number, result_sha):
         candidates.append(run)
     if not candidates:
         return {'workflow_id': workflow_id, 'run_id': None, 'run_attempt': None,
-                'run_number': None, 'successful_checks': [], 'check_ids': []}
+                'run_number': None, 'successful_checks': [], 'check_ids': {}}
     run = max(candidates, key=lambda item: (item['run_number'], item['run_attempt'], item['id']))
     run_id, attempt = run['id'], run['run_attempt']
     jobs = _github_get(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
@@ -1665,23 +1672,21 @@ def _collect_ci_evidence(*, pr_number, result_sha):
     for job in jobs['jobs']:
         if type(job) is not dict:
             _stop('CI_WORKFLOW_JOBS_INVALID')
-        name = job.get('name')
-        if name not in _REQUIRED_CHECKS:
+        if job.get('name') != check_name:
             continue
         check_url = job.get('check_run_url')
         check_id_match = (None if type(check_url) is not str else re.fullmatch(
             r'https://api\.github\.com/repos/davidcatcat/davidcattoolsproject/'
             r'check-runs/([1-9][0-9]{0,18})', check_url))
-        if (name in required_jobs or job.get('run_id') != run_id or
-                job.get('runner_name') not in _CI_RUNNER_NAMES or
+        if (check_name in required_jobs or job.get('run_id') != run_id or
+                job.get('runner_name') not in runner_names or
                 type(job.get('id')) is not int or job['id'] <= 0 or
                 check_id_match is None):
             _stop('CI_WORKFLOW_JOBS_INVALID')
-        required_jobs[name] = (job, int(check_id_match.group(1)))
-    if set(required_jobs) != set(_REQUIRED_CHECKS):
+        required_jobs[check_name] = (job, int(check_id_match.group(1)))
+    if set(required_jobs) != {check_name}:
         return {'workflow_id': workflow_id, 'run_id': run_id, 'run_attempt': attempt,
-                'run_number': run['run_number'], 'successful_checks': [], 'check_ids': []}
-
+                'run_number': run['run_number'], 'successful_checks': [], 'check_ids': {}}
     checks = _github_get(f'commits/{result_sha}/check-runs?per_page=100')
     if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
             type(checks.get('total_count')) is not int or
@@ -1695,26 +1700,39 @@ def _collect_ci_evidence(*, pr_number, result_sha):
         if check['id'] in by_id and by_id[check['id']] != check:
             _stop('CI_EVIDENCE_INVALID')
         by_id[check['id']] = check
-    successful = set()
-    check_ids = {}
-    for name, (job, check_id) in required_jobs.items():
-        check = by_id.get(check_id)
-        app = None if check is None else check.get('app')
-        if (check is None or check.get('name') != name or
-                check.get('head_sha') != result_sha or
-                type(app) is not dict or app.get('id') != _GITHUB_ACTIONS_APP_ID or
-                app.get('slug') != 'github-actions' or app.get('name') != 'GitHub Actions'):
-            continue
-        if (job.get('status') == 'completed' and job.get('conclusion') == 'success' and
-                check.get('status') == 'completed' and check.get('conclusion') == 'success'):
-            successful.add(name)
-            check_ids[name] = check['id']
-    run_success = run.get('status') == 'completed' and run.get('conclusion') == 'success'
-    if not run_success:
-        successful.clear()
+    successful, check_ids = set(), {}
+    job, check_id = required_jobs[check_name]
+    check = by_id.get(check_id)
+    app = None if check is None else check.get('app')
+    if (check is not None and check.get('name') == check_name and
+            check.get('head_sha') == result_sha and type(app) is dict and
+            app.get('id') == _GITHUB_ACTIONS_APP_ID and app.get('slug') == 'github-actions' and
+            app.get('name') == 'GitHub Actions' and
+            job.get('status') == 'completed' and job.get('conclusion') == 'success' and
+            check.get('status') == 'completed' and check.get('conclusion') == 'success' and
+            run.get('status') == 'completed' and run.get('conclusion') == 'success'):
+        successful.add(check_name)
+        check_ids[check_name] = check['id']
     return {'workflow_id': workflow_id, 'run_id': run_id, 'run_attempt': attempt,
             'run_number': run['run_number'], 'successful_checks': sorted(successful),
             'check_ids': check_ids}
+
+
+def _collect_ci_evidence(*, pr_number, result_sha):
+    mac = _collect_one_ci_workflow(
+        pr_number=pr_number, result_sha=result_sha, workflow_path=_CI_WORKFLOW_PATH,
+        workflow_name=_CI_WORKFLOW_NAME, check_name=_MAC_CHECK, runner_names=_CI_RUNNER_NAMES)
+    linux = _collect_one_ci_workflow(
+        pr_number=pr_number, result_sha=result_sha, workflow_path=_LINUX_CI_WORKFLOW_PATH,
+        workflow_name=_LINUX_CI_WORKFLOW_NAME, check_name=_LINUX_CHECK,
+        runner_names=_LINUX_CI_RUNNER_NAMES)
+    successful = set(mac['successful_checks']) | set(linux['successful_checks'])
+    check_ids = dict(mac['check_ids'])
+    check_ids.update(linux['check_ids'])
+    return {'workflow_id': mac['workflow_id'], 'run_id': mac['run_id'],
+            'run_attempt': mac['run_attempt'], 'run_number': mac['run_number'],
+            'successful_checks': sorted(successful), 'check_ids': check_ids,
+            'linux_required': True}
 
 
 def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
