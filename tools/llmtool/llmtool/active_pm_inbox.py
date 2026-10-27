@@ -243,14 +243,26 @@ def _session_records(store, session_key):
     return records, unreadable
 
 
-def read_inbox(store, session_key):
-    """Reconcile READY Tasks, then return every unacknowledged event of this PM."""
+def _inbox(store, session_key, *, reconcile):
+    """Build an inbox view, optionally reconciling READY Tasks into events."""
     from .task_submission_cli import _active_pm_handoff
 
     records, unreadable = _session_records(store, session_key)
-    events, blocked = [], []
+    events, blocked, pending = [], [], []
     for record in records:
-        if _active_pm_handoff(record) is not None:
+        handoff = _active_pm_handoff(record)
+        if handoff is not None:
+            binding = _handoff_event(record, handoff)
+            known = (record.get('completion_events', []) +
+                     record.get('completion_event_tombstones', []))
+            if not reconcile and not any(
+                    event['event_id'] == binding['event_id'] for event in known):
+                pending.append({
+                    'task_id': record['task_id'], 'event_id': binding['event_id'],
+                    'source': binding['source'], 'session_id': binding['session_id'],
+                    'state': 'NOT_YET_RECORDED',
+                })
+        if reconcile and handoff is not None:
             try:
                 record_ready_event(store, record['task_id'])
                 record = store.get(record['task_id'])
@@ -281,7 +293,18 @@ def read_inbox(store, session_key):
     return {'pm_session_id': session_key,
             'status': 'ATTENTION' if blocked or unreadable else 'OK',
             'events': events, 'blocked': blocked,
-            'unreadable_task_count': unreadable}
+            'unreadable_task_count': unreadable,
+            **({'pending': pending} if not reconcile else {})}
+
+
+def read_inbox(store, session_key):
+    """Reconcile READY Tasks, then return every unacknowledged event of this PM."""
+    return _inbox(store, session_key, reconcile=True)
+
+
+def peek_inbox(store, session_key):
+    """Return the PM inbox without writing; unrecorded READY results are pending."""
+    return _inbox(store, session_key, reconcile=False)
 
 
 def wait_inbox(store, session_key, *, wait=False, timeout=DEFAULT_WAIT_SECONDS,

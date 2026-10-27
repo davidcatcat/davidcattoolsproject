@@ -21,7 +21,7 @@ from llmtool.cli import main
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
 from llmtool.task_submission_cli import (
-    run_task_ack, run_task_complete, run_task_inbox, run_task_record_pm,
+    _active_pm_handoff, run_task_ack, run_task_complete, run_task_inbox, run_task_record_pm,
     run_task_show)
 
 # Reuse the registered-D6 completion fixture without re-collecting its tests.
@@ -179,6 +179,60 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertIs(event['current'], True)
         self.assertEqual(event['active_pm_handoff'], view['active_pm_handoff'])
         self.assertEqual(event['pm_recovery']['resume_argv'][-1], self.session)
+
+    def test_peek_reports_ready_event_without_writing_then_sees_recorded_event(self):
+        task = self._ready_task()
+        # Keep this READY handoff in the crash window before event recording.
+        # Normal completion records it as part of run_task_complete.
+        with patch('llmtool.active_pm_inbox.record_ready_event', return_value=None):
+            self._complete(task)
+        path = self.store.root / (task['task_id'] + '.json')
+        before_bytes = path.read_bytes()
+        before = self.store.get(task['task_id'])
+        self.assertEqual(before.get('completion_events', []), [])
+        with patch('llmtool.active_pm_inbox.record_ready_event',
+                   side_effect=AssertionError('peek must not record events')):
+            peek = active_pm_inbox.peek_inbox(self.store, 'pm-' + self.session)
+        self.assertEqual(path.read_bytes(), before_bytes)
+        self.assertEqual(self.store.get(task['task_id'])['record_sha256'],
+                         before['record_sha256'])
+        self.assertEqual(peek['events'], [])
+        self.assertEqual(peek['pending'], [{
+            'task_id': task['task_id'],
+            'event_id': active_pm_inbox._handoff_event(
+                before, _active_pm_handoff(before))['event_id'],
+            'source': 'DIRECT_D6_DEVELOPER', 'session_id': before['developer']['session_id'],
+            'state': 'NOT_YET_RECORDED',
+        }])
+        inbox = active_pm_inbox.read_inbox(self.store, 'pm-' + self.session)
+        self.assertEqual(len(inbox['events']), 1)
+        after = active_pm_inbox.peek_inbox(self.store, 'pm-' + self.session)
+        self.assertEqual(after['pending'], [])
+        self.assertEqual([event['event_id'] for event in after['events']],
+                         [inbox['events'][0]['event_id']])
+
+    def test_peek_excludes_acked_events_and_counts_unreadable_tasks(self):
+        task = self._ready_task()
+        self._complete(task)
+        (event,) = self._inbox()['events']
+        self._ack(event['event_id'])
+        peek = active_pm_inbox.peek_inbox(self.store, 'pm-' + self.session)
+        self.assertEqual(peek['events'], [])
+        self.assertEqual(peek['pending'], [])
+
+        other = self._ready_task()
+        original_get = self.store.get
+
+        def unreadable(task_id):
+            if task_id == other['task_id']:
+                raise LLMToolError('unreadable test task')
+            return original_get(task_id)
+
+        with patch.object(self.store, 'get', side_effect=unreadable):
+            unreadable_peek = active_pm_inbox.peek_inbox(
+                self.store, 'pm-' + self.session)
+        self.assertEqual(unreadable_peek['unreadable_task_count'], 1)
+        self.assertEqual(unreadable_peek['status'], 'ATTENTION')
 
     def test_pm_absent_then_later_read_after_restart(self):
         task = self._ready_task()
