@@ -137,6 +137,59 @@ class HighDebugTests(unittest.TestCase):
                         failed_corrections=2, evidence=str(evidence))
             self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_EVIDENCE_SENSITIVE')
 
+    def test_usage_comes_from_last_turn_completed_event(self):
+        events = (b'{"type":"thread.started","thread_id":"thread-1234567890"}\n'
+                  b'{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":1}}\n'
+                  b'{"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":3,"output_tokens":5,"reasoning_output_tokens":2}}\n')
+        self.assertEqual(high_debug._usage_from_events(events),
+                         {'input': 7, 'cached': 3, 'output': 5, 'reasoning': 2})
+
+    def test_session_model_and_effort_are_read_from_rollout(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rollout = root / '2026' / '10' / '27' / 'rollout-test-thread-1234567890.jsonl'
+            rollout.parent.mkdir(parents=True)
+            rollout.write_text('{"type":"session_meta","payload":{"model":"gpt-test","reasoning_effort":"high","other":"ignored"}}\n', encoding='utf-8')
+            self.assertEqual(high_debug._session_observed('thread-1234567890', root),
+                             ('gpt-test', 'high'))
+
+    def test_missing_session_file_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            self.assertEqual(high_debug._session_observed('thread-1234567890', directory),
+                             ('UNKNOWN', 'UNKNOWN'))
+
+    def test_conflicting_session_models_are_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            day = root / '2026' / '10' / '27'
+            day.mkdir(parents=True)
+            for suffix, model in (('a', 'gpt-a'), ('b', 'gpt-b')):
+                (day / f'rollout-{suffix}-thread-1234567890.jsonl').write_text(
+                    json.dumps({'payload': {'model': model, 'effort': 'high'}}), encoding='utf-8')
+            self.assertEqual(high_debug._session_observed('thread-1234567890', root),
+                             ('UNKNOWN', 'high'))
+
+    def test_symlinked_session_file_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / 'sessions'
+            day = root / '2026' / '10' / '27'
+            day.mkdir(parents=True)
+            target = Path(directory) / 'outside.jsonl'
+            target.write_text('{"payload":{"model":"gpt-test","effort":"high"}}', encoding='utf-8')
+            (day / 'rollout-test-thread-1234567890.jsonl').symlink_to(target)
+            self.assertEqual(high_debug._session_observed('thread-1234567890', root),
+                             ('UNKNOWN', 'UNKNOWN'))
+
+    def test_oversized_session_file_is_unknown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            day = root / '2026' / '10' / '27'
+            day.mkdir(parents=True)
+            rollout = day / 'rollout-test-thread-1234567890.jsonl'
+            rollout.write_bytes(b' ' * (high_debug._SESSION_READ_LIMIT + 1))
+            self.assertEqual(high_debug._session_observed('thread-1234567890', root),
+                             ('UNKNOWN', 'UNKNOWN'))
+
 
 class _Store:
     def __init__(self):
