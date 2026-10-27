@@ -22,6 +22,7 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
     requests = []
     fail_models = False
     fail_large_context = False
+    response_delay = 0
 
     def log_message(self, _format, *args):
         return
@@ -56,6 +57,9 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
                               "total_tokens": max(1, len(content) // 4) + completion}})
 
     def _send(self, payload):
+        if type(self).response_delay:
+            import time
+            time.sleep(type(self).response_delay)
         data = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -64,10 +68,15 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class FakeThreadingHTTPServer(http.server.ThreadingHTTPServer):
+    request_queue_size = 128
+    daemon_threads = True
+
+
 class FakeServer(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
+        cls.server = FakeThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
         cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
         cls.thread.start()
         cls.base_url = "http://127.0.0.1:" + str(cls.server.server_port)
@@ -82,6 +91,7 @@ class FakeServer(unittest.TestCase):
         FakeHandler.requests = []
         FakeHandler.fail_models = False
         FakeHandler.fail_large_context = False
+        FakeHandler.response_delay = 0
         self.client = probe.ProbeClient(self.base_url, "fake-model", "sample-value")
 
     def test_each_probe_parses_fake_responses(self):
@@ -94,7 +104,23 @@ class FakeServer(unittest.TestCase):
         self.assertEqual(len(results["output"]["runs"]), 3)
         self.assertEqual(results["concurrency"]["runs"][-1]["ok_count"], 32)
         self.assertEqual(results["quality"]["off"]["total"], 20)
+        self.assertIn("answer", results["quality"]["off"]["runs"][0])
+        self.assertIn("finish_reason", results["quality"]["off"]["runs"][0])
+        self.assertEqual(results["quality"]["off"]["runs"][0]["completion_tokens"], 12)
         self.assertTrue(all(run["status"] == 200 for run in results["thinking"]["runs"]))
+
+    def test_answer_matching_ignores_sentence_punctuation_but_keeps_decimals(self):
+        for answer in ("42.", "Yes.", "Thursday.", "17 + 25 = 42.", "**42**", "0.8"):
+            expected = "0.8" if answer == "0.8" else "42" if answer in ("42.", "17 + 25 = 42.", "**42**") else answer.rstrip(".").lower()
+            with self.subTest(answer=answer):
+                self.assertTrue(probe._answer_matches(answer, expected))
+        self.assertFalse(probe._answer_matches("0.75", "0.8"))
+
+    def test_slow_fake_response_is_reported_as_timeout(self):
+        FakeHandler.response_delay = 0.2
+        result = self.client.send(body={"messages": [{"role": "user", "content": "slow"}]}, timeout=0.02)
+        self.assertEqual(result["error_code"], "TIMEOUT")
+        self.assertLess(result["latency_seconds"], 2)
 
     def test_http_error_is_recorded_and_later_probe_runs(self):
         FakeHandler.fail_models = True

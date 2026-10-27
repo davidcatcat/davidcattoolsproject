@@ -61,7 +61,7 @@ class ProbeClient:
         self._fake_lock = threading.Lock()
         self._fake_count = 0
 
-    def send(self, method="POST", body=None, path="/v1/chat/completions"):
+    def send(self, method="POST", body=None, path="/v1/chat/completions", timeout=30):
         if self.dry_run:
             return self._canned(method, path, body)
         headers = {"Accept": "application/json"}
@@ -75,7 +75,7 @@ class ProbeClient:
         req = request.Request(self.base_url + path, data=data, headers=headers, method=method)
         start = time.monotonic()
         try:
-            with self.opener.open(req, timeout=TIMEOUT_SECONDS) as response:
+            with self.opener.open(req, timeout=timeout) as response:
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
                 status = response.status
         except error.HTTPError as exc:
@@ -83,7 +83,14 @@ class ProbeClient:
             exc.close()
             return {"status": status, "error_code": "HTTP_" + str(status),
                     "latency_seconds": round(time.monotonic() - start, 3)}
-        except (error.URLError, TimeoutError, socket.timeout, OSError, ValueError):
+        except (socket.timeout, TimeoutError):
+            return {"status": None, "error_code": "TIMEOUT",
+                    "latency_seconds": round(time.monotonic() - start, 3)}
+        except error.URLError as exc:
+            code = "TIMEOUT" if isinstance(exc.reason, (socket.timeout, TimeoutError)) else "TRANSPORT_ERROR"
+            return {"status": None, "error_code": code,
+                    "latency_seconds": round(time.monotonic() - start, 3)}
+        except (OSError, ValueError):
             return {"status": None, "error_code": "TRANSPORT_ERROR",
                     "latency_seconds": round(time.monotonic() - start, 3)}
         result = {"status": status, "latency_seconds": round(time.monotonic() - start, 3)}
@@ -134,14 +141,7 @@ def _chat(client, messages, *, effort=None, thinking="unset", max_tokens=128, te
     if tools is not None:
         body["tools"] = tools
         body["tool_choice"] = "auto"
-    if timeout is None:
-        return client.send(body=body)
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(client.send, "POST", body, "/v1/chat/completions")
-        try:
-            return future.result(timeout=timeout)
-        except concurrent.futures.TimeoutError:
-            return {"status": None, "error_code": "TIMEOUT", "latency_seconds": timeout}
+    return client.send(body=body, timeout=TIMEOUT_SECONDS if timeout is None else timeout)
 
 
 def _response(result):
@@ -216,7 +216,7 @@ def probe_context(client):
             break
         filler = "alpha beta gamma delta " * ((size * 4 // 24) + 1)
         prompt = needle + "\n" + filler[:size * 4] + "\nQuestion: What exact needle appeared at the beginning? Reply with only the needle."
-        result = _chat(client, [{"role": "user", "content": prompt}], max_tokens=64)
+        result = _chat(client, [{"role": "user", "content": prompt}], max_tokens=64, timeout=300)
         response, _, message = _response(result)
         usage = _usage(response)
         observation = {"approx_prompt_tokens": size, "status": result.get("status"),
@@ -234,7 +234,7 @@ def probe_output(client):
     runs = []
     prompt = [{"role": "user", "content": "Count upward from 1, one integer per line, and continue until stopped."}]
     for limit in (4096, 16384, 32768):
-        result = _chat(client, prompt, max_tokens=limit)
+        result = _chat(client, prompt, max_tokens=limit, timeout=300)
         response, choice, _ = _response(result)
         usage = _usage(response)
         runs.append({"max_tokens": limit, "status": result.get("status"), "error_code": result.get("error_code"),
@@ -293,6 +293,8 @@ def _answer_matches(answer, expected):
     if not isinstance(answer, str):
         return False
     normalized = re.sub(r"[^a-z0-9.]+", " ", answer.lower()).strip()
+    normalized = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
     target = expected.lower()
     return normalized == target or normalized.endswith(" " + target)
 
@@ -302,11 +304,15 @@ def probe_quality(client):
     for mode in ("off", "on"):
         results = []
         for question, expected in QUESTIONS:
-            result = _chat(client, [{"role": "user", "content": question}], thinking=mode, max_tokens=128)
-            response, _, message = _response(result)
+            result = _chat(client, [{"role": "user", "content": question}], thinking=mode, max_tokens=2048,
+                           timeout=120 if mode == "on" else None)
+            response, choice, message = _response(result)
             answer = message.get("content")
             results.append({"correct": _answer_matches(answer, expected),
+                            "answer": answer if isinstance(answer, str) else None,
+                            "finish_reason": choice.get("finish_reason"),
                             "latency_seconds": result.get("latency_seconds"), "usage": _usage(response),
+                            "completion_tokens": (_usage(response) or {}).get("completion_tokens"),
                             "status": result.get("status"), "error_code": result.get("error_code")})
         latencies = [r["latency_seconds"] for r in results if isinstance(r["latency_seconds"], (int, float))]
         completion_tokens = [r["usage"]["completion_tokens"] for r in results if r["usage"] and

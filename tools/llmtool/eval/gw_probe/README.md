@@ -8,7 +8,7 @@ python3 -I -B tools/llmtool/eval/gw_probe/probe.py --out-dir /private/tmp/gw-pro
 
 Use `--only NAME` to run one probe, or repeat it for a selection. Names are `models`, `thinking`, `tools`, `determinism`, `context`, `output`, `concurrency`, and `quality`. Results go to `gw_probe.json` and `gw_probe.md` under `--out-dir`; without it, they go under the system temporary directory in `gw-probe`.
 
-`--dry-run` uses built-in canned responses and makes no network requests. `--base-url` and `--model` are intended for tests with a loopback fake server; endpoint and model overrides require a loopback base URL (or `--dry-run`). Network requests have a 30-second timeout and response bodies are bounded.
+`--dry-run` uses built-in canned responses and makes no network requests. `--base-url` and `--model` are intended for tests with a loopback fake server; endpoint and model overrides require a loopback base URL (or `--dry-run`). Calls have a 30-second timeout by default; context and output calls use 300 seconds, and thinking-on quality calls use 120 seconds. `TIMEOUT` means the client-side request limit was reached; it does not report a gateway timeout limit. Response bodies are bounded.
 
 The probes measure:
 
@@ -19,6 +19,6 @@ The probes measure:
 - `context`: a needle at the beginning and question at the end of increasingly long prompts, from about 8K up to 300K tokens; stops at the first request error.
 - `output`: an open-ended count request with 4K, 16K, and 32K max token limits.
 - `concurrency`: batches of 1, 4, 8, 16, and 32 small requests, with success/error counts, wall time, and aggregate output tokens per second.
-- `quality`: 20 synthetic arithmetic, logic, and code-reading questions with thinking off and on, including accuracy, latency, and token usage.
+- `quality`: 20 synthetic arithmetic, logic, and code-reading questions with thinking off and on, both with a 2048-token output budget, including each answer, finish reason, completion-token count, accuracy, latency, and token usage.
 
 An HTTP or transport error is represented in that probe's result and does not stop later probes. The reported context size is approximate; gateway-reported token usage is recorded separately when available. This is a bounded deployment measurement, not a general model evaluation.
