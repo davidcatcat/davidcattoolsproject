@@ -117,6 +117,14 @@ class StressFakeServer(unittest.TestCase):
         self.assertTrue(result["windows"])
         self.assertIn("start_offset_seconds", result["requests"][0])
 
+    def test_sustained_windows_follow_requested_duration(self):
+        code, _stdout, output, _files = self._run(["--only", "sustained", "--concurrency", "4",
+                                                   "--duration", "2", "--window", "1"])
+        result = output["modes"]["sustained"]
+        self.assertEqual(code, 0)
+        self.assertEqual(len(result["windows"]), 2)
+        self.assertEqual(output["thinking_applies_to"], ["burst", "sustained"])
+
     def test_budget_collects_reasoning_and_needle_results(self):
         code, _stdout, output, _files = self._run(["--only", "budget", "--thinking", "off"])
         result = output["modes"]["budget"]

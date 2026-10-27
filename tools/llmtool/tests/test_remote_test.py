@@ -4,6 +4,8 @@ import hashlib
 import json
 import os
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -90,7 +92,7 @@ class RemoteTestTests(unittest.TestCase):
             receipt['failure_excerpt'] = failure_excerpt
         return json.dumps(receipt, separators=(',', ':')).encode()
 
-    def failure_excerpt(self, output):
+    def failure_excerpt(self, output, stderr=''):
         parsed = ast.parse(remote_test._REMOTE_SCRIPT)
         sensitive = next(node for node in parsed.body
                          if isinstance(node, ast.Assign) and
@@ -102,7 +104,7 @@ class RemoteTestTests(unittest.TestCase):
         namespace = {'re': re, '_emitted_sensitive': remote_test._emitted_sensitive}
         exec(compile(ast.Module(body=[sensitive, helper], type_ignores=[]),
                      '<remote-excerpt-helper>', 'exec'), namespace)
-        return namespace['failure_excerpt']([output.encode()],
+        return namespace['failure_excerpt']([output.encode(), stderr.encode()],
             '/tmp/llmtool-remote-test.Abc123', '/home/runner')
 
     def run_it(self, data=None, *, error=None, modules=('test_remote_test',), sha=SHA,
@@ -159,6 +161,36 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('<REMOTE_WORKDIR>/test.py', excerpt)
         self.assertNotIn('/tmp/llmtool-remote-test.Abc123', excerpt)
         self.assertNotIn(cred_value, excerpt)
+        self.assertEqual(self.failure_excerpt(''), '')
+        with tempfile.TemporaryDirectory() as test_dir:
+            fixture = Path(test_dir) / 'test_excerpt_fixture.py'
+            fixture.write_text(
+                'import unittest\n'
+                'class ExcerptFailures(unittest.TestCase):\n'
+                '    def test_assertion(self):\n'
+                "        self.assertEqual(1, 2, 'expected value')\n"
+                '    def test_error(self):\n'
+                "        raise RuntimeError('broken')\n")
+            generated = subprocess.run(
+                [sys.executable, '-m', 'unittest', 'discover', '-s', test_dir,
+                 '-p', fixture.name], capture_output=True, check=False)
+        self.assertNotEqual(generated.returncode, 0)
+        stdout = generated.stdout.decode('utf-8', 'replace')
+        stderr = generated.stderr.decode('utf-8', 'replace')
+        combined = self.failure_excerpt(stdout, stderr)
+        self.assertRegex(combined, r'FAIL: test_assertion '
+            r'\(test_excerpt_fixture\.ExcerptFailures(?:\.test_assertion)?\)')
+        self.assertRegex(combined, r'ERROR: test_error '
+            r'\(test_excerpt_fixture\.ExcerptFailures(?:\.test_error)?\)')
+        self.assertIn('AssertionError:', combined)
+        self.assertIn('expected value', combined)
+        self.assertIn('RuntimeError: broken', combined)
+        self.assertEqual(self.failure_excerpt(''), '')
+        home_path = self.failure_excerpt(
+            'FAIL: test_home\n  File "/home/runner/test.py", line 1\n'
+            'AssertionError: failed\n----------------------------------------------------------------------\n')
+        self.assertIn('<REMOTE_HOME>/test.py', home_path)
+        self.assertNotIn('/home/runner', home_path)
         url_value = ''.join(('https', '://', 'user', ':', 'value', '@',
                              'example.test/path'))
         jwt_value = '.'.join(('a' * 12, 'b' * 12, 'c' * 12))

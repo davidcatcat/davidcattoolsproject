@@ -544,6 +544,13 @@ def add_task_submission_parsers(actions):
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
     complete.add_argument('--reviewer-task', help='registered D6 independent Reviewer task id (omit for the initial Executor-result callback)')
     complete.add_argument('--pr', type=int, help='public GitHub pull request number (omit for the initial Executor-result callback)')
+    advance = actions.add_parser('advance', help='Advance one Task through its next review or closure step')
+    advance.add_argument('task_id', help='existing durable Task ID')
+    advance.add_argument('--pr', type=int, help='public GitHub pull request number')
+    advance.add_argument('--integration-pr', type=int,
+                         help='merged integration PR containing the reviewed head')
+    advance.add_argument('--reviewer-session-done', action='store_true',
+                         help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
     review_prompt = actions.add_parser(
         'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
     review_prompt.add_argument('task_id', help='existing durable Task ID')
@@ -732,6 +739,17 @@ def run_task_review_dispatch(args, *, store=None):
                              task_id=args.task_id, executor_task=args.executor_task,
                              pr_number=args.pr, version=getattr(args, 'version', 1))
     return _print(result)
+
+
+def run_task_advance(args, *, store=None, **adapters):
+    """Thin CLI adapter for one idempotent Task advancement step."""
+    from .task_advance import advance
+    result = advance(task_id=args.task_id, store=TaskStore() if store is None else store,
+        pr_number=getattr(args, 'pr', None),
+        integration_pr=getattr(args, 'integration_pr', None),
+        reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
+    _print(result)
+    return 1 if result.get('codes') else 0
 
 
 def run_task_review_result(args, *, store=None, github_get=None):
