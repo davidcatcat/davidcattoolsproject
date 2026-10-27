@@ -40,6 +40,11 @@ def tearDownModule():
     _ISOLATED.cleanup()
 
 
+# The runner and worker counts every header ends with when no runner runs and
+# GitHub was not read.
+NO_RUNNERS = "  Mac runner 0  EC2 runner 未確認  EC2 worker 1"
+
+
 def ps(*rows):
     return "\n".join(rows)
 
@@ -1453,7 +1458,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual([(row.name, row.state, row.detail.split("，")[0]) for row in codex_rows],
                          [("codex cli #1", mon.IDLE, "本 repo：已開啟")])
         # The launcher pair is one CLI; the daemon, app-server and code-mode host are not members.
-        self.assertEqual(mon.summary(procs, [], []), "Codex 1")
+        self.assertEqual(mon.summary(procs, [], []), "Codex 1" + NO_RUNNERS)
         # With an active rollout the session row is that CLI: no extra row.
         self._codex("live", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                              "originator": "codex-tui"}, ["task_started"], age=5)
@@ -1485,7 +1490,7 @@ class OfficeViewTests(unittest.TestCase):
                                cwd_of=lambda pid: self.canonical)
         self.assertEqual(sorted((row.name, row.state) for row in rows if row.name.startswith("claude")),
                          [("claude cli #1", mon.IDLE), ("claude 互動", mon.IDLE)])
-        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 2")
+        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 2" + NO_RUNNERS)
 
     def test_open_agent_clis_outside_the_repo_get_a_row_like_opencode(self):
         elsewhere = os.path.join(self.tmp.name, "other-project")
@@ -1503,7 +1508,7 @@ class OfficeViewTests(unittest.TestCase):
                                 ("codex cli #1", mon.UNCHECKED, "其他資料夾：已開啟"),
                                 ("opencode cli #1", mon.IDLE,
                                  "其他資料夾：已開啟，沒有執行中的任務，已開 5 分鐘")])
-        self.assertEqual(mon.summary(procs, [], []), "Claude 1  Codex 1  OpenCode 1")
+        self.assertEqual(mon.summary(procs, [], []), "Claude 1  Codex 1  OpenCode 1" + NO_RUNNERS)
 
     def test_session_that_cd_into_a_d6_keeps_its_cli_to_one_row(self):
         # The CLI was opened in the canonical checkout; its session `cd`s into the D6.
@@ -1519,7 +1524,7 @@ class OfficeViewTests(unittest.TestCase):
                                cwd_of=lambda pid: self.canonical)
         self.assertEqual([(row.state, row.task) for row in rows if row.name.startswith("claude")],
                          [(mon.WORKING, "task wp-1")])
-        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 1")
+        self.assertEqual(mon.summary(procs, [], str(sessions)), "Claude 1" + NO_RUNNERS)
 
     def test_session_that_cd_into_a_d6_never_takes_a_cli_outside_the_repo(self):
         self._write(self.claude / "proj" / "s1.jsonl", [
@@ -1536,13 +1541,13 @@ class OfficeViewTests(unittest.TestCase):
         procs = [cli(70), cli(81)]
         self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
                                               (mon.UNCHECKED, "其他資料夾：已開啟")])
-        self.assertEqual(mon.summary(procs, [], []), "Claude 2")
+        self.assertEqual(mon.summary(procs, [], []), "Claude 2" + NO_RUNNERS)
         # Two canonical CLIs for one session that moved: which is free is a guess.
         procs.append(cli(82))
         self.assertEqual(claude_rows(procs), [(mon.WORKING, "task wp-1"),
                                               (mon.UNCHECKED, "其他資料夾：已開啟"),
                                               (mon.UNCHECKED, "本 repo：已開啟")])
-        self.assertEqual(mon.summary(procs, [], []), "Claude 3")
+        self.assertEqual(mon.summary(procs, [], []), "Claude 3" + NO_RUNNERS)
 
     def test_process_fallback_does_not_duplicate_transcript_task_row(self):
         self._codex("dev", {"id": "T9", "cwd": str(self.task), "thread_source": "user"},
@@ -2390,7 +2395,7 @@ class OfficeViewTests(unittest.TestCase):
         spare = mon.Process(44, 7, 7, "05:00", "S", "Claude Code background session", "claude",
                             "Claude Code daemon 7")
         self.assertEqual(mon.summary(procs + [daemon, spare], [],
-                                     mon.claude_sessions([str(self.claude), str(other)])), "Claude 3")
+                                     mon.claude_sessions([str(self.claude), str(other)])), "Claude 3" + NO_RUNNERS)
 
     def test_working_claude_shows_its_latest_action_description_only(self):
         call = lambda description: {"type": "assistant", "message": {"content": [
@@ -3680,6 +3685,34 @@ class GitHubRunnerTests(unittest.TestCase):
         return [("actions/runners", (0, {"runners": runners}))] + [
             (f"actions/runs/{run}/jobs", (0, {"jobs": found})) for run, found in jobs.items()] + [
             ("actions/runs?", (0, runs))]
+
+    def test_header_counts_runners_and_the_ec2_worker_not_processes(self):
+        procs = [mon.Process(30, 1, 30, "01:00", "S", "Actions runner", "Runner.Listener"),
+                 mon.Process(31, 30, 30, "00:10", "S", "Actions runner job", "Runner.Worker"),
+                 mon.Process(40, 1, 40, "01:00", "S", "Actions runner", "Runner.Listener"),
+                 mon.Process(41, 40, 40, "00:10", "S", "Actions runner job", "Runner.Worker"),
+                 mon.Process(50, 1, 50, "01:00", "S+", "Codex CLI", "codex")]
+        runners = mon.ci_runners({"runners": [
+            self.MAC, self.linux("ec2-llmtool-01"), self.linux("ec2-llmtool-02", "offline"),
+            {"name": "ec2-self-runner-3", "os": "unknown", "status": "online", "busy": False,
+             "labels": [{"name": "local-ec2-linux-ci-pending"}]}]})
+        fresh = mon.CiView(runners, NOW - 30)
+        self.assertEqual(mon.summary(procs, [], [], ci_view=fresh, now=NOW),
+                         "Codex 1  Mac runner 2  EC2 runner 3  EC2 worker 1")
+        # old, failed or never-read runner data is not counted
+        for view in (mon.CiView(runners, NOW - mon.GITHUB_STALE - 1),
+                     mon.CiView(runners, NOW - 30, error="逾時"),
+                     mon.CiView(None, 0.0, error="逾時"), None):
+            self.assertEqual(mon.summary(procs, [], [], ci_view=view, now=NOW),
+                             "Codex 1  Mac runner 2  EC2 runner 未確認  EC2 worker 1")
+
+    def test_an_ec2_runner_with_only_a_pending_label_is_a_linux_runner(self):
+        runners = mon.ci_runners({"runners": [
+            {"name": "ec2-self-runner-3", "os": "unknown", "status": "online", "busy": False,
+             "labels": [{"name": "local-ec2-linux-ci-pending"}]}]})
+        [row] = mon.github_runner_rows(mon.CiView(runners, NOW - 30), NOW)
+        self.assertEqual((row.name, row.state), ("linux ci runner ec2-self-runner-3", mon.IDLE))
+        self.assertIn("標籤 local-ec2-linux-ci-pending", row.detail)
 
     def test_idle_busy_offline_and_several_linux_runners_beside_the_mac(self):
         source, gh = self.source(self.ci([

@@ -372,17 +372,31 @@ def running_stages(tasks: list) -> int:
     return sum(1 for t in tasks for s in t.stages if stage_state(s) == "RUNNING")
 
 
-def summary(processes: list[Process], lingering: list, sessions=None) -> str:
+def summary(processes: list[Process], lingering: list, sessions=None,
+            ci_view: "CiView | None" = None, now: float | None = None) -> str:
     # An agent family counts its open CLIs, the processes office rows stand
     # for; its daemons and servers are listed in the table, not counted.
+    # Runners and Workers are counted as the office rows count them: one Mac
+    # runner per Listener (its Worker process is not another runner), the
+    # Linux runners in GitHub's list only while that list is fresh, and the
+    # EC2 remote-test worker, which is always a member.
     members = {p.pid for p in agent_clis(processes, sessions)}
     counts: dict[str, int] = {}
     for p in processes:
-        if p.role.startswith(" ") or family(p.role) in AGENT_FAMILIES and p.pid not in members:
+        if (p.role.startswith(" ") or family(p.role) == "Actions runner"
+                or family(p.role) in AGENT_FAMILIES and p.pid not in members):
             continue
         counts[family(p.role)] = counts.get(family(p.role), 0) + 1
-    order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "Actions runner", "other")
-    text = "  ".join(f"{k} {counts[k]}" for k in order if k in counts) or "no agent process"
+    order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop")
+    now = time.time() if now is None else now
+    fresh = (ci_view is not None and ci_view.runners is not None and not ci_view.error
+             and now - ci_view.seen_at <= GITHUB_STALE)
+    linux = sum(_runner_system(runner[0], runner[1]) == "linux" for runner in ci_view.runners) if fresh else 0
+    parts = [f"{k} {counts[k]}" for k in order if k in counts] + [
+        f"Mac runner {sum(p.role == 'Actions runner' for p in processes)}",
+        f"EC2 runner {linux if fresh else '未確認'}", "EC2 worker 1"]
+    parts += [f"other {counts['other']}"] if "other" in counts else []
+    text = "  ".join(parts)
     return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")
 
 
@@ -463,7 +477,7 @@ class Monitor:
         current = {p.pid: p for p in result.processes}
         new: list[tuple[str, str, str]] = []
         if self.polls == 1:
-            new.append((stamp, "i", f"monitor started; {summary(result.processes, result.lingering)}"))
+            new.append((stamp, "i", f"monitor started; {summary(result.processes, result.lingering, ci_view=self.github.ci_view if self.github else None)}"))
         for pid, p in current.items():
             if pid in self.announced:
                 continue
@@ -3334,6 +3348,13 @@ def _runner_row(root, listener, processes, now, isolation, ci, number, total, qu
 RUNNER_DEFAULT_LABELS = frozenset({"self-hosted", "linux", "macos", "windows", "x64", "arm64", "arm"})
 
 
+def _runner_system(name: str, system: str) -> str:
+    """The runner's platform word for its row: GitHub's os, except that an
+    `ec2-` runner is a Linux one even while its os or labels are incomplete
+    (a newly added runner can carry only a pending label)."""
+    return "linux" if name.startswith("ec2-") else system.lower()
+
+
 def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | None = None) -> list[OfficeRow]:
     """One row per self-hosted runner GitHub lists that no row on this Mac
     covers (e.g. a Linux runner elsewhere): GitHub's word alone, so data
@@ -3381,7 +3402,8 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
         if fits:   # GitHub has not given them to a runner; this one has every label they ask for
             notes.append(f"排隊中、它可以接 {len(fits)} 個：" + "、".join(fits[:3])
                          + ("…" if len(fits) > 3 else ""))
-        rows.append(OfficeRow(f"{system.lower() + ' ' if system else ''}ci runner {name}", state,
+        kind = _runner_system(name, system)
+        rows.append(OfficeRow(f"{kind + ' ' if kind else ''}ci runner {name}", state,
                               "；".join(notes), age, 90 + number, key=name, kind="worker",
                               evidence="GitHub", alert=alert))
     return rows
@@ -4454,7 +4476,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
         mon.github = github
     mon.poll()
     print(f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
-          f"{summary(mon.processes, mon.lingering)}")
+          f"{summary(mon.processes, mon.lingering, ci_view=github.ci_view if github else None)}")
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
@@ -4526,7 +4548,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
                 colors.get("!", 0) | curses.A_BOLD)
         status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
-                  else summary(mon.processes, mon.lingering))
+                  else summary(mon.processes, mon.lingering,
+                               ci_view=mon.github.ci_view if mon.github else None))
         running = running_stages(mon.tasks)
         status += f"  ·  llmtool stages running: {running}" if running else ""
         put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)
