@@ -105,7 +105,8 @@ class RemoteTestTests(unittest.TestCase):
         return namespace['failure_excerpt']([output.encode()],
             '/tmp/llmtool-remote-test.Abc123', '/home/runner')
 
-    def run_it(self, data=None, *, error=None, modules=('test_remote_test',), sha=SHA):
+    def run_it(self, data=None, *, error=None, modules=('test_remote_test',), sha=SHA,
+               pr=None):
         def transport(argv, script, timeout):
             self.calls.append((argv, script, timeout))
             if error:
@@ -116,7 +117,7 @@ class RemoteTestTests(unittest.TestCase):
                           return_value=SimpleNamespace(result_sha=SHA)):
             return remote_test.run_remote_test(
                 self.store.task['task_id'], executor_task='d6-task', sha=sha,
-                ref='refs/pull/425/head', modules=modules, store=self.store,
+                ref='refs/pull/425/head', modules=modules, pr=pr, store=self.store,
                 config_path=self.config, transport=transport)
 
     def test_pass_is_stored_on_same_task_and_delivered_to_pm_inbox(self):
@@ -334,6 +335,79 @@ class RemoteTestTests(unittest.TestCase):
                          ('ADMISSION_DENIED', 'MODULE_NOT_ADMITTED'))
         self.assertTrue(denied['persisted'])
         self.assertEqual(self.calls, [])
+
+    def test_test_failed_callback_admits_modules_without_changing_callback(self):
+        callback = self.store.task['developer']['direct_result_callback']
+        callback.update(state='WAITING_EXECUTOR', missing_gates=['TEST_FAILED'])
+        callback['evidence']['verification_state'] = 'FAILED'
+        callback_bytes = json.dumps(callback, sort_keys=True,
+                                    separators=(',', ':')).encode()
+
+        failed_receipt = self.receipt('FAIL', exit_code=1,
+                                      final=('FAILED (failures=1)',))
+        failed = self.run_it(failed_receipt)
+        self.assertEqual(failed['result'], 'FAIL')
+        self.assertEqual(json.dumps(callback, sort_keys=True,
+                                    separators=(',', ':')).encode(), callback_bytes)
+
+        passed = self.run_it()
+        self.assertEqual(passed['result'], 'PASS')
+        self.assertEqual(json.dumps(callback, sort_keys=True,
+                                    separators=(',', ':')).encode(), callback_bytes)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_non_eligible_waiting_callback_states_do_not_admit_modules(self):
+        callback = self.store.task['developer']['direct_result_callback']
+        eligible_evidence = dict(callback['evidence'], verification_state='FAILED')
+        variants = (
+            {'state': 'WAITING_EXECUTOR', 'missing_gates': ['OTHER'],
+             'evidence': eligible_evidence},
+            {'state': 'WAITING_EXECUTOR', 'missing_gates': ['TEST_FAILED'],
+             'evidence': dict(eligible_evidence, verification_state='PASS')},
+            {'state': 'FAILED', 'missing_gates': ['TEST_FAILED'],
+             'evidence': eligible_evidence},
+            {'state': 'WAITING_EXECUTOR', 'missing_gates': ['TEST_FAILED', 'OTHER'],
+             'evidence': eligible_evidence},
+        )
+        for variant in variants:
+            with self.subTest(variant=variant):
+                callback.clear()
+                callback.update(variant)
+                result = self.run_it()
+                self.assertEqual((result['result'], result['code']),
+                                 ('ADMISSION_DENIED', 'MODULE_NOT_ADMITTED'))
+        self.assertEqual(self.calls, [])
+
+    def test_pr_without_completion_review_reads_and_binds_github_head(self):
+        with patch.object(remote_test, '_github_get',
+                          return_value={'number': 425, 'head': {'sha': SHA}}) as github_get:
+            result = self.run_it(pr=425)
+
+        self.assertEqual(result['result'], 'PASS')
+        github_get.assert_called_once_with('pulls/425')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_pr_without_completion_review_denies_mismatch_or_read_failure_before_ssh(self):
+        for response, error in (({'number': 425, 'head': {'sha': OTHER}}, None),
+                                ({'number': 426, 'head': {'sha': SHA}}, None),
+                                (None, OSError('unavailable'))):
+            with self.subTest(response=response, error=error):
+                with patch.object(remote_test, '_github_get',
+                                  side_effect=error if error else None,
+                                  return_value=response):
+                    result = self.run_it(pr=425)
+                self.assertEqual((result['result'], result['code']),
+                                 ('ADMISSION_DENIED', 'PR_HEAD_NOT_TASK_RESULT'))
+        self.assertEqual(self.calls, [])
+
+    def test_pr_with_completion_review_keeps_existing_binding(self):
+        self.store.task['completion']['evidence']['review_pr_ci'] = {
+            'pr_number': 425, 'head_sha': SHA}
+        with patch.object(remote_test, '_github_get',
+                          side_effect=AssertionError('unexpected GitHub lookup')):
+            result = self.run_it(pr=425)
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual(len(self.calls), 1)
 
     def test_remote_script_recognizes_unittest_failure_summary(self):
         self.assertIn('line.startswith("FAILED (")', remote_test._REMOTE_SCRIPT)
