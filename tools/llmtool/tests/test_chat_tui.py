@@ -12,7 +12,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmtool import chat_tui
+from llmtool import chat_tui, chat_tui_pm
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
 from llmtool.providers.base import Reply
@@ -437,7 +437,7 @@ class WidgetTests(Base):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
                                   '/exit', '/quit', '/task submit', '/task show', '/task mode', '/task list', '/task events',
-                                  '/pm connect', '/pm disconnect', '/pm history'])
+                                  '/pm connect', '/pm new', '/pm disconnect', '/pm history'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
@@ -583,24 +583,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 16)
+            self.assertEqual(len(ui.menu_items), 17)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/help', rows[0])
-            self.assertIn('11 more (0 above, 11 below)', rows[-1])
+            self.assertIn('12 more (0 above, 12 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/help', ''.join(rows))
             self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('11 more (2 above, 9 below)', rows[-1])
+            self.assertIn('12 more (2 above, 10 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 15)
+            self.assertEqual(ui.menu_index, 16)
             self.assertIn('/pm history', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(11 above, 0 below)', rows[-1])
+            self.assertIn('(12 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -1864,9 +1864,15 @@ class FakeClaude:
         return [line for line in self.written if line.get('type') == 'user']
 
 
-def _delta(text):
-    return {'type': 'stream_event', 'event': {'type': 'content_block_delta',
+def _delta(text, index=0):
+    """A Claude Code stream-json partial text event, as pm_runtime S2 parses it."""
+    return {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': index,
                                               'delta': {'type': 'text_delta', 'text': text}}}
+
+
+def _tool_result(tool_id, content, is_error):
+    return {'type': 'user', 'message': {'content': [
+        {'type': 'tool_result', 'tool_use_id': tool_id, 'content': content, 'is_error': is_error}]}}
 
 
 def _assistant(*content):
@@ -1974,7 +1980,7 @@ class PMDisplayScreeningTests(unittest.TestCase):
         self.assertIn('PM runtime error UNKNOWN', self.pm.error_text('leak ' + self.key))
         self.assertEqual(self.pm.event_ids({'turn_id': self.key, 'seq': True}), (None, None))
         line = self.pm.tool_result_text({'is_error': True, 'reason': self.key}, 'Read')
-        self.assertEqual(line, '  · tool Read: error (UNKNOWN)')
+        self.assertEqual(line, '  · tool Read: error (reason UNKNOWN)')
         end = self.pm.turn_end_text({'status': 'x ' + self.key, 'usage': {}}, 1.0)
         self.assertNotIn(self.key[3:9], end)
         self.assertIn('PM turn UNKNOWN', end)
@@ -1982,19 +1988,27 @@ class PMDisplayScreeningTests(unittest.TestCase):
 
 
 class PMAdapterTests(unittest.TestCase):
-    """S2-dependent fields are read through the adapter; absent means not reported."""
+    """Display text for the values pm_runtime S2 returns; anything else is UNKNOWN."""
 
     def test_adapter_points_and_texts(self):
         from llmtool import chat_tui_pm as pm
-        self.assertEqual(pm.binding_text(object()), 'dedicated: not reported by pm_runtime S1')
+        self.assertEqual(pm.binding_text(None), 'NOT dedicated (no pm_runtime binding)')
+        self.assertEqual(pm.binding_text({'dedicated': True, 'created_at': '2026-10-28T01:00:00+00:00'}),
+                         'dedicated (pm_runtime binding created 2026-10-28T01:00:00+00:00)')
         self.assertEqual(pm.event_ids({'type': 'TEXT_DELTA'}), (None, None))
         self.assertEqual(pm.event_ids({'turn_id': 'abc', 'seq': 3}), ('abc', 3))
-        self.assertIn('auto-denied permission is possible',
-                      pm.tool_result_text({'is_error': True}, 'Read'))
-        self.assertIn('auto-denied (permission prompts are off until S3)',
-                      pm.tool_result_text({'is_error': True, 'reason': 'PERMISSION_DENIED'}, 'Bash'))
-        self.assertEqual(pm.tool_result_text({'is_error': False}, None), '  · tool UNKNOWN: done')
-        self.assertIn('open in another process', pm.error_text('PM_SESSION_LIVE_ELSEWHERE'))
+        # Only S2's three reason values get a meaning; a missing reason is never guessed.
+        self.assertEqual(pm.tool_result_text({'reason': 'OK', 'is_error': False}, 'Read'),
+                         '  · tool Read: done')
+        self.assertEqual(pm.tool_result_text({'reason': 'TOOL_ERROR', 'is_error': True}, 'Read'),
+                         '  · tool Read: error (pm_runtime reason TOOL_ERROR)')
+        self.assertIn('auto-denied (pm_runtime reason PERMISSION_DENIED',
+                      pm.tool_result_text({'reason': 'PERMISSION_DENIED', 'is_error': True}, 'Bash'))
+        self.assertEqual(pm.tool_result_text({'is_error': True}, None),
+                         '  · tool UNKNOWN: error (reason UNKNOWN)')
+        self.assertIn('/pm new', pm.error_text('PM_SESSION_NOT_DEDICATED'))
+        self.assertIn('usage limit must reset', pm.error_text('PM_QUOTA_EXHAUSTED'))
+        self.assertIn('looks open in another process', pm.error_text('PM_SESSION_LIVE_ELSEWHERE'))
         self.assertIn('UNKNOWN — pm_runtime gives no recovery', pm.error_text('PM_NEW_CODE'))
         self.assertEqual(pm.usage_text({}), 'UNKNOWN')
         self.assertEqual(pm.error_code(ValueError('PRIVATE')), 'UNKNOWN')
@@ -2002,7 +2016,10 @@ class PMAdapterTests(unittest.TestCase):
 
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
 class PMConversationTests(Base):
-    """The real PMRuntime (S1) against a scripted fake `claude`; ChatSession is never used."""
+    """The real pm_runtime S2 against a scripted fake `claude`; ChatSession is never used.
+
+    The dedicated binding is created by pm_runtime.create_dedicated_pm (its runner only
+    records the argv), so open() passes S2's binding check for real."""
 
     idle = staticmethod(WidgetTests.idle)
 
@@ -2016,6 +2033,17 @@ class PMConversationTests(Base):
         self.observe.start()
         self.fakes = []
         self.turns = [_full_turn()]
+        self.created = []
+        test = self
+
+        class API(chat_tui_pm.PMRuntimeAPI):
+            def runtime(self, session_id, cwd):
+                return test.make_runtime(session_id, cwd)
+
+        self.api = API(state_root=self.state, environ={'HOME': str(self.temp_root)},
+                       create_runner=lambda argv, cwd, env: self.created.append(argv))
+        self.binding = self.api.create_dedicated(str(self.temp_root))
+        self.session_id = self.binding['native_session_id']
 
     def make_runtime(self, session_id, cwd):
         def runner(argv, run_cwd, env):
@@ -2031,7 +2059,7 @@ class PMConversationTests(Base):
         if size is not None:
             output.get_size = lambda: size[0]
         with create_pipe_input() as pipe:
-            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output, pm_factory=self.make_runtime)
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output, pm_api=self.api)
             self.ui = ui
 
             async def main():
@@ -2070,19 +2098,20 @@ class PMConversationTests(Base):
         return self.until(ui, lambda ui: not ui.pm_turn_active, 'PM turn end')
 
     def connect(self):
-        return '/pm connect ' + PM_SESSION + ' ' + str(self.temp_root) + '\r'
+        return '/pm connect\r'   # uses the saved dedicated binding
 
     def test_connect_stream_tools_and_turn_end(self):
         self.turns = [_full_turn(hold=True)]
 
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
-            self.assertEqual(ui.status_text(), 'PM:0123abcd idle | F1')   # no chat fields
-            self.assertIn('dedicated PM session ' + PM_SESSION, ui.conversation.text)
-            self.assertIn('dedicated: not reported by pm_runtime S1', ui.conversation.text)
+            self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8] + ' idle | F1')   # no chat fields
+            self.assertIn('PM session ' + self.session_id, ui.conversation.text)
+            self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
+            self.assertEqual(self.created, [['claude', '--session-id', self.session_id]])
             self.assertIn('PM history: no stored turns', ui.conversation.text)
             argv = self.fakes[0].argv
-            self.assertEqual(argv[argv.index('--resume') + 1], PM_SESSION)
+            self.assertEqual(argv[argv.index('--resume') + 1], self.session_id)
             self.assertIn('--include-partial-messages', argv)
 
         async def partial(ui):
@@ -2098,7 +2127,8 @@ class PMConversationTests(Base):
         self.assertIn('owner → PM:\n請問進度？', text)
         self.assertEqual(text.count('Hello 老闆'), 1)                # assistant text not doubled
         self.assertIn('  · tool Read', text)
-        self.assertIn('  · tool Read: error (an auto-denied permission is possible', text)
+        self.assertIn('  · tool Read: error (pm_runtime reason TOOL_ERROR)', text)
+        self.assertNotIn('auto-denied', text)
         self.assertIn('PM:\nafter tool', text)                      # new block after the tool
         self.assertIn('— PM turn COMPLETED in', text)
         self.assertIn('usage: input 5, output 7 (provider-reported)', text)
@@ -2203,8 +2233,8 @@ class PMConversationTests(Base):
         key = _fake_key()
         root = self.state
         root.mkdir(parents=True, exist_ok=True)
-        (root / ('pm-' + PM_SESSION + '.history.json')).write_text(json.dumps(
-            {'pm_session_id': PM_SESSION, 'turns': [_crafted_turn(
+        (root / ('pm-' + self.session_id + '.history.json')).write_text(json.dumps(
+            {'pm_session_id': self.session_id, 'turns': [_crafted_turn(
                 tool_names=['tool ' + key], owner_text='o ' + key, result_text='r ' + key,
                 status='s ' + key)]}))
         ui, _ = self.drive([self.connect(), self.connected, '/pm history\r',
@@ -2224,7 +2254,7 @@ class PMConversationTests(Base):
         self.assertEqual(ui.pm_state, 'error(UNKNOWN)')
 
     def lock_is_free(self):
-        probe = self.make_runtime(PM_SESSION, str(self.temp_root)).open()   # raises if still locked
+        probe = self.make_runtime(self.session_id, str(self.temp_root)).open()   # raises if still locked
         probe.close()
 
     def test_exit_while_open_runs_closes_the_runtime_it_opens(self):
@@ -2277,6 +2307,79 @@ class PMConversationTests(Base):
                 thread.join(5)
         self.assertIsNone(ui.pm_runtime)
 
+    def pending_done(self, ui):
+        return self.until(ui, lambda ui: not ui.pm_pending, 'PM request done')
+
+    def test_no_binding_new_and_explicit_connect(self):
+        self.state = self.temp_root.resolve() / 'empty-state'   # no binding saved here
+        self.api.state_root = self.state
+        ui, _ = self.drive([self.connect(), self.pending_done])
+        self.assertIn('no dedicated PM binding is saved. /pm new [CWD]', ui.conversation.text)
+        self.assertIsNone(ui.pm_runtime)
+        cwd = str(self.temp_root)
+        ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
+                            self.connect(), self.connected])
+        created = self.created[-1][2]
+        self.assertEqual(self.created[-1][:2], ['claude', '--session-id'])
+        self.assertIn('Dedicated PM session ' + created + ' created by pm_runtime', ui.conversation.text)
+        self.assertIn('the TUI has not verified that session', ui.conversation.text)
+        self.assertEqual(ui.pm_target[0], created)
+        argv = self.fakes[-1].argv
+        self.assertEqual(argv[argv.index('--resume') + 1], created)
+        ui, _ = self.drive(['/pm connect ' + created + ' ' + cwd + '\r', self.connected])
+        self.assertEqual(ui.pm_target, (created, cwd))
+
+    def test_not_dedicated_and_live_elsewhere_are_refused(self):
+        import uuid as _uuid
+        other = str(_uuid.uuid4())
+        ui, _ = self.drive(['/pm connect ' + other + ' ' + str(self.temp_root) + '\r',
+                            self.pending_done])
+        self.assertIn('PM runtime error PM_SESSION_NOT_DEDICATED', ui.conversation.text)
+        self.assertIn('/pm new [CWD] creates one', ui.conversation.text)
+        # A transcript written after the binding, within S2's 20 s window, means live elsewhere.
+        from llmtool import active_pm_inbox
+        transcript = active_pm_inbox.claude_session_file(
+            self.session_id, self.binding['cwd'], {'HOME': str(self.temp_root)})
+        transcript.parent.mkdir(parents=True)
+        transcript.write_text('{}\n')
+        ui, _ = self.drive([self.connect(), self.pending_done])
+        self.assertIn('PM runtime error PM_SESSION_LIVE_ELSEWHERE', ui.conversation.text)
+        self.assertIsNone(ui.pm_runtime)
+        self.assertEqual(self.fakes, [])   # no claude process was started
+
+    def test_permission_denied_reason_comes_from_the_stream(self):
+        self.turns = [[_assistant({'type': 'tool_use', 'id': 't9', 'name': 'Bash', 'input': {}}),
+                       _tool_result('t9', 'Permission denied: Bash is not allowed', True),
+                       _assistant({'type': 'tool_use', 'id': 't10', 'name': 'Read', 'input': {}}),
+                       _tool_result('t10', 'file content', False),
+                       _result('done')]]
+        ui, _ = self.drive([self.connect(), self.connected, 'run it\r', self.turn_done])
+        text = ui.conversation.text
+        self.assertIn('  · tool Bash: auto-denied (pm_runtime reason PERMISSION_DENIED', text)
+        self.assertIn('  · tool Read: done', text)
+        self.assertNotIn('file content', text)
+
+    def test_same_send_key_is_replayed_not_resent(self):
+        fixed = Mock(hex='k' * 32)
+        self.turns = [[_delta('first answer '), _result('first answer')], [_result('never')]]
+        with patch.object(chat_tui.uuid, 'uuid4', return_value=fixed):
+            ui, _ = self.drive([self.connect(), self.connected, 'one\r', self.turn_done,
+                                'two\r', self.turn_done])
+        self.assertIn('not sent again: pm_runtime already has this message as turn', ui.conversation.text)
+        self.assertIn('(COMPLETED)', ui.conversation.text)
+        self.assertEqual(len(self.fakes[0].users()), 1)
+
+    def test_quota_error_and_block_index(self):
+        self.turns = [[_delta('part A ', 0), _delta('part B ', 1), _delta('end', 1),
+                       _result('You have hit your limit', is_error=True, subtype='error')]]
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', self.turn_done])
+        text = ui.conversation.text
+        self.assertIn('PM:\npart A', text)
+        self.assertIn('PM:\npart B end', text)          # a new content block opens a new PM block
+        self.assertIn('PM runtime error PM_QUOTA_EXHAUSTED; retry when (TUI guidance): the PM', text)
+        self.assertIn('— PM turn ERROR', text)
+        self.assertRegex(text, r'turn [0-9a-f]{8} event #\d+')
+
     def test_esc_enter_is_still_a_newline_when_no_turn_runs(self):
         ui, _ = self.drive([self.connect(), self.connected, 'a', '\x1b\r', 'b',
                             lambda ui: self.assertEqual(ui.input.text, 'a\nb')])
@@ -2292,7 +2395,7 @@ class PMConversationTests(Base):
         self.assertNotIn('PRIVATE', ui.conversation.text)
         self.assertFalse(ui.pm_mode)
         self.observe.start()
-        holder = self.make_runtime(PM_SESSION, str(self.temp_root)).open()   # another driver holds it
+        holder = self.make_runtime(self.session_id, str(self.temp_root)).open()   # another driver holds it
         try:
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
                 ui, lambda ui: not ui.pm_pending)])
@@ -2330,7 +2433,7 @@ class PMConversationTests(Base):
         self.assertTrue(self.fakes[0].closed_stdin)
 
     def test_run_closes_the_pm_runtime_even_when_the_app_fails(self):
-        ui = chat_tui.ChatTUI(self.session, input=None, output=DummyOutput(), pm_factory=self.make_runtime)
+        ui = chat_tui.ChatTUI(self.session, input=None, output=DummyOutput(), pm_api=self.api)
         runtime = Mock()
         ui.pm_runtime = runtime
         ui.app.run = Mock(side_effect=RuntimeError('ui broke'))

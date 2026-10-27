@@ -4,10 +4,11 @@ The TUI talks to the Owner-designated, dedicated PM session only through
 ``pm_runtime`` (Owner decision G1 = a). This module never writes Core state
 itself and never fakes a reply: every PM line comes from a pm_runtime event.
 
-pm_runtime S1 is the API in use. Features expected from S2 (dedicated binding,
-turn_id/seq on every event, TOOL_RESULT.reason, PM_SESSION_LIVE_ELSEWHERE) are
-read through the small functions below; while S1 does not report them, the TUI
-shows "not reported" instead of guessing.
+Built on pm_runtime S2: the dedicated-session binding (create_dedicated_pm,
+current_binding; open() refuses an unbound session and one that looks live
+elsewhere), turn_id/seq on every event, block_index on text deltas,
+TOOL_RESULT.reason, idempotent send (TURN_REPLAY) and typed runtime codes.
+What S2 still does not provide is shown as UNKNOWN.
 """
 
 import re
@@ -15,7 +16,6 @@ import re
 from .chat_tui_task import UNKNOWN
 from .test_output_excerpts import _emitted_sensitive
 
-NOT_REPORTED = "not reported by pm_runtime S1"
 HISTORY_SHOWN = 20  # Most recent stored turns rendered on connect.
 WITHHELD = "[PM text withheld: it contains credential-like text]"
 # While a PM reply streams, the ASCII token still growing at the end (any run of
@@ -28,8 +28,15 @@ _RECOVERY = {
     "PM_SESSION_INVALID": "the dedicated PM session ID must be a Claude Code session UUID whose "
                           "transcript exists for the given working directory",
     "PM_SESSION_BUSY": "another llmtool driver holds this PM session; close it, then connect again",
-    "PM_SESSION_LIVE_ELSEWHERE": "the PM session is open in another process; close that process "
-                                 "(the TUI drives only a dedicated session), then connect again",
+    "PM_SESSION_LIVE_ELSEWHERE": "the PM session looks open in another process (a claude process "
+                                 "for it, or its transcript changed in the last 20 s); close "
+                                 "that process or wait, then connect again",
+    "PM_SESSION_NOT_DEDICATED": "the session must have a dedicated pm_runtime binding for this "
+                                "working directory: /pm new [CWD] creates one, /pm connect uses it",
+    "PM_QUOTA_EXHAUSTED": "the PM's Claude usage limit must reset; then send again",
+    "PM_IDEMPOTENCY_KEY_INVALID": "internal TUI error: the send key was rejected; send again",
+    "PM_BINDING_WRITE_FAILED": "pm_runtime could not save the binding; check the llmtool state "
+                               "directory, then /pm new again",
     "PM_RUNTIME_UNSUPPORTED": "only the claude-code PM runtime is supported",
     "PM_PROCESS_START_FAILED": "the claude CLI must be installed and runnable; then connect again",
     "PM_PROCESS_EXITED": "the PM process ended; /pm disconnect, then /pm connect again",
@@ -39,7 +46,7 @@ _RECOVERY = {
     "PM_MESSAGE_INVALID": "the message must be non-empty text of at most 16 KiB without control "
                           "characters or credential material",
     "PM_TURN_ACTIVE": "wait for the current PM turn to end (Esc interrupts it)",
-    "PM_RUNTIME_CLOSED": "connect with /pm connect SESSION [CWD]",
+    "PM_RUNTIME_CLOSED": "connect with /pm connect",
     "PM_HISTORY_INVALID": "the stored PM history could not be read; the conversation itself is "
                           "unaffected",
     "PM_HISTORY_WRITE_FAILED": "pm_runtime could not save the turn history; check the llmtool state "
@@ -60,11 +67,40 @@ def error_text(code):
             + (hint or UNKNOWN + " — pm_runtime gives no recovery for this code"))
 
 
-# -- S2 adapter points --------------------------------------------------------------
-def binding_text(_runtime):
-    """Dedicated-binding status. S1 keeps no binding record; S2's API plugs in here once
-    it is merged (its name and shape are not known yet, so nothing is probed)."""
-    return "dedicated: " + NOT_REPORTED
+# -- pm_runtime calls (one place; tests substitute state_root and runners) ------------
+class PMRuntimeAPI:
+    """The pm_runtime S2 calls the TUI makes. Nothing here writes Core state except
+    through pm_runtime itself (create_dedicated_pm, PMRuntime)."""
+
+    def __init__(self, *, state_root=None, runner=None, create_runner=None, environ=None):
+        self.state_root, self.runner = state_root, runner
+        self.create_runner, self.environ = create_runner, environ
+
+    def runtime(self, session_id, cwd):
+        from .pm_runtime import PMRuntime
+        return PMRuntime(session_id, cwd=cwd, runner=self.runner, state_root=self.state_root,
+                         environ=self.environ)
+
+    def current_binding(self, session_id=None):
+        from .pm_runtime import current_binding
+        return current_binding(session_id, state_root=self.state_root)
+
+    def create_dedicated(self, cwd):
+        from .pm_runtime import create_dedicated_pm
+        return create_dedicated_pm(cwd, state_root=self.state_root, environ=self.environ,
+                                   runner=self.create_runner)
+
+    def read_history(self, session_id):
+        from .pm_runtime import read_history
+        return read_history(session_id, after=0, limit=200, state_root=self.state_root)
+
+
+def binding_text(binding):
+    """Dedicated-binding status from pm_runtime.current_binding (a dict or None)."""
+    if type(binding) is not dict:
+        return "NOT dedicated (no pm_runtime binding)"
+    return ("dedicated (pm_runtime binding created " + safe_text(binding.get("created_at"))
+            + ")" if binding.get("dedicated") is True else "NOT dedicated")
 
 
 def event_ids(event):
@@ -76,20 +112,37 @@ def event_ids(event):
 
 
 def tool_result_text(event, name):
-    """One line for a TOOL_RESULT; never claims a permission denial S1 cannot report."""
+    """One line for a TOOL_RESULT from S2's typed reason (OK / TOOL_ERROR /
+    PERMISSION_DENIED). A missing or unknown reason is shown as such, never guessed."""
     label = "  · tool " + safe_name(name)
-    if not event.get("is_error"):
-        return label + ": done"
     reason = event.get("reason")
     if reason == "PERMISSION_DENIED":
-        return label + ": auto-denied (permission prompts are off until S3)"
-    if reason is not None:
-        return label + ": error (" + safe_code(reason) + ")"
-    return (label + ": error (an auto-denied permission is possible; pm_runtime does not "
-            "report the reason)")
+        return label + ": auto-denied (pm_runtime reason PERMISSION_DENIED; permission prompts are off until S3)"
+    if reason == "TOOL_ERROR":
+        return label + ": error (pm_runtime reason TOOL_ERROR)"
+    if reason == "OK":
+        return label + ": done"
+    return (label + (": error" if event.get("is_error") else ": result")
+            + " (reason " + safe_code(reason) + ")")
 
 
-# -- streamed text screening (pm_runtime S1 screens only the stored result) ----------
+def stderr_text(event):
+    """First line of the stderr excerpt pm_runtime attaches to a runtime error."""
+    value = event.get("stderr")
+    if type(value) is not str or not value.strip():
+        return None
+    first = safe_text(value.strip().splitlines()[0])
+    return first[:160] + ("…" if len(first) > 160 else "")
+
+
+def replay_text(event):
+    turn_id, seq = event_ids(event)
+    return ("  — not sent again: pm_runtime already has this message as turn "
+            + (turn_id[:8] if turn_id else UNKNOWN) + " #" + (str(seq) if seq is not None else UNKNOWN)
+            + " (" + safe_code(event.get("status")) + ")")
+
+
+# -- streamed text screening (pm_runtime screens only the stored result; gap G13) -----
 def screen_stream(raw, final):
     """Display text for one streamed PM block.
 
@@ -157,9 +210,10 @@ def usage_text(usage):
 
 def turn_end_text(event, elapsed):
     status = safe_code(event.get("status"))
-    turn_id, _seq = event_ids(event)
+    turn_id, seq = event_ids(event)
     return ("  — PM turn " + status + " in %.1fs (measured locally); usage: " % elapsed
-            + usage_text(event.get("usage")) + "; turn " + (turn_id[:8] if turn_id else UNKNOWN))
+            + usage_text(event.get("usage")) + "; turn " + (turn_id[:8] if turn_id else UNKNOWN)
+            + " event #" + (str(seq) if seq is not None else UNKNOWN))
 
 
 def history_text(result):
