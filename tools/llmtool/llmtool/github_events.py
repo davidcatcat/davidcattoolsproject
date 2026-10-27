@@ -28,7 +28,11 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
         for task in tasks:
             evidence = (task.get('completion') or {}).get('evidence') or {}
             review = evidence.get('review_pr_ci') or {}
-            if review.get('pr_number') == number or task.get('issue_number') == number:
+            claims = task.get('review_dispatch_claim')
+            claims = [claims] if type(claims) is dict else claims if type(claims) is list else []
+            claim_bound = any(type(claim) is dict and claim.get('pr') == number
+                              for claim in claims)
+            if review.get('pr_number') == number or task.get('issue_number') == number or claim_bound:
                 bound.append(task)
         if not bound:
             continue
@@ -78,8 +82,32 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
         pr = get(f'pulls/{number}')
         if type(pr) is dict and pr.get('merged') is True:
             merge_sha = pr.get('merge_commit_sha')
-            if type(merge_sha) == str and re.fullmatch(r'[0-9a-f]{40}', merge_sha):
+            pr_head = pr.get('head')
+            pr_head_sha = pr_head.get('sha') if type(pr_head) is dict else None
+            if (type(merge_sha) == str and re.fullmatch(r'[0-9a-f]{40}', merge_sha) and
+                    type(pr_head_sha) is str and
+                    re.fullmatch(r'[0-9a-f]{40}', pr_head_sha)):
                 for task in bound:
+                    claims = task.get('review_dispatch_claim')
+                    claims = [claims] if type(claims) is dict else claims if type(claims) is list else []
+                    reviewed_heads = {claim.get('head_sha') for claim in claims
+                                      if type(claim) is dict and claim.get('pr') == number and
+                                      type(claim.get('head_sha')) is str and
+                                      re.fullmatch(r'[0-9a-f]{40}', claim.get('head_sha'))}
+                    evidence = (task.get('completion') or {}).get('evidence') or {}
+                    result = evidence.get('result') or {}
+                    if type(result.get('result_head')) is str:
+                        reviewed_heads.add(result['result_head'])
+                    if not reviewed_heads:
+                        continue
+                    matched = False
+                    for reviewed_head in reviewed_heads:
+                        compare = get(f'compare/{reviewed_head}...{pr_head_sha}')
+                        if type(compare) is dict and compare.get('status') in ('ahead', 'identical'):
+                            matched = True
+                            break
+                    if not matched:
+                        continue
                     event_id = hashlib.sha256(
                         f'GITHUB\0merge\0{number}\0{merge_sha}'.encode()).hexdigest()[:32]
                     created.append(_record(store, task, stream_id, event_id,

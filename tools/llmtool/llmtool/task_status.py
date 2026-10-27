@@ -43,6 +43,12 @@ def derive_state(record):
     """Derive only states supported by recognized persisted values."""
     if type(record) is not dict:
         return 'UNKNOWN'
+    events = record.get('completion_events')
+    events = events if type(events) is list else []
+    if any(type(event) is dict and event.get('source') == 'GITHUB' and
+           event.get('marker_type') == 'merge' and event.get('marker_status') == 'MERGED'
+           for event in events):
+        return 'COMPLETED'
     developer = record.get('developer')
     if type(developer) is dict:
         callback = developer.get('direct_result_callback')
