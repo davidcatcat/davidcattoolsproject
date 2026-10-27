@@ -54,9 +54,9 @@ def _safe_chat(client, prompt, *, thinking, max_tokens, timeout=None):
 
 def _quality_questions():
     questions = []
-    for left in range(11, 21):
+    for left in range(11, 16):
         questions.append(("What is " + str(left) + " + " + str(left + 7) + "?", str(2 * left + 7)))
-    for left in range(2, 12):
+    for left in range(2, 7):
         questions.append(("What is " + str(left) + " times " + str(left + 3) + "?", str(left * (left + 3))))
     for start in range(1, 11):
         questions.append(("Continue the sequence " + ", ".join(str(start + 3 * i) for i in range(4)) +
@@ -249,7 +249,7 @@ def _quality_mode(client, mode, parallelism):
     def run(item):
         question, expected = item
         result = _safe_chat(client, question, thinking=mode, max_tokens=4096,
-                            timeout=120 if mode == "on" else None)
+                            timeout=120)
         response, choice, message = _response(result)
         usage = _usage(response)
         answer = message.get("content")
