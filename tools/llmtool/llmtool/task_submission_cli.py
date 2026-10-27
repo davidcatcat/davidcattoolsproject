@@ -554,6 +554,8 @@ def add_task_submission_parsers(actions):
 
 
 def run_task_remote_test(args, *, store=None, stdout=None):
+    from .source_freshness import require_fresh_source
+    require_fresh_source()
     from .remote_test import run_remote_test
     result = run_remote_test(args.task_id, executor_task=args.executor_task,
                              sha=args.sha, ref=args.ref, modules=args.module,
@@ -663,6 +665,8 @@ def run_task_review_prompt(args, *, store=None):
 
 def run_task_review_dispatch(args, *, store=None):
     """Thin CLI adapter for the one-shot Reviewer dispatcher."""
+    from .source_freshness import require_fresh_source
+    require_fresh_source()
     from .review_dispatch import dispatch_review
     result = dispatch_review(store=TaskStore() if store is None else store,
                              task_id=args.task_id, executor_task=args.executor_task,
@@ -686,12 +690,25 @@ def _assignment_paths(read_paths, write_paths):
                 not path.startswith('/') and '\\' not in path and
                 all(part not in ('', '.', '..') for part in path.split('/')) and
                 all(0x20 <= ord(char) < 0x7f for char in path))
-    if (type(read_paths) is not list or type(write_paths) is not list or
-            not read_paths or not write_paths or len(read_paths) > 32 or len(write_paths) > 32 or
-            any(not valid(path) for path in read_paths + write_paths) or
-            len(set(read_paths)) != len(read_paths) or len(set(write_paths)) != len(write_paths) or
-            not set(write_paths).issubset(read_paths)):
-        raise LLMToolError('developer assignment scope is invalid')
+    def invalid(rule):
+        raise LLMToolError(f'developer assignment scope is invalid: {rule}')
+
+    if type(read_paths) is not list or type(write_paths) is not list:
+        invalid('PATH_LIST_INVALID')
+    if not read_paths or not write_paths:
+        invalid('PATH_LIST_EMPTY')
+    if len(read_paths) > 32 or len(write_paths) > 32:
+        invalid('PATH_LIMIT_EXCEEDED')
+    for path in read_paths + write_paths:
+        if type(path) is str and (path.startswith('/') or '..' in path.split('/') or
+                                  '\\' in path):
+            invalid('PATH_OUTSIDE_REPO')
+        if not valid(path):
+            invalid('PATH_INVALID')
+    if len(set(read_paths)) != len(read_paths) or len(set(write_paths)) != len(write_paths):
+        invalid('DUPLICATE_PATH')
+    if not set(write_paths).issubset(read_paths):
+        invalid('WRITE_PATH_NOT_IN_READ_PATHS')
     return sorted(read_paths), sorted(write_paths)
 
 
@@ -1985,6 +2002,8 @@ def run_task_codex_delegate(args, *, store):
 
 
 def run_task_delegate(args, *, store=None):
+    from .source_freshness import require_fresh_source
+    require_fresh_source()
     store = TaskStore() if store is None else store
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
