@@ -102,6 +102,56 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(second['step'], 'RECORD_REVIEW_RESULT')
         self.assertEqual(dispatched, [1])
 
+    def _advance_dispatched_review(self, *, claim_changes=None, reviewer_session_done=False,
+                                   outcomes=None, completion=None):
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED',
+                 'reviewer_task': 'reviewer-1', 'native_session_id': 'session-1'}
+        claim.update(claim_changes or {})
+        record = base_record(review_dispatch_claim=[claim])
+        if completion is not None:
+            record['completion'] = completion
+        class Store:
+            def get(self, _task_id):
+                return record
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=outcomes or []):
+            result = task_advance.advance(task_id=record['task_id'], store=Store(),
+                pr_number=17, reviewer_session_done=reviewer_session_done,
+                record_review_result_call=lambda **_kwargs: {'state': 'NOT_READY'},
+                github_get=lambda _url: [])
+        return result
+
+    def test_done_reviewer_without_verdict_is_actionable(self):
+        result = self._advance_dispatched_review(reviewer_session_done=True)
+        self.assertEqual(result['step'], 'REVIEW_NOT_POSTED')
+        self.assertEqual(result['next'], 'resume the reviewer to post its verdict')
+        self.assertEqual(result['result'], {'reviewer_task': 'reviewer-1',
+                                            'reviewer_session_id': 'session-1'})
+
+    def test_finished_claim_without_verdict_is_actionable(self):
+        result = self._advance_dispatched_review(
+            claim_changes={'reviewer_session_state': 'FINISHED'})
+        self.assertEqual(result['step'], 'REVIEW_NOT_POSTED')
+        self.assertEqual(result['next'], 'resume the reviewer to post its verdict')
+
+    def test_done_reviewer_with_current_head_pass_keeps_pass_path(self):
+        result = self._advance_dispatched_review(reviewer_session_done=True, outcomes=[{
+            'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+            'outcome': 'REVIEW_PASS'}], completion={
+                'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY', 'evidence': {
+                    'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+
+    def test_older_head_verdict_does_not_count_and_running_reviewer_waits(self):
+        old_head = 'b' * 40
+        done = self._advance_dispatched_review(reviewer_session_done=True, outcomes=[{
+            'source': 'REVIEWER', 'source_sha': old_head, 'version': 1,
+            'outcome': 'REVIEW_PASS'}])
+        running = self._advance_dispatched_review()
+        self.assertEqual(done['step'], 'REVIEW_NOT_POSTED')
+        self.assertEqual(running['step'], 'RECORD_REVIEW_RESULT')
+
     def test_restart_does_not_dispatch_repair_twice(self):
         class Store:
             def __init__(self):
