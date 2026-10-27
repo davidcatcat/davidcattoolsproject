@@ -76,7 +76,8 @@ class RemoteTestGateTests(unittest.TestCase):
 
     def test_direct_callback_defers_remote_tests_and_keeps_local_execution(self):
         task = task_with_tests()
-        evidence = {'test_policy': 'REMOTE_RECEIPT', 'source_sha': SHA}
+        evidence = {'test_policy': 'REMOTE_RECEIPT', 'source_sha': SHA,
+                    'root': '/repo'}
         result = {'diff_sha256': '4' * 64, 'changed_paths': [PATH]}
         developer = {'read_paths': [PATH], 'write_paths': [PATH]}
         with patch.object(task_submission_cli.task_completion,
