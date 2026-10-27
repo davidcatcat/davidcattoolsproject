@@ -153,7 +153,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
     def test_blocked_final_is_recorded_as_blocked(self):
         final = dict(self.final, status='BLOCKED', blocked_reason='cannot safely edit')
         self.write_fake(self.events(final))
-        self.assertEqual(self.run_fake().status, 'BLOCKED')
+        self.assertEqual(self.run_fake(timeout=30).status, 'BLOCKED')
 
     def test_malformed_final_json_is_typed_failure(self):
         raw = json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) + '\n'

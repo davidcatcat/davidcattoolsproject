@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -59,7 +60,7 @@ if mode == "mutation":
     capture["git_status"] = git.returncode
 Path(%r).write_text(json.dumps(capture))
 if mode == "timeout":
-    time.sleep(5)
+    time.sleep(60)
 elif mode == "descendant":
     subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
 elif mode == "large":
@@ -298,8 +299,27 @@ else:
 
     def test_timeout_is_normalized_and_resources_cleaned(self):
         self.fake("timeout")
-        with self.assertRaisesRegex(LLMToolError, "^Codex CLI timed out$"):
-            self.complete(timeout_seconds=1)
+        outcome = []
+
+        def invoke():
+            try:
+                self.complete(timeout_seconds=30)
+            except BaseException as exc:
+                outcome.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        # The capture is written by the child before it blocks. Waiting for it
+        # proves the fake reached its ready point before the timeout is tested.
+        deadline = time.monotonic() + 30
+        while not self.capture.exists() and worker.is_alive() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertTrue(self.capture.exists(), "timed fake child did not signal ready")
+        worker.join(timeout=35)
+        self.assertFalse(worker.is_alive(), "timed-out Codex CLI request did not finish")
+        self.assertEqual(len(outcome), 1)
+        self.assertIsInstance(outcome[0], LLMToolError)
+        self.assertEqual(str(outcome[0]), "Codex CLI timed out")
         self.assertFalse(Path(self.captured()["cwd"]).exists())
 
     def test_descendant_pipe_handles_are_bounded_by_timeout(self):
