@@ -1718,31 +1718,6 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             'check_ids': check_ids}
 
 
-def _linux_monitor_only(paths):
-    if type(paths) is not list or not paths or len(paths) >= 100:
-        return False
-    for path in paths:
-        if (type(path) is not dict or type(path.get('filename')) is not str or
-                ('previous_filename' in path and
-                 type(path['previous_filename']) is not str)):
-            return False
-        names = [path['filename']]
-        if 'previous_filename' in path:
-            names.append(path['previous_filename'])
-        for name in names:
-            if (not name or name.startswith('/') or '\\' in name or
-                    any(part in ('', '.', '..') for part in name.split('/'))):
-                return False
-            if name == _LINUX_CI_WORKFLOW_PATH or name.startswith('tools/ec2-runner/'):
-                return False
-            # The workflow's negative glob excludes only top-level llmtool markdown.
-            if name.startswith('tools/llmtool/'):
-                rest = name[len('tools/llmtool/'):]
-                if '/' in rest or not rest.endswith('.md'):
-                    return False
-    return True
-
-
 def _collect_ci_evidence(*, pr_number, result_sha):
     mac = _collect_one_ci_workflow(
         pr_number=pr_number, result_sha=result_sha, workflow_path=_CI_WORKFLOW_PATH,
@@ -1751,17 +1726,13 @@ def _collect_ci_evidence(*, pr_number, result_sha):
         pr_number=pr_number, result_sha=result_sha, workflow_path=_LINUX_CI_WORKFLOW_PATH,
         workflow_name=_LINUX_CI_WORKFLOW_NAME, check_name=_LINUX_CHECK,
         runner_names=_LINUX_CI_RUNNER_NAMES)
-    linux_required = True
-    if linux['run_id'] is None:
-        files = _github_get(f'pulls/{pr_number}/files?per_page=100')
-        linux_required = not _linux_monitor_only(files)
     successful = set(mac['successful_checks']) | set(linux['successful_checks'])
     check_ids = dict(mac['check_ids'])
     check_ids.update(linux['check_ids'])
     return {'workflow_id': mac['workflow_id'], 'run_id': mac['run_id'],
             'run_attempt': mac['run_attempt'], 'run_number': mac['run_number'],
             'successful_checks': sorted(successful), 'check_ids': check_ids,
-            'linux_required': linux_required}
+            'linux_required': True}
 
 
 def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
@@ -1938,9 +1909,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                       not reviewer_gates.intersection(missing))
     ci = _collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
     successful = set(ci['successful_checks'])
-    required_checks = (_REQUIRED_CHECKS if ci['linux_required'] else
-                       frozenset((_MAC_CHECK,)))
-    if not required_checks.issubset(successful):
+    if not _REQUIRED_CHECKS.issubset(successful):
         missing.append('REQUIRED_CI_MISSING')
     return {'evidence': {'pr_number': pr_number, 'head_sha': result_sha,
             'formal_review_state': 'ACCEPTED' if reviewer_bound else 'UNVERIFIED',
@@ -1956,11 +1925,10 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'review_task_id': task_id, 'review_run_id': run_id,
             'review_contract_digest': contract_digest,
             'review_binding_verified': review_binding_verified,
-            'required_checks': sorted(required_checks),
+            'required_checks': sorted(_REQUIRED_CHECKS),
             'successful_checks': sorted(successful), 'ci_head_sha': result_sha,
             'not_run_checks': [{'name': name, 'status': 'NOT_RUN'}
-                               for name in (_NOT_RUN_CHECKS if ci['linux_required'] else
-                                            ('Linux Python 3.14',) + _NOT_RUN_CHECKS)],
+                               for name in _NOT_RUN_CHECKS],
             'ci_workflow_path': _CI_WORKFLOW_PATH,
             'ci_workflow_name': _CI_WORKFLOW_NAME,
             'ci_workflow_id': ci['workflow_id'], 'ci_run_id': ci['run_id'],
