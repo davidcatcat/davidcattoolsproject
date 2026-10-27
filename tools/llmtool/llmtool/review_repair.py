@@ -344,11 +344,20 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                 'claim': claim,
                 'next_action': f"review-dispatch --version {packet['version'] + 1}"}
     if auto_review:
-        dispatch = review_dispatcher
-        if dispatch is None:
-            from .review_dispatch import dispatch_review
-            dispatch = dispatch_review
-        response['review'] = dispatch(
-            store=store, task_id=task_id, executor_task=executor_task,
-            pr_number=pr_number, version=packet['version'] + 1)
+        try:
+            published_head = _current_d6_head(task, executor_task, current_head)
+        except Exception:
+            published_head = packet['failed_head']
+        if (type(published_head) is str and
+                re.fullmatch(r'[0-9a-f]{40}', published_head) is not None and
+                published_head != packet['failed_head']):
+            dispatch = review_dispatcher
+            if dispatch is None:
+                from .review_dispatch import dispatch_review
+                dispatch = dispatch_review
+            response['review'] = dispatch(
+                store=store, task_id=task_id, executor_task=executor_task,
+                pr_number=pr_number, version=packet['version'] + 1)
+        else:
+            response['review'] = {'state': 'NOT_READY', 'reason': 'REPAIR_NOT_PUBLISHED'}
     return response

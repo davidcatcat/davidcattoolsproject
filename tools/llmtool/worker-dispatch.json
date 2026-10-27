@@ -9,11 +9,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
     },
     "claude-developer": {
-      "dispatch": "OWNER_ASSIGNMENT_ONLY",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-23",
-      "reason": "use only when explicitly assigned by the Owner",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289",
+      "decided_at": "2026-10-28",
+      "reason": "Owner: dispatch the Claude UI Agent like the other Developer Workers to push TUI progress",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6449248781",
       "owner_assignments": [
         {
           "task_id": "5fd1be3ee96e42678fe1dac75a9b697a",

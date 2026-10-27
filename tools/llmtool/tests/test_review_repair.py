@@ -86,6 +86,7 @@ class ReviewRepairTests(unittest.TestCase):
         def adapter(**request):
             self.calls.append(request)
             return {'status': 'DISPATCHED', 'head': HEAD}
+        adapter = kwargs.pop('dispatch_adapter', adapter)
         current_head = kwargs.pop('current_head', lambda _task, _executor: HEAD)
         github_get = kwargs.pop('github_get', lambda _path: [_comment()])
         decision = kwargs.pop('decision', type('Decision', (), {'allowed': True})())
@@ -308,8 +309,30 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_auto_review_calls_next_version(self):
         seen = []
-        self.dispatch(auto_review=True, review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
+        repair_published = False
+
+        def current_head(_task, _executor):
+            return 'f' * 40 if repair_published else HEAD
+
+        def dispatch_repair(**_request):
+            nonlocal repair_published
+            repair_published = True
+            return {'status': 'DISPATCHED', 'head': 'f' * 40}
+
+        self.dispatch(auto_review=True,
+                      current_head=current_head,
+                      dispatch_adapter=dispatch_repair,
+                      review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
         self.assertEqual(seen[0]['version'], 2)
+
+    def test_auto_review_waits_until_repair_is_published(self):
+        seen = []
+        result = self.dispatch(auto_review=True,
+                               current_head=lambda _task, _executor: HEAD,
+                               review_dispatcher=lambda **kwargs: seen.append(kwargs) or 'review')
+        self.assertEqual(result['review'], {
+            'state': 'NOT_READY', 'reason': 'REPAIR_NOT_PUBLISHED'})
+        self.assertEqual(seen, [])
 
     def test_default_adapter_rebuilds_original_direct_developer_request(self):
         seen = []

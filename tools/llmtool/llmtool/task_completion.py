@@ -1031,7 +1031,8 @@ def validate_host_worker_receipt(packet, *, task_binding, task_id, run_id,
 def collect_executor_result(*, task_id, expected_common_dir, expected_root,
                            expected_branch, source_sha, task_binding,
                            expected_agent, expected_session_ref,
-                           expected_native_session_id, write_paths, artifact, artifact_sha256):
+                           expected_native_session_id, write_paths, artifact, artifact_sha256,
+                           artifact_segments=None):
     """Compare the current registered Executor HEAD and actual source-to-result diff."""
     registration = read_d6_registration(task_id, expected_common_dir,
                                         allowed_states=_D6_EVIDENCE_STATES)
@@ -1073,11 +1074,46 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     if not paths or len(paths) > 128:
         _stop('RESULT_DIFF_INVALID')
     if not set(paths).issubset(set(write_paths)):
-        _stop('RESULT_SCOPE_MISMATCH')
+        _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID' if artifact_segments is not None
+              else 'RESULT_SCOPE_MISMATCH')
     patch = _git(registration.root, ('diff', '--binary', '--no-ext-diff', '--no-textconv',
                 '--no-renames', source_sha, snapshot.head, '--'), limit=_GIT_LIMIT)
-    verify_artifact_applied(registration.root, artifact, artifact_sha256,
-                            source_sha, snapshot.head, paths, write_paths)
+    if artifact_segments is None:
+        verify_artifact_applied(registration.root, artifact, artifact_sha256,
+                                source_sha, snapshot.head, paths, write_paths)
+    else:
+        if (type(artifact_segments) is not list or not artifact_segments or
+                any(type(segment) is not tuple or len(segment) != 4
+                    for segment in artifact_segments)):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        if (artifact_segments[0][2] != source_sha or
+                artifact_segments[-1][3] != snapshot.head):
+            _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+        previous_end = source_sha
+        for segment in artifact_segments:
+            segment_artifact, segment_digest, start_sha, end_sha = segment
+            if (start_sha != previous_end or
+                    type(start_sha) is not str or _HEX40.fullmatch(start_sha) is None or
+                    type(end_sha) is not str or _HEX40.fullmatch(end_sha) is None):
+                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+            try:
+                _git(registration.root, ('merge-base', '--is-ancestor', start_sha, end_sha),
+                     limit=4096)
+            except LLMToolError:
+                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+            changed_segment = _git(registration.root,
+                ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
+                 '--no-renames', start_sha, end_sha, '--'), limit=1024*1024)
+            segment_paths = tuple(sorted(set(
+                path for path in changed_segment.decode('utf-8', 'strict').split('\x00') if path)))
+            if (not segment_paths or not set(segment_paths).issubset(set(write_paths))):
+                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+            try:
+                verify_artifact_applied(registration.root, segment_artifact,
+                    segment_digest, start_sha, end_sha, segment_paths, write_paths)
+            except LLMToolError:
+                _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
+            previous_end = end_sha
     return {
         'task_id': task_binding.get('task_id'), 'run_id': task_binding.get('run_id'),
         'executor_task_id': registration.task_id,

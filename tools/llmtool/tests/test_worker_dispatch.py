@@ -77,7 +77,8 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertTrue(worker_dispatch.evaluate('company-gw').allowed)
         self.assertTrue(worker_dispatch.evaluate('claude-reviewer').allowed)
         self.assertTrue(worker_dispatch.evaluate('codex-reviewer').allowed)
-        self.assertEqual(worker_dispatch.evaluate('claude-developer').reason_code,
+        self.assertTrue(worker_dispatch.evaluate('claude-developer').allowed)
+        self.assertEqual(worker_dispatch.evaluate('agy').reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
         self.assertEqual(worker_dispatch.evaluate('opencode-developer').reason_code,
                          'OWNER_PAUSED')
@@ -85,29 +86,29 @@ class WorkerDispatchTests(unittest.TestCase):
 
     def test_owner_assignment_only_stays_blocked_without_explicit_policy_row(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848'
-        self.policy['workers']['claude-developer'].pop('owner_assignments', None)
+        self.policy['workers']['agy'].pop('owner_assignments', None)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.assertEqual(self.policy['workers']['claude-developer'].get('owner_assignments', []), [])
-        decision = worker_dispatch.evaluate('claude-developer', ref, self.task['task_id'])
+        self.assertEqual(self.policy['workers']['agy'].get('owner_assignments', []), [])
+        decision = worker_dispatch.evaluate('agy', ref, self.task['task_id'])
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
 
     def test_owner_assignment_requires_exact_task_reference_and_policy_allowlist(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
         task_id = self.task['task_id']
-        self.assertEqual(worker_dispatch.evaluate('claude-developer', ref, task_id).reason_code,
+        self.assertEqual(worker_dispatch.evaluate('agy', ref, task_id).reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
         assignment = {'task_id': task_id, 'owner_assignment_ref': ref}
-        self.policy['workers']['claude-developer']['owner_assignments'] = [assignment]
+        self.policy['workers']['agy']['owner_assignments'] = [assignment]
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
-        self.assertTrue(worker_dispatch.evaluate('claude-developer', ref, task_id).allowed)
-        self.assertEqual(worker_dispatch.evaluate('claude-developer', ref, 'a' * 32).reason_code,
+        self.assertTrue(worker_dispatch.evaluate('agy', ref, task_id).allowed)
+        self.assertEqual(worker_dispatch.evaluate('agy', ref, 'a' * 32).reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
-        self.assertEqual(worker_dispatch.evaluate('claude-developer', ref + '0', task_id).reason_code,
+        self.assertEqual(worker_dispatch.evaluate('agy', ref + '0', task_id).reason_code,
                          'OWNER_ASSIGNMENT_REQUIRED')
         for suffix in ('?query=1', '/extra', '#fragment'):
             self.assertEqual(worker_dispatch.evaluate(
-                'claude-developer', ref + suffix, task_id).reason_code,
+                'agy', ref + suffix, task_id).reason_code,
                 'OWNER_ASSIGNMENT_REQUIRED')
         self.policy['workers']['opencode-developer']['dispatch'] = 'OWNER_ASSIGNMENT_ONLY'
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
@@ -152,6 +153,7 @@ class WorkerDispatchTests(unittest.TestCase):
         developer = self.developer(provider='claude')
         developer['owner_assignment_ref'] = ref
         record['developer'] = developer
+        self.policy['workers']['claude-developer']['dispatch'] = 'OWNER_ASSIGNMENT_ONLY'
         self.policy['workers']['claude-developer']['owner_assignments'] = [{
             'task_id': record['task_id'], 'owner_assignment_ref': ref}]
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
