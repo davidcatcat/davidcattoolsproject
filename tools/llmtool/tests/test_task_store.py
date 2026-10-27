@@ -72,6 +72,29 @@ class TaskStoreTests(unittest.TestCase):
             self.store.update(task['task_id'], high_debug=[changed])
         self.assertEqual(self.store.get(task['task_id'])['high_debug'], [entry])
 
+    def test_review_repair_claim_can_fail_only_after_dispatch(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        claim = {
+            'executor_task': 'executor-1', 'pr': 17, 'head_sha': 'a' * 40,
+            'version': 1, 'attempt': 1, 'family': 'pr-17', 'state': 'CLAIMED',
+            'repair_task_id': new_id(), 'comment_id': 9, 'packet_sha256': 'b' * 64,
+            'claimed_at': '2026-10-27T00:00:00Z',
+        }
+        self.store.compare_and_update(task['task_id'], expected={'review_repair_claims': []},
+                                      review_repair_claims=[claim])
+        dispatched = dict(claim, state='DISPATCHED')
+        self.store.compare_and_update(task['task_id'],
+            expected={'review_repair_claims': [claim]}, review_repair_claims=[dispatched])
+        failed = dict(dispatched, state='FAILED')
+        saved = self.store.compare_and_update(task['task_id'],
+            expected={'review_repair_claims': [dispatched]}, review_repair_claims=[failed])
+        self.assertEqual(saved['review_repair_claims'], [failed])
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(task['task_id'],
+                expected={'review_repair_claims': [failed]},
+                review_repair_claims=[dict(failed, state='DISPATCHED')])
+
     def test_remote_test_receipt_is_appended_idempotently_to_same_task(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

@@ -5,6 +5,7 @@ import re
 import contextlib
 import io
 import json
+import shutil
 from argparse import Namespace
 
 from . import github_events, review_dispatch, review_repair, review_result
@@ -76,6 +77,10 @@ def decide(record, d6, pr, related):
             repairs = (related.get('repair_claims', []) if type(related) is dict else [])
             current_repair = next((item for item in reversed(repairs)
                                    if type(item) is dict and item.get('head_sha') == result_head), None)
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') in (
+                        'DEVELOPER_UNAVAILABLE', 'BLOCKED', 'DEVELOPER_OUTPUT_REJECTED')):
+                return 'REPAIR_RETRY'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') in ('RUNNING', 'UNKNOWN')):
                 return 'WAITING_REPAIR'
@@ -265,13 +270,15 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         pr = None
     related = {'events': record.get('completion_events', []),
                'repair_claims': record.get('review_repair_claims', [])}
-    from .task_status import derive_state
     repair_claims = []
     for claim in related['repair_claims']:
         if type(claim) is not dict:
             continue
         try:
-            repair_state = derive_state(store.get(claim['repair_task_id']))
+            repair_record = store.get(claim['repair_task_id'])
+            repair_developer = repair_record.get('developer') if type(repair_record) is dict else None
+            repair_state = (repair_developer.get('state')
+                            if type(repair_developer) is dict else 'UNKNOWN')
         except Exception:
             repair_state = 'UNKNOWN'
         repair_claims.append(dict(claim, repair_state=repair_state))
@@ -337,27 +344,52 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                           'reviewer_session_id': claim.get('native_session_id')}
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
-    elif step == 'REPAIR_REVIEW':
+    elif step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
         if type(d6) is not dict or type(cwd or os.getcwd()) != str or os.path.realpath(cwd or os.getcwd()) != os.path.realpath(d6['root']):
             step, codes = 'NEEDS_CWD', ['NEEDS_CWD']
         else:
-            invoke = repair_review_call or review_repair.repair_review
-            try:
-                captured = io.StringIO()
-                with contextlib.redirect_stdout(captured):
-                    result_value = invoke(store=store, task_id=task_id,
-                        executor_task=executor_task, pr_number=number,
-                        auto_review=False, github_get=get)
-                emitted = captured.getvalue().strip()
-                try:
-                    result = json.loads(emitted) if emitted else result_value
-                except (TypeError, ValueError):
-                    result = result_value
-            except Exception as exc:
-                code = _refusal(exc, 'review_repair_code')
-                codes.append(code)
-                if code in ('REPAIR_LIMIT_REACHED', 'REPAIR_NEEDS_HIGH_DEBUG'):
-                    pass
+            profile = (record.get('developer') or {}).get('provider_profile')
+            if profile in ('codex', 'claude') and shutil.which(profile) is None:
+                step, codes = 'RUNTIME_NOT_ON_PATH', ['RUNTIME_NOT_ON_PATH']
+            else:
+                if step == 'REPAIR_RETRY':
+                    repair_claim = next((item for item in reversed(record.get('review_repair_claims', []))
+                                         if type(item) is dict and item.get('head_sha') == d6['result_head'] and
+                                         item.get('state') == 'DISPATCHED'), None)
+                    if repair_claim is None:
+                        step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
+                    else:
+                        current = store.get(task_id)
+                        claims = list(current.get('review_repair_claims', []))
+                        index = next((i for i, item in enumerate(claims)
+                                      if type(item) is dict and
+                                      item.get('repair_task_id') == repair_claim.get('repair_task_id') and
+                                      item.get('state') == 'DISPATCHED'), None)
+                        if index is None:
+                            step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
+                        else:
+                            claims[index] = dict(claims[index], state='FAILED')
+                            try:
+                                store.compare_and_update(
+                                    task_id, expected={'record_sha256': current['record_sha256']},
+                                    review_repair_claims=claims)
+                            except Exception as exc:
+                                step, codes = 'REFUSED', [_refusal(exc, 'task_store_error_code')]
+                if step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
+                    invoke = repair_review_call or review_repair.repair_review
+                    try:
+                        captured = io.StringIO()
+                        with contextlib.redirect_stdout(captured):
+                            result_value = invoke(store=store, task_id=task_id,
+                                executor_task=executor_task, pr_number=number,
+                                auto_review=False, github_get=get)
+                        emitted = captured.getvalue().strip()
+                        try:
+                            result = json.loads(emitted) if emitted else result_value
+                        except (TypeError, ValueError):
+                            result = result_value
+                    except Exception as exc:
+                        codes.append(_refusal(exc, 'review_repair_code'))
     elif step == 'RUN_TASK_COMPLETE':
         claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
@@ -421,7 +453,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         codes.append('NEEDS_PUBLISH')
     elif step == 'DEVELOPER_ATTENTION':
         codes.append('DEVELOPER_ATTENTION')
-    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR', 'NEEDS_CWD'):
+    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR', 'REPAIR_RETRY',
+                  'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
         codes.append(step)
     next_action = ('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)

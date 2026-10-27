@@ -642,7 +642,7 @@ def _validate(record):
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
-                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
                     (item.get('reviewer_task') is not None and
                      (type(item['reviewer_task']) is not str or
                       not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['reviewer_task']))) or
@@ -2455,8 +2455,10 @@ class TaskStore:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     i = changed[0]
                     old, new = old_claims[i], new_claims[i]
-                    if (old.get('state') != 'CLAIMED' or
-                            new.get('state') not in ('DISPATCHED', 'UNKNOWN') or
+                    if (not ((old.get('state') == 'CLAIMED' and
+                              new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
+                             (old.get('state') == 'DISPATCHED' and
+                              new.get('state') == 'FAILED')) or
                             any(old.get(key) != new.get(key) for key in
                                 old.keys() - {'state'})):
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')

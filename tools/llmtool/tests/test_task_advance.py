@@ -64,6 +64,15 @@ class TaskAdvanceTests(unittest.TestCase):
                                      'repair_state': 'RUNNING'}]
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'WAITING_REPAIR')
+        related['repair_claims'][0]['repair_state'] = 'DEVELOPER_UNAVAILABLE'
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
+                         'REPAIR_RETRY')
+        related['repair_claims'][0]['repair_state'] = 'BLOCKED'
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
+                         'REPAIR_RETRY')
+        related['repair_claims'][0]['repair_state'] = 'DEVELOPER_OUTPUT_REJECTED'
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
+                         'REPAIR_RETRY')
 
     def test_pass_retries_completion_and_reaches_integration(self):
         claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
@@ -104,7 +113,10 @@ class TaskAdvanceTests(unittest.TestCase):
 
     def _advance_dispatched_review(self, *, claim_changes=None, reviewer_session_done=False,
                                    outcomes=None, completion=None):
-        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED',
+        claim = {'executor_task': 'executor-1', 'pr': 17, 'head_sha': HEAD,
+                 'version': 1, 'state': 'DISPATCHED',
+                 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+                 'claimed_at': '2026-10-27T00:00:00Z', 'updated_at': '2026-10-27T00:00:01Z',
                  'reviewer_task': 'reviewer-1', 'native_session_id': 'session-1'}
         claim.update(claim_changes or {})
         record = base_record(review_dispatch_claim=[claim])
@@ -178,6 +190,110 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(first['step'], 'REPAIR_REVIEW')
         self.assertEqual(second['step'], 'WAITING_REPAIR')
         self.assertEqual(repaired, ['1' * 32])
+
+    def test_unavailable_repair_is_failed_and_retried_once(self):
+        class Store:
+            def __init__(self):
+                self.record = base_record(
+                    developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex'},
+                    review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD,
+                        'version': 1, 'state': 'DISPATCHED'}],
+                    review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
+                        'repair_task_id': '3' * 32, 'attempt': 1}],
+                    record_sha256='d' * 64)
+                self.repair = {'developer': {'state': 'DEVELOPER_UNAVAILABLE'}}
+            def get(self, task_id):
+                return self.repair if task_id == '3' * 32 else self.record
+            def compare_and_update(self, _task_id, *, expected, **changes):
+                if expected != {'record_sha256': self.record['record_sha256']}:
+                    raise RuntimeError('conflict')
+                self.record.update(changes)
+                self.record['record_sha256'] = 'e' * 64
+                return self.record
+
+        store = Store()
+        called = []
+        def retry(**_kwargs):
+            called.append(store.record['review_repair_claims'][0]['state'])
+            print('{"repair_task_id":"4' + '4' * 31 + '"}')
+            return {'ignored': True}
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_FAIL'}]), \
+             patch.object(task_advance.shutil, 'which', return_value='/usr/bin/codex'):
+            result = task_advance.advance(task_id=store.record['task_id'], store=store,
+                pr_number=17, cwd='/repo/task', repair_review_call=retry,
+                github_get=lambda _path: [])
+        self.assertEqual(result['step'], 'REPAIR_RETRY')
+        self.assertEqual(result['result'], {'repair_task_id': '4' * 32})
+        self.assertEqual(called, ['FAILED'])
+        self.assertEqual(store.record['review_repair_claims'][0]['state'], 'FAILED')
+
+    def test_repair_retry_limit_error_is_reported_after_failed_claim(self):
+        class Store:
+            def __init__(self):
+                self.record = base_record(
+                    review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD,
+                        'version': 1, 'state': 'DISPATCHED'}],
+                    review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
+                        'repair_task_id': '3' * 32, 'attempt': 3}],
+                    record_sha256='d' * 64)
+                self.repair = {'developer': {'state': 'BLOCKED'}}
+            def get(self, task_id):
+                return self.repair if task_id == '3' * 32 else self.record
+            def compare_and_update(self, _task_id, *, expected, **changes):
+                self.record.update(changes)
+                self.record['record_sha256'] = 'e' * 64
+
+        store = Store()
+        def exhausted(**_kwargs):
+            error = RuntimeError('bounded attempt limit')
+            error.review_repair_code = 'REPAIR_LIMIT_REACHED'
+            raise error
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_FAIL'}]):
+            result = task_advance.advance(task_id=store.record['task_id'], store=store,
+                pr_number=17, cwd='/repo/task', repair_review_call=exhausted,
+                github_get=lambda _path: [])
+        self.assertEqual(result['step'], 'REPAIR_RETRY')
+        self.assertIn('REPAIR_LIMIT_REACHED', result['codes'])
+        self.assertEqual(store.record['review_repair_claims'][0]['state'], 'FAILED')
+
+    def test_missing_runtime_stops_before_repair_claim_transition(self):
+        class Store:
+            def __init__(self):
+                self.record = base_record(
+                    developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex'},
+                    review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD,
+                        'version': 1, 'state': 'DISPATCHED'}],
+                    review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
+                        'repair_task_id': '3' * 32, 'attempt': 1}])
+                self.repair = {'developer': {'state': 'DEVELOPER_UNAVAILABLE'}}
+                self.updated = False
+            def get(self, task_id):
+                return self.repair if task_id == '3' * 32 else self.record
+            def compare_and_update(self, *_args, **_kwargs):
+                self.updated = True
+                raise AssertionError('claim transition must not occur')
+
+        store = Store()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_FAIL'}]), \
+             patch.object(task_advance.shutil, 'which', return_value=None):
+            result = task_advance.advance(task_id=store.record['task_id'], store=store,
+                pr_number=17, cwd='/repo/task', repair_review_call=lambda **_kwargs:
+                    self.fail('repair provider must not run'), github_get=lambda _path: [])
+        self.assertEqual(result['step'], 'RUNTIME_NOT_ON_PATH')
+        self.assertEqual(result['codes'], ['RUNTIME_NOT_ON_PATH'])
+        self.assertFalse(store.updated)
 
     def test_separate_tasks_and_merge_train_closure_decision(self):
         blocked = base_record(task_id='3' * 32,
