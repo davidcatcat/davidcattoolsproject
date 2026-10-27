@@ -38,7 +38,12 @@
       "decided_at": "2026-10-27",
       "reason": "Owner-only per-Task AGY direct CLI candidate; validate auth, quota, session, D6 and scoped safety; no automatic dispatch or fallback",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6433940134",
-      "owner_assignments": []
+      "owner_assignments": [
+        {
+          "task_id": "d3b1e153cf934e7f81542b17d8e37bf2",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6441807296"
+        }
+      ]
     },
     "company-gw": {
       "dispatch": "ALLOWED",
