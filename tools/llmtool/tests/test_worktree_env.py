@@ -208,13 +208,35 @@ def _chmod_writable(path):
             if entry.is_symlink():
                 continue
             try:
-                os.chmod(str(entry), 0o755 if entry.is_dir() else 0o644)
+                mode = 0o755 if entry.is_dir() else stat.S_IMODE(entry.stat().st_mode) | 0o200
+                os.chmod(str(entry), mode)
             except OSError:
                 pass
 
 
 class EnvironmentTempCase(unittest.TestCase):
-    """Shared temp workspace with one wheel source and a scratch cache root."""
+    """Per-test workspaces backed by immutable class-level fixture templates."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._fixture_root = Path(tempfile.mkdtemp(prefix="llmtool-env-fixtures-"))
+        cls._wheel_template = cls._fixture_root / "wheels"
+        dep = make_wheel(cls._wheel_template, "tiny-dep", "1.0.0", marker="dep")
+        extra = make_wheel(cls._wheel_template, "tiny-extra", "1.0.0", marker="extra")
+        cls._wheel_hashes = {
+            "tiny-dep": [sha256_of(dep)],
+            "tiny-extra": [sha256_of(extra)],
+        }
+        for path in cls._wheel_template.iterdir():
+            path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+        cls._wheel_template.chmod(0o555)
+
+    @classmethod
+    def tearDownClass(cls):
+        _chmod_writable(cls._fixture_root)
+        shutil.rmtree(str(cls._fixture_root), ignore_errors=True)
+        super().tearDownClass()
 
     def setUp(self):
         # Hermetic package-source configuration: no ambient PIP_* index
@@ -228,9 +250,8 @@ class EnvironmentTempCase(unittest.TestCase):
         os.environ["PIP_CONFIG_FILE"] = os.devnull
         self.tmp = Path(tempfile.mkdtemp(prefix="llmtool-env-test-"))
         self.wheels = self.tmp / "wheels"
-        dep = make_wheel(self.wheels, "tiny-dep", "1.0.0", marker="dep")
-        extra = make_wheel(self.wheels, "tiny-extra", "1.0.0", marker="extra")
-        self.hashes = {"tiny-dep": [sha256_of(dep)], "tiny-extra": [sha256_of(extra)]}
+        shutil.copytree(str(self._wheel_template), str(self.wheels))
+        self.hashes = {name: list(digests) for name, digests in self._wheel_hashes.items()}
         self.cache = self.tmp / "cache"
 
     def make_worktree(self, root, marker, hashes=None, **kwargs):
@@ -658,6 +679,33 @@ def _satisfies(version, specifier):
 
 
 class CacheTest(EnvironmentTempCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._pip_venv_template = cls._fixture_root / "pip-venv"
+        venv.EnvBuilder(with_pip=True).create(str(cls._pip_venv_template))
+        for root, dirs, files in os.walk(str(cls._pip_venv_template), topdown=False):
+            for name in files:
+                path = Path(root) / name
+                if not path.is_symlink():
+                    path.chmod(stat.S_IMODE(path.stat().st_mode) & ~0o222)
+            for name in dirs:
+                path = Path(root) / name
+                if not path.is_symlink():
+                    path.chmod(0o555)
+        cls._pip_venv_template.chmod(0o555)
+
+    @classmethod
+    def tearDownClass(cls):
+        _chmod_writable(cls._pip_venv_template)
+        super().tearDownClass()
+
+    def copy_pip_venv(self, destination):
+        shutil.copytree(
+            str(self._pip_venv_template), str(destination), symlinks=True
+        )
+        _chmod_writable(destination)
+
     def test_cache_miss_offline_fails_closed_without_creating_a_venv(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         code, out, err = self.run_cli(
@@ -874,7 +922,7 @@ class CacheTest(EnvironmentTempCase):
         wheelhouse = self.tmp / "empty-wheelhouse"
         wheelhouse.mkdir()
         isolated_python = self.tmp / "pip-dependency-venv" / "bin" / "python"
-        venv.EnvBuilder(with_pip=True).create(isolated_python.parent.parent)
+        self.copy_pip_venv(isolated_python.parent.parent)
         links = "file://%s?token=install-secret#install-fragment" % wheelhouse
         with mock.patch.dict(os.environ, {"PIP_FIND_LINKS": links}):
             self._capture_real_subprocess_output(
@@ -895,7 +943,7 @@ class CacheTest(EnvironmentTempCase):
         wheelhouse = self.tmp / "empty-project-wheelhouse"
         wheelhouse.mkdir()
         isolated_python = self.tmp / "pip-project-venv" / "bin" / "python"
-        venv.EnvBuilder(with_pip=True).create(isolated_python.parent.parent)
+        self.copy_pip_venv(isolated_python.parent.parent)
         self._capture_real_subprocess_output(
             lambda: we.install_project(
                 str(isolated_python), worktree / "tools" / "llmtool", wheelhouse

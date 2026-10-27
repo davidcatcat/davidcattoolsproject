@@ -1,0 +1,10 @@
+{
+  "default_seconds": 10,
+  "modules": {
+    "test_worktree_env.py": 338,
+    "test_action_contract_cli.py": 75,
+    "test_task_submission_cli.py": 66,
+    "test_cli.py": 64,
+    "test_d6_worktree_env.py": 59
+  }
+}

@@ -20,7 +20,8 @@ row each with a live state such as
 labels, titles and verdict words (see the office view section); a role is
 named only when a record binds it, never guessed. A session untouched for 6 hours is left out,
 and finished subagent work for 30 minutes; office data is rebuilt at most every
-5 seconds.
+5 seconds. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
+running `llmtool task remote-test`, else its newest local receipt or outcome.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -76,6 +77,7 @@ class Process:
     role: str
     name: str = "?"   # executable basename only, never arguments
     owner: str = ""   # nearest agent this process belongs to / was started by
+    job: tuple = ()   # a remote-test run: (source, task, sha, modules), validated tokens only
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -215,6 +217,51 @@ def _host_job(command: str) -> tuple[str, str] | None:
     return None
 
 
+HEX_SHA = re.compile(r"[0-9a-f]{40}")
+TEST_MODULE = re.compile(r"test_[a-z0-9_]{1,80}")
+
+
+def _remote_test_job(command: str) -> tuple:
+    """(source, short task, short SHA, modules) of an `llmtool task remote-test`
+    run ("cli") or of the ssh it starts ("ssh"); "" where unknown. Only tokens
+    matching their strict shape and position are kept, so the host, user, ref
+    and paths in the command line are never returned."""
+    parts = command.split()
+    if not parts or (_base(parts[0]) != "ssh" and "remote-test" not in parts):
+        return ()
+    if _base(parts[0]) == "ssh":
+        # ssh ... python3 - <sha> <ref> <repo> <python> <module>...: the
+        # modules start after the python path; the ref and paths are skipped.
+        for i in range(1, len(parts) - 4):
+            if (parts[i] == "-" and _base(parts[i - 1]).startswith("python")
+                    and HEX_SHA.fullmatch(parts[i + 1])):
+                modules = tuple(m for m in parts[i + 5:] if TEST_MODULE.fullmatch(m))
+                return ("ssh", "", parts[i + 1][:7], modules)
+        return ()
+    if classify(command) != "llmtool CLI":
+        return ()
+    for i in range(len(parts) - 1):
+        if parts[i] == "task" and parts[i + 1] == "remote-test":
+            args = parts[i + 2:]
+            break
+    else:
+        return ()
+    task, sha, modules, j = "", "", [], 0
+    while j < len(args):
+        arg = args[j]
+        name, eq, value = arg.partition("=")
+        if arg.startswith("--") and not eq and j + 1 < len(args):
+            value, j = args[j + 1], j + 1
+        if name == "--sha" and HEX_SHA.fullmatch(value):
+            sha = value[:7]
+        elif name == "--module" and TEST_MODULE.fullmatch(value):
+            modules.append(value)
+        elif not arg.startswith("-") and not task and re.fullmatch(r"[0-9a-f]{8,64}", arg):
+            task = arg[:8]
+        j += 1
+    return ("cli", task, sha, tuple(modules))
+
+
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
     """remembered: {pgid: member PIDs} of agent-led groups seen in earlier polls.
 
@@ -242,7 +289,7 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
         rows[pid] = (ppid, pgid,
                      elapsed if len(elapsed) <= 18 else "UNKNOWN",
                      stat if ALLOWED_STATE.fullmatch(stat) else "?",
-                     role, safe_name(found.group(6)))
+                     role, safe_name(found.group(6)), _remote_test_job(found.group(6)))
     matched = {pid for pid, row in rows.items()
                if row[4] is not None and row[4] not in NO_EXPAND}
     # Expand a whole process group only when the agent leads it (as llmtool's
@@ -266,7 +313,7 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
         return None
 
     result = []
-    for pid, (ppid, pgid, elapsed, stat, role, name) in rows.items():
+    for pid, (ppid, pgid, elapsed, stat, role, name, job) in rows.items():
         ancestor = agent_ancestor(pid)
         if role is None:
             if ancestor is not None:
@@ -281,7 +328,7 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
             owner = label(ancestor) if ancestor is not None else ""
         if stat.startswith("Z"):
             role += " (zombie)"
-        result.append(Process(pid, ppid, pgid, elapsed, stat, role, name, owner))
+        result.append(Process(pid, ppid, pgid, elapsed, stat, role, name, owner, job))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -325,17 +372,31 @@ def running_stages(tasks: list) -> int:
     return sum(1 for t in tasks for s in t.stages if stage_state(s) == "RUNNING")
 
 
-def summary(processes: list[Process], lingering: list, sessions=None) -> str:
+def summary(processes: list[Process], lingering: list, sessions=None,
+            ci_view: "CiView | None" = None, now: float | None = None) -> str:
     # An agent family counts its open CLIs, the processes office rows stand
     # for; its daemons and servers are listed in the table, not counted.
+    # Runners and Workers are counted as the office rows count them: one Mac
+    # runner per Listener (its Worker process is not another runner), the
+    # Linux runners in GitHub's list only while that list is fresh, and the
+    # EC2 remote-test worker, which is always a member.
     members = {p.pid for p in agent_clis(processes, sessions)}
     counts: dict[str, int] = {}
     for p in processes:
-        if p.role.startswith(" ") or family(p.role) in AGENT_FAMILIES and p.pid not in members:
+        if (p.role.startswith(" ") or family(p.role) == "Actions runner"
+                or family(p.role) in AGENT_FAMILIES and p.pid not in members):
             continue
         counts[family(p.role)] = counts.get(family(p.role), 0) + 1
-    order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop", "Actions runner", "other")
-    text = "  ".join(f"{k} {counts[k]}" for k in order if k in counts) or "no agent process"
+    order = ("Claude", "Codex", "OpenCode", "Kilo", "llmtool", "ai-loop")
+    now = time.time() if now is None else now
+    fresh = (ci_view is not None and ci_view.runners is not None and not ci_view.error
+             and now - ci_view.seen_at <= GITHUB_STALE)
+    linux = sum(_runner_system(runner[0], runner[1]) == "linux" for runner in ci_view.runners) if fresh else 0
+    parts = [f"{k} {counts[k]}" for k in order if k in counts] + [
+        f"Mac runner {sum(p.role == 'Actions runner' for p in processes)}",
+        f"EC2 runner {linux if fresh else '未確認'}", "EC2 worker 1"]
+    parts += [f"other {counts['other']}"] if "other" in counts else []
+    text = "  ".join(parts)
     return text + (f"  ·  ⚠ possible leftover groups: {', '.join(map(str, lingering))}" if lingering else "")
 
 
@@ -416,7 +477,7 @@ class Monitor:
         current = {p.pid: p for p in result.processes}
         new: list[tuple[str, str, str]] = []
         if self.polls == 1:
-            new.append((stamp, "i", f"monitor started; {summary(result.processes, result.lingering)}"))
+            new.append((stamp, "i", f"monitor started; {summary(result.processes, result.lingering, ci_view=self.github.ci_view if self.github else None)}"))
         for pid, p in current.items():
             if pid in self.announced:
                 continue
@@ -519,6 +580,7 @@ class Monitor:
 # rendered or logged. A database is opened only when its state root provably
 # belongs to the evidence directory (see _verified_db); otherwise UNKNOWN.
 import glob
+import heapq
 import json
 import sqlite3
 
@@ -3286,6 +3348,13 @@ def _runner_row(root, listener, processes, now, isolation, ci, number, total, qu
 RUNNER_DEFAULT_LABELS = frozenset({"self-hosted", "linux", "macos", "windows", "x64", "arm64", "arm"})
 
 
+def _runner_system(name: str, system: str) -> str:
+    """The runner's platform word for its row: GitHub's os, except that an
+    `ec2-` runner is a Linux one even while its os or labels are incomplete
+    (a newly added runner can carry only a pending label)."""
+    return "linux" if name.startswith("ec2-") else system.lower()
+
+
 def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | None = None) -> list[OfficeRow]:
     """One row per self-hosted runner GitHub lists that no row on this Mac
     covers (e.g. a Linux runner elsewhere): GitHub's word alone, so data
@@ -3333,7 +3402,8 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
         if fits:   # GitHub has not given them to a runner; this one has every label they ask for
             notes.append(f"排隊中、它可以接 {len(fits)} 個：" + "、".join(fits[:3])
                          + ("…" if len(fits) > 3 else ""))
-        rows.append(OfficeRow(f"{system.lower() + ' ' if system else ''}ci runner {name}", state,
+        kind = _runner_system(name, system)
+        rows.append(OfficeRow(f"{kind + ' ' if kind else ''}ci runner {name}", state,
                               "；".join(notes), age, 90 + number, key=name, kind="worker",
                               evidence="GitHub", alert=alert))
     return rows
@@ -3366,7 +3436,7 @@ def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
                 continue
             with open(path, "rb") as handle:
                 record = json.loads(handle.read(1 << 20))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         developer = record.get("developer") if type(record) is dict else None
         if type(developer) is not dict:
@@ -3409,7 +3479,7 @@ def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[floa
                 continue
             with open(path, "rb") as handle:
                 record = json.loads(handle.read(1 << 20))
-        except (OSError, ValueError):
+        except (OSError, ValueError, RecursionError):
             continue
         if type(record) is not dict:
             continue
@@ -3444,6 +3514,220 @@ def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[floa
         via = (("派給 " if dev_state else "PM 建議 ") + route) if route else "未指定路線"
         found.append((updated, f"{when}  {name:<36} {via:<18} {result}"))
     return sorted(found, reverse=True)
+
+
+REMOTE_TEST_RESULTS = frozenset({"PASS", "FAIL", "TIMEOUT", "SHA_MISMATCH"})
+REMOTE_TEST_OUTCOMES = frozenset({"ADMISSION_DENIED", "UNAVAILABLE", "TIMEOUT", "UNKNOWN"})
+REMOTE_TEST_FILES = 32        # newest task files read per office rebuild
+REMOTE_TEST_READ = 4 << 20    # a Task holds up to 32 receipts of up to 64 result lines
+REMOTE_TEST_SKEW = 300.0      # receipts carry the EC2 clock; file times the local one
+REMOTE_TEST_RELIST = 60.0     # seconds a task-file listing is reused while the folder is unchanged
+REMOTE_TEST_SCAN = 4096       # folder entries looked at per listing, at most
+REMOTE_TEST_BUDGET = 4 << 20  # bytes of task files read per office rebuild, in total
+REMOTE_TEST_CAPPED = "task 目錄超過上限，結果可能不是最新"
+REMOTE_TEST_OVER_BUDGET = "task 紀錄超過讀取上限，結果可能不是最新"
+_remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths, capped)
+_remote_test_parsed: dict = {}    # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
+
+
+def _remote_test_paths(root: str) -> tuple[list, bool]:
+    """(up to REMOTE_TEST_FILES newest *.json paths in root, whether the listing
+    stopped at REMOTE_TEST_SCAN entries). The folder is listed again only when
+    its mtime changes (TaskStore writes by rename, which changes it) or after
+    REMOTE_TEST_RELIST seconds; otherwise only the kept paths are looked at again."""
+    try:
+        folder = os.stat(root).st_mtime_ns
+    except OSError:
+        return [], False
+    kept = _remote_test_listing.get(root)
+    if kept and kept[0] == folder and time.monotonic() - kept[1] < REMOTE_TEST_RELIST:
+        return kept[2], kept[3]
+    stamped, seen, capped = [], 0, False
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if seen >= REMOTE_TEST_SCAN:
+                    capped = True   # more entries remain; the newest may be among them
+                    break
+                seen += 1
+                if not entry.name.endswith(".json"):
+                    continue
+                try:   # never follow a link: it could point at the remote-test config
+                    info = entry.stat(follow_symlinks=False)
+                    if not entry.is_symlink() and stat.S_ISREG(info.st_mode):
+                        stamped.append((info.st_mtime, entry.path))
+                except OSError:
+                    continue
+    except OSError:
+        return [], False
+    paths = [path for _, path in heapq.nlargest(REMOTE_TEST_FILES, stamped)]
+    if len(_remote_test_listing) >= 8:
+        _remote_test_listing.clear()   # one root in use; tests pass many
+    _remote_test_listing[root] = (folder, time.monotonic(), paths, capped)
+    return paths, capped
+
+
+def _remote_test_open(path: str, budget: int):
+    """(file key, raw bytes) of one regular task file, opened without following
+    a link or blocking on a FIFO and checked again on the open descriptor, so a
+    file swapped after the listing is refused too. A hard link (TaskStore
+    writes by rename, so its files have one) could name the remote-test config
+    and is refused. (key, None) for a refused or oversized file, (key, False)
+    when it does not fit the remaining budget, None when unreadable."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(fd)
+        key = (info.st_ino, info.st_mtime_ns, info.st_size)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > REMOTE_TEST_READ:
+            return key, None
+        if info.st_size > budget:
+            return key, False
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            return key, handle.read(info.st_size)
+    except OSError:
+        return None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _remote_test_json(raw: bytes):
+    """Parsed JSON, or None when malformed or nested too deeply."""
+    try:
+        return json.loads(raw)
+    except (ValueError, RecursionError):
+        return None
+
+
+def _remote_test_time(value) -> float:
+    if type(value) is not str:
+        return 0.0
+    return _github_time(re.sub(r"\.\d{6}Z$", "Z", value))
+
+
+def _remote_test_entries(record) -> tuple:
+    """((when, words), ...) for each well-typed receipt and outcome of a record.
+    Only result words, codes, the Task id, the SHA and the test count are kept."""
+    if type(record) is not dict:
+        return ()
+    task = record.get("task_id")
+    task = task[:8] if type(task) is str and re.fullmatch(r"[0-9a-f]{8,64}", task) else "未知"
+    found = []
+    receipts, outcomes = record.get("remote_test_receipts"), record.get("remote_test_outcomes")
+    for item in receipts if type(receipts) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        if type(result) is not str or result not in REMOTE_TEST_RESULTS:
+            continue
+        sha, ran = item.get("source_sha"), item.get("ran_total")
+        words = f"task {task} {result}"
+        words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
+        words += f"，跑了 {ran} 個測試" if type(ran) is int and ran >= 0 else ""
+        found.append((_remote_test_time(item.get("ended_at")), words))
+    for item in outcomes if type(outcomes) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        if type(result) is not str or result not in REMOTE_TEST_OUTCOMES:
+            continue
+        sha, code = item.get("sha"), item.get("code")
+        words = f"task {task} {result}"
+        words += f"（{code}）" if type(code) is str and CODE_TEXT.fullmatch(code) else ""
+        words += f" @{sha[:7]}" if type(sha) is str and HEX_SHA.fullmatch(sha) else ""
+        found.append((_remote_test_time(item.get("at")), words))
+    return tuple(entry for entry in found if entry[0])
+
+
+def remote_test_latest(root: str | None = None) -> tuple[tuple[float, str] | None, str]:
+    """((when, words) or None, problem): the newest EC2 remote-test receipt or
+    receipt-less outcome in llmtool's local task records. problem is "" or why
+    a newer one may exist unseen (the listing or the read budget stopped early).
+    The remote config, host, paths and logs are never touched. At most
+    REMOTE_TEST_FILES files are looked at, newest first, stopping once a file is
+    older than the newest entry found; an unchanged file (same inode, mtime and
+    size) is not read again, and at most REMOTE_TEST_BUDGET bytes are read."""
+    root = LLMTOOL_TASKS if root is None else root
+    stamped = []
+    listed, capped = _remote_test_paths(root)
+    for path in listed:
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode):
+            stamped.append((info.st_mtime, path, (info.st_ino, info.st_mtime_ns, info.st_size)))
+    best, budget, short, kept = None, REMOTE_TEST_BUDGET, False, {}
+    parsed = _remote_test_parsed.get(root, {})
+    for mtime, path, key in sorted(stamped, reverse=True)[:REMOTE_TEST_FILES]:
+        if best is not None and mtime < best[0] - REMOTE_TEST_SKEW:
+            break   # any entry in an older file was written before it
+        cached = parsed.get(path)
+        if cached and cached[0] == key:
+            entries = cached[1]
+        else:
+            opened = _remote_test_open(path, budget)
+            if opened is None:
+                continue
+            key, raw = opened
+            if raw is False:
+                short = True   # read the rest on a later rebuild
+                continue
+            budget -= len(raw or b"")
+            entries = _remote_test_entries(_remote_test_json(raw)) if raw else ()
+        kept[path] = (key, entries)
+        for entry in entries:
+            if best is None or entry[0] > best[0]:
+                best = entry
+    # Keep only files looked at this time, so the cache is no larger than the listing.
+    if root not in _remote_test_parsed and len(_remote_test_parsed) >= 8:
+        _remote_test_parsed.clear()   # one root in use; tests pass many
+    _remote_test_parsed[root] = kept
+    return best, REMOTE_TEST_CAPPED if capped else REMOTE_TEST_OVER_BUDGET if short else ""
+
+
+def _remote_test_runs(processes: list[Process]) -> list:
+    """[(process, modules)] for each live `llmtool task remote-test` CLI. An ssh
+    counts only through a CLI in its parent chain (it may name the modules the
+    CLI argv left out); any other ssh of the same shape is not this worker."""
+    by_pid = {p.pid: p for p in processes}
+    clis = {p.pid: p for p in processes if p.job and p.job[0] == "cli"}
+    modules = {pid: p.job[3] for pid, p in clis.items()}
+    for p in processes:
+        if not p.job or p.job[0] != "ssh":
+            continue
+        parent, seen = by_pid.get(p.ppid), 0
+        while parent is not None and parent.pid not in clis and seen < MAX_ANCESTRY:
+            parent, seen = by_pid.get(parent.ppid), seen + 1
+        if parent is not None and parent.pid in clis and not modules[parent.pid]:
+            if clis[parent.pid].job[2] in ("", p.job[2]):
+                modules[parent.pid] = p.job[3]
+    return [(p, modules[pid]) for pid, p in sorted(clis.items())]
+
+
+def remote_test_row(processes: list[Process], now: float, root: str | None = None) -> OfficeRow:
+    """The EC2 remote-test worker: the run the process table shows, else the
+    newest local record. It says only what the process or record says."""
+    runs = _remote_test_runs(processes)
+    if runs:
+        (proc, modules), (_, task, sha, _) = runs[0], runs[0][0].job
+        detail = f"執行中：task {task or '未知'}" + (f" @{sha}" if sha else "")
+        detail += f"；{', '.join(modules)}" if modules else ""
+        if len(runs) > 1:
+            detail += f"；另有 {len(runs) - 1} 個執行中"
+        return OfficeRow("EC2 遠端測試", WORKING, detail, _elapsed_seconds(proc.elapsed),
+                         80, kind="worker", evidence="程序")
+    latest, problem = remote_test_latest(root)
+    if problem:   # only part of the records was read: never claim the newest
+        detail = (f"已讀到的一次：{latest[1]}；" if latest else "") + problem
+        return OfficeRow("EC2 遠端測試", UNCHECKED, detail,
+                         max(0.0, now - latest[0]) if latest else None, 80, kind="worker",
+                         evidence="llmtool 紀錄")
+    if latest is None:
+        return OfficeRow("EC2 遠端測試", IDLE, "尚無遠端測試紀錄", None, 80, kind="worker",
+                         evidence="llmtool 紀錄")
+    return OfficeRow("EC2 遠端測試", IDLE, f"最近一次：{latest[1]}", max(0.0, now - latest[0]),
+                     80, kind="worker", evidence="llmtool 紀錄")
 
 
 # Codex reviewers are not a standing Worker: they run as sessions the PM starts
@@ -3871,6 +4155,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
     mac = runner_rows(processes, now, runner_root, cwd_of, ci=ci)
     rows += agy + mac + github_runner_rows(ci_view, now, {row.key for row in mac}, ci)
+    rows.append(remote_test_row(processes, now, llmtool_tasks))
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
     for name, key, order in WORKER_ROSTER:
@@ -4191,7 +4476,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
         mon.github = github
     mon.poll()
     print(f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
-          f"{summary(mon.processes, mon.lingering)}")
+          f"{summary(mon.processes, mon.lingering, ci_view=github.ci_view if github else None)}")
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
@@ -4263,7 +4548,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
                 colors.get("!", 0) | curses.A_BOLD)
         status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
-                  else summary(mon.processes, mon.lingering))
+                  else summary(mon.processes, mon.lingering,
+                               ci_view=mon.github.ci_view if mon.github else None))
         running = running_stages(mon.tasks)
         status += f"  ·  llmtool stages running: {running}" if running else ""
         put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)

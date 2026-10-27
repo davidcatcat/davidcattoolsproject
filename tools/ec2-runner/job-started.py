@@ -1,5 +1,5 @@
 #!/usr/bin/python3.9
-"""Root-owned, fail-closed admission for the two persistent EC2 runners."""
+"""Root-owned, fail-closed admission for the three persistent EC2 runners."""
 import json
 import os
 from pathlib import Path
@@ -9,7 +9,11 @@ import sys
 
 REPO = 'davidcatcat/davidcattoolsproject'
 OWNER = 'davidcatcat'
-IDENTITIES = {'ec2-self-runner': 'ghrunner', 'ec2-self-runner-2': 'ghrunner2'}
+IDENTITIES = {
+    'ec2-self-runner': 'ghrunner',
+    'ec2-self-runner-2': 'ghrunner2',
+    'ec2-self-runner-3': 'ghrunner3',
+}
 BRANCHES = {'refs/heads/main'}
 
 def reject(reason):

@@ -40,6 +40,7 @@ POLL_SECONDS = 2.0
 _EVENT_ID_DOMAIN = b'llmtool-active-pm-completion-event-v1\0'
 _ACK_DOMAIN = b'llmtool-active-pm-ack-v1\0'
 _REMOTE_TEST_EVENT_DOMAIN = b'llmtool-active-pm-remote-test-event-v1\0'
+_REMOTE_TEST_OUTCOME_EVENT_DOMAIN = b'llmtool-active-pm-remote-test-outcome-event-v1\0'
 
 
 def pm_session_key(value):
@@ -174,6 +175,38 @@ def record_remote_test_event(store, task_id, receipt):
     event_id = hashlib.sha256(_REMOTE_TEST_EVENT_DOMAIN + '\0'.join((
         task_id, record['run_id'], source_sha,
         ','.join(receipt['modules']), receipt['receipt_digest'])).encode()).hexdigest()[:32]
+    known = record.get('completion_events', []) + record.get('completion_event_tombstones', [])
+    existing = next((event for event in known if event['event_id'] == event_id), None)
+    if existing is not None:
+        return existing
+    stream = [event['sequence'] for event in known
+              if (event['source'], event['session_id']) == ('EC2_REMOTE_TEST', session_id)]
+    return store.record_completion_event(
+        task_id, event_id=event_id, run_id=record['run_id'], session_id=session_id,
+        source='EC2_REMOTE_TEST', source_sha=source_sha,
+        sequence=max(stream) + 1 if stream else 0,
+        payload_sha256=payload_sha256)['event']
+
+
+def record_remote_test_outcome_event(store, task_id, outcome, counter):
+    """Deliver a persisted no-receipt outcome, with a stable per-write identity."""
+    record = store.get(task_id)
+    from .task_submission_cli import _active_pm_runtime
+
+    if (outcome.get('task_id') not in (None, task_id) or
+            outcome.get('run_id') not in (None, record.get('run_id')) or
+            not _active_pm_runtime(record) or type(counter) is not int or counter < 0):
+        raise LLMToolError('remote test outcome does not match this Task')
+    payload = json.dumps(outcome, ensure_ascii=True, sort_keys=True,
+                         separators=(',', ':')).encode('utf-8')
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
+    source_sha = outcome.get('sha') or hashlib.sha1(payload).hexdigest()
+    modules = outcome.get('modules', [])
+    session_id = 'remote-test-' + (outcome.get('executor_task') or 'unknown')
+    event_id = hashlib.sha256(_REMOTE_TEST_OUTCOME_EVENT_DOMAIN + b'\0' + b'\0'.join((
+        task_id.encode(), record['run_id'].encode(), source_sha.encode(),
+        ','.join(modules).encode(), outcome['result'].encode(), outcome['code'].encode(),
+        str(counter).encode()))).hexdigest()[:32]
     known = record.get('completion_events', []) + record.get('completion_event_tombstones', [])
     existing = next((event for event in known if event['event_id'] == event_id), None)
     if existing is not None:

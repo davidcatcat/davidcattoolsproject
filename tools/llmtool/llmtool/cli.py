@@ -34,9 +34,11 @@ from .task_submission_cli import (add_task_submission_parsers, run_task_ack,
                                  run_task_complete, run_task_delegate, run_task_inbox,
                                  run_task_record_pm, run_task_review_prompt,
                                  run_task_remote_test, run_task_review_dispatch,
+                                 run_task_review_result,
                                  run_task_show, run_task_submit)
 from .task_review_cli import add_review_parser, run_task_review
 from .review_authority_cli import add_review_authority_parser, run_review_authority_check
+from .dispatch_check import add_dispatch_check_parser, run_dispatch_check
 
 
 def _validation_packet(filename):
@@ -136,6 +138,7 @@ def parser_for_cli():
     add_task_submission_parsers(task_actions)
     add_review_parser(task_actions)
     add_review_authority_parser(sub)
+    add_dispatch_check_parser(sub)
     validate = sub.add_parser("validate", help="Assess commands or Context Packets offline; never execute")
     actions = validate.add_subparsers(dest="action", required=True)
     command = actions.add_parser("command", help="Classify a suggested command as data")
@@ -491,6 +494,8 @@ def main(argv=None):
         args = parser_for_cli().parse_args(argv)
         if args.command == 'review-authority':
             return run_review_authority_check(args)
+        if args.command == 'dispatch-check':
+            return run_dispatch_check(args)
         if args.command == 'task':
             if args.action == 'submit':
                 return run_task_submit(args)
@@ -503,14 +508,22 @@ def main(argv=None):
             if args.action == 'ack':
                 return run_task_ack(args)
             if args.action == 'delegate':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
                 return run_task_delegate(args)
             if args.action == 'complete':
                 return run_task_complete(args)
             if args.action == 'review-prompt':
                 return run_task_review_prompt(args)
             if args.action == 'review-dispatch':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
                 return run_task_review_dispatch(args)
+            if args.action == 'review-result':
+                return run_task_review_result(args)
             if args.action == 'remote-test':
+                from .source_freshness import require_fresh_source
+                require_fresh_source()
                 return run_task_remote_test(args)
             if args.action in ('review-request','review-wait'):
                 from .review_exchange import run_exchange
@@ -630,13 +643,13 @@ def main(argv=None):
         return 0
     except LLMToolError as exc:
         refusal_code = getattr(exc, 'completion_code', None)
-        if getattr(args, 'command', None) == 'task' and getattr(args, 'action', None) == 'review-dispatch':
+        if getattr(args, 'command', None) == 'task' and getattr(args, 'action', None) in ('review-dispatch', 'review-result'):
             refusal_code = getattr(exc, 'review_dispatch_code', None)
-            refusal_label = 'review-dispatch'
+            refusal_label = 'review-result' if args.action == 'review-result' else 'review-dispatch'
         else:
             refusal_label = 'review-prompt'
         if (getattr(args, 'command', None) == 'task' and
-                getattr(args, 'action', None) in ('review-prompt', 'review-dispatch') and
+                getattr(args, 'action', None) in ('review-prompt', 'review-dispatch', 'review-result') and
                 type(refusal_code) is str and
                 re.fullmatch(r'[A-Z0-9_]{1,64}', refusal_code)):
             print('llmtool: ' + refusal_label + ' refused: ' + refusal_code, file=sys.stderr)
