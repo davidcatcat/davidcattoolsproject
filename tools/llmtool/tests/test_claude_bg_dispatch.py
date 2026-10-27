@@ -147,6 +147,11 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                                       'CLAUDE_CONFIG_DIR': str(self.config)})
         env.start()
         self.addCleanup(env.stop)
+        gate = patch.object(dispatch_tool.worker_dispatch, 'evaluate',
+                            return_value=dispatch_tool.worker_dispatch.PolicyDecision(
+                                'claude-developer', True, 'OWNER_POLICY_ALLOWED', 'a' * 64))
+        gate.start()
+        self.addCleanup(gate.stop)
         self.root = str(self.f.root)
         self.cwd = str(self.home)  # the session's recorded cwd must exist to launch there
 
@@ -186,10 +191,50 @@ class ClaudeBgDispatchTests(unittest.TestCase):
             code = dispatch_tool._main(argv)
         return code, json.loads(out.getvalue())
 
-    def dispatch(self, session=TARGET, *, name='claude-developer', task='executor-task', timeout='1'):
+    def dispatch(self, session=TARGET, *, name='claude-developer', task='executor-task', timeout='1',
+                 owner_ref=None):
+        args = ['dispatch', '--session', session, '--name', name,
+                '--task-id', task, '--prompt', 'Task Contract: do the work']
+        if owner_ref is not None:
+            args += ['--owner-assignment-ref', owner_ref]
         return self.run_tool('dispatch', '--session', session, '--name', name,
                              '--task-id', task, '--prompt', 'Task Contract: do the work',
-                             timeout=timeout)
+                             timeout=timeout) if owner_ref is None else self.run_tool(
+                                 *args, timeout=timeout)
+
+    def test_dispatch_gate_allows_pauses_assignment_and_unknown_roles_before_launch(self):
+        valid_ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-1'
+        cases = [
+            ('claude-developer', 'executor-task', None, True, 'OWNER_POLICY_ALLOWED'),
+            ('claude-reviewer', 'executor-task', None, False, 'OWNER_PAUSED'),
+            ('claude-developer', 'executor-task', None, False, 'OWNER_ASSIGNMENT_REQUIRED'),
+            ('claude-developer', 'executor-task', valid_ref, True, 'OWNER_ASSIGNMENT_MATCHED'),
+            ('unknown-role', 'executor-task', None, False, 'WORKER_UNKNOWN'),
+        ]
+        for role, task, ref, allowed, reason in cases:
+            with self.subTest(role=role, allowed=allowed):
+                self.reset()
+                self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)], before=[], after=[[]])
+                decision = dispatch_tool.worker_dispatch.PolicyDecision(
+                    role if role in dispatch_tool.worker_dispatch.WORKERS else 'unknown',
+                    allowed, reason, 'b' * 64)
+                with patch.object(dispatch_tool.worker_dispatch, 'evaluate', return_value=decision) as gate:
+                    code, receipt = self.dispatch(name=role, task=task, owner_ref=ref)
+                if allowed:
+                    gate.assert_called_once_with(role, ref, task)
+                    self.assertEqual(len(self.launches()), 1)
+                else:
+                    self.assertEqual(code, 2)
+                    self.assertEqual(receipt['reason'], reason)
+                    self.assertEqual(self.launches(), [])
+
+    def test_dispatch_unknown_role_is_refused_without_evaluating_or_launching(self):
+        with patch.object(dispatch_tool.worker_dispatch, 'evaluate') as gate:
+            code, receipt = self.dispatch(name='other')
+        self.assertEqual(code, 2)
+        self.assertEqual(receipt['reason'], 'WORKER_UNKNOWN')
+        gate.assert_not_called()
+        self.assertEqual(self.calls(), [])
 
     def test_busy_with_new_action_is_delivered_and_old_history_is_ignored(self):
         self.scenario(
