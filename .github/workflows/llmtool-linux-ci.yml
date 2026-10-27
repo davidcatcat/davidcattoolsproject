@@ -86,6 +86,12 @@ jobs:
             git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"
             while IFS= read -r -d '' path; do
               case "$path" in
+                tools/llmtool/*)
+                  code=true
+                  case "$path" in
+                    *.md) docs=true ;;
+                  esac
+                  ;;
                 *.md|AGENTS.md|CLAUDE.md|skills/*|docs/*|tools/llmtool/*.md) docs=true ;;
                 *) code=true ;;
               esac
