@@ -996,10 +996,26 @@ class TaskCompletionTests(unittest.TestCase):
             {'id': 2, 'name': 'check (3.9)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
         api = self._github_response_sequence(result_sha, {}, [], legacy_checks)
-        with patch('llmtool.task_completion._github_get', side_effect=api[3:]):
+        api[5]['jobs'][0]['name'] = 'check (3.9)'
+        api[5]['jobs'][0]['check_run_url'] = (
+            'https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/2')
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:6] + api[7:]):
             evidence = task_completion._collect_ci_evidence(
                 pr_number=pr_number, result_sha=result_sha)
         self.assertEqual(evidence['successful_checks'], ['check (Linux 3.14)'])
+
+        api = self._github_response_sequence(result_sha, {}, [], checks)
+        api[9]['jobs'][0]['name'] = 'check (Linux 3.9)'
+        api[9]['jobs'][0]['check_run_url'] = (
+            'https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/2')
+        api[10] = {'total_count': 1, 'check_runs': [
+            {'id': 2, 'name': 'check (Linux 3.9)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success',
+             'app': {'id': 15368, 'slug': 'github-actions', 'name': 'GitHub Actions'}}]}
+        with patch('llmtool.task_completion._github_get', side_effect=api[3:10]):
+            evidence = task_completion._collect_ci_evidence(
+                pr_number=pr_number, result_sha=result_sha)
+        self.assertEqual(evidence['successful_checks'], ['check (macOS 3.13)'])
 
     def test_ci_selects_latest_exact_pull_request_workflow_run_and_attempt(self):
         result_sha, _ = self._make_result()
