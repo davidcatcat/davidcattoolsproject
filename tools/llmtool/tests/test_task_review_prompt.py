@@ -151,7 +151,7 @@ class TaskReviewPromptTests(unittest.TestCase):
             error.completion_code = code
             output = io.StringIO()
             with self.subTest(code=code), patch.object(
-                    cli, 'run_task_review_prompt', side_effect=error), \
+                    task_submission_cli, 'run_task_review_prompt', side_effect=error), \
                     redirect_stderr(output):
                 self.assertEqual(cli.main(['task', 'review-prompt', TASK_ID,
                                            '--executor-task', 'executor-d6',
