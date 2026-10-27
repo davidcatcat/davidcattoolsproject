@@ -72,7 +72,10 @@ def run(argv,limit=None,cleanup=False,**kw):
     left=end-time.monotonic()
     if left<=0: raise subprocess.TimeoutExpired(argv,0)
     seconds=min(left,limit) if limit is not None else left
-    return subprocess.run(argv,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,check=False,timeout=max(.1,seconds),**kw)
+    capture_stderr=kw.pop("capture_stderr",False)
+    return subprocess.run(argv,stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE if capture_stderr else subprocess.STDOUT,
+        check=False,timeout=max(.1,seconds),**kw)
 def nobody(work,argv,env=None):
     values={"PATH":"/usr/bin:/bin","HOME":work,"TMPDIR":work,"PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1"}
     values.update(env or {})
@@ -158,18 +161,19 @@ try:
             for index,mod in enumerate(mods):
                 allowance=(deadline-time.monotonic())/(len(mods)-index)-3
                 if allowance<=1: raise subprocess.TimeoutExpired(mod,0)
-                test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance)); log+=test.stdout
-                lines=[x.decode("utf8","replace").strip() for x in test.stdout.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
+                test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance),capture_stderr=True)
+                test_output=test.stdout+(test.stderr or b""); log+=test_output
+                lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
                 final=next((line for line in reversed(lines)
                             if line.endswith("OK") or line.startswith("FAILED (") or
                             line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
                 finals.append(final)
-                ran+=int(re.search(rb"Ran (\d+) tests?",test.stdout).group(1)) if re.search(rb"Ran (\d+) tests?",test.stdout) else 0
+                ran+=int(re.search(rb"Ran (\d+) tests?",test_output).group(1)) if re.search(rb"Ran (\d+) tests?",test_output) else 0
                 if test.returncode==124:
                     result="TIMEOUT"; code=124; failures.append(mod); break
                 if test.returncode or not final.endswith("OK"):
                     result="FAIL"; code=test.returncode or 1
-                    failures.append(mod); failed_outputs.append(test.stdout)
+                    failures.append(mod); failed_outputs.extend((test.stdout,test.stderr or b""))
             if result!="TIMEOUT" and code==1 and len(failures)==0 and ran>0: result="PASS"; code=0
         finally:
             if work:

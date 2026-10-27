@@ -90,7 +90,7 @@ class RemoteTestTests(unittest.TestCase):
             receipt['failure_excerpt'] = failure_excerpt
         return json.dumps(receipt, separators=(',', ':')).encode()
 
-    def failure_excerpt(self, output):
+    def failure_excerpt(self, output, stderr=''):
         parsed = ast.parse(remote_test._REMOTE_SCRIPT)
         sensitive = next(node for node in parsed.body
                          if isinstance(node, ast.Assign) and
@@ -102,7 +102,7 @@ class RemoteTestTests(unittest.TestCase):
         namespace = {'re': re, '_emitted_sensitive': remote_test._emitted_sensitive}
         exec(compile(ast.Module(body=[sensitive, helper], type_ignores=[]),
                      '<remote-excerpt-helper>', 'exec'), namespace)
-        return namespace['failure_excerpt']([output.encode()],
+        return namespace['failure_excerpt']([output.encode(), stderr.encode()],
             '/tmp/llmtool-remote-test.Abc123', '/home/runner')
 
     def run_it(self, data=None, *, error=None, modules=('test_remote_test',), sha=SHA,
@@ -159,6 +159,25 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('<REMOTE_WORKDIR>/test.py', excerpt)
         self.assertNotIn('/tmp/llmtool-remote-test.Abc123', excerpt)
         self.assertNotIn(cred_value, excerpt)
+        self.assertEqual(self.failure_excerpt(''), '')
+        stdout = 'F.E\nRan 2 tests in 0.1s\nFAILED (failures=1, errors=1)\n'
+        stderr = ('======================================================================\n'
+                  'FAIL: test_expected (test_remote_test.Case)\n'
+                  'Traceback (most recent call last):\n'
+                  '  File "/home/runner/test_remote_test.py", line 12\n'
+                  'AssertionError: expected value\n'
+                  '======================================================================\n'
+                  'ERROR: test_broken (test_remote_test.Case)\n'
+                  'Traceback (most recent call last):\n'
+                  '  File "/home/runner/test_remote_test.py", line 20\n'
+                  'RuntimeError: broken\n'
+                  '----------------------------------------------------------------------\n')
+        combined = self.failure_excerpt(stdout, stderr)
+        self.assertIn('FAIL: test_expected (test_remote_test.Case)', combined)
+        self.assertIn('ERROR: test_broken (test_remote_test.Case)', combined)
+        self.assertIn('AssertionError: expected value', combined)
+        self.assertIn('<REMOTE_HOME>/test_remote_test.py', combined)
+        self.assertNotIn('/home/runner', combined)
         url_value = ''.join(('https', '://', 'user', ':', 'value', '@',
                              'example.test/path'))
         jwt_value = '.'.join(('a' * 12, 'b' * 12, 'c' * 12))
