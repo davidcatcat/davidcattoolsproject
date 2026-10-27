@@ -93,6 +93,8 @@ _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
+_REVIEW_REPAIR_OPTIONAL_FIELDS = frozenset(('repair_task_id', 'family',
+                                             'high_debug_report_sha256'))
 _V2_REPAIR_BASES = (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                     *_V2_REMOTE_OUTCOME_SHAPES,
                     *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)
@@ -666,17 +668,25 @@ def _validate(record):
         if type(claims) is not list or not 1 <= len(claims) <= 64:
             _fail('REVIEW_REPAIR_CLAIM_INVALID')
         identities = set()
+        families = {}
         for item in claims:
             if (type(item) is not dict or
-                    set(item) not in (_REVIEW_REPAIR_CLAIM_FIELDS,
-                                      _REVIEW_REPAIR_CLAIM_FIELDS | {'repair_task_id'}) or
+                    not _REVIEW_REPAIR_CLAIM_FIELDS.issubset(item) or
+                    set(item) - _REVIEW_REPAIR_CLAIM_FIELDS - _REVIEW_REPAIR_OPTIONAL_FIELDS or
                     type(item.get('executor_task')) is not str or
                     not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
                     type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
-                    type(item.get('attempt')) is not int or item['attempt'] not in (1, 2) or
+                    type(item.get('attempt')) is not int or item['attempt'] not in (1, 2, 3) or
+                    ('family' in item and
+                     (type(item['family']) is not str or
+                      re.fullmatch(r'[a-z0-9._-]{1,64}', item['family']) is None)) or
+                    ('high_debug_report_sha256' in item and
+                     (item.get('attempt') != 3 or
+                      type(item['high_debug_report_sha256']) is not str or
+                      re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
                     item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
                     (item.get('comment_id') is not None and
                      (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
@@ -693,9 +703,30 @@ def _validate(record):
             if identity in identities:
                 _fail('REVIEW_REPAIR_CLAIM_INVALID')
             identities.add(identity)
-        if any(sum(1 for item in claims if item['pr'] == pr) > 2
-               for pr in {item['pr'] for item in claims}):
-            _fail('REVIEW_REPAIR_CLAIM_INVALID')
+            family = item.get('family', f"pr-{item['pr']}")
+            families.setdefault(family, []).append(item)
+        for family_claims in families.values():
+            if len(family_claims) > 3:
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
+            if any(item.get('attempt') != index
+                   for index, item in enumerate(family_claims, 1)):
+                _fail('REVIEW_REPAIR_CLAIM_INVALID')
+            if len(family_claims) == 3:
+                third = family_claims[2]
+                if third.get('attempt') != 3:
+                    _fail('REVIEW_REPAIR_CLAIM_INVALID')
+                second_claimed_at = max(item['claimed_at'] for item in family_claims[:2])
+                matching = [entry for entry in record.get('high_debug', [])
+                            if type(entry) is dict and entry.get('family') ==
+                            third.get('family', f"pr-{third['pr']}") and
+                            entry.get('status') == 'RCA_CONFIRMED' and
+                            entry.get('examined_sha') == third['head_sha'] and
+                            type(entry.get('recorded_at')) is str and
+                            entry['recorded_at'] > second_claimed_at and
+                            entry.get('report_sha256') ==
+                            third.get('high_debug_report_sha256')]
+                if not matching:
+                    _fail('REVIEW_REPAIR_CLAIM_INVALID')
     if 'remote_test_receipts' in record:
         _validate_remote_test_receipts(record)
     if 'remote_test_outcomes' in record:
@@ -2405,9 +2436,17 @@ class TaskStore:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     added = new_claims[-1]
                     if (type(added) is not dict or added.get('state') != 'CLAIMED' or
+                            type(added.get('family')) is not str or
+                            re.fullmatch(r'[a-z0-9._-]{1,64}', added.get('family', '')) is None or
                             type(added.get('repair_task_id')) is not str or
                             re.fullmatch(r'[0-9a-f]{32}', added['repair_task_id']) is None or
-                            sum(1 for item in old_claims if item.get('pr') == added.get('pr')) >= 2):
+                            sum(1 for item in old_claims
+                                if item.get('family', f"pr-{item.get('pr')}") ==
+                                added.get('family')) >= 3 or
+                            added.get('attempt') != 1 + sum(
+                                1 for item in old_claims
+                                if item.get('family', f"pr-{item.get('pr')}") ==
+                                added.get('family'))):
                         _fail('REVIEW_REPAIR_CLAIM_LIMIT_REACHED')
                 else:
                     changed = [i for i, (old, new) in enumerate(zip(old_claims, new_claims))
