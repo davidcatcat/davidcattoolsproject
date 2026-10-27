@@ -4,8 +4,8 @@ name: llmtool Linux CI
 # version, runs the full offline suite on every PR and main push. 3.9, the
 # oldest pyproject.toml declares (requires-python >=3.9), runs only before a
 # release: start this workflow by hand on main with `python39` (Owner
-# 2026-10-25). Both runners carry the same label, so either takes a job and
-# two jobs run at the same time. Each runner runs under its own non-admin
+# 2026-10-25). All three runners carry the same label, so each can take a job
+# and three jobs run at the same time. Each runner runs under its own non-admin
 # account with the instance metadata service blocked for its service; the
 # root-owned job-started hook on the host
 # (tools/ec2-runner, installed in /opt/llmtool-ci) refuses any job that is
@@ -45,8 +45,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  check:
-    name: check (Linux ${{ matrix.python }})
+  shards:
+    name: linux shard ${{ matrix.shard }}/3 (${{ matrix.python }})
     if: >-
       vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
@@ -55,6 +55,7 @@ jobs:
       fail-fast: false
       matrix:
         python: ${{ fromJSON(inputs.python39 && '["3.14", "3.9"]' || '["3.14"]') }}
+        shard: [1, 2, 3]
     runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
     timeout-minutes: 40
     env:
@@ -68,6 +69,7 @@ jobs:
           case "$RUNNER_NAME" in
             ec2-self-runner) account=ghrunner ;;
             ec2-self-runner-2) account=ghrunner2 ;;
+            ec2-self-runner-3) account=ghrunner3 ;;
             *) fail "unexpected runner" ;;
           esac
           user=$(id -un) || fail "cannot identify job user"
@@ -143,9 +145,17 @@ jobs:
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --requirement tools/llmtool/requirements-ci.txt
           "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet --no-deps -e tools/llmtool
           echo "JOB_PYTHON=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
-      - name: Offline canonical checks
-        run: make -C tools/llmtool check PYTHON="$JOB_PYTHON"
+      - name: Offline test shard
+        shell: bash
+        run: |
+          make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
+          modules=$("$JOB_PYTHON" tools/llmtool/scripts/ci_test_shards.py 3 "${{ matrix.shard }}")
+          while IFS= read -r module; do
+            [ -n "$module" ] || continue
+            "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module"
+          done <<< "$modules"
       - name: Host admission checks
+        if: matrix.shard == 1
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s tools/ec2-runner -p 'test_*.py'
       - name: Working tree is clean
@@ -158,3 +168,27 @@ jobs:
             exit 1
           fi
           echo "working tree clean"
+
+  check:
+    name: check (Linux ${{ matrix.python }})
+    needs: shards
+    if: >-
+      always()
+      && vars.LINUX_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && github.actor == 'davidcatcat'
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ${{ fromJSON(inputs.python39 && '["3.14", "3.9"]' || '["3.14"]') }}
+    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    steps:
+      - name: Require every Linux shard to pass
+        env:
+          SHARDS_RESULT: ${{ needs.shards.result }}
+        run: |
+          if [ "$SHARDS_RESULT" != success ]; then
+            echo "::error::Linux shard matrix result: $SHARDS_RESULT"
+            exit 1
+          fi
+          echo "all Linux shards passed"
