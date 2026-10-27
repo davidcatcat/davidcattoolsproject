@@ -146,10 +146,9 @@ class RemoteTestTests(unittest.TestCase):
 
     def test_outcome_event_replay_is_idempotent_but_retry_gets_new_event(self):
         first = self.run_it(error=OSError('offline'))
-        replay = remote_test._record_outcome(
-            self.store, self.store.task['task_id'], self.store.task,
-            result='UNAVAILABLE', code='SSH_UNAVAILABLE', executor_task='d6-task',
-            sha=SHA, modules=['test_remote_test'])
+        saved = self.store.task['remote_test_outcomes'][0]
+        replay = remote_test.record_remote_test_outcome_event(
+            self.store, self.store.task['task_id'], saved, 0)
         second = self.run_it(error=OSError('offline'))
         self.assertEqual(replay['event_id'], first['event_id'])
         self.assertNotEqual(second['event_id'], first['event_id'])
