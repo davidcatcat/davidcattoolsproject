@@ -14,7 +14,7 @@ if common="$(env -u GIT_DIR -u GIT_COMMON_DIR -u GIT_WORK_TREE \
   fi
 fi
 SKILLS_DIR="$REPO/skills"
-DESTS=("$HOME/.claude/skills" "$HOME/.agents/skills")
+DESTS=("$HOME/.claude/skills" "$HOME/.agents/skills" "$HOME/.gemini/config/skills")
 
 if [ ! -d "$SKILLS_DIR" ]; then
   echo "error: skills directory not found: $SKILLS_DIR" >&2
@@ -43,4 +43,4 @@ done
 
 echo
 echo "Skills installed for Claude Code (~/.claude/skills)"
-echo "and Agent Skills-compatible tools (~/.agents/skills)."
+echo "Agent Skills-compatible tools (~/.agents/skills) and AGY/Antigravity CLI (~/.gemini/config/skills)."
