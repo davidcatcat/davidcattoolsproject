@@ -433,7 +433,10 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         self.assertNotEqual(e['runtime_session_id'],h.expect.agents[1].session_id)
         argv=json.loads(h.argv_file.read_text())
         self.assertEqual(argv,['--print','--output-format','json','--no-session-persistence',
-                               '--safe-mode','--tools','','--model','fake-model'])
+                               '--safe-mode','--tools','WebSearch,WebFetch','--model','fake-model'])
+        allowed_tools=argv[argv.index('--tools')+1].split(',')
+        for tool in ('Read','Write','Edit','Bash'):
+            self.assertNotIn(tool,allowed_tools)
         receipt=next(iter(h.authority.receipts.values()))
         self.assertEqual(h.ledger.status(receipt.nonce),'EFFECT_DONE')
         with self.assertRaises(Exception):h.launcher.launch(h.packet_input,
