@@ -1,3 +1,5 @@
+import ast
+import fcntl
 import hashlib
 import json
 import os
@@ -173,14 +175,33 @@ class RemoteTestTests(unittest.TestCase):
                 self.assertIsNone(remote_test._validate_remote_receipt(
                     raw, sha=SHA, modules=('test_remote_test',)))
 
-    def test_remote_script_has_deadline_kill_lock_and_bounded_cleanup(self):
+    def test_remote_script_has_deadline_kill_and_bounded_owned_cleanup(self):
         script = remote_test._REMOTE_SCRIPT
         self.assertIn('deadline=begin+540', script)
-        self.assertIn('flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)', script)
         self.assertIn('"--kill-after=2s"', script)
         self.assertIn('info.st_uid!=nobody_uid', script)
         self.assertIn('now-info.st_mtime>86400', script)
-        self.assertIn('owned_logs[20:]', script)
+        self.assertIn('owned_dirs[20:]', script)
+
+    def test_remote_script_lock_helper_excludes_concurrent_run_and_releases(self):
+        parsed = ast.parse(remote_test._REMOTE_SCRIPT)
+        helper = next(node for node in parsed.body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'acquire_lock')
+        namespace = {'fcntl': fcntl, 'os': os}
+        exec(compile(ast.Module(body=[helper], type_ignores=[]),
+                     '<remote-lock-helper>', 'exec'), namespace)
+        lock_path = Path(self.temp.name) / 'remote-test.lock'
+        lock_path.touch()
+
+        held_fd = namespace['acquire_lock'](str(lock_path))
+        try:
+            with self.assertRaises(BlockingIOError):
+                namespace['acquire_lock'](str(lock_path))
+        finally:
+            os.close(held_fd)
+
+        released_fd = namespace['acquire_lock'](str(lock_path))
+        os.close(released_fd)
 
     def test_module_admission_is_bounded(self):
         modules = tuple(f'test_module{i}' for i in range(9))

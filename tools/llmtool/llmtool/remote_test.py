@@ -65,21 +65,25 @@ created=nobody_cli([python,"-c",lock_create],limit=5)
 if created.returncode and not os.path.exists("/tmp/llmtool-remote-test.lock"): sys.exit(1)
 lock_info=os.lstat("/tmp/llmtool-remote-test.lock")
 if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=nobody_uid or lock_info.st_mode&0o777!=0o666: sys.exit(1)
-lock_fd=os.open("/tmp/llmtool-remote-test.lock",os.O_RDWR|os.O_NOFOLLOW)
-try: fcntl.flock(lock_fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
-except BlockingIOError: os.close(lock_fd); sys.exit(75)
+def acquire_lock(path):
+    fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+    try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    except BlockingIOError: os.close(fd); raise
+    return fd
+try: lock_fd=acquire_lock("/tmp/llmtool-remote-test.lock")
+except BlockingIOError: sys.exit(75)
 cleanup_source="""import os,re,shutil,stat,sys,time
-uid=os.getuid(); now=time.time(); keep=sys.argv[1] if len(sys.argv)>1 else ""; test=re.compile(r"llmtool-remote-test\\.[A-Za-z0-9]+\\Z"); logs=re.compile(r"llmtool-remote-log\\.[A-Za-z0-9]+\\Z"); owned=[]
+uid=os.getuid(); now=time.time(); keep=sys.argv[1] if len(sys.argv)>1 else ""; test=re.compile(r"llmtool-remote-test\\.[A-Za-z0-9]+\\Z"); logs=re.compile(r"llmtool-remote-log\\.[A-Za-z0-9]+\\Z"); owned_dirs=[]
 for entry in os.scandir("/tmp"):
  if not (test.fullmatch(entry.name) or logs.fullmatch(entry.name)): continue
  try:
   info=entry.stat(follow_symlinks=False)
   if not stat.S_ISDIR(info.st_mode) or info.st_uid!=uid or info.st_mode&0o777!=0o700: continue
-  if logs.fullmatch(entry.name): owned.append((info.st_mtime,entry.path))
   if now-info.st_mtime>86400: shutil.rmtree(entry.path)
+  else: owned_dirs.append((info.st_mtime,entry.path,entry.path==keep or entry.path+"/remote-test.log"==keep))
  except OSError: pass
-owned.sort(key=lambda item:(item[0],item[1]==keep),reverse=True)
-for _,path in owned[20:]:
+owned_dirs.sort(key=lambda item:(item[2],item[0]),reverse=True)
+for _,path,_ in owned_dirs[20:]:
  try: shutil.rmtree(path)
  except OSError: pass"""
 def cleanup_stale():
