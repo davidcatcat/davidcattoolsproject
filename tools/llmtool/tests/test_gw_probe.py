@@ -116,6 +116,30 @@ class FakeServer(unittest.TestCase):
                 self.assertTrue(probe._answer_matches(answer, expected))
         self.assertFalse(probe._answer_matches("0.75", "0.8"))
 
+    def test_answer_matching_accepts_bold_and_short_answers(self):
+        true_cases = (
+            ("There are **7** tokens total.", "7"),
+            ("There are **7 tokens total**.", "7"),
+            ("A hexagon has **6 sides**.", "6"),
+            ("Each person gets **4** apples.", "4"),
+            ("3 iterations.", "3"),
+            ("42.", "42"),
+            ("0.8", "0.8"),
+        )
+        false_cases = (
+            ("**0.75** is larger", "0.8"),
+            ("**Red tokens:** 3", "7"),
+            ("about 70 tokens", "7"),
+            ("7 is not the answer, it is 8 for sure", "7"),
+            (None, "7"),
+        )
+        for answer, expected in true_cases:
+            with self.subTest(answer=answer, expected=expected):
+                self.assertTrue(probe._answer_matches(answer, expected))
+        for answer, expected in false_cases:
+            with self.subTest(answer=answer, expected=expected):
+                self.assertFalse(probe._answer_matches(answer, expected))
+
     def test_slow_fake_response_is_reported_as_timeout(self):
         FakeHandler.response_delay = 0.2
         result = self.client.send(body={"messages": [{"role": "user", "content": "slow"}]}, timeout=0.02)
