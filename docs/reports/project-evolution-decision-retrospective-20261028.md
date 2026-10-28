@@ -695,4 +695,3 @@ Snapshot 之後 merge train 11 合併了 TUI Task mode／Task list／事件時�
 - **最該停止／最該優先：** 見 Report A 第 22 章與 Brief；涉及 Gate、Reviewer、Dispatch、Roadmap 者為 OWNER_DECISION_REQUIRED。
 
 ---
-

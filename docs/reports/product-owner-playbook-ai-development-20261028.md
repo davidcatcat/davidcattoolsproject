@@ -1,4 +1,4 @@
-# Report C — Owner Playbook：以最少管理負擔取得可用產品（v4）
+# Report C — Owner Playbook：以最少管理負擔取得可用產品（v5）
 
 - **日期：** 2026-10-28　**Snapshot：** `139a62c0483560be4e7a0aadd76c82652a8a2cd9`
 - **對象：** 本專案的 Owner（需求方、出資者、最終決策者）與 AI 團隊。
@@ -198,7 +198,7 @@ issue 的具體天數與送達方式（GitHub `waiting_owner` 標記、TUI 提�
 1. NOW 已由 Owner 給出；AI PM 展開成第一版清單（Report B 9C.6）並把其餘標 FROZEN（OWNER_DECISION_REQUIRED：Roadmap 順序）。
 2. PM 自本週起用需求確認單、狀態頁、決策單三種格式，加白話規則；不符格式的輸出視為未完成。
 3. CTO 自本週起對任何提案附方案比較單；建立容量、成本與額度看板；gw 省不省先量。
-4. Engineering 以 `task advance` 驅動器取代審查到結案的手動串接，並補齊它尚未涵蓋的派工、發布與合併；Reviewer 加可用性驗收。
+4. Engineering 以 `task advance` 驅動器取代審查到結案的手動串接（每次呼叫一個動作）。若要把它延伸到首次派工、發布與合併，屬 **OWNER_DECISION_REQUIRED**，而且延伸後仍受既有的派工政策、Git、審查、CI 與合併 gate 約束，不得繞過；Reviewer 加可用性驗收。
 5. 第一個 demo：Owner 在 TUI 提一個真實需求，PM 即時回話，看到它被開發、審查、合併、顯示完成。Owner 什麼時候問，什麼時候就要拿得出來；做不到是 PM 的失敗，不是 Owner 的。
 
 ---
