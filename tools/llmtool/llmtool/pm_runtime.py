@@ -134,8 +134,7 @@ _STREAM_SECRET_START = re.compile(
     r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
     r'\bxox[abprs]-[A-Za-z0-9-]*|\b(?:bearer|basic)\s+\S*|'
     r'\beyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
-_STREAM_AUTH_URL = re.compile(
-    r'\b[a-z][a-z0-9+.-]*://[^/\s?#]*:[^/\s?#]*@?[^/\s?#]*$', re.IGNORECASE)
+_STREAM_URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 
 
 def _stream_safe_end(value):
@@ -162,9 +161,20 @@ def _stream_safe_end(value):
             if lowered.endswith(marker[:size]) and (
                     start == 0 or not (value[start - 1].isalnum() or value[start - 1] == '_')):
                 safe_end = min(safe_end, start)
-    auth_url = _STREAM_AUTH_URL.search(value)
-    if auth_url is not None:
-        safe_end = min(safe_end, auth_url.start())
+    token_start = max((index for index, char in enumerate(value) if char.isspace()),
+                      default=-1) + 1
+    tail = value[token_start:]
+    for scheme in _STREAM_URL_SCHEME.finditer(tail):
+        start, end = scheme.span()
+        if ((start == 0 or not (tail[start - 1].isalnum() or tail[start - 1] == '_')) and
+                tail.startswith('://', end)):
+            authority = tail[end + 3:]
+            authority_end = min((position for marker in '/?#'
+                                 if (position := authority.find(marker)) >= 0),
+                                default=len(authority))
+            if ':' in authority[:authority_end]:
+                safe_end = min(safe_end, token_start + start)
+                break
     return safe_end
 
 
@@ -746,6 +756,7 @@ class PMRuntime:
         child = self._child
         event_seq = 0
         blocks = {}
+        withheld_blocks = set()
         emitted_lengths = {}
 
         def emit(kind, **fields):
@@ -756,12 +767,12 @@ class PMRuntime:
             return value
 
         def flush_block(index, force=False):
-            buffered = blocks.get(index, '')
-            if buffered == '[withheld]':
+            if index in withheld_blocks:
                 return None
+            buffered = blocks.get(index, '')
             screened = _screen_stream_text(buffered)
             if screened == '[withheld]':
-                blocks[index] = '[withheld]'
+                withheld_blocks.add(index)
                 return None
             previous = emitted_lengths.get(index, 0)
             safe_end = len(screened) if force else _stream_safe_end(screened)
@@ -820,18 +831,24 @@ class PMRuntime:
                 if kind == 'stream_event':
                     event = line.get('event') or {}
                     delta = event.get('delta') or {}
-                    if event.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta':
+                    if event.get('type') == 'message_start':
+                        blocks.clear()
+                        withheld_blocks.clear()
+                        emitted_lengths.clear()
+                    elif event.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta':
                         text = delta.get('text')
                         if isinstance(text, str):
                             index = event.get('index', 0)
+                            if index in withheld_blocks:
+                                continue
                             blocks[index] = blocks.get(index, '') + text
                             buffered = blocks[index]
                             if len(buffered.encode('utf-8', 'ignore')) > MAX_MESSAGE_BYTES:
-                                blocks[index] = '[withheld]'
+                                withheld_blocks.add(index)
                             else:
                                 screened = _screen_stream_text(buffered)
                                 if screened == '[withheld]':
-                                    blocks[index] = '[withheld]'
+                                    withheld_blocks.add(index)
                                 else:
                                     event = flush_block(index)
                                     if event is not None:
@@ -848,10 +865,13 @@ class PMRuntime:
                             continue
                         if item.get('type') == 'text' and isinstance(item.get('text'), str):
                             index = item.get('index', position)
+                            if index in withheld_blocks:
+                                continue
                             final_text = _screen_stream_text(item['text'])
                             if final_text == '[withheld]':
-                                blocks[index] = '[withheld]'
-                            elif blocks.get(index) != '[withheld]':
+                                withheld_blocks.add(index)
+                                continue
+                            elif index not in withheld_blocks:
                                 flushed = flush_block(index, force=True)
                                 if flushed is not None:
                                     yield flushed
@@ -859,6 +879,7 @@ class PMRuntime:
                                 remainder = final_text[min(previous, len(final_text)):]
                                 record['result_text'] = _bounded_stream_append(
                                     record.get('result_text', ''), remainder)
+                                blocks[index] = final_text
                                 emitted_lengths[index] = len(final_text)
                             yield emit('ASSISTANT_TEXT', text=final_text, final=True)
                         elif item.get('type') == 'tool_use':

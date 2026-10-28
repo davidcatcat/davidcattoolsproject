@@ -2142,8 +2142,16 @@ class PMConversationTests(BoundedPMTest):
             def runtime(self, session_id, cwd):
                 return test.make_runtime(session_id, cwd)
 
+        class CreatedProcess:
+            def wait(self, timeout=None):
+                return 0
+
+        def create_runner(argv, cwd, env):
+            self.created.append(argv)
+            return CreatedProcess()
+
         self.api = API(state_root=self.state, environ={'HOME': str(self.temp_root)},
-                       create_runner=lambda argv, cwd, env: self.created.append(argv))
+                       create_runner=create_runner)
         self.binding = self.api.create_dedicated(str(self.temp_root))
         self.session_id = self.binding['native_session_id']
 
