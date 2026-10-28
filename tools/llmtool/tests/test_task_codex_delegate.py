@@ -492,6 +492,53 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertFalse(task_submission_cli._codex_timeout_recovery(
             previous, **{**args, 'acceptance': ['other criterion']}))
 
+    def test_timeout_recovery_rejects_sibling_of_timed_out_source_before_launch(self):
+        task = self._task()
+
+        # The timed-out attempt starts at A, which descends from the registry
+        # base. Move the D6 back to the base and create sibling B, so the
+        # registry base is an ancestor of B but A is not.
+        (self.root / 'src.py').write_text('VALUE = 1  # attempt A\n')
+        self._git('add', 'src.py')
+        self._git('commit', '-m', 'attempt A source')
+        attempt_source = self._git('rev-parse', 'HEAD')
+        registry = task_completion.D6Registration(
+            task_id='executor-task-1', trusted_agent_id='executor-agent',
+            session_ref='executor-session', root=str(self.root),
+            common_dir=self.common_dir, branch='feat/codex-delegate',
+            source_sha=self.source_sha, result_sha=attempt_source, state='ACTIVE',
+            lock_state='LOCKED', device=0, inode=0, uid=os.getuid(),
+            native_session_id=None, github_login=None, env2_pass_marker=None,
+            env2_approved_tooling_sha=None)
+
+        def timeout(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_TIMEOUT', attempted=True, cleanup_status='CONFIRMED')
+
+        with redirect_stdout(io.StringIO()):
+            _result, saved, _callback = self._dispatch(
+                task, registration=registry, codex_error=timeout)
+        self.assertEqual(saved['developer']['error_code'],
+                         'CODEX_TIMEOUT_WITH_CHANGES')
+
+        self._git('reset', '--hard', self.source_sha)
+        (self.root / 'src.py').write_text('VALUE = 3  # sibling B\n')
+        self._git('add', 'src.py')
+        self._git('commit', '-m', 'sibling B result')
+        sibling_head = self._git('rev-parse', 'HEAD')
+        sibling_registration = dataclasses.replace(
+            registry, result_sha=sibling_head)
+        bound_registration = dataclasses.replace(sibling_registration,
+            native_session_id='12345678-1234-4234-8234-123456789abc')
+        with patch('llmtool.task_submission_cli.codex_direct_developer.run') as launch:
+            with self.assertRaises(task_completion.LLMToolError) as caught:
+                self._dispatch(task, registration=sibling_registration,
+                    bound_registration=bound_registration)
+        self.assertEqual(caught.exception.completion_code,
+                         'CODEX_TIMEOUT_SOURCE_NOT_ANCESTOR')
+        launch.assert_not_called()
+
     def test_normal_worktree_snapshot_rejects_head_different_from_source(self):
         with patch.object(task_completion, 'collect_git_snapshot',
                           return_value=SimpleNamespace(head='b' * 40)):
