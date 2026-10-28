@@ -231,6 +231,45 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(calls[0][0][2], binding['native_session_id'])
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
+    def test_create_failure_stops_child_and_retry_starts_one_process(self):
+        write_json_atomic = pm_runtime._write_json_atomic
+        for failed_write in ('binding', 'pointer'):
+            with self.subTest(failed_write=failed_write):
+                state_root = self.root / failed_write
+                pm_runtime._ensure_state_dir(state_root)
+                processes = []
+
+                def starter(argv, cwd, env):
+                    process = FakeProcess()
+                    processes.append(process)
+                    return process
+
+                def fail_selected_write(root, path, value):
+                    is_binding = path.name.endswith('.binding.json')
+                    if ((failed_write == 'binding' and is_binding) or
+                            (failed_write == 'pointer' and path.name == 'current-binding.json')):
+                        raise pm_runtime._error(
+                            'PM_BINDING_WRITE_FAILED', 'synthetic binding write failure')
+                    return write_json_atomic(root, path, value)
+
+                with patch.object(pm_runtime, '_write_json_atomic',
+                                  side_effect=fail_selected_write):
+                    with self.assertRaises(LLMToolError) as raised:
+                        pm_runtime.create_dedicated_pm(
+                            self.cwd, state_root=state_root, runner=starter)
+                self.assertEqual(raised.exception.pm_runtime_code, 'PM_BINDING_WRITE_FAILED')
+                self.assertEqual(len(processes), 1)
+                self.assertTrue(processes[0].terminated)
+                self.assertGreater(processes[0].wait_calls, 0)
+
+                binding = pm_runtime.create_dedicated_pm(
+                    self.cwd, state_root=state_root, runner=starter)
+                self.assertEqual(len(processes), 2)
+                self.assertTrue(processes[0].terminated)
+                self.assertFalse(processes[1].terminated)
+                self.assertEqual(
+                    pm_runtime.current_binding(state_root=state_root), binding)
+
     def test_open_refuses_non_dedicated_session(self):
         (self.root / (SESSION + '.binding.json')).unlink()
         with self.assertRaises(LLMToolError) as raised:

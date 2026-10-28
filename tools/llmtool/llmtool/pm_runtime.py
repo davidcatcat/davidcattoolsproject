@@ -130,6 +130,36 @@ def _binding_path(root, native_session_id):
     return root / (native_session_id + '.binding.json')
 
 
+def _stop_started_process(process, timeout=2):
+    """Stop a newly started PM process and its session within a bounded time."""
+    if process is None:
+        return
+    is_popen = isinstance(process, subprocess.Popen)
+    try:
+        if is_popen:
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=timeout)
+        return
+    except Exception:
+        pass
+    try:
+        if is_popen:
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=timeout)
+    except Exception:
+        pass
+
+
 def _write_json_atomic(root, path, value):
     fd, temporary = tempfile.mkstemp(prefix='.pm-runtime-', dir=root)
     try:
@@ -196,20 +226,24 @@ def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runne
     env = dict(os.environ if environ is None else environ)
     try:
         if runner is None:
-            subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                             start_new_session=True, close_fds=True)
+            process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        start_new_session=True, close_fds=True)
         else:
-            runner(argv, cwd, env)
+            process = runner(argv, cwd, env)
     except Exception:
         raise _error('PM_PROCESS_START_FAILED', 'Claude PM session could not be started') from None
-    root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
-    root = _ensure_state_dir(Path(root_arg))
-    binding = {'runtime': 'claude-code', 'native_session_id': native_id, 'cwd': cwd,
-               'dedicated': True, 'created_at': _timestamp(clock or time.time)}
-    _write_json_atomic(root, _binding_path(root, native_id), binding)
-    _write_json_atomic(root, root / 'current-binding.json',
-                       {'native_session_id': native_id})
+    try:
+        root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+        root = _ensure_state_dir(Path(root_arg))
+        binding = {'runtime': 'claude-code', 'native_session_id': native_id, 'cwd': cwd,
+                   'dedicated': True, 'created_at': _timestamp(clock or time.time)}
+        _write_json_atomic(root, _binding_path(root, native_id), binding)
+        _write_json_atomic(root, root / 'current-binding.json',
+                           {'native_session_id': native_id})
+    except Exception:
+        _stop_started_process(process)
+        raise
     return binding
 
 
