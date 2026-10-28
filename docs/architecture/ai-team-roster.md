@@ -9,9 +9,9 @@ Status: Owner-approved **role / resource inventory**, 2026-10-27. This is not li
 | Owner | Human product owner | [Owner authority matrix](../../skills/ai-team-delivery/owner-escalation.md) | Product, priority, material cost/egress/risk, selected Developer tasks and Reviewer-pairing exceptions. |
 | Integrator / PM | Claude PM (role, not a dispatch-map Worker key) | [AGENTS.md](../../AGENTS.md) | Plan, orchestrate, continue/recover, report, integrate; cannot bypass review or approve its own change. |
 | Developer | `codex-developer` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | Normal authorized Developer; high reasoning model route defined in AGENTS. |
-| Developer | `opencode-developer` | Worker dispatch | Free-model, direct-D6, bounded paths; availability is variable. |
+| Developer | `opencode-developer` | Worker dispatch | **PAUSED** (Owner 2026-10-27); do not dispatch until the Owner re-enables it. |
 | Developer | `agy` | Worker dispatch | **OWNER_ASSIGNMENT_ONLY**; direct CLI D6 candidate, not proven fully integrated; quota-limited. |
-| Developer | `claude-developer` | Worker dispatch | OWNER_ASSIGNMENT_ONLY with exact Task/Owner reference. |
+| Developer | `claude-developer` | Worker dispatch | **ALLOWED** (Owner 2026-10-28); per-Task Owner assignments remain recorded in `worker-dispatch.json`. |
 | Developer proposal route | `company-gw` | Worker dispatch + [company delegation](../../skills/company-llm-delegation/SKILL.md) | Low-risk via llmtool only; no shell/filesystem/Git authority; external input screened. |
 | Formal reviewer | `claude-reviewer` | Worker dispatch + [formal verdict](../../skills/ai-team-delivery/formal-verdict.md) | Separate read-only D6 reviewer for eligible cross-family Developer Tasks. |
 | Formal reviewer | `codex-reviewer` | Worker dispatch | Separate read-only D6 reviewer for Claude Developer / Claude PM changes. |
