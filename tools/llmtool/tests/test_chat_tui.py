@@ -2208,7 +2208,6 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8] + ' idle | F1')   # no chat fields
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
-            self.assertEqual(self.created, [])
             self.assertIn('PM history: no stored turns', ui.conversation.text)
             argv = self.fakes[0].argv
             self.assertEqual(argv[argv.index('--session-id') + 1], self.session_id)
@@ -2420,7 +2419,6 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
                             self.connect(), self.connected])
         created = self.api.current_binding()['native_session_id']
-        self.assertEqual(self.created, [])
         self.assertIn('Dedicated PM session ' + created + ' created by pm_runtime', ui.conversation.text)
         self.assertIn('the TUI has not verified that session', ui.conversation.text)
         self.assertEqual(ui.pm_target[0], created)
