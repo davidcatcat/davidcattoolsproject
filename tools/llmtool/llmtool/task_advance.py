@@ -340,8 +340,11 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             elif (type(result) is dict and result.get('state') == 'NOT_READY' and
                   reviewer_session_done):
                 step = 'REVIEW_NOT_POSTED'
+                codes.append('REVIEW_VERDICT_NOT_POSTED')
                 result = {'reviewer_task': claim.get('reviewer_task'),
-                          'reviewer_session_id': claim.get('native_session_id')}
+                          'reviewer_session_id': claim.get('native_session_id'),
+                          'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
+                          'version': claim.get('version')}
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
     elif step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
