@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import re
+import shutil
 from argparse import Namespace
 
 from . import review_result, task_completion, worker_dispatch
@@ -231,7 +232,7 @@ def _high_debug_report(task, family, head, claims):
 def repair_review(*, store, task_id, executor_task, pr_number, family=None, github_get=None,
                   dispatch_adapter=None, current_head=None, auto_review=False,
                   review_dispatcher=None, delegate_callable=None,
-                  repair_task_recorder=None):
+                  repair_task_recorder=None, retry_claim_id=None):
     """Claim and dispatch one repair based on the newest pending failed review."""
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
@@ -248,6 +249,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile == 'company-gw':
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
+    if profile in ('codex', 'claude') and shutil.which(profile) is None:
+        _refuse('RUNTIME_NOT_ON_PATH')
     decision = worker_dispatch.evaluate(
         worker, developer.get('owner_assignment_ref'), task_id)
     if not decision.allowed:
@@ -267,8 +270,17 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     existing = next((claim for claim in attempts
                      if claim.get('pr') == pr_number and
                      claim.get('head_sha') == packet['failed_head'] and
-                     claim.get('version') == packet['version']), None)
-    if existing is not None:
+                     claim.get('version') == packet['version'] and
+                     claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')), None)
+    retry_claim = next((claim for claim in attempts
+                        if retry_claim_id is not None and
+                        claim.get('repair_task_id') == retry_claim_id and
+                        claim.get('pr') == pr_number and
+                        claim.get('head_sha') == packet['failed_head'] and
+                        claim.get('state') == 'DISPATCHED'), None)
+    if retry_claim_id is not None and retry_claim is None:
+        _refuse('REPAIR_CLAIM_UNAVAILABLE')
+    if existing is not None and existing is not retry_claim:
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
@@ -301,10 +313,19 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     }
     if high_debug is not None:
         claim['high_debug_report_sha256'] = high_debug['report_sha256']
+    next_claims = list(claims)
+    if retry_claim is not None:
+        retry_index = next((index for index, item in enumerate(next_claims)
+                            if item.get('repair_task_id') == retry_claim_id and
+                            item.get('state') == 'DISPATCHED'), None)
+        if retry_index is None:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        next_claims[retry_index] = dict(next_claims[retry_index], state='FAILED')
+    next_claims.append(claim)
     try:
         store.compare_and_update(
             task_id, expected={'record_sha256': task['record_sha256']},
-            review_repair_claims=claims + [claim])
+            review_repair_claims=next_claims)
     except Exception:
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
 
