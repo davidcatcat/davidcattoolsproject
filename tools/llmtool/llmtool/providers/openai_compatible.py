@@ -117,9 +117,7 @@ class OpenAICompatibleClient:
                                 if not finished:
                                     raise self._stream_incomplete()
                                 return
-                            if finished:
-                                raise self._stream_invalid()
-                            chunks, event_finished = self._stream_event(event_data)
+                            chunks, event_finished = self._stream_event(event_data, finished)
                             for chunk in chunks:
                                 yield chunk
                             finished = finished or event_finished
@@ -143,9 +141,7 @@ class OpenAICompatibleClient:
                                 if not finished:
                                     raise self._stream_incomplete()
                                 return
-                            if finished:
-                                raise self._stream_invalid()
-                            chunks, event_finished = self._stream_event(event_data)
+                            chunks, event_finished = self._stream_event(event_data, finished)
                             for chunk in chunks:
                                 yield chunk
                             finished = finished or event_finished
@@ -212,7 +208,7 @@ class OpenAICompatibleClient:
         )
 
     @classmethod
-    def _stream_event(cls, event_data):
+    def _stream_event(cls, event_data, finished=False):
         try:
             payload = "\n".join(event_data)
             if payload == "[DONE]":
@@ -225,7 +221,27 @@ class OpenAICompatibleClient:
         if obj.get("error") is not None:
             raise cls._stream_invalid()
         choices = obj.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        if not isinstance(choices, list):
+            raise cls._stream_invalid()
+        if not choices:
+            if finished:
+                allowed_fields = {
+                    "choices", "usage", "id", "object", "created", "model",
+                    "system_fingerprint",
+                }
+                if set(obj) - allowed_fields:
+                    raise cls._stream_invalid()
+                pending_values = list(obj.items())
+                while pending_values:
+                    field, value = pending_values.pop()
+                    if field in ("content", "text"):
+                        raise cls._stream_invalid()
+                    if isinstance(value, dict):
+                        pending_values.extend(value.items())
+                    elif isinstance(value, list):
+                        pending_values.extend((None, item) for item in value)
+            return [], False
+        if finished or not isinstance(choices[0], dict):
             raise cls._stream_invalid()
         finish_reason = choices[0].get("finish_reason")
         if finish_reason == "length":

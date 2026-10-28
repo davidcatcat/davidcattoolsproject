@@ -324,12 +324,12 @@ class OpenAIProviderTests(unittest.TestCase):
         opened = []
         response = FakeResponse([
             b'retry: 1000\n\n',
-            b'data: {"choices":[{"delta":{"reasoning_content":"hidden"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n',
+            b'data: {"choices":[{"delta":{"reasoning":"hidden"}}]}\n\n',
             b'data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n',
-            b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n',
-            b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop","stop_reason":null}]}\n\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
             b"data: [DONE]\n\n",
-            b'data: {"choices":[{"delta":{"content":"ignored"}}]}\n\n',
         ])
         client = make_client(response)
         self.assertEqual(list(client.stream([{"role": "user", "content": "question"}])),
@@ -340,6 +340,37 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertEqual(req.get_header("Accept"), "text/event-stream")
         self.assertEqual(timeout, 2)
 
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1},"id":"event-1","object":"chunk","created":1,"model":"test-model","system_fingerprint":"fp"}\n\n',
+        ])
+        self.assertEqual(list(make_client(response).stream([{"role": "user", "content": "question"}])),
+                         ["answer"])
+        self.assertTrue(response.closed)
+
+        for event in (
+            b'data: {"choices":[],"message":{"content":"late"}}\n\n',
+            b'data: {"choices":[],"unexpected":"value"}\n\n',
+            b'data: {"choices":[],"usage":{"details":{"text":"late"}}}\n\n',
+        ):
+            response = FakeResponse([
+                b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
+                event,
+            ])
+            with self.assertRaises(LLMToolError) as caught:
+                list(make_client(response).stream([{"role": "user", "content": "question"}]))
+            self.assertIn("invalid streaming data", str(caught.exception))
+            self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"late"}}]}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("invalid streaming data", str(caught.exception))
+        self.assertTrue(response.closed)
+
         response = FakeResponse([b"data: [DONE]\n\n"])
         with self.assertRaises(LLMToolError) as caught:
             list(make_client(response).stream([{"role": "user", "content": "question"}]))
@@ -348,6 +379,14 @@ class OpenAIProviderTests(unittest.TestCase):
 
         response = FakeResponse([
             b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("ended before finish_reason=stop", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[],"usage":{"total_tokens":1}}\n\n',
         ])
         with self.assertRaises(LLMToolError) as caught:
             list(make_client(response).stream([{"role": "user", "content": "question"}]))
