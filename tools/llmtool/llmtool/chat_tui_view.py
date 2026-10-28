@@ -47,6 +47,7 @@ TAB_WIDTH = 4
 CACHE_LINES = 4096        # Wrapped-line cache entries kept before it is cleared.
 COPY_LIMIT_BYTES = 1024 * 1024   # Largest selection handed to the clipboard tool (UTF-8 bytes).
 COPY_SCAN_CHUNK = 65536          # Characters measured at a time while checking that limit.
+WORD_SCAN_LIMIT = COPY_LIMIT_BYTES  # Characters a double-click word may extend in either direction.
 _ZWJ = "\u200d"
 
 
@@ -195,7 +196,13 @@ class ConversationView:
         self.copied = None      # (characters, monotonic time) of the last copy
         self.copy_failed = False
         self.copy_error = None  # why the last copy failed (status text)
+        # One clipboard worker at a time: copies are serialized through ``_copy_next`` (only
+        # the newest request is kept) so the clipboard always ends with the newest selection
+        # and the status describes it; ``_copy_generation`` tags the newest request.
+        self._copy_lock = threading.Lock()
         self._copy_thread = None
+        self._copy_next = None       # (generation, text) waiting for the worker, or None
+        self._copy_generation = 0
         self.on_copied = None   # called (from the copy thread) when a copy finishes
         self._last_click = None  # (offset, monotonic time) of the last click without a drag
 
@@ -332,19 +339,21 @@ class ConversationView:
         return ""
 
     def select_word(self, offset):
-        """Select the run of non-blank characters around ``offset`` and copy it."""
+        """Select the run of non-blank characters around ``offset`` and copy it.
+
+        The scan is bounded (WORD_SCAN_LIMIT each way) and the copy goes through
+        ``copy_range``, so a huge blank-free run is neither walked nor sliced whole.
+        """
         text = self.text
         if offset >= len(text) or text[offset].isspace():
             return ""
         start = end = offset
-        while start > 0 and not text[start - 1].isspace():
+        while start > 0 and offset - start < WORD_SCAN_LIMIT and not text[start - 1].isspace():
             start -= 1
-        while end < len(text) and not text[end].isspace():
+        while end < len(text) and end - offset < WORD_SCAN_LIMIT and not text[end].isspace():
             end += 1
         self.anchor, self.head = start, end
-        word = text[start:end]
-        self.copy(word)
-        return word
+        return self.copy_range(start, end)
 
     def copy_range(self, start, end):
         """Copy ``text[start:end]``: the selected text when accepted, '' when over the limit.
@@ -361,27 +370,47 @@ class ConversationView:
         return text
 
     def copy(self, text):
-        """Hand ``text`` (already within the limit) to the clipboard tool on a worker thread.
+        """Queue ``text`` for the clipboard worker; False when it is over the byte limit.
 
-        The UI loop never waits for pbcopy: encoding happens in the worker, ``status()``
-        says 複製中… meanwhile and ``wait_copy()`` joins it (tests).
+        Every route (drag release, double-click, Ctrl-C) ends here, so the limit holds for
+        all of them. The UI loop never waits for pbcopy: encoding happens in the worker,
+        ``status()`` says 複製中… meanwhile and ``wait_copy()`` joins it (tests). A newer
+        request supersedes a queued one; a copy still running finishes first and its
+        result is ignored, so the clipboard ends with the newest text.
         """
-        copier = self._copier or copy_to_clipboard
+        if utf8_size(text, 0, len(text), COPY_LIMIT_BYTES) > COPY_LIMIT_BYTES:
+            self.copied, self.copy_failed = (len(text), time.monotonic()), True
+            self.copy_error = "選取超過複製上限 %d KB" % (COPY_LIMIT_BYTES // 1024)
+            return False
+        with self._copy_lock:
+            self._copy_generation += 1
+            self._copy_next = (self._copy_generation, text)
+            self.copied, self.copy_failed, self.copy_error = (len(text), time.monotonic()), False, None
+            if self._copy_thread is None or not self._copy_thread.is_alive():
+                self._copy_thread = threading.Thread(target=self._copy_worker,
+                                                     name="llmtool-clipboard", daemon=True)
+                self._copy_thread.start()
+        return True
 
-        def run():
+    def _copy_worker(self):
+        copier = self._copier or copy_to_clipboard
+        while True:
+            with self._copy_lock:
+                if self._copy_next is None:
+                    return
+                generation, text = self._copy_next
+                self._copy_next = None
             try:
                 ok = bool(copier(text))
             except Exception:
                 ok = False
-            self.copy_error = None if ok else "複製失敗 (無剪貼簿工具)"
-            self.copied, self.copy_failed = (len(text), time.monotonic()), not ok
+            with self._copy_lock:
+                if generation != self._copy_generation:
+                    continue   # Superseded while running: the newer copy reports instead.
+                self.copy_error = None if ok else "複製失敗 (無剪貼簿工具)"
+                self.copied, self.copy_failed = (len(text), time.monotonic()), not ok
             if self.on_copied is not None:
                 self.on_copied()
-
-        self.copied, self.copy_failed, self.copy_error = (len(text), time.monotonic()), False, None
-        self._copy_thread = threading.Thread(target=run, name="llmtool-clipboard", daemon=True)
-        self._copy_thread.start()
-        return True
 
     def copy_pending(self):
         return self._copy_thread is not None and self._copy_thread.is_alive()

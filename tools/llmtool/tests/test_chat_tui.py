@@ -3158,6 +3158,58 @@ class ConversationViewTests(unittest.TestCase):
             self.assertTrue(view.wait_copy())
             self.assertEqual(calls, ['中文'])
 
+    def test_double_click_word_goes_through_the_byte_limit_and_a_bounded_scan(self):
+        # Codex review v3: select_word sliced the whole word and bypassed copy_range.
+        calls = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: calls.append(t) or True)
+        word = '中' * 400000                                   # 1.2 MB of UTF-8, no blanks
+        view.set_text('a ' + word + ' b')
+        view.layout(80, 10)
+        with patch('llmtool.chat_tui_view.utf8_size', wraps=chat_tui_view.utf8_size) as sized:
+            self.assertEqual(view.select_word(2 + 1000), '')   # refused
+            sized.assert_called_once()
+        self.assertEqual(calls, [])
+        self.assertTrue(view.copy_failed)
+        self.assertEqual(view.status(), '選取超過複製上限 1024 KB')
+        self.assertEqual(view.selected_range(), (2, 2 + len(word)))   # selected, not copied
+        with patch('llmtool.chat_tui_view.WORD_SCAN_LIMIT', 5):
+            self.assertEqual(view.select_word(2 + 1000), '中' * 10)    # bounded scan: 5 each way
+            self.assertTrue(view.wait_copy())
+        self.assertEqual(calls, ['中' * 10])
+
+    def test_rapid_copies_are_serialized_and_the_newest_wins(self):
+        # Codex review v3: independent workers could run pbcopy concurrently and an older
+        # one could overwrite the clipboard or report after a newer copy.
+        import threading
+        release = threading.Event()
+        running, overlap, order = [0], [0], []
+
+        def slow_copier(text):
+            running[0] += 1
+            overlap[0] = max(overlap[0], running[0])
+            order.append(text)
+            if text == 'first':
+                release.wait(5)
+            running[0] -= 1
+            return text != 'first'                              # the stale one even fails
+        view = chat_tui_view.ConversationView(get_cwidth, copier=slow_copier)
+        view.set_text('first second third')
+        view.layout(80, 2)
+        self.assertTrue(view.copy('first'))
+        for _ in range(100):
+            if order:
+                break
+            time.sleep(0.01)
+        self.assertTrue(view.copy('second'))                    # queued behind the running one
+        self.assertTrue(view.copy('third'))                     # supersedes 'second' in the queue
+        self.assertEqual(view.status(), '複製中…')
+        release.set()
+        self.assertTrue(view.wait_copy())
+        self.assertEqual(order, ['first', 'third'])             # serialized, newest wins
+        self.assertEqual(overlap[0], 1)                         # never two copier calls at once
+        self.assertFalse(view.copy_failed)                      # the stale failure is ignored
+        self.assertEqual(view.status(), '已複製 5 字')          # describes 'third'
+
     def test_oversized_selection_is_refused_without_measuring_or_building_it_whole(self):
         # Codex review v2: the limit check must not encode (or slice) the whole selection on
         # the UI thread. Measured chunks are bounded and the scan stops at the first excess.

@@ -237,3 +237,9 @@ Owner 步驟（Terminal.app 2.14，再在 Warp 重做一次）：
 | 本專案 PTY 已驗證（pyte／真實程序） | 滾輪每事件一列、閱讀位置、resize、拖選＋邊緣自動捲動、複製內容逐字相同、串流、Esc、Ctrl-C、字素叢集不拆 | §7、§11 |
 
 結論：研究沒有顯示比現行更簡單、更安全的改法；Claude Code 自己的 fullscreen 與兩個開源實作走的是同一條路。不切換設計；三項可選小改進列於 §13.4，待 Owner 實機驗收結果後由 PM 決定。
+
+## 14. Codex Review v3（d5ca8dc）兩項 P2 的處理
+
+1. **雙擊選詞繞過上限**：`select_word` 的邊界掃描改為每側最多 `WORD_SCAN_LIMIT`（= 1 MiB 字）且改走 `copy_range(start, end)`（先 `utf8_size` 分段量、超限即拒絕、不切字串）；拒絕時字詞仍反白、狀態列 `選取超過複製上限 1024 KB`。測試 `test_double_click_word_goes_through_the_byte_limit_and_a_bounded_scan`：40 萬個中文字的無空白長詞只量一次即拒、copier 未呼叫；`WORD_SCAN_LIMIT=5` 時只取每側 5 字。
+2. **連續複製並行、舊結果覆蓋**：改為單一工作執行緒＋「只保留最新請求」佇列（`_copy_next`）＋世代號（`_copy_generation`）：新請求取代仍在排隊的舊請求；正在執行的舊 pbcopy 跑完後若已被取代，結果與狀態一律忽略；因此 pbcopy 永不並行、剪貼簿最後一定是最新選取、狀態描述的是最新那次。測試 `test_rapid_copies_are_serialized_and_the_newest_wins`：慢 copier 阻塞第一次時連送兩次，實際呼叫序列 `['first', 'third']`、最大並行 1、第一次刻意失敗但狀態為 `已複製 5 字`（third）。
+3. **全路徑自查**：所有複製入口（拖曳放開 `end_drag`、雙擊 `select_word`、Ctrl-C `copy_selection`）都經 `copy_range`，且 `copy()` 本身再量一次上限，不存在繞過路徑；無全選、無三擊。`tests.test_chat_tui` 154/154 PASS。
