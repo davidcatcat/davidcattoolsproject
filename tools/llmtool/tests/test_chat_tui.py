@@ -7,6 +7,7 @@ import signal
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -1796,6 +1797,7 @@ class FakeClaude:
         self.turns = list(turns)        # one list of (stream object | 'HOLD') per user message
         self.gate = threading.Event()
         self.written = []
+        self.threads = []               # playback threads, joined by the test cleanup
         read, self._write = os.pipe()
         self.stdout = os.fdopen(read, 'rb')
         self.stdin = self
@@ -1808,7 +1810,10 @@ class FakeClaude:
         self.written.append(line)
         if line.get('type') == 'user' and self.turns:
             self.gate.clear()   # each turn holds until its own interrupt or release
-            threading.Thread(target=self._play, args=(self.turns.pop(0),), daemon=True).start()
+            thread = threading.Thread(target=self._play, args=(self.turns.pop(0),),
+                                      name='fake-claude-play', daemon=True)
+            self.threads.append(thread)
+            thread.start()
         elif line.get('type') == 'control_request':
             self.gate.set()
         return len(data)
@@ -2030,18 +2035,29 @@ class BoundedPMTest(Base):
         self.fakes = []
         self.addCleanup(self._release_fakes)
 
+    THREAD_JOIN_LIMIT = 10   # seconds, shared by all of one test's threads
+
     def _release_fakes(self):
+        """Stop every fake playback thread and TUI PM worker thread, joined within one
+        bound; any thread still alive afterwards fails the test (it must not outlive it)."""
         for fake in self.fakes:
             fake.gate.set()            # a held turn ends
             fake._end()                # its stdout reaches EOF
-        for thread in threading.enumerate():
-            if thread.name.startswith('llmtool-chat-pm'):
-                thread.join(5)
+        threads = [thread for fake in self.fakes for thread in fake.threads]
+        threads += [thread for thread in threading.enumerate()
+                    if thread.name.startswith('llmtool-chat-pm') and thread not in threads]
+        deadline = time.monotonic() + self.THREAD_JOIN_LIMIT
+        for thread in threads:
+            thread.join(max(0.0, deadline - time.monotonic()))
         for fake in self.fakes:
             try:
                 fake.stdout.close()
             except OSError:
                 pass
+        alive = sorted(thread.name for thread in threads if thread.is_alive())
+        if alive:
+            self.fail('threads still alive %.0fs after the test: %s'
+                      % (self.THREAD_JOIN_LIMIT, ', '.join(alive)))
 
     def run_ui(self, main):
         """Run one TUI session on its own loop, bounded; never waits on executor shutdown."""
@@ -2056,6 +2072,48 @@ class BoundedPMTest(Base):
                 loop.run_until_complete(asyncio.wait(pending, timeout=5))
             loop.run_until_complete(loop.shutdown_asyncgens())
             loop.close()
+
+
+class BoundedPMCleanupTests(unittest.TestCase):
+    """The bounded cleanup itself: a thread that outlives a test fails that test."""
+
+    def test_stuck_fake_or_pm_thread_fails_the_test(self):
+        release = threading.Event()
+
+        class Stuck(BoundedPMTest):
+            THREAD_JOIN_LIMIT = 0.2
+
+            def test_fake(self):
+                fake = FakeClaude([])
+                thread = threading.Thread(target=release.wait, args=(10,),
+                                          name='fake-claude-play', daemon=True)
+                fake.threads.append(thread)
+                thread.start()
+                self.fakes.append(fake)
+
+            def test_pm_worker(self):
+                threading.Thread(target=release.wait, args=(10,),
+                                 name='llmtool-chat-pm-stuck', daemon=True).start()
+
+            def test_clean(self):
+                self.fakes.append(FakeClaude([]))
+
+        try:
+            # Clean first: the stuck cases leave live threads that any later case would see.
+            for name, failed in (('test_clean', False), ('test_fake', True),
+                                 ('test_pm_worker', True)):
+                with self.subTest(name=name):
+                    result = unittest.TestResult()
+                    Stuck(name).run(result)
+                    problems = result.failures + result.errors
+                    self.assertEqual(bool(problems), failed, problems)
+                    if failed:
+                        self.assertIn('threads still alive', problems[0][1])
+        finally:
+            release.set()
+            for thread in threading.enumerate():
+                if thread.name in ('fake-claude-play', 'llmtool-chat-pm-stuck'):
+                    thread.join(5)
 
 
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
