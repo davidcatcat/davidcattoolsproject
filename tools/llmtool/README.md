@@ -296,8 +296,9 @@ policy, or approval.** In particular, `code_edit`, `shell`, or `git` metadata do
 permission or cause llmtool to modify files, execute commands, or operate Git. Capability metadata
 is implementation-owned and is not stored in user/project config.
 
-The `openai` and `openai-compatible` providers declare `chat: yes`, `large_context: yes`,
-`reasoning_control: yes`, `streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
+The `openai` provider declares `chat: yes`, `large_context: yes`, `reasoning_control: yes`,
+`streaming: no`, `code_edit: no`, `shell: no`, and `git: no`. The `openai-compatible` provider
+declares the same capabilities except `streaming: yes`.
 `claude-cli` and `codex-cli` declare only `chat: yes`; their `large_context`, `reasoning_control`, `streaming`,
 `code_edit`, `shell`, and `git` capabilities are false.
 `large_context` describes support for large-context workflows, not a fixed context window;
