@@ -5,6 +5,7 @@ import re
 import contextlib
 import io
 import json
+import shutil
 from argparse import Namespace
 
 from . import github_events, review_dispatch, review_repair, review_result
@@ -26,6 +27,31 @@ def _events(related):
     else:
         value = related
     return value if type(value) is list else []
+
+
+def derive_repair_state(repair_record):
+    """Normalize a repair Task record into the state used by the advance loop."""
+    if type(repair_record) is not dict:
+        return 'UNKNOWN'
+    developer = repair_record.get('developer')
+    state = developer.get('state') if type(developer) is dict else None
+    if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
+        return 'PENDING'
+    if state == 'DEVELOPER_DISPATCHING':
+        return 'RUNNING'
+    if state == 'DEVELOPER_UNAVAILABLE':
+        return 'UNAVAILABLE'
+    if state == 'DEVELOPER_OUTPUT_REJECTED':
+        return 'OUTPUT_REJECTED'
+    if state == 'DEVELOPER_RESPONDED':
+        return 'RESPONDED'
+    if state == 'DEVELOPER_OUTCOME_UNKNOWN':
+        execution = developer.get('execution') if type(developer) is dict else None
+        if (developer.get('error_code') == 'CODEX_BLOCKED' or
+                (type(execution) is dict and execution.get('status') == 'BLOCKED')):
+            return 'BLOCKED'
+        return 'UNKNOWN'
+    return 'UNKNOWN'
 
 
 def decide(record, d6, pr, related):
@@ -77,8 +103,21 @@ def decide(record, d6, pr, related):
             current_repair = next((item for item in reversed(repairs)
                                    if type(item) is dict and item.get('head_sha') == result_head), None)
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
-                    current_repair.get('repair_state') in ('RUNNING', 'UNKNOWN')):
+                    current_repair.get('repair_state') in (
+                        'UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED')):
+                return 'REPAIR_RETRY'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') in ('RUNNING', 'PENDING')):
                 return 'WAITING_REPAIR'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'UNKNOWN'):
+                return 'REPAIR_OUTCOME_UNKNOWN'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'RECORD_UNAVAILABLE'):
+                return 'DEVELOPER_ATTENTION'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'RESPONDED'):
+                return 'REPAIR_RESULT_NOT_PUBLISHED'
             return 'REPAIR_REVIEW'
         if outcome == 'REVIEW_PASS':
             completion = record.get('completion')
@@ -265,20 +304,24 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         pr = None
     related = {'events': record.get('completion_events', []),
                'repair_claims': record.get('review_repair_claims', [])}
-    from .task_status import derive_state
     repair_claims = []
     for claim in related['repair_claims']:
         if type(claim) is not dict:
             continue
+        repair_record = None
         try:
-            repair_state = derive_state(store.get(claim['repair_task_id']))
+            repair_record = store.get(claim['repair_task_id'])
+            repair_state = (derive_repair_state(repair_record)
+                            if type(repair_record) is dict else 'RECORD_UNAVAILABLE')
         except Exception:
-            repair_state = 'UNKNOWN'
+            repair_state = 'RECORD_UNAVAILABLE'
         repair_claims.append(dict(claim, repair_state=repair_state))
     related['repair_claims'] = repair_claims
     try:
-        related['events'] = list(related['events']) + _review_outcomes(record, _claims(record), get)
+        review_outcomes = _review_outcomes(record, _claims(record), get)
+        related['events'] = list(related['events']) + review_outcomes
     except Exception:
+        # Advance may proceed from persisted reviewer events when GitHub is unavailable.
         pass
     merged = _merged_review_target(record, _claims(record), related['events'], pr,
                                     integration_pr, get)
@@ -322,26 +365,56 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         try:
             result = invoke(store=store, task_id=task_id, executor_task=executor_task,
                             pr_number=number, version=claim['version'],
-                            reviewer_session_done=reviewer_session_done,
+                            # First check for a posted comment without creating a
+                            # REVIEW_BLOCKED event for a missing verdict.
+                            reviewer_session_done=False,
                             github_get=get)
             if type(result) is dict and result.get('state') == 'REVIEW_BLOCKED':
                 step = 'REVIEWER_ATTENTION'
                 codes.append('REVIEWER_ATTENTION')
+            elif (type(result) is dict and result.get('state') == 'NOT_READY' and
+                  reviewer_session_done):
+                step = 'REVIEW_NOT_POSTED'
+                codes.append('REVIEW_VERDICT_NOT_POSTED')
+                result = {'reviewer_task': claim.get('reviewer_task'),
+                          'reviewer_session_id': claim.get('native_session_id'),
+                          'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
+                          'version': claim.get('version')}
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
-    elif step == 'REPAIR_REVIEW':
+    elif step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
+        # decide() is the pre-check: RECORD_UNAVAILABLE must surface before cwd/runtime checks.
         if type(d6) is not dict or type(cwd or os.getcwd()) != str or os.path.realpath(cwd or os.getcwd()) != os.path.realpath(d6['root']):
             step, codes = 'NEEDS_CWD', ['NEEDS_CWD']
         else:
-            invoke = repair_review_call or review_repair.repair_review
-            try:
-                result = invoke(store=store, task_id=task_id, executor_task=executor_task,
-                                pr_number=number, auto_review=False, github_get=get)
-            except Exception as exc:
-                code = _refusal(exc, 'review_repair_code')
-                codes.append(code)
-                if code in ('REPAIR_LIMIT_REACHED', 'REPAIR_NEEDS_HIGH_DEBUG'):
-                    pass
+            profile = (record.get('developer') or {}).get('provider_profile')
+            if profile in ('codex', 'claude') and shutil.which(profile) is None:
+                step, codes = 'RUNTIME_NOT_ON_PATH', ['RUNTIME_NOT_ON_PATH']
+            else:
+                if step == 'REPAIR_RETRY':
+                    repair_claim = next((item for item in reversed(record.get('review_repair_claims', []))
+                                         if type(item) is dict and item.get('head_sha') == d6['result_head'] and
+                                         item.get('state') == 'DISPATCHED'), None)
+                    if repair_claim is None:
+                        step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
+                if step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
+                    invoke = repair_review_call or review_repair.repair_review
+                    try:
+                        captured = io.StringIO()
+                        with contextlib.redirect_stdout(captured):
+                            result_value = invoke(store=store, task_id=task_id,
+                                executor_task=executor_task, pr_number=number,
+                                auto_review=False, github_get=get,
+                                retry_claim_id=(repair_claim.get('repair_task_id')
+                                                if step == 'REPAIR_RETRY' and
+                                                type(repair_claim) is dict else None))
+                        emitted = captured.getvalue().strip()
+                        try:
+                            result = json.loads(emitted) if emitted else result_value
+                        except (TypeError, ValueError):
+                            result = result_value
+                    except Exception as exc:
+                        codes.append(_refusal(exc, 'review_repair_code'))
     elif step == 'RUN_TASK_COMPLETE':
         claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
@@ -398,12 +471,45 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                 getattr(exc, 'completion_code', None) else
                 _refusal(exc, 'task_store_error_code')]
     elif step == 'REVIEWER_ATTENTION':
-        codes.append('REVIEWER_ATTENTION')
+        # A prior result check may already have persisted the synthetic
+        # REVIEW_BLOCKED event for a completed session with no posted verdict.
+        # Keep that recoverable state actionable on later advance calls.
+        claim = next((c for c in reversed(_claims(record)) if type(c) is dict and
+                      c.get('pr') == number and c.get('head_sha') == d6['result_head']), None)
+        missing_verdict = (reviewer_session_done and claim is not None and any(
+            type(event) is dict and event.get('source') == 'REVIEWER' and
+            event.get('source_sha') == claim.get('head_sha') and
+            event.get('version') == claim.get('version') and
+            (event.get('outcome') or event.get('state')) == 'REVIEW_BLOCKED'
+            for event in related['events']))
+        if missing_verdict:
+            step = 'REVIEW_NOT_POSTED'
+            codes.append('REVIEW_VERDICT_NOT_POSTED')
+            result = {'reviewer_task': claim.get('reviewer_task'),
+                      'reviewer_session_id': claim.get('native_session_id'),
+                      'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
+                      'version': claim.get('version')}
+        else:
+            codes.append('REVIEWER_ATTENTION')
+    elif step == 'REVIEW_NOT_POSTED':
+        pass
     elif step == 'NEEDS_PUBLISH':
         codes.append('NEEDS_PUBLISH')
     elif step == 'DEVELOPER_ATTENTION':
-        codes.append('DEVELOPER_ATTENTION')
-    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR', 'NEEDS_CWD'):
+        active_repair = next((item for item in reversed(related['repair_claims'])
+                              if type(item) is dict and item.get('head_sha') ==
+                              (d6.get('result_head') if type(d6) is dict else None) and
+                              item.get('state') == 'DISPATCHED'), None)
+        if type(active_repair) is dict and active_repair.get('repair_state') == 'RECORD_UNAVAILABLE':
+            codes.append('REPAIR_TASK_RECORD_UNAVAILABLE')
+        else:
+            codes.append('DEVELOPER_ATTENTION')
+    elif step in ('REPAIR_OUTCOME_UNKNOWN', 'REPAIR_RESULT_NOT_PUBLISHED'):
         codes.append(step)
+    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR',
+                  'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
+        codes.append(step)
+    next_action = ('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
+                   else step)
     return {'task_id': task_id, 'step': step, 'result': result,
-            'next': step, 'codes': codes}
+            'next': next_action, 'codes': codes}

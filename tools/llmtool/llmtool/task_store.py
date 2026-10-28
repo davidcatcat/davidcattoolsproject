@@ -687,7 +687,7 @@ def _validate(record):
                      (item.get('attempt') != 3 or
                       type(item['high_debug_report_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
-                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
                     (item.get('comment_id') is not None and
                      (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
                     type(item.get('packet_sha256')) is not str or
@@ -2432,7 +2432,21 @@ class TaskStore:
                         len(new_claims) > 64):
                     _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                 if len(new_claims) == len(old_claims) + 1:
-                    if new_claims[:-1] != old_claims:
+                    prefix = new_claims[:-1]
+                    changed = [i for i, (old, new) in enumerate(zip(old_claims, prefix))
+                               if old != new]
+                    retry_transition_valid = False
+                    if len(changed) == 1:
+                        index = changed[0]
+                        before, after = old_claims[index], prefix[index]
+                        retry_transition_valid = (
+                            before.get('state') == 'DISPATCHED' and
+                            after.get('state') == 'FAILED' and
+                            all(before.get(key) == after.get(key)
+                                for key in before.keys() - {'state'}) and
+                            all(old == new for i, (old, new) in
+                                enumerate(zip(old_claims, prefix)) if i != index))
+                    if prefix != old_claims and not retry_transition_valid:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     added = new_claims[-1]
                     if (type(added) is not dict or added.get('state') != 'CLAIMED' or
@@ -2455,8 +2469,10 @@ class TaskStore:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     i = changed[0]
                     old, new = old_claims[i], new_claims[i]
-                    if (old.get('state') != 'CLAIMED' or
-                            new.get('state') not in ('DISPATCHED', 'UNKNOWN') or
+                    if (not ((old.get('state') == 'CLAIMED' and
+                              new.get('state') in ('DISPATCHED', 'UNKNOWN')) or
+                             (old.get('state') == 'DISPATCHED' and
+                              new.get('state') == 'FAILED')) or
                             any(old.get(key) != new.get(key) for key in
                                 old.keys() - {'state'})):
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
