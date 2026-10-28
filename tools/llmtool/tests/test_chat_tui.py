@@ -837,7 +837,10 @@ class WidgetTests(Base):
             ui.quit_pending = False
         self.drive([measure], size=size)
         self.assertEqual(widths[80], 'p:first | m:test | exit pending | t:UNKNOWN | 最新 | F6 滑鼠:開 | F1')
-        self.assertEqual(widths[40], 'p:first | m:test | exit pending | 最新')
+        # QA O2: the mouse state outlives the F1 hint, usage, model and provider fields.
+        self.assertEqual(widths[50], 'p:first | exit pending | 最新 | F6 滑鼠:開')
+        self.assertEqual(widths[40], 'exit pending | 最新 | F6 滑鼠:開')
+        self.assertEqual(widths[30], 'exit pending | F6 滑鼠:開')
         self.assertEqual(widths[20], 'exit pending')
         self.assertEqual(widths[8], 'exit pe…')
         for columns, status in widths.items():
@@ -3067,9 +3070,18 @@ class ConversationViewTests(unittest.TestCase):
         view, _ = self.make(CJK_LINES, width=80, height=20)
         view.scroll_rows(-30)
         anchor = view.text[view.top_offset:view.top_offset + 8]
+        top = view.top
         view.layout(45, 24)                         # narrower and taller: rows re-wrap
         self.assertEqual(view.text[view.top_offset:view.top_offset + 8], anchor)
         self.assertFalse(view.following)
+        # QA O3: back and forth never drifts, because the anchor offset is kept across re-wraps.
+        for _ in range(3):
+            view.layout(80, 20)
+            self.assertEqual(view.top, top)
+            view.layout(45, 24)
+            self.assertEqual(view.text[view.top_offset:view.top_offset + 8], anchor)
+        view.scroll_rows(-1)                        # scrolling moves the anchor again
+        self.assertNotEqual(view.text[view.top_offset:view.top_offset + 8], anchor)
         view.to_bottom()
         view.layout(120, 10)
         self.assertEqual(view.top, view.max_top())
@@ -3209,6 +3221,40 @@ class ConversationViewTests(unittest.TestCase):
         self.assertEqual(overlap[0], 1)                         # never two copier calls at once
         self.assertFalse(view.copy_failed)                      # the stale failure is ignored
         self.assertEqual(view.status(), '已複製 5 字')          # describes 'third'
+
+    def test_streamed_chunks_rewrap_only_the_changed_tail(self):
+        # QA D2: with > 4096 lines every chunk re-wrapped everything (476 ms per chunk at
+        # 6000 lines). Only the changed line(s) are wrapped now; the result equals a full wrap.
+        lines = ['L%05d 中文與 English mixed 長行內容 lorem ipsum dolor sit amet 再加中文確保超過八十欄寬度 abc' % i
+                 for i in range(10000)]
+        text = '\n'.join(lines)
+        view = chat_tui_view.ConversationView(get_cwidth)
+        view.set_text(text)
+        view.layout(80, 21)
+        self.assertEqual(len(view.rows), 20000)
+        wrapper = view._wrapper
+        started = time.monotonic()
+        with patch.object(wrapper, 'line_rows', wraps=wrapper.line_rows) as wrapped:
+            for i in range(100):
+                text += '片段' if i % 10 else '\nnew line'
+                view.set_text(text)
+                view.layout(80, 21)
+                self.assertLessEqual(wrapped.call_count, 2, 'chunk %d' % i)   # the tail only
+                wrapped.reset_mock()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed / 100, 0.05)                      # per chunk, generous for CI
+        view.scroll_rows(-5)
+        text = text[:-300] + '\nreplaced tail 中文'                   # a streaming block re-render
+        view.set_text(text)
+        view.layout(80, 21)
+        fresh = chat_tui_view.ConversationView(get_cwidth)
+        fresh.set_text(text)
+        fresh.layout(80, 21)
+        self.assertEqual(view.rows, fresh.rows)
+        self.assertEqual(view._line_rows, fresh._line_rows)
+        view.layout(45, 21)                                       # a width change: full re-wrap
+        fresh.layout(45, 21)
+        self.assertEqual(view.rows, fresh.rows)
 
     def test_oversized_selection_is_refused_without_measuring_or_building_it_whole(self):
         # Codex review v2: the limit check must not encode (or slice) the whole selection on
@@ -3456,6 +3502,53 @@ class ScrollSelectTests(Base):
         self.drive([fill, press(3, 2), drag(3, 5), drag(3, 20), drag(3, 20), release(3, 20),
                     selected, resize, resized, lambda ui: ui.view.clear_selection()], size=size)
 
+    def test_click_on_the_first_or_last_row_never_scrolls_selects_or_copies(self):
+        # QA D1: a plain click on the pane's first/last row scrolled one row, selected and
+        # overwrote the clipboard; a double-click there copied the wrong fragment.
+        seen = {}
+
+        async def fill(ui):
+            ui.append(SHORT_LINES)
+            await self.settle(ui)
+            for _ in range(20):
+                ui.app.key_processor.feed(KeyPress(Keys.Vt100MouseEvent, WHEEL_UP))
+            ui.app.key_processor.process_keys()
+            await self.settle(ui)
+            seen['rows'] = pane_rows(ui)
+            self.assertTrue(seen['rows'][0].startswith('0'))
+
+        async def unchanged(ui):
+            await self.settle(ui)
+            self.assertEqual(pane_rows(ui), seen['rows'])
+            self.assertIsNone(ui.view.selected_range())
+            self.assertFalse(ui.view.following)
+            self.assertEqual(self.copies, [])
+
+        async def word(ui):
+            await self.settle(ui)
+            self.assertEqual(pane_rows(ui), seen['rows'])            # still no scroll
+            self.assertTrue(ui.view.wait_copy())
+            self.assertEqual(self.copies, [seen['rows'][0][:3]])      # the label under the click
+            ui.view.clear_selection()
+
+        async def to_bottom(ui):
+            ui.view.to_bottom()
+            await self.settle(ui)
+            self.assertTrue(ui.view.following)
+
+        async def still_following(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.following)
+            self.assertIsNone(ui.view.selected_range())
+
+        bottom = 21   # pane rows 1..21 at 24 rows (rule, input, status below)
+        self.drive([fill, press(5, 1), release(5, 1), unchanged,
+                    press(5, bottom), release(5, bottom), unchanged,
+                    press(5, 1), drag(5, 1), release(5, 1), unchanged,       # a motion report in place
+                    press(2, 1), release(2, 1), press(2, 1), release(2, 1), word,
+                    to_bottom, press(5, 1), release(5, 1), still_following],
+                   size=[Size(rows=24, columns=80)])
+
     def test_pageup_pagedown_arrows_and_home_end_scroll_rows(self):
         long_reply = '\n'.join('row %d' % i for i in range(200))
         self.client.complete.return_value = Reply(long_reply, {})
@@ -3529,6 +3622,8 @@ class ScrollSelectTests(Base):
             await self.settle(ui)
             self.assertTrue(ui.view.wait_copy())
             self.assertIsNone(ui.view.selected_range())
+            self.assertIn('已複製 ', ui.status_text())
+            self.assertIn('再按 Ctrl-C 中斷', ui.status_text())            # QA O1 hint
             self.assertEqual(self.copies, [self.copies[0], self.copies[0]])
             self.assertFalse(ui.quit_pending)
             self.assertIsNone(ui.app.future.result() if ui.app.future.done() else None)

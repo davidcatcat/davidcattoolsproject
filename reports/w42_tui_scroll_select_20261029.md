@@ -243,3 +243,13 @@ Owner 步驟（Terminal.app 2.14，再在 Warp 重做一次）：
 1. **雙擊選詞繞過上限**：`select_word` 的邊界掃描改為每側最多 `WORD_SCAN_LIMIT`（= 1 MiB 字）且改走 `copy_range(start, end)`（先 `utf8_size` 分段量、超限即拒絕、不切字串）；拒絕時字詞仍反白、狀態列 `選取超過複製上限 1024 KB`。測試 `test_double_click_word_goes_through_the_byte_limit_and_a_bounded_scan`：40 萬個中文字的無空白長詞只量一次即拒、copier 未呼叫；`WORD_SCAN_LIMIT=5` 時只取每側 5 字。
 2. **連續複製並行、舊結果覆蓋**：改為單一工作執行緒＋「只保留最新請求」佇列（`_copy_next`）＋世代號（`_copy_generation`）：新請求取代仍在排隊的舊請求；正在執行的舊 pbcopy 跑完後若已被取代，結果與狀態一律忽略；因此 pbcopy 永不並行、剪貼簿最後一定是最新選取、狀態描述的是最新那次。測試 `test_rapid_copies_are_serialized_and_the_newest_wins`：慢 copier 阻塞第一次時連送兩次，實際呼叫序列 `['first', 'third']`、最大並行 1、第一次刻意失敗但狀態為 `已複製 5 字`（third）。
 3. **全路徑自查**：所有複製入口（拖曳放開 `end_drag`、雙擊 `select_word`、Ctrl-C `copy_selection`）都經 `copy_range`，且 `copy()` 本身再量一次上限，不存在繞過路徑；無全選、無三擊。`tests.test_chat_tui` 154/154 PASS。
+
+## 15. TUI QA（6a5524a 實測）D1/D2 與 O1–O3 的處理
+
+- **D1 邊緣列單擊會捲動、選取並覆寫剪貼簿**：根因確認為 `chat_tui.py` `_pane_mouse` 在 MOUSE_UP 無條件呼叫 `_drag_to`，而 `_drag_to` 把面板第一列／最後一列視為邊緣。修法：記錄按下格 `_drag_origin`，只有指標離開該格後才算拖曳（`_drag_moved`）；MOUSE_MOVE 未移動則忽略；MOUSE_UP 不再捲動，只在曾移動時以 `_extend_to` 延伸到指標格；單擊、原地雙擊不捲動、不選取（雙擊只選詞）、不碰剪貼簿；邊緣自動捲動只在真正拖曳後才啟動（邊緣列仍算邊緣，因 Terminal.app 會把離開視窗的拖曳夾到邊緣列）。測試 `test_click_on_the_first_or_last_row_never_scrolls_selects_or_copies`（頂列、底列單擊、原地 MOVE、頂列雙擊選到該格的字、跟隨中點頂列仍跟隨）。PTY `pty_click.py`：頂/底列單擊 view moved=False、copied=False；頂列雙擊只複製該格的字 `text`、畫面不動。
+- **D2 >4096 行時每個串流 chunk 全部重折**：根因為 `Wrapper` 快取滿 4096 時整個 `clear()`，且 `layout` 每次 `set_text` 全文重折。修法：`set_text` 以分段比較（`common_prefix_length`）記錄最早變動的 offset；`layout` 在寬度不變時只重折從該 offset 所在邏輯行起的尾段（`_rewrap_tail`），前面各行的列、起點與每行列數（`_line_rows`）原樣保留；寬度改變才全文重折；快取改為只淘汰最舊一筆。QA 的 `perf_view.py` 重跑：1000/3000/6000 行每 chunk 1.3/4.2/476 ms → **0.3/0.7/1.1 ms**；另測 10000/20000 行 2.4/4.0 ms。測試 `test_streamed_chunks_rewrap_only_the_changed_tail`：10000 行 100 個 chunk 每次 `line_rows` 呼叫 ≤ 2、每 chunk < 50 ms（寬鬆供 CI），尾段替換與改寬後結果與全文重折逐列相等。
+- **O1 選取久留使第一個 Ctrl-C 只重複複製**：Ctrl-C 有選取時仍是複製並清除，但狀態列改為 `已複製 N 字；選取已清除，再按 Ctrl-C 中斷/離開`（3 s），使用者知道下一次 Ctrl-C 會中斷。未採「捲出畫面即清除」以免選取無故消失。
+- **O2 窄寬度時 F6 滑鼠狀態被擠掉**：`STATUS_DROP_ORDER` 改為 `help, usage, model, provider, scroll, mouse`：先去 F1 提示、token、model、provider，滑鼠狀態最後才去。測試 `test_status_bar_drops_low_priority_fields_when_narrow` 更新（50/40/30/20 欄）。
+- **O3 來回 resize 每次往上漂一列**：根因為每次重折後把錨點重設為新頂列的起點。修法：重折後保留原錨點 offset（`_clamp(keep_anchor=True)`），只有使用者捲動或夾限改變了頂列才更新錨點。測試 `test_resize_keeps_the_text_at_the_top_of_the_view` 加入 80→45→80 三次往返 `top` 不變。
+
+`tests.test_chat_tui` 156/156 PASS。

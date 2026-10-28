@@ -116,7 +116,7 @@ SLASH_COMMANDS = (
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "provider", "model", "state", "usage", "scroll", "mouse", "help")
-STATUS_DROP_ORDER = ("mouse", "help", "usage", "scroll", "model", "provider")
+STATUS_DROP_ORDER = ("help", "usage", "model", "provider", "scroll", "mouse")
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
 # PM typewriter: the CLI emits text in bursts (0.6–1 s apart); received text is queued and
 # released every tick at PM_CHARS_PER_TICK (≈67 chars/s). A long queue raises the rate to
@@ -290,6 +290,8 @@ class ChatTUI:
         # Mouse drag in the conversation: last pointer (x, y) and the auto-scroll timer handle
         # used while the pointer is held at or beyond the pane edge.
         self._drag_pointer = None
+        self._drag_origin = None     # cell of the press; a drag counts only after it moved
+        self._drag_moved = False
         self._autoscroll_handle = None
         self.worker = None
         self.worker_kind = None
@@ -569,6 +571,7 @@ class ChatTUI:
             if self.view.selected_range() and not self.show_help:
                 self.view.copy_selection()
                 self.view.clear_selection()
+                self.view.copy_note = "選取已清除，再按 Ctrl-C 中斷/離開"
                 return
             self.request_quit()
 
@@ -861,9 +864,17 @@ class ChatTUI:
             return True
         if view.dragging and button == MouseButton.LEFT and kind in (MouseEventType.MOUSE_MOVE,
                                                                      MouseEventType.MOUSE_UP):
-            self._drag_to(x, y)
-            if kind == MouseEventType.MOUSE_UP:
+            # A click (no movement) never scrolls, selects or touches the clipboard; a
+            # release never scrolls either, it only extends to the pointer.
+            if (x, y) != self._drag_origin:
+                self._drag_moved = True
+            if kind == MouseEventType.MOUSE_MOVE:
+                if self._drag_moved:
+                    self._drag_to(x, y)
+            else:
                 self._autoscroll_stop()
+                if self._drag_moved:
+                    self._extend_to(x, y)
                 view.end_drag(view.head)
             return True
         if not inside:
@@ -871,14 +882,30 @@ class ChatTUI:
         if kind == MouseEventType.MOUSE_DOWN and button == MouseButton.LEFT:
             self._autoscroll_stop()
             view.begin_drag(view.offset_at(view.top + y - top, x - left))
-            self._drag_pointer = (x, y)
+            self._drag_pointer = self._drag_origin = (x, y)
+            self._drag_moved = False
             return True
         if kind == MouseEventType.MOUSE_DOWN:
             view.clear_selection()
         return True  # Clicks on the pane never move focus or the input caret.
 
+    def _extend_to(self, x, y):
+        """Extend the selection to the pointer's cell (clamped to the pane), no scrolling."""
+        geometry = self._pane_geometry()
+        if geometry is None:
+            return
+        left, top, height = geometry
+        view = self.view
+        row = max(view.top, min(view.top + height - 1, view.top + y - top))
+        view.extend_drag(view.offset_at(row, max(0, x - left)))
+        self.app.invalidate()
+
     def _drag_to(self, x, y):
-        """Extend the selection to the pointer; at or beyond an edge, scroll a row first."""
+        """Extend a moving drag to the pointer; at or beyond an edge, scroll a row first.
+
+        Only reached after the pointer left the press cell. The pane's first and last rows
+        count as the edge because Terminal.app clamps drags that leave the window to them.
+        """
         view = self.view
         geometry = self._pane_geometry()
         if geometry is None:

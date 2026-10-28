@@ -108,6 +108,22 @@ def copy_to_clipboard(text):
     return False
 
 
+def common_prefix_length(old, new):
+    """Length of the common prefix of two strings, compared in chunks (C speed)."""
+    limit = min(len(old), len(new))
+    low = 0
+    while low < limit and old[low:low + COPY_SCAN_CHUNK] == new[low:low + COPY_SCAN_CHUNK]:
+        low += COPY_SCAN_CHUNK
+    low, high = min(low, limit), min(limit, low + COPY_SCAN_CHUNK)
+    while low < high:                       # first difference inside the chunk
+        middle = (low + high + 1) // 2
+        if old[low:middle] == new[low:middle]:
+            low = middle
+        else:
+            high = middle - 1
+    return low
+
+
 class Wrapper:
     """Wrap logical lines into rows of at most ``width`` columns; cached per line.
 
@@ -139,7 +155,7 @@ class Wrapper:
             found.append((position, position + len(cluster), sum(map(self.char_width, cluster))))
             position += len(cluster)
         if len(self._clusters) >= CACHE_LINES:
-            self._clusters.clear()
+            del self._clusters[next(iter(self._clusters))]
         self._clusters[line] = found
         return found
 
@@ -159,7 +175,7 @@ class Wrapper:
         if start < len(line) or not rows:
             rows.append((start, len(line)))   # a line that exactly fills its rows adds no blank row
         if len(self._cache) >= CACHE_LINES:
-            self._cache.clear()
+            del self._cache[next(iter(self._cache))]   # oldest entry only, never the whole cache
         self._cache[key] = rows
         return rows
 
@@ -182,9 +198,11 @@ class ConversationView:
         self.text = ""
         self.rows = [(0, 0, 0)]
         self._starts = [0]
+        self._line_rows = [1]    # rows each logical line occupies (incremental re-wrap)
         self.width = 0
         self.height = 1
         self._dirty = True
+        self._changed_from = 0   # lowest text offset changed since the last layout
         self.top = 0            # first visible row
         self.top_offset = 0     # text offset at the start of that row (kept across re-wraps)
         self.following = True   # view at the bottom: new output stays in view
@@ -196,6 +214,7 @@ class ConversationView:
         self.copied = None      # (characters, monotonic time) of the last copy
         self.copy_failed = False
         self.copy_error = None  # why the last copy failed (status text)
+        self.copy_note = None   # extra hint shown with 已複製 (Ctrl-C: how to interrupt next)
         # One clipboard worker at a time: copies are serialized through ``_copy_next`` (only
         # the newest request is kept) so the clipboard always ends with the newest selection
         # and the status describes it; ``_copy_generation`` tags the newest request.
@@ -210,6 +229,8 @@ class ConversationView:
     def set_text(self, text):
         if text == self.text:
             return
+        changed = common_prefix_length(self.text, text)
+        self._changed_from = changed if not self._dirty else min(self._changed_from, changed)
         self.text = text
         self._dirty = True
         if self.anchor is not None:
@@ -223,26 +244,62 @@ class ConversationView:
     def layout(self, width, height):
         """Rows for this width and the first visible row for this height (each render)."""
         width, height = max(1, width), max(1, height)
-        if self._dirty or width != self.width:
-            self.rows = self._wrapper.wrap(self.text, width)
-            self._starts = [row[1] for row in self.rows]
+        rewrapped = self._dirty or width != self.width
+        if rewrapped:
+            if width == self.width:
+                self._rewrap_tail(self._changed_from)
+            else:
+                self._set_rows(self._wrapper.wrap(self.text, width), 0, 0, 0)
             self.width, self._dirty = width, False
             if not self.following:
                 self.top = self.row_of(self.top_offset)
         self.height = height
-        self._clamp()
+        # After a re-wrap the anchor offset stays, so resizing back and forth never drifts.
+        self._clamp(keep_anchor=rewrapped)
         return self.rows
+
+    def _rewrap_tail(self, changed_from):
+        """Re-wrap only the logical lines from the first changed character on.
+
+        Rows of the unchanged lines before it are kept as they are (same offsets), so a
+        streamed chunk costs the changed line(s), not the whole conversation.
+        """
+        text = self.text
+        line_start = text.rfind("\n", 0, changed_from) + 1
+        line_index = text.count("\n", 0, line_start)
+        keep_rows = sum(self._line_rows[:line_index])
+        tail = self._wrapper.wrap(text[line_start:], self.width)
+        self._set_rows(tail, keep_rows, line_index, line_start)
+
+    def _set_rows(self, tail, keep_rows, line_index, line_start):
+        """Replace the rows from ``keep_rows`` on with ``tail`` (relative to line_start)."""
+        rows = self.rows[:keep_rows]
+        starts = self._starts[:keep_rows]
+        counts = self._line_rows[:line_index]
+        last = None
+        for line, start, end in tail:
+            rows.append((line_index + line, line_start + start, line_start + end))
+            starts.append(line_start + start)
+            if line == last:
+                counts[-1] += 1
+            else:
+                counts.append(1)
+                last = line
+        self.rows, self._starts, self._line_rows = rows, starts, counts
 
     def max_top(self):
         return max(0, len(self.rows) - self.height)
 
-    def _clamp(self):
+    def _clamp(self, keep_anchor=False):
         limit = self.max_top()
         if self.following or self.top >= limit:
             self.top, self.following, self.unseen = limit, True, False
         else:
             self.top = max(0, self.top)
-        self.top_offset = self._starts[self.top] if self.rows else 0
+        if not self.rows:
+            self.top_offset = 0
+        elif not keep_anchor or self.row_of(self.top_offset) != self.top:
+            self.top_offset = self._starts[self.top]
 
     def scroll_rows(self, delta):
         """Move the view; arriving at the bottom resumes following, leaving it stops."""
@@ -386,6 +443,7 @@ class ConversationView:
             self._copy_generation += 1
             self._copy_next = (self._copy_generation, text)
             self.copied, self.copy_failed, self.copy_error = (len(text), time.monotonic()), False, None
+            self.copy_note = None
             if self._copy_thread is None or not self._copy_thread.is_alive():
                 self._copy_thread = threading.Thread(target=self._copy_worker,
                                                      name="llmtool-clipboard", daemon=True)
@@ -432,7 +490,9 @@ class ConversationView:
         if self.copy_pending():
             return "複製中…"
         if self.copied is not None and time.monotonic() - self.copied[1] < COPIED_SECONDS:
-            return self.copy_error if self.copy_failed else "已複製 %d 字" % self.copied[0]
+            if self.copy_failed:
+                return self.copy_error
+            return "已複製 %d 字" % self.copied[0] + ("；" + self.copy_note if self.copy_note else "")
         span = self.selected_range()
         if span:
             return "已選 %d 字" % (span[1] - span[0])
