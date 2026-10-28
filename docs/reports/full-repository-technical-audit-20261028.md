@@ -817,7 +817,7 @@ flowchart LR
 - Root Cause：子命令需 PM 手動串接；PM 用更快的手動路徑。
 - Impact：Roadmap「MERGED」不代表可用；投入未產生產品價值。
 - 修復：單一驅動器；把 PM 手動路徑移除或標為 debug-only。
-- 驗證：驅動器在本機推進 10 個 Task 無人工介入。Confidence 高。P0。
+- 驗證（依 §26.1 修正）：每次呼叫 `task advance` 只完成一個審查、修正、完成或結案動作，且重放不重複派工；首次派工、測試、發布與合併仍由 PM／Worker 執行。「無人工介入的端到端推進」是另一個尚未承諾的目標，不屬本項驗收。Confidence 高。P0。
 
 ### High
 
