@@ -99,6 +99,20 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(result.status, 'DONE')
         config_loader.assert_called_once_with(cwd=self.root.resolve())
 
+    def test_effective_timeout_is_added_to_invocation_prompt(self):
+        prompts = []
+        add_timeout = direct._prompt_with_effective_timeout
+        def capture_timeout(prompt, timeout):
+            effective = add_timeout(prompt, timeout)
+            prompts.append(effective)
+            return effective
+        with patch.object(direct, '_prompt_with_effective_timeout',
+                          side_effect=capture_timeout) as wrapped:
+            self.assertEqual(self.run_fake_configured(900).status, 'DONE')
+        wrapped.assert_called_once_with('bounded prompt', 900)
+        self.assertIn('Effective timeout for this invocation: 900 seconds.',
+                      prompts[0])
+
     def test_configured_timeout_is_used(self):
         self.assertEqual(self.run_fake_configured(900).status, 'DONE')
 
@@ -657,10 +671,6 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('"allowed_write_paths":["src.py"]', prompt)
         self.assertIn('"acceptance":["expected behavior"]', prompt)
         self.assertIn('"test_commands":[["python3","-m","unittest"]]', prompt)
-        timeout_lines = [line for line in prompt.splitlines()
-                         if 'effective timeout' in line.lower()]
-        self.assertTrue(timeout_lines)
-        self.assertTrue(any('600' in line for line in timeout_lines))
 
 
 if __name__ == '__main__':

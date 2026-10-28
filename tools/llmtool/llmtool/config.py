@@ -317,6 +317,10 @@ def _config_view(cli=None, environ=None, cwd=None, home=None, *, inspection=Fals
 def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configured=False):
     """Resolve a viewable config; model requests must require readiness as well."""
     config, _ = _config_view(cli, environ, cwd, home)
+    config.setdefault("codex_direct", {
+        "timeout_seconds": CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS,
+    })
+    validate_codex_direct_timeout(config["codex_direct"]["timeout_seconds"])
     if require_configured:
         provider = selected_provider(config)
         client_type(provider["type"]).validate_ready(provider)

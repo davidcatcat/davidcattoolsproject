@@ -97,6 +97,13 @@ def _command_path(root):
     return ':'.join(entries)
 
 
+def _prompt_with_effective_timeout(prompt, timeout):
+    effective = f"{prompt.rstrip()}\n\nEffective timeout for this invocation: {timeout} seconds.\n"
+    if len(effective.encode('utf-8')) > MAX_PROMPT_BYTES:
+        _fail('CODEX_PROMPT_INVALID')
+    return effective
+
+
 def _thread_from_events(raw):
     """Accept the actual Codex JSONL thread.started event only."""
     found = None
@@ -358,6 +365,7 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         timeout = validate_codex_direct_timeout(timeout)
     if type(timeout) not in (int, float) or not 0 < timeout <= MAX_WALL_CLOCK_SECONDS:
         _fail('CODEX_BUDGET_INVALID')
+    prompt = _prompt_with_effective_timeout(prompt, timeout)
     executable = shutil.which('codex')
     if executable is None or not os.path.isabs(executable):
         _fail('CODEX_RUNTIME_UNAVAILABLE')
