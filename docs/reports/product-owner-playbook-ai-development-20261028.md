@@ -3,7 +3,7 @@
 - **日期：** 2026-10-28　**Snapshot：** `139a62c0483560be4e7a0aadd76c82652a8a2cd9`
 - **對象：** 本專案的 Owner（需求方、出資者、最終決策者）與 AI 團隊。
 - **依據：** [Report A（技術稽核）](full-repository-technical-audit-20261028.md)、[Report B（演變與決策回顧，含 9A AI Management Failure Register 與 9C Owner 答覆紀錄）](project-evolution-decision-retrospective-20261028.md)。
-- **版本：** v4（2026-10-28 依 Owner 三輪答覆更新：Owner 已給 NOW、預算、聯絡方式、第一版 PM；週報改為隨時可答的狀態頁；issue 與 report 分開；新增白話規則與 gw 量測條件）。v3 把 Owner 定位為 Sponsor；v1／v2 把需求分析、驗收標準、Scope、停損等寫成 Owner 責任，是錯誤前提，已撤銷。本版核心原則：**讓 Owner 以最少的管理負擔，取得高品質的產品交付；日常產品管理、工程管理、技術品質與交付管理由 AI 團隊主動承擔。**
+- **版本：** v5（2026-10-28 依 ChatGPT 顧問審查（advisory，非正式 verdict；Owner 2026-10-28 轉交）五項修正：等待逾時不得視為授權、`task advance` 實際範圍、gw 整題成本含修復、現行優先表統一、Codex PM 適配只保留 Owner 自述）；v4（2026-10-28 依 Owner 三輪答覆更新：Owner 已給 NOW、預算、聯絡方式、第一版 PM；週報改為隨時可答的狀態頁；issue 與 report 分開；新增白話規則與 gw 量測條件）。v3 把 Owner 定位為 Sponsor；v1／v2 把需求分析、驗收標準、Scope、停損等寫成 Owner 責任，是錯誤前提，已撤銷。本版核心原則：**讓 Owner 以最少的管理負擔，取得高品質的產品交付；日常產品管理、工程管理、技術品質與交付管理由 AI 團隊主動承擔。**
 - 本文全部為建議。涉及既有 Gate、Reviewer 配對、Dispatch 政策或 Roadmap 的項目標 **OWNER_DECISION_REQUIRED**，採用與否由 Owner 決定；AI 不得據此直接改政策。文中數字除 Owner 已給者外皆為待驗證目標。
 
 ---
@@ -15,7 +15,7 @@
 | **A. Owner 必須親自決定** | Owner | 產品方向與定位；一個 NOW；預算上限；安全與資料外送邊界；新帳號／新付費服務；看 demo 後說符合／不符合；AI 明說能力不足時決定替代方案 | 技術架構、模組設計、工作包拆解、PR 順序、CI 策略、worktree、Agent 交接、催 PM、找架構缺陷、寫技術規格、QA／CI 驗證、監看額度 |
 | **B. AI PM 主動完成** | PM session | 把 Owner 的每句話轉成需求確認單；MVP 與範圍；新想法影響分析；Roadmap；驗收標準；隨時可 demo；一頁狀態隨時可答；卡住時主動開 issue；可平行的工作先平行 | 不得把需求原樣展開成實作；不得把技術狀態呈現為 Owner 決策；不得主動推送定期報告 |
 | **C. AI CTO／Architect 主動完成** | 同一 PM session 或獨立 session | 每個架構／治理提案附三選項（含不做）、最小版本、停損、一句白話；過度工程預警；技術債、容量、成本與額度看板；對 PM 與 Owner 說「不建議，因為…」 | 不得只回答「可以實作」；不得用術語代替說明 |
-| **D. AI Engineering 自動完成** | 驅動器＋Developer＋Reviewer | 派工、測試、審查、修復、合併、worktree 退場、Developer／Reviewer 額度改派、CI 選擇、事件消費 | 不得經 Owner |
+| **D. AI Engineering 自動完成** | 驅動器＋Developer＋Reviewer＋PM 的手動步驟 | 派工、測試、審查派送、修復重派、結案記錄、發布與合併、worktree 退場、Developer／Reviewer 額度改派、CI 選擇、事件消費（目前 `task advance` 只涵蓋審查派送到結案，其餘仍是 PM／Worker 手動，見第 6 章） | 不得經 Owner |
 | **E. 只有 issue 才通知 Owner** | PM | 預估超過預算；安全事件；同一問題兩次修復失敗；卡住超過文件定義的天數；需要新帳號／新支出；AI 能力不足以完成某項工作；Owner 定義的方向與現況衝突 | 其餘不通知；進度 report 等 Owner 問 |
 
 不一定需要四個獨立 AI。最小配置：一個 PM session 同時承擔 B 與 C，但 C 的輸出格式（第 4 章）是硬性要求；D 由確定性程式承擔；Reviewer 加「可用性驗收」。
@@ -112,7 +112,7 @@ AI 從未監看額度，Owner 自己盯 usage 才發現用光（Report B F15）�
 - 讓 monitor 顯示 Codex／Claude 的額度狀態（目前沒有）。
 - Developer／Reviewer 額度用盡時在 ALLOWED 路線內自動改派，狀態頁記一行（OWNER_DECISION_REQUIRED：dispatch 開關目前為 Owner 專屬）。
 - PM 自己的額度是單點故障：先把 PM 每次載入的規則文件砍到最小；仍不足再提備援 PM 方案（Report B 9C.4）。
-- 每個「省 token」工程附前後數字；gw 路線依 Owner 條件「不能節省就沒必要」，先量「PM 準備 context＋套 diff＋審查」對「直接派 Codex」的總成本，再決定去留。
+- 每個「省 token」工程附前後數字；gw 路線依 Owner 條件「不能節省就沒必要」，先量**整題**成本（含失敗與修復的每次呼叫、PM 準備 context、套 diff、Reviewer 審查）對「直接派 Codex」的整題成本，再決定去留。
 
 ---
 
@@ -125,7 +125,7 @@ AI 從未監看額度，Owner 自己盯 usage 才發現用光（Report B F15）�
 推薦：<方案>，因為 <一句話>
 替代：<方案 B> / 不做
 優缺點與風險：A：<一行>；B：<一行>
-不決定的後果：<一行；含等待多久會自動採推薦方案>
+不決定的後果：<一行；保留事項（預算／方向／安全／新帳號）未回覆就維持等待，不視為同意；只有 Owner 事先授權的預設方案才可自動採用>
 請回答：是 / 否 / A / B
 ```
 
@@ -135,7 +135,7 @@ AI 從未監看額度，Owner 自己盯 usage 才發現用光（Report B F15）�
 
 ## 6. AI Engineering 自動完成的事（Owner 不參與）
 
-- 派工、測試、審查、修復、合併：由 `task advance` 驅動器推進（#519 已合併）；PM 只處理 BLOCKED。
+- 審查派送、審查結果記錄、退修重派、結案記錄：由 `task advance` 驅動器推進（#519 已合併；原始碼自述「每次呼叫只做一個審查或結案動作」）。**驅動器目前不做的：** 第一次派工（PM 的 `task delegate`）、跑測試（由派工流程的 EC2 remote-test 觸發）、開 PR／發布（未發布時回 NEEDS_PUBLISH）、合併（未合併時回 WAITING_INTEGRATION，確認 GitHub 已合併才記 MERGED）。這些仍由 PM 或 Worker 執行；「全自動閉環」是目標，不是現況。PM 處理 BLOCKED 與上述手動步驟。
 - Developer／Reviewer 額度／CLI 不可用：技術狀態，PM 在 ALLOWED 路線內改派（OWNER_DECISION_REQUIRED：dispatch 規則的使用方式）。
 - worktree 退場：通過 D6 lifecycle gate 的自動退場；RETAIN_BLOCKED 由 PM 處理。
 - CI 範圍、merge 方式、Reviewer 復用：由 PM／CTO 在現行授權內評估；改變 Gate 者走決策單（OWNER_DECISION_REQUIRED）。
@@ -154,7 +154,7 @@ Owner 2026-10-28：「AI 卡好幾天我要知道，但是不應該是我去主�
 | 安全事件、資料外送疑慮 | issue | 立即，決策單 |
 | 同一 root cause 兩次修復失敗 | issue | 通知 Owner 一行（AI 自行走 High Debug 等既有規則，不要 Owner 決定） |
 | NOW 卡住超過 AI PM 在文件中定義的天數（審查者建議 24 小時為待驗證目標） | issue | 通知 Owner 一行，附原因與 AI 的下一步 |
-| 決策單等 Owner 超過文件定義的時間 | issue | 提醒一次，然後依「不決定的後果」自動採推薦方案 |
+| 決策單等 Owner 超過文件定義的時間 | issue | 提醒一次；保留事項維持等待（AGENTS.md：No response is not consent），只有相依的那一步停，其他已授權工作繼續；只有 Owner 事先授權的預設方案才可自動採用 |
 | 需要新帳號／付費服務／root 權限 | issue | 決策單 |
 | AI 能力不足（例如無法無人值守連續運作） | issue | 決策單，附替代管理機制 |
 | NOW 與現況衝突 | issue | 決策單 |
@@ -198,7 +198,7 @@ issue 的具體天數與送達方式（GitHub `waiting_owner` 標記、TUI 提�
 1. NOW 已由 Owner 給出；AI PM 展開成第一版清單（Report B 9C.6）並把其餘標 FROZEN（OWNER_DECISION_REQUIRED：Roadmap 順序）。
 2. PM 自本週起用需求確認單、狀態頁、決策單三種格式，加白話規則；不符格式的輸出視為未完成。
 3. CTO 自本週起對任何提案附方案比較單；建立容量、成本與額度看板；gw 省不省先量。
-4. Engineering 以 `task advance` 驅動器取代手動串接；Reviewer 加可用性驗收。
+4. Engineering 以 `task advance` 驅動器取代審查到結案的手動串接，並補齊它尚未涵蓋的派工、發布與合併；Reviewer 加可用性驗收。
 5. 第一個 demo：Owner 在 TUI 提一個真實需求，PM 即時回話，看到它被開發、審查、合併、顯示完成。Owner 什麼時候問，什麼時候就要拿得出來；做不到是 PM 的失敗，不是 Owner 的。
 
 ---
