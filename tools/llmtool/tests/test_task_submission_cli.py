@@ -2336,6 +2336,30 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         self.assertEqual(submission_cli._developer_output_rejection(
             wrong_delete_mode, [target]), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
 
+    def test_empty_file_entry_before_another_diff_is_admitted(self):
+        empty = 'tools/llmtool/__init__.py'
+        modified = 'tools/llmtool/example.py'
+        mixed = (
+            f'diff --git a/{empty} b/{empty}\n'
+            'new file mode 100644\n'
+            'index 0000000..e69de29\n'
+            f'diff --git a/{modified} b/{modified}\n'
+            f'--- a/{modified}\n+++ b/{modified}\n'
+            '@@ -1 +1 @@\n-old\n+new\n')
+        source_files = submission_cli._DeveloperSourceFiles()
+        source_files[empty] = ''
+        source_files[modified] = 'old\n'
+        source_files.existing_paths.add(modified)
+        source_files.regular_paths.add(modified)
+
+        artifact, _normalizations, rejection = submission_cli._developer_normalized_output(
+            mixed, [empty, modified], source_files=source_files)
+
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, mixed)
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            mixed, [empty, modified]))
+
     def test_proposal_can_mix_new_files_with_existing_file_modifications(self):
         target = 'tools/llmtool/existing.py'
         added = 'tools/llmtool/new.py'

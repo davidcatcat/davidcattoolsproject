@@ -890,7 +890,8 @@ def _patch_paths(patch):
         while index < len(lines) and lines[index].startswith(_INDEX_METADATA):
             index_count += 1
             index += 1
-        if ((new_file or deleted_file) and index == len(lines) and
+        if ((new_file or deleted_file) and
+                (index == len(lines) or lines[index].startswith('diff --git ')) and
                 index_count == 1 and
                 re.fullmatch(r'index [0-9a-f]+\.\.[0-9a-f]+(?: 100644)?',
                              lines[index - 1])):
