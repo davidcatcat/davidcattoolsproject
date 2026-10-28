@@ -515,16 +515,14 @@ class PMRuntime:
                 if (len(cwd) > 1024 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in cwd) or
                         not os.path.isdir(cwd) or binding.get('cwd') != cwd):
                     raise LLMToolError('PM working directory does not match its dedicated binding')
-                transcript = active_pm_inbox.claude_session_file(
+                # Checked without following symlinks: a symlinked or dangling
+                # component is refused even though the transcript may not exist yet.
+                transcript_present = active_pm_inbox.claude_session_present(
                     self.pm_session_id, cwd, self.environ)
-                if transcript.exists():
-                    cwd = active_pm_inbox.observe_claude_session(
-                        self.pm_session_id, cwd, self.environ)
             else:
                 cwd = active_pm_inbox.observe_claude_session(
                     self.pm_session_id, self.cwd, self.environ)
-                transcript = active_pm_inbox.claude_session_file(
-                    self.pm_session_id, cwd, self.environ)
+                transcript_present = True
         except LLMToolError:
             raise _error('PM_SESSION_INVALID', 'PM session binding could not be validated') from None
         lock_fd = _check_state_file(root / (key + '.lock'), create=True)
@@ -570,7 +568,7 @@ class PMRuntime:
                              'PM session appears active elsewhere; close it before using pm_runtime')
             env = dict(os.environ if self.environ is None else self.environ)
             session_flag = ('--resume' if binding.get('session_started') or
-                            transcript.exists() else '--session-id')
+                            transcript_present else '--session-id')
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
                     'stream-json', '--verbose', '--include-partial-messages', session_flag,
                     self.pm_session_id, '--permission-prompts', 'none']

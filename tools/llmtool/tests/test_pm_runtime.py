@@ -509,6 +509,46 @@ class PMRuntimeTests(unittest.TestCase):
                 runtime.open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_LIVE_ELSEWHERE')
 
+    def _fresh_transcript_path(self):
+        self.observe_patcher.stop()
+        return pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+
+    def test_first_open_refuses_symlinked_transcript_parent_before_launch(self):
+        transcript = self._fresh_transcript_path()
+        elsewhere = Path(self.temp.name) / 'elsewhere'
+        elsewhere.mkdir()
+        transcript.parent.parent.mkdir(parents=True)
+        transcript.parent.symlink_to(elsewhere, target_is_directory=True)
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
+        self.assertEqual(self.calls, [])
+
+    def test_first_open_refuses_dangling_transcript_symlink_before_launch(self):
+        transcript = self._fresh_transcript_path()
+        transcript.parent.mkdir(parents=True)
+        transcript.symlink_to(Path(self.temp.name) / 'missing.jsonl')
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
+        self.assertEqual(self.calls, [])
+
+    def test_first_open_without_transcript_in_real_directory_uses_session_id(self):
+        transcript = self._fresh_transcript_path()
+        transcript.parent.mkdir(parents=True)
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        runtime.open()
+        argv = self.calls[0][0]
+        self.assertIn('--session-id', argv)
+        self.assertNotIn('--resume', argv)
+        runtime.close()
+
     def test_stream_metadata_and_text_rebuild_without_duplication(self):
         process = FakeProcess(encoded(
             {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 3,
