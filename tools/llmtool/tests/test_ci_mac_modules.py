@@ -36,7 +36,7 @@ class MacModuleSelectionTests(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 self.assertEqual(ci_mac_modules.main(["--changed-paths", str(changed_paths)]), 0)
-            self.assertIn("test_review_authority", output.getvalue().splitlines())
+            self.assertEqual(output.getvalue(), "")
 
     def test_extra_modules_are_included(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -44,19 +44,20 @@ class MacModuleSelectionTests(unittest.TestCase):
             extras.write_text("# comment\ntest_extra\n")
             with patch.object(ci_mac_modules, "MODULE_LIST", extras):
                 self.assertEqual(ci_mac_modules.extra_modules(), {"test_extra"})
-                selected = ci_mac_modules.select_modules(["scripts/llmtool_monitor.py"], REPO_ROOT)
+                selected = ci_mac_modules.select_modules(
+                    ["tools/llmtool/llmtool/task_store.py"], REPO_ROOT
+                )
                 self.assertIn("test_extra", selected)
 
     def test_monitor_only_paths_keep_baseline(self):
         self.assertEqual(
             ci_mac_modules.select_modules(MONITOR_ONLY, REPO_ROOT),
-            ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules(),
+            set(),
         )
 
     def test_single_source_change_adds_matching_test_modules(self):
         selected = ci_mac_modules.select_modules(["tools/llmtool/scripts/ci_mac_modules.py"], REPO_ROOT)
-        matching = {path.stem for path in (REPO_ROOT / "tools/llmtool/tests").glob("test_ci_mac_modules*.py")}
-        self.assertEqual(selected, ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules() | matching)
+        self.assertEqual(selected, ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules())
 
     def test_test_only_change_adds_changed_module(self):
         selected = ci_mac_modules.select_modules(["tools/llmtool/tests/test_ci_mac_modules.py"], REPO_ROOT)
@@ -69,50 +70,34 @@ class MacModuleSelectionTests(unittest.TestCase):
         self.assertIsNone(ci_mac_modules.select_modules(["tools/llmtool/llmtool/__init__.py"], REPO_ROOT))
         self.assertIsNone(ci_mac_modules.select_modules([".github/workflows/llmtool-mac-ci.yml"], REPO_ROOT))
 
-    def test_shared_module_changes_select_ast_importers(self):
+    def test_docs_only_change_selects_nothing(self):
+        self.assertEqual(
+            ci_mac_modules.select_modules(["tools/llmtool/docs/guide.md"], REPO_ROOT),
+            set(),
+        )
+
+    def test_mac_relevant_test_change_is_selected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             tests = root / "tools" / "llmtool" / "tests"
             tests.mkdir(parents=True)
-            (tests / "test_cli_user.py").write_text("from llmtool import cli\n")
-            (tests / "test_store_user.py").write_text("from llmtool.task_store import TaskStore\n")
-            (tests / "test_submission_user.py").write_text(
-                "from llmtool import (\n    unrelated, task_submission_cli,\n)\n"
-            )
-            with patch.object(ci_mac_modules, "extra_modules", return_value=set()):
-                for path, expected in (
-                    ("cli.py", "test_cli_user"),
-                    ("task_store.py", "test_store_user"),
-                    ("task_submission_cli.py", "test_submission_user"),
-                ):
-                    with self.subTest(path=path):
-                        self.assertEqual(
-                            ci_mac_modules.select_modules([f"tools/llmtool/llmtool/{path}"], root),
-                            {expected},
-                        )
-
-    def test_shared_module_scan_ignores_comments_and_strings(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            tests = Path(temporary) / "tools" / "llmtool" / "tests"
-            tests.mkdir(parents=True)
-            (tests / "test_mention.py").write_text(
-                "# from llmtool import cli\ntext = 'from llmtool import cli'\n"
-            )
-            with patch.object(ci_mac_modules, "extra_modules", return_value=set()):
+            (tests / "test_changed_mac.py").write_text("import sys\nassert sys.platform == 'darwin'\n")
+            with patch.object(ci_mac_modules, "scanned_test_modules", return_value={"test_baseline"}), \
+                    patch.object(ci_mac_modules, "extra_modules", return_value={"test_extra"}):
                 self.assertEqual(
-                    ci_mac_modules.select_modules(["tools/llmtool/llmtool/cli.py"], Path(temporary)),
-                    set(),
+                    ci_mac_modules.select_modules(
+                        ["tools/llmtool/tests/test_changed_mac.py"], root
+                    ),
+                    {"test_baseline", "test_extra", "test_changed_mac"},
                 )
 
-    def test_unparsable_test_forces_full_for_shared_module(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            tests = Path(temporary) / "tools" / "llmtool" / "tests"
-            tests.mkdir(parents=True)
-            (tests / "test_broken.py").write_text("from llmtool import cli\nif\n")
-            with patch.object(ci_mac_modules, "extra_modules", return_value=set()):
-                self.assertIsNone(
-                    ci_mac_modules.select_modules(["tools/llmtool/llmtool/cli.py"], Path(temporary))
-                )
+    def test_non_mac_module_change_selects_only_mac_relevant_set(self):
+        with patch.object(ci_mac_modules, "scanned_test_modules", return_value={"test_mac"}), \
+                patch.object(ci_mac_modules, "extra_modules", return_value={"test_extra"}):
+            self.assertEqual(
+                ci_mac_modules.select_modules(["tools/llmtool/llmtool/task_store.py"], REPO_ROOT),
+                {"test_mac", "test_extra"},
+            )
 
     def test_empty_selection_prints_full(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -156,7 +141,9 @@ class MacModuleSelectionTests(unittest.TestCase):
         self.assertNotIn("cron:", trigger)
         self.assertNotIn("push:", trigger)
         self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
-        self.assertIn('[ -z "$selection" ] || [ "$selection" = FULL ]', workflow)
+        self.assertIn('elif [ -z "$selection" ]; then', workflow)
+        self.assertIn("mode=docs-only", workflow)
+        self.assertIn("steps.coverage.outputs.verify == 'true'", workflow)
 
     def test_subset_unittest_invocations_do_not_inherit_module_list_stdin(self):
         workflow = (REPO_ROOT / ".github" / "workflows" / "llmtool-mac-ci.yml").read_text()

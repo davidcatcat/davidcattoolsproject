@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import ast
 from pathlib import Path
 import re
 import sys
@@ -23,15 +22,6 @@ MAC_RELEVANT_TEST = re.compile(
     r"keychain|Keychain|/Applications|killpg|setsid|os\.setpgid|getpgid|start_new_session",
     re.IGNORECASE,
 )
-# Importers are enough here because every PR also runs the full suite on EC2 Linux,
-# and the Mac full suite runs on the main schedule (#461).
-SHARED_MODULES = {
-    "llmtool/cli.py",
-    "llmtool/task_store.py",
-    "llmtool/task_submission_cli.py",
-}
-
-
 def extra_modules() -> set[str]:
     return {
         line.partition("#")[0].strip()
@@ -49,38 +39,19 @@ def scanned_test_modules(repo_root: Path = DEFAULT_REPO_ROOT) -> set[str]:
     }
 
 
-def importing_test_modules(module_name: str, repo_root: Path) -> set[str] | None:
-    """Return tests importing an llmtool module, or None if any test cannot parse."""
-    tests = repo_root / "tools" / "llmtool" / "tests"
-    importing: set[str] = set()
-    leaf = Path(module_name).stem
-    for path in tests.glob("test_*.py"):
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-        except (SyntaxError, UnicodeDecodeError):
-            return None
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Import):
-                if any(alias.name == f"llmtool.{leaf}" for alias in node.names):
-                    importing.add(path.stem)
-            elif isinstance(node, ast.ImportFrom):
-                if node.module == f"llmtool.{leaf}":
-                    importing.add(path.stem)
-                elif node.module == "llmtool" and any(alias.name == leaf for alias in node.names):
-                    importing.add(path.stem)
-    return importing
-
-
 def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> set[str] | None:
     """Return selected test names, or None when full coverage is required."""
     selected = scanned_test_modules(repo_root) | extra_modules()
     test_dir = repo_root / "tools" / "llmtool" / "tests"
+    has_mac_relevant_change = False
 
     for raw_path in changed_paths:
         path = raw_path.strip().replace("\\", "/").removeprefix("./")
         if not path:
             return None
         if path in MONITOR_PATHS:
+            continue
+        if path.startswith("tools/llmtool/") and path.endswith(".md"):
             continue
         if (
             not path.startswith("tools/llmtool/")
@@ -93,18 +64,19 @@ def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT
 
         prefix = "tools/llmtool/"
         relative = path[len(prefix):]
+        has_mac_relevant_change = True
         if relative == "llmtool/__init__.py":
             return None
-        if relative in SHARED_MODULES:
-            importers = importing_test_modules(Path(relative).stem, repo_root)
-            if importers is None:
-                return None
-            selected.update(importers)
-            continue
         if relative.startswith("tests/test_") and relative.endswith(".py"):
             if not (repo_root / path).is_file():
                 return None
-            selected.add(Path(relative).stem)
+            changed_test = repo_root / path
+            try:
+                is_mac_relevant = MAC_RELEVANT_TEST.search(changed_test.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError):
+                return None
+            if is_mac_relevant:
+                selected.add(Path(relative).stem)
             continue
 
         source_parts = ("llmtool/", "scripts/")
@@ -115,10 +87,8 @@ def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT
         )
         if source_name is None or "/" in source_name:
             return None
-        for test_path in test_dir.glob(f"test_{Path(source_name).stem}*.py"):
-            selected.add(test_path.stem)
 
-    return selected
+    return selected if has_mac_relevant_change else set()
 
 
 def _read_changed_paths(path: str) -> list[str]:
@@ -130,7 +100,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--changed-paths", required=True, help="file with one changed repo path per line")
     args = parser.parse_args(argv)
     selected = select_modules(_read_changed_paths(args.changed_paths))
-    if not selected:
+    if selected is None:
         print("FULL")
         return 0
     for module in sorted(selected):

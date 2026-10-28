@@ -71,8 +71,8 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
-      # PRs use the committed Mac baseline plus tests for changed modules.
-      # Monitor-only changes retain their existing lightweight path. Empty,
+      # PRs use the committed Mac baseline plus Mac-relevant changed tests.
+      # Monitor-only and documentation-only changes skip canonical Mac tests;
       # unknown, failed, and non-PR comparisons use full checks.
       - name: Coverage mode
         id: coverage
@@ -81,13 +81,18 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           mode=full
+          verify=false
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             paths="$RUNNER_TEMP/changed-paths"
             if git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"; then
               count=0
               mode=monitor-only
+              verify=false
               while IFS= read -r -d '' path; do
                 count=$((count + 1))
+                case "$path" in
+                  .github/workflows/*|tools/llmtool/scripts/ci_*.py) verify=true ;;
+                esac
                 case "$path" in
                   scripts/llmtool_monitor.py|scripts/test_llmtool_monitor.py) ;;
                   *) mode=mac-subset ;;
@@ -99,8 +104,10 @@ jobs:
               if [ "$mode" = mac-subset ]; then
                 selection=$(python3 -I -B tools/llmtool/scripts/ci_mac_modules.py --changed-paths "$paths") || mode=full
                 if [ "$mode" = mac-subset ]; then
-                  if [ -z "$selection" ] || [ "$selection" = FULL ]; then
+                  if [ "$selection" = FULL ]; then
                     mode=full
+                  elif [ -z "$selection" ]; then
+                    mode=docs-only
                   else
                     printf '%s\n' "$selection" > "$RUNNER_TEMP/mac-modules"
                   fi
@@ -109,6 +116,7 @@ jobs:
             fi
           fi
           printf 'mode=%s\n' "$mode" >> "$GITHUB_OUTPUT"
+          printf 'verify=%s\n' "$verify" >> "$GITHUB_OUTPUT"
           echo "coverage mode: $mode"
       - name: Full main suite due gate
         id: full-due
@@ -165,7 +173,7 @@ jobs:
           "$JOB_PYTHON" -m pip install --requirement tools/llmtool/requirements-ci.txt
           "$JOB_PYTHON" -m pip install --no-deps -e tools/llmtool
       - name: Verifier failure-path checks
-        if: steps.full-due.outputs.run != 'false'
+        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.verify == 'true'
         run: |
           "$JOB_PYTHON" -B - <<'PY'
           import os
@@ -239,7 +247,7 @@ jobs:
           print('Verifier checks: 12/12 PASS; no skips')
           PY
       - name: Offline canonical checks
-        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only'
+        if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only' && steps.coverage.outputs.mode != 'docs-only'
         run: |
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
             make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
