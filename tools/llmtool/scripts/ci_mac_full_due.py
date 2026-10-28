@@ -1,90 +1,31 @@
 #!/usr/bin/env python3
-"""Decide whether the scheduled full Mac suite needs to run for main."""
+"""Allow a manually dispatched full Mac suite run for main."""
 
 from __future__ import annotations
 
 import argparse
-import json
-import os
-import re
 import sys
-from urllib.request import Request, urlopen
-
-
-WORKFLOW = "llmtool-mac-ci.yml"
-API_ROOT = "https://api.github.com"
-TIMEOUT_SECONDS = 20
-
-
-def latest_successful_sha(repo: str, api_value: str) -> str | None:
-    """Return the newest successful schedule/dispatch head SHA, if available."""
-    url = (
-        f"{API_ROOT}/repos/{repo}/actions/workflows/{WORKFLOW}/runs"
-        "?branch=main&per_page=100"
-    )
-    scheme = "Be" + "arer"
-    auth_value = "%s %s" % (scheme, api_value)
-    auth_key = "Author" + "ization"
-    request = Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            auth_key: auth_value,
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-    )
-    with urlopen(request, timeout=TIMEOUT_SECONDS) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-    return latest_successful_sha_from_payload(payload)
-
-
-def latest_successful_sha_from_payload(payload: object) -> str | None:
-    if not isinstance(payload, dict):
-        raise ValueError("Actions API response is not an object")
-    runs = payload.get("workflow_runs")
-    if not isinstance(runs, list):
-        raise ValueError("Actions API response has no workflow_runs list")
-    candidates = [
-        run for run in runs
-        if isinstance(run, dict)
-        and run.get("event") in {"schedule", "workflow_dispatch"}
-        and run.get("head_branch") == "main"
-        and run.get("conclusion") == "success"
-        and isinstance(run.get("head_sha"), str)
-    ]
-    if not candidates:
-        return None
-    newest = max(candidates, key=lambda run: str(run.get("created_at", "")))
-    return newest["head_sha"]
-
-
-def is_due(
-    repo: str,
-    current_sha: str,
-    api_value: str | None,
-    event: str,
-    fetch_latest=latest_successful_sha,
-) -> bool:
-    if event == "workflow_dispatch":
-        return True
-    if event != "schedule" or not re.fullmatch(r"[0-9a-f]{40}", current_sha):
-        return True
-    if not api_value:
-        return True
-    try:
-        previous_sha = fetch_latest(repo, api_value)
-    except Exception:
-        return True
-    return previous_sha is None or previous_sha != current_sha
+def is_due(event: str) -> bool:
+    """Return whether an event may run the full suite; reject stale triggers."""
+    if event != "workflow_dispatch":
+        raise ValueError(f"unexpected event {event!r}; expected 'workflow_dispatch'")
+    return True
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--repo", required=True, help="owner/repository")
+    parser.add_argument(
+        "--repo", required=True, help="owner/repository (accepted for workflow compatibility)"
+    )
     parser.add_argument("--sha", required=True, help="current main commit SHA")
-    parser.add_argument("--event", required=True, choices=("schedule", "workflow_dispatch"))
+    parser.add_argument(
+        "--event",
+        required=True,
+        choices=("workflow_dispatch",),
+        help="workflow event; only workflow_dispatch is supported",
+    )
     args = parser.parse_args(argv)
-    print("DUE" if is_due(args.repo, args.sha, os.environ.get("GH_API_VALUE"), args.event) else "SKIP")
+    print("DUE" if is_due(args.event) else "SKIP")
     return 0
 
 
