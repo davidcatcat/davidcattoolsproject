@@ -43,6 +43,8 @@ def derive_state(repair_record):
         return 'UNAVAILABLE'
     if state == 'DEVELOPER_OUTPUT_REJECTED':
         return 'OUTPUT_REJECTED'
+    if state == 'DEVELOPER_RESPONDED':
+        return 'RESPONDED'
     if state == 'DEVELOPER_OUTCOME_UNKNOWN':
         execution = developer.get('execution') if type(developer) is dict else None
         if (developer.get('error_code') == 'CODEX_BLOCKED' or
@@ -105,8 +107,17 @@ def decide(record, d6, pr, related):
                         'UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED')):
                 return 'REPAIR_RETRY'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
-                    current_repair.get('repair_state') in ('RUNNING', 'PENDING', 'UNKNOWN')):
+                    current_repair.get('repair_state') in ('RUNNING', 'PENDING')):
                 return 'WAITING_REPAIR'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'UNAVAILABLE'):
+                return 'DEVELOPER_ATTENTION'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'UNKNOWN'):
+                return 'REPAIR_OUTCOME_UNKNOWN'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'RESPONDED'):
+                return 'REPAIR_RESULT_NOT_PUBLISHED'
             return 'REPAIR_REVIEW'
         if outcome == 'REVIEW_PASS':
             completion = record.get('completion')
@@ -297,11 +308,14 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
     for claim in related['repair_claims']:
         if type(claim) is not dict:
             continue
+        repair_record = None
         try:
             repair_record = store.get(claim['repair_task_id'])
             repair_state = derive_state(repair_record)
         except Exception:
-            repair_state = 'UNKNOWN'
+            repair_state = 'UNAVAILABLE'
+        if type(repair_record) is not dict:
+            repair_state = 'UNAVAILABLE'
         repair_claims.append(dict(claim, repair_state=repair_state))
     related['repair_claims'] = repair_claims
     try:
@@ -481,7 +495,16 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
     elif step == 'NEEDS_PUBLISH':
         codes.append('NEEDS_PUBLISH')
     elif step == 'DEVELOPER_ATTENTION':
-        codes.append('DEVELOPER_ATTENTION')
+        active_repair = next((item for item in reversed(related['repair_claims'])
+                              if type(item) is dict and item.get('head_sha') ==
+                              (d6.get('result_head') if type(d6) is dict else None) and
+                              item.get('state') == 'DISPATCHED'), None)
+        if type(active_repair) is dict and active_repair.get('repair_state') == 'UNAVAILABLE':
+            codes.append('REPAIR_TASK_RECORD_UNAVAILABLE')
+        else:
+            codes.append('DEVELOPER_ATTENTION')
+    elif step in ('REPAIR_OUTCOME_UNKNOWN', 'REPAIR_RESULT_NOT_PUBLISHED'):
+        codes.append(step)
     elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR', 'REPAIR_RETRY',
                   'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
         codes.append(step)

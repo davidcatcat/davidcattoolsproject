@@ -73,6 +73,23 @@ class TaskAdvanceTests(unittest.TestCase):
         related['repair_claims'][0]['repair_state'] = 'OUTPUT_REJECTED'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'REPAIR_RETRY')
+        related['repair_claims'][0]['repair_state'] = 'UNKNOWN'
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
+                         'REPAIR_OUTCOME_UNKNOWN')
+        related['repair_claims'][0]['repair_state'] = 'UNAVAILABLE'
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
+                         'DEVELOPER_ATTENTION')
+        related['repair_claims'][0]['repair_state'] = 'RESPONDED'
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
+                         'REPAIR_RESULT_NOT_PUBLISHED')
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(False), PR, related),
+                         'NEEDS_PUBLISH')
+        new_head = 'b' * 40
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]),
+            {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
+             'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
+            {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                         'outcome': 'REVIEW_FAIL'}], 'repair_claims': []}), 'DISPATCH_REVIEW')
 
     def test_repair_record_states_are_derived_for_waiting_and_retry(self):
         expected = (
@@ -82,6 +99,13 @@ class TaskAdvanceTests(unittest.TestCase):
             ({'developer': {'state': 'DEVELOPER_UNAVAILABLE'}}, 'UNAVAILABLE', 'REPAIR_RETRY'),
             ({'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
                             'error_code': 'CODEX_BLOCKED'}}, 'BLOCKED', 'REPAIR_RETRY'),
+            ({'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                            'execution': {'status': 'BLOCKED'}},
+              'error_code': 'CODEX_BLOCKED'}, 'BLOCKED', 'REPAIR_RETRY'),
+            ({'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN'}}, 'UNKNOWN',
+             'REPAIR_OUTCOME_UNKNOWN'),
+            ({'developer': {'state': 'DEVELOPER_RESPONDED'}}, 'RESPONDED',
+             'REPAIR_RESULT_NOT_PUBLISHED'),
             ({'developer': {'state': 'DEVELOPER_OUTPUT_REJECTED'}},
              'OUTPUT_REJECTED', 'REPAIR_RETRY'),
         )
@@ -97,6 +121,58 @@ class TaskAdvanceTests(unittest.TestCase):
                 }
                 self.assertEqual(task_advance.decide(
                     base_record(review_dispatch_claim=[review_claim]), d6(), PR, related), action)
+
+    def test_missing_repair_task_record_is_developer_attention_with_specific_code(self):
+        class Store:
+            record = base_record(
+                review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                        'state': 'DISPATCHED'}],
+                review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
+                                       'repair_task_id': '3' * 32}])
+            def __init__(self, unreadable=False):
+                self.unreadable = unreadable
+            def get(self, task_id):
+                if task_id == '3' * 32:
+                    if self.unreadable:
+                        raise OSError('unreadable')
+                    return None
+                return self.record
+
+        for unreadable in (False, True):
+            with self.subTest(unreadable=unreadable):
+                store = Store(unreadable=unreadable)
+                with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                     patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                     patch.object(task_advance, '_review_outcomes', return_value=[{
+                         'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                         'outcome': 'REVIEW_FAIL'}]):
+                    result = task_advance.advance(task_id=store.record['task_id'], store=store,
+                        pr_number=17, github_get=lambda _path: [])
+                self.assertEqual(result['step'], 'DEVELOPER_ATTENTION')
+                self.assertEqual(result['codes'], ['REPAIR_TASK_RECORD_UNAVAILABLE'])
+
+    def test_nonblocked_unknown_repair_has_specific_actionable_code(self):
+        class Store:
+            record = base_record(
+                review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                        'state': 'DISPATCHED'}],
+                review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
+                                       'repair_task_id': '3' * 32}])
+            def get(self, task_id):
+                if task_id == '3' * 32:
+                    return {'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN'}}
+                return self.record
+
+        store = Store()
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_FAIL'}]):
+            result = task_advance.advance(task_id=store.record['task_id'], store=store,
+                pr_number=17, github_get=lambda _path: [])
+        self.assertEqual(result['step'], 'REPAIR_OUTCOME_UNKNOWN')
+        self.assertEqual(result['codes'], ['REPAIR_OUTCOME_UNKNOWN'])
 
     def test_pass_retries_completion_and_reaches_integration(self):
         claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
@@ -277,7 +353,8 @@ class TaskAdvanceTests(unittest.TestCase):
                     review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
                         'repair_task_id': '3' * 32, 'attempt': 3}],
                     record_sha256='d' * 64)
-                self.repair = {'developer': {'state': 'BLOCKED'}}
+                self.repair = {'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                    'error_code': 'CODEX_BLOCKED', 'execution': {'status': 'BLOCKED'}}}
             def get(self, task_id):
                 return self.repair if task_id == '3' * 32 else self.record
             def compare_and_update(self, _task_id, *, expected, **changes):
