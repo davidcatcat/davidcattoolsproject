@@ -1823,7 +1823,8 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None):
 def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                             contract_digest, executor_identity,
                             executor_session_ref, executor_native_session_id,
-                            reviewer_task_id, common_dir, changed_paths=None):
+                            reviewer_task_id, common_dir, changed_paths=None,
+                            task_record=None):
     """Read a public PR, formal review marker and exact-head required check runs."""
     if (type(pr_number) is not int or not 1 <= pr_number <= 9999999 or
             type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None or
@@ -1885,6 +1886,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             type(comment) is not dict for comment in comments):
         _stop('REVIEW_EVIDENCE_INVALID')
     verdict = None
+    codex_task_record = task_record
+    codex_task_record_loaded = task_record is not None
     for comment in comments:
         login = (comment.get('user') or {}).get('login')
         body = comment.get('body')
@@ -1903,12 +1906,64 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         standard = (marker is not None and status is not None and
                     status.group(1) == marker.group(2) and status.group(2) == result_sha)
         if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
-            continue  # Advisory Codex PASS neither accepts nor supersedes.
+            accepted_codex = False
+            if reviewer.trusted_agent_id == 'codex-reviewer':
+                try:
+                    if not codex_task_record_loaded:
+                        from .task_store import TaskStore
+                        codex_task_record = TaskStore().get(task_id)
+                        codex_task_record_loaded = True
+                    from . import review_result
+                    classified = review_result._comment_verdict(
+                        comment, head=result_sha,
+                        version=int(status.group(3)), task=codex_task_record)
+                    claims = codex_task_record.get('review_dispatch_claim')
+                    if type(claims) is dict:
+                        claims = [claims]
+                    task_binding = (codex_task_record.get('task_binding')
+                                    if type(codex_task_record) is dict else None)
+                    matching_claims = [claim for claim in claims
+                                       if type(claim) is dict and
+                                       claim.get('pr') == pr_number and
+                                       claim.get('head_sha') == result_sha and
+                                       claim.get('reviewer_task') == reviewer_task_id and
+                                       claim.get('version') == int(status.group(3)) and
+                                       claim.get('state') == 'COMPLETED' and
+                                       type(claim.get('review_result')) is dict and
+                                       claim['review_result'].get('task_id') == task_id and
+                                       claim['review_result'].get('run_id') == run_id and
+                                       type(task_binding) is dict and
+                                       claim['review_result'].get('contract_digest') ==
+                                       task_binding.get('contract_digest') and
+                                       claim['review_result'].get('head') == result_sha and
+                                       claim['review_result'].get('verdict') == 'PASS'
+                                       ] if type(claims) is list else []
+                    comment_lines = [line for line in body.splitlines() if line.strip()]
+                    claim_lines = ([line for line in matching_claims[0]['review_result']['review_text'].splitlines()
+                                    if line.strip()]
+                                   if len(matching_claims) == 1 and
+                                   type(matching_claims[0]['review_result'].get('review_text')) is str else None)
+                    accepted_codex = (
+                        type(codex_task_record) is dict and
+                        codex_task_record.get('task_id') == task_id and
+                        codex_task_record.get('run_id') == run_id and
+                        type(classified) is tuple and len(classified) >= 3 and
+                        classified[2] == 'REVIEW_PASS' and
+                        len(matching_claims) == 1 and claim_lines and
+                        claim_lines == comment_lines)
+                except Exception:
+                    accepted_codex = False
+            if not accepted_codex:
+                continue  # Unbound or otherwise unverified Codex PASS stays advisory.
         # Anything else that claims to be a verdict for this HEAD is a
         # disposition; only the exact standard Claude PASS form accepts.
-        accepted = (standard and is_formal_claude_pass(
-            body, task_id=task_id, run_id=run_id, contract_digest=contract_digest,
-            result_sha=result_sha))
+        accepted = (standard and (
+            (marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
+             is_formal_claude_pass(
+                 body, task_id=task_id, run_id=run_id,
+                 contract_digest=contract_digest, result_sha=result_sha)) or
+            (marker.group(1) == 'Codex' and marker.group(2) == 'PASS' and
+             accepted_codex)))
         if type(comment.get('id')) is not int:
             _stop('REVIEW_EVIDENCE_INVALID')
         created = _review_time(comment, 'created_at')
