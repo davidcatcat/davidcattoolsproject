@@ -2,16 +2,14 @@ name: llmtool Mac CI
 
 # Feature branches are tested through their pull request, not again on push:
 # a branch push plus its PR used to run the same commit twice (Issue #99).
-# main gets a scheduled full-suite safety net; workflow_dispatch is the manual
-# check for main. Jobs run on the Owner's Mac as the dedicated non-admin
+# The PM triggers workflow_dispatch after each merge train for main's full
+# suite. Jobs run on the Owner's Mac as the dedicated non-admin
 # account from tools/mac-runner (installed outside the repo, so a PR cannot
 # turn it off); its job-started hook fails any job from a runner running as
 # the Owner, a fork or an untrusted actor. MAC_CI_ENABLED is the kill switch:
 # anything but 'true' skips the job, and a skipped job is NOT_RUN, not PASS.
 # Use workflow_dispatch after re-enabling the switch so the full suite runs.
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   pull_request:
     # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
     paths:
@@ -28,8 +26,8 @@ permissions:
   actions: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 jobs:
   check:
@@ -114,7 +112,7 @@ jobs:
           echo "coverage mode: $mode"
       - name: Full main suite due gate
         id: full-due
-        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        if: github.event_name == 'workflow_dispatch'
         env:
           GH_API_VALUE: ${{ github.token }}
         run: |
