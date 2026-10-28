@@ -18,7 +18,7 @@ from llmtool import task_completion
 from llmtool import task_submission_cli
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import (
-    _record, run_task_codex_delegate, run_task_direct_result_event,
+    run_task_codex_delegate, run_task_direct_result_event,
 )
 
 
@@ -117,17 +117,16 @@ class CodexDelegateTests(unittest.TestCase):
 
     def _task(self):
         request = 'Codex direct fixture task'
-        task = _record(new_id(), new_id(), 'pm-' + new_id(), 'pm-profile', request,
-            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
-            backend='NO_NATIVE_SESSION_ID_EXPOSED',
-            request_sha=hashlib.sha256(request.encode()).hexdigest())
-        task.update(response='PM bounded task.',
-            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
-                              'base_url': None},
-            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
-                'goal': 'Edit src.py.', 'acceptance': ['src.py is changed']})
-        self.store.create(task)
-        return task
+        response = json.dumps({'schema_version': 1, 'summary': 'PM bounded task.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW',
+                'goal': 'Edit src.py.', 'acceptance': ['src.py is changed']}},
+            separators=(',', ':'))
+        return task_submission_cli.run_task_record_pm(
+            Namespace(pm_session_id=None, pm_runtime=None, pm_cwd=None),
+            store=self.store,
+            input_stream=io.StringIO(json.dumps(
+                {'request': request, 'response': response}, separators=(',', ':'))),
+            return_record=True)
 
     def _fake_codex(self, *, ignored=False, bytecode=False, overwrite_ignored=None):
         final = {'status': 'DONE', 'summary': 'updated', 'tests': [],
