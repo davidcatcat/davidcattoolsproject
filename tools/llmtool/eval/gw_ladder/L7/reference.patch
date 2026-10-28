@@ -1,6 +1,6 @@
 --- a/store.py
 +++ b/store.py
-@@ -1,8 +1,8 @@
+@@ -1,11 +1,11 @@
  def latest_entry(entries):
      """Return the most recently appended item.
  
@@ -10,6 +10,9 @@
          return None
 -    return entries[0]
 +    return entries[-1]
+ 
+ 
+ def snapshot_entries(entries):
 --- a/target.py
 +++ b/target.py
 @@ -1,8 +1,7 @@
