@@ -46,7 +46,23 @@ DOUBLE_CLICK_SECONDS = 0.35
 TAB_WIDTH = 4
 CACHE_LINES = 4096        # Wrapped-line cache entries kept before it is cleared.
 COPY_LIMIT_BYTES = 1024 * 1024   # Largest selection handed to the clipboard tool (UTF-8 bytes).
+COPY_SCAN_CHUNK = 65536          # Characters measured at a time while checking that limit.
 _ZWJ = "\u200d"
+
+
+def utf8_size(text, start, end, limit, measure=None):
+    """UTF-8 byte count of ``text[start:end]``, stopping as soon as it exceeds ``limit``.
+
+    Measures bounded chunks, so a huge selection is never copied or encoded whole on
+    the caller's thread; the result is exact when it is at most ``limit``.
+    """
+    measure = measure or (lambda part: len(part.encode("utf-8")))
+    total = 0
+    for position in range(start, end, COPY_SCAN_CHUNK):
+        total += measure(text[position:min(position + COPY_SCAN_CHUNK, end)])
+        if total > limit:
+            break
+    return total
 
 
 def iter_graphemes(line):
@@ -303,11 +319,10 @@ class ConversationView:
         if offset is not None:
             self.head = offset
         self.dragging = False
-        text = self.selected_text()
-        if text:
+        span = self.selected_range()
+        if span:
             self._last_click = None
-            self.copy(text)
-            return text
+            return self.copy_range(*span)
         now = time.monotonic()
         last, self._last_click = self._last_click, (self.anchor, now)
         self.clear_selection()
@@ -331,18 +346,26 @@ class ConversationView:
         self.copy(word)
         return word
 
-    def copy(self, text):
-        """Hand ``text`` to the clipboard tool on a worker thread; False if over the limit.
+    def copy_range(self, start, end):
+        """Copy ``text[start:end]``: the selected text when accepted, '' when over the limit.
 
-        The UI loop never waits for pbcopy; ``status()`` says 複製中… meanwhile and
-        ``wait_copy()`` joins it (tests). A selection over COPY_LIMIT_BYTES is refused
-        and the status bar says so.
+        The byte limit is checked chunk by chunk first (``utf8_size``), so an oversized
+        selection is refused without building or encoding it on the UI thread.
         """
-        size = len(text.encode("utf-8"))
-        if size > COPY_LIMIT_BYTES:
-            self.copied, self.copy_failed = (len(text), time.monotonic()), True
-            self.copy_error = "選取 %d KB 超過複製上限 %d KB" % (size // 1024, COPY_LIMIT_BYTES // 1024)
-            return False
+        if utf8_size(self.text, start, end, COPY_LIMIT_BYTES) > COPY_LIMIT_BYTES:
+            self.copied, self.copy_failed = (end - start, time.monotonic()), True
+            self.copy_error = "選取超過複製上限 %d KB" % (COPY_LIMIT_BYTES // 1024)
+            return ""
+        text = self.text[start:end]
+        self.copy(text)
+        return text
+
+    def copy(self, text):
+        """Hand ``text`` (already within the limit) to the clipboard tool on a worker thread.
+
+        The UI loop never waits for pbcopy: encoding happens in the worker, ``status()``
+        says 複製中… meanwhile and ``wait_copy()`` joins it (tests).
+        """
         copier = self._copier or copy_to_clipboard
 
         def run():
@@ -369,10 +392,10 @@ class ConversationView:
         return not self.copy_pending()
 
     def copy_selection(self):
-        text = self.selected_text()
-        if text:
-            self.copy(text)
-        return bool(text)
+        span = self.selected_range()
+        if span:
+            self.copy_range(*span)
+        return bool(span)
 
     # -- status ------------------------------------------------------------------------
     def status(self):

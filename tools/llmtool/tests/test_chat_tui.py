@@ -3148,14 +3148,43 @@ class ConversationViewTests(unittest.TestCase):
             view.set_text('中文' * 10)
             view.layout(20, 2)
             view.begin_drag(0)
-            self.assertEqual(view.end_drag(4), '中文中文')   # 12 UTF-8 bytes > 8: refused
+            self.assertEqual(view.end_drag(4), '')           # 12 UTF-8 bytes > 8: refused
             self.assertEqual(calls, [])
             self.assertTrue(view.copy_failed)
-            self.assertEqual(view.status(), '選取 0 KB 超過複製上限 0 KB')
+            self.assertEqual(view.selected_range(), (0, 4))   # still highlighted
+            self.assertEqual(view.status(), '選取超過複製上限 0 KB')
             view.begin_drag(0)
             self.assertEqual(view.end_drag(2), '中文')       # 6 bytes: copied
             self.assertTrue(view.wait_copy())
             self.assertEqual(calls, ['中文'])
+
+    def test_oversized_selection_is_refused_without_measuring_or_building_it_whole(self):
+        # Codex review v2: the limit check must not encode (or slice) the whole selection on
+        # the UI thread. Measured chunks are bounded and the scan stops at the first excess.
+        text = '中文abc' * 400000                              # 2 M chars, ~3.2 MB of UTF-8
+        measured = []
+
+        def measure(part):
+            measured.append(len(part))
+            return len(part.encode('utf-8'))
+        size = chat_tui_view.utf8_size(text, 0, len(text), 1024 * 1024, measure=measure)
+        self.assertGreater(size, 1024 * 1024)
+        self.assertLessEqual(len(measured), 1024 * 1024 // chat_tui_view.COPY_SCAN_CHUNK + 1)
+        self.assertTrue(all(n <= chat_tui_view.COPY_SCAN_CHUNK for n in measured))
+        self.assertEqual(chat_tui_view.utf8_size('中文abc', 0, 5, 100), 9)   # exact under the limit
+        self.assertEqual(chat_tui_view.utf8_size(text, 10, 10, 100), 0)
+        calls = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: calls.append(t) or True)
+        view.set_text(text)
+        view.layout(80, 10)
+        view.begin_drag(0)
+        with patch('llmtool.chat_tui_view.utf8_size', wraps=chat_tui_view.utf8_size) as sized:
+            self.assertEqual(view.end_drag(len(text)), '')
+            sized.assert_called_once_with(text, 0, len(text), chat_tui_view.COPY_LIMIT_BYTES)
+        self.assertEqual(calls, [])
+        self.assertIsNone(view._copy_thread)
+        self.assertEqual(view.status(), '選取超過複製上限 1024 KB')
+        self.assertEqual(view.selected_range(), (0, len(text)))
 
     def test_wrapping_and_clicks_keep_grapheme_clusters_whole(self):
         family, flag, accented, heart = ('\U0001F468\u200d\U0001F469\u200d\U0001F467',

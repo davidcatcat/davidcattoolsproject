@@ -172,3 +172,7 @@ Owner 步驟（Terminal.app 2.14，再在 Warp 重做一次）：
    PTY：pyte 無法模擬 ZWJ/VS16（畫面出現錯位），故改由真實 `llmtool chat --tui` 程序在 80/73/45 欄的 PTY 中轉存面板實際排版列（`pty_emoji2.py`）：三種寬度各 132/134/158 列，含叢集的列 21/14/20，**拆開的叢集 0，超寬的列 0**。
 
 `tests.test_chat_tui`：151/151 PASS。
+
+## 12. Codex Review v2（6a5524a）P2 的處理
+
+`copy()` 曾在 UI 執行緒 `len(text.encode())` 整段編碼後才比上限。修法：`utf8_size(text, start, end, limit)` 以 `COPY_SCAN_CHUNK`（65536 字）分段量 UTF-8 位元組、一超過上限即停；`end_drag`/`copy_selection` 改走 `copy_range(start, end)`：先以 range 量大小，超限直接拒絕（不建立選取字串、不編碼），狀態列 `選取超過複製上限 1024 KB`，選取維持反白；未超限才切出字串並交給工作執行緒（編碼在工作執行緒內）。測試 `test_oversized_selection_is_refused_without_measuring_or_building_it_whole`：2M 字（約 3.2 MB）的選取只量 ≤ 17 個 ≤ 65536 字的區塊即停、copier 未被呼叫、沒有工作執行緒；`utf8_size` 在上限內為精確值。`tests.test_chat_tui` 152/152 PASS。
