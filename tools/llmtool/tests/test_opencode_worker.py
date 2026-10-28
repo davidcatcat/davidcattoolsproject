@@ -24,6 +24,7 @@ _LIBC_WAITID = None
 _WEXITED = getattr(os, 'WEXITED', 4)
 _WNOHANG = getattr(os, 'WNOHANG', 1)
 _WNOWAIT = getattr(os, 'WNOWAIT', 32)
+LOAD_TOLERANT_BUDGET = RunBudget(1, 8, 0, 15000, 100, 100)
 
 
 def _test_libc_waitid():
@@ -666,7 +667,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                           ('missing-cache','OPENCODE_USAGE_UNKNOWN'),
                           ('nonzero-cost','OPENCODE_COST_UNKNOWN')):
             with self.subTest(mode=mode):
-                result=w.run_worker(self.job(mode),Host())
+                result=w.run_worker(self.job(mode,budget=LOAD_TOLERANT_BUDGET),Host())
                 self.assertEqual(result.code,code,result)
                 self.assertIsNone(result.content)
                 self.assertTrue(result.cleanup_confirmed)
