@@ -427,9 +427,9 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(direct_callback['state'], 'PM_EVIDENCE_READY',
                          direct_callback['missing_gates'])
         self.assertEqual(direct_callback['missing_gates'], [])
-        self.assertEqual(direct_callback['evidence']['source_sha'], self.source_sha)
+        self.assertEqual(direct_callback['evidence']['source_sha'], dispatch_source)
         self.assertEqual(direct_callback['evidence']['result_head'], result_head)
-        self.assertEqual(direct_callback['evidence']['result']['source_sha'], self.source_sha)
+        self.assertEqual(direct_callback['evidence']['result']['source_sha'], dispatch_source)
         self.assertEqual(direct_callback['evidence']['result']['changed_paths'], ['src.py'])
         self.assertNotIn('D6_TASK_BINDING_MISMATCH', direct_callback['missing_gates'])
         callback.assert_called_once()
