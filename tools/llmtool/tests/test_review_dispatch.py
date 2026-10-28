@@ -47,7 +47,7 @@ class ReviewDispatchTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def invoke(self, *, create=None, preflight=None, policy=True):
+    def invoke(self, *, create=None, preflight=None, policy=True, codex_runner=None):
         create = create or (lambda **kw: self.created.append(kw))
         send = lambda **kw: (self.sent.append(kw) or 'native-session')
         bind = lambda **kw: self.bound.append(kw)
@@ -58,7 +58,8 @@ class ReviewDispatchTests(unittest.TestCase):
             return review_dispatch.dispatch_review(
                 store=self.store, task_id=TASK, executor_task='executor-d6',
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
-                bind_session=bind, prompt_renderer=lambda *_: 'bound prompt')
+                bind_session=bind, prompt_renderer=lambda *_: 'bound prompt',
+                codex_runner=codex_runner)
 
     def test_happy_path_claims_creates_dispatches_and_binds(self):
         result = self.invoke()
@@ -162,11 +163,99 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['state'], 'UNKNOWN')
 
-    def test_codex_reviewer_route_is_blocked(self):
-        with self.assertRaises(LLMToolError) as raised:
-            self.invoke(preflight=LLMToolError('REVIEWER_ROUTE_UNIMPLEMENTED'))
-        self.assertEqual(self.created, [])
+    def test_claude_authored_task_dispatches_codex_in_reviewer_d6(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'r' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        reviewer = SimpleNamespace(root='/repo/reviewer-d6')
+        create_args, runner_args = [], []
+        def create(**kwargs):
+            create_args.append(kwargs)
+        def run_codex(**kwargs):
+            runner_args.append(kwargs)
+            return '0123456789abcdef'
+        with patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                          return_value=reviewer):
+            result = self.invoke(
+                preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
+                           (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
+                create=create, codex_runner=run_codex)
+        self.assertEqual(result['state'], 'DISPATCHED')
+        self.assertEqual(create_args[0]['reviewer_key'], 'codex-reviewer')
+        self.assertEqual(runner_args[0]['reviewer_root'], '/repo/reviewer-d6')
+        self.assertEqual(runner_args[0]['head'], HEAD)
         self.assertEqual(self.sent, [])
+        self.assertEqual(self.bound[0]['session_id'], '0123456789abcdef')
+
+    def test_codex_argv_is_read_only_and_uses_required_profile_and_d6(self):
+        verdict = {'task_id': TASK, 'run_id': 'r' * 32,
+                   'contract_digest': 'd' * 64, 'head': HEAD, 'verdict': 'PASS'}
+        events = [
+            {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
+            {'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': json.dumps(verdict)}},
+        ]
+        result = SimpleNamespace(returncode=0, stdout='\n'.join(
+            json.dumps(event) for event in events).encode('utf-8'))
+        with patch.object(review_dispatch.shutil, 'which', return_value='/bin/codex'), \
+                patch.object(review_dispatch.subprocess, 'run', return_value=result) as run:
+            session_id = review_dispatch._dispatch_codex(
+                reviewer_root='/repo/reviewer-d6', prompt='review prompt',
+                task={'task_id': TASK, 'run_id': 'r' * 32,
+                      'task_binding': {'contract_digest': 'd' * 64}}, head=HEAD)
+        argv = run.call_args.args[0]
+        self.assertIn('-s', argv)
+        self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
+        self.assertEqual(argv[argv.index('--model') + 1], 'gpt-6-luna')
+        self.assertIn('model_reasoning_effort=high', argv)
+        self.assertEqual(argv[argv.index('--cd') + 1], '/repo/reviewer-d6')
+        self.assertEqual(run.call_args.kwargs['cwd'], '/repo/reviewer-d6')
+        self.assertEqual(run.call_args.kwargs['timeout'], 600)
+        self.assertEqual(session_id, '0123456789abcdef')
+
+    def test_malformed_or_misbinding_codex_verdict_is_refused(self):
+        raw = (b'{"type":"item.completed","item":{"type":"agent_message",'
+               b'"text":"{\\"task_id\\":\\"wrong\\",\\"run_id\\":\\"run\\",'
+               b'\\"contract_digest\\":\\"digest\\",\\"head\\":\\"head\\",'
+               b'\\"verdict\\":\\"PASS\\"}"}}')
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                raw, task_id=TASK, run_id='run', contract_digest='digest', head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+
+    def test_reviewer_selection_is_cross_family_and_unknown_is_refused(self):
+        executor = SimpleNamespace(
+            result_sha=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task')
+        snapshot = SimpleNamespace(
+            head=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task',
+            clean=True)
+        task = {
+            'task_id': TASK, 'run_id': 'r' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+            'developer': {'provider_profile': 'claude'},
+            'completion': {'executor_task_id': 'executor-d6',
+                           'evidence': {'common_dir': '/repo/.git'}},
+        }
+        pull = {'number': 42, 'head': {'sha': HEAD}, 'base': {'sha': 'c' * 40}}
+        with patch.object(review_dispatch.task_completion, 'validate_task_binding'), \
+                patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                             return_value=executor), \
+                patch.object(review_dispatch.task_completion, 'collect_git_snapshot',
+                             return_value=snapshot), \
+                patch.object(review_dispatch.task_completion, '_github_get',
+                             return_value=pull):
+            self.assertEqual(review_dispatch._preflight(
+                self.store, TASK, 'executor-d6', 42, 1, task=task)[4], 'codex-reviewer')
+            task['developer']['provider_profile'] = 'codex'
+            self.assertEqual(review_dispatch._preflight(
+                self.store, TASK, 'executor-d6', 42, 1, task=task)[4], 'claude-reviewer')
+            task['developer']['provider_profile'] = 'opencode'
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch._preflight(
+                    self.store, TASK, 'executor-d6', 42, 1, task=task)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEWER_FAMILY_UNSUPPORTED')
 
     def test_paused_worker_policy_refuses_before_claim_or_side_effect(self):
         with self.assertRaises(LLMToolError):

@@ -15,6 +15,21 @@ from .errors import LLMToolError
 from . import task_completion, worker_dispatch
 
 
+_CODEX_REVIEW_MODEL = 'gpt-6-luna'
+_CODEX_REVIEW_EFFORT = 'high'
+_CODEX_REVIEW_TIMEOUT = 600
+_CODEX_REVIEW_MAX_OUTPUT = 1024 * 1024
+
+
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate key')
+        result[key] = value
+    return result
+
+
 def _refuse(code, message='Reviewer dispatch refused; details omitted'):
     error = LLMToolError(message)
     error.review_dispatch_code = code
@@ -108,20 +123,21 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
     developer = task.get('developer')
     family = developer.get('provider_profile') if type(developer) is dict else None
-    if family in ('codex', 'opencode', 'company-gw', 'agy'):
+    if family in ('codex', 'company-gw', 'gw'):
         reviewer_key = 'claude-reviewer'
     elif family == 'claude':
-        _refuse('REVIEWER_ROUTE_UNIMPLEMENTED')
+        reviewer_key = 'codex-reviewer'
     else:
         _refuse('REVIEWER_FAMILY_UNSUPPORTED')
     return task, executor, head, base['sha'], reviewer_key
 
 
-def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login):
+def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
+               reviewer_key='claude-reviewer'):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
     lease = f'read-only formal review of executor task {executor_task} at {base_sha}'
     args = [sys.executable, '-B', str(lifecycle), '--task-id', task_id,
-            '--agent-id', 'claude-reviewer', '--session-ref', 'pending-' + task_id,
+            '--agent-id', reviewer_key, '--session-ref', 'pending-' + task_id,
             '--lease-ref', lease, '--branch', 'llmtool/reviewer-' + task_id,
             '--base-sha', base_sha, '--github-login', github_login,
             '--repo-root', str(repo_root)]
@@ -130,6 +146,78 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login):
                             check=False, timeout=180)
     if result.returncode:
         raise RuntimeError('REVIEWER_D6_CREATE_FAILED')
+
+
+def _codex_argv(executable, reviewer_root):
+    return [executable, 'exec', '--color', 'never', '--json', '--model',
+            _CODEX_REVIEW_MODEL, '-c', 'model_reasoning_effort=' + _CODEX_REVIEW_EFFORT,
+            '-s', 'read-only', '--cd', str(reviewer_root), '-']
+
+
+def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head):
+    """Accept one exact, binding-complete Codex review object from JSONL."""
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
+        _refuse('REVIEW_NOT_POSTED')
+    final = None
+    thread_id = None
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line, object_pairs_hook=_unique_json_object)
+            if type(event) is dict and event.get('type') == 'thread.started':
+                current = event.get('thread_id')
+                if (thread_id is not None or type(current) is not str or
+                        re.fullmatch(r'[0-9a-fA-F-]{16,64}', current) is None):
+                    _refuse('REVIEW_NOT_POSTED')
+                thread_id = current
+            elif type(event) is dict and event.get('type') == 'item.completed':
+                item = event.get('item')
+                if type(item) is dict and item.get('type') == 'agent_message':
+                    if type(item.get('text')) is not str or final is not None:
+                        _refuse('REVIEW_NOT_POSTED')
+                    final = item['text']
+    except (UnicodeError, ValueError, RecursionError):
+        _refuse('REVIEW_NOT_POSTED')
+    if final is None or thread_id is None:
+        _refuse('REVIEW_NOT_POSTED')
+    try:
+        verdict = json.loads(final, object_pairs_hook=_unique_json_object)
+    except (ValueError, TypeError, RecursionError):
+        _refuse('REVIEW_NOT_POSTED')
+    expected = {'task_id', 'run_id', 'contract_digest', 'head', 'verdict'}
+    if (type(verdict) is not dict or set(verdict) != expected or
+            verdict.get('task_id') != task_id or verdict.get('run_id') != run_id or
+            verdict.get('contract_digest') != contract_digest or
+            verdict.get('head') != head or
+            verdict.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED')):
+        _refuse('REVIEW_NOT_POSTED')
+    return thread_id
+
+
+def _dispatch_codex(*, reviewer_root, prompt, task, head):
+    executable = shutil.which('codex')
+    if executable is None:
+        _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
+    try:
+        result = subprocess.run(
+            _codex_argv(executable, reviewer_root), cwd=str(reviewer_root),
+            input=prompt.encode('utf-8'), stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=False,
+            timeout=_CODEX_REVIEW_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _refuse('REVIEWER_TIMEOUT')
+    except OSError:
+        _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
+    if result.returncode:
+        _refuse('REVIEW_NOT_POSTED')
+    binding = task.get('task_binding')
+    if type(binding) is not dict:
+        _refuse('REVIEW_PROMPT_BINDING_MISSING')
+    return _parse_codex_review(
+        result.stdout, task_id=task.get('task_id'), run_id=task.get('run_id'),
+        contract_digest=binding.get('contract_digest'),
+        head=head)
 
 
 def _dispatch(*, task_id, prompt, repo_root, env):
@@ -165,7 +253,7 @@ def _bind_d6(task_id, session_id, repo_root):
 
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
-                    prompt_renderer=None):
+                    prompt_renderer=None, codex_runner=None):
     """Claim once, create a read-only Reviewer D6 and bind its dispatched session."""
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
@@ -218,7 +306,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             _refuse(gate.reason_code)
         github_login = _resolve_github_login()
         create(task_id=reviewer_task, base_sha=head, repo_root=repo_root,
-               executor_task=executor_task, github_login=github_login)
+               executor_task=executor_task, github_login=github_login,
+               reviewer_key=reviewer_key)
         if prompt_renderer is None:
             from . import task_submission_cli
             args = type('ReviewArgs', (), {'task_id': task_id, 'executor_task': executor_task,
@@ -229,6 +318,18 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             prompt = output.getvalue()
         else:
             prompt = prompt_renderer(task_id, executor_task, reviewer_task, pr_number, version)
+        if reviewer_key == 'codex-reviewer':
+            binding = task.get('task_binding')
+            if type(binding) is not dict:
+                _refuse('REVIEW_PROMPT_BINDING_MISSING')
+            prompt += (
+                '\n\nReturn the final review as one JSON object with exactly these keys: '
+                'task_id, run_id, contract_digest, head, verdict. Bind each value to the '
+                'Task record and the exact reviewed head. verdict must be PASS, FIX, FAIL, '
+                'or BLOCKED. Do not add other keys or surrounding text.\n' +
+                json.dumps({'task_id': task_id, 'run_id': task.get('run_id'),
+                            'contract_digest': binding.get('contract_digest'), 'head': head},
+                           sort_keys=True, separators=(',', ':')))
         # Detect a moved PR/head before starting the Reviewer session.
         _, _, current_head, _, _ = _preflight(store, task_id, executor_task, pr_number, version)
         if current_head != head:
@@ -239,9 +340,20 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         env = os.environ.copy()
         if not config_dir:
             env.pop('CLAUDE_CONFIG_DIR', None)
-        session_id = send(task_id=reviewer_task, prompt=prompt,
-                          repo_root=repo_root, env=env)
-        bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
+        if reviewer_key == 'codex-reviewer':
+            reviewer = task_completion.read_d6_registration(
+                reviewer_task, executor.common_dir,
+                allowed_states=task_completion._D6_EVIDENCE_STATES)
+            run_codex = codex_runner or _dispatch_codex
+            session_id = run_codex(reviewer_root=reviewer.root, prompt=prompt,
+                                   task=task, head=head)
+            if type(session_id) is not str or not session_id:
+                _refuse('REVIEW_NOT_POSTED')
+            bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
+        else:
+            session_id = send(task_id=reviewer_task, prompt=prompt,
+                              repo_root=repo_root, env=env)
+            bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
         dispatched = dict(claim, state='DISPATCHED', reviewer_task=reviewer_task,
                           native_session_id=session_id, updated_at=_now())
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
