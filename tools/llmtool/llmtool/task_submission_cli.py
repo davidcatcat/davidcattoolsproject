@@ -2250,7 +2250,10 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         boundary_impl = for_platform(denied_dirs=route_config['denied_dirs'])
         def route_gate():
             nonlocal owner_gate_denied
-            validate_binding()
+            try:
+                validate_binding()
+            except LLMToolError:
+                raise RouteError('AGY_D6_BINDING_CHANGED') from None
             decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
             if decision.allowed is True and decision.reason_code == 'OWNER_ASSIGNMENT_MATCHED':
                 return decision
@@ -2290,15 +2293,16 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         if any(path not in write_paths for path in changed_paths):
             raise RouteError('AGY_WRITE_SCOPE_VIOLATION')
         artifact = raw.decode('utf-8', 'strict')
+        usage = _normalize_agy_usage(result.usage)
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             error_code=None, execution={
                 'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
-                'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+                'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None}, usage=result.usage)
+                'source_manifest_sha256': None}, usage=usage)
     except RouteError as exc:
         error_code = ('AGY_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='agy-cli', model=model,
@@ -2319,11 +2323,33 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         store.update(task['task_id'], developer=developer)
         _print(_task_view(store.get(task['task_id'])))
         return 1
-    saved = store.update(task['task_id'], developer=developer, completion=completion)
+    try:
+        saved = store.update(task['task_id'], developer=developer, completion=completion)
+    except Exception:
+        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
+            artifact_sha256=None, error_code='AGY_RESULT_PERSISTENCE_REJECTED',
+            execution={**developer['execution'], 'status': 'UNKNOWN',
+                       'usage_source': 'UNKNOWN'}, usage=None)
+        try:
+            saved = store.update(task['task_id'], developer=developer, completion=completion)
+        except Exception:
+            raise LLMToolError('AGY result was observed but could not be persisted') from None
     if developer['state'] == 'DEVELOPER_RESPONDED':
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     _print(_task_view(saved))
     return 1
+
+
+def _normalize_agy_usage(value):
+    """Keep only the token fields accepted by TaskStore; unknown shapes stay unknown."""
+    fields = {'prompt_tokens', 'completion_tokens', 'total_tokens',
+              'cached_prompt_tokens', 'reasoning_tokens', 'tool_calls'}
+    if (type(value) is not dict or not {'prompt_tokens', 'completion_tokens',
+                                        'total_tokens'}.issubset(value) or
+            not set(value).issubset(fields) or
+            any(type(count) is not int or count < 0 for count in value.values())):
+        return None
+    return dict(value)
 
 
 def run_task_codex_delegate(args, *, store):

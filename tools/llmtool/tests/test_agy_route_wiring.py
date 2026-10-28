@@ -12,7 +12,8 @@ from llmtool.errors import LLMToolError
 
 class AgyRouteWiringTests(unittest.TestCase):
     def _run_agy_delegate(self, route_error=None, *, diff_bytes=b'diff --git a/src.py b/src.py\n',
-                          decisions=None, repair_packet=None):
+                          decisions=None, repair_packet=None, usage=None,
+                          binding_changes=False, fail_success_persist=False):
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
@@ -37,6 +38,9 @@ class AgyRouteWiringTests(unittest.TestCase):
                 return dict(self.task)
 
             def update(self, _task_id, **updates):
+                if (fail_success_persist and
+                        updates.get('developer', {}).get('state') == 'DEVELOPER_RESPONDED'):
+                    raise RuntimeError('simulated persistence rejection')
                 self.task.update(updates)
                 return dict(self.task)
 
@@ -47,12 +51,16 @@ class AgyRouteWiringTests(unittest.TestCase):
             common_dir=snapshot.common_dir, branch=snapshot.branch, result_sha=snapshot.head,
             trusted_agent_id='codex', session_ref='session-ref', native_session_id=None)
         callback = {'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id}
-        usage = {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
+        usage = ({'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
+                 if usage is None else usage)
         result = SimpleNamespace(session_id='conversation_12345678', exit_code=0,
             stdout_sha256='e' * 64, elapsed_ms=42, cleanup_status='CONFIRMED', usage=usage)
         allowed = SimpleNamespace(allowed=True, reason_code='OWNER_ASSIGNMENT_MATCHED')
         denied = SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_MISMATCH')
         gate_decisions = iter(decisions or (allowed, allowed))
+        binding_results = iter(((registration, snapshot), (registration, snapshot),
+                                (SimpleNamespace(**{**registration.__dict__,
+                                                    'result_sha': 'f' * 40}), snapshot)))
         inbox_events = []
         prompts = []
 
@@ -86,7 +94,9 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.task_completion, 'validate_task_binding'), \
              patch.object(task_submission_cli.task_completion, 'collect_git_snapshot', return_value=snapshot), \
              patch.object(task_submission_cli.task_completion, 'bind_executor_task',
-                          return_value=(registration, snapshot)), \
+                          side_effect=(lambda *_args, **_kwargs:
+                              next(binding_results) if binding_changes else
+                              (registration, snapshot))), \
              patch.object(task_submission_cli.task_completion, 'read_d6_registration',
                           return_value=registration), \
              patch.object(task_submission_cli.task_completion, '_worktree_diff',
@@ -141,7 +151,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             'developer': {'provider_profile': 'agy'},
         }
         executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git',
-                                   result_sha='d' * 40)
+                                   branch='task-branch', result_sha='d' * 40)
         snapshot = SimpleNamespace(clean=True, head='d' * 40, root='/repo/worktree',
                                    common_dir='/repo/.git', branch='task-branch')
         pull = {'number': 7, 'head': {'sha': 'd' * 40}, 'base': {'sha': 'e' * 40}}
@@ -161,6 +171,30 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(task['developer']['direct_result_callback']['state'], 'WAITING_EXECUTOR')
         self.assertEqual(inbox_events, [{'task_id': 'a' * 32,
                                          'executor_task_id': 'executor-d6'}])
+
+    def test_agy_unknown_usage_is_not_persisted_as_cli_reported(self):
+        status, task, _inbox_events, _prompts = self._run_agy_delegate(
+            usage={'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5,
+                    'vendor_metric': 99})
+        self.assertEqual(status, 0)
+        self.assertIsNone(task['developer']['usage'])
+        self.assertEqual(task['developer']['execution']['usage_source'], 'UNKNOWN')
+
+    def test_agy_success_persistence_rejection_is_recorded_unknown(self):
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            fail_success_persist=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(task['developer']['error_code'],
+                         'AGY_RESULT_PERSISTENCE_REJECTED')
+        self.assertIsNone(task['developer']['artifact'])
+        self.assertEqual(inbox_events, [])
+
+    def test_agy_route_gate_binding_failure_has_binding_error(self):
+        status, task, inbox_events, _prompts = self._run_agy_delegate(binding_changes=True)
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['error_code'], 'AGY_D6_BINDING_CHANGED')
+        self.assertEqual(inbox_events, [])
 
     def test_agy_isolation_failure_records_specific_boundary_reason(self):
         status, task, inbox_events, _prompts = self._run_agy_delegate(
