@@ -67,8 +67,10 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(result['native_session_id'], 'native-session')
         self.assertEqual(len(self.created), 1)
         self.assertEqual(self.created[0]['github_login'], 'reviewer-user')
+        self.assertTrue(self.created[0]['task_id'].startswith('reviewer-'))
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(len(self.bound), 1)
+        self.assertEqual(self.bound[0]['session_id'], 'native-session')
 
     def test_replay_after_restart_returns_claim_without_redispatch(self):
         first = self.invoke()

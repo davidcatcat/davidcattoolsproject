@@ -780,6 +780,9 @@ def bind_native_session(*, task_id, native_session_id, canonical_root,
             _stop("D6_BIND_NATIVE_SESSION_ALREADY_SET")
         updated = dict(record)
         updated["native_session_id"] = native_session_id
+        if (type(updated.get("session_ref")) is str and
+                updated["session_ref"].startswith("pending-")):
+            updated["session_ref"] = native_session_id
         _replace_record(record_path, updated)
         print("D6_NATIVE_SESSION_BOUND task_id=" + task_id)
         return native_session_id
