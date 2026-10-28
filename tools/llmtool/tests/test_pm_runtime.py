@@ -79,10 +79,10 @@ class PMRuntimeTests(unittest.TestCase):
         self.root = Path(self.temp.name) / 'state'
         pm_runtime._ensure_state_dir(self.root)
         self.cwd = self.temp.name
-        self.observe = patch.object(pm_runtime.active_pm_inbox,
-                                    'observe_claude_session', return_value=self.cwd)
-        self.observe.start()
-        self.addCleanup(self.observe.stop)
+        self.observe_patcher = patch.object(pm_runtime.active_pm_inbox,
+                                            'observe_claude_session', return_value=self.cwd)
+        self.observe = self.observe_patcher.start()
+        self.addCleanup(self.observe_patcher.stop)
         pm_runtime._write_json_atomic(self.root, pm_runtime._binding_path(self.root, SESSION), {
             'runtime': 'claude-code', 'native_session_id': SESSION, 'cwd': self.cwd,
             'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1),
@@ -244,21 +244,6 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertFalse(binding['session_started'])
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
-        class RealCLIShapeFake:
-            def __init__(self, argv):
-                self.argv = argv
-                self.stdin = None if '-p' not in argv else io.BytesIO()
-                self.error = ('Error: Input must be provided either through stdin or as a '
-                              'prompt argument when using --print')
-
-            def wait(self, timeout=None):
-                return 1 if self.stdin is None else 0
-
-        legacy = RealCLIShapeFake(['claude', '--session-id', SESSION])
-        self.assertIsNone(legacy.stdin)
-        self.assertEqual(legacy.wait(), 1)
-        self.assertIn('Input must be provided either through stdin', legacy.error)
-
     def test_completed_first_turn_marks_binding_for_resume_on_next_open(self):
         process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
         runtime = self.runtime(process, clock=time.time)
@@ -271,7 +256,7 @@ class PMRuntimeTests(unittest.TestCase):
             SESSION, self.cwd, {'HOME': self.temp.name})
         transcript.parent.mkdir(parents=True, exist_ok=True)
         transcript.write_text('{}', encoding='utf-8')
-        self.observe.stop()
+        self.observe_patcher.stop()
 
         later = self.runtime(FakeProcess(), clock=time.time)
         later.open()
@@ -336,7 +321,7 @@ class PMRuntimeTests(unittest.TestCase):
 
     def test_open_refuses_non_dedicated_session(self):
         (self.root / (SESSION + '.binding.json')).unlink()
-        self.observe.stop()
+        self.observe_patcher.stop()
         with self.assertRaises(LLMToolError) as raised:
             self.runtime().open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')

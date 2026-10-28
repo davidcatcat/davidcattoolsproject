@@ -2130,10 +2130,10 @@ class PMConversationTests(BoundedPMTest):
         from llmtool import pm_runtime
         self.pm_runtime = pm_runtime
         self.state = self.temp_root.resolve() / 'pm-state'
-        self.observe = patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
-                                    side_effect=lambda session, cwd, environ=None: cwd)
-        self.observe.start()
-        self.addCleanup(self.observe.stop)
+        self.observe_patcher = patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
+                                            side_effect=lambda session, cwd, environ=None: cwd)
+        self.observe = self.observe_patcher.start()
+        self.addCleanup(self.observe_patcher.stop)
         self.turns = [_full_turn()]
         test = self
 
@@ -2419,8 +2419,9 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
                             self.connect(), self.connected])
         created = self.api.current_binding()['native_session_id']
-        self.assertIn('Dedicated PM session ' + created + ' created by pm_runtime', ui.conversation.text)
-        self.assertIn('the TUI has not verified that session', ui.conversation.text)
+        self.assertIn('Dedicated PM session ' + created + ' dedicated binding created',
+                      ui.conversation.text)
+        self.assertIn('the session starts on the first message', ui.conversation.text)
         self.assertEqual(ui.pm_target[0], created)
         argv = self.fakes[-1].argv
         self.assertEqual(argv[argv.index('--session-id') + 1], created)
@@ -2457,6 +2458,13 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('  · tool Read: done', text)
         self.assertNotIn('file content', text)
 
+    def test_fresh_binding_connects_without_transcript(self):
+        ui, _ = self.drive([self.connect(), self.connected])
+        self.assertTrue(ui.pm_mode)
+        self.assertFalse(self.observe.called)
+        self.assertFalse(self.binding['session_started'])
+        self.assertIn('--session-id', self.fakes[0].argv)
+
     def test_same_send_key_is_replayed_not_resent(self):
         fixed = Mock(hex='k' * 32)
         self.turns = [[_delta('first answer '), _result('first answer')], [_result('never')]]
@@ -2484,7 +2492,11 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(self.fakes[0].users(), [])
 
     def test_connect_errors_show_code_and_recovery(self):
-        self.observe.stop()
+        binding = self.pm_runtime.current_binding(self.session_id, state_root=self.state)
+        binding['session_started'] = True
+        self.pm_runtime._write_json_atomic(
+            self.state, self.pm_runtime._binding_path(self.state, self.session_id), binding)
+        self.observe_patcher.stop()
         with patch.object(self.pm_runtime.active_pm_inbox, 'observe_claude_session',
                           side_effect=chat_tui.LLMToolError('PRIVATE path detail')):
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
@@ -2492,7 +2504,7 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('PM not connected. PM runtime error PM_SESSION_INVALID', ui.conversation.text)
         self.assertNotIn('PRIVATE', ui.conversation.text)
         self.assertFalse(ui.pm_mode)
-        self.observe.start()
+        self.observe_patcher.start()
         holder = self.make_runtime(self.session_id, str(self.temp_root)).open()   # another driver holds it
         try:
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
