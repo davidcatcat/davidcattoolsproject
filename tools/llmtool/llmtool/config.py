@@ -326,8 +326,9 @@ def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configur
 
 def codex_direct_timeout(cwd=None, home=None):
     """Return the configured direct Codex timeout without changing config output."""
-    config, _ = _config_view(cwd=cwd, home=home)
-    direct_config = config.get("codex_direct", {})
+    user = _read_yaml(user_config_path(home), "user config")
+    direct_config = user.get("codex_direct", {})
+    _fields(direct_config, {"timeout_seconds"}, "user codex_direct")
     return validate_codex_direct_timeout(
         direct_config.get("timeout_seconds", CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS))
 

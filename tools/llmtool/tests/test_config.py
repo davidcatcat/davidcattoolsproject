@@ -67,7 +67,13 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.user.write_text(yaml.safe_dump({"codex_direct": {"timeout_seconds": value}}))
                 with self.assertRaises(LLMToolError):
-                    self.resolve()
+                    codex_direct_timeout(self.cwd, self.home)
+
+    def test_codex_direct_timeout_ignores_project_and_provider_selection(self):
+        self.user.write_text("codex_direct:\n  timeout_seconds: 900\n", encoding="utf-8")
+        self.project.write_text("[broken project config", encoding="utf-8")
+        with patch.dict(os.environ, {"LLMTOOL_PROVIDER": "unavailable-profile"}):
+            self.assertEqual(codex_direct_timeout(self.cwd, self.home), 900)
 
     def test_openai_provider_config_uses_fixed_endpoint_and_explicit_auth(self):
         self.user.write_text("""providers:
