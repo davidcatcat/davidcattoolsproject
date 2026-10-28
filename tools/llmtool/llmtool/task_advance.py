@@ -182,12 +182,24 @@ def _review_outcomes(record, claims, github_get):
     outcomes = []
     task = record
     for claim in claims:
-        if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
+        if type(claim) is not dict:
             continue
         number, version, head = claim.get('pr'), claim.get('version'), claim.get('head_sha')
         events = [event for event in record.get('completion_events', [])
                   if type(event) is dict and event.get('source') == 'REVIEWER' and
                   event.get('source_sha') == head]
+        if claim.get('state') == 'COMPLETED':
+            try:
+                latest, event_id = result_module._completed_claim_result(
+                    task, claim, version=version)
+            except Exception:
+                continue
+            if any(event.get('event_id') == event_id for event in events):
+                outcomes.append({'source': 'REVIEWER', 'source_sha': head,
+                                 'version': version, 'outcome': latest[2]})
+            continue
+        if claim.get('state') != 'DISPATCHED':
+            continue
         if not events:
             continue
         comments = github_get(f'issues/{number}/comments?per_page=100')

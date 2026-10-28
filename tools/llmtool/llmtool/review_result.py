@@ -121,6 +121,37 @@ def _claim_for(task, *, executor_task, pr_number, version):
     return claim, head
 
 
+def _completed_claim_result(task, claim, *, version):
+    """Classify a completed claim's stored verdict and return its event identity."""
+    task_id = task.get('task_id')
+    run_id = task.get('run_id')
+    binding = task.get('task_binding')
+    result = claim.get('review_result')
+    head = claim.get('head_sha')
+    if (type(result) is not dict or result.get('task_id') != task_id or
+            result.get('run_id') != run_id or type(binding) is not dict or
+            result.get('contract_digest') != binding.get('contract_digest') or
+            result.get('head') != head or
+            result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+            type(result.get('review_text')) is not str):
+        _refuse('REVIEW_RESULT_INVALID')
+    claim_stamp = claim.get('updated_at')
+    latest = _comment_verdict(
+        {'id': 0, 'body': result['review_text'],
+         'created_at': claim_stamp, 'updated_at': claim_stamp},
+        head=head, version=version, task=task)
+    if latest is None:
+        _refuse('REVIEW_RESULT_INVALID')
+    expected_verdict = 'PASS' if latest[2] == 'REVIEW_PASS' else 'FAIL'
+    if (result['verdict'] == 'PASS') != (expected_verdict == 'PASS'):
+        _refuse('REVIEW_RESULT_INVALID')
+    identity = {'task': task_id, 'run': run_id, 'head': head,
+                'version': version, 'outcome': latest[2], 'comment_id': latest[1]}
+    event_id = hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+    return latest, event_id
+
+
 def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
                          reviewer_session_done=False, github_get=None):
     """Classify the latest claim-bound verdict and persist one idempotent event."""
@@ -141,26 +172,9 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
         _refuse('REVIEW_RESULT_TASK_INVALID')
 
     latest = None
+    event_id = None
     if claim.get('state') == 'COMPLETED':
-        result = claim.get('review_result')
-        binding = task.get('task_binding')
-        if (type(result) is not dict or result.get('task_id') != task_id or
-                result.get('run_id') != task['run_id'] or
-                result.get('contract_digest') != binding.get('contract_digest') or
-                result.get('head') != head or
-                result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
-                type(result.get('review_text')) is not str):
-            _refuse('REVIEW_RESULT_INVALID')
-        claim_stamp = claim.get('updated_at')
-        latest = _comment_verdict(
-            {'id': 0, 'body': result['review_text'],
-             'created_at': claim_stamp, 'updated_at': claim_stamp},
-            head=head, version=version, task=task)
-        if latest is None:
-            _refuse('REVIEW_RESULT_INVALID')
-        expected_verdict = 'PASS' if latest[2] == 'REVIEW_PASS' else 'FAIL'
-        if (result['verdict'] == 'PASS') != (expected_verdict == 'PASS'):
-            _refuse('REVIEW_RESULT_INVALID')
+        latest, event_id = _completed_claim_result(task, claim, version=version)
     else:
         get = task_completion._github_get if github_get is None else github_get
         comments = get(f'issues/{pr_number}/comments?per_page=100')
@@ -186,10 +200,11 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
     if len(payload_bytes) > 512:
         _refuse('REVIEW_RESULT_INVALID')
     payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
-    identity = {'task': task_id, 'run': task['run_id'], 'head': head,
-                'version': version, 'outcome': outcome, 'comment_id': comment_id}
-    event_id = hashlib.sha256(json.dumps(
-        identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+    if event_id is None:
+        identity = {'task': task_id, 'run': task['run_id'], 'head': head,
+                    'version': version, 'outcome': outcome, 'comment_id': comment_id}
+        event_id = hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
     result = store.record_completion_event(
         task_id, event_id=event_id, run_id=task['run_id'],
         session_id='review-' + event_id, source='REVIEWER', source_sha=head,

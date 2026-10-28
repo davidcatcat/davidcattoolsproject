@@ -1,3 +1,5 @@
+import hashlib
+import json
 import unittest
 from unittest.mock import patch
 
@@ -29,6 +31,40 @@ def d6(clean=True, recorded=HEAD):
 
 
 class TaskAdvanceTests(unittest.TestCase):
+    def _completed_codex_review(self, verdict, *, recorded=True):
+        task_id, run_id, contract_digest = '1' * 32, '2' * 32, 'd' * 64
+        body = (f'<!-- activity: type=review_verdict actor=Codex target=PM status={verdict} -->\n'
+                f'Verdict: {verdict} | Version: v1 | HEAD: {HEAD}\n')
+        if verdict == 'PASS':
+            body += 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+        body += (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+                 f'contract={contract_digest} head={HEAD}\n')
+        claim = {
+            'executor_task': 'executor-1', 'pr': 17, 'head_sha': HEAD,
+            'version': 1, 'state': 'COMPLETED', 'updated_at': '2026-10-28T00:00:00Z',
+            'review_result': {
+                'task_id': task_id, 'run_id': run_id,
+                'contract_digest': contract_digest, 'head': HEAD,
+                'verdict': verdict, 'review_text': body,
+            },
+        }
+        record = base_record(
+            schema_version=2, pm_session_id='pm-session',
+            task_binding={'contract_digest': contract_digest},
+            developer={'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude'},
+            review_dispatch_claim=[claim])
+        if recorded:
+            outcome = 'REVIEW_PASS' if verdict == 'PASS' else 'REVIEW_FAIL'
+            identity = {'task': task_id, 'run': run_id, 'head': HEAD,
+                        'version': 1, 'outcome': outcome, 'comment_id': 0}
+            event_id = hashlib.sha256(json.dumps(
+                identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+            record['completion_events'] = [{
+                'event_id': event_id, 'source': 'REVIEWER', 'source_sha': HEAD,
+                'version': 1, 'outcome': outcome,
+            }]
+        return record, claim
+
     def test_cli_route(self):
         parsed = parser_for_cli().parse_args(['task', 'advance', '1' * 32, '--pr', '17'])
         self.assertEqual(parsed.action, 'advance')
@@ -93,6 +129,42 @@ class TaskAdvanceTests(unittest.TestCase):
              'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
             {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
                          'outcome': 'REVIEW_FAIL'}], 'repair_claims': []}), 'DISPATCH_REVIEW')
+
+    def test_completed_codex_pass_with_recorded_event_reaches_integration(self):
+        record, claim = self._completed_codex_review('PASS')
+        outcomes = task_advance._review_outcomes(
+            record, [claim], lambda _path: self.fail('completed review must not fetch GitHub'))
+        self.assertEqual(outcomes, [{'source': 'REVIEWER', 'source_sha': HEAD,
+                                     'version': 1, 'outcome': 'REVIEW_PASS'}])
+        record['completion'] = {'state': 'PM_EVIDENCE_READY', 'evidence': {
+            'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}}
+        self.assertEqual(task_advance.decide(record, d6(), PR, {'events': outcomes}),
+                         'READY_FOR_INTEGRATION')
+
+    def test_completed_codex_fail_with_recorded_event_requests_repair(self):
+        record, claim = self._completed_codex_review('FAIL')
+        outcomes = task_advance._review_outcomes(
+            record, [claim], lambda _path: self.fail('completed review must not fetch GitHub'))
+        self.assertEqual(outcomes, [{'source': 'REVIEWER', 'source_sha': HEAD,
+                                     'version': 1, 'outcome': 'REVIEW_FAIL'}])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {'events': outcomes}),
+                         'REPAIR_REVIEW')
+
+    def test_completed_codex_review_without_event_requests_recording(self):
+        record, claim = self._completed_codex_review('FAIL', recorded=False)
+        outcomes = task_advance._review_outcomes(
+            record, [claim], lambda _path: self.fail('completed review must not fetch GitHub'))
+        self.assertEqual(outcomes, [])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {'events': outcomes}),
+                         'RECORD_REVIEW_RESULT')
+
+    def test_tampered_completed_codex_review_text_produces_no_outcome(self):
+        record, claim = self._completed_codex_review('FAIL')
+        claim['review_result']['review_text'] = claim['review_result']['review_text'].replace(
+            f'head={HEAD}', f"head={'b' * 40}")
+        outcomes = task_advance._review_outcomes(
+            record, [claim], lambda _path: self.fail('completed review must not fetch GitHub'))
+        self.assertEqual(outcomes, [])
 
     def test_repair_record_states_are_derived_for_waiting_and_retry(self):
         expected = (
