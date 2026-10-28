@@ -56,6 +56,43 @@ class SourceFreshnessTests(unittest.TestCase):
             freshness.require_fresh_source()
         self.assertEqual(caught.exception.completion_code, 'LLMTOOL_SOURCE_STALE')
 
+    def test_fetch_updates_tracking_ref_from_local_bare_origin(self):
+        support = tempfile.TemporaryDirectory()
+        self.addCleanup(support.cleanup)
+        support_root = Path(support.name)
+        bare = support_root / 'origin.git'
+        peer = support_root / 'peer'
+        subprocess.run(['git', 'init', '--bare', '-q', str(bare)], check=True,
+                       capture_output=True, text=True)
+        self._git('remote', 'add', 'origin', str(bare))
+        self._git('push', '-q', 'origin', 'main')
+        self._git('fetch', '-q', 'origin', 'main')
+
+        subprocess.run(['git', 'clone', '-q', '--branch', 'main', str(bare), str(peer)],
+                       check=True, capture_output=True, text=True)
+        subprocess.run(['git', 'config', 'user.name', 'Test'], cwd=peer, check=True)
+        subprocess.run(['git', 'config', 'user.email', 'test@example.invalid'],
+                       cwd=peer, check=True)
+        (peer / 'tracked.txt').write_text('remote update\n')
+        subprocess.run(['git', 'commit', '-q', '-am', 'remote update'], cwd=peer,
+                       check=True, capture_output=True, text=True)
+        subprocess.run(['git', 'push', '-q', 'origin', 'main'], cwd=peer, check=True,
+                       capture_output=True, text=True)
+
+        self.assertEqual(freshness.source_freshness(), 'STALE')
+
+    def test_fetch_timeout_falls_back_to_existing_tracking_ref(self):
+        self._stale()
+        original_run = subprocess.run
+
+        def run_with_fetch_timeout(argv, *args, **kwargs):
+            if argv[:2] == ['git', 'fetch']:
+                raise subprocess.TimeoutExpired(argv, timeout=5)
+            return original_run(argv, *args, **kwargs)
+
+        with patch.object(freshness.subprocess, 'run', side_effect=run_with_fetch_timeout):
+            self.assertEqual(freshness.source_freshness(), 'STALE')
+
     def test_dirty(self):
         (self.root / 'tracked.txt').write_text('dirty\n')
         self.assertEqual(freshness.source_freshness(), 'DIRTY')
