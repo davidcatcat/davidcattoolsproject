@@ -238,7 +238,23 @@ def _config(path=None):
     return value
 
 
+def _task_path_modules(task):
+    developer = task.get('developer') if type(task.get('developer')) is dict else {}
+    declared_paths = set()
+    for field in ('read_paths', 'write_paths'):
+        paths = developer.get(field)
+        if type(paths) is list:
+            declared_paths.update(
+                path for path in paths
+                if type(path) is str and
+                re.fullmatch(r'tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py', path))
+    return tuple(sorted(Path(path).stem for path in declared_paths))
+
+
 def _admitted_modules(task):
+    declared = _task_path_modules(task)
+    if declared:
+        return declared
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
@@ -307,7 +323,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
             return None
     if receipt['result'] == 'PASS' and (receipt['exit_code'] != 0 or
             type(receipt['identity']['uid']) is not int or receipt['identity']['uid'] == 0 or
-            receipt['ran_total'] <= 0 or receipt['failures'] or
+            receipt['fetch_head'] != sha or receipt['ran_total'] <= 0 or receipt['failures'] or
             receipt['tree'] is None or len(receipt['final']) < len(modules) or
             any(not line.endswith('OK') for line in receipt['final'])):
         return None
@@ -359,47 +375,48 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
             type(sha) is not str or not _SHA.fullmatch(sha) or
             type(ref) is not str or not _REF.fullmatch(ref)):
         return denied('ARGUMENT_INVALID')
-    admitted = _admitted_modules(task)
-    selected = tuple(sorted(set(modules or admitted)))
-    if (not selected or len(selected) > _MAX_REMOTE_MODULES or
-            any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
-        return denied('MODULE_NOT_ADMITTED')
     evidence = task.get('completion', {}).get('evidence', {}) if type(task.get('completion')) is dict else {}
+    callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
+    callback_evidence = callback.get('evidence') if type(callback) is dict else None
+    if not (type(evidence) is dict and evidence.get('common_dir')):
+        evidence = callback_evidence if type(callback_evidence) is dict else evidence
     common_dir = evidence.get('common_dir') if type(evidence) is dict else None
     expected = evidence.get('result', {}).get('result_head') if type(evidence.get('result')) is dict else None
     review = evidence.get('review_pr_ci') if type(evidence) is dict else None
     if pr is not None:
         if type(pr) is not int or not 1 <= pr <= 9999999:
-            return denied('PR_HEAD_NOT_TASK_RESULT')
+            return denied('RECEIPT_HEAD_UNRECORDED')
         if type(review) is dict and 'pr_number' in review:
             if (review.get('pr_number') != pr or
                     type(review.get('head_sha')) is not str):
-                return denied('PR_HEAD_NOT_TASK_RESULT')
+                return denied('RECEIPT_HEAD_MISMATCH')
             expected = review['head_sha']
     try:
         registration = read_d6_registration(executor_task, common_dir)
-        if expected is not None and expected != registration.result_sha:
-            return denied('D6_RESULT_BINDING_MISMATCH')
-        expected = registration.result_sha
-    except (LLMToolError, TypeError):
-        if pr is not None:
-            return denied('PR_HEAD_NOT_TASK_RESULT')
-        expected = None
+        recorded_head = getattr(registration, 'result_sha', None)
+        if type(recorded_head) is not str or _SHA.fullmatch(recorded_head) is None:
+            return denied('RECEIPT_HEAD_UNRECORDED')
+    except Exception:
+        return denied('RECEIPT_HEAD_UNRECORDED')
     if pr is not None and not (type(review) is dict and 'pr_number' in review):
         try:
             pr_data = _github_get(f'pulls/{pr}')
         except Exception:
-            return denied('PR_HEAD_NOT_TASK_RESULT')
+            return denied('RECEIPT_HEAD_UNRECORDED')
         head = pr_data.get('head') if type(pr_data) is dict else None
         if (type(pr_data) is not dict or type(pr_data.get('number')) is not int or
-                pr_data['number'] != pr or
-                type(head) is not dict or
-                type(head.get('sha')) is not str or
-                head['sha'] != registration.result_sha):
-            return denied('PR_HEAD_NOT_TASK_RESULT')
-        expected = registration.result_sha
-    if expected != sha:
-        return denied('SHA_NOT_TASK_RESULT')
+                pr_data['number'] != pr or type(head) is not dict or
+                type(head.get('sha')) is not str):
+            return denied('RECEIPT_HEAD_UNRECORDED')
+        expected = head['sha']
+    if ((expected is not None and expected != recorded_head) or
+            sha != recorded_head or (expected is not None and sha != expected)):
+        return denied('RECEIPT_HEAD_MISMATCH')
+    admitted = _task_path_modules(task)
+    selected = tuple(sorted(set(modules or admitted)))
+    if (not selected or len(selected) > _MAX_REMOTE_MODULES or
+            any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
+        return denied('MODULE_NOT_ADMITTED')
     try:
         config = _config(config_path)
     except LLMToolError:
