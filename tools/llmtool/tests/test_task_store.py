@@ -240,6 +240,72 @@ class TaskStoreTests(unittest.TestCase):
         patcher.start()
         self.addCleanup(patcher.stop)
 
+    def _allow_agy_assignment(self, task_id, owner_assignment_ref):
+        policy_path = Path(worker_dispatch._POLICY_PATH)
+        policy = json.loads(policy_path.read_text(encoding='utf-8'))
+        policy['workers']['agy']['owner_assignments'] = [{
+            'task_id': task_id, 'owner_assignment_ref': owner_assignment_ref,
+        }]
+        temporary_policy = Path(self.temp.name) / 'worker-dispatch.json'
+        temporary_policy.write_text(json.dumps(policy), encoding='utf-8')
+        patcher = patch.object(worker_dispatch, '_POLICY_PATH', temporary_policy)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_developer_progress_is_optional_extension_for_all_direct_routes(self):
+        artifact = ('diff --git a/src.py b/src.py\n'
+                    '--- a/src.py\n+++ b/src.py\n@@ -1 +1 @@\n-x=1\n+x=2\n')
+        execution = {
+            'status': 'DONE', 'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 12,
+            'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None,
+        }
+        cases = (
+            ('codex', 'DEVELOPER_PENDING', False, False),
+            ('codex', 'DEVELOPER_RESPONDED', True, False),
+            ('agy', 'DEVELOPER_RESPONDED', True, False),
+            ('agy', 'BLOCKED', False, True),
+        )
+        for provider, state, with_execution, with_progress in cases:
+            with self.subTest(provider=provider, state=state, progress=with_progress):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                developer = self._developer_assignment(provider=provider, max_tokens=None)
+                developer.update(state=state,
+                    provider_type=('agy-cli' if provider == 'agy' and state != 'DEVELOPER_PENDING'
+                                   else 'codex-cli' if provider == 'codex' and state != 'DEVELOPER_PENDING'
+                                   else None),
+                    model=('gemini-test' if provider == 'agy' and state != 'DEVELOPER_PENDING'
+                           else 'gpt-6-luna' if provider == 'codex' and state != 'DEVELOPER_PENDING'
+                           else None),
+                    backend_session_semantics=('CLI_REPORTED_SESSION_ID' if provider == 'agy'
+                                               else 'NO_NATIVE_SESSION_ID_EXPOSED'),
+                    error_code='AGY_QUOTA_EXHAUSTED' if with_progress else None)
+                if provider == 'agy':
+                    developer['owner_assignment_ref'] = (
+                        'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+                        '#issuecomment-1')
+                    self._allow_agy_assignment(task['task_id'],
+                                               developer['owner_assignment_ref'])
+                developer['execution'] = execution if with_execution else None
+                if with_progress:
+                    developer['progress'] = {
+                        'state': 'QUOTA_EXHAUSTED', 'head_sha': 'a' * 40,
+                        'changed_files': ['src.py'], 'unfinished_checks': ['UNKNOWN'],
+                        'session_id': 'conversation_12345678',
+                    }
+                if state == 'DEVELOPER_RESPONDED':
+                    developer.update(artifact=artifact,
+                        artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+                saved = self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+                self.assertEqual(saved['developer'].get('progress'),
+                                 developer.get('progress'))
+                self.assertEqual(saved['developer'].get('execution'),
+                                 developer.get('execution'))
+
     def test_codex_cli_dispatch_and_response_allow_unknown_token_cap(self):
         self._allow_codex_dispatch()
         task = self._codex_dispatch_task()

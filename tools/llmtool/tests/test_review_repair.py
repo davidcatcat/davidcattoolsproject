@@ -74,6 +74,24 @@ def _record():
 
 
 class ReviewRepairTests(unittest.TestCase):
+    def test_agy_uses_the_owner_gated_repair_route(self):
+        self.assertEqual(review_repair._worker_key('agy'), 'agy')
+        captured = []
+        task = {'task_id': TASK, 'pm_assignment': {'acceptance': ['Fix it.']}}
+        developer = {'provider_profile': 'agy', 'owner_assignment_ref':
+                     'https://github.com/example/repo/issues/1#issuecomment-2',
+                     'read_paths': ['src'], 'write_paths': ['src/file.py']}
+        result = review_repair._delegate_repair(
+            task=task, developer=developer, packet={'verdict_comment_id': 9,
+                'failed_head': HEAD, 'version': 1, 'findings_count': 1,
+                'reviewer_text_excerpt_untrusted_data': 'Fix the reported issue.'},
+            executor_task=EXECUTOR, delegate=lambda args, store: captured.append(args) or 0,
+            store=object())
+        self.assertEqual(result, 0)
+        self.assertEqual(captured[0].provider, 'agy')
+        self.assertEqual(captured[0].mode, 'direct')
+        self.assertEqual(captured[0].owner_ref, developer['owner_assignment_ref'])
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.store = TempTaskStore(self.temp.name, _record())

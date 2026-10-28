@@ -30,7 +30,10 @@ class Store:
                 'common_dir': '/repo/.git',
                 'result': {'result_head': SHA},
             }},
-            'developer': {'direct_result_callback': {
+            'developer': {
+                'read_paths': ['tools/llmtool/tests/test_remote_test.py'],
+                'write_paths': [],
+                'direct_result_callback': {
                 'state': 'PM_EVIDENCE_READY',
                 'evidence': {'common_dir': '/repo/.git',
                     'result': {'result_head': SHA},
@@ -144,6 +147,10 @@ class RemoteTestTests(unittest.TestCase):
         self.store = Store()
         mismatch = self.run_it(self.receipt('SHA_MISMATCH', fetch=OTHER, exit_code=41))
         self.assertEqual(mismatch['result'], 'SHA_MISMATCH')
+        invalid_pass = json.loads(self.receipt(fetch=OTHER).decode())
+        self.assertIsNone(remote_test._validate_remote_receipt(
+            json.dumps(invalid_pass, separators=(',', ':')).encode(),
+            sha=SHA, modules=('test_remote_test',)))
 
     def test_failure_excerpt_is_bounded_redacted_and_only_on_failures(self):
         cred_value = ''.join(['sk', '-']) + 'a' * 16
@@ -269,6 +276,44 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(len(self.store.task['remote_test_outcomes']), 1)
         self.assertEqual(len(self.store.task['completion_events']), 1)
 
+    def test_timeout_outcome_can_admit_recorded_pr_result_from_task_paths(self):
+        developer = self.store.task['developer']
+        developer.update(
+            state='TIMEOUT',
+            read_paths=['tools/llmtool/tests/test_remote_test.py'],
+            write_paths=['tools/llmtool/remote_test.py'])
+        callback = developer['direct_result_callback']
+        callback.update(state='WAITING_EXECUTOR', missing_gates=['EXECUTOR_TIMEOUT'])
+        callback['evidence'].pop('tests')
+        self.store.task['completion']['evidence']['review_pr_ci'] = {
+            'pr_number': 425, 'head_sha': SHA}
+
+        result = self.run_it(pr=425)
+
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual(len(self.calls), 1)
+
+    def test_unrecorded_and_mismatched_heads_are_refused_before_transport(self):
+        with patch.object(remote_test, 'read_d6_registration',
+                          return_value=SimpleNamespace(result_sha=None)):
+            unrecorded = remote_test.run_remote_test(
+                self.store.task['task_id'], executor_task='d6-task', sha=SHA,
+                ref='refs/pull/425/head', modules=('test_remote_test',),
+                store=self.store, config_path=self.config,
+                transport=lambda *args: self.fail('transport called'))
+        self.assertEqual(unrecorded['code'], 'RECEIPT_HEAD_UNRECORDED')
+
+        self.store = Store()
+        with patch.object(remote_test, 'read_d6_registration',
+                          return_value=SimpleNamespace(result_sha=OTHER)):
+            mismatch = remote_test.run_remote_test(
+                self.store.task['task_id'], executor_task='d6-task', sha=SHA,
+                ref='refs/pull/425/head', modules=('test_remote_test',),
+                store=self.store, config_path=self.config,
+                transport=lambda *args: self.fail('transport called'))
+        self.assertEqual(mismatch['code'], 'RECEIPT_HEAD_MISMATCH')
+        self.assertEqual(self.calls, [])
+
     def test_outcome_event_replay_is_idempotent_but_retry_gets_new_event(self):
         first = self.run_it(error=OSError('offline'))
         saved = self.store.task['remote_test_outcomes'][0]
@@ -390,6 +435,8 @@ class RemoteTestTests(unittest.TestCase):
 
     def test_non_eligible_waiting_callback_states_do_not_admit_modules(self):
         callback = self.store.task['developer']['direct_result_callback']
+        self.store.task['developer']['read_paths'] = []
+        self.store.task['developer']['write_paths'] = []
         eligible_evidence = dict(callback['evidence'], verification_state='FAILED')
         variants = (
             {'state': 'WAITING_EXECUTOR', 'missing_gates': ['OTHER'],
@@ -420,16 +467,19 @@ class RemoteTestTests(unittest.TestCase):
         self.assertEqual(len(self.calls), 1)
 
     def test_pr_without_completion_review_denies_mismatch_or_read_failure_before_ssh(self):
-        for response, error in (({'number': 425, 'head': {'sha': OTHER}}, None),
-                                ({'number': 426, 'head': {'sha': SHA}}, None),
-                                (None, OSError('unavailable'))):
+        for response, error, code in (
+                ({'number': 425, 'head': {'sha': OTHER}}, None,
+                 'RECEIPT_HEAD_MISMATCH'),
+                ({'number': 426, 'head': {'sha': SHA}}, None,
+                 'RECEIPT_HEAD_UNRECORDED'),
+                (None, OSError('unavailable'), 'RECEIPT_HEAD_UNRECORDED')):
             with self.subTest(response=response, error=error):
                 with patch.object(remote_test, '_github_get',
                                   side_effect=error if error else None,
                                   return_value=response):
                     result = self.run_it(pr=425)
                 self.assertEqual((result['result'], result['code']),
-                                 ('ADMISSION_DENIED', 'PR_HEAD_NOT_TASK_RESULT'))
+                                 ('ADMISSION_DENIED', code))
         self.assertEqual(self.calls, [])
 
     def test_pr_with_completion_review_keeps_existing_binding(self):

@@ -608,7 +608,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertFalse(job._attempted)
 
     def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
-        job=self.job();executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
+        job=self.job(budget=LOAD_TOLERANT_BUDGET);executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
         os.link(executable,alias)
         self.assertEqual(os.lstat(executable).st_nlink,2)
         self.assertEqual(os.lstat(alias).st_ino,os.lstat(executable).st_ino)

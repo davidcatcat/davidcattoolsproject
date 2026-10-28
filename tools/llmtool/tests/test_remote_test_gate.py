@@ -143,6 +143,17 @@ class RemoteTestGateTests(unittest.TestCase):
                                  if 'skipped' in str(change).lower()
                                  else 'REMOTE_TEST_RECEIPT_MISSING')
 
+    def test_consumer_rejects_receipt_for_sha_other_than_reviewed_head(self):
+        task = task_with_tests()
+        task.update(task_id='1' * 32, run_id='2' * 32,
+                    remote_test_receipts=[sealed_receipt(source_sha='b' * 40)])
+
+        receipt, code = task_submission_cli._matching_remote_test_receipt(
+            task, executor_task='d6-task', source_sha=SHA, paths=[PATH])
+
+        self.assertIsNone(receipt)
+        self.assertEqual(code, 'REMOTE_TEST_RECEIPT_MISSING')
+
 
 if __name__ == '__main__':
     unittest.main()
