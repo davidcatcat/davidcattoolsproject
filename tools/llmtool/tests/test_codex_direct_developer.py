@@ -81,6 +81,38 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
                 timeout=timeout, **kwargs)
 
+    def run_fake_configured(self, configured_timeout):
+        with patch('llmtool.codex_direct_developer.resolve_config',
+                   return_value={'codex_direct': {'timeout_seconds': configured_timeout}}), \
+                patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
+            return direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+                reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
+                prelaunch_validate=lambda: True)
+
+    def test_default_timeout_uses_600_seconds(self):
+        with patch('llmtool.codex_direct_developer.resolve_config',
+                   return_value={'codex_direct': {'timeout_seconds': 600}}) as config_loader, \
+                patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
+            result = direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+                reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
+                prelaunch_validate=lambda: True)
+        self.assertEqual(result.status, 'DONE')
+        config_loader.assert_called_once_with(cwd=self.root)
+
+    def test_configured_timeout_is_used(self):
+        self.assertEqual(self.run_fake_configured(900).status, 'DONE')
+
+    def test_invalid_config_timeout_fails_with_typed_config_error(self):
+        for configured_timeout in (1801, 0, -1, 1.5, '900', True):
+            with self.subTest(configured_timeout=configured_timeout):
+                with patch('llmtool.codex_direct_developer.resolve_config',
+                           return_value={'codex_direct': {'timeout_seconds': configured_timeout}}), \
+                        self.assertRaises(LLMToolError) as caught:
+                    direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+                        reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
+                        prelaunch_validate=lambda: True)
+                self.assertNotIsInstance(caught.exception, direct.DirectCodexError)
+
     def test_done_captures_thread_usage_and_hardening_arguments(self):
         result = self.run_fake()
         self.assertEqual((result.status, result.thread_id), ('DONE', self.THREAD))

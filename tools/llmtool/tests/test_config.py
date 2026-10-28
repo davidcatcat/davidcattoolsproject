@@ -57,6 +57,15 @@ class ConfigTests(unittest.TestCase):
         self.user.write_text("generation:\n  max_tokens: 321\n", encoding="utf-8")
         self.assertEqual(self.resolve()["generation"]["max_tokens"], 321)
 
+    def test_codex_direct_timeout_configuration(self):
+        self.user.write_text("codex_direct:\n  timeout_seconds: 900\n", encoding="utf-8")
+        self.assertEqual(self.resolve()["codex_direct"]["timeout_seconds"], 900)
+        for value in (1801, 0, -1, 1.5, "900", True):
+            with self.subTest(value=value):
+                self.user.write_text(yaml.safe_dump({"codex_direct": {"timeout_seconds": value}}))
+                with self.assertRaises(LLMToolError):
+                    self.resolve()
+
     def test_openai_provider_config_uses_fixed_endpoint_and_explicit_auth(self):
         self.user.write_text("""providers:
   openai-main:
