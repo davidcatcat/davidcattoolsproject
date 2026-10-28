@@ -111,6 +111,38 @@ class PMRuntimeTests(unittest.TestCase):
         self.addCleanup(runtime.close)
         return runtime
 
+    def test_thinking_blocks_are_status_only_and_never_answer_text(self):
+        # Owner #304: a reasoning block must not render as the PM answer; the UI gets
+        # a THINKING status event and only text blocks become TEXT_DELTA/ASSISTANT_TEXT.
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'message_start', 'message': {}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': 0,
+             'content_block': {'type': 'thinking', 'thinking': ''}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'thinking_delta', 'thinking': 'PRIVATE_REASONING no tools needed'}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': 0}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': 1,
+             'content_block': {'type': 'text', 'text': ''}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 1,
+             'delta': {'type': 'text_delta', 'text': '台北101'}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': 2,
+             'content_block': {'type': 'redacted_thinking', 'data': 'OPAQUE'}}},
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'thinking', 'thinking': 'PRIVATE_REASONING no tools needed', 'signature': 'x'},
+                {'type': 'text', 'text': '台北101'}]}},
+            {'type': 'result', 'result': '台北101', 'usage': {'input_tokens': 1}}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send('說出台北觀光地點'))
+        self.assertEqual([event['type'] for event in events],
+                         ['THINKING', 'TEXT_DELTA', 'THINKING', 'ASSISTANT_TEXT', 'TURN_END'])
+        self.assertEqual([event['text'] for event in events if 'text' in event], ['台北101', '台北101'])
+        self.assertNotIn('PRIVATE_REASONING', json.dumps(events, ensure_ascii=False))
+        self.assertNotIn('OPAQUE', json.dumps(events, ensure_ascii=False))
+        self.assertEqual(events[-1]['result_text'], '台北101')
+        history = pm_runtime.read_history(SESSION, state_root=self.root)
+        self.assertNotIn('PRIVATE_REASONING', json.dumps(history, ensure_ascii=False))
+
     def test_argv_cwd_stream_events_and_history(self):
         process = FakeProcess(encoded(
             {'type': 'stream_event', 'event': {'type': 'content_block_delta',
