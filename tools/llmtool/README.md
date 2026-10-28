@@ -1659,14 +1659,28 @@ persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
 Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
 on the first/last input line recall earlier inputs from this process only; Tab
 switches focus between input and conversation; PageUp/PageDown (Fn+↑/↓ on a Mac
-keyboard) or the mouse wheel scroll the conversation (mouse reporting is on by
-default; F6 turns it off so the terminal's own drag-select and copy work); F1
-toggles key help; Ctrl-C (or Ctrl-D on empty input) exits with status 0. Resize and wide
-Unicode are handled by the terminal UI. Model output, reported model names and
-errors are untrusted and rendered through the same control-character escaping as
-TTY line mode. New output only auto-scrolls when the conversation caret is at the
-end, so a scrolled-back position is preserved; wheeling back down to the bottom
-resumes following.
+keyboard) scroll the conversation one screen and the mouse wheel or trackpad one
+row per wheel step (mouse reporting is on by default); F1 toggles key help; Ctrl-C
+(or Ctrl-D on empty input) exits with status 0. Model output, reported model names
+and errors are untrusted and rendered through the same control-character escaping
+as TTY line mode.
+
+The conversation pane keeps its own reading position, selection and follow state
+(`chat_tui_view.py`), in screen rows rather than prompt-toolkit's caret-anchored
+logical lines, so wrapped long lines and CJK text scroll one row per wheel step
+without sticking or jumping. New output never moves a scrolled-back view (the
+status bar shows `捲動 N% ⇣新輸出`); scrolling back to the bottom resumes following
+(`最新`). A resize keeps the text that was at the top of the view. Dragging in the
+pane selects text; dragging past the top or bottom edge keeps scrolling and extends
+the selection; releasing copies exactly the selected text (CJK, wrapped lines,
+several screens) to the system clipboard with `pbcopy` (`wl-copy`/`xclip`/`xsel`
+elsewhere) and the status bar shows `已複製 N 字`, so Cmd+V pastes it. The pane
+has no scrollbar of its own. Terminal.app never passes Cmd+C to the application and
+has no OSC 52, which is why the copy happens on release; Ctrl-C with a selection
+copies it again and clears it instead of exiting. F6 hands the mouse back to the
+terminal (its own select/copy; the wheel then no longer scrolls the pane);
+Terminal.app also selects natively with Fn-drag and Warp with Shift-drag while
+mouse reporting is on.
 
 One request is in flight at a time: Enter while busy keeps the typed input and
 sends nothing; commands such as `/provider` are not run while busy. Esc, or the

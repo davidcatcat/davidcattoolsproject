@@ -16,7 +16,7 @@ import threading
 import time
 import uuid
 
-from . import chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task
+from . import chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_view
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
@@ -35,11 +35,19 @@ KEY_HELP = """Keys
                         choose, Enter puts the entry in the draft without running it,
                         Esc cancels and leaves the draft unchanged
   Tab, Shift-Tab        Switch focus between input and conversation
-  PageUp/PageDown       Scroll conversation (Fn+↑/↓ on a Mac keyboard; arrows also scroll
-                        when it is focused)
-  Mouse wheel           Scroll conversation (mouse reporting is on by default)
-  F6                    Toggle mouse reporting: off lets the terminal select and copy text by
-                        dragging as usual (iTerm2 also selects with Option-drag while it is on)
+  PageUp/PageDown       Scroll conversation one screen (Fn+↑/↓ on a Mac keyboard); when it is
+                        focused Up/Down scroll one row, Home/End go to the top/bottom
+  Mouse wheel           Scroll conversation one row per wheel step (trackpad works the same);
+                        the view stays where you read it while output arrives, and scrolling
+                        back to the bottom follows new output again (status shows 最新)
+  Drag                  Select conversation text; dragging past the top/bottom edge keeps
+                        scrolling and extends the selection. Releasing copies exactly the
+                        selected text to the system clipboard (pbcopy; status shows 已複製),
+                        so Cmd+V pastes it; double-click selects a word. Ctrl-C with a
+                        selection copies it again and clears it instead of exiting
+  F6                    Toggle mouse reporting off/on: off hands the mouse to the terminal
+                        (its own select/copy; the wheel then no longer scrolls). Terminal.app
+                        also selects natively with Fn-drag and Warp with Shift-drag while on
   F1                    Toggle this help (shown in place of the conversation)
   F2                    Toggle the last Task detail (Esc also closes it)
   F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
@@ -108,7 +116,7 @@ SLASH_COMMANDS = (
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "provider", "model", "state", "usage", "scroll", "mouse", "help")
-STATUS_DROP_ORDER = ("mouse", "help", "usage", "scroll", "model", "provider")
+STATUS_DROP_ORDER = ("help", "usage", "model", "provider", "scroll", "mouse")
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
 # PM typewriter: the CLI emits text in bursts (0.6–1 s apart); received text is queued and
 # released every tick at PM_CHARS_PER_TICK (≈67 chars/s). A long queue raises the rate to
@@ -118,6 +126,28 @@ ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Es
 PM_TICK_SECONDS = 0.03
 PM_CHARS_PER_TICK = 2
 PM_MAX_LAG_TICKS = 33
+
+
+def _enable_mouse_drag_reporting(output):
+    """Also set xterm button-event tracking (DECSET 1002) with mouse reporting.
+
+    prompt_toolkit sets 1000 (clicks) and 1003 (any motion). A drag needs motion events
+    while a button is held; 1002 reports exactly those, on terminals with or without 1003
+    (Terminal.app, Warp, iTerm2 all have it), and after 1003 it also stops the stream of
+    hover events nothing uses. Reset with the rest when mouse reporting goes off.
+    """
+    enable, disable = output.enable_mouse_support, output.disable_mouse_support
+
+    def enable_with_drag():
+        enable()
+        output.write_raw("\x1b[?1002h")
+
+    def disable_with_drag():
+        output.write_raw("\x1b[?1002l")
+        disable()
+
+    output.enable_mouse_support = enable_with_drag
+    output.disable_mouse_support = disable_with_drag
 
 
 def slash_matches(text):
@@ -239,6 +269,8 @@ class ChatTUI:
         from prompt_toolkit.filters import Condition, has_focus
         from prompt_toolkit.history import InMemoryHistory
         from prompt_toolkit.key_binding import KeyBindings
+        from prompt_toolkit.key_binding.bindings.mouse import load_mouse_bindings
+        from prompt_toolkit.keys import Keys
         from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension
@@ -255,7 +287,12 @@ class ChatTUI:
         # Mouse reporting: on, the wheel scrolls the conversation; off (F6), the terminal's
         # own drag-select and copy work. The Application reads this filter every render.
         self.mouse_enabled = True
-        self._view_at_bottom = True  # conversation view state at the last render (see _follow_tick)
+        # Mouse drag in the conversation: last pointer (x, y) and the auto-scroll timer handle
+        # used while the pointer is held at or beyond the pane edge.
+        self._drag_pointer = None
+        self._drag_origin = None     # cell of the press; a drag counts only after it moved
+        self._drag_moved = False
+        self._autoscroll_handle = None
         self.worker = None
         self.worker_kind = None
         # Chat request interrupt (Esc or the first Ctrl-C): the worker's cancel event,
@@ -315,16 +352,17 @@ class ChatTUI:
         self.pm_tools = {}
         self._loop = None
         self._received_signal = None
-        self.conversation = TextArea(
-            text=terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
-                                    + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."
-                                    + "\nChat mode talks to the chat provider directly; it is not a PM."
-                                    + " /pm connect (or /pm new) talks to the dedicated PM."
-                                    + " /task submit is for development testing only: it records"
-                                    + " a Task and dispatches nothing."),
-            read_only=True, scrollbar=True, wrap_lines=True, focus_on_click=True,
-            height=Dimension(min=1, weight=1))
-        self.conversation.buffer.cursor_position = len(self.conversation.text)
+        # The conversation pane keeps its own rows, reading position, selection and
+        # follow state (chat_tui_view); no scrollbar: the terminal's own is the only one.
+        self.view = chat_tui_view.ConversationView(get_cwidth)
+        self.conversation = chat_tui_view.make_pane(self.view)
+        self.conversation.set_text(
+            terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
+                               + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."
+                               + "\nChat mode talks to the chat provider directly; it is not a PM."
+                               + " /pm connect (or /pm new) talks to the dedicated PM."
+                               + " /task submit is for development testing only: it records"
+                               + " a Task and dispatches nothing."))
         self.input = TextArea(multiline=True, wrap_lines=True, focus_on_click=True,
                               prompt=lambda: ("pm> " if self.pm_mode else
                                               "task> " if self.task_profile else "> "),
@@ -459,6 +497,28 @@ class ChatTUI:
         def _page_down(event):
             self.scroll(1)
 
+        conversation_focused = has_focus(self.conversation)
+
+        @keys.add("up", filter=conversation_focused)
+        def _row_up(event):
+            self.view.scroll_rows(-1)
+
+        @keys.add("down", filter=conversation_focused)
+        def _row_down(event):
+            self.view.scroll_rows(1)
+
+        @keys.add("home", filter=conversation_focused)
+        def _to_top(event):
+            self.view.to_top()
+
+        @keys.add("end", filter=conversation_focused)
+        def _to_bottom(event):
+            self.view.to_bottom()
+
+        @keys.add(Keys.Vt100MouseEvent)
+        def _mouse_event(event):
+            return self.mouse_event(event)
+
         @keys.add("f1")
         def _help(event):
             self.toggle_help()
@@ -506,6 +566,13 @@ class ChatTUI:
 
         @keys.add("c-c")
         def _interrupt(event):
+            # Warp may send Ctrl-C for Cmd+C: with a selection, copy it again and clear it
+            # instead of interrupting or exiting (a second Ctrl-C then acts as usual).
+            if self.view.selected_range() and self.conversation_visible():
+                self.view.copy_selection()
+                self.view.clear_selection()
+                self.view.copy_note = "選取已清除，再按 Ctrl-C 中斷/離開"
+                return
             self.request_quit()
 
         @keys.add("c-d", filter=Condition(lambda: not self.input.text))
@@ -517,6 +584,7 @@ class ChatTUI:
             mouse_support=Condition(lambda: self.mouse_enabled), refresh_interval=0.5,
             input=input, output=output,
             style=Style.from_dict({"status": "reverse", "help": "italic", "rule": "fg:ansibrightblack",
+                                   "conversation.selected": "reverse",
                                    "menu": "bg:ansibrightblack fg:ansiwhite",
                                    "menu.current": "reverse",
                                    "menu.header": "bg:ansibrightblack fg:ansiwhite bold"}))
@@ -528,8 +596,9 @@ class ChatTUI:
         self.app.before_render += lambda _app: self._sync_picker()
         # A shown list re-reads TaskStore when stale; redraws never read more often.
         self.app.before_render += lambda _app: self._list_tick()
-        # Wheel-scrolled back to the bottom: follow new output again.
-        self.app.before_render += lambda _app: self._follow_tick()
+        self._default_mouse_binding = load_mouse_bindings().bindings[0]
+        _enable_mouse_drag_reporting(self.app.output)
+        self.view.on_copied = self.app.invalidate   # thread-safe: shows 已複製 when pbcopy is done
 
     # -- rendering -----------------------------------------------------------------
     def status_text(self):
@@ -565,7 +634,7 @@ class ChatTUI:
             "model": "m:" + compact(reported or model or "default", 14),
             "state": compact(state, 14),
             "usage": "t:" + compact(_tokens(session.last_usage), 14),
-            "scroll": ("滾輪/Fn+↑↓ 捲動對話" if self.mouse_enabled else "Fn+↑↓ 捲動對話"),
+            "scroll": self.view.status(),
             "mouse": "F6 滑鼠:" + ("開" if self.mouse_enabled else "關"),
             "help": "F1",
         }
@@ -746,47 +815,130 @@ class ChatTUI:
             self.unseen_output = True  # The pane header says so; it stays for browsing.
             if self.show_events:
                 self.render_events()
-        buffer = self.conversation.buffer
-        safe = terminal_safe_text(text)
-        old = buffer.text
-        follow = buffer.cursor_position >= len(old)
-        new = old + ("\n\n" if old else "") + safe
-        position = len(new) if follow else buffer.cursor_position
-        buffer.set_document(self._Document(new, position), bypass_readonly=True)
+        old = self.conversation.text
+        self.conversation.set_text(old + ("\n\n" if old else "") + terminal_safe_text(text))
         if block is not None:
             self._stream_attach(block)
         self.app.invalidate()
 
-    def _follow_tick(self):
-        """Resume following new output when the view arrives back at the bottom.
-
-        The wheel moves the caret only as far as the view needs, so after wheeling back
-        down a later reply would be appended out of sight. Only the transition counts:
-        a first PageUp leaves the view at the bottom with the caret one page up, and that
-        caret must stay. A focused conversation keeps its caret too (arrows move it).
-        """
-        if self.show_help or self.show_detail or self.show_list or self.show_events:
-            return
-        info = self.conversation.window.render_info
-        if info is None:
-            return
-        at_bottom = info.vertical_scroll + info.window_height >= info.content_height
-        arrived, self._view_at_bottom = at_bottom and not self._view_at_bottom, at_bottom
-        if arrived and self.app.layout.has_focus(self.input):
-            buffer = self.conversation.buffer
-            buffer.cursor_position = len(buffer.text)
+    def conversation_visible(self):
+        return not (self.show_help or self.show_detail or self.show_list or self.show_events)
 
     def scroll(self, direction):
-        buffer = self.conversation.buffer
+        """PageUp/PageDown: one screen of rows; the pane keeps or resumes following itself."""
+        self.view.page(direction)
+
+    # -- mouse: wheel, drag selection, edge auto-scroll, copy ------------------------------
+    def mouse_event(self, event):
+        """Every vt100 mouse event: the conversation pane's own handling, else the default.
+
+        The wheel scrolls the conversation from anywhere while it is shown (never the input
+        or its history). A left drag that starts on the pane selects text, keeps selecting
+        while the pointer is beyond the pane, and copies on release. Other clicks (input,
+        picker, status) go to prompt_toolkit's own handler.
+        """
+        parsed = chat_tui_view.parse_mouse(event.data)
+        if parsed is None or not self.conversation_visible() or not self._pane_mouse(*parsed):
+            return self._default_mouse_binding.call(event)
+        return None
+
+    def _pane_geometry(self):
         info = self.conversation.window.render_info
-        rows = max(1, (info.window_height if info is not None else 10) - 1)
-        document = buffer.document
-        if direction < 0:
-            buffer.cursor_position += document.get_cursor_up_position(count=rows)
+        if info is None:
+            return None
+        return info._x_offset, info._y_offset, info.window_height
+
+    def _pane_mouse(self, kind, button, x, y):
+        from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+        view = self.view
+        geometry = self._pane_geometry()
+        if geometry is None:
+            return False
+        left, top, height = geometry
+        inside = top <= y < top + height
+        if kind == MouseEventType.SCROLL_UP:
+            view.scroll_rows(-chat_tui_view.WHEEL_ROWS)
+            return True
+        if kind == MouseEventType.SCROLL_DOWN:
+            view.scroll_rows(chat_tui_view.WHEEL_ROWS)
+            return True
+        if view.dragging and button == MouseButton.LEFT and kind in (MouseEventType.MOUSE_MOVE,
+                                                                     MouseEventType.MOUSE_UP):
+            # A click (no movement) never scrolls, selects or touches the clipboard; a
+            # release never scrolls either, it only extends to the pointer.
+            if (x, y) != self._drag_origin:
+                self._drag_moved = True
+            if kind == MouseEventType.MOUSE_MOVE:
+                if self._drag_moved:
+                    self._drag_to(x, y)
+            else:
+                self._autoscroll_stop()
+                if self._drag_moved:
+                    self._extend_to(x, y)
+                view.end_drag(view.head)
+            return True
+        if not inside:
+            return False
+        if kind == MouseEventType.MOUSE_DOWN and button == MouseButton.LEFT:
+            self._autoscroll_stop()
+            view.begin_drag(view.offset_at(view.top + y - top, x - left))
+            self._drag_pointer = self._drag_origin = (x, y)
+            self._drag_moved = False
+            return True
+        if kind == MouseEventType.MOUSE_DOWN:
+            view.clear_selection()
+        return True  # Clicks on the pane never move focus or the input caret.
+
+    def _extend_to(self, x, y):
+        """Extend the selection to the pointer's cell (clamped to the pane), no scrolling."""
+        geometry = self._pane_geometry()
+        if geometry is None:
+            return
+        left, top, height = geometry
+        view = self.view
+        row = max(view.top, min(view.top + height - 1, view.top + y - top))
+        view.extend_drag(view.offset_at(row, max(0, x - left)))
+        self.app.invalidate()
+
+    def _drag_to(self, x, y):
+        """Extend a moving drag to the pointer; at or beyond an edge, scroll a row first.
+
+        Only reached after the pointer left the press cell. The pane's first and last rows
+        count as the edge because Terminal.app clamps drags that leave the window to them.
+        """
+        view = self.view
+        geometry = self._pane_geometry()
+        if geometry is None:
+            return
+        left, top, height = geometry
+        self._drag_pointer = (x, y)
+        if y <= top and view.top > 0:
+            view.scroll_rows(-1)
+            row = view.top
+        elif y >= top + height - 1 and not view.following:
+            view.scroll_rows(1)
+            row = view.top + height - 1
         else:
-            buffer.cursor_position += document.get_cursor_down_position(count=rows)
-            if buffer.document.cursor_position_row >= buffer.document.line_count - 1:
-                buffer.cursor_position = len(buffer.text)
+            row = max(view.top, min(view.top + height - 1, view.top + y - top))
+        view.extend_drag(view.offset_at(row, max(0, x - left)))
+        at_edge = y <= top or y >= top + height - 1
+        if at_edge and self._autoscroll_handle is None:
+            # Mouse events arrive on the running loop; keep scrolling without new events.
+            self._autoscroll_handle = asyncio.get_running_loop().call_later(
+                chat_tui_view.AUTOSCROLL_SECONDS, self._autoscroll_tick)
+        elif not at_edge:
+            self._autoscroll_stop()
+        self.app.invalidate()
+
+    def _autoscroll_tick(self):
+        self._autoscroll_handle = None
+        if self.view.dragging and self._drag_pointer is not None and self.conversation_visible():
+            self._drag_to(*self._drag_pointer)
+
+    def _autoscroll_stop(self):
+        if self._autoscroll_handle is not None:
+            self._autoscroll_handle.cancel()
+            self._autoscroll_handle = None
 
     def toggle_focus(self):
         self.close_menu()  # Also restores the default Esc timeout.
@@ -797,17 +949,28 @@ class ChatTUI:
         layout.focus(pane if layout.has_focus(self.input) else self.input)
 
     def toggle_mouse(self):
-        """F6: mouse reporting on (wheel scrolls) or off (terminal drag-select/copy works)."""
+        """F6: mouse reporting on (wheel scrolls, drag selects and copies) or off (the
+        terminal's own drag-select and copy; the wheel no longer reaches the pane)."""
         self.mouse_enabled = not self.mouse_enabled
+        self._autoscroll_stop()
+        self.view.clear_selection()
         if self.mouse_enabled:
-            self.append("llmtool: mouse on; the wheel scrolls the conversation. F6 turns it off"
-                        " to select and copy text with the terminal")
+            self.append("llmtool: mouse on; the wheel scrolls the conversation and a drag selects"
+                        " and copies text. F6 turns it off to select with the terminal instead")
         else:
             self.append("llmtool: mouse off; drag to select and copy text with the terminal."
                         " Fn+↑/↓ (PageUp/PageDown) scroll; F6 turns the wheel back on")
 
+    def _leave_conversation(self):
+        """Any pane switch ends a drag, its auto-scroll timer and the selection, so nothing
+        hidden keeps scrolling, extending or capturing Ctrl-C."""
+        self._autoscroll_stop()
+        self._drag_pointer = None
+        self.view.clear_selection()
+
     def toggle_help(self):
         self.show_help = not self.show_help
+        self._leave_conversation()
         # Never leave focus on a hidden pane; the help pane itself scrolls when focused.
         # Closing help over the list or events pane gives it focus back, so Esc closes it.
         pane = (self.list_window if self.list_visible()
@@ -820,6 +983,7 @@ class ChatTUI:
         if show and not self.detail.text:
             self.append("llmtool: no Task detail loaded yet; use /task show TASK_ID")
             show = False
+        self._leave_conversation()
         self.show_detail = show
         # Closing a detail opened from the list goes back to the list.
         self.app.layout.focus(self.list_window if self.show_list and not show else self.input)
@@ -827,6 +991,7 @@ class ChatTUI:
 
     # -- Task list (TaskStore reads only; never a provider or network call) ----------
     def toggle_list(self, show):
+        self._leave_conversation()
         self.show_list = show
         if show:
             self.show_detail = False
@@ -840,6 +1005,7 @@ class ChatTUI:
 
     def toggle_events(self, show):
         """Recent events across Tasks; shares the list's TaskStore reader and interval."""
+        self._leave_conversation()
         self.show_events = show
         if show:
             self.show_list = False
@@ -1039,7 +1205,8 @@ class ChatTUI:
             return
         if text.strip() == "/clear":
             # The pane mirrors the cleared in-memory conversation.
-            self.conversation.buffer.set_document(self._Document(""), bypass_readonly=True)
+            self.view.clear_selection()
+            self.conversation.set_text("")
         self.append(output)
         if not self.session.active:
             self.app.exit(result=0)
@@ -1247,10 +1414,10 @@ class ChatTUI:
 
     def _stream_attach(self, raw):
         """Open the chat reply block at the end of the pane with the text so far."""
-        self.stream_head = len(self.conversation.buffer.text)
+        self.stream_head = len(self.conversation.text)
         self.append("assistant:")
         self.stream_raw = raw
-        self.stream_start = len(self.conversation.buffer.text) + 1   # after "\n"
+        self.stream_start = len(self.conversation.text) + 1   # after "\n"
         if raw:
             self._block_render(self.stream_start, terminal_safe_text(raw))
 
@@ -1261,10 +1428,7 @@ class ChatTUI:
         if raw is None:
             return None
         self.stream_raw = None
-        buffer = self.conversation.buffer
-        head = buffer.text[:self.stream_head]
-        buffer.set_document(self._Document(head, min(buffer.cursor_position, len(head))),
-                            bypass_readonly=True)
+        self.conversation.set_text(self.conversation.text[:self.stream_head])
         return raw
 
     def _stream_finalize(self):
@@ -1568,7 +1732,7 @@ class ChatTUI:
         if self.pm_block_raw is None:
             self.append("PM:")
             self.pm_block_raw = ""
-            self.pm_block_start = len(self.conversation.buffer.text) + 1   # after "\n"
+            self.pm_block_start = len(self.conversation.text) + 1   # after "\n"
         self.pm_queue += text
         self._pm_rate = max(self._pm_rate, -(-len(self.pm_queue) // PM_MAX_LAG_TICKS))
         self._pm_schedule_tick()
@@ -1609,13 +1773,12 @@ class ChatTUI:
                            terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final)))
 
     def _block_render(self, start, shown):
-        """Replace the pane text from a streaming block's start with its current text."""
-        buffer = self.conversation.buffer
-        old = buffer.text
-        follow = buffer.cursor_position >= len(old)
-        new = old[:start - 1] + "\n" + shown
-        position = len(new) if follow else min(buffer.cursor_position, len(new))
-        buffer.set_document(self._Document(new, position), bypass_readonly=True)
+        """Replace the pane text from a streaming block's start with its current text.
+
+        The view keeps its reading position (rows above the block are unchanged) and
+        follows only while it is at the bottom.
+        """
+        self.conversation.set_text(self.conversation.text[:start - 1] + "\n" + shown)
         self.app.invalidate()
 
     def _pm_finalize(self):
