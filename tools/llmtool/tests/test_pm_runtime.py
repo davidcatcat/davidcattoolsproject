@@ -85,7 +85,8 @@ class PMRuntimeTests(unittest.TestCase):
         self.addCleanup(self.observe.stop)
         pm_runtime._write_json_atomic(self.root, pm_runtime._binding_path(self.root, SESSION), {
             'runtime': 'claude-code', 'native_session_id': SESSION, 'cwd': self.cwd,
-            'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1)})
+            'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1),
+            'session_started': False})
 
     def tearDown(self):
         for runtime in tuple(self.runtimes):
@@ -126,7 +127,7 @@ class PMRuntimeTests(unittest.TestCase):
         argv, cwd, _ = self.calls[0]
         self.assertEqual(argv, ['claude', '-p', '--input-format', 'stream-json',
                                 '--output-format', 'stream-json', '--verbose',
-                                '--include-partial-messages', '--resume', SESSION,
+                                '--include-partial-messages', '--session-id', SESSION,
                                 '--permission-prompts', 'none'])
         self.assertEqual(cwd, self.cwd)
         self.assertEqual([event['type'] for event in events],
@@ -236,24 +237,50 @@ class PMRuntimeTests(unittest.TestCase):
             self.runtime(runtime='codex').open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
 
-    def test_create_and_read_dedicated_binding(self):
+    def test_create_dedicated_binding_starts_no_process(self):
         calls = []
-        processes = []
 
         def starter(argv, cwd, env):
             calls.append((argv, cwd, env))
-            process = FakeProcess()
-            processes.append(process)
-            return process
+            return FakeProcess()
 
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
                                                  environ={'HOME': self.temp.name},
                                                  clock=lambda: 1000, runner=starter)
-        self.assertEqual(calls[0][0][:1], ['claude'])
-        self.assertEqual(calls[0][0][1], '--session-id')
-        self.assertEqual(calls[0][0][2], binding['native_session_id'])
-        self.assertEqual(processes[0].wait_calls, 1)
+        self.assertEqual(calls, [])
+        self.assertFalse(binding['session_started'])
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
+
+        class RealCLIShapeFake:
+            def __init__(self, argv):
+                self.argv = argv
+                self.stdin = None if '-p' not in argv else io.BytesIO()
+                self.error = ('Error: Input must be provided either through stdin or as a '
+                              'prompt argument when using --print')
+
+            def wait(self, timeout=None):
+                return 1 if self.stdin is None else 0
+
+        legacy = RealCLIShapeFake(['claude', '--session-id', SESSION])
+        self.assertIsNone(legacy.stdin)
+        self.assertEqual(legacy.wait(), 1)
+        self.assertIn('Input must be provided either through stdin', legacy.error)
+
+    def test_completed_first_turn_marks_binding_for_resume_on_next_open(self):
+        process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
+        runtime = self.runtime(process)
+        runtime.open()
+        list(runtime.send('first request'))
+        runtime.close()
+        binding = pm_runtime.current_binding(SESSION, state_root=self.root)
+        self.assertTrue(binding['session_started'])
+
+        later = self.runtime(FakeProcess())
+        later.open()
+        argv = self.calls[-1][0]
+        self.assertIn('--resume', argv)
+        self.assertNotIn('--session-id', argv)
+        later.close()
 
     def test_create_then_connect_does_not_treat_creator_as_live_session(self):
         created = []
@@ -278,48 +305,28 @@ class PMRuntimeTests(unittest.TestCase):
                 state_root=self.root, environ={'HOME': self.temp.name}, clock=time.time)
             self.runtimes.add(runtime)
             runtime.open()
-        self.assertEqual(created[0].wait_calls, 1)
+        self.assertEqual(created[0].wait_calls, 0)
         self.assertEqual(len(calls), 1)
         runtime.close()
 
-    def test_create_failure_stops_child_and_retry_starts_one_process(self):
+    def test_create_binding_write_failure_starts_no_child(self):
         write_json_atomic = pm_runtime._write_json_atomic
-        for failed_write in ('binding', 'pointer'):
-            with self.subTest(failed_write=failed_write):
-                state_root = self.root / failed_write
-                pm_runtime._ensure_state_dir(state_root)
-                processes = []
+        state_root = self.root / 'write-failure'
+        pm_runtime._ensure_state_dir(state_root)
+        calls = []
 
-                def starter(argv, cwd, env):
-                    process = FakeProcess()
-                    processes.append(process)
-                    return process
+        def fail_write(root, path, value):
+            if path.name.endswith('.binding.json'):
+                raise pm_runtime._error(
+                    'PM_BINDING_WRITE_FAILED', 'synthetic binding write failure')
+            return write_json_atomic(root, path, value)
 
-                def fail_selected_write(root, path, value):
-                    is_binding = path.name.endswith('.binding.json')
-                    if ((failed_write == 'binding' and is_binding) or
-                            (failed_write == 'pointer' and path.name == 'current-binding.json')):
-                        raise pm_runtime._error(
-                            'PM_BINDING_WRITE_FAILED', 'synthetic binding write failure')
-                    return write_json_atomic(root, path, value)
-
-                with patch.object(pm_runtime, '_write_json_atomic',
-                                  side_effect=fail_selected_write):
-                    with self.assertRaises(LLMToolError) as raised:
-                        pm_runtime.create_dedicated_pm(
-                            self.cwd, state_root=state_root, runner=starter)
-                self.assertEqual(raised.exception.pm_runtime_code, 'PM_BINDING_WRITE_FAILED')
-                self.assertEqual(len(processes), 1)
-                self.assertTrue(processes[0].terminated)
-                self.assertGreater(processes[0].wait_calls, 0)
-
-                binding = pm_runtime.create_dedicated_pm(
-                    self.cwd, state_root=state_root, runner=starter)
-                self.assertEqual(len(processes), 2)
-                self.assertTrue(processes[0].terminated)
-                self.assertFalse(processes[1].terminated)
-                self.assertEqual(
-                    pm_runtime.current_binding(state_root=state_root), binding)
+        with patch.object(pm_runtime, '_write_json_atomic', side_effect=fail_write):
+            with self.assertRaises(LLMToolError) as raised:
+                pm_runtime.create_dedicated_pm(
+                    self.cwd, state_root=state_root, runner=lambda *args: calls.append(args))
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_BINDING_WRITE_FAILED')
+        self.assertEqual(calls, [])
 
     def test_open_refuses_non_dedicated_session(self):
         (self.root / (SESSION + '.binding.json')).unlink()
