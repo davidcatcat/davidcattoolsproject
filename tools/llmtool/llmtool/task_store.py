@@ -178,7 +178,7 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
     'artifact_format', 'artifact', 'artifact_sha256', 'usage', 'error_code',
     'created_at',
 ))
-_DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution', 'progress'))
+_DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DEVELOPER_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
@@ -195,6 +195,11 @@ _DEVELOPER_EXTENSION_SHAPES = tuple(
 _DEVELOPER_BLOCKED_REASON_SHAPES = tuple(
     shape | frozenset(('blocked_reason',))
     for shape in (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
+)
+_DEVELOPER_PROGRESS_SHAPES = tuple(
+    shape | frozenset(('progress',))
+    for shape in (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+                  *_DEVELOPER_BLOCKED_REASON_SHAPES)
 )
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
@@ -955,7 +960,8 @@ def _validate(record):
         developer = record['developer']
         if developer is not None:
             assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
-                                 *_DEVELOPER_BLOCKED_REASON_SHAPES)
+                                 *_DEVELOPER_BLOCKED_REASON_SHAPES,
+                                 *_DEVELOPER_PROGRESS_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
@@ -1157,13 +1163,19 @@ def _validate(record):
                     developer['provider_profile'] == 'agy' and
                     developer['state'] == 'BLOCKED' and
                     developer['error_code'] == 'BLOCKED_WRITE_ISOLATION' and
-                    reason == 'BLOCKED_WRITE_ISOLATION')
+                    reason in ('BLOCKED_WRITE_ISOLATION', 'UNSUPPORTED_BOUNDARY',
+                               'BOUNDARY_PREPARATION_FAILED', 'BOUNDARY_UNVERIFIED'))
+                agy_dispatch_block = (
+                    developer['provider_profile'] == 'agy' and
+                    developer['state'] == 'BLOCKED' and
+                    developer['error_code'] == 'AGY_DISPATCH_DENIED' and
+                    reason == 'OWNER_DISPATCH_DENIED')
                 codex_block = (
                     developer['provider_profile'] == 'codex' and
                     developer['state'] == 'DEVELOPER_OUTCOME_UNKNOWN' and
                     developer['error_code'] == 'CODEX_BLOCKED' and
                     type(execution) is dict and execution.get('status') == 'BLOCKED')
-                if (not (agy_isolation_block or codex_block) or
+                if (not (agy_isolation_block or agy_dispatch_block or codex_block) or
                         type(reason) is not str or
                         len(reason.encode('utf-8')) > 2048 or
                         any((ord(char) < 32 and char not in '\t\n\r') or
