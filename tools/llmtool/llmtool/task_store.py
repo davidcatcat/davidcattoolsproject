@@ -251,6 +251,9 @@ WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
 TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
+_TASK_STORE_CONTENTION_ERRNOS = frozenset(
+    value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR)
+    if value is not None)
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
     'company-gw', 'claude-reviewer',
@@ -286,6 +289,10 @@ def _fail(code='TASK_STORE_INVALID'):
     error.task_store_code = category
     error.task_store_error_code = safe_code
     raise error from None
+
+
+def _is_contention_error(error):
+    return error.errno in _TASK_STORE_CONTENTION_ERRNOS
 
 
 def _validate_usage(value):
@@ -1781,7 +1788,18 @@ class TaskStore:
                         follow_symlinks=False)
                 os.unlink(temporary, dir_fd=directory)
             else:
-                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        os.replace(temporary, name, src_dir_fd=directory,
+                                   dst_dir_fd=directory)
+                        break
+                    except OSError as exc:
+                        if not _is_contention_error(exc):
+                            raise
+                        if time.monotonic() >= deadline:
+                            _fail('TASK_STORE_BUSY')
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             os.fsync(directory)
         except FileExistsError:
             _fail('TASK_STORE_CONFLICT')
@@ -2422,6 +2440,12 @@ class TaskStore:
                         if time.monotonic() >= deadline:
                             raise
                         time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                    except OSError as exc:
+                        if not _is_contention_error(exc):
+                            raise
+                        if time.monotonic() >= deadline:
+                            _fail('TASK_STORE_BUSY')
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
                 info = os.fstat(lock_fd)
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
                         stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
@@ -2445,8 +2469,12 @@ class TaskStore:
                     if time.monotonic() >= deadline:
                         _fail('TASK_STORE_BUSY')
                     time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
-                except OSError:
-                    _fail('TASK_STORE_UNAVAILABLE')
+                except OSError as exc:
+                    if not _is_contention_error(exc):
+                        _fail('TASK_STORE_UNAVAILABLE')
+                    if time.monotonic() >= deadline:
+                        _fail('TASK_STORE_BUSY')
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             current = self._read_at(directory, task_id)
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
