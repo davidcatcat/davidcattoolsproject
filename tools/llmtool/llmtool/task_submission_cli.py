@@ -1087,7 +1087,7 @@ def _codex_timeout_diff(root, source_sha):
         return {'changed_paths': changed_paths,
                 'diff_sha256': hashlib.sha256(raw).hexdigest(),
                 'base_sha': source_sha}
-    except Exception:
+    except (LLMToolError, OSError, UnicodeDecodeError):
         return None
 
 
@@ -1210,11 +1210,19 @@ def _persist_developer_output_rejection(store, task_id, developer, error_code,
     except Exception:
         capture = None
     developer.pop('rejected_output_capture', None)
+    developer.pop('blocked_reason', None)
+    developer.pop('progress', None)
     developer.update(state='DEVELOPER_OUTPUT_REJECTED', error_code=error_code,
                      usage=None if usage is None else dict(usage), **fields)
     if capture is not None:
         developer['rejected_output_capture'] = capture
-    return store.update(task_id, developer=developer)
+    try:
+        return store.update(task_id, developer=developer)
+    except Exception:
+        if capture is None:
+            raise
+        developer.pop('rejected_output_capture', None)
+        return store.update(task_id, developer=developer)
 
 
 def _ignored_file_fingerprints(root):
@@ -2500,8 +2508,10 @@ def run_task_codex_delegate(args, *, store):
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'executor_task_id': registration.task_id,
-        'state': 'DEVELOPER_PENDING', 'provider_profile': 'codex',
-        'provider_type': None, 'model': None,
+        'state': ('DEVELOPER_DISPATCHING' if recovering_timeout else 'DEVELOPER_PENDING'),
+        'provider_profile': 'codex',
+        'provider_type': ('codex-cli' if recovering_timeout else None),
+        'model': (provider['model'] if recovering_timeout else None),
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
         'session_id': 'dev-' + new_id(), 'source_sha': task_source_sha,
         'source_sha_binding': 'D6_REGISTRY_OBSERVED',
@@ -2526,7 +2536,8 @@ def run_task_codex_delegate(args, *, store):
             'executor_native_session': ('VERIFIED' if registration.native_session_id else 'UNKNOWN'),
             'execution_mode': 'DIRECT_D6', 'root': registration.root,
             'common_dir': registration.common_dir, 'branch': registration.branch,
-            'source_sha': task_source_sha, 'result_head': None},
+            'source_sha': task_source_sha,
+            'result_head': snapshot.head if recovering_timeout else None},
         'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
@@ -2538,10 +2549,15 @@ def run_task_codex_delegate(args, *, store):
             developer=developer, completion=completion)
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        detail = ('Codex timeout continuation denied' if recovering_timeout else
+                  'Codex dispatch denied')
+        raise LLMToolError(detail + ' (' + exc.dispatch_code + ')') from None
     try:
-        developer.update(state='DEVELOPER_DISPATCHING', provider_type='codex-cli',
-                         model=provider['model'])
-        store.update(task['task_id'], developer=developer)
+        if not recovering_timeout:
+            developer.update(state='DEVELOPER_DISPATCHING', provider_type='codex-cli',
+                             model=provider['model'])
+            store.update(task['task_id'], developer=developer)
         def validate_binding():
             current_registration, current_snapshot = task_completion.bind_executor_task(
                 registration.task_id, expected_common_dir=registration.common_dir,
@@ -2574,7 +2590,8 @@ def run_task_codex_delegate(args, *, store):
         result = codex_direct_developer.run(root=registration.root, prompt=prompt,
             model=provider['model'], reasoning_effort=reasoning_effort,
             dispatch_store=store, dispatch_task_id=task['task_id'],
-            prelaunch_validate=validate_binding)
+            prelaunch_validate=validate_binding,
+            dispatch_action=('TIMEOUT_CONTINUATION' if recovering_timeout else 'DISPATCH'))
     except worker_dispatch.WorkerDispatchDenied as exc:
         developer.update(state='DEVELOPER_UNAVAILABLE', provider_type='codex-cli',
                          model=provider['model'], error_code=exc.dispatch_code)
@@ -2627,6 +2644,8 @@ def run_task_codex_delegate(args, *, store):
     except Exception as exc:
         # Fail closed (no automatic resend), but keep a stable, content-free
         # code naming what failed instead of one opaque adapter UNKNOWN.
+        developer.pop('blocked_reason', None)
+        developer.pop('progress', None)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', provider_type='codex-cli',
             model=provider['model'],
             error_code=codex_direct_developer.adapter_error_code(exc),
@@ -2704,6 +2723,7 @@ def run_task_codex_delegate(args, *, store):
         saved = store.update(task['task_id'], developer=developer, completion=completion)
     except Exception:
         developer.pop('blocked_reason', None)
+        developer.pop('progress', None)
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', artifact=None,
             artifact_sha256=None, error_code='CODEX_RESULT_PERSISTENCE_REJECTED',
             execution={**execution, 'status': 'UNKNOWN', 'usage_source': 'UNKNOWN'},

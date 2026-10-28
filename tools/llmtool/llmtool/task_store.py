@@ -771,7 +771,7 @@ def _validate(record):
                     re.fullmatch(r'[a-z][a-z0-9-]{0,63}', entry['worker_key']) is None or
                     entry['action'] not in (
                         'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
-                        'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
+                        'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
                     entry['decision'] not in ('ALLOWED', 'BLOCKED') or
                     type(entry['reason_code']) is not str or
                     re.fullmatch(r'[A-Z0-9_]{1,64}', entry['reason_code']) is None or

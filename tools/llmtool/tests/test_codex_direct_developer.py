@@ -532,6 +532,20 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(code, 'CODEX_TIMEOUT')
         self.assertIsNone(evidence)
 
+    def test_timeout_diff_treats_decode_failure_as_missing_evidence(self):
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['src.py'], b'\xff')):
+            code, evidence = task_submission_cli._codex_timeout_outcome(
+                'CODEX_TIMEOUT', True, self.root, 'b' * 40)
+        self.assertEqual(code, 'CODEX_TIMEOUT')
+        self.assertIsNone(evidence)
+
+    def test_timeout_diff_does_not_hide_programming_errors(self):
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          side_effect=RuntimeError('fixture bug')):
+            with self.assertRaisesRegex(RuntimeError, 'fixture bug'):
+                task_submission_cli._codex_timeout_diff(self.root, 'b' * 40)
+
     def test_followup_uses_cumulative_task_base_diff(self):
         base_sha = 'b' * 40
         raw = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'

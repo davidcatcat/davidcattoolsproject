@@ -540,6 +540,128 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(repair_task['dispatch_audit'][-1]['reason_code'],
                          'WORKER_REPAIR_LIMIT_REACHED')
 
+    def test_codex_timeout_continuation_is_same_scope_and_durable(self):
+        previous = self.developer(state='DEVELOPER_OUTCOME_UNKNOWN', provider='codex')
+        previous.update(provider_type='codex-cli', model='gpt-6-luna',
+                        executor_task_id='executor-task-1',
+                        error_code='CODEX_TIMEOUT_WITH_CHANGES',
+                        execution={'status': 'TIMEOUT', 'diff_sha256': 'c' * 64,
+                                   'diff_base_sha': previous['source_sha']})
+        continued = {**previous, 'assignment_id': new_id(),
+                     'state': 'DEVELOPER_DISPATCHING', 'session_id': 'dev-' + new_id(),
+                     'artifact': None, 'artifact_sha256': None, 'usage': None,
+                     'error_code': None, 'execution': None}
+        completion = {'executor_task_id': 'executor-task-1',
+                      'evidence': {'result_head': 'd' * 40}}
+        current = {'task_id': self.task['task_id'], 'developer': previous,
+                   'completion': None, 'dispatch_audit': []}
+        changes = {'developer': continued, 'completion': completion}
+        expected = {'developer': previous}
+        self.assertEqual(worker_dispatch.task_store_attempts(current, changes),
+                         [('codex-developer', 'TIMEOUT_CONTINUATION')])
+        self.assertIsNone(worker_dispatch.authorize_task_store_change(
+            current, changes, expected=expected))
+        self.assertEqual(current['dispatch_audit'][-1]['action'], 'TIMEOUT_CONTINUATION')
+        self.assertEqual(current['dispatch_audit'][-1]['decision'], 'ALLOWED')
+
+    def test_codex_timeout_continuation_refuses_stale_scope_and_replay(self):
+        previous = self.developer(state='DEVELOPER_OUTCOME_UNKNOWN', provider='codex')
+        previous.update(provider_type='codex-cli', model='gpt-6-luna',
+                        executor_task_id='executor-task-1',
+                        error_code='CODEX_TIMEOUT_WITH_CHANGES',
+                        execution={'status': 'TIMEOUT', 'diff_sha256': 'c' * 64,
+                                   'diff_base_sha': previous['source_sha']})
+        continued = {**previous, 'assignment_id': new_id(),
+                     'state': 'DEVELOPER_DISPATCHING', 'session_id': 'dev-' + new_id(),
+                     'error_code': None, 'execution': None}
+        completion = {'executor_task_id': 'executor-task-1',
+                      'evidence': {'result_head': 'd' * 40}}
+        current = {'task_id': self.task['task_id'], 'developer': previous,
+                   'completion': None, 'dispatch_audit': []}
+        changes = {'developer': {**continued, 'write_paths': ['other.py']},
+                   'completion': completion}
+        denied = worker_dispatch.authorize_task_store_change(
+            current, changes, expected={'developer': previous})
+        self.assertEqual(denied.dispatch_code,
+                         'WORKER_TIMEOUT_CONTINUATION_PRECONDITION')
+        self.assertEqual(current['dispatch_audit'][-1]['decision'], 'BLOCKED')
+
+        current = {'task_id': self.task['task_id'], 'developer': previous,
+                   'completion': None, 'dispatch_audit': []}
+        denied = worker_dispatch.authorize_task_store_change(
+            current, {'developer': continued, 'completion': completion},
+            expected={'developer': self.developer(state='DEVELOPER_OUTCOME_UNKNOWN',
+                                                  provider='codex')})
+        self.assertEqual(denied.dispatch_code,
+                         'WORKER_TIMEOUT_CONTINUATION_PRECONDITION')
+
+        current['dispatch_audit'] = [worker_dispatch.audit_entry(
+            worker_dispatch.PolicyDecision('codex-developer', True,
+                'OWNER_POLICY_ALLOWED', 'a' * 64), 'TIMEOUT_CONTINUATION')]
+        denied = worker_dispatch.authorize_task_store_change(
+            current, {'developer': continued, 'completion': completion},
+            expected={'developer': previous})
+        self.assertEqual(denied.dispatch_code, 'WORKER_TIMEOUT_CONTINUATION_LIMIT')
+
+    def test_codex_timeout_continuation_honors_paused_policy(self):
+        previous = self.developer(state='DEVELOPER_OUTCOME_UNKNOWN', provider='codex')
+        previous.update(provider_type='codex-cli', model='gpt-6-luna',
+                        executor_task_id='executor-task-1',
+                        error_code='CODEX_TIMEOUT_WITH_CHANGES',
+                        execution={'status': 'TIMEOUT', 'diff_sha256': 'c' * 64,
+                                   'diff_base_sha': previous['source_sha']})
+        continued = {**previous, 'assignment_id': new_id(),
+                     'state': 'DEVELOPER_DISPATCHING', 'session_id': 'dev-' + new_id(),
+                     'error_code': None, 'execution': None}
+        current = {'task_id': self.task['task_id'], 'developer': previous,
+                   'completion': None, 'dispatch_audit': []}
+        self._set_state('codex-developer', 'PAUSED')
+        denied = worker_dispatch.authorize_task_store_change(current,
+            {'developer': continued, 'completion': {'executor_task_id': 'executor-task-1',
+                'evidence': {'result_head': 'd' * 40}}}, expected={'developer': previous})
+        self.assertEqual(denied.dispatch_code, 'OWNER_PAUSED')
+
+    def test_codex_timeout_continuation_adapter_consumes_recorded_action(self):
+        self._set_state('codex-developer', 'ALLOWED')
+        previous = self.developer(state='DEVELOPER_OUTCOME_UNKNOWN', provider='codex')
+        previous.update(provider_type='codex-cli', model='gpt-6-luna',
+                        executor_task_id='executor-task-1',
+                        error_code='CODEX_TIMEOUT_WITH_CHANGES',
+                        execution={'status': 'TIMEOUT', 'native_session_id': None,
+                            'process_exit_code': None, 'stdout_sha256': None,
+                            'elapsed_ms': 100, 'cleanup_status': 'CONFIRMED',
+                            'usage_source': 'UNKNOWN', 'source_bytes': None,
+                            'source_file_count': None, 'source_manifest_sha256': None,
+                            'diff_sha256': 'c' * 64,
+                            'diff_base_sha': previous['source_sha']})
+        self.store.compare_and_update(self.task['task_id'],
+            expected={'developer': None}, developer=previous)
+        continued = {**previous, 'assignment_id': new_id(),
+                     'state': 'DEVELOPER_DISPATCHING', 'session_id': 'dev-' + new_id(),
+                     'artifact': None, 'artifact_sha256': None, 'usage': None,
+                     'error_code': None, 'execution': None}
+        result_head = 'd' * 40
+        evidence = {'task_id': self.task['task_id'], 'run_id': self.task['run_id'],
+            'contract_digest': self.task['task_binding']['contract_digest'],
+            'executor_task_id': 'executor-task-1', 'source_sha': previous['source_sha'],
+            'result_head': result_head, 'execution_mode': 'DIRECT_D6'}
+        completion = {'state': 'WAITING_EXECUTOR',
+            'executor_task_id': 'executor-task-1', 'reviewer_task_id': None,
+            'evidence': evidence, 'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
+            'pm_response': None, 'pm_recommendation': None, 'pm_usage': None,
+            'pm_error_code': None}
+        transitioned = self.store.compare_and_update(self.task['task_id'],
+            expected={'developer': previous}, developer=continued, completion=completion)
+        transition = transitioned['dispatch_audit'][-1]
+        self.assertEqual(transition['action'], 'TIMEOUT_CONTINUATION')
+        decision = worker_dispatch.authorize_dispatch(self.store, self.task['task_id'],
+            'codex-developer', 'TIMEOUT_CONTINUATION')
+        saved = self.store.get(self.task['task_id'])
+        self.assertTrue(decision.allowed)
+        self.assertEqual(saved['dispatch_audit'][-1]['authorization_id'],
+                         transition['attempt_id'])
+        self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
+
     def test_repair_requires_a_persisted_failed_review_decision(self):
         responded = self.developer(state='DEVELOPER_RESPONDED')
         responded.update(provider_type='openai-compatible', model='gw-model')

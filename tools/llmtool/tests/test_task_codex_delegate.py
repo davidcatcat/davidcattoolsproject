@@ -1,9 +1,11 @@
 import dataclasses
+import importlib.util
 import io
 import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -167,7 +169,8 @@ class CodexDelegateTests(unittest.TestCase):
 
     def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None,
                   overwrite_ignored=None, malformed_diff=None, callback_handler=None,
-                  registration=None, bound_registration=None, codex_error=None):
+                  registration=None, bound_registration=None, codex_error=None,
+                  codex_result=None):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
@@ -215,6 +218,8 @@ class CodexDelegateTests(unittest.TestCase):
                     (patch('llmtool.task_submission_cli.codex_direct_developer.run',
                            side_effect=codex_error) if codex_error is not None else
                      patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                           return_value=codex_result) if codex_result is not None else
+                     patch('llmtool.task_submission_cli.codex_direct_developer.run',
                            wraps=task_submission_cli.codex_direct_developer.run)), \
                     patch('llmtool.task_submission_cli.run_task_direct_result_event',
                           side_effect=callback_handler, return_value=0) as callback:
@@ -222,6 +227,62 @@ class CodexDelegateTests(unittest.TestCase):
         finally:
             os.chdir(original_cwd)
         return result, self.store.get(task['task_id']), callback
+
+    def test_blocked_result_preserves_typed_reason(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='BLOCKED', summary='blocked safely', tests=(),
+            self_review='checked', blocked_reason='cannot safely edit',
+            exit_code=0, thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='a' * 64, elapsed_ms=1, cleanup_status='CONFIRMED',
+            usage=None)
+        with redirect_stdout(io.StringIO()):
+            _result, saved, callback = self._dispatch(task, codex_result=result)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['developer']['error_code'], 'CODEX_BLOCKED')
+        self.assertEqual(saved['developer']['blocked_reason'], 'cannot safely edit')
+        self.assertEqual(saved['developer']['execution']['status'], 'BLOCKED')
+        callback.assert_not_called()
+
+    def test_capture_write_failure_keeps_typed_rejection(self):
+        developer = {'assignment_id': new_id(), 'state': 'DEVELOPER_DISPATCHING'}
+
+        class RecordingStore:
+            def update(self, task_id, *, developer):
+                self.saved = dict(developer)
+                return self.saved
+
+        store = RecordingStore()
+        with patch.object(task_submission_cli, '_capture_rejected_output',
+                          side_effect=OSError('capture unavailable')):
+            saved = task_submission_cli._persist_developer_output_rejection(
+                store, 'task-id', developer, 'DEVELOPER_OUTPUT_INVALID_DIFF',
+                None, 'bad diff')
+        self.assertEqual(saved['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertNotIn('rejected_output_capture', saved)
+
+        class CaptureRejectingStore:
+            def __init__(self):
+                self.calls = []
+
+            def update(self, task_id, *, developer):
+                self.calls.append(dict(developer))
+                if 'rejected_output_capture' in developer:
+                    raise OSError('capture record unavailable')
+                return dict(developer)
+
+        store = CaptureRejectingStore()
+        with patch.object(task_submission_cli, '_capture_rejected_output',
+                          return_value={'ref': 'rejected-developer-output/a.txt',
+                                        'sha256': 'a' * 64}):
+            saved = task_submission_cli._persist_developer_output_rejection(
+                store, 'task-id', dict(developer), 'DEVELOPER_OUTPUT_INVALID_DIFF',
+                None, 'bad diff')
+        self.assertEqual(len(store.calls), 2)
+        self.assertIn('rejected_output_capture', store.calls[0])
+        self.assertNotIn('rejected_output_capture', saved)
+        self.assertEqual(saved['state'], 'DEVELOPER_OUTPUT_REJECTED')
 
     def test_timeout_with_changes_is_persisted_by_dispatch_task_store(self):
         task = self._task()
@@ -255,13 +316,46 @@ class CodexDelegateTests(unittest.TestCase):
         self._git('add', 'src.py')
         self._git('commit', '-m', 'record timeout result')
         result_head = self._git('rev-parse', 'HEAD')
-        registration = SimpleNamespace(task_id='executor-task-1',
-            trusted_agent_id='executor-agent', session_ref='executor-session',
-            native_session_id=None, root=str(self.root), common_dir=self.common_dir,
-            branch='feat/codex-delegate', source_sha=self.source_sha,
-            result_sha=result_head)
-        bound_registration = SimpleNamespace(**{
-            **vars(registration), 'native_session_id': '12345678-1234-4234-8234-123456789abc'})
+        lifecycle_path = (Path(__file__).resolve().parents[1] / 'scripts' /
+                          'd6_worktree_lifecycle.py')
+        spec = importlib.util.spec_from_file_location('d6_worktree_lifecycle_fixture',
+                                                       lifecycle_path)
+        lifecycle = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = lifecycle
+        spec.loader.exec_module(lifecycle)
+        registry_path = (Path(self.common_dir) / 'llmtool-worktrees' /
+                         'executor-task-1.json')
+        registry = json.loads(registry_path.read_text(encoding='utf-8'))
+        registry['env2_approved_tooling_sha'] = None
+        registry_path.write_text(json.dumps(registry), encoding='utf-8')
+        registry_path.chmod(0o600)
+
+        def bootstrap_result(root, task_id):
+            report_path = Path(root) / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+            report = json.loads(report_path.read_text(encoding='utf-8'))
+            report.update(head_sha=result_head, tooling_sha=result_head)
+            report_bytes = (json.dumps(report, sort_keys=True,
+                separators=(',', ':')) + '\n').encode('utf-8')
+            report_path.write_bytes(report_bytes)
+            report_path.chmod(0o600)
+            current = json.loads(registry_path.read_text(encoding='utf-8'))
+            current['env2_pass_marker'].update(
+                submitted_head_sha=result_head, current_head_sha=result_head,
+                tooling_sha=result_head,
+                report_sha256=hashlib.sha256(report_bytes).hexdigest())
+            registry_path.write_text(json.dumps(current), encoding='utf-8')
+            registry_path.chmod(0o600)
+
+        with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
+                patch.object(lifecycle, '_bootstrap', side_effect=bootstrap_result):
+            recorded_head = lifecycle.record_result(task_id='executor-task-1',
+                canonical_root=self.repo, root=self.root, workspace_root=self.base)
+        self.assertEqual(recorded_head, result_head)
+        registration, snapshot = task_completion.bind_executor_task(
+            'executor-task-1', expected_common_dir=self.common_dir, root=self.root)
+        self.assertEqual(snapshot.head, result_head)
+        bound_registration = dataclasses.replace(registration,
+            native_session_id='12345678-1234-4234-8234-123456789abc')
         other_d6 = SimpleNamespace(**{
             **vars(registration), 'task_id': 'other-d6'})
         with self.assertRaises(task_completion.LLMToolError):
@@ -324,6 +418,12 @@ class CodexDelegateTests(unittest.TestCase):
             previous, **{**args, 'executor_task_id': 'other-d6'}))
         self.assertFalse(task_submission_cli._codex_timeout_recovery(
             previous, **{**args, 'registration_result_sha': self.source_sha}))
+        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'registration_source_sha': 'c' * 40}))
+        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'write_paths': ['other.py']}))
+        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'acceptance': ['other criterion']}))
 
     def test_direct_codex_rejects_malformed_hunk_strictly_and_captures_it(self):
         task = self._task()
