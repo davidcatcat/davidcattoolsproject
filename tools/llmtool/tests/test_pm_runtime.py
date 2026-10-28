@@ -3,12 +3,13 @@
 import io
 import json
 import os
+import signal
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmtool import pm_runtime
@@ -50,6 +51,11 @@ class FakeProcess:
 
 class PMRuntimeTests(unittest.TestCase):
     def setUp(self):
+        self.original_signal_handlers = {
+            signum: signal.getsignal(signum)
+            for signum in (signal.SIGTERM, signal.SIGHUP)
+        }
+        self.runtimes = set()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name) / 'state'
@@ -63,6 +69,13 @@ class PMRuntimeTests(unittest.TestCase):
             'runtime': 'claude-code', 'native_session_id': SESSION, 'cwd': self.cwd,
             'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1)})
 
+    def tearDown(self):
+        for runtime in tuple(self.runtimes):
+            runtime.close(timeout=0)
+        self.assertFalse(pm_runtime._active_runtimes)
+        for signum, handler in self.original_signal_handlers.items():
+            self.assertIs(signal.getsignal(signum), handler)
+
     def runtime(self, process=None, **kwargs):
         self.process = process or FakeProcess()
         self.calls = []
@@ -72,9 +85,12 @@ class PMRuntimeTests(unittest.TestCase):
             return self.process
 
         kwargs.setdefault('clock', lambda: 1000)
-        return pm_runtime.PMRuntime(SESSION, cwd=self.cwd, runner=runner,
-                                    state_root=self.root, environ={'HOME': self.temp.name},
-                                    **kwargs)
+        runtime = pm_runtime.PMRuntime(SESSION, cwd=self.cwd, runner=runner,
+                                       state_root=self.root, environ={'HOME': self.temp.name},
+                                       **kwargs)
+        self.runtimes.add(runtime)
+        self.addCleanup(runtime.close)
+        return runtime
 
     def test_argv_cwd_stream_events_and_history(self):
         process = FakeProcess(encoded(
@@ -123,6 +139,12 @@ class PMRuntimeTests(unittest.TestCase):
             list(runtime.send('hello'))
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_FORKED')
         self.assertTrue(process.terminated)
+        self.assertGreater(process.wait_calls, 0)
+        self.assertIsNone(runtime._child)
+        self.assertIsNone(runtime._lock_fd)
+        self.assertNotIn(runtime, pm_runtime._active_runtimes)
+        for signum, handler in self.original_signal_handlers.items():
+            self.assertIs(signal.getsignal(signum), handler)
         other = self.runtime()
         other.open()
         other.close()
@@ -216,12 +238,175 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_NOT_DEDICATED')
         self.assertIn('create', str(raised.exception))
 
+    def test_open_failure_after_lifecycle_registration_unregisters(self):
+        register = pm_runtime._register_lifecycle
+
+        def register_then_fail(runtime):
+            register(runtime)
+            raise LLMToolError('synthetic lifecycle registration failure')
+
+        process = FakeProcess()
+        runtime = self.runtime(process)
+        with patch.object(pm_runtime, '_register_lifecycle', side_effect=register_then_fail):
+            with self.assertRaises(LLMToolError):
+                runtime.open()
+        self.assertFalse(pm_runtime._active_runtimes)
+        for signum, handler in self.original_signal_handlers.items():
+            self.assertIs(signal.getsignal(signum), handler)
+        self.assertTrue(process.terminated)
+
     def test_open_refuses_external_live_session_process(self):
         with patch.object(pm_runtime.subprocess, 'check_output',
                           return_value=f'123 claude --resume {SESSION}'.encode()):
             with self.assertRaises(LLMToolError) as raised:
                 self.runtime().open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_LIVE_ELSEWHERE')
+
+    def test_ps_match_requires_claude_executable_and_session_argument(self):
+        for listing in (f'123 python worker-claude {SESSION}'.encode(),
+                        f'123 /tmp/not-claude {SESSION}'.encode(),
+                        f'123 claude --resume other-{SESSION}'.encode()):
+            with self.subTest(listing=listing), patch.object(
+                    pm_runtime.subprocess, 'check_output', return_value=listing):
+                runtime = self.runtime()
+                runtime.open()
+                runtime.close()
+
+    def test_close_then_reopen_ignores_own_recent_transcript(self):
+        runtime = self.runtime(clock=time.time)
+        runtime.open()
+        runtime.close()
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{}', encoding='utf-8')
+        now = time.time()
+        os.utime(transcript, (now, now))
+        with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
+            runtime.open()
+        runtime.close()
+
+    def test_clean_close_allows_new_driver_within_live_window(self):
+        runtime = self.runtime(clock=time.time)
+        runtime.open()
+        runtime.close()
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{}', encoding='utf-8')
+        now = time.time()
+        os.utime(transcript, (now, now))
+        with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
+            new_runtime = self.runtime(clock=time.time)
+            new_runtime.open()
+        new_runtime.close()
+
+    def test_crash_left_active_turn_is_interrupted_before_idempotency_replay(self):
+        runtime = self.runtime()
+        runtime.open()
+        list(runtime.send('request', idempotency_key='crash-key'))
+        runtime.close()
+        history_path = pm_runtime._history_path(runtime._root, runtime._key)
+        history = json.loads(history_path.read_text(encoding='utf-8'))
+        history['turns'][0]['status'] = 'ACTIVE'
+        history['turns'][0]['ended_at'] = None
+        history_path.write_text(json.dumps(history), encoding='utf-8')
+
+        recovered = self.runtime()
+        recovered.open()
+        page = pm_runtime.read_history(SESSION, state_root=self.root)
+        self.assertEqual(page['turns'][0]['status'], 'INTERRUPTED')
+        replay = list(recovered.send('request', idempotency_key='crash-key'))
+        self.assertEqual(replay[0]['type'], 'TURN_REPLAY')
+        self.assertEqual(replay[0]['status'], 'INTERRUPTED')
+        recovered.close()
+
+    def test_signal_handler_none_restores_default_and_all_runtimes_close(self):
+        signum = signal.SIGTERM
+        failing = type('StubRuntime', (), {})()
+        succeeding = type('StubRuntime', (), {})()
+        pm_runtime._active_runtimes.update((failing, succeeding))
+        close_calls = []
+
+        def close_failing():
+            close_calls.append('failing')
+            raise RuntimeError('first close failed')
+
+        def close_succeeding():
+            close_calls.append('succeeding')
+
+        failing.close = close_failing
+        succeeding.close = close_succeeding
+        pm_runtime._previous_signal_handlers[signum] = None
+        pm_runtime._previous_signal_handlers[signal.SIGHUP] = None
+        try:
+            with patch.object(pm_runtime.signal, 'getsignal', return_value=pm_runtime._terminate_all), \
+                    patch.object(pm_runtime.signal, 'signal') as set_signal:
+                pm_runtime._restore_signal_handlers()
+                self.assertCountEqual(set_signal.call_args_list, [
+                    call(signal.SIGTERM, signal.SIG_DFL),
+                    call(signal.SIGHUP, signal.SIG_DFL)])
+            pm_runtime._previous_signal_handlers[signum] = None
+            with patch.object(pm_runtime.os, 'kill') as kill:
+                with self.assertRaisesRegex(RuntimeError, 'first close failed'):
+                    pm_runtime._terminate_all(signum, None)
+            kill.assert_called_once_with(pm_runtime.os.getpid(), signum)
+            self.assertCountEqual(close_calls, ['failing', 'succeeding'])
+        finally:
+            pm_runtime._active_runtimes.discard(failing)
+            pm_runtime._active_runtimes.discard(succeeding)
+            pm_runtime._previous_signal_handlers.pop(signum, None)
+            pm_runtime._previous_signal_handlers.pop(signal.SIGHUP, None)
+            pm_runtime._signal_handlers_installed = False
+
+    def test_runtime_signal_handler_chains_after_all_close_attempts(self):
+        signum = signal.SIGHUP
+        failing = type('StubRuntime', (), {})()
+        succeeding = type('StubRuntime', (), {})()
+        pm_runtime._active_runtimes.update((failing, succeeding))
+        close_calls = []
+        received = []
+
+        def close_failing():
+            close_calls.append('failing')
+            raise RuntimeError('first close failed')
+
+        def close_succeeding():
+            close_calls.append('succeeding')
+
+        failing.close = close_failing
+        succeeding.close = close_succeeding
+        pm_runtime._previous_signal_handlers[signum] = lambda received_signum, frame: received.append(received_signum)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'first close failed'):
+                pm_runtime._terminate_all(signum, None)
+            self.assertCountEqual(close_calls, ['failing', 'succeeding'])
+            self.assertEqual(received, [signum])
+        finally:
+            pm_runtime._active_runtimes.discard(failing)
+            pm_runtime._active_runtimes.discard(succeeding)
+            pm_runtime._previous_signal_handlers.pop(signum, None)
+
+    def test_runtime_signal_handlers_restore_and_chain_previous_handler(self):
+        signum = signal.SIGTERM
+        previous = signal.getsignal(signum)
+        received = []
+
+        def handler(received_signum, frame):
+            received.append(received_signum)
+
+        try:
+            signal.signal(signum, handler)
+            self.assertIs(signal.getsignal(signum), handler)
+            runtime = self.runtime()
+            runtime.open()
+            self.assertIs(signal.getsignal(signum), pm_runtime._terminate_all)
+            runtime.close()
+            self.assertIs(signal.getsignal(signum), handler)
+            os.kill(os.getpid(), signum)
+            self.assertEqual(received, [signum])
+        finally:
+            signal.signal(signum, previous)
 
     def test_open_refuses_fresh_transcript_without_runtime_lock(self):
         transcript = pm_runtime.active_pm_inbox.claude_session_file(
@@ -309,6 +494,27 @@ class PMRuntimeTests(unittest.TestCase):
         runtime.open()
         runtime.close()
         self.assertTrue(process.terminated)
+
+    def test_close_persistence_failure_still_cleans_and_can_be_repeated(self):
+        process = FakeProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        runtime.send('pending request')
+        persist = runtime._persist_turn
+        failure = LLMToolError('synthetic persistence failure')
+        with patch.object(runtime, '_persist_turn', side_effect=[failure, persist]):
+            with self.assertRaisesRegex(LLMToolError, 'synthetic persistence failure'):
+                runtime.close(timeout=0)
+            self.assertTrue(process.terminated)
+            self.assertGreater(process.wait_calls, 0)
+            self.assertIsNone(runtime._child)
+            self.assertIsNone(runtime._lock_fd)
+            self.assertNotIn(runtime, pm_runtime._active_runtimes)
+            for signum, handler in self.original_signal_handlers.items():
+                self.assertIs(signal.getsignal(signum), handler)
+            runtime.close(timeout=0)
+            runtime.close(timeout=0)
+        self.assertIsNone(runtime._turn)
 
 
 if __name__ == '__main__':

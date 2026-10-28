@@ -4,6 +4,7 @@ import fcntl
 import atexit
 import json
 import os
+import shlex
 import signal
 import stat
 import subprocess
@@ -27,6 +28,8 @@ _LIVE_WINDOW_SECONDS = 20
 _STDERR_LIMIT = 65536
 _active_runtimes = set()
 _signal_handlers_installed = False
+_previous_signal_handlers = {}
+_atexit_registered = False
 
 
 def _error(code, message):
@@ -119,6 +122,10 @@ def _history_path(root, key):
     return root / (key + '.history.json')
 
 
+def _runtime_state_path(root, key):
+    return root / (key + '.runtime.json')
+
+
 def _binding_path(root, native_session_id):
     return root / (native_session_id + '.binding.json')
 
@@ -206,41 +213,97 @@ def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runne
     return binding
 
 
-def _session_live_elsewhere(native_id, transcript, now, created_at=None):
+def _session_live_elsewhere(native_id, transcript, now, created_at=None,
+                            *, ignore_recent_transcript=False):
     try:
         listing = subprocess.check_output(['ps', '-axo', 'pid=,command='],
                                           stderr=subprocess.DEVNULL, timeout=2)
         for line in listing.decode('utf-8', 'replace').splitlines():
-            if native_id in line and ('claude' in line.lower()):
+            try:
+                _, command = line.strip().split(None, 1)
+                argv = shlex.split(command)
+            except (ValueError, IndexError):
+                continue
+            if (argv and os.path.basename(argv[0]).lower() == 'claude' and
+                    native_id in argv[1:]):
                 return True
     except (OSError, subprocess.SubprocessError):
         pass
     try:
         modified = transcript.stat().st_mtime
         is_newer_than_binding = created_at is None or modified > created_at
+        if ignore_recent_transcript:
+            return False
         return is_newer_than_binding and 0 <= now - modified <= _LIVE_WINDOW_SECONDS
     except OSError:
         return False
 
 
 def _terminate_all(signum=None, frame=None):
+    previous = _previous_signal_handlers.get(signum, signal.SIG_DFL)
+    if previous is None:
+        previous = signal.SIG_DFL
+    close_error = None
     for runtime in tuple(_active_runtimes):
-        runtime.close()
-    if signum is not None:
-        raise SystemExit(128 + signum)
+        try:
+            runtime.close()
+        except Exception as exc:
+            if close_error is None:
+                close_error = exc
+    if signum is None or previous is signal.SIG_IGN:
+        if close_error is not None:
+            raise close_error
+        return
+    if callable(previous):
+        previous(signum, frame)
+        if close_error is not None:
+            raise close_error
+        return
+    # The old disposition is now restored by the final runtime close. Re-sending
+    # the signal lets the operating system apply its original default action.
+    os.kill(os.getpid(), signum)
+    if close_error is not None:
+        raise close_error
+
+
+def _restore_signal_handlers():
+    global _signal_handlers_installed
+    for signum, handler in tuple(_previous_signal_handlers.items()):
+        try:
+            # Do not overwrite a handler installed by another owner while this
+            # runtime was open. The cache can be stale if that owner replaced
+            # our handler, so the live disposition is authoritative.
+            if signal.getsignal(signum) is _terminate_all:
+                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+        except (ValueError, OSError):
+            pass
+    _previous_signal_handlers.clear()
+    _signal_handlers_installed = False
+
+
+def _unregister_lifecycle(runtime):
+    _active_runtimes.discard(runtime)
+    if not _active_runtimes:
+        _restore_signal_handlers()
 
 
 def _register_lifecycle(runtime):
-    global _signal_handlers_installed
+    global _signal_handlers_installed, _atexit_registered
     _active_runtimes.add(runtime)
-    if not _signal_handlers_installed:
-        for signum in (signal.SIGTERM, signal.SIGHUP):
-            try:
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            current = signal.getsignal(signum)
+            if current is not _terminate_all:
+                _previous_signal_handlers[signum] = current
                 signal.signal(signum, _terminate_all)
-            except (ValueError, OSError):
-                pass
+        except (ValueError, OSError):
+            pass
+    _signal_handlers_installed = any(
+        signal.getsignal(signum) is _terminate_all
+        for signum in (signal.SIGTERM, signal.SIGHUP))
+    if _signal_handlers_installed and not _atexit_registered:
         atexit.register(_terminate_all)
-        _signal_handlers_installed = True
+        _atexit_registered = True
 
 
 class PMRuntime:
@@ -262,6 +325,7 @@ class PMRuntime:
         self._state_lock = threading.RLock()
         self._turn = None
         self._closed = False
+        self._has_owned_session = False
         self._was_interrupted = False
         self._unknown_lines = 0
         self._stderr_buffer = bytearray()
@@ -339,6 +403,35 @@ class PMRuntime:
             except FileNotFoundError:
                 pass
 
+    def _recent_clean_close(self, now):
+        path = _runtime_state_path(self._root, self._key)
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except (FileNotFoundError, OSError):
+            return False
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            with os.fdopen(fd, 'r', encoding='utf-8') as stream:
+                fd = -1
+                state = json.load(stream)
+            closed_at = datetime.fromisoformat(state['clean_closed_at']).timestamp()
+            return 0 <= now - closed_at <= _LIVE_WINDOW_SECONDS
+        except (KeyError, TypeError, ValueError, UnicodeError, OSError):
+            return False
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def _record_clean_close(self):
+        path = _runtime_state_path(self._root, self._key)
+        try:
+            _write_json_atomic(self._root, path,
+                               {'clean_closed_at': _timestamp(self.clock)})
+        except LLMToolError:
+            raise _error('PM_STATE_WRITE_FAILED', 'PM runtime state could not be saved') from None
+
     def open(self):
         if self._child is not None:
             return self
@@ -364,7 +457,17 @@ class PMRuntime:
             raise _error('PM_SESSION_BUSY', 'PM session lock could not be acquired') from None
         self._key, self._root, self._lock_fd = key, root, lock_fd
         try:
-            for turn in self._history_read():
+            turns = self._history_read()
+            recovered = False
+            recovery_time = _timestamp(self.clock)
+            for turn in turns:
+                if isinstance(turn, dict) and turn.get('status') == 'ACTIVE':
+                    turn['status'] = 'INTERRUPTED'
+                    turn['ended_at'] = recovery_time
+                    recovered = True
+            if recovered:
+                self._history_write(turns)
+            for turn in turns:
                 if isinstance(turn, dict) and isinstance(turn.get('idempotency_key'), str):
                     self._idempotency[turn['idempotency_key']] = turn
             binding = current_binding(self.pm_session_id, state_root=root)
@@ -378,7 +481,10 @@ class PMRuntime:
                 created_at = datetime.fromisoformat(binding['created_at']).timestamp()
             except (ValueError, TypeError, OverflowError):
                 created_at = None
-            if _session_live_elsewhere(self.pm_session_id, transcript, now, created_at):
+            recently_closed = self._recent_clean_close(now)
+            if _session_live_elsewhere(
+                    self.pm_session_id, transcript, now, created_at,
+                    ignore_recent_transcript=self._has_owned_session or recently_closed):
                 raise _error('PM_SESSION_LIVE_ELSEWHERE',
                              'PM session appears active elsewhere; close it before using pm_runtime')
             env = dict(os.environ if self.environ is None else self.environ)
@@ -399,14 +505,25 @@ class PMRuntime:
             self.cwd = cwd
             self._closed = False
             _register_lifecycle(self)
+            self._has_owned_session = True
             return self
         except LLMToolError:
-            self._release_lock()
+            try:
+                self.close(timeout=0)
+            except Exception:
+                _unregister_lifecycle(self)
+                self._release_lock()
+                self._child = None
             self._key = self._root = None
             raise
         except Exception:
-            self._release_lock()
-            self._child = None
+            try:
+                self.close(timeout=0)
+            except Exception:
+                _unregister_lifecycle(self)
+                self._release_lock()
+                self._child = None
+            self._key = self._root = None
             raise _error('PM_PROCESS_START_FAILED', 'PM runtime process could not be started') from None
 
     def _release_lock(self):
@@ -552,11 +669,19 @@ class PMRuntime:
                     yield emit('TURN_END', status='ERROR', result_text='', usage={})
                     return
                 if _contains_different_session(line, self.pm_session_id):
-                    self._terminate_child()
-                    self._finish(record, 'ERROR')
-                    self._release_lock()
-                    self._closed = True
-                    raise _error('PM_SESSION_FORKED', 'Claude Code started a different PM session')
+                    fork_error = _error(
+                        'PM_SESSION_FORKED', 'Claude Code started a different PM session')
+                    try:
+                        self._finish(record, 'ERROR')
+                    except Exception:
+                        with self._state_lock:
+                            if self._turn is record:
+                                self._turn = None
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+                    raise fork_error
                 kind = line.get('type')
                 if kind == 'stream_event':
                     event = line.get('event') or {}
@@ -648,13 +773,19 @@ class PMRuntime:
 
     def close(self, timeout=5):
         with self._state_lock:
-            if self._closed and self._lock_fd is None:
+            if (self._closed and self._lock_fd is None and self._child is None and
+                    self not in _active_runtimes and self._turn is None):
                 return
             self._closed = True
             child = self._child
             active_turn = self._turn
+        error = None
+        had_child = child is not None
         if active_turn is not None:
-            self._finish(active_turn, 'INTERRUPTED')
+            try:
+                self._finish(active_turn, 'INTERRUPTED')
+            except Exception as exc:
+                error = exc
         try:
             if child is not None:
                 try:
@@ -684,9 +815,24 @@ class PMRuntime:
                         except Exception:
                             pass
         finally:
-            _active_runtimes.discard(self)
-            self._release_lock()
             self._child = None
+            try:
+                _unregister_lifecycle(self)
+            except Exception as exc:
+                if error is None:
+                    error = exc
+            if error is None and had_child and self._key is not None:
+                try:
+                    self._record_clean_close()
+                except Exception as exc:
+                    error = exc
+            try:
+                self._release_lock()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
 
 
 def read_history(pm_session_id, *, after=0, limit=50, state_root=None):
