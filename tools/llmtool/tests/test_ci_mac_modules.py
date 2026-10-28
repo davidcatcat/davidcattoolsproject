@@ -149,9 +149,12 @@ class MacModuleSelectionTests(unittest.TestCase):
         self.assertIn("name: check (macOS 3.13)", workflow)
         self.assertIn("mode=full", workflow)
         self.assertIn("make -C tools/llmtool check PYTHON=\"$JOB_PYTHON\"", workflow)
-        self.assertIn("cron: '0 */6 * * *'", workflow)
-        self.assertIn("pull_request:", workflow)
-        self.assertNotIn("  push:\n", workflow)
+        trigger = workflow.split("on:\n", 1)[1].split("permissions:\n", 1)[0]
+        self.assertIn("pull_request:", trigger)
+        self.assertIn("workflow_dispatch:", trigger)
+        self.assertNotIn("schedule:", trigger)
+        self.assertNotIn("cron:", trigger)
+        self.assertNotIn("push:", trigger)
         self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
         self.assertIn('[ -z "$selection" ] || [ "$selection" = FULL ]', workflow)
 
