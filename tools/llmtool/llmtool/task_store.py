@@ -2432,7 +2432,21 @@ class TaskStore:
                         len(new_claims) > 64):
                     _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                 if len(new_claims) == len(old_claims) + 1:
-                    if new_claims[:-1] != old_claims:
+                    prefix = new_claims[:-1]
+                    changed = [i for i, (old, new) in enumerate(zip(old_claims, prefix))
+                               if old != new]
+                    retry_transition_valid = False
+                    if len(changed) == 1:
+                        index = changed[0]
+                        before, after = old_claims[index], prefix[index]
+                        retry_transition_valid = (
+                            before.get('state') == 'DISPATCHED' and
+                            after.get('state') == 'FAILED' and
+                            all(before.get(key) == after.get(key)
+                                for key in before.keys() - {'state'}) and
+                            all(old == new for i, (old, new) in
+                                enumerate(zip(old_claims, prefix)) if i != index))
+                    if prefix != old_claims and not retry_transition_valid:
                         _fail('REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
                     added = new_claims[-1]
                     if (type(added) is not dict or added.get('state') != 'CLAIMED' or

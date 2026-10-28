@@ -78,8 +78,12 @@ class ReviewRepairTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.store = TempTaskStore(self.temp.name, _record())
         self.calls = []
+        self.runtime_path_patch = patch.object(
+            review_repair.shutil, 'which', return_value='/usr/bin/codex')
+        self.runtime_path_patch.start()
 
     def tearDown(self):
+        self.runtime_path_patch.stop()
         self.temp.cleanup()
 
     def dispatch(self, **kwargs):
@@ -140,6 +144,26 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(claims[0]['state'], 'FAILED')
         self.assertEqual(claims[1]['state'], 'DISPATCHED')
         self.assertNotEqual(claims[0]['repair_task_id'], claims[1]['repair_task_id'])
+
+    def test_retry_guard_refusal_keeps_dispatched_claim(self):
+        self._repair_history(3)
+        record = self.store.get(TASK)
+        retry_id = record['review_repair_claims'][-1]['repair_task_id']
+        with self.assertRaisesRegex(Exception, 'refused') as raised:
+            self.dispatch(family='network', retry_claim_id=retry_id,
+                          github_get=lambda _path: [_comment(version=4)])
+        self.assertEqual(raised.exception.review_repair_code, 'REPAIR_LIMIT_REACHED')
+        self.assertEqual(self.store.get(TASK)['review_repair_claims'][-1]['state'],
+                         'DISPATCHED')
+
+    def test_retry_claim_is_failed_atomically_with_new_attempt(self):
+        self._repair_history(1)
+        retry_id = self.store.get(TASK)['review_repair_claims'][-1]['repair_task_id']
+        result = self.dispatch(family='network', retry_claim_id=retry_id,
+                               github_get=lambda _path: [_comment(version=2)])
+        claims = self.store.get(TASK)['review_repair_claims']
+        self.assertEqual(result['claim']['attempt'], 2)
+        self.assertEqual([claim['state'] for claim in claims], ['FAILED', 'DISPATCHED'])
 
     def test_third_attempt_without_report_requires_high_debug(self):
         result = self.dispatch()

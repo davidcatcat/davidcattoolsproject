@@ -111,6 +111,33 @@ class TaskStoreTests(unittest.TestCase):
                          'REVIEW_REPAIR_CLAIM_TRANSITION_INVALID')
         self.assertEqual(self.store.get(task['task_id']), saved)
 
+    def test_retry_claim_transition_is_atomic_with_next_attempt(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        first = {
+            'executor_task': 'executor-1', 'pr': 17, 'head_sha': 'a' * 40,
+            'version': 1, 'attempt': 1, 'family': 'pr-17', 'state': 'CLAIMED',
+            'repair_task_id': new_id(), 'comment_id': 9, 'packet_sha256': 'b' * 64,
+            'claimed_at': '2026-10-27T00:00:00Z',
+        }
+        saved = self.store.get(task['task_id'])
+        self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': saved['record_sha256']},
+            review_repair_claims=[first])
+        saved = self.store.get(task['task_id'])
+        first_dispatched = dict(first, state='DISPATCHED')
+        self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': saved['record_sha256']},
+            review_repair_claims=[first_dispatched])
+        second = dict(first, attempt=2, state='CLAIMED', repair_task_id=new_id(),
+                      claimed_at='2026-10-27T00:01:00Z')
+        saved = self.store.get(task['task_id'])
+        updated = self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': saved['record_sha256']},
+            review_repair_claims=[dict(first_dispatched, state='FAILED'), second])
+        self.assertEqual([claim['state'] for claim in updated['review_repair_claims']],
+                         ['FAILED', 'CLAIMED'])
+
     def test_remote_test_receipt_is_appended_idempotently_to_same_task(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

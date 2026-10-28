@@ -29,6 +29,29 @@ def _events(related):
     return value if type(value) is list else []
 
 
+def derive_state(repair_record):
+    """Normalize a repair Task record into the state used by the advance loop."""
+    if type(repair_record) is not dict:
+        return 'UNKNOWN'
+    developer = repair_record.get('developer')
+    state = developer.get('state') if type(developer) is dict else None
+    if state == 'DEVELOPER_PENDING' or repair_record.get('state') == 'PM_PENDING':
+        return 'PENDING'
+    if state == 'DEVELOPER_DISPATCHING':
+        return 'RUNNING'
+    if state == 'DEVELOPER_UNAVAILABLE':
+        return 'UNAVAILABLE'
+    if state == 'DEVELOPER_OUTPUT_REJECTED':
+        return 'OUTPUT_REJECTED'
+    if state == 'DEVELOPER_OUTCOME_UNKNOWN':
+        execution = developer.get('execution') if type(developer) is dict else None
+        if (developer.get('error_code') == 'CODEX_BLOCKED' or
+                (type(execution) is dict and execution.get('status') == 'BLOCKED')):
+            return 'BLOCKED'
+        return 'UNKNOWN'
+    return 'UNKNOWN'
+
+
 def decide(record, d6, pr, related):
     """Return the next action name using only supplied snapshots."""
     if type(record) is not dict:
@@ -79,10 +102,10 @@ def decide(record, d6, pr, related):
                                    if type(item) is dict and item.get('head_sha') == result_head), None)
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') in (
-                        'DEVELOPER_UNAVAILABLE', 'BLOCKED', 'DEVELOPER_OUTPUT_REJECTED')):
+                        'UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED')):
                 return 'REPAIR_RETRY'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
-                    current_repair.get('repair_state') in ('RUNNING', 'UNKNOWN')):
+                    current_repair.get('repair_state') in ('RUNNING', 'PENDING', 'UNKNOWN')):
                 return 'WAITING_REPAIR'
             return 'REPAIR_REVIEW'
         if outcome == 'REVIEW_PASS':
@@ -276,9 +299,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             continue
         try:
             repair_record = store.get(claim['repair_task_id'])
-            repair_developer = repair_record.get('developer') if type(repair_record) is dict else None
-            repair_state = (repair_developer.get('state')
-                            if type(repair_developer) is dict else 'UNKNOWN')
+            repair_state = derive_state(repair_record)
         except Exception:
             repair_state = 'UNKNOWN'
         repair_claims.append(dict(claim, repair_state=repair_state))
@@ -361,23 +382,6 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                                          item.get('state') == 'DISPATCHED'), None)
                     if repair_claim is None:
                         step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
-                    else:
-                        current = store.get(task_id)
-                        claims = list(current.get('review_repair_claims', []))
-                        index = next((i for i, item in enumerate(claims)
-                                      if type(item) is dict and
-                                      item.get('repair_task_id') == repair_claim.get('repair_task_id') and
-                                      item.get('state') == 'DISPATCHED'), None)
-                        if index is None:
-                            step, codes = 'REFUSED', ['REPAIR_CLAIM_UNAVAILABLE']
-                        else:
-                            claims[index] = dict(claims[index], state='FAILED')
-                            try:
-                                store.compare_and_update(
-                                    task_id, expected={'record_sha256': current['record_sha256']},
-                                    review_repair_claims=claims)
-                            except Exception as exc:
-                                step, codes = 'REFUSED', [_refusal(exc, 'task_store_error_code')]
                 if step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
                     invoke = repair_review_call or review_repair.repair_review
                     try:
@@ -385,7 +389,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                         with contextlib.redirect_stdout(captured):
                             result_value = invoke(store=store, task_id=task_id,
                                 executor_task=executor_task, pr_number=number,
-                                auto_review=False, github_get=get)
+                                auto_review=False, github_get=get,
+                                retry_claim_id=(repair_claim.get('repair_task_id')
+                                                if step == 'REPAIR_RETRY' and
+                                                type(repair_claim) is dict else None))
                         emitted = captured.getvalue().strip()
                         try:
                             result = json.loads(emitted) if emitted else result_value

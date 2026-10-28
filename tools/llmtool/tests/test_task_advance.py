@@ -64,15 +64,39 @@ class TaskAdvanceTests(unittest.TestCase):
                                      'repair_state': 'RUNNING'}]
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'WAITING_REPAIR')
-        related['repair_claims'][0]['repair_state'] = 'DEVELOPER_UNAVAILABLE'
+        related['repair_claims'][0]['repair_state'] = 'UNAVAILABLE'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'REPAIR_RETRY')
         related['repair_claims'][0]['repair_state'] = 'BLOCKED'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'REPAIR_RETRY')
-        related['repair_claims'][0]['repair_state'] = 'DEVELOPER_OUTPUT_REJECTED'
+        related['repair_claims'][0]['repair_state'] = 'OUTPUT_REJECTED'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'REPAIR_RETRY')
+
+    def test_repair_record_states_are_derived_for_waiting_and_retry(self):
+        expected = (
+            ({'state': 'PM_PENDING'}, 'PENDING', 'WAITING_REPAIR'),
+            ({'developer': {'state': 'DEVELOPER_PENDING'}}, 'PENDING', 'WAITING_REPAIR'),
+            ({'developer': {'state': 'DEVELOPER_DISPATCHING'}}, 'RUNNING', 'WAITING_REPAIR'),
+            ({'developer': {'state': 'DEVELOPER_UNAVAILABLE'}}, 'UNAVAILABLE', 'REPAIR_RETRY'),
+            ({'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                            'error_code': 'CODEX_BLOCKED'}}, 'BLOCKED', 'REPAIR_RETRY'),
+            ({'developer': {'state': 'DEVELOPER_OUTPUT_REJECTED'}},
+             'OUTPUT_REJECTED', 'REPAIR_RETRY'),
+        )
+        review_claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
+        for repair_record, derived, action in expected:
+            with self.subTest(repair_record=repair_record):
+                self.assertEqual(task_advance.derive_state(repair_record), derived)
+                related = {
+                    'events': [{'source': 'REVIEWER', 'source_sha': HEAD,
+                                'version': 1, 'outcome': 'REVIEW_FAIL'}],
+                    'repair_claims': [{'head_sha': HEAD, 'state': 'DISPATCHED',
+                                      'repair_state': derived}],
+                }
+                self.assertEqual(task_advance.decide(
+                    base_record(review_dispatch_claim=[review_claim]), d6(), PR, related), action)
 
     def test_pass_retries_completion_and_reaches_integration(self):
         claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
@@ -230,8 +254,8 @@ class TaskAdvanceTests(unittest.TestCase):
                 github_get=lambda _path: [])
         self.assertEqual(result['step'], 'REPAIR_RETRY')
         self.assertEqual(result['result'], {'repair_task_id': '4' * 32})
-        self.assertEqual(called, ['FAILED'])
-        self.assertEqual(store.record['review_repair_claims'][0]['state'], 'FAILED')
+        self.assertEqual(called, ['DISPATCHED'])
+        self.assertEqual(store.record['review_repair_claims'][0]['state'], 'DISPATCHED')
 
     def test_repair_retry_limit_error_is_reported_after_failed_claim(self):
         class Store:
@@ -264,7 +288,7 @@ class TaskAdvanceTests(unittest.TestCase):
                 github_get=lambda _path: [])
         self.assertEqual(result['step'], 'REPAIR_RETRY')
         self.assertIn('REPAIR_LIMIT_REACHED', result['codes'])
-        self.assertEqual(store.record['review_repair_claims'][0]['state'], 'FAILED')
+        self.assertEqual(store.record['review_repair_claims'][0]['state'], 'DISPATCHED')
 
     def test_missing_runtime_stops_before_repair_claim_transition(self):
         class Store:
