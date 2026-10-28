@@ -186,6 +186,7 @@ class ReviewDispatchTests(unittest.TestCase):
                 create=create, codex_runner=run_codex)
         self.assertEqual(result['state'], 'COMPLETED')
         self.assertEqual(create_args[0]['reviewer_key'], 'codex-reviewer')
+        self.assertEqual(result['account_mode'], 'CODEX_CLI')
         self.assertEqual(runner_args[0]['reviewer_root'], '/repo/reviewer-d6')
         self.assertEqual(runner_args[0]['head'], HEAD)
         self.assertEqual(self.sent, [])
@@ -225,7 +226,7 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['cwd'], '/repo/reviewer-d6')
         self.assertEqual(run.call_args.kwargs['timeout'], 600)
         self.assertEqual(review_result, {'thread_id': '0123456789abcdef',
-                                         'review_text': final_review,
+                                         'review_text': review_text,
                                          'verdict': 'PASS'})
         self.assertEqual(run.call_args.kwargs['env']['PATH'], '/bin:/usr/bin:/bin')
         for flag in ('--no-daemon', '--ignore-user-config', '--ignore-rules',
@@ -469,7 +470,7 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
 
     def test_claimed_transitions_to_completed_with_bound_codex_result(self):
         initial = self.store.get(self.task_id)
-        claimed = _claim()
+        claimed = dict(_claim(), account_mode='CODEX_CLI')
         self.update_claims(initial, [claimed])
         current = self.store.get(self.task_id)
         completed = dict(claimed, state='COMPLETED', native_session_id='codex-thread')

@@ -306,7 +306,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     if not policy.allowed:
         _refuse(policy.reason_code)
     config_dir = os.environ.get('CLAUDE_CONFIG_DIR')
-    account_mode = ('EXPLICIT_CLAUDE_CONFIG_DIR' if config_dir else 'DEFAULT_SECOND_ACCOUNT')
+    account_mode = ('CODEX_CLI' if reviewer_key == 'codex-reviewer' else
+                    'EXPLICIT_CLAUDE_CONFIG_DIR' if config_dir else 'DEFAULT_SECOND_ACCOUNT')
     reviewer_task = 'reviewer-' + os.urandom(10).hex()
     claim = {'executor_task': executor_task, 'pr': pr_number, 'head_sha': head,
              'version': version, 'state': 'CLAIMED', 'reviewer_task': reviewer_task,

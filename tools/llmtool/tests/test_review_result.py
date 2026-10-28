@@ -12,7 +12,7 @@ TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
 EXECUTOR, REVIEWER, PR = 'executor-d6', 'reviewer-d6', 42
 
 
-def _store(root, *, completed_review=False):
+def _store(root, *, claim_state='DISPATCHED', account_mode='DEFAULT_SECOND_ACCOUNT'):
     contract = {
         'schema_version': 1, 'contract_version': 1, 'task_id': TASK,
         'goal': 'test review results', 'authorized_scope': ['pm-planning'],
@@ -22,16 +22,10 @@ def _store(root, *, completed_review=False):
     parsed = task_store.parse_task_contract(json.dumps(contract))
     stamp = '2026-10-27T00:00:00Z'
     claim = {'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
-             'state': 'COMPLETED' if completed_review else 'DISPATCHED', 'reviewer_task': REVIEWER,
-             'native_session_id': 'review-session', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+             'state': claim_state, 'reviewer_task': REVIEWER,
+             'native_session_id': None if claim_state == 'CLAIMED' else 'review-session',
+             'account_mode': account_mode,
              'claimed_at': stamp, 'updated_at': stamp}
-    if completed_review:
-        review_text = _comment()['body'].replace(CONTRACT, parsed.binding(RUN).contract_digest)
-        claim['review_result'] = {
-            'task_id': TASK, 'run_id': RUN,
-            'contract_digest': parsed.binding(RUN).contract_digest,
-            'head': HEAD, 'verdict': 'PASS', 'review_text': review_text,
-        }
     record = {
         'schema_version': 2, 'task_id': TASK, 'run_id': RUN,
         'pm_session_id': 'pm-test', 'pm_provider_profile': 'test',
@@ -138,7 +132,27 @@ class ReviewResultTests(unittest.TestCase):
         self.assertEqual(event['source_sha'], HEAD)
 
     def test_completed_codex_claim_is_recorded_without_github_fetch(self):
-        self.store = FamilyStore(_store(self.temp.name, completed_review=True), 'claude')
+        codex_root = Path(self.temp.name) / 'codex'
+        codex_root.mkdir(mode=0o700)
+        codex_store = _store(codex_root, claim_state='CLAIMED', account_mode='CODEX_CLI')
+        record = codex_store.get(TASK)
+        digest = record['task_binding']['contract_digest']
+        claim = record['review_dispatch_claim'][0]
+        dispatched = dict(claim, state='DISPATCHED', native_session_id='review-session')
+        codex_store.compare_and_update(
+            TASK, expected={'record_sha256': record['record_sha256']},
+            review_dispatch_claim=[dispatched])
+        dispatched_record = codex_store.get(TASK)
+        review_text = _comment(actor='Codex')['body'].replace(CONTRACT, digest)
+        completed = dict(dispatched, state='COMPLETED')
+        completed['review_result'] = {
+            'task_id': TASK, 'run_id': RUN, 'contract_digest': digest,
+            'head': HEAD, 'verdict': 'PASS', 'review_text': review_text,
+        }
+        codex_store.compare_and_update(
+            TASK, expected={'record_sha256': dispatched_record['record_sha256']},
+            review_dispatch_claim=[completed])
+        self.store = FamilyStore(codex_store, 'claude')
         result = self.run_result([], github_get=lambda _path: self.fail('unexpected GitHub read'))
         self.assertEqual(result['state'], 'REVIEW_PASS')
 
