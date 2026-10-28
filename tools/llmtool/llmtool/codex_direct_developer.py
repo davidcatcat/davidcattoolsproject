@@ -15,10 +15,7 @@ import tempfile
 import time
 
 from . import worker_dispatch
-from .config import (
-    CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, resolve_config,
-    validate_codex_direct_timeout,
-)
+from .config import codex_direct_timeout
 from .errors import LLMToolError
 from .providers.cli_lifecycle import CLIHostTermination, CLIProcessLifecycle
 
@@ -95,13 +92,6 @@ def _command_path(root):
     if venv_bin.is_dir() and not venv_bin.is_symlink():
         entries.insert(0, str(venv_bin))
     return ':'.join(entries)
-
-
-def _prompt_with_effective_timeout(prompt, timeout):
-    effective = f"{prompt.rstrip()}\n\nEffective timeout for this invocation: {timeout} seconds.\n"
-    if len(effective.encode('utf-8')) > MAX_PROMPT_BYTES:
-        _fail('CODEX_PROMPT_INVALID')
-    return effective
 
 
 def _thread_from_events(raw):
@@ -359,13 +349,9 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
     if type(prompt) is not str or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES:
         _fail('CODEX_PROMPT_INVALID')
     if timeout is None:
-        loaded_config = resolve_config(cwd=root)
-        timeout = loaded_config.get("codex_direct", {}).get(
-            "timeout_seconds", CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS)
-        timeout = validate_codex_direct_timeout(timeout)
+        timeout = codex_direct_timeout(cwd=root)
     if type(timeout) not in (int, float) or not 0 < timeout <= MAX_WALL_CLOCK_SECONDS:
         _fail('CODEX_BUDGET_INVALID')
-    prompt = _prompt_with_effective_timeout(prompt, timeout)
     executable = shutil.which('codex')
     if executable is None or not os.path.isabs(executable):
         _fail('CODEX_RUNTIME_UNAVAILABLE')

@@ -75,23 +75,24 @@ class CodexDirectDeveloperTests(unittest.TestCase):
 
     def run_fake(self, **kwargs):
         timeout = kwargs.pop('timeout', 3)
+        prompt = kwargs.pop('prompt', 'bounded prompt')
         kwargs.setdefault('prelaunch_validate', lambda: True)
         with patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
-            return direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+            return direct.run(root=self.root, prompt=prompt, model='gpt-6-luna',
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
                 timeout=timeout, **kwargs)
 
     def run_fake_configured(self, configured_timeout):
-        with patch('llmtool.codex_direct_developer.resolve_config',
-                   return_value={'codex_direct': {'timeout_seconds': configured_timeout}}), \
+        with patch('llmtool.codex_direct_developer.codex_direct_timeout',
+                   return_value=configured_timeout), \
                 patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
             return direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
                 prelaunch_validate=lambda: True)
 
     def test_default_timeout_uses_600_seconds(self):
-        with patch('llmtool.codex_direct_developer.resolve_config',
-                   return_value={'codex_direct': {'timeout_seconds': 600}}) as config_loader, \
+        with patch('llmtool.codex_direct_developer.codex_direct_timeout',
+                   return_value=600) as config_loader, \
                 patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
             result = direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
@@ -99,33 +100,21 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(result.status, 'DONE')
         config_loader.assert_called_once_with(cwd=self.root.resolve())
 
-    def test_effective_timeout_is_added_to_invocation_prompt(self):
-        prompts = []
-        add_timeout = direct._prompt_with_effective_timeout
-        def capture_timeout(prompt, timeout):
-            effective = add_timeout(prompt, timeout)
-            prompts.append(effective)
-            return effective
-        with patch.object(direct, '_prompt_with_effective_timeout',
-                          side_effect=capture_timeout) as wrapped:
-            self.assertEqual(self.run_fake_configured(900).status, 'DONE')
-        wrapped.assert_called_once_with('bounded prompt', 900)
-        self.assertIn('Effective timeout for this invocation: 900 seconds.',
-                      prompts[0])
+    def test_prompt_at_exact_byte_limit_is_accepted_unchanged(self):
+        prompt = 'x' * direct.MAX_PROMPT_BYTES
+        self.assertEqual(self.run_fake(prompt=prompt).status, 'DONE')
 
     def test_configured_timeout_is_used(self):
         self.assertEqual(self.run_fake_configured(900).status, 'DONE')
 
     def test_invalid_config_timeout_fails_with_typed_config_error(self):
-        for configured_timeout in (1801, 0, -1, 1.5, '900', True):
-            with self.subTest(configured_timeout=configured_timeout):
-                with patch('llmtool.codex_direct_developer.resolve_config',
-                           return_value={'codex_direct': {'timeout_seconds': configured_timeout}}), \
-                        self.assertRaises(LLMToolError) as caught:
-                    direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
-                        reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
-                        prelaunch_validate=lambda: True)
-                self.assertNotIsInstance(caught.exception, direct.DirectCodexError)
+        with patch('llmtool.codex_direct_developer.codex_direct_timeout',
+                   side_effect=LLMToolError('invalid direct timeout')), \
+                self.assertRaises(LLMToolError) as caught:
+            direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+                reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
+                prelaunch_validate=lambda: True)
+        self.assertNotIsInstance(caught.exception, direct.DirectCodexError)
 
     def test_done_captures_thread_usage_and_hardening_arguments(self):
         result = self.run_fake()
@@ -671,6 +660,18 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('"allowed_write_paths":["src.py"]', prompt)
         self.assertIn('"acceptance":["expected behavior"]', prompt)
         self.assertIn('"test_commands":[["python3","-m","unittest"]]', prompt)
+        self.assertIn('"wall_clock_seconds":600', prompt)
+
+    def test_prompt_budget_uses_configured_timeout(self):
+        prompt = task_submission_cli._codex_direct_prompt({
+            'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'task_binding': {'contract_digest': 'c' * 64},
+            'task_contract': {'goal': 'bounded goal', 'criteria': [],
+                              'test_commands': [['python3', '-m', 'unittest']]},
+        }, source_sha='d' * 40, read_paths=['src.py'], write_paths=['src.py'],
+            acceptance=['expected behavior'], pm_goal='selected Developer goal',
+            model='gpt-6-luna', reasoning_effort='high', timeout=900)
+        self.assertIn('"wall_clock_seconds":900', prompt)
 
 
 if __name__ == '__main__':

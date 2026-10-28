@@ -317,14 +317,19 @@ def _config_view(cli=None, environ=None, cwd=None, home=None, *, inspection=Fals
 def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configured=False):
     """Resolve a viewable config; model requests must require readiness as well."""
     config, _ = _config_view(cli, environ, cwd, home)
-    config.setdefault("codex_direct", {
-        "timeout_seconds": CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS,
-    })
-    validate_codex_direct_timeout(config["codex_direct"]["timeout_seconds"])
+    config.pop("codex_direct", None)
     if require_configured:
         provider = selected_provider(config)
         client_type(provider["type"]).validate_ready(provider)
     return config
+
+
+def codex_direct_timeout(cwd=None, home=None):
+    """Return the configured direct Codex timeout without changing config output."""
+    config, _ = _config_view(cwd=cwd, home=home)
+    direct_config = config.get("codex_direct", {})
+    return validate_codex_direct_timeout(
+        direct_config.get("timeout_seconds", CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS))
 
 
 def inspect_config(*, environ=None, cwd=None, home=None):

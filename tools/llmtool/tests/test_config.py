@@ -9,7 +9,8 @@ from io import StringIO
 import yaml
 
 from llmtool.config import (
-    DEFAULTS, api_key, init_config, resolve_config, show_config, user_config_path,
+    DEFAULTS, api_key, codex_direct_timeout, init_config, resolve_config,
+    show_config, user_config_path,
 )
 from llmtool.errors import LLMToolError
 from llmtool.cli import main
@@ -46,9 +47,8 @@ class ConfigTests(unittest.TestCase):
 
     def test_defaults_and_independent_instances(self):
         config = self.resolve()
-        self.assertEqual({key: value for key, value in config.items()
-                          if key != "codex_direct"}, DEFAULTS)
-        self.assertEqual(config["codex_direct"], {"timeout_seconds": 600})
+        self.assertEqual(config, DEFAULTS)
+        self.assertEqual(codex_direct_timeout(self.cwd, self.home), 600)
         self.assertIsNone(config["providers"]["default"]["base_url"])
         self.assertIsNone(config["providers"]["default"]["model"])
         self.assertEqual(config["providers"]["default"]["provider_options"], {})
@@ -61,7 +61,8 @@ class ConfigTests(unittest.TestCase):
 
     def test_codex_direct_timeout_configuration(self):
         self.user.write_text("codex_direct:\n  timeout_seconds: 900\n", encoding="utf-8")
-        self.assertEqual(self.resolve()["codex_direct"]["timeout_seconds"], 900)
+        self.assertEqual(self.resolve(), DEFAULTS)
+        self.assertEqual(codex_direct_timeout(self.cwd, self.home), 900)
         for value in (1801, 0, -1, 1.5, "900", True):
             with self.subTest(value=value):
                 self.user.write_text(yaml.safe_dump({"codex_direct": {"timeout_seconds": value}}))
@@ -235,8 +236,7 @@ active_provider: openai-main
 
     def test_init_permissions_no_overwrite_and_force(self):
         init_config(self.user)
-        expected = {**DEFAULTS, "codex_direct": {"timeout_seconds": 600}}
-        self.assertEqual(self.resolve(), expected)
+        self.assertEqual(self.resolve(), DEFAULTS)
         self.assertEqual(yaml.safe_load(self.user.read_text()), DEFAULTS)
         self.assertNotIn("10.29.7.58", self.user.read_text())
         self.assertNotIn("gw", self.user.read_text())
@@ -246,7 +246,7 @@ active_provider: openai-main
             init_config(self.user)
         self.assertIn("42", self.user.read_text())
         init_config(self.user, force=True)
-        self.assertEqual(self.resolve(), expected)
+        self.assertEqual(self.resolve(), DEFAULTS)
 
     def test_init_refuses_symlinks_even_with_force(self):
         target = self.cwd / "keep.txt"
@@ -278,7 +278,7 @@ active_provider: openai-main
     def test_example_matches_defaults(self):
         example = Path(__file__).resolve().parents[1] / "config.example.yaml"
         self.user.write_bytes(example.read_bytes())
-        self.assertEqual(self.resolve(), {**DEFAULTS, "codex_direct": {"timeout_seconds": 600}})
+        self.assertEqual(self.resolve(), DEFAULTS)
 
     def test_project_forbids_endpoint_auth_type_and_options_even_if_unchanged(self):
         for field, value in (
