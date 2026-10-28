@@ -18,7 +18,7 @@
 | **D. AI Engineering 自動完成** | 驅動器＋Developer＋Reviewer＋PM 的手動步驟 | 派工、測試、審查派送、修復重派、結案記錄、發布與合併、worktree 退場、Developer／Reviewer 額度改派、CI 選擇、事件消費（目前 `task advance` 只涵蓋審查派送到結案，其餘仍是 PM／Worker 手動，見第 6 章） | 在既有授權、派工政策、Reviewer、CI 與合併 gate 之內自動進行，不需 Owner 逐件經手；任何政策或 gate 變更仍須 Owner 決定 |
 | **E. 只有 issue 才通知 Owner** | PM | 預估超過預算；安全事件；同一問題兩次修復失敗；卡住超過文件定義的天數；需要新帳號／新支出；AI 能力不足以完成某項工作；Owner 定義的方向與現況衝突 | 其餘不通知；進度 report 等 Owner 問 |
 
-不一定需要四個獨立 AI。最小配置：一個 PM session 同時承擔 B 與 C，但 C 的輸出格式（第 4 章）是硬性要求；D 由確定性程式承擔；Reviewer 加「可用性驗收」。
+不一定需要四個獨立 AI。最小配置：一個 PM session 同時承擔 B 與 C，但 C 的輸出格式（第 4 章）是硬性要求；D 由確定性程式承擔；建議 Reviewer 加「可用性驗收」（提案，**OWNER_DECISION_REQUIRED**）。
 
 **責任類型區分：** 專業建議責任（B、C）、決策權（A）、執行責任（D）、品質保證責任（D 的 Reviewer＋B 的驗收標準）、最終授權責任（A，僅限 A 列出的事項）。
 
@@ -169,7 +169,7 @@ issue 的具體天數與送達方式（GitHub `waiting_owner` 標記、TUI 提�
 | 層 | 誰 | 驗什麼 |
 |---|---|---|
 | 程式正確 | Developer 自測＋Reviewer | diff、測試、CI |
-| **使用者可用** | **AI QA／Reviewer（新增）** | 依需求確認單的「驗收」句實際操作一遍，附操作紀錄；未做此步不得標 DONE |
+| **使用者可用** | **AI QA／Reviewer（新增）** | 依需求確認單的「驗收」句實際操作一遍，附操作紀錄；提案：Owner 核准後才成為 DONE 的條件（**OWNER_DECISION_REQUIRED**） |
 | 符合期望 | Owner | 看 demo，回答符合／不符合 |
 
 「MERGED ≠ VERIFIED」由 AI QA 負責把 VERIFIED 做出來，不由 Owner 補。第一版的驗收句（Owner 2026-10-28）：「在 TUI 提需求，PM 即時回話，最後拿到我要的結果；而且能用公司 LLM 搭配其他 AI 開發其他專案。」
@@ -198,7 +198,7 @@ issue 的具體天數與送達方式（GitHub `waiting_owner` 標記、TUI 提�
 1. NOW 已由 Owner 給出；AI PM 展開成第一版清單（Report B 9C.6）並把其餘標 FROZEN（OWNER_DECISION_REQUIRED：Roadmap 順序）。
 2. PM 自本週起用需求確認單、狀態頁、決策單三種格式，加白話規則；不符格式的輸出視為未完成。
 3. CTO 自本週起對任何提案附方案比較單；建立容量、成本與額度看板；gw 省不省先量。
-4. Engineering 以 `task advance` 驅動器取代審查到結案的手動串接（每次呼叫一個動作）。若要把它延伸到首次派工、發布與合併，屬 **OWNER_DECISION_REQUIRED**，而且延伸後仍受既有的派工政策、Git、審查、CI 與合併 gate 約束，不得繞過；Reviewer 加可用性驗收。
+4. Engineering 以 `task advance` 驅動器取代審查到結案的手動串接（每次呼叫一個動作）。若要把它延伸到首次派工、發布與合併，屬 **OWNER_DECISION_REQUIRED**，而且延伸後仍受既有的派工政策、Git、審查、CI 與合併 gate 約束，不得繞過；Reviewer 加可用性驗收同屬提案，需 Owner 核准（**OWNER_DECISION_REQUIRED**）。
 5. 第一個 demo：Owner 在 TUI 提一個真實需求，PM 即時回話，看到它被開發、審查、合併、顯示完成。Owner 什麼時候問，什麼時候就要拿得出來；做不到是 PM 的失敗，不是 Owner 的。
 
 ---

@@ -836,7 +836,7 @@ flowchart LR
 
 **AUDIT-023 — 流程成本／PR 碎片化（Architecture Risk／Process）**：437 PR／31 天；83 CLOSED；docs > feat。修復：分級流程（16.3）。P1。
 
-**AUDIT-017 — Codex direct 31% 無 artifact（Confirmed Defect）**：OUTCOME_UNKNOWN 57（BLOCKED 32、FINAL_JSON_INVALID 12、FINAL_MESSAGE_INVALID 5）＋ OUTPUT_REJECTED 29。Root Cause：final JSON 契約過嚴（#379 已部分修）、600 s 上限、刪檔／新檔 diff 規則（#413／#517）。修復：放寬 envelope（允許 fences／前後文）、上限可設、diff 規則覆蓋 A/D。P1。
+**AUDIT-017 — Codex direct 31% 無 artifact（Confirmed Defect）**：OUTCOME_UNKNOWN 57（BLOCKED 32、FINAL_JSON_INVALID 12、FINAL_MESSAGE_INVALID 5）＋ OUTPUT_REJECTED 29。Root Cause：final JSON 契約過嚴（#379 已部分修）、600 s 上限、刪檔／新檔 diff 規則（#413／#517）。建議修復（**OWNER_DECISION_REQUIRED**）：放寬 envelope（允許 fences／前後文）、上限可設、diff 規則覆蓋 A/D；須經 Owner 核准，且保留既有的驗收、預算與安全 gate（不得因放寬而接受無 artifact 或越權的結果）。P1。
 
 **AUDIT-037 — 無恢復路徑（Confirmed Defect）**：見 8.1。P1。
 
@@ -896,7 +896,7 @@ flowchart LR
 ### P1 — Architecture / Reliability（4 週）
 
 - 拆 `task_submission_cli.py`；claim 狀態機移出 TaskStore（AUDIT-005）。
-- `task retry` 恢復路徑（AUDIT-037）；Codex 上限可設、envelope 放寬（AUDIT-017／027）。
+- `task retry` 恢復路徑（AUDIT-037）；Codex 上限可設、envelope 放寬（AUDIT-017／027；**OWNER_DECISION_REQUIRED**，保留既有驗收、預算與安全 gate）。
 - 統一 PM 通道為 record-pm／pm_runtime（AUDIT-022；OWNER_DECISION_REQUIRED）；Claude-author Reviewer 路線（AUDIT-034）與 `task complete` 接受 Codex 正式 PASS（AUDIT-035；AGENTS.md 已列為 future work，實作仍需 Owner 確認接受條件）。
 - 硬編碼 → config（AUDIT-006／024）；Claude Code adapter（AUDIT-007）。
 - Mac CI 只跑 Mac 專屬（AUDIT-004；OWNER_DECISION_REQUIRED）；事件自動 ACK（AUDIT-030）；修復上限單一化（AUDIT-036）。
