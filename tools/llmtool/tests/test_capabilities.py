@@ -22,7 +22,7 @@ EXPECTED = {
     "chat": True,
     "large_context": True,
     "reasoning_control": True,
-    "streaming": False,
+    "streaming": True,
     "code_edit": False,
     "shell": False,
     "git": False,
