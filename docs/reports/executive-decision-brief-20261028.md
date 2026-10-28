@@ -2,7 +2,8 @@
 
 - **Snapshot：** `139a62c0483560be4e7a0aadd76c82652a8a2cd9`　**審查者：** Independent Auditor（Claude Fable 5.1）
 - 完整證據見 [Report A](full-repository-technical-audit-20261028.md)、[Report B](project-evolution-decision-retrospective-20261028.md)、[Report C](product-owner-playbook-ai-development-20261028.md)。本文只給結論。
-- **v5 註記（2026-10-28 Owner 三輪答覆）：** Owner 回答了審查者 29 項質疑（Report B 9C）。結果：Owner 主要責任歸零，只剩 Owner 自述的「新東西一直加」為次要項；gw 改為「以量測為條件的必做路線」；AGY／OpenCode 可後接；第一版＝TUI 即時 PM 對話＋能用公司 LLM 搭配其他 AI 開發其他專案；預算每月 USD 300；不要排程報告，卡住要當 issue 主動找 Owner。查證：worktree 已清理（374→32、磁碟可用 28 GB）、`task advance` 與 TUI 即時 PM 已合併、gw thinking 開啟後 2/2。
+- **v5 註記（2026-10-28 Owner 三輪答覆）：** Owner 回答了審查者 29 項質疑（Report B 9C）。結果：Owner 主要責任歸零，只剩 Owner 自述的「新東西一直加」為次要項；gw 改為「以量測為條件的必做路線」；AGY／OpenCode 可後接；第一版＝TUI 即時 PM 對話＋能用公司 LLM 搭配其他 AI 開發其他專案；預算每月 USD 300；不要排程報告，卡住要當 issue 主動找 Owner。查證：worktree 已清理（374→32、磁碟可用 28 GB）、`task advance`（只涵蓋審查派送到結案）與 TUI 即時 PM 已合併、gw thinking 開啟後兩題最終通過（一題第二次才過）。
+- **v6 註記：** 依 ChatGPT 顧問審查（advisory，非正式 verdict；Owner 2026-10-28 轉交）五項修正：等待逾時不得視為授權、`task advance` 實際範圍、gw 整題成本含修復、現行優先表統一、Codex PM 適配只保留 Owner 自述。
 - **v4 註記：** 補入 Owner 對省 token 路線的說明（Report B 9B）；DEC-008／029 改評 REASONABLE AT THE TIME。
 - **v3 註記（2026-10-28 Owner 身份重判）：** Owner 是需求方與出資者，不是 PM／CTO。v1／v2 用專業管理標準評價 Owner 的部分已撤銷；責任重判見問題四，AI 失職與能力限制見「問題十之前」，Owner 只需做的四件事見文末。
 - **v2 註記（2026-10-28 自我校正）：** 本文所有「應停止／應優先／建議」都是審查者建議；凡涉及 Gate、Reviewer 配對、Dispatch 政策或 Roadmap 者為 **OWNER_DECISION_REQUIRED**，不取代 AGENTS.md。本機 TaskStore 統計（279 Task、COMPLETED 1、review claim 0）只代表 llmtool 子命令在 Owner Mac 上的使用情況，不代表專案整體產出（Report A 2.4）。Snapshot 後 main 已合併 #513（TUI Task mode／Task list／事件／pm_runtime／developer route 契約），AUDIT-001 部分改善但核心未變（Report A 第 26 章）。
@@ -44,7 +45,7 @@ TaskStore + D6 lifecycle + Codex direct + EC2 receipt + CI 隔離 + cross-family
 開可後接的路線（AGY／OpenCode／CliNest／Telegram／Web；Owner 2026-10-28 確認可後接）；merge train；每輪新建 Reviewer worktree；docs PR 正式審；額度 policy PR；High Debug 與 GitHub events 自動化；再寫任何超過兩頁的規範。**gw 不在停止之列**：Owner 定為必做路線，但條件是「不能節省就沒必要」，所以先量再決定。
 
 ## 問題九：最該優先
-一條鏈：TUI 提交（已合併）→ PM 即時對話（pm_runtime 已接入 TUI，#544／#549）→ Codex direct → EC2 測試 → Reviewer → 一次自動退修 → PR → merge → COMPLETED（`task advance` #519 已合併）。零件已齊；**下一步是 Owner 親手在 TUI 跑一個真實任務**，這是第一版驗收（Owner：「提需求，到我想要的，對話要能即時回答我」）。之後依序：gw 接入同一條鏈並量測省不省；硬編碼→config 並在第二個專案目錄跑一次（Owner 要求第一版能開發其他專案）；Codex retry 與契約放寬。四週為建議期程。
+一條鏈：TUI 提交（已合併）→ PM 即時對話（pm_runtime 已接入 TUI，#544／#549）→ Codex direct → EC2 測試 → Reviewer → 一次自動退修 → PR → merge → COMPLETED（`task advance` #519 已合併，但它只涵蓋審查派送到結案；第一次派工、發布、合併仍是 PM／Worker 的手動步驟）。零件大致齊了；**下一步是 Owner 親手在 TUI 跑一個真實任務**，這是第一版驗收（Owner：「提需求，到我想要的，對話要能即時回答我」）。之後依序：gw 接入同一條鏈並量測整題成本（含失敗修復與 PM／Reviewer 開銷）省不省；硬編碼→config 並在第二個專案目錄跑一次（Owner 要求第一版能開發其他專案）；Codex retry 與契約放寬。四週為建議期程。
 
 ## 問題十之前：AI 團隊的失職與能力限制（v3 新增）
 - **第 13 天（10-09）Owner 已說「你們 AI 自行協調好就好」「停下來要人審查什麼我也不懂」；同日 Claude 的回顧已診斷出 AI 自製 gate、把 Owner 拉進迴圈的模式；之後在 fake-only、D4 per-call 核准、High Debug 重複三次。** 10-17、10-20、10-21、10-28 四次是 Owner 先於 AI 發現方向偏離。
