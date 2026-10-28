@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -29,6 +30,32 @@ def _policy(task, reviewer_key):
     assignment = (developer.get('owner_assignment_ref')
                   if type(developer) is dict else None)
     return worker_dispatch.evaluate(reviewer_key, assignment, task.get('task_id'))
+
+
+def _resolve_github_login():
+    """Resolve the authenticated GitHub account without exposing credentials."""
+    gh = shutil.which('gh', path=task_completion._GH_PATH)
+    if gh is None:
+        _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
+    env = {'PATH': task_completion._GH_PATH, 'HOME': os.path.expanduser('~'),
+           'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
+           'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
+    if os.environ.get('GH_CONFIG_DIR'):
+        env['GH_CONFIG_DIR'] = os.environ['GH_CONFIG_DIR']
+    try:
+        result = subprocess.run(
+            [gh, 'api', 'user', '--jq', '.login'], env=env,
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=False, timeout=8)
+    except (OSError, subprocess.TimeoutExpired):
+        _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
+    try:
+        login = result.stdout.decode('utf-8').strip()
+    except UnicodeDecodeError:
+        _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
+    if (result.returncode or re.fullmatch(r'[A-Za-z0-9-]{1,39}', login) is None):
+        _refuse('REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
+    return login
 
 
 def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
@@ -90,13 +117,14 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
     return task, executor, head, base['sha'], reviewer_key
 
 
-def _create_d6(*, task_id, base_sha, repo_root, executor_task):
+def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login):
     lifecycle = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
     lease = f'read-only formal review of executor task {executor_task} at {base_sha}'
     args = [sys.executable, '-B', str(lifecycle), '--task-id', task_id,
             '--agent-id', 'claude-reviewer', '--session-ref', 'pending-' + task_id,
             '--lease-ref', lease, '--branch', 'llmtool/reviewer-' + task_id,
-            '--base-sha', base_sha, '--repo-root', str(repo_root)]
+            '--base-sha', base_sha, '--github-login', github_login,
+            '--repo-root', str(repo_root)]
     result = subprocess.run(args, cwd=str(repo_root), stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             check=False, timeout=180)
@@ -188,8 +216,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         gate = _policy(task, reviewer_key)
         if not gate.allowed:
             _refuse(gate.reason_code)
+        github_login = _resolve_github_login()
         create(task_id=reviewer_task, base_sha=head, repo_root=repo_root,
-               executor_task=executor_task)
+               executor_task=executor_task, github_login=github_login)
         if prompt_renderer is None:
             from . import task_submission_cli
             args = type('ReviewArgs', (), {'task_id': task_id, 'executor_task': executor_task,
