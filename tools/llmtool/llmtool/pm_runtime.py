@@ -122,6 +122,10 @@ def _history_path(root, key):
     return root / (key + '.history.json')
 
 
+def _runtime_state_path(root, key):
+    return root / (key + '.runtime.json')
+
+
 def _binding_path(root, native_session_id):
     return root / (native_session_id + '.binding.json')
 
@@ -237,16 +241,29 @@ def _session_live_elsewhere(native_id, transcript, now, created_at=None,
 
 def _terminate_all(signum=None, frame=None):
     previous = _previous_signal_handlers.get(signum, signal.SIG_DFL)
+    if previous is None:
+        previous = signal.SIG_DFL
+    close_error = None
     for runtime in tuple(_active_runtimes):
-        runtime.close()
+        try:
+            runtime.close()
+        except Exception as exc:
+            if close_error is None:
+                close_error = exc
     if signum is None or previous is signal.SIG_IGN:
+        if close_error is not None:
+            raise close_error
         return
     if callable(previous):
         previous(signum, frame)
+        if close_error is not None:
+            raise close_error
         return
     # The old disposition is now restored by the final runtime close. Re-sending
     # the signal lets the operating system apply its original default action.
     os.kill(os.getpid(), signum)
+    if close_error is not None:
+        raise close_error
 
 
 def _restore_signal_handlers():
@@ -257,7 +274,7 @@ def _restore_signal_handlers():
             # runtime was open. The cache can be stale if that owner replaced
             # our handler, so the live disposition is authoritative.
             if signal.getsignal(signum) is _terminate_all:
-                signal.signal(signum, handler)
+                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
         except (ValueError, OSError):
             pass
     _previous_signal_handlers.clear()
@@ -386,6 +403,35 @@ class PMRuntime:
             except FileNotFoundError:
                 pass
 
+    def _recent_clean_close(self, now):
+        path = _runtime_state_path(self._root, self._key)
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except (FileNotFoundError, OSError):
+            return False
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            with os.fdopen(fd, 'r', encoding='utf-8') as stream:
+                fd = -1
+                state = json.load(stream)
+            closed_at = datetime.fromisoformat(state['clean_closed_at']).timestamp()
+            return 0 <= now - closed_at <= _LIVE_WINDOW_SECONDS
+        except (KeyError, TypeError, ValueError, UnicodeError, OSError):
+            return False
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def _record_clean_close(self):
+        path = _runtime_state_path(self._root, self._key)
+        try:
+            _write_json_atomic(self._root, path,
+                               {'clean_closed_at': _timestamp(self.clock)})
+        except LLMToolError:
+            raise _error('PM_STATE_WRITE_FAILED', 'PM runtime state could not be saved') from None
+
     def open(self):
         if self._child is not None:
             return self
@@ -411,7 +457,17 @@ class PMRuntime:
             raise _error('PM_SESSION_BUSY', 'PM session lock could not be acquired') from None
         self._key, self._root, self._lock_fd = key, root, lock_fd
         try:
-            for turn in self._history_read():
+            turns = self._history_read()
+            recovered = False
+            recovery_time = _timestamp(self.clock)
+            for turn in turns:
+                if isinstance(turn, dict) and turn.get('status') == 'ACTIVE':
+                    turn['status'] = 'INTERRUPTED'
+                    turn['ended_at'] = recovery_time
+                    recovered = True
+            if recovered:
+                self._history_write(turns)
+            for turn in turns:
                 if isinstance(turn, dict) and isinstance(turn.get('idempotency_key'), str):
                     self._idempotency[turn['idempotency_key']] = turn
             binding = current_binding(self.pm_session_id, state_root=root)
@@ -425,9 +481,10 @@ class PMRuntime:
                 created_at = datetime.fromisoformat(binding['created_at']).timestamp()
             except (ValueError, TypeError, OverflowError):
                 created_at = None
+            recently_closed = self._recent_clean_close(now)
             if _session_live_elsewhere(
                     self.pm_session_id, transcript, now, created_at,
-                    ignore_recent_transcript=self._has_owned_session):
+                    ignore_recent_transcript=self._has_owned_session or recently_closed):
                 raise _error('PM_SESSION_LIVE_ELSEWHERE',
                              'PM session appears active elsewhere; close it before using pm_runtime')
             env = dict(os.environ if self.environ is None else self.environ)
@@ -723,6 +780,7 @@ class PMRuntime:
             child = self._child
             active_turn = self._turn
         error = None
+        had_child = child is not None
         if active_turn is not None:
             try:
                 self._finish(active_turn, 'INTERRUPTED')
@@ -762,6 +820,11 @@ class PMRuntime:
                 _unregister_lifecycle(self)
             except Exception as exc:
                 if error is None:
+                    error = exc
+            if error is None and had_child and self._key is not None:
+                try:
+                    self._record_clean_close()
+                except Exception as exc:
                     error = exc
             try:
                 self._release_lock()

@@ -9,7 +9,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmtool import pm_runtime
@@ -285,6 +285,107 @@ class PMRuntimeTests(unittest.TestCase):
         with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
             runtime.open()
         runtime.close()
+
+    def test_clean_close_allows_new_driver_within_live_window(self):
+        runtime = self.runtime(clock=time.time)
+        runtime.open()
+        runtime.close()
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{}', encoding='utf-8')
+        now = time.time()
+        os.utime(transcript, (now, now))
+        with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
+            new_runtime = self.runtime(clock=time.time)
+            new_runtime.open()
+        new_runtime.close()
+
+    def test_crash_left_active_turn_is_interrupted_before_idempotency_replay(self):
+        runtime = self.runtime()
+        runtime.open()
+        list(runtime.send('request', idempotency_key='crash-key'))
+        runtime.close()
+        history_path = pm_runtime._history_path(runtime._root, runtime._key)
+        history = json.loads(history_path.read_text(encoding='utf-8'))
+        history['turns'][0]['status'] = 'ACTIVE'
+        history['turns'][0]['ended_at'] = None
+        history_path.write_text(json.dumps(history), encoding='utf-8')
+
+        recovered = self.runtime()
+        recovered.open()
+        page = pm_runtime.read_history(SESSION, state_root=self.root)
+        self.assertEqual(page['turns'][0]['status'], 'INTERRUPTED')
+        replay = list(recovered.send('request', idempotency_key='crash-key'))
+        self.assertEqual(replay[0]['type'], 'TURN_REPLAY')
+        self.assertEqual(replay[0]['status'], 'INTERRUPTED')
+        recovered.close()
+
+    def test_signal_handler_none_restores_default_and_all_runtimes_close(self):
+        signum = signal.SIGTERM
+        failing = type('StubRuntime', (), {})()
+        succeeding = type('StubRuntime', (), {})()
+        pm_runtime._active_runtimes.update((failing, succeeding))
+        close_calls = []
+
+        def close_failing():
+            close_calls.append('failing')
+            raise RuntimeError('first close failed')
+
+        def close_succeeding():
+            close_calls.append('succeeding')
+
+        failing.close = close_failing
+        succeeding.close = close_succeeding
+        pm_runtime._previous_signal_handlers[signum] = None
+        pm_runtime._previous_signal_handlers[signal.SIGHUP] = None
+        try:
+            with patch.object(pm_runtime.signal, 'getsignal', return_value=pm_runtime._terminate_all), \
+                    patch.object(pm_runtime.signal, 'signal') as set_signal:
+                pm_runtime._restore_signal_handlers()
+                self.assertCountEqual(set_signal.call_args_list, [
+                    call(signal.SIGTERM, signal.SIG_DFL),
+                    call(signal.SIGHUP, signal.SIG_DFL)])
+            pm_runtime._previous_signal_handlers[signum] = None
+            with patch.object(pm_runtime.os, 'kill') as kill:
+                with self.assertRaisesRegex(RuntimeError, 'first close failed'):
+                    pm_runtime._terminate_all(signum, None)
+            kill.assert_called_once_with(pm_runtime.os.getpid(), signum)
+            self.assertCountEqual(close_calls, ['failing', 'succeeding'])
+        finally:
+            pm_runtime._active_runtimes.discard(failing)
+            pm_runtime._active_runtimes.discard(succeeding)
+            pm_runtime._previous_signal_handlers.pop(signum, None)
+            pm_runtime._previous_signal_handlers.pop(signal.SIGHUP, None)
+            pm_runtime._signal_handlers_installed = False
+
+    def test_runtime_signal_handler_chains_after_all_close_attempts(self):
+        signum = signal.SIGHUP
+        failing = type('StubRuntime', (), {})()
+        succeeding = type('StubRuntime', (), {})()
+        pm_runtime._active_runtimes.update((failing, succeeding))
+        close_calls = []
+        received = []
+
+        def close_failing():
+            close_calls.append('failing')
+            raise RuntimeError('first close failed')
+
+        def close_succeeding():
+            close_calls.append('succeeding')
+
+        failing.close = close_failing
+        succeeding.close = close_succeeding
+        pm_runtime._previous_signal_handlers[signum] = lambda received_signum, frame: received.append(received_signum)
+        try:
+            with self.assertRaisesRegex(RuntimeError, 'first close failed'):
+                pm_runtime._terminate_all(signum, None)
+            self.assertCountEqual(close_calls, ['failing', 'succeeding'])
+            self.assertEqual(received, [signum])
+        finally:
+            pm_runtime._active_runtimes.discard(failing)
+            pm_runtime._active_runtimes.discard(succeeding)
+            pm_runtime._previous_signal_handlers.pop(signum, None)
 
     def test_runtime_signal_handlers_restore_and_chain_previous_handler(self):
         signum = signal.SIGTERM
