@@ -780,6 +780,9 @@ def bind_native_session(*, task_id, native_session_id, canonical_root,
             _stop("D6_BIND_NATIVE_SESSION_ALREADY_SET")
         updated = dict(record)
         updated["native_session_id"] = native_session_id
+        if (type(updated.get("session_ref")) is str and
+                updated["session_ref"].startswith("pending-")):
+            updated["session_ref"] = native_session_id
         _replace_record(record_path, updated)
         print("D6_NATIVE_SESSION_BOUND task_id=" + task_id)
         return native_session_id
@@ -948,10 +951,12 @@ def _uncommitted_file(root, root_dev, relative):
 def _worktree_listing(canonical_root, root):
     """The canonical checkout's porcelain entry for exactly this root, or None."""
     raw = _task_git(canonical_root, "worktree", "list", "--porcelain").stdout
+    root_real = os.path.realpath(root)
     matches = []
     for stanza in raw.split("\n\n"):
         fields = stanza.splitlines()
-        if fields and fields[0] == "worktree " + str(root):
+        if (fields and fields[0].startswith("worktree ") and
+                os.path.realpath(fields[0][9:]) == root_real):
             matches.append(fields[1:])
     if len(matches) != 1:
         return None
@@ -995,13 +1000,16 @@ def _identity_reasons(root, record, canonical_root, common_dir, workspace_root):
                       "--git-common-dir").stdout.strip() != str(common_dir)):
         return ["D6_RETIRE_COMMON_DIR_MISMATCH"]
     branch = record.get("branch")
+    current_branch = _task_git(root, "branch", "--show-current").stdout.strip()
+    detached_review = (type(branch) is str and branch.startswith("review/") and
+                       _valid_branch(canonical_root, branch) and not current_branch)
     if (type(branch) is not str or not _valid_branch(canonical_root, branch) or
-            _task_git(root, "branch", "--show-current").stdout.strip() != branch):
+            (current_branch != branch and not detached_review)):
         return ["D6_RETIRE_BRANCH_MISMATCH"]
     return []
 
 
-def _publication(root, branch, head, squash):
+def _publication(root, branch, head, squash, train_squash=None):
     """Name the rule proving HEAD's commits are published, or None.
 
     Uses only local remote-tracking refs; the PM fetches origin first.
@@ -1029,6 +1037,20 @@ def _publication(root, branch, head, squash):
         if (pr_head == head and parents.returncode == 0 and
                 len(parents.stdout.split()) == 2 and is_ancestor(squash_sha, origin_main)):
             return "squash_evidence"
+    if train_squash is not None:
+        pr_head, train_head, squash_sha = train_squash
+        parents = _task_git(root, "rev-list", "--parents", "-n", "1", squash_sha,
+                            check=False)
+        squash_tree = _task_git(root, "rev-parse", "--verify", "--quiet",
+                                squash_sha + "^{tree}", check=False)
+        train_tree = _task_git(root, "rev-parse", "--verify", "--quiet",
+                               train_head + "^{tree}", check=False)
+        if (pr_head == head and is_ancestor(pr_head, train_head) and
+                parents.returncode == 0 and len(parents.stdout.split()) == 2 and
+                is_ancestor(squash_sha, origin_main) and
+                squash_tree.returncode == 0 and train_tree.returncode == 0 and
+                squash_tree.stdout == train_tree.stdout):
+            return "train_squash_evidence"
     return None
 
 
@@ -1056,6 +1078,7 @@ def _unknown_digest(paths):
 
 
 def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root, squash,
+                 train_squash=None,
                  discard_uncommitted=False, unknown_evidence=None):
     """Evaluate every retire gate for one task without changing anything.
 
@@ -1085,8 +1108,10 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
     head = _task_git(root, "rev-parse", "HEAD").stdout.strip()
     plan.update(branch=branch, head=head)
     listing = _worktree_listing(canonical_root, root)
+    detached_review = branch.startswith("review/") and "detached" in (listing or {})
     if (listing is None or listing.get("HEAD") != head or
-            listing.get("branch") != "refs/heads/" + branch or "prunable" in listing):
+            (listing.get("branch") != "refs/heads/" + branch and not detached_review) or
+            "prunable" in listing):
         plan["reasons"].append("D6_RETIRE_WORKTREE_NOT_REGISTERED")
         return plan
     plan["locked"] = "locked" in listing
@@ -1107,7 +1132,7 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
     locks.append(common_dir / "refs" / "heads" / (branch + ".lock"))
     if any(os.path.lexists(path) for path in locks):
         plan["reasons"].append("D6_RETIRE_GIT_LOCKED")
-    plan["publication"] = _publication(root, branch, head, squash)
+    plan["publication"] = _publication(root, branch, head, squash, train_squash)
     if plan["publication"] is None:
         plan["reasons"].append("D6_RETIRE_UNPUBLISHED")
     if _task_git(root, "status", "--porcelain=v1", "-z",
@@ -1320,6 +1345,7 @@ def _mark_retain_blocked(record_path, record, reasons):
 
 
 def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence=None,
+                     train_evidence=None,
                      discard_uncommitted=(), unknown_evidence=None,
                      workspace_root=TASKS_ROOT):
     """Plan (default) or execute gated retirement; print one JSON line per task.
@@ -1328,10 +1354,12 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
     """
     workspace_root = Path(workspace_root)
     squash_evidence = squash_evidence or {}
+    train_evidence = train_evidence or {}
     unknown_evidence = unknown_evidence or {}
     if (not task_ids or len(task_ids) != len(set(task_ids)) or
             any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids) or
             not set(squash_evidence) <= set(task_ids) or
+            not set(train_evidence) <= set(task_ids) or
             not set(unknown_evidence) <= set(task_ids) or
             len(discard_uncommitted) != len(set(discard_uncommitted)) or
             not set(discard_uncommitted) <= set(task_ids)):
@@ -1371,6 +1399,7 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                 plan = _retire_plan(task_id, record, canonical_root=canonical_root,
                                     common_dir=common_dir, workspace_root=workspace_root,
                                     squash=squash_evidence.get(task_id),
+                                    train_squash=train_evidence.get(task_id),
                                     discard_uncommitted=task_id in discard_uncommitted,
                                     unknown_evidence=unknown_evidence.get(task_id))
             except LifecycleError as exc:
@@ -1442,6 +1471,112 @@ def _parse_squash_evidence(values):
     return evidence
 
 
+def _parse_train_evidence(values):
+    evidence = {}
+    for value in values or []:
+        task_id, _sep, shas = value.partition("=")
+        parts = shas.split(":")
+        if (task_id in evidence or len(parts) != 3 or
+                any(not SHA40_RE.fullmatch(sha) for sha in parts)):
+            _stop("D6_TASK_INPUT_INVALID")
+        evidence[task_id] = tuple(parts)
+    return evidence
+
+
+def reconcile_registry(*, canonical_root, execute=False, workspace_root=TASKS_ROOT):
+    """Report missing-worktree registry entries, optionally retire their records."""
+    workspace_root = Path(workspace_root)
+    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+        _stop("D6_WORKSPACE_ROOT_INVALID")
+    workspace_root = Path(os.path.realpath(workspace_root))
+    canonical_root = Path(canonical_root).resolve(strict=True)
+    if _task_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
+        _stop("D6_REPOSITORY_INVALID")
+    common_dir = Path(_task_git(canonical_root, "rev-parse", "--path-format=absolute",
+                                "--git-common-dir").stdout.strip())
+    if (not common_dir.is_absolute() or common_dir.name != ".git" or
+            Path(os.path.realpath(common_dir)) != common_dir or
+            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS):
+        _stop("D6_COMMON_DIR_INVALID")
+    registry = common_dir / "llmtool-worktrees"
+    _safe_dir(registry, mode=0o700, uid=os.getuid())
+    lock_fd = None
+    if execute:
+        try:
+            lock_fd = os.open(registry / ".lifecycle.lock",
+                              os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            os.fchmod(lock_fd, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except OSError:
+            _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
+    try:
+        raw = _task_git(canonical_root, "worktree", "list", "--porcelain").stdout
+        listed = set()
+        for stanza in raw.split("\n\n"):
+            first = stanza.splitlines()[:1]
+            if first and first[0].startswith("worktree "):
+                listed.add(os.path.realpath(first[0][9:]))
+        candidates = []
+        for record_path in sorted(registry.glob("*.json")):
+            try:
+                record = _read_registry_record(record_path)
+            except LifecycleError:
+                continue
+            task_id = record.get("task_id")
+            expected_root = workspace_root / task_id if type(task_id) is str else None
+            if (type(task_id) is not str or not TASK_ID_RE.fullmatch(task_id) or
+                    record_path.name != task_id + ".json" or
+                    record.get("schema_version") != 1 or
+                    record.get("state") in ("RETAIN_BLOCKED", "REMOVED",
+                                             "RETIRED_EXTERNALLY") or
+                    type(record.get("root_realpath")) is not str or
+                    os.path.realpath(record["root_realpath"]) !=
+                    os.path.realpath(expected_root)):
+                continue
+            root = workspace_root / task_id
+            if os.path.lexists(root) or os.path.realpath(root) in listed:
+                continue
+            candidates.append((task_id, record_path, record))
+        results = []
+        for task_id, record_path, record in candidates:
+            result = {"task_id": task_id, "mode": "execute" if execute else "dry-run",
+                      "result": "RETIRED_EXTERNALLY" if execute else "RECONCILE_READY"}
+            if execute:
+                # Recheck both independent absence signals while holding the registry lock.
+                latest_listing = _task_git(canonical_root, "worktree", "list",
+                                           "--porcelain").stdout
+                latest_paths = {line[9:] for line in latest_listing.splitlines()
+                                if line.startswith("worktree ")}
+                if (os.path.lexists(workspace_root / task_id) or
+                        os.path.realpath(workspace_root / task_id) in
+                        {os.path.realpath(path) for path in latest_paths}):
+                    result["result"] = "SKIPPED_EXISTS"
+                elif _read_registry_record(record_path) != record:
+                    result["result"] = "BLOCKED"
+                    result["reason"] = "D6_REGISTRY_CHANGED"
+                elif record.get("state") == "RETAIN_BLOCKED":
+                    result["result"] = "SKIPPED_RETAIN_BLOCKED"
+                else:
+                    now = _now()
+                    updated = dict(record)
+                    updated.update(state="RETIRED_EXTERNALLY", last_verified_at=now,
+                                   retired_externally_at=now,
+                                   disposition="Worktree directory absent and not registered with Git at " + now)
+                    _replace_record(record_path, updated)
+                    result["retired_externally_at"] = now
+                    result["reason"] = "worktree directory absent and not in git worktree list"
+            else:
+                result["reason"] = "worktree directory absent and not in git worktree list"
+            results.append(result)
+        print(json.dumps({"mode": "execute" if execute else "dry-run",
+                          "records": results}, sort_keys=True))
+        return True
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
 def _parse_unknown_evidence(values):
     evidence = {}
     for value in values or []:
@@ -1473,6 +1608,13 @@ def _main(argv=None):
     parser.add_argument("--squash-evidence", action="append",
                         metavar="TASK_ID=PR_HEAD_SHA:SQUASH_SHA",
                         help="merged squash PR: final PR head and its commit on origin/main")
+    parser.add_argument("--train-evidence", action="append",
+                        metavar="TASK_ID=PR_HEAD_SHA:TRAIN_HEAD_SHA:SQUASH_SHA",
+                        help="merged squash train: PR head, train head and squash commit")
+    parser.add_argument("--reconcile-registry", action="store_true",
+                        help="list registry records whose worktree is absent; dry run by default")
+    parser.add_argument("--execute-approved-reconcile", action="store_true",
+                        help="mark absent worktree records RETIRED_EXTERNALLY")
     parser.add_argument("--discard-uncommitted", action="append", metavar="TASK_ID",
                         help="Owner-approved: discard this retire task's tracked and "
                              "untracked changes (repeatable); needs the execute flag to act")
@@ -1495,6 +1637,8 @@ def _main(argv=None):
                     args.resume_root is not None or args.record_result_task_id is not None or
                     args.retire_task_id is not None or args.execute_approved_lifecycle or
                     args.execute_approved_retire or args.squash_evidence or
+                    args.train_evidence or args.reconcile_registry or
+                    args.execute_approved_reconcile or
                     args.discard_uncommitted or args.retain_blocked_evidence):
                 _stop("D6_TASK_INPUT_INVALID")
             bind_native_session(task_id=args.bind_native_session_task_id,
@@ -1506,6 +1650,8 @@ def _main(argv=None):
                     args.resume_task_id is not None or args.resume_root is not None or
                     args.retire_task_id is not None or args.execute_approved_lifecycle or
                     args.execute_approved_retire or args.squash_evidence or
+                    args.train_evidence or args.reconcile_registry or
+                    args.execute_approved_reconcile or
                     args.discard_uncommitted or args.retain_blocked_evidence):
                 _stop("D6_TASK_INPUT_INVALID")
             record_result(task_id=args.record_result_task_id,
@@ -1521,8 +1667,21 @@ def _main(argv=None):
                 execute=args.execute_approved_retire,
                 discard_uncommitted=args.discard_uncommitted or (),
                 unknown_evidence=_parse_unknown_evidence(args.retain_blocked_evidence),
-                squash_evidence=_parse_squash_evidence(args.squash_evidence)) else 1
-        if (args.execute_approved_retire or args.squash_evidence or
+                squash_evidence=_parse_squash_evidence(args.squash_evidence),
+                train_evidence=_parse_train_evidence(args.train_evidence)) else 1
+        if args.reconcile_registry or args.execute_approved_reconcile:
+            if (args.retire_task_id is not None or args.execute_approved_retire or
+                    args.squash_evidence or args.train_evidence or
+                    args.discard_uncommitted or args.retain_blocked_evidence or
+                    any(value is not None for value in create_values + create_options) or
+                    args.resume_task_id is not None or args.resume_root is not None or
+                    args.record_result_task_id is not None or
+                    args.bind_native_session_task_id is not None or
+                    args.execute_approved_lifecycle):
+                _stop("D6_TASK_INPUT_INVALID")
+            return 0 if reconcile_registry(canonical_root=args.repo_root,
+                                           execute=args.execute_approved_reconcile) else 1
+        if (args.execute_approved_retire or args.squash_evidence or args.train_evidence or
                 args.discard_uncommitted or args.retain_blocked_evidence):
             _stop("D6_TASK_INPUT_INVALID")
         if args.execute_approved_lifecycle:

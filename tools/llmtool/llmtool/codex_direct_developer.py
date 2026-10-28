@@ -27,6 +27,7 @@ _EFFORT = re.compile(r'(?:minimal|low|medium|high|xhigh)\Z')
 _TOOL_CALL_ITEM_TYPES = frozenset((
     'command_execution', 'tool_call', 'function_call', 'mcp_tool_call',
 ))
+_JSON_CODE_FENCE = re.compile(r'\A```(?:json)?[ \t]*\r?\n(.*?)\r?\n?```\Z', re.DOTALL)
 
 
 class DirectCodexError(LLMToolError):
@@ -179,8 +180,12 @@ def _result_from_events(raw):
         _fail('CODEX_THREAD_ID_MISSING')
     if final is None:
         _fail('CODEX_FINAL_MESSAGE_MISSING')
+    candidate = final
+    fenced = _JSON_CODE_FENCE.fullmatch(final)
+    if fenced is not None:
+        candidate = fenced.group(1)
     try:
-        obj = json.loads(final, object_pairs_hook=_unique_keys,
+        obj = json.loads(candidate, object_pairs_hook=_unique_keys,
                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     except (ValueError, TypeError, RecursionError):
         _fail('CODEX_FINAL_JSON_INVALID')
@@ -190,7 +195,7 @@ def _result_from_events(raw):
             obj.get('status') not in ('DONE', 'BLOCKED') or
             type(obj.get('summary')) is not str or len(obj['summary'].encode('utf-8')) > 8192 or
             type(obj.get('tests')) is not list or len(obj['tests']) > 32 or
-            any(type(item) is not str or len(item.encode('utf-8')) > 1024 for item in obj['tests']) or
+            any(type(item) not in (str, dict) for item in obj['tests']) or
             type(obj.get('self_review')) is not str or len(obj['self_review'].encode('utf-8')) > 8192 or
             (obj.get('blocked_reason') is not None and
              (type(obj['blocked_reason']) is not str or len(obj['blocked_reason'].encode('utf-8')) > 2048)))
@@ -200,7 +205,35 @@ def _result_from_events(raw):
         _fail('CODEX_FINAL_JSON_INVALID')
     if (obj['status'] == 'BLOCKED') != (obj['blocked_reason'] is not None):
         _fail('CODEX_FINAL_JSON_INVALID')
+    normalized_tests = []
+    for item in obj['tests']:
+        if type(item) is str:
+            normalized = item
+        else:
+            normalized = '; '.join(
+                f'{key}: {value if type(value) is str else json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)}'
+                for key, value in sorted(item.items())
+            )
+        try:
+            if len(normalized.encode('utf-8')) > 1024:
+                _fail('CODEX_FINAL_JSON_INVALID')
+        except UnicodeError:
+            _fail('CODEX_FINAL_JSON_INVALID')
+        normalized_tests.append(normalized)
+    obj['tests'] = normalized_tests
     return thread_id, obj, usage
+
+
+def _d6_has_changes(root):
+    """Return whether Git reports tracked, staged, or untracked D6 changes."""
+    try:
+        result = subprocess.run(
+            ['git', 'status', '--porcelain', '--untracked-files=all'],
+            cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=False, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and bool(result.stdout)
 
 
 def _usage_from_events(raw):
@@ -451,6 +484,9 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         # with the observed process facts, never a bare adapter UNKNOWN.
         error = (exc if isinstance(exc, DirectCodexError) else
                  DirectCodexError(adapter_error_code(exc)))
+        if (error.direct_codex_code == 'CODEX_FINAL_JSON_INVALID' and
+                _d6_has_changes(root)):
+            error.direct_codex_code = 'CODEX_FINAL_JSON_INVALID_WITH_CHANGES'
         if (process is not None and process.returncode is not None and
                 process.returncode < 0 and
                 error.direct_codex_code != 'CODEX_TIMEOUT' and

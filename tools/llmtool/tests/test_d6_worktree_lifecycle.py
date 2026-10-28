@@ -134,6 +134,110 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         return subprocess.check_output(["/usr/bin/git", "rev-parse", "HEAD"],
                                        cwd=root, text=True).strip()
 
+    def _git(self, cwd, *args):
+        return subprocess.check_output(["/usr/bin/git", *args], cwd=cwd,
+                                       text=True).strip()
+
+    def test_train_squash_publication_requires_all_evidence(self):
+        root, _ = self._registered_result_fixture("train-evidence")
+        head = self._commit_file(root, "pr head\n", "PR head")
+        train_head = self._commit_file(root, "train result\n", "train result")
+        tree = self._git(root, "rev-parse", train_head + "^{tree}")
+        squash = subprocess.check_output(["/usr/bin/git", "commit-tree", tree,
+                                          "-p", self.base], cwd=root, text=True).strip()
+        self._git(root, "update-ref", "refs/remotes/origin/main", squash)
+        evidence = (head, train_head, squash)
+        self.assertEqual(lifecycle._publication(root, "test/train-evidence", head,
+                                                None, evidence),
+                         "train_squash_evidence")
+
+        self.assertIsNone(lifecycle._publication(
+            root, "test/train-evidence", head, None,
+            (self.base, train_head, squash)))
+        self.assertIsNone(lifecycle._publication(
+            root, "test/train-evidence", head, None,
+            (head, self.base, squash)))
+
+        mismatch_tree = subprocess.check_output(["/usr/bin/git", "mktree"],
+                                                cwd=root, input="", text=True).strip()
+        mismatched_squash = subprocess.check_output(
+            ["/usr/bin/git", "commit-tree", mismatch_tree, "-p", self.base],
+            cwd=root, text=True).strip()
+        self._git(root, "update-ref", "refs/remotes/origin/main", mismatched_squash)
+        self.assertIsNone(lifecycle._publication(
+            root, "test/train-evidence", head, None,
+            (head, train_head, mismatched_squash)))
+
+        self._git(root, "update-ref", "refs/remotes/origin/main", self.base)
+        self.assertIsNone(lifecycle._publication(
+            root, "test/train-evidence", head, None, evidence))
+
+    def test_detached_reviewer_worktree_is_retire_ready_when_head_is_published(self):
+        root, record_path = self._registered_result_fixture("reviewer-published")
+        head = self._commit_file(root, "reviewed\n", "reviewed head")
+        self._git(root, "branch", "review/reviewer-published", head)
+        self._git(root, "checkout", "--detach", head)
+        self._git(root, "update-ref", "refs/remotes/origin/main", head)
+        record = lifecycle._read_registry_record(record_path)
+        record.update(branch="review/reviewer-published", head_sha=head)
+        lifecycle._replace_record(record_path, record)
+        with patch.object(lifecycle, "_live_pids", return_value=[]):
+            plan = lifecycle._retire_plan(
+                "reviewer-published", record, canonical_root=self.source,
+                common_dir=self.source / ".git", workspace_root=self.tasks,
+                squash=None)
+        self.assertEqual(plan["publication"], "origin_main")
+        self.assertEqual(plan["reasons"], [])
+
+    def test_reconcile_registry_dry_run_execute_and_safety_boundaries(self):
+        missing_root, missing_path = self._registered_result_fixture("missing-record")
+        retained_root, retained_path = self._registered_result_fixture("retained-record")
+        existing_root, existing_path = self._registered_result_fixture("existing-record")
+        locked_root, locked_path = self._registered_result_fixture("locked-missing-record")
+        retained = lifecycle._read_registry_record(retained_path)
+        retained["state"] = "RETAIN_BLOCKED"
+        lifecycle._replace_record(retained_path, retained)
+        existing_before = lifecycle._read_registry_record(existing_path)
+        for root in (missing_root, retained_root):
+            subprocess.run(["/usr/bin/git", "worktree", "unlock", str(root)],
+                           cwd=self.source, check=True, capture_output=True)
+        for root in (missing_root, retained_root):
+            shutil.rmtree(root)
+        shutil.rmtree(locked_root)
+        subprocess.run(["/usr/bin/git", "worktree", "prune"], cwd=self.source,
+                       check=True, capture_output=True)
+
+        listed_worktrees = subprocess.check_output(
+            ["/usr/bin/git", "worktree", "list", "--porcelain"],
+            cwd=self.source, text=True)
+        self.assertIn("worktree " + str(locked_root), listed_worktrees)
+
+        dry_output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                contextlib.redirect_stdout(dry_output):
+            self.assertTrue(lifecycle.reconcile_registry(
+                canonical_root=self.source, workspace_root=self.tasks))
+        dry = json.loads(dry_output.getvalue())
+        self.assertEqual([item["task_id"] for item in dry["records"]], ["missing-record"])
+        self.assertNotIn("locked-missing-record",
+                         [item["task_id"] for item in dry["records"]])
+        self.assertTrue(existing_root.is_dir())
+        self.assertEqual(lifecycle._read_registry_record(missing_path)["state"], "ACTIVE")
+        self.assertEqual(lifecycle._read_registry_record(locked_path)["state"], "ACTIVE")
+
+        execute_output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                contextlib.redirect_stdout(execute_output):
+            self.assertTrue(lifecycle.reconcile_registry(
+                canonical_root=self.source, execute=True, workspace_root=self.tasks))
+        executed = json.loads(execute_output.getvalue())
+        self.assertEqual([item["task_id"] for item in executed["records"]], ["missing-record"])
+        self.assertEqual(lifecycle._read_registry_record(missing_path)["state"],
+                         "RETIRED_EXTERNALLY")
+        self.assertEqual(lifecycle._read_registry_record(retained_path), retained)
+        self.assertEqual(lifecycle._read_registry_record(existing_path), existing_before)
+        self.assertTrue(existing_root.is_dir())
+
     def test_record_result_rebootstraps_env2_for_new_head(self):
         root, record_path = self._registered_result_fixture()
         before = lifecycle._read_registry_record(record_path)
@@ -260,6 +364,20 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(after["native_session_id"], bound)
         self.assertEqual({key: value for key, value in after.items()
                           if key != "native_session_id"}, before)
+
+    def test_bind_native_session_finalizes_pending_session_ref(self):
+        root, record_path = self._registered_result_fixture("bind-pending-session")
+        record = lifecycle._read_registry_record(record_path)
+        record["session_ref"] = "pending-bind-pending-session"
+        lifecycle._replace_record(record_path, record)
+        native_session_id = "12345678-1234-4234-8234-123456789abc"
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            lifecycle.bind_native_session(task_id="bind-pending-session",
+                native_session_id=native_session_id, canonical_root=self.source,
+                workspace_root=self.tasks)
+        after = lifecycle._read_registry_record(record_path)
+        self.assertEqual(after["session_ref"], native_session_id)
+        self.assertEqual(after["native_session_id"], native_session_id)
 
     def test_bind_native_session_refuses_overwrite_and_bad_format(self):
         root, record_path = self._registered_result_fixture("bind-native-refused")

@@ -810,6 +810,41 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(rejected['evidence']['formal_review_state'], 'UNVERIFIED')
         self.assertIn('FORMAL_REVIEW_NOT_ACCEPTED', rejected['missing_gates'])
 
+    def test_advance_dispatched_formal_pass_comment_satisfies_review_gate(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer'
+        self._git('worktree', 'add', '-b', 'review/comment-branch',
+                  str(reviewer_root), result_sha)
+        self._write_registration('reviewer-task', 'claude-reviewer',
+            'native-reviewer-session', reviewer_root, 'review/comment-branch',
+            result_sha, result_sha, native_session_id='native-reviewer-session',
+            github_login='reviewer-user', state='REVIEW_PENDING')
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        comment_body = (
+            '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v1 | HEAD: {result_sha}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+            self._review_binding(head=result_sha))
+        comments = [{'id': 42, 'user': {'login': 'reviewer-user'},
+            'body': comment_body, 'created_at': '2026-10-21T10:00:00Z',
+            'updated_at': '2026-10-21T10:00:00Z'}]
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        api = self._github_response_sequence(result_sha, pr, [], checks,
+                                             comments=comments)
+        with patch('llmtool.task_completion._github_get', side_effect=api):
+            evidence = task_completion.collect_github_evidence(
+                **self._github_kwargs(result_sha))
+        self.assertEqual(evidence['evidence']['review_source'], 'PR_COMMENT')
+        self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
+        self.assertEqual(evidence['evidence']['reviewer_github_login'], 'reviewer-user')
+        self.assertEqual(evidence['evidence']['reviewer_session_ref'],
+                         'native-reviewer-session')
+        self.assertEqual(evidence['missing_gates'], [])
+
     def test_review_binding_must_match_task_run_contract_and_result_head(self):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'
