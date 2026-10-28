@@ -41,7 +41,8 @@ class CodexDelegateTests(unittest.TestCase):
             check=True, capture_output=True, text=True).stdout.strip()
 
     @staticmethod
-    def _completion_git(root, args, *, limit=1024 * 1024, allow_exit_1=False):
+    def _completion_git(root, args, *, limit=1024 * 1024, allow_exit_1=False,
+                        return_exit_code=False):
         # Apple Git calls confstr for its temp path; retain the normal Git
         # reader's fixed environment while supplying this test process's valid
         # temporary directory so stderr remains a meaningful failure signal.
@@ -60,7 +61,8 @@ class CodexDelegateTests(unittest.TestCase):
         allowed_codes = (0, 1) if allow_exit_1 else (0,)
         if process.returncode not in allowed_codes or process.stderr or len(process.stdout) > limit:
             raise AssertionError('fixture Git read failed')
-        return process.stdout
+        return ((process.stdout, process.returncode) if return_exit_code
+                else process.stdout)
 
     def _registered_worktree(self):
         self.repo.mkdir()
@@ -186,12 +188,14 @@ class CodexDelegateTests(unittest.TestCase):
         try:
             os.chdir(self.root)
             git_reader = self._completion_git
-            def read_git(root, args, *, limit=1024 * 1024, allow_exit_1=False):
+            def read_git(root, args, *, limit=1024 * 1024, allow_exit_1=False,
+                         return_exit_code=False):
                 if (malformed_diff is not None and tuple(args[:2]) ==
                         ('diff', '--binary')):
                     return malformed_diff.encode('utf-8')
                 return git_reader(root, args, limit=limit,
-                                  allow_exit_1=allow_exit_1)
+                                  allow_exit_1=allow_exit_1,
+                                  return_exit_code=return_exit_code)
             with patch.dict(os.environ, {'PATH': str(self.bin) + os.pathsep + os.environ['PATH']}), \
                     patch('llmtool.task_submission_cli._codex_developer_profile',
                           return_value=({'model': 'gpt-6-luna'}, 'high')), \

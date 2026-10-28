@@ -808,7 +808,8 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
     return marker
 
 
-def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False):
+def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
+         return_exit_code=False):
     """Run one fixed Git read with bounded output and no inherited Git config."""
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
@@ -856,7 +857,8 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False):
             _stop('GIT_INSPECTION_FAILED')
         if errors:
             _stop('GIT_INSPECTION_FAILED')
-        return bytes(out)
+        result = bytes(out)
+        return (result, returncode) if return_exit_code else result
     except subprocess.TimeoutExpired:
         _stop('GIT_INSPECTION_TIMEOUT')
     finally:

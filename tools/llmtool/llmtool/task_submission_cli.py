@@ -2492,12 +2492,13 @@ def run_task_codex_delegate(args, *, store):
             write_paths=write_paths, acceptance=acceptance):
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     if recovering_timeout:
-        try:
-            task_completion._git(registration.root,
-                ('merge-base', '--is-ancestor', task_source_sha, snapshot.head),
-                limit=4096)
-        except LLMToolError:
+        _result, ancestor_result = task_completion._git(registration.root,
+            ('merge-base', '--is-ancestor', task_source_sha, snapshot.head),
+            limit=4096, allow_exit_1=True, return_exit_code=True)
+        if ancestor_result == 1:
             task_completion._stop('CODEX_TIMEOUT_SOURCE_NOT_ANCESTOR')
+        if ancestor_result != 0:
+            task_completion._stop('GIT_INSPECTION_FAILED')
     _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     provider, reasoning_effort = _codex_developer_profile()
