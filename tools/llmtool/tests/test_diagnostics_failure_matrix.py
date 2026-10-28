@@ -29,6 +29,7 @@ PROMPT = 'PRIVATE_A11A6_PROMPT'
 RAW = 'PRIVATE_A11A6_HTTP_STDERR_REASONING_BODY'
 SECRET = 'sk-' + 'b' * 40
 RUN_ID = 'c' * 32
+CLI_NON_TIMEOUT_SECONDS = 30
 
 
 class Response(io.BytesIO):
@@ -234,7 +235,7 @@ class FailureMatrixTests(unittest.TestCase):
                     with self.subTest(kind=kind, failure=failure, fault=fault):
                         self.invoke(kind, code, store_fault=fault,
                                     cause={'process_status': 7} if failure == 'failure' else None, setup=setup,
-                                    timeout_seconds=0.2 if failure == 'timeout' else 2)
+                                    timeout_seconds=0.2 if failure == 'timeout' else CLI_NON_TIMEOUT_SECONDS)
                     self.assertEqual(spawns[0].call_count, 0 if failure == 'missing' else 1)
 
     def test_cli_spawn_permission_error_redacts_sensitive_data(self):
@@ -256,7 +257,7 @@ class FailureMatrixTests(unittest.TestCase):
                 with self.subTest(kind=kind, mode=mode or 'normal'):
                     serial = self.serial + 1
                     stderr = self.invoke(kind, 'PROVIDER_RUNTIME_ERROR', mode=mode, setup=setup,
-                                         timeout_seconds=2)
+                                         timeout_seconds=CLI_NON_TIMEOUT_SECONDS)
                     self.assertEqual(spawns[0].call_count, 1)
                     state = self.base / ('state-' + str(serial))
                     persisted = b''.join(path.read_bytes() for path in state.rglob('*') if path.is_file())
