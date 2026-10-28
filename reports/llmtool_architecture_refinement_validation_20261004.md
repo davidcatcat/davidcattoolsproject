@@ -53,7 +53,7 @@ uses objective failure/evidence events for escalation; distinguishes fallback;
 rechecks trust/data export even for summaries; accepts completion only with required
 evidence; discloses deterministic-check coverage limits; and records missing
 token/cost as unknown rather than zero. Detailed rules are in
-[ROADMAP](../tools/llmtool/ROADMAP.md#architecture-refinement--planning-only) and
+[ROADMAP](../docs/history/llmtool-roadmap-archive-20261028.md#architecture-refinement--planning-only) and
 [WORKFLOW](../tools/llmtool/WORKFLOW.md#task-contract-company-llm-and-evidence).
 Runtime enforcement/routing/cost savings are not implemented or measured.
 
