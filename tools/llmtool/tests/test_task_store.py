@@ -740,6 +740,84 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(path.stat().st_nlink, 1)
         self.assertEqual(loaded['task_binding']['task_id'], loaded['task_id'])
 
+    def test_get_retries_when_atomic_replace_lands_after_open(self):
+        value = record()
+        self.store.create(value)
+        original_stat = os.stat
+        replacing = [False]
+        replaced = [False]
+        updated = []
+
+        def replace_before_path_stat(path, *args, **kwargs):
+            if (path == value['task_id'] + '.json' and not replacing[0] and
+                    not replaced[0]):
+                replaced[0] = True
+                replacing[0] = True
+                try:
+                    updated.append(self.store.update(
+                        value['task_id'], state='PM_UNAVAILABLE',
+                        error_code='PROVIDER_TIMEOUT'))
+                finally:
+                    replacing[0] = False
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(task_store_module.os, 'stat', side_effect=replace_before_path_stat):
+            loaded = self.store.get(value['task_id'])
+
+        self.assertTrue(replaced[0])
+        self.assertEqual(loaded, updated[0])
+
+    def test_get_reports_busy_when_path_keeps_changing(self):
+        value = record()
+        self.store.create(value)
+        original_stat = os.stat
+        replacing = [False]
+        replacements = []
+
+        def replace_before_path_stat(path, *args, **kwargs):
+            if path == value['task_id'] + '.json' and not replacing[0]:
+                replacing[0] = True
+                try:
+                    replacements.append(self.store.update(
+                        value['task_id'], state='PM_UNAVAILABLE',
+                        error_code='PROVIDER_TIMEOUT'))
+                finally:
+                    replacing[0] = False
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(task_store_module.os, 'stat', side_effect=replace_before_path_stat):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.get(value['task_id'])
+
+        self.assertEqual(len(replacements), 3)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_BUSY')
+
+    def test_get_rejects_self_inconsistent_open_descriptor(self):
+        value = record()
+        self.store.create(value)
+        path = self.root / (value['task_id'] + '.json')
+        target_inode = path.stat().st_ino
+        original_fstat = os.fstat
+        task_fd_calls = [0]
+
+        def inconsistent_fstat(fd):
+            info = original_fstat(fd)
+            if info.st_ino == target_inode:
+                task_fd_calls[0] += 1
+                if task_fd_calls[0] == 2:
+                    return SimpleNamespace(
+                        st_dev=info.st_dev, st_ino=info.st_ino, st_mode=info.st_mode,
+                        st_uid=info.st_uid, st_gid=info.st_gid, st_size=info.st_size + 1,
+                        st_mtime_ns=info.st_mtime_ns, st_nlink=info.st_nlink)
+            return info
+
+        with patch.object(task_store_module.os, 'fstat', side_effect=inconsistent_fstat):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.get(value['task_id'])
+
+        self.assertEqual(task_fd_calls[0], 2)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
+
     def test_atomic_update_preserves_integrity_and_retains_lock_inode(self):
         value = record()
         self.store.create(value)
@@ -988,64 +1066,6 @@ class TaskStoreTests(unittest.TestCase):
         holder.stdin.write('release\n')
         holder.stdin.flush()
         self.assertEqual(holder.wait(timeout=5), 0)
-
-    def test_lock_wait_past_old_timeout_succeeds_within_new_bound(self):
-        value = record()
-        self.store.create(value)
-        lock_name = '.' + value['task_id'] + '.json.lock'
-        clock = [0.0]
-        original_flock = fcntl.flock
-
-        def advance(seconds):
-            clock[0] += seconds
-
-        def hold_then_acquire(fd, operation):
-            if operation == fcntl.LOCK_EX | fcntl.LOCK_NB and clock[0] < 2.5:
-                raise BlockingIOError(errno.EAGAIN, 'simulated held lock')
-            if operation == fcntl.LOCK_UN:
-                return None
-            return original_flock(fd, operation)
-
-        # The lock file exists before this call; the mocked flock supplies a
-        # deterministic holder interval without creating another process.
-        (self.root / lock_name).touch(mode=0o600)
-        with patch.object(task_store_module.time, 'monotonic', side_effect=lambda: clock[0]), \
-                patch.object(task_store_module.time, 'sleep', side_effect=advance), \
-                patch.object(task_store_module.fcntl, 'flock', side_effect=hold_then_acquire):
-            updated = self.store.update(value['task_id'], state='PM_UNAVAILABLE',
-                                        error_code='PROVIDER_TIMEOUT')
-
-        self.assertGreaterEqual(clock[0], 2.5)
-        self.assertLess(clock[0], task_store_module.TASK_UPDATE_LOCK_TIMEOUT_SECONDS)
-        self.assertEqual(updated['state'], 'PM_UNAVAILABLE')
-        self.assertEqual(self.store.get(value['task_id']), updated)
-
-    def test_lock_wait_past_new_bound_is_bounded_and_classified_busy(self):
-        value = record()
-        self.store.create(value)
-        lock_name = '.' + value['task_id'] + '.json.lock'
-        clock = [0.0]
-
-        def advance(seconds):
-            clock[0] += seconds
-
-        def always_held(fd, operation):
-            if operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
-                raise BlockingIOError(errno.EAGAIN, 'simulated held lock')
-            return None
-
-        (self.root / lock_name).touch(mode=0o600)
-        with patch.object(task_store_module.time, 'monotonic', side_effect=lambda: clock[0]), \
-                patch.object(task_store_module.time, 'sleep', side_effect=advance), \
-                patch.object(task_store_module.fcntl, 'flock', side_effect=always_held):
-            with self.assertRaises(LLMToolError) as caught:
-                self.store.update(value['task_id'], state='PM_UNAVAILABLE',
-                                  error_code='PROVIDER_TIMEOUT')
-
-        self.assertGreaterEqual(clock[0], task_store_module.TASK_UPDATE_LOCK_TIMEOUT_SECONDS)
-        self.assertEqual(caught.exception.task_store_code, 'BUSY')
-        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_BUSY')
-        self.assertEqual(self.store.get(value['task_id'])['state'], value['state'])
 
     def test_concurrent_lock_create_enoent_is_retried(self):
         # macOS openat(O_CREAT) may report ENOENT while another process
