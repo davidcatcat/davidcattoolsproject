@@ -101,18 +101,23 @@ def nobody_cli(argv,limit=10,cleanup=False):
     if left<=4: raise subprocess.TimeoutExpired(argv,0)
     command_seconds=max(1,math.floor(min(left-1,limit))-2)
     return run(["sudo","-n","-u","nobody","/usr/bin/timeout","--signal=TERM","--kill-after=2s",str(command_seconds),*argv],limit=command_seconds+4,cleanup=cleanup)
-lock_create='import os; p="/tmp/llmtool-remote-test.lock"; fd=os.open(p,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o666); os.fchmod(fd,0o666); os.close(fd)'
-nobody_uid=int(nobody_cli(["id","-u"],limit=5).stdout.strip())
-created=nobody_cli([python,"-c",lock_create],limit=5)
-if created.returncode and not os.path.exists("/tmp/llmtool-remote-test.lock"): sys.exit(1)
-lock_info=os.lstat("/tmp/llmtool-remote-test.lock")
-if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=nobody_uid or lock_info.st_mode&0o777!=0o666: sys.exit(1)
-def acquire_lock(path):
-    fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+def open_lock(path):
+    try: fd=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+    except OSError: sys.exit(76)
+    try: info=os.fstat(fd)
+    except OSError: os.close(fd); sys.exit(76)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or
+            info.st_mode&0o777!=0o600 or info.st_nlink!=1):
+        os.close(fd); sys.exit(76)
     try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError: os.close(fd); raise
     return fd
-try: lock_fd=acquire_lock("/tmp/llmtool-remote-test.lock")
+def final_line(lines):
+    return next((line for line in reversed(lines)
+                 if line.endswith("OK") or line.startswith("FAILED (") or
+                 re.fullmatch(r"OK(?: \((?:skipped=\d+|expected failures=\d+)(?:, (?:skipped=\d+|expected failures=\d+))*\))?", line) or
+                 line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
+try: lock_fd=open_lock(os.path.expanduser("~")+"/.llmtool-remote-test.lock")
 except BlockingIOError: sys.exit(75)
 cleanup_source="""import os,re,shutil,stat,sys,time
 uid=os.getuid(); now=time.time(); keep=sys.argv[1] if len(sys.argv)>1 else ""; test=re.compile(r"llmtool-remote-test\\.[A-Za-z0-9]+\\Z"); logs=re.compile(r"llmtool-remote-log\\.[A-Za-z0-9]+\\Z"); owned_dirs=[]
@@ -171,9 +176,7 @@ try:
                 test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance),capture_stderr=True)
                 test_output=test.stdout+(test.stderr or b""); log+=test_output
                 lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
-                final=next((line for line in reversed(lines)
-                            if line.endswith("OK") or line.startswith("FAILED (") or
-                            line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
+                final=final_line(lines)
                 finals.append(final)
                 ran+=int(re.search(rb"Ran (\d+) tests?",test_output).group(1)) if re.search(rb"Ran (\d+) tests?",test_output) else 0
                 if test.returncode==124:
@@ -450,6 +453,9 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     if result.returncode != 0 and not stdout:
         if result.returncode == 75:
             return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='REMOTE_BUSY',
+                                   executor_task=executor_task, sha=sha, modules=selected)
+        if result.returncode == 76:
+            return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='REMOTE_LOCK_UNSAFE',
                                    executor_task=executor_task, sha=sha, modules=selected)
         return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_FAILED',
                                executor_task=executor_task, sha=sha, modules=selected)
