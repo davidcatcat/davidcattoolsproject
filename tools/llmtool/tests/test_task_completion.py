@@ -906,10 +906,11 @@ class TaskCompletionTests(unittest.TestCase):
                      task_digest='3' * 64):
             case_number[0] += 1
             reviewer_root = self.base / ('reviewer-' + str(case_number[0]))
-            self._git('worktree', 'add', '-b', 'review/' + reviewer + '-' + author,
+            reviewer_branch = 'review/' + reviewer + '-' + author + '-' + str(case_number[0])
+            self._git('worktree', 'add', '-b', reviewer_branch,
                       str(reviewer_root), result_sha)
             self._write_registration('reviewer-task', reviewer,
-                'native-reviewer-session', reviewer_root, 'review/' + reviewer + '-' + author,
+                'native-reviewer-session', reviewer_root, reviewer_branch,
                 result_sha, result_sha, native_session_id='native-reviewer-session',
                 github_login='reviewer-user', state='REVIEW_PENDING')
             current_comment = dict(comment, body=binding_body)
