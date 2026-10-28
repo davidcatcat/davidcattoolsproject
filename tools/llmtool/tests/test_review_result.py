@@ -50,7 +50,7 @@ def _comment(status='PASS', *, actor='Claude', head=HEAD, version=1,
     marker_status = 'PASS' if status == 'PASS' else 'FIX' if status == 'FIX' else 'FAIL'
     body = (f'<!-- activity: type=review_verdict actor={actor} target=PM status={marker_status} -->\n'
             f'Verdict: {stamp} | Version: v{version} | HEAD: {head}\n')
-    if actor == 'Claude' and status == 'PASS':
+    if actor in ('Claude', 'Codex') and status == 'PASS':
         body += (f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
                  f'contract={CONTRACT} head={head}\nFORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n')
     body += extra
@@ -104,6 +104,31 @@ class ReviewResultTests(unittest.TestCase):
 
     def test_codex_pass_is_advisory(self):
         self.assertEqual(self.run_result([_comment(actor='Codex')])['state'], 'NOT_READY')
+
+    def test_bound_codex_pass_is_formal_only_for_claude_task(self):
+        record = self.store.get(TASK)
+        self.store.compare_and_update(
+            TASK, expected={'record_sha256': record['record_sha256']},
+            developer={'provider_profile': 'claude'})
+        self.assertEqual(self.run_result([_comment(actor='Codex')])['state'], 'REVIEW_PASS')
+
+    def test_codex_pass_with_mismatched_binding_is_advisory(self):
+        record = self.store.get(TASK)
+        self.store.compare_and_update(
+            TASK, expected={'record_sha256': record['record_sha256']},
+            developer={'provider_profile': 'claude'})
+        comment = _comment(actor='Codex')
+        comment['body'] = comment['body'].replace(f'task={TASK}', 'task=wrong')
+        self.assertEqual(self.run_result([comment])['state'], 'NOT_READY')
+
+    def test_codex_pass_stays_advisory_for_codex_and_gw_tasks(self):
+        for family in ('codex', 'company-gw', 'gw'):
+            record = self.store.get(TASK)
+            self.store.compare_and_update(
+                TASK, expected={'record_sha256': record['record_sha256']},
+                developer={'provider_profile': family})
+            self.assertEqual(self.run_result([_comment(actor='Codex')])['state'],
+                             'NOT_READY')
 
     def test_event_survives_taskstore_restart(self):
         self.run_result([_comment()])
