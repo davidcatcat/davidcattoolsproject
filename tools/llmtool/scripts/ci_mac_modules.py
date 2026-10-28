@@ -42,7 +42,6 @@ def scanned_test_modules(repo_root: Path = DEFAULT_REPO_ROOT) -> set[str]:
 def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> set[str] | None:
     """Return selected test names, or None when full coverage is required."""
     selected = scanned_test_modules(repo_root) | extra_modules()
-    test_dir = repo_root / "tools" / "llmtool" / "tests"
     has_mac_relevant_change = False
 
     for raw_path in changed_paths:
@@ -88,6 +87,8 @@ def select_modules(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT
         if source_name is None or "/" in source_name:
             return None
 
+    if has_mac_relevant_change and not selected:
+        return None
     return selected if has_mac_relevant_change else set()
 
 
@@ -102,6 +103,9 @@ def main(argv: list[str] | None = None) -> int:
     selected = select_modules(_read_changed_paths(args.changed_paths))
     if selected is None:
         print("FULL")
+        return 0
+    if not selected:
+        print("NONE")
         return 0
     for module in sorted(selected):
         print(module)

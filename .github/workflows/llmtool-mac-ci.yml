@@ -81,7 +81,7 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
           mode=full
-          verify=false
+          verify=true
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             paths="$RUNNER_TEMP/changed-paths"
             if git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"; then
@@ -106,8 +106,10 @@ jobs:
                 if [ "$mode" = mac-subset ]; then
                   if [ "$selection" = FULL ]; then
                     mode=full
-                  elif [ -z "$selection" ]; then
+                  elif [ "$selection" = NONE ]; then
                     mode=docs-only
+                  elif [ -z "$selection" ]; then
+                    mode=full
                   else
                     printf '%s\n' "$selection" > "$RUNNER_TEMP/mac-modules"
                   fi

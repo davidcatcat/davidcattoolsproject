@@ -36,7 +36,7 @@ class MacModuleSelectionTests(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 self.assertEqual(ci_mac_modules.main(["--changed-paths", str(changed_paths)]), 0)
-            self.assertEqual(output.getvalue(), "")
+            self.assertEqual(output.getvalue(), "NONE\n")
 
     def test_extra_modules_are_included(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -76,6 +76,13 @@ class MacModuleSelectionTests(unittest.TestCase):
             set(),
         )
 
+    def test_empty_mac_baseline_after_source_change_requires_full(self):
+        with patch.object(ci_mac_modules, "scanned_test_modules", return_value=set()), \
+                patch.object(ci_mac_modules, "extra_modules", return_value=set()):
+            self.assertIsNone(
+                ci_mac_modules.select_modules(["tools/llmtool/llmtool/source.py"], REPO_ROOT)
+            )
+
     def test_mac_relevant_test_change_is_selected(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -113,8 +120,8 @@ class MacModuleSelectionTests(unittest.TestCase):
             with self.subTest(path=path):
                 self.assertIsNone(ci_mac_modules.select_modules([path], REPO_ROOT))
 
-    def test_unknown_path_requires_full(self):
-        self.assertIsNone(ci_mac_modules.select_modules(["tools/llmtool/docs/unknown.md"], REPO_ROOT))
+    def test_unknown_non_markdown_path_requires_full(self):
+        self.assertIsNone(ci_mac_modules.select_modules(["tools/llmtool/docs/unknown.txt"], REPO_ROOT))
 
     def test_output_is_deterministic(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -141,8 +148,10 @@ class MacModuleSelectionTests(unittest.TestCase):
         self.assertNotIn("cron:", trigger)
         self.assertNotIn("push:", trigger)
         self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
-        self.assertIn('elif [ -z "$selection" ]; then', workflow)
+        self.assertIn('elif [ "$selection" = NONE ]; then', workflow)
+        self.assertIn('elif [ -z "$selection" ]; then\n                    mode=full', workflow)
         self.assertIn("mode=docs-only", workflow)
+        self.assertIn("verify=true", workflow)
         self.assertIn("steps.coverage.outputs.verify == 'true'", workflow)
 
     def test_subset_unittest_invocations_do_not_inherit_module_list_stdin(self):
