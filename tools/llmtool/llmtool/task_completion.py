@@ -1131,10 +1131,10 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     }
 
 
-def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
+def _worktree_snapshot(*, root, source_sha, read_paths, write_paths, expected_head=None):
     """Hash a registered uncommitted result without promoting it to a commit."""
     snapshot = collect_git_snapshot(root)
-    if snapshot.head != source_sha:
+    if snapshot.head != (source_sha if expected_head is None else expected_head):
         _stop('WORKTREE_SOURCE_HEAD_MISMATCH')
     status = _git(root, ('status', '--porcelain=v1', '-z', '--untracked-files=all'),
                    limit=1024 * 1024)
@@ -1258,7 +1258,8 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
     if any(path not in set(write_paths) for path in untracked):
         _stop('WORKTREE_UNTRACKED_FILES')
     live = _worktree_snapshot(root=registration.root, source_sha=source_sha,
-                              read_paths=read_paths, write_paths=write_paths)
+                              read_paths=read_paths, write_paths=write_paths,
+                              expected_head=result_head)
     if (live['common_dir'] != registration.common_dir or
             live['branch'] != registration.branch or live['source_sha'] != result_head):
         _stop('D6_TASK_BINDING_MISMATCH')

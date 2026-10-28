@@ -469,6 +469,16 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertFalse(task_submission_cli._codex_timeout_recovery(
             previous, **{**args, 'acceptance': ['other criterion']}))
 
+    def test_normal_worktree_snapshot_rejects_head_different_from_source(self):
+        with patch.object(task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='b' * 40)):
+            with self.assertRaises(task_completion.LLMToolError) as caught:
+                task_completion._worktree_snapshot(
+                    root=self.root, source_sha=self.source_sha,
+                    read_paths=['src.py'], write_paths=['src.py'])
+        self.assertEqual(caught.exception.completion_code,
+                         'WORKTREE_SOURCE_HEAD_MISMATCH')
+
     def test_direct_codex_rejects_malformed_hunk_strictly_and_captures_it(self):
         task = self._task()
         raw = ('diff --git a/src.py b/src.py\n'
