@@ -12,12 +12,28 @@ _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _HEX32 = re.compile(r'[0-9a-f]{32}\Z')
 _VERDICT_VERSION_HEAD = re.compile(
     r'Verdict: (PASS|FIX|FAIL|BLOCKED) \| Version: v([1-9][0-9]{0,3}) \| HEAD: ([0-9a-f]{40})\Z')
+_CODEX_BINDING = re.compile(
+    r'LLMTOOL-REVIEW-BINDING v1 task=([0-9a-f]{32}) run=([0-9a-f]{32}) '
+    r'contract=([0-9a-f]{64}) head=([0-9a-f]{40})\Z')
 
 
 def _refuse(code):
     error = LLMToolError('Review result is unavailable; details omitted')
     error.review_dispatch_code = code
     raise error from None
+
+
+def _codex_formal_pass(lines, *, head, version, task_id, run_id, contract_digest):
+    """Match Codex's PASS header and its exact accept and binding lines."""
+    if len(lines) < 4:
+        return False
+    return (
+        lines[0] == '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->' and
+        lines[1] == f'Verdict: PASS | Version: v{version} | HEAD: {head}' and
+        'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT' in lines[2:] and
+        (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+         f'contract={contract_digest} head={head}') in lines[2:]
+    )
 
 
 def _comment_verdict(comment, *, head, version, task):
@@ -27,27 +43,50 @@ def _comment_verdict(comment, *, head, version, task):
     lines = [line for line in body.splitlines() if line.strip()]
     if len(lines) < 2:
         return None
+    marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
+    codex_formal_pass = False
+    codex_bound = False
+    if marker is not None and marker.group(1) == 'Codex':
+        developer = task.get('developer')
+        if type(developer) is not dict or developer.get('provider_profile') != 'claude':
+            return None
+        binding = next((match for line in lines[1:]
+                        if (match := _CODEX_BINDING.fullmatch(line)) is not None), None)
+        task_binding = task.get('task_binding')
+        codex_bound = (
+            binding is not None and type(task_binding) is dict and
+            binding.group(1) == task.get('task_id') and
+            binding.group(2) == task.get('run_id') and
+            binding.group(3) == task_binding.get('contract_digest') and
+            binding.group(4) == head)
+        if not codex_bound:
+            return None
     status_line = _VERDICT_VERSION_HEAD.fullmatch(lines[1])
     if status_line is None:
         return None
     status, raw_version, raw_head = status_line.groups()
     if raw_head != head or int(raw_version) != version:
         return None
-
-    marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
     marker_matches = marker is not None and marker.group(2) == status
-    # A Codex PASS is explicitly advisory. It does not supersede a Claude verdict.
+    # A Codex PASS is formal only for a Claude-authored Task and the exact
+    # accept and binding lines required by the Codex Reviewer prompt.
     if marker_matches and marker.group(1) == 'Codex' and status == 'PASS':
-        return None
+        codex_formal_pass = _codex_formal_pass(
+            lines, head=head, version=version, task_id=task['task_id'],
+            run_id=task['run_id'],
+            contract_digest=task['task_binding']['contract_digest'])
+        if not codex_formal_pass:
+            return None
     comment_id = comment.get('id')
     if type(comment_id) is not int or comment_id < 0:
         _refuse('REVIEW_RESULT_INVALID')
 
-    formal_pass = (marker_matches and marker.group(1) == 'Claude' and status == 'PASS' and
-                   task_completion.is_formal_claude_pass(
-                       body, task_id=task['task_id'], run_id=task['run_id'],
-                       contract_digest=task['task_binding']['contract_digest'],
-                       result_sha=head))
+    formal_pass = (codex_formal_pass or
+                   (marker_matches and marker.group(1) == 'Claude' and status == 'PASS' and
+                    task_completion.is_formal_claude_pass(
+                        body, task_id=task['task_id'], run_id=task['run_id'],
+                        contract_digest=task['task_binding']['contract_digest'],
+                        result_sha=head)))
     # Match the strict formal PASS shape used by task_completion. All other
     # bound verdicts are non-passing dispositions, including malformed PASSes.
     outcome = 'REVIEW_PASS' if formal_pass else 'REVIEW_FAIL'
@@ -82,6 +121,37 @@ def _claim_for(task, *, executor_task, pr_number, version):
     return claim, head
 
 
+def _completed_claim_result(task, claim, *, version):
+    """Classify a completed claim's stored verdict and return its event identity."""
+    task_id = task.get('task_id')
+    run_id = task.get('run_id')
+    binding = task.get('task_binding')
+    result = claim.get('review_result')
+    head = claim.get('head_sha')
+    if (type(result) is not dict or result.get('task_id') != task_id or
+            result.get('run_id') != run_id or type(binding) is not dict or
+            result.get('contract_digest') != binding.get('contract_digest') or
+            result.get('head') != head or
+            result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+            type(result.get('review_text')) is not str):
+        _refuse('REVIEW_RESULT_INVALID')
+    claim_stamp = claim.get('updated_at')
+    latest = _comment_verdict(
+        {'id': 0, 'body': result['review_text'],
+         'created_at': claim_stamp, 'updated_at': claim_stamp},
+        head=head, version=version, task=task)
+    if latest is None:
+        _refuse('REVIEW_RESULT_INVALID')
+    expected_verdict = 'PASS' if latest[2] == 'REVIEW_PASS' else 'FAIL'
+    if (result['verdict'] == 'PASS') != (expected_verdict == 'PASS'):
+        _refuse('REVIEW_RESULT_INVALID')
+    identity = {'task': task_id, 'run': run_id, 'head': head,
+                'version': version, 'outcome': latest[2], 'comment_id': latest[1]}
+    event_id = hashlib.sha256(json.dumps(
+        identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+    return latest, event_id
+
+
 def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
                          reviewer_session_done=False, github_get=None):
     """Classify the latest claim-bound verdict and persist one idempotent event."""
@@ -101,17 +171,21 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
             type(task['task_binding'].get('contract_digest')) is not str):
         _refuse('REVIEW_RESULT_TASK_INVALID')
 
-    get = task_completion._github_get if github_get is None else github_get
-    comments = get(f'issues/{pr_number}/comments?per_page=100')
-    if type(comments) is not list or len(comments) >= 100:
-        _refuse('REVIEW_RESULT_COMMENTS_INVALID')
     latest = None
-    for comment in comments:
-        if type(comment) is not dict:
+    event_id = None
+    if claim.get('state') == 'COMPLETED':
+        latest, event_id = _completed_claim_result(task, claim, version=version)
+    else:
+        get = task_completion._github_get if github_get is None else github_get
+        comments = get(f'issues/{pr_number}/comments?per_page=100')
+        if type(comments) is not list or len(comments) >= 100:
             _refuse('REVIEW_RESULT_COMMENTS_INVALID')
-        current = _comment_verdict(comment, head=head, version=version, task=task)
-        if current is not None and (latest is None or current[:2] > latest[:2]):
-            latest = current
+        for comment in comments:
+            if type(comment) is not dict:
+                _refuse('REVIEW_RESULT_COMMENTS_INVALID')
+            current = _comment_verdict(comment, head=head, version=version, task=task)
+            if current is not None and (latest is None or current[:2] > latest[:2]):
+                latest = current
 
     if latest is None:
         if not reviewer_session_done:
@@ -126,10 +200,11 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
     if len(payload_bytes) > 512:
         _refuse('REVIEW_RESULT_INVALID')
     payload_sha256 = hashlib.sha256(payload_bytes).hexdigest()
-    identity = {'task': task_id, 'run': task['run_id'], 'head': head,
-                'version': version, 'outcome': outcome, 'comment_id': comment_id}
-    event_id = hashlib.sha256(json.dumps(
-        identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
+    if event_id is None:
+        identity = {'task': task_id, 'run': task['run_id'], 'head': head,
+                    'version': version, 'outcome': outcome, 'comment_id': comment_id}
+        event_id = hashlib.sha256(json.dumps(
+            identity, sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()[:32]
     result = store.record_completion_event(
         task_id, event_id=event_id, run_id=task['run_id'],
         session_id='review-' + event_id, source='REVIEWER', source_sha=head,

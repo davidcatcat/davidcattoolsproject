@@ -91,7 +91,7 @@ def decide(record, d6, pr, related):
     events = [event for event in _events(related) if type(event) is dict and
               event.get('source') == 'REVIEWER' and event.get('source_sha') == result_head and
               event.get('version', claim.get('version')) == claim.get('version')]
-    if claim.get('state') == 'DISPATCHED' and not events:
+    if claim.get('state') in ('DISPATCHED', 'COMPLETED') and not events:
         return 'RECORD_REVIEW_RESULT'
     if events:
         event = events[-1]
@@ -182,12 +182,24 @@ def _review_outcomes(record, claims, github_get):
     outcomes = []
     task = record
     for claim in claims:
-        if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
+        if type(claim) is not dict:
             continue
         number, version, head = claim.get('pr'), claim.get('version'), claim.get('head_sha')
         events = [event for event in record.get('completion_events', [])
                   if type(event) is dict and event.get('source') == 'REVIEWER' and
                   event.get('source_sha') == head]
+        if claim.get('state') == 'COMPLETED':
+            try:
+                latest, event_id = result_module._completed_claim_result(
+                    task, claim, version=version)
+            except Exception:
+                continue
+            if any(event.get('event_id') == event_id for event in events):
+                outcomes.append({'source': 'REVIEWER', 'source_sha': head,
+                                 'version': version, 'outcome': latest[2]})
+            continue
+        if claim.get('state') != 'DISPATCHED':
+            continue
         if not events:
             continue
         comments = github_get(f'issues/{number}/comments?per_page=100')
@@ -237,7 +249,7 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
             type(result) is not dict or type(review_ci) is not dict):
         return None
     for claim in reversed(claims):
-        if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
+        if type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'COMPLETED'):
             continue
         head = claim.get('head_sha')
         number = claim.get('pr')
