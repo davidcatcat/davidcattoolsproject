@@ -90,6 +90,8 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
+_REVIEW_DISPATCH_RESULT_FIELDS = frozenset((
+    'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review_text'))
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
@@ -657,14 +659,17 @@ def _validate(record):
             _fail('REVIEW_DISPATCH_CLAIM_INVALID')
         identities = set()
         for item in claims:
-            if (type(item) is not dict or set(item) != _REVIEW_DISPATCH_CLAIM_FIELDS or
+            if (type(item) is not dict or
+                    set(item) not in (_REVIEW_DISPATCH_CLAIM_FIELDS,
+                                      _REVIEW_DISPATCH_CLAIM_FIELDS |
+                                      frozenset(('review_result',))) or
                     type(item.get('executor_task')) is not str or
                     not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
                     type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
-                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'COMPLETED', 'UNKNOWN') or
                     (item.get('reviewer_task') is not None and
                      (type(item['reviewer_task']) is not str or
                       not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['reviewer_task']))) or
@@ -679,8 +684,25 @@ def _validate(record):
                     (item['state'] == 'CLAIMED' and
                      (item['reviewer_task'] is None or item['native_session_id'] is not None)) or
                     (item['state'] == 'DISPATCHED' and
-                     (item['reviewer_task'] is None or item['native_session_id'] is None))):
+                     (item['reviewer_task'] is None or item['native_session_id'] is None)) or
+                    (item['state'] == 'COMPLETED' and
+                     (item['reviewer_task'] is None or item['native_session_id'] is None or
+                      'review_result' not in item)) or
+                    (item['state'] != 'COMPLETED' and 'review_result' in item)):
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            if item['state'] == 'COMPLETED':
+                result = item['review_result']
+                task_binding = record.get('task_binding')
+                if (type(result) is not dict or set(result) != _REVIEW_DISPATCH_RESULT_FIELDS or
+                        result.get('task_id') != record.get('task_id') or
+                        result.get('run_id') != record.get('run_id') or
+                        type(task_binding) is not dict or
+                        result.get('contract_digest') != task_binding.get('contract_digest') or
+                        result.get('head') != item['head_sha'] or
+                        result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+                        type(result.get('review_text')) is not str or
+                        len(result['review_text'].encode('utf-8', 'replace')) > 65536):
+                    _fail('REVIEW_DISPATCH_CLAIM_INVALID')
             identity = (item['pr'], item['head_sha'], item['version'])
             if identity in identities:
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
@@ -2523,10 +2545,13 @@ class TaskStore:
                             before, after = old_claims[index], new_claims[index]
                             allowed_claim_transition = (
                                 before.get('state') == 'CLAIMED' and
-                                after.get('state') in ('UNKNOWN', 'DISPATCHED') and
+                                after.get('state') in ('UNKNOWN', 'DISPATCHED', 'COMPLETED') and
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'claimed_at', 'reviewer_task')) and
+                                (before.get('state') == 'CLAIMED' and
+                                 (after.get('state') == 'COMPLETED' or
+                                  ('review_result' not in after))) and
                                 all(old == new for i, (old, new) in
                                     enumerate(zip(old_claims, new_claims)) if i != index))
                 if not allowed_claim_transition:

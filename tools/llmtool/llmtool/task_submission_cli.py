@@ -715,6 +715,10 @@ def run_task_review_prompt(args, *, store=None):
             task['task_id'], task['run_id'], binding['contract_digest'], expected_head)
     except Exception:
         refuse('REVIEW_PROMPT_BINDING_MISSING')
+    reviewer_actor = ('Codex' if type(task.get('developer')) is dict and
+                      task['developer'].get('provider_profile') == 'claude' else 'Claude')
+    verdict_line = task_completion._REVIEW_VERDICT_ACTIVITY_LINE.replace(
+        'actor=Claude', 'actor=' + reviewer_actor)
     lines = [
         f'Review PR #{args.pr} at exact HEAD {expected_head}.',
         f'Scope: git diff {base_sha}...{expected_head}',
@@ -724,12 +728,22 @@ def run_task_review_prompt(args, *, store=None):
         'After posting the verdict and sending the summary, end this session and leave no background process.',
         '',
         'Post these exact lines in your review:',
-        task_completion._REVIEW_VERDICT_ACTIVITY_LINE,
+        verdict_line,
         f'Verdict: PASS | Version: v{version} | HEAD: {expected_head}',
         task_completion._FORMAL_ACCEPT,
         binding_line,
         f'For a non-pass result, use marker status=FIX and "Verdict: FAIL | Version: v{version} | HEAD: {expected_head}".',
     ]
+    if reviewer_actor == 'Codex':
+        lines.extend((
+            'Return one JSON object with exactly these keys: task_id, run_id, '
+            'contract_digest, head, verdict, review.',
+            'Set verdict to PASS, FIX, FAIL, or BLOCKED. Set review to the exact '
+            'review text using the lines above, with no changes to their binding values.',
+            json.dumps({'task_id': task['task_id'], 'run_id': task['run_id'],
+                        'contract_digest': binding['contract_digest'], 'head': expected_head},
+                       sort_keys=True, separators=(',', ':')),
+        ))
     if not all(type(line) is str for line in lines):
         refuse('REVIEW_PROMPT_BINDING_MISSING')
     print('\n'.join(lines))

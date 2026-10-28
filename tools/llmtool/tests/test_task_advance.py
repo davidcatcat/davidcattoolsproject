@@ -53,6 +53,9 @@ class TaskAdvanceTests(unittest.TestCase):
         claim['state'] = 'DISPATCHED'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, {}),
                          'RECORD_REVIEW_RESULT')
+        claim['state'] = 'COMPLETED'
+        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, {}),
+                         'RECORD_REVIEW_RESULT')
         related = {'events': [{'source': 'REVIEWER', 'source_sha': HEAD,
                                'version': 1, 'outcome': 'REVIEW_BLOCKED'}]}
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),

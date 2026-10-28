@@ -91,7 +91,7 @@ def decide(record, d6, pr, related):
     events = [event for event in _events(related) if type(event) is dict and
               event.get('source') == 'REVIEWER' and event.get('source_sha') == result_head and
               event.get('version', claim.get('version')) == claim.get('version')]
-    if claim.get('state') == 'DISPATCHED' and not events:
+    if claim.get('state') in ('DISPATCHED', 'COMPLETED') and not events:
         return 'RECORD_REVIEW_RESULT'
     if events:
         event = events[-1]
@@ -237,7 +237,7 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
             type(result) is not dict or type(review_ci) is not dict):
         return None
     for claim in reversed(claims):
-        if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
+        if type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'COMPLETED'):
             continue
         head = claim.get('head_sha')
         number = claim.get('pr')

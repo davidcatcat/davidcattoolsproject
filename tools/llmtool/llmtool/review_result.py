@@ -30,22 +30,15 @@ def _comment_verdict(comment, *, head, version, task):
     lines = [line for line in body.splitlines() if line.strip()]
     if len(lines) < 2:
         return None
-    status_line = _VERDICT_VERSION_HEAD.fullmatch(lines[1])
-    if status_line is None:
-        return None
-    status, raw_version, raw_head = status_line.groups()
-    if raw_head != head or int(raw_version) != version:
-        return None
-
     marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
-    marker_matches = marker is not None and marker.group(2) == status
     codex_formal_pass = False
     codex_bound = False
-    if marker_matches and marker.group(1) == 'Codex':
+    if marker is not None and marker.group(1) == 'Codex':
         developer = task.get('developer')
         if type(developer) is not dict or developer.get('provider_profile') != 'claude':
             return None
-        binding = _CODEX_BINDING.fullmatch(lines[2]) if len(lines) > 2 else None
+        binding = next((match for line in lines[1:]
+                        if (match := _CODEX_BINDING.fullmatch(line)) is not None), None)
         task_binding = task.get('task_binding')
         codex_bound = (
             binding is not None and type(task_binding) is dict and
@@ -55,6 +48,13 @@ def _comment_verdict(comment, *, head, version, task):
             binding.group(4) == head)
         if not codex_bound:
             return None
+    status_line = _VERDICT_VERSION_HEAD.fullmatch(lines[1])
+    if status_line is None:
+        return None
+    status, raw_version, raw_head = status_line.groups()
+    if raw_head != head or int(raw_version) != version:
+        return None
+    marker_matches = marker is not None and marker.group(2) == status
     # A Codex PASS can be formal only for a Claude-authored Task, and only
     # after the existing strict Claude validator accepts the same bound body.
     if marker_matches and marker.group(1) == 'Codex' and status == 'PASS':
@@ -129,17 +129,38 @@ def record_review_result(*, store, task_id, executor_task, pr_number, version=1,
             type(task['task_binding'].get('contract_digest')) is not str):
         _refuse('REVIEW_RESULT_TASK_INVALID')
 
-    get = task_completion._github_get if github_get is None else github_get
-    comments = get(f'issues/{pr_number}/comments?per_page=100')
-    if type(comments) is not list or len(comments) >= 100:
-        _refuse('REVIEW_RESULT_COMMENTS_INVALID')
     latest = None
-    for comment in comments:
-        if type(comment) is not dict:
+    if claim.get('state') == 'COMPLETED':
+        result = claim.get('review_result')
+        binding = task.get('task_binding')
+        if (type(result) is not dict or result.get('task_id') != task_id or
+                result.get('run_id') != task['run_id'] or
+                result.get('contract_digest') != binding.get('contract_digest') or
+                result.get('head') != head or
+                result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+                type(result.get('review_text')) is not str):
+            _refuse('REVIEW_RESULT_INVALID')
+        claim_stamp = claim.get('updated_at')
+        latest = _comment_verdict(
+            {'id': 0, 'body': result['review_text'],
+             'created_at': claim_stamp, 'updated_at': claim_stamp},
+            head=head, version=version, task=task)
+        if latest is None:
+            _refuse('REVIEW_RESULT_INVALID')
+        expected_verdict = 'PASS' if latest[2] == 'REVIEW_PASS' else 'FAIL'
+        if (result['verdict'] == 'PASS') != (expected_verdict == 'PASS'):
+            _refuse('REVIEW_RESULT_INVALID')
+    else:
+        get = task_completion._github_get if github_get is None else github_get
+        comments = get(f'issues/{pr_number}/comments?per_page=100')
+        if type(comments) is not list or len(comments) >= 100:
             _refuse('REVIEW_RESULT_COMMENTS_INVALID')
-        current = _comment_verdict(comment, head=head, version=version, task=task)
-        if current is not None and (latest is None or current[:2] > latest[:2]):
-            latest = current
+        for comment in comments:
+            if type(comment) is not dict:
+                _refuse('REVIEW_RESULT_COMMENTS_INVALID')
+            current = _comment_verdict(comment, head=head, version=version, task=task)
+            if current is not None and (latest is None or current[:2] > latest[:2]):
+                latest = current
 
     if latest is None:
         if not reviewer_session_done:

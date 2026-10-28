@@ -1,6 +1,7 @@
 import hashlib
 import json
 import io
+import re
 from contextlib import redirect_stderr
 from pathlib import Path
 import tempfile
@@ -176,25 +177,29 @@ class ReviewDispatchTests(unittest.TestCase):
         def run_codex(**kwargs):
             runner_args.append(kwargs)
             return {'thread_id': '0123456789abcdef',
-                    'review_text': '{"verdict":"PASS"}', 'verdict': 'PASS'}
+                    'review_text': _codex_review_text(), 'verdict': 'PASS'}
         with patch.object(review_dispatch.task_completion, 'read_d6_registration',
                           return_value=reviewer):
             result = self.invoke(
                 preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
                            (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
                 create=create, codex_runner=run_codex)
-        self.assertEqual(result['state'], 'DISPATCHED')
+        self.assertEqual(result['state'], 'COMPLETED')
         self.assertEqual(create_args[0]['reviewer_key'], 'codex-reviewer')
         self.assertEqual(runner_args[0]['reviewer_root'], '/repo/reviewer-d6')
         self.assertEqual(runner_args[0]['head'], HEAD)
         self.assertEqual(self.sent, [])
         self.assertEqual(self.bound[0]['session_id'], '0123456789abcdef')
-        self.assertEqual(result['review_text'], '{"verdict":"PASS"}')
+        self.assertEqual(result['review_text'], _codex_review_text())
         self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['review_result']['verdict'],
+                         'PASS')
 
     def test_codex_argv_is_read_only_and_uses_required_profile_and_d6(self):
+        review_text = _codex_review_text(run_id='r' * 32, contract='d' * 64)
         verdict = {'task_id': TASK, 'run_id': 'r' * 32,
-                   'contract_digest': 'd' * 64, 'head': HEAD, 'verdict': 'PASS'}
+                   'contract_digest': 'd' * 64, 'head': HEAD, 'verdict': 'PASS',
+                   'review': review_text}
         final_review = json.dumps(verdict)
         events = [
             {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
@@ -227,6 +232,35 @@ class ReviewDispatchTests(unittest.TestCase):
                      '--ephemeral', '--strict-config'):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index('--ask-for-approval') + 1], 'never')
+        self.assertLess(argv.index('exec'), argv.index('--no-daemon'))
+        self.assertLess(argv.index('exec'), argv.index('--ask-for-approval'))
+
+    def test_codex_flags_follow_exec_command_help_shape(self):
+        global_help = ('Usage: codex [OPTIONS] [PROMPT] [COMMAND]\n\n'
+                       'Commands:\n  exec  Run Codex non-interactively\n')
+        exec_help = ('Usage: codex exec [OPTIONS] [PROMPT]\n\nOptions:\n'
+                     '  --no-daemon\n  --ask-for-approval <POLICY>\n')
+        self.assertRegex(global_help, r'(?m)^\s+exec\s+')
+        exec_options = set(re.findall(r'(?m)^\s+(--[a-z-]+)', exec_help))
+        self.assertTrue({'--no-daemon', '--ask-for-approval'}.issubset(exec_options))
+        argv = review_dispatch._codex_argv('/bin/codex', '/repo/reviewer-d6')
+        self.assertEqual(argv[1], 'exec')
+        self.assertTrue(all(argv.index(flag) > argv.index('exec') for flag in exec_options))
+
+    def test_codex_review_parser_requires_standard_bound_review_text(self):
+        raw = _codex_event_stream(_codex_review_text())
+        parsed = review_dispatch._parse_codex_review(
+            raw, task_id=TASK, run_id='r' * 32, contract_digest='d' * 64,
+            head=HEAD, version=2)
+        self.assertEqual(parsed['review_text'], _codex_review_text(version=2))
+        self.assertEqual(parsed['verdict'], 'PASS')
+        malformed = _codex_event_stream(_codex_review_text().replace(
+            'actor=Codex', 'actor=Claude'))
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                malformed, task_id=TASK, run_id='r' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
 
     def test_malformed_or_misbinding_codex_verdict_is_refused(self):
         raw = (b'{"type":"item.completed","item":{"type":"agent_message",'
@@ -264,7 +298,7 @@ class ReviewDispatchTests(unittest.TestCase):
             task['developer']['provider_profile'] = 'codex'
             self.assertEqual(review_dispatch._preflight(
                 self.store, TASK, 'executor-d6', 42, 1, task=task)[4], 'claude-reviewer')
-            for family in ('opencode', 'company-gw', 'gw', 'agy'):
+            for family in ('opencode', 'company-gw', 'agy'):
                 task['developer']['provider_profile'] = family
                 self.assertEqual(review_dispatch._preflight(
                     self.store, TASK, 'executor-d6', 42, 1, task=task)[4],
@@ -383,6 +417,26 @@ def _real_store(tmp_path):
     return store, task_id
 
 
+def _codex_review_text(*, run_id='r' * 32, contract='d' * 64, version=1):
+    return ('<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v{version} | HEAD: {HEAD}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={run_id} '
+            f'contract={contract} head={HEAD}')
+
+
+def _codex_event_stream(review_text):
+    verdict = {'task_id': TASK, 'run_id': 'r' * 32,
+               'contract_digest': 'd' * 64, 'head': HEAD,
+               'verdict': 'PASS', 'review': review_text}
+    events = [
+        {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
+        {'type': 'item.completed', 'item': {
+            'type': 'agent_message', 'text': json.dumps(verdict)}},
+    ]
+    return '\n'.join(json.dumps(event) for event in events).encode('utf-8')
+
+
 def _claim(*, head=HEAD, version=1, reviewer='reviewer-a'):
     stamp = '2026-10-27T00:00:00Z'
     return {'executor_task': 'executor-d6', 'pr': 42, 'head_sha': head,
@@ -412,6 +466,22 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         dispatched = dict(claimed, state='DISPATCHED', native_session_id='native-1')
         self.update_claims(current, [dispatched])
         self.assertEqual(self.store.get(self.task_id)['review_dispatch_claim'], [dispatched])
+
+    def test_claimed_transitions_to_completed_with_bound_codex_result(self):
+        initial = self.store.get(self.task_id)
+        claimed = _claim()
+        self.update_claims(initial, [claimed])
+        current = self.store.get(self.task_id)
+        completed = dict(claimed, state='COMPLETED', native_session_id='codex-thread')
+        completed['review_result'] = {
+            'task_id': self.task_id, 'run_id': current['run_id'],
+            'contract_digest': current['task_binding']['contract_digest'],
+            'head': HEAD, 'verdict': 'PASS', 'review_text': _codex_review_text(
+                run_id=current['run_id'],
+                contract=current['task_binding']['contract_digest']),
+        }
+        self.update_claims(current, [completed])
+        self.assertEqual(self.store.get(self.task_id)['review_dispatch_claim'][0], completed)
 
     def test_claimed_transitions_to_unknown(self):
         initial = self.store.get(self.task_id)
@@ -446,6 +516,37 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
             self.update_claims(saved, [claim1, claim2, dict(claim1)])
         self.assertEqual(getattr(raised.exception, 'task_store_error_code', None),
                          'REVIEW_DISPATCH_CLAIM_INVALID')
+
+    def test_completed_codex_result_survives_reopen_without_redispatch(self):
+        executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
+        preflight = (self.task_id, executor, HEAD, 'e' * 40, 'codex-reviewer')
+        reviewer = SimpleNamespace(root='/repo/reviewer')
+        review_text = _codex_review_text() + '\nFinding: retained finding text'
+        calls = []
+
+        def invoke(store, preflights):
+            with patch.object(review_dispatch, '_preflight', side_effect=preflights), \
+                    patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                 return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                    patch.object(review_dispatch, '_resolve_github_login',
+                                 return_value='reviewer-user'), \
+                    patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                                 return_value=reviewer):
+                return review_dispatch.dispatch_review(
+                    store=store, task_id=self.task_id, executor_task='executor-d6',
+                    pr_number=42, create_d6=lambda **_: None,
+                    bind_session=lambda **_: None, prompt_renderer=lambda *_: 'prompt',
+                    codex_runner=lambda **_: (calls.append('called') or {
+                        'thread_id': '0123456789abcdef', 'review_text': review_text,
+                        'verdict': 'PASS'}))
+
+        first = invoke(self.store, [preflight, preflight])
+        reopened = task_store.TaskStore(Path(self.temp.name).resolve())
+        second = invoke(reopened, [preflight])
+        self.assertEqual(first['state'], 'COMPLETED')
+        self.assertEqual(second['review_text'], review_text)
+        self.assertEqual(second['verdict'], 'PASS')
+        self.assertEqual(calls, ['called'])
 
 
 if __name__ == '__main__':

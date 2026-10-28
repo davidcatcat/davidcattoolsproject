@@ -19,7 +19,7 @@ COMMON = '/repo/.git'
 
 
 class FakeStore:
-    def __init__(self, *, binding=True, completed=True):
+    def __init__(self, *, binding=True, completed=True, provider_profile='codex'):
         evidence = {'common_dir': COMMON}
         if completed:
             evidence['result'] = {'result_head': HEAD, 'source_sha': SOURCE}
@@ -28,6 +28,7 @@ class FakeStore:
             'run_id': RUN_ID,
             'task_binding': ({'task_id': TASK_ID, 'run_id': RUN_ID,
                               'contract_digest': CONTRACT} if binding else None),
+            'developer': {'provider_profile': provider_profile},
             'completion': {
                 'executor_task_id': 'executor-d6',
                 'evidence': evidence,
@@ -110,6 +111,19 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn(f'Verdict: PASS | Version: v2 | HEAD: {HEAD}', output)
         self.assertIn(f'For a non-pass result, use marker status=FIX and "Verdict: FAIL | Version: v2 | HEAD: {HEAD}".', output)
+
+    def test_claude_task_gets_codex_actor_and_bound_result_shape(self):
+        code, output = self.invoke(store=FakeStore(provider_profile='claude'))
+        self.assertEqual(code, 0)
+        actor = '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->'
+        status = f'Verdict: PASS | Version: v1 | HEAD: {HEAD}'
+        binding = (f'LLMTOOL-REVIEW-BINDING v1 task={TASK_ID} run={RUN_ID} '
+                   f'contract={CONTRACT} head={HEAD}')
+        self.assertLess(output.index(actor), output.index(status))
+        self.assertLess(output.index(status), output.index(task_completion._FORMAL_ACCEPT))
+        self.assertLess(output.index(task_completion._FORMAL_ACCEPT), output.index(binding))
+        self.assertIn('contract_digest, head, verdict, review.', output)
+        self.assertIn(f'"task_id":"{TASK_ID}"', output)
 
     def test_refuses_unrecorded_executor_head_without_prompt(self):
         with self.assertRaises(LLMToolError) as raised:

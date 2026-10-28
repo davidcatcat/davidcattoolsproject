@@ -123,7 +123,7 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
     developer = task.get('developer')
     family = developer.get('provider_profile') if type(developer) is dict else None
-    if family in ('codex', 'opencode', 'company-gw', 'gw', 'agy'):
+    if family in ('codex', 'opencode', 'company-gw', 'agy'):
         reviewer_key = 'claude-reviewer'
     elif family == 'claude':
         reviewer_key = 'codex-reviewer'
@@ -156,7 +156,7 @@ def _codex_argv(executable, reviewer_root):
             '-s', 'read-only', '--cd', str(reviewer_root), '-']
 
 
-def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head):
+def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=1):
     """Accept one exact, binding-complete Codex review object from JSONL."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
         _refuse('REVIEW_NOT_POSTED')
@@ -187,17 +187,32 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head):
         verdict = json.loads(final, object_pairs_hook=_unique_json_object)
     except (ValueError, TypeError, RecursionError):
         _refuse('REVIEW_NOT_POSTED')
-    expected = {'task_id', 'run_id', 'contract_digest', 'head', 'verdict'}
+    expected = {'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review'}
     if (type(verdict) is not dict or set(verdict) != expected or
             verdict.get('task_id') != task_id or verdict.get('run_id') != run_id or
             verdict.get('contract_digest') != contract_digest or
             verdict.get('head') != head or
-            verdict.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED')):
+            verdict.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+            type(verdict.get('review')) is not str or
+            len(verdict['review'].encode('utf-8', 'replace')) > 65536):
         _refuse('REVIEW_NOT_POSTED')
-    return {'thread_id': thread_id, 'review_text': final, 'verdict': verdict['verdict']}
+    lines = [line.strip() for line in verdict['review'].splitlines() if line.strip()]
+    status = verdict['verdict']
+    displayed_status = 'PASS' if status == 'PASS' else 'FAIL'
+    marker_status = 'PASS' if status == 'PASS' else 'FIX'
+    expected_marker = (f'<!-- activity: type=review_verdict actor=Codex target=PM '
+                       f'status={marker_status} -->')
+    expected_status = (f'Verdict: {displayed_status} | Version: v{version} | HEAD: {head}')
+    binding_line = (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+                    f'contract={contract_digest} head={head}')
+    if (len(lines) < 3 or lines[0] != expected_marker or lines[1] != expected_status or
+            binding_line not in lines or
+            status == 'PASS' and 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT' not in lines):
+        _refuse('REVIEW_NOT_POSTED')
+    return {'thread_id': thread_id, 'review_text': verdict['review'], 'verdict': status}
 
 
-def _dispatch_codex(*, reviewer_root, prompt, task, head):
+def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1):
     executable = shutil.which('codex')
     if executable is None:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
@@ -222,7 +237,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head):
     return _parse_codex_review(
         result.stdout, task_id=task.get('task_id'), run_id=task.get('run_id'),
         contract_digest=binding.get('contract_digest'),
-        head=head)
+        head=head, version=version)
 
 
 def _dispatch(*, task_id, prompt, repo_root, env):
@@ -272,6 +287,10 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     if prior is not None:
         if prior.get('executor_task') != executor_task:
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
+        if prior.get('state') == 'COMPLETED':
+            result = prior.get('review_result')
+            return dict(prior, review_text=result['review_text'],
+                        verdict=result['verdict'])
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
             updated_claims = [unknown if claim is prior else claim for claim in claims]
@@ -323,18 +342,6 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             prompt = output.getvalue()
         else:
             prompt = prompt_renderer(task_id, executor_task, reviewer_task, pr_number, version)
-        if reviewer_key == 'codex-reviewer':
-            binding = task.get('task_binding')
-            if type(binding) is not dict:
-                _refuse('REVIEW_PROMPT_BINDING_MISSING')
-            prompt += (
-                '\n\nReturn the final review as one JSON object with exactly these keys: '
-                'task_id, run_id, contract_digest, head, verdict. Bind each value to the '
-                'Task record and the exact reviewed head. verdict must be PASS, FIX, FAIL, '
-                'or BLOCKED. Do not add other keys or surrounding text.\n' +
-                json.dumps({'task_id': task_id, 'run_id': task.get('run_id'),
-                            'contract_digest': binding.get('contract_digest'), 'head': head},
-                           sort_keys=True, separators=(',', ':')))
         # Detect a moved PR/head before starting the Reviewer session.
         _, _, current_head, _, _ = _preflight(store, task_id, executor_task, pr_number, version)
         if current_head != head:
@@ -351,7 +358,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 allowed_states=task_completion._D6_EVIDENCE_STATES)
             run_codex = codex_runner or _dispatch_codex
             codex_result = run_codex(reviewer_root=reviewer.root, prompt=prompt,
-                                     task=task, head=head)
+                                     task=task, head=head, version=version)
             if type(codex_result) is not dict:
                 _refuse('REVIEW_NOT_POSTED')
             session_id = codex_result.get('thread_id')
@@ -362,8 +369,17 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             session_id = send(task_id=reviewer_task, prompt=prompt,
                               repo_root=repo_root, env=env)
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
-        dispatched = dict(claim, state='DISPATCHED', reviewer_task=reviewer_task,
+        result_state = 'COMPLETED' if reviewer_key == 'codex-reviewer' else 'DISPATCHED'
+        dispatched = dict(claim, state=result_state, reviewer_task=reviewer_task,
                           native_session_id=session_id, updated_at=_now())
+        if result_state == 'COMPLETED':
+            binding = task.get('task_binding')
+            dispatched['review_result'] = {
+                'task_id': task_id, 'run_id': task.get('run_id'),
+                'contract_digest': binding.get('contract_digest'), 'head': head,
+                'verdict': codex_result['verdict'],
+                'review_text': codex_result['review_text'],
+            }
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
