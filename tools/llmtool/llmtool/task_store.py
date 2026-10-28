@@ -261,7 +261,10 @@ WORKER_AVAILABILITY_NAME = '.worker-availability.json'
 WORKER_AVAILABILITY_LOCK_NAME = '.worker-availability.lock'
 WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
-TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
+# Updates serialize validation and durable writes under this per-Task lock.
+# Leave enough bounded time for queued writers to complete on a busy host.
+TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 10.0
+TASK_UPDATE_REPLACE_TIMEOUT_SECONDS = 2.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
 _TASK_STORE_CONTENTION_ERRNOS = frozenset(
     value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR)
@@ -1836,7 +1839,7 @@ class TaskStore:
                         follow_symlinks=False)
                 os.unlink(temporary, dir_fd=directory)
             else:
-                deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+                deadline = time.monotonic() + TASK_UPDATE_REPLACE_TIMEOUT_SECONDS
                 while True:
                     try:
                         os.replace(temporary, name, src_dir_fd=directory,
