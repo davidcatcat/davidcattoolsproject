@@ -448,9 +448,9 @@ def _real_store(tmp_path):
 def _codex_review_text(*, run_id='r' * 32, contract='d' * 64, version=1):
     return ('<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
             f'Verdict: PASS | Version: v{version} | HEAD: {HEAD}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
             f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={run_id} '
-            f'contract={contract} head={HEAD}\n'
-            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT')
+            f'contract={contract} head={HEAD}')
 
 
 def _codex_event_stream(review_text):

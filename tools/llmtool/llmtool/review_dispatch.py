@@ -206,8 +206,21 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
     binding_line = (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
                     f'contract={contract_digest} head={head}')
     if (len(lines) < 3 or lines[0] != expected_marker or lines[1] != expected_status or
-            binding_line not in lines or
-            status == 'PASS' and 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT' not in lines):
+            binding_line not in lines):
+        _refuse('REVIEW_NOT_POSTED')
+    # Use the persisted-result classifier as the authority for the body shape.
+    # This keeps direct Codex results and later comment classification in parity.
+    from . import review_result
+    classified = review_result._comment_verdict(
+        {'id': 0, 'body': verdict['review'],
+         'created_at': '2000-01-01T00:00:00Z',
+         'updated_at': '2000-01-01T00:00:00Z'},
+        head=head, version=version,
+        task={'task_id': task_id, 'run_id': run_id,
+              'task_binding': {'contract_digest': contract_digest},
+              'developer': {'provider_profile': 'claude'}})
+    expected_outcome = 'REVIEW_PASS' if status == 'PASS' else 'REVIEW_FAIL'
+    if classified is None or classified[2] != expected_outcome:
         _refuse('REVIEW_NOT_POSTED')
     return {'thread_id': thread_id, 'review_text': verdict['review'], 'verdict': status}
 

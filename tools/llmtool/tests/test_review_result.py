@@ -96,10 +96,15 @@ def _comment(status='PASS', *, actor='Claude', head=HEAD, version=1,
     body = (f'<!-- activity: type=review_verdict actor={actor} target=PM status={marker_status} -->\n'
             f'Verdict: {stamp} | Version: v{version} | HEAD: {head}\n')
     if actor in ('Claude', 'Codex'):
-        body += (f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
-                 f'contract={CONTRACT} head={head}\n')
-        if status == 'PASS':
-            body += 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+        if actor == 'Codex' and status == 'PASS':
+            body += ('FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+                     f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
+                     f'contract={CONTRACT} head={head}\n')
+        else:
+            body += (f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
+                     f'contract={CONTRACT} head={head}\n')
+            if status == 'PASS':
+                body += 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
     body += extra
     return {'id': comment_id, 'body': body, 'created_at': created, 'updated_at': created,
             'user': {'login': 'shared-agent'}}

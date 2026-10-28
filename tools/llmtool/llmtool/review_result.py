@@ -23,6 +23,19 @@ def _refuse(code):
     raise error from None
 
 
+def _codex_formal_pass(lines, *, head, version, task_id, run_id, contract_digest):
+    """Match Codex's PASS header and its exact accept and binding lines."""
+    if len(lines) < 4:
+        return False
+    return (
+        lines[0] == '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->' and
+        lines[1] == f'Verdict: PASS | Version: v{version} | HEAD: {head}' and
+        'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT' in lines[2:] and
+        (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+         f'contract={contract_digest} head={head}') in lines[2:]
+    )
+
+
 def _comment_verdict(comment, *, head, version, task):
     body = comment.get('body')
     if type(body) is not str or len(body.encode('utf-8', 'replace')) > 65536:
@@ -55,15 +68,13 @@ def _comment_verdict(comment, *, head, version, task):
     if raw_head != head or int(raw_version) != version:
         return None
     marker_matches = marker is not None and marker.group(2) == status
-    # A Codex PASS can be formal only for a Claude-authored Task, and only
-    # after the existing strict Claude validator accepts the same bound body.
+    # A Codex PASS is formal only for a Claude-authored Task and the exact
+    # accept and binding lines required by the Codex Reviewer prompt.
     if marker_matches and marker.group(1) == 'Codex' and status == 'PASS':
-        claude_marker = lines[0].replace('actor=Codex', 'actor=Claude', 1)
-        claude_body = body.replace(lines[0], claude_marker, 1)
-        codex_formal_pass = task_completion.is_formal_claude_pass(
-            claude_body, task_id=task['task_id'], run_id=task['run_id'],
-            contract_digest=task['task_binding']['contract_digest'],
-            result_sha=head)
+        codex_formal_pass = _codex_formal_pass(
+            lines, head=head, version=version, task_id=task['task_id'],
+            run_id=task['run_id'],
+            contract_digest=task['task_binding']['contract_digest'])
         if not codex_formal_pass:
             return None
     comment_id = comment.get('id')
