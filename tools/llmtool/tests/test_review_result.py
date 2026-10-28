@@ -138,19 +138,14 @@ class ReviewResultTests(unittest.TestCase):
         record = codex_store.get(TASK)
         digest = record['task_binding']['contract_digest']
         claim = record['review_dispatch_claim'][0]
-        dispatched = dict(claim, state='DISPATCHED', native_session_id='review-session')
-        codex_store.compare_and_update(
-            TASK, expected={'record_sha256': record['record_sha256']},
-            review_dispatch_claim=[dispatched])
-        dispatched_record = codex_store.get(TASK)
         review_text = _comment(actor='Codex')['body'].replace(CONTRACT, digest)
-        completed = dict(dispatched, state='COMPLETED')
+        completed = dict(claim, state='COMPLETED', native_session_id='review-session')
         completed['review_result'] = {
             'task_id': TASK, 'run_id': RUN, 'contract_digest': digest,
             'head': HEAD, 'verdict': 'PASS', 'review_text': review_text,
         }
         codex_store.compare_and_update(
-            TASK, expected={'record_sha256': dispatched_record['record_sha256']},
+            TASK, expected={'record_sha256': record['record_sha256']},
             review_dispatch_claim=[completed])
         self.store = FamilyStore(codex_store, 'claude')
         result = self.run_result([], github_get=lambda _path: self.fail('unexpected GitHub read'))
