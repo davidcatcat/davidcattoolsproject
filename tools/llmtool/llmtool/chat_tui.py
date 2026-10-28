@@ -110,6 +110,14 @@ MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 STATUS_FIELDS = ("mode", "provider", "model", "state", "usage", "scroll", "mouse", "help")
 STATUS_DROP_ORDER = ("mouse", "help", "usage", "scroll", "model", "provider")
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
+# PM typewriter: the CLI emits text in bursts (0.6–1 s apart); received text is queued and
+# released every tick at PM_CHARS_PER_TICK (≈67 chars/s). A long queue raises the rate to
+# len/PM_MAX_LAG_TICKS until it empties, so the pane never lags the stream by more than
+# about PM_MAX_LAG_TICKS ticks (≈1 s). The end of a block, of the turn or an interrupt
+# flushes everything at once: total time unchanged.
+PM_TICK_SECONDS = 0.03
+PM_CHARS_PER_TICK = 2
+PM_MAX_LAG_TICKS = 33
 
 
 def slash_matches(text):
@@ -294,6 +302,10 @@ class ChatTUI:
         self.pm_interrupted = False
         self.pm_block_raw = None     # raw text of the streaming PM block (None: no block open)
         self.pm_block_start = 0      # where that block's displayed text starts in the pane
+        self.pm_queue = ""           # received PM text not yet released to the pane
+        self._pm_tick_handle = None  # loop.call_later handle of the next typewriter tick
+        self._pm_rate = PM_CHARS_PER_TICK   # characters released per tick (raised when behind)
+        self.pm_warm = False         # connected, nothing received yet: the PM process is cold
         # Exit/connect hand-off: a runtime opened by the connect worker but not yet adopted
         # is closed by whichever side sees the other first (close_pm or the worker).
         self._pm_lock = threading.Lock()
@@ -1302,6 +1314,10 @@ class ChatTUI:
         state = self.pm_state or chat_tui_task.UNKNOWN
         if state == "working" and self.pm_turn_started is not None:
             state = "working %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+            if self.pm_warm:   # first turn, nothing received yet: cold start, not a slow PM
+                state = "暖機中… %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+        elif state == "idle" and self.pm_warm:
+            state = "暖機中…"
         elif state == "thinking":
             state = "思考中…"
         return "PM:" + compact(session_id, 8) + " " + compact(state, 18)
@@ -1466,6 +1482,8 @@ class ChatTUI:
         self.pm_binding = outcome.get("binding")
         self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
+        # Status shows 暖機中… until the first turn's first output; W41 A: no warm-up message.
+        self.pm_warm = True
         self.append("PM mode: Enter sends each draft in real time to the PM session "
                     + self.pm_target[0] + " (claude-code, cwd "
                     + chat_tui_pm.safe_text(str(self.pm_target[1]))
@@ -1493,7 +1511,7 @@ class ChatTUI:
     def finish_pm_disconnect(self):
         self.pm_pending = False
         self.pm_runtime, self.pm_target, self.pm_mode, self.pm_state = None, None, False, None
-        self.pm_binding = None
+        self.pm_binding, self.pm_warm = None, False
         self.append("PM disconnected; chat mode (Enter sends to chat provider "
                     + self.session.provider + ", not a PM)")
 
@@ -1542,16 +1560,49 @@ class ChatTUI:
         self._post(loop, self.finish_pm_turn)
 
     def _pm_extend(self, text):
-        """Stream text into the current PM block; every update is screened (see
-        chat_tui_pm.screen_stream), so the pane shows only redacted, settled text."""
+        """Queue text for the current PM block; the typewriter tick releases it. Every
+        update is screened (see chat_tui_pm.screen_stream), so the pane shows only
+        redacted, settled text."""
         if not text:
             return
         if self.pm_block_raw is None:
             self.append("PM:")
             self.pm_block_raw = ""
             self.pm_block_start = len(self.conversation.buffer.text) + 1   # after "\n"
-        self.pm_block_raw += text
+        self.pm_queue += text
+        self._pm_rate = max(self._pm_rate, -(-len(self.pm_queue) // PM_MAX_LAG_TICKS))
+        self._pm_schedule_tick()
+
+    def _pm_schedule_tick(self):
+        if self._pm_tick_handle is not None or not self.pm_queue:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return   # No loop (unit tests): _pm_tick is driven directly; a flush empties it.
+        self._pm_tick_handle = loop.call_later(PM_TICK_SECONDS, self._pm_tick)
+
+    def _pm_tick(self):
+        """Release a slice of the queued PM text, in order; more per tick when behind."""
+        self._pm_tick_handle = None
+        if self.pm_block_raw is None or not self.pm_queue:
+            self.pm_queue, self._pm_rate = "", PM_CHARS_PER_TICK
+            return
+        self.pm_block_raw += self.pm_queue[:self._pm_rate]
+        self.pm_queue = self.pm_queue[self._pm_rate:]
+        if not self.pm_queue:
+            self._pm_rate = PM_CHARS_PER_TICK
         self._pm_render(final=False)
+        self._pm_schedule_tick()
+
+    def _pm_flush(self):
+        """Release every queued character now (block/turn end, interrupt, other output)."""
+        if self._pm_tick_handle is not None:
+            self._pm_tick_handle.cancel()
+            self._pm_tick_handle = None
+        if self.pm_queue and self.pm_block_raw is not None:
+            self.pm_block_raw += self.pm_queue
+        self.pm_queue, self._pm_rate = "", PM_CHARS_PER_TICK
 
     def _pm_render(self, final):
         self._block_render(self.pm_block_start,
@@ -1569,6 +1620,7 @@ class ChatTUI:
 
     def _pm_finalize(self):
         """End the streaming block: show its full screened text, held-back tail included."""
+        self._pm_flush()
         if self.pm_block_raw is None:
             return
         self._pm_render(final=True)
@@ -1578,6 +1630,8 @@ class ChatTUI:
         kind = event.get("type")
         if kind != "THINKING" and self.pm_state == "thinking":
             self.pm_state = "working"   # Thinking ended: text, a tool or the end follows.
+        if kind in ("TEXT_DELTA", "ASSISTANT_TEXT", "TOOL_USE", "TURN_END", "RUNTIME_ERROR"):
+            self.pm_warm = False        # The process answered: the cold start is over.
         if kind == "THINKING":
             # Status only: thinking content never reaches the pane (pm_runtime sends none).
             if self.pm_state == "working":
@@ -1616,9 +1670,10 @@ class ChatTUI:
             self.append(chat_tui_pm.replay_text(event))
         elif kind == "TURN_END":
             elapsed = max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic()))
-            self.append(chat_tui_pm.turn_end_text(event, elapsed))
+            self.append(chat_tui_pm.turn_end_text(event, elapsed))   # append() flushes first
 
     def finish_pm_turn(self):
+        self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
         self.pm_turn_active, self.pm_turn_started = False, None
         if self.pm_state in ("working", "thinking", "interrupting"):
             self.pm_state = "idle"
@@ -1628,7 +1683,7 @@ class ChatTUI:
         if not self.pm_turn_active or self.pm_interrupted or self.pm_runtime is None:
             return
         self.pm_interrupted, self.pm_state = True, "interrupting"
-        self.append("llmtool: interrupt sent to the PM; waiting for the turn to end")
+        self.append("llmtool: interrupt sent to the PM; waiting for the turn to end")   # flushes
         try:
             self.pm_runtime.interrupt()
         except LLMToolError as exc:
@@ -1643,6 +1698,9 @@ class ChatTUI:
             self._pm_exiting = True
             runtimes = [self.pm_runtime, self._pm_unadopted]
             self.pm_runtime, self._pm_unadopted = None, None
+        if self._pm_tick_handle is not None:
+            self._pm_tick_handle.cancel()
+            self._pm_tick_handle = None
         for runtime in runtimes:
             if runtime is not None:
                 self._close_runtime(runtime)
