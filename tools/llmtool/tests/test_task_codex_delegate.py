@@ -99,7 +99,7 @@ class CodexDelegateTests(unittest.TestCase):
             'trusted_agent_id': 'executor-agent', 'session_ref': 'executor-session',
             'root_realpath': str(self.root),
             'physical_identity': {'device': root_stat.st_dev, 'inode': root_stat.st_ino,
-                                  'uid': root_stat.st_uid},
+                                  'uid': root_stat.st_uid, 'mode': '0o700'},
             'git_common_dir': common_dir, 'branch': 'feat/codex-delegate',
             'base_sha': self.source_sha, 'head_sha': self.source_sha,
             'state': 'ACTIVE', 'lock_state': 'LOCKED', 'native_session_id': 'executor-native',
@@ -386,13 +386,16 @@ class CodexDelegateTests(unittest.TestCase):
         self._git('add', 'private.py')
         self._git('commit', '-m', 'record out of scope timeout result')
         result_head = self._git('rev-parse', 'HEAD')
-        registration = SimpleNamespace(task_id='executor-task-1',
-            trusted_agent_id='executor-agent', session_ref='executor-session',
-            native_session_id=None, root=str(self.root), common_dir=self.common_dir,
-            branch='feat/codex-delegate', source_sha=self.source_sha,
-            result_sha=result_head)
-        bound_registration = SimpleNamespace(**{
-            **vars(registration), 'native_session_id': '12345678-1234-4234-8234-123456789abc'})
+        registration = task_completion.D6Registration(
+            task_id='executor-task-1', trusted_agent_id='executor-agent',
+            session_ref='executor-session', root=str(self.root),
+            common_dir=self.common_dir, branch='feat/codex-delegate',
+            source_sha=self.source_sha, result_sha=result_head, state='ACTIVE',
+            lock_state='LOCKED', device=0, inode=0, uid=os.getuid(),
+            native_session_id=None, github_login=None, env2_pass_marker=None,
+            env2_approved_tooling_sha=None)
+        bound_registration = dataclasses.replace(registration,
+            native_session_id='12345678-1234-4234-8234-123456789abc')
         with redirect_stdout(io.StringIO()):
             result, saved, callback = self._dispatch(task, registration=registration,
                 bound_registration=bound_registration)
