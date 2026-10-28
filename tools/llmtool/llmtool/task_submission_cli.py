@@ -18,7 +18,8 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .chat import reply_usage
-from .config import (api_key, codex_direct_timeout, resolve_profile_config,
+from .config import (CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, api_key,
+                     codex_direct_timeout, resolve_profile_config,
                      selected_provider, yaml_module)
 from .errors import LLMToolError
 from .providers import create_client
@@ -2082,7 +2083,7 @@ def run_task_opencode_delegate(args, *, store):
 def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
                          acceptance, pm_goal, model, reasoning_effort,
                          repair_packet=None, timeout_recovery=None,
-                         timeout=codex_direct_developer.CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS):
+                         timeout=CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS):
     contract = task.get('task_contract')
     if type(contract) is not dict:
         raise LLMToolError('Codex Developer Task Contract is unavailable')
