@@ -117,9 +117,7 @@ class OpenAICompatibleClient:
                                 if not finished:
                                     raise self._stream_incomplete()
                                 return
-                            if finished:
-                                raise self._stream_invalid()
-                            chunks, event_finished = self._stream_event(event_data)
+                            chunks, event_finished = self._stream_event(event_data, finished)
                             for chunk in chunks:
                                 yield chunk
                             finished = finished or event_finished
@@ -143,9 +141,7 @@ class OpenAICompatibleClient:
                                 if not finished:
                                     raise self._stream_incomplete()
                                 return
-                            if finished:
-                                raise self._stream_invalid()
-                            chunks, event_finished = self._stream_event(event_data)
+                            chunks, event_finished = self._stream_event(event_data, finished)
                             for chunk in chunks:
                                 yield chunk
                             finished = finished or event_finished
@@ -212,7 +208,7 @@ class OpenAICompatibleClient:
         )
 
     @classmethod
-    def _stream_event(cls, event_data):
+    def _stream_event(cls, event_data, finished=False):
         try:
             payload = "\n".join(event_data)
             if payload == "[DONE]":
@@ -225,7 +221,13 @@ class OpenAICompatibleClient:
         if obj.get("error") is not None:
             raise cls._stream_invalid()
         choices = obj.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        if not isinstance(choices, list):
+            raise cls._stream_invalid()
+        if not choices:
+            if finished and any(obj.get(field) not in (None, "") for field in ("content", "text")):
+                raise cls._stream_invalid()
+            return [], False
+        if finished or not isinstance(choices[0], dict):
             raise cls._stream_invalid()
         finish_reason = choices[0].get("finish_reason")
         if finish_reason == "length":
