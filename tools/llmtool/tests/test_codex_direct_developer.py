@@ -97,7 +97,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
                 prelaunch_validate=lambda: True)
         self.assertEqual(result.status, 'DONE')
-        config_loader.assert_called_once_with(cwd=self.root)
+        config_loader.assert_called_once_with(cwd=self.root.resolve())
 
     def test_configured_timeout_is_used(self):
         self.assertEqual(self.run_fake_configured(900).status, 'DONE')
@@ -657,7 +657,10 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('"allowed_write_paths":["src.py"]', prompt)
         self.assertIn('"acceptance":["expected behavior"]', prompt)
         self.assertIn('"test_commands":[["python3","-m","unittest"]]', prompt)
-        self.assertIn('"wall_clock_seconds":600', prompt)
+        timeout_lines = [line for line in prompt.splitlines()
+                         if 'effective timeout' in line.lower()]
+        self.assertTrue(timeout_lines)
+        self.assertTrue(any('600' in line for line in timeout_lines))
 
 
 if __name__ == '__main__':

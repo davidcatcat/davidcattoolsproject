@@ -15,7 +15,10 @@ import tempfile
 import time
 
 from . import worker_dispatch
-from .config import CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, resolve_config
+from .config import (
+    CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, resolve_config,
+    validate_codex_direct_timeout,
+)
 from .errors import LLMToolError
 from .providers.cli_lifecycle import CLIHostTermination, CLIProcessLifecycle
 
@@ -352,6 +355,7 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         loaded_config = resolve_config(cwd=root)
         timeout = loaded_config.get("codex_direct", {}).get(
             "timeout_seconds", CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS)
+        timeout = validate_codex_direct_timeout(timeout)
     if type(timeout) not in (int, float) or not 0 < timeout <= MAX_WALL_CLOCK_SECONDS:
         _fail('CODEX_BUDGET_INVALID')
     executable = shutil.which('codex')

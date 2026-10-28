@@ -207,6 +207,13 @@ def _timeout_seconds(value):
     return result
 
 
+def validate_codex_direct_timeout(value):
+    """Validate the configured direct Codex wall clock limit."""
+    if type(value) is not int or not 1 <= value <= CODEX_DIRECT_MAX_TIMEOUT_SECONDS:
+        raise LLMToolError("codex_direct.timeout_seconds must be an integer from 1 through 1800")
+    return value
+
+
 def _validate_provider(provider, profile_name):
     implementation = client_type(provider["type"])
     options = provider["provider_options"]
@@ -264,9 +271,7 @@ def _validate(config):
         raise LLMToolError("temperature must be between 0 and 2")
     direct_config = config.get("codex_direct")
     if direct_config is not None:
-        timeout = direct_config["timeout_seconds"]
-        if type(timeout) is not int or not 1 <= timeout <= CODEX_DIRECT_MAX_TIMEOUT_SECONDS:
-            raise LLMToolError("codex_direct.timeout_seconds must be an integer from 1 through 1800")
+        validate_codex_direct_timeout(direct_config["timeout_seconds"])
 
 
 def _inspection_env_name(name):
