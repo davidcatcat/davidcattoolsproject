@@ -8,7 +8,7 @@
 - **可觀察 Reasoning Effort：** UNKNOWN（執行環境未向模型揭露此設定）。
 - **審查工具與限制：** 唯讀 `git`、`gh` API、本機 TaskStore 與 D6 registry 的**彙總統計**（只讀取狀態欄位，不讀取 prompt／diff 內容）、GitHub Actions run 紀錄。**本機測試執行：NOT_RUN**（Owner 於審查中拒絕在 Mac 上執行測試，改以 CI 紀錄為證據）。未存取任何私人對話、憑證或客戶資料。
 - **姊妹報告：** [Report B — Project Evolution & Decision Retrospective](project-evolution-decision-retrospective-20261028.md)、[Report C — Product Owner Playbook](product-owner-playbook-ai-development-20261028.md)、[Executive Decision Brief](executive-decision-brief-20261028.md)。
-- **版本：** v2（2026-10-28 Audit Quality Review 自我校正；修正 Finding 計數、統計適用範圍、worktree 清理方案、建議與授權的區分，並新增第 26 章 Post-Snapshot Status Update）。原始 Snapshot 的歷史事實未改寫。
+- **版本：** v3（2026-10-28 依 Owner 三輪答覆更新：第 22 章優先序改寫（gw 以量測為條件必做、AGY／OpenCode 可後接、即時 PM 對話進入第一版、背景續跑降級、可攜性因「其他項目開發」提前）；第 26 章新增 26.1 至 main `3677806`：`task advance` 與 TUI 即時 PM 已合併、worktree 已清理、gw thinking 開啟 2/2）；v2（2026-10-28 Audit Quality Review 自我校正；修正 Finding 計數、統計適用範圍、worktree 清理方案、建議與授權的區分，並新增第 26 章 Post-Snapshot Status Update）。原始 Snapshot 的歷史事實未改寫。
 
 > 證據標記：**FACT**（有直接證據）、**INFERENCE**（由證據推論）、**OPINION**（專業判斷）、**UNKNOWN**（資料不足）。所有「本機統計」指 2026-10-28 於 Owner Mac 上以唯讀方式彙總的 `~/.local/state/llmtool/tasks`（279 筆）與 `.git/llmtool-worktrees`（489 筆）；其適用範圍與限制見 2.4。
 >
@@ -26,7 +26,7 @@
 
 **值得肯定的部分**（同樣有證據）：Provider／行程生命週期、TaskStore 原子寫入、D6 身份綁定、Mac／EC2 runner 隔離、exact-head CI 與敏感資料篩選，是嚴謹且有大量離線測試（116 個測試檔、約 5 萬行）的工程；`nlf` 是一個已完成、跨三平台 CI 的獨立產品；Owner 於 2026-10-21 定義的產品定位（llmtool 無 AI 智能、只做介面／授權／狀態／交接）是正確的架構原則。
 
-**總體判斷（OPINION）：** 方向正確、原則正確，但執行順序倒置：先建了約 3.4 萬行的「管理 AI 的確定性框架」，才在第 28 天開始做使用者入口。最短可用路徑不是再加 runtime 切片，而是**凍結新路線、把現有 record-pm → Codex direct → EC2 receipt → review → complete 這條已經有 runtime 的鏈真正接成一條由 TUI 驅動、可重啟恢復的閉環**，並以一個真實 Owner 任務做 E2E 驗收。
+**總體判斷（OPINION）：** 方向正確、原則正確，但執行順序倒置：先建了約 3.4 萬行的「管理 AI 的確定性框架」，才在第 28 天開始做使用者入口。最短可用路徑不是再加 runtime 切片，而是**暫緩可後接的路線（AGY／OpenCode；gw 依 Owner 2026-10-28 為必做路線，排在主鏈之後並以量測決定去留）、把現有 record-pm → Codex direct → EC2 receipt → review → complete 這條已經有 runtime 的鏈真正接成一條由 TUI 驅動、可重啟恢復的閉環**，並以一個真實 Owner 任務做 E2E 驗收。
 
 | 指標 | 數值（FACT，v2 重新核對） |
 |---|---|
@@ -147,7 +147,7 @@ runtime 唯一依賴 `PyYAML>=6.0,<7`；`tui` extra 為 `prompt-toolkit>=3.0.52,
 
 - llmtool 是使用者直接操作的通用本機 AI 協作工具；**本身沒有 AI 智能**。
 - 使用者啟動 `llmtool` → 輸入需求 → 連接指定 PM AI → PM 拆解、選角 → llmtool 負責授權、執行、狀態、交接 → Developer → 獨立 Reviewer → 測試／CI → 修復 → 整合 → 使用者在 llmtool 查看結果。
-- 關閉介面後工作繼續；重開可接回；多任務並行；PR 合併由 PM 決定。
+- 關閉介面後工作繼續；重開可接回；多任務並行；PR 合併由 PM 決定。（Owner 2026-10-28 補充：「關閉介面後繼續」不是本機第一版的硬需求，Owner 會開著 CLI／TUI；第一版的驗收是「在 TUI 提需求、PM 像 Claude TUI 一樣即時回話、拿到想要的結果」，並且要能用公司 LLM 搭配其他 AI 開發其他專案、省 token。見 Report B 9C。）
 
 ### 4.2 差距分析表
 
@@ -889,7 +889,7 @@ flowchart LR
 | P0-2 | `task advance` 驅動器（#519）+ 終態（AUDIT-014） | AUDIT-002／014 | 無人工串接 | task_advance、task_status | #519 審查 | 中 | M | 10 個 Task 自動推進 | 否 | 2 |
 | P0-3 | 以現有 retire 工具對通過 D6 退場 gate 的候選批次退場（Reviewer D6 復用為 OWNER_DECISION_REQUIRED） | AUDIT-003 | ACTIVE 與磁碟用量明顯下降（待驗證目標） | d6 scripts | — | 中（誤刪；靠 gate 防範） | S | RETAIN_BLOCKED 有逐筆處置；可用空間回到 PM 實測的安全水位 | 否 | 1 |
 | P0-4 | 一個真實 Owner 任務 E2E（TUI → merge → COMPLETED） | 產品驗收 | 第一次真正閉環 | — | P0-1～3 | — | S | Owner 操作紀錄 | — | 3 |
-| P0-5 | 暫停新路線（AGY、OpenCode、gw 真實題、Telegram、Web、CliNest） | 聚焦 | 釋放 PM／Reviewer 容量 | 政策 | **OWNER_DECISION_REQUIRED**（Roadmap 與 dispatch 切換） | 低 | — | 期間內無新路線 PR | — | 0 |
+| P0-5 | 暫停可後接的路線（AGY、OpenCode、Telegram、Web、CliNest；Owner 2026-10-28 確認可後接）；gw 不暫停，但排在 P0-4 之後接入並量測是否省 token（Owner：不能省就不要） | 聚焦 | 釋放 PM／Reviewer 容量 | 政策 | **OWNER_DECISION_REQUIRED**（Roadmap 與 dispatch 切換） | 低 | — | 期間內無可後接路線的 PR | — | 0 |
 
 **P0–P3 中凡涉及 `worker-dispatch.json`、AGENTS.md Gate、Reviewer 配對、Mac CI 合併 gate、Roadmap 順序者，皆為 OWNER_DECISION_REQUIRED；本報告不授權執行。**
 
@@ -944,9 +944,13 @@ flowchart LR
 **過度設計：** 五套授權模型、三套修復上限、Mac CI verifier-of-verifier、每輪新建 Reviewer worktree、140 KB 級文件 ×3。
 **設計不足：** Task 終態、恢復路徑、驅動器、TUI 視圖、安裝。
 **錯誤後排：** TUI Task mode、`task status` 終態、D6 retire。
-**可延後：** AGY、gw 真實題、OpenCode、Telegram、Web、CliNest、High Debug 自動化、GitHub events inbox。
+**可延後：** AGY、OpenCode（Owner 2026-10-28：省 token 用途，可後接）、Telegram、Web、CliNest、High Debug 自動化、GitHub events inbox。
+**不可延後但排在主鏈之後：** gw（Owner 2026-10-28：公司自建 LLM、為省大型 AI token 的必做路線；主鏈通後以同一條鏈接入，並量測「PM 準備 context＋套 diff＋審查」對「直接派 Codex」的總成本；Owner 的條件是「不能節省就沒必要」）。
+**提前（v3）：** 可攜性（AUDIT-006 硬編碼路徑與 `issues/289` URL、AUDIT-007 Claude Code 耦合、安裝方式）因 Owner 要求第一版「一起進行其他項目開發」而從 90 天提前為第一版相關。
+**可降級：** 「關閉介面後工作繼續」（Owner 2026-10-28：本機第一版非硬需求）；第 11 章第 5 點的 Developer 子行程改獨立 session 降為 P2。
 
 **四週計畫：** 第 1 週 D6 安全退場 + TUI PR 修綠合併；第 2 週 advance + 終態 + retry；第 3 週 E2E ×3 + 修 bug；第 4 週 拆模組 + 文件瘦身 + 硬編碼 config。
+**v3 註記：** 第 1、2 週的項目在 2026-10-28 已大多合併（26.1）；Owner 對第一版的要求是「在 TUI 提需求、PM 像 Claude TUI 一樣即時回話」（即時 PM 對話已合併，#544／#549，待 E2E）與「用公司 LLM 搭配其他 AI 開發其他專案」（可攜性提前）。因此四週計畫改為：第 1 週 Owner 親手跑一個真實任務 E2E（TUI → PM 即時對話 → Codex → EC2 → Reviewer → PR → COMPLETED）並修出現的 bug；第 2 週 gw 經同一條鏈接入並量測省不省；第 3 週 硬編碼→config、在第二個專案目錄跑一次；第 4 週 拆模組 + 文件瘦身。四週仍為待驗證目標。
 **一名 Developer + 一名 Reviewer：** Developer = Codex direct（唯一路線）；Reviewer = Claude（唯一路線）；PM = Claude Code session（Owner 對話）；Reviewer 只審 runtime PR，docs／test-only PR 由 EC2 CI + 自審放行（**OWNER_DECISION_REQUIRED**：與 AGENTS.md 現行審查規則不同）。
 **減少 Token／CI：** Mac 只跑 Mac 專屬（OWNER_DECISION_REQUIRED）；減少 merge train 雙 CI（OWNER_DECISION_REQUIRED）；Reviewer 復用 D6 只讀 delta（OWNER_DECISION_REQUIRED）；政策文件瘦身；gw 只做合成評測（OWNER_DECISION_REQUIRED：#290 取樣計畫為 Owner 決策）；Codex `--read-path` 限縮（工程建議）。
 
@@ -979,3 +983,19 @@ flowchart LR
 | 第 9 章狀態表 | — | TUI 相關列：「Task list／progress」由「無」改為「有（顯示層）」；其餘不變 | — |
 
 **結論：** Post-snapshot 變化主要是 TUI 顯示層與 PM runtime API 零件到位，沒有改變「從 TUI 提交後不會自動進入開發流程」的核心判斷；#519 合併並接上 TUI 後才需要重新評估 AUDIT-001／002／014。
+
+### 26.1 第二次更新（main `3677806`，2026-10-28，merge train 12–19）
+
+依據：`git diff --shortstat 3621aa4..origin/main`（49 檔、+5,517／−327）、main log、PR #533／#538／#545／#546 描述、Issue #290 留言、本機唯讀統計。未重新做完整程式閱讀；本機測試仍 NOT_RUN。
+
+| Finding | 26 章狀態 | 現在 | 依據 |
+|---|---|---|---|
+| AUDIT-001 使用者入口止於 intake | 部分改善 | **顯著改善，待 E2E 驗證。** `chat_tui.py` 已接 `pm_runtime`（S2 #524、S2b #549、TUI PM 窗格 S4 #544）：`/pm new` 建立專屬 PM session、PM 回覆串流顯示、`/pm history`。這正是 Owner 2026-10-28 說的第一版驗收（即時回話）。尚無任何「從 TUI 提需求到 COMPLETED」的操作紀錄，Critical 降為 High 的條件是一次 Owner E2E | origin/main `chat_tui.py`、PR #546 |
+| AUDIT-002 WP3 runtime 未使用 | 未變 | **`task advance` 已合併**（#519，train 13b `2341fae`）；#538 加 REVIEW_NOT_POSTED；#542 completion 接受 advance 派審 verdict。本機 store 未重新統計，使用次數 UNKNOWN | PR #533、#538、#546 |
+| AUDIT-014 無終態 | 未變 | 隨 #519 合併而有驅動器；終態是否完整未重新核對（UNKNOWN） | — |
+| AUDIT-003 D6 堆積 | 未變 | **已清理。** worktree 374→32；registry 580 筆中 ACTIVE 25、REMOVED 305、RETIRED_EXTERNALLY 214、RETAIN_BLOCKED 34；根磁碟可用 13→28 GB；PR #545 逐一審計保留的 35 個（SUPERSEDED 29、CONFLICTING 3、USEFUL 3，待 Owner 於 #352 決定）。High 可降為 Medium；自動退場仍未驗證 | 本機 `git worktree list`、registry 狀態欄位、`df`、#545 |
+| AUDIT-029 gw | Info | thinking 開、max_tokens 16384 後真實題 **2/2**（#522、#523 已合併）；thinking 關 4/5；合計 6/8。thinking 開每題 1.0–1.4 萬 completion tokens、74–92 秒（多 5–10 倍）。**省不省大型 AI token 仍未量**（Claude PM 準備 context／套 diff／審查的成本未記）；proposal 模式不能新增檔案（llmtool 缺口）。Owner 稱 EC2／CI 可經 VPN 連 gw，repo 內無執行紀錄（UNVERIFIED） | #290 留言 2026-10-27 20:50 UTC |
+| AUDIT-021 Mac CI 慢 | — | 排程觸發移除（#556／#557）、CLI 契約測試改 in-process（#548）；平均時間未重新量 | main log |
+| AUDIT-006／007 可攜性 | 未變 | 程式未變；**優先序提前**：Owner 要求第一版能用於其他專案（第 22 章） | Report B 9C.3 第 5 題 |
+
+**結論（v3）：** 零件已經齊到可以做第一次真實 E2E 的程度；下一個有意義的證據不是更多 PR，而是 Owner 在 TUI 跑完一個任務的操作紀錄。
