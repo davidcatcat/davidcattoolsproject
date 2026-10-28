@@ -1099,8 +1099,10 @@ def _codex_timeout_outcome(code, attempted, root, source_sha):
 
 
 def _codex_timeout_recovery(previous, *, executor_task_id, source_sha,
-                            read_paths, write_paths, acceptance):
-    """Allow only a same-D6 retry of a timeout that captured a cumulative diff."""
+                            result_head, registration_source_sha,
+                            registration_result_sha, read_paths, write_paths,
+                            acceptance):
+    """Allow a same-D6 retry after the PM records the committed timeout result."""
     if type(previous) is not dict:
         return False
     execution = previous.get('execution')
@@ -1108,10 +1110,15 @@ def _codex_timeout_recovery(previous, *, executor_task_id, source_sha,
         previous.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and
         previous.get('error_code') == 'CODEX_TIMEOUT_WITH_CHANGES' and
         type(execution) is dict and execution.get('status') == 'TIMEOUT' and
-        execution.get('diff_base_sha') == source_sha and
+        execution.get('diff_base_sha') == previous.get('source_sha') and
         type(execution.get('diff_sha256')) is str and
         re.fullmatch(r'[0-9a-f]{64}', execution['diff_sha256']) and
-        previous.get('source_sha') == source_sha and
+        type(previous.get('source_sha')) is str and
+        re.fullmatch(r'[0-9a-f]{40}', previous['source_sha']) and
+        source_sha == previous['source_sha'] and
+        type(result_head) is str and re.fullmatch(r'[0-9a-f]{40}', result_head) and
+        registration_source_sha == previous['source_sha'] and
+        registration_result_sha == result_head and
         previous.get('executor_task_id') == executor_task_id and
         previous.get('read_paths') == read_paths and
         previous.get('write_paths') == write_paths and
@@ -2468,7 +2475,9 @@ def run_task_codex_delegate(args, *, store):
                        else snapshot.head)
     if recovering_timeout and not _codex_timeout_recovery(
             previous_developer, executor_task_id=registration.task_id,
-            source_sha=task_source_sha, read_paths=read_paths,
+            source_sha=task_source_sha, result_head=snapshot.head,
+            registration_source_sha=registration.source_sha,
+            registration_result_sha=registration.result_sha, read_paths=read_paths,
             write_paths=write_paths, acceptance=acceptance):
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
     _screen_text(task['request'], REQUEST_LIMIT)

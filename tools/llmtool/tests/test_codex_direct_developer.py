@@ -547,7 +547,9 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         }
         self.assertTrue(task_submission_cli._codex_timeout_recovery(
             previous, executor_task_id='executor-1', source_sha=base_sha,
-            read_paths=['src.py'], write_paths=['src.py'], acceptance=['works']))
+            result_head='c' * 40, registration_source_sha=base_sha,
+            registration_result_sha='c' * 40, read_paths=['src.py'],
+            write_paths=['src.py'], acceptance=['works']))
         with patch.object(task_submission_cli.task_completion, '_worktree_diff',
                           return_value=(['src.py'], raw)) as diff:
             rejection, artifact = task_submission_cli._codex_cumulative_diff_rejection(

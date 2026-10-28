@@ -179,12 +179,16 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
     'created_at',
 ))
 _DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DEVELOPER_EXECUTOR_TASK_FIELDS = frozenset(('executor_task_id',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DEVELOPER_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
+)
+_DEVELOPER_TASK_ID_SHAPES = tuple(
+    shape | _DEVELOPER_EXECUTOR_TASK_FIELDS for shape in _DEVELOPER_SHAPES
 )
 _DEVELOPER_EXTENSION_SHAPES = tuple(
     shape | extension for shape in _DEVELOPER_SHAPES
@@ -209,6 +213,11 @@ _DIRECT_EXECUTION_FIELDS = frozenset((
 _DIRECT_EXECUTION_BINDING_FIELDS = _DIRECT_EXECUTION_FIELDS | frozenset((
     'native_session_binding',
 ))
+_DEVELOPER_EXECUTION_DIFF_FIELDS = frozenset(('diff_sha256', 'diff_base_sha'))
+_DEVELOPER_EXECUTION_DIFF_SHAPES = (
+    _DIRECT_EXECUTION_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
+    _DIRECT_EXECUTION_BINDING_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
+)
 _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
     'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
@@ -959,10 +968,14 @@ def _validate(record):
             _fail()
         developer = record['developer']
         if developer is not None:
-            assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+            assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_TASK_ID_SHAPES,
+                                 *_DEVELOPER_EXTENSION_SHAPES,
                                  *_DEVELOPER_BLOCKED_REASON_SHAPES,
                                  *_DEVELOPER_PROGRESS_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
+                _fail()
+            if ('executor_task_id' in developer and
+                    not _safe_identifier(developer['executor_task_id'], D6_TASK_ID)):
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
@@ -1053,7 +1066,8 @@ def _validate(record):
                     if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
                             type(execution) is not dict or
                             set(execution) not in (
-                                _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS) or
+                                _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,
+                                *_DEVELOPER_EXECUTION_DIFF_SHAPES) or
                             ('native_session_binding' in execution and
                              (developer['provider_profile'] != 'codex' or
                               type(execution['native_session_binding']) is not str or
@@ -1091,6 +1105,16 @@ def _validate(record):
                                            execution['source_manifest_sha256']) is None)) or
                             execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
                             execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
+                        _fail()
+                    if set(execution) in _DEVELOPER_EXECUTION_DIFF_SHAPES and (
+                            developer.get('error_code') != 'CODEX_TIMEOUT_WITH_CHANGES' or
+                            developer.get('provider_profile') != 'codex' or
+                            execution['status'] != 'TIMEOUT' or
+                            type(execution.get('diff_sha256')) is not str or
+                            re.fullmatch(r'[0-9a-f]{64}', execution['diff_sha256']) is None or
+                            type(execution.get('diff_base_sha')) is not str or
+                            re.fullmatch(r'[0-9a-f]{40}', execution['diff_base_sha']) is None or
+                            execution['diff_base_sha'] != developer['source_sha']):
                         _fail()
                     if execution['status'] in ('SUCCEEDED', 'DONE') and (
                             execution['native_session_id'] is None or
