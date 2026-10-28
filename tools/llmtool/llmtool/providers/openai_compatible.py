@@ -235,9 +235,12 @@ class OpenAICompatibleClient:
             raise cls._stream_invalid()
         allowed_event_fields = {
             "choices", "usage", "id", "object", "created", "model",
-            "system_fingerprint",
+            "system_fingerprint", "prompt_text", "prompt_token_ids",
         }
         if set(obj) - allowed_event_fields or "choices" not in obj:
+            raise cls._stream_invalid()
+        if any(obj[field] is not None for field in ("prompt_text", "prompt_token_ids")
+               if field in obj):
             raise cls._stream_invalid()
         for field in ("id", "object", "model"):
             if field in obj and not isinstance(obj[field], str):
@@ -259,8 +262,12 @@ class OpenAICompatibleClient:
         if len(choices) != 1 or not isinstance(choices[0], dict):
             raise cls._stream_invalid()
         choice = choices[0]
-        allowed_choice_fields = {"delta", "index", "finish_reason", "stop_reason", "logprobs"}
+        allowed_choice_fields = {
+            "delta", "index", "finish_reason", "stop_reason", "logprobs", "token_ids",
+        }
         if set(choice) - allowed_choice_fields or "delta" not in choice:
+            raise cls._stream_invalid()
+        if "token_ids" in choice and choice["token_ids"] is not None:
             raise cls._stream_invalid()
         if "index" in choice and (type(choice["index"]) is not int or choice["index"] != 0):
             raise cls._stream_invalid()

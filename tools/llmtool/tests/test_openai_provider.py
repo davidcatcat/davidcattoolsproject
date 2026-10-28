@@ -348,7 +348,78 @@ class OpenAIProviderTests(unittest.TestCase):
                          ["answer"])
         self.assertTrue(response.closed)
 
+        envelope = {
+            "created": 1761696000,
+            "id": "chatcmpl-real-stream",
+            "model": "gw-model",
+            "object": "chat.completion.chunk",
+        }
+        captured_events = [
+            {
+                **envelope,
+                "prompt_text": None,
+                "prompt_token_ids": None,
+                "choices": [{
+                    "delta": {"content": "", "role": "assistant"},
+                    "finish_reason": None,
+                    "index": 0,
+                    "logprobs": None,
+                }],
+            }
+        ]
+        expected_content = []
+        for index in range(1, 67):
+            content_event = index % 2 == 0
+            delta_field = "content" if content_event else "reasoning"
+            value = chr(ord("a") + (index // 2) % 26) if content_event else "private reasoning"
+            if content_event:
+                expected_content.append(value)
+            captured_events.append({
+                **envelope,
+                "choices": [{
+                    "delta": {delta_field: value},
+                    "index": 0,
+                    "token_ids": None,
+                }],
+            })
+        captured_events.append({
+            **envelope,
+            "choices": [{
+                "delta": {"content": "!"},
+                "finish_reason": "stop",
+                "index": 0,
+                "stop_reason": None,
+                "token_ids": None,
+            }],
+        })
+        expected_content.append("!")
+        captured_events.append({
+            **envelope,
+            "system_fingerprint": "fp-real-stream",
+            "choices": [],
+            "usage": {
+                "completion_tokens": 67,
+                "completion_tokens_details": {"reasoning_tokens": 33},
+                "prompt_tokens": 12,
+                "total_tokens": 79,
+            },
+        })
+        self.assertEqual(len(captured_events), 69)
+        response = FakeResponse([
+            *(b"data: " + json.dumps(event).encode("utf-8") + b"\n\n"
+              for event in captured_events),
+            b"data: [DONE]\n\n",
+        ])
+        self.assertEqual(
+            list(make_client(response).stream([{"role": "user", "content": "question"}])),
+            expected_content,
+        )
+        self.assertTrue(response.closed)
+
         for event in (
+            b'data: {"choices":[{"delta":{}}],"prompt_text":"unexpected"}\n\n',
+            b'data: {"choices":[{"delta":{}}],"prompt_token_ids":[]}\n\n',
+            b'data: {"choices":[{"delta":{},"token_ids":[1]}]}\n\n',
             b'data: {"choices":[]}\n\n',
             b'data: {"choices":[],"usage":{"total_tokens":1},"message":{"content":"late"}}\n\n',
             b'data: {"choices":[],"usage":{"total_tokens":1},"unexpected":"value"}\n\n',
