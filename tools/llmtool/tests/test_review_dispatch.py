@@ -53,7 +53,8 @@ class ReviewDispatchTests(unittest.TestCase):
         bind = lambda **kw: self.bound.append(kw)
         gate = SimpleNamespace(allowed=policy, reason_code='PAUSED')
         with patch.object(review_dispatch, '_preflight', side_effect=preflight or [self.preflight, self.preflight]), \
-                patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate):
+                patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
+                patch.object(review_dispatch, '_resolve_github_login', return_value='reviewer-user'):
             return review_dispatch.dispatch_review(
                 store=self.store, task_id=TASK, executor_task='executor-d6',
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
@@ -65,6 +66,7 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(result['reviewer_task'][:9], 'reviewer-')
         self.assertEqual(result['native_session_id'], 'native-session')
         self.assertEqual(len(self.created), 1)
+        self.assertEqual(self.created[0]['github_login'], 'reviewer-user')
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(len(self.bound), 1)
 
@@ -81,7 +83,9 @@ class ReviewDispatchTests(unittest.TestCase):
             preflight = (TASK, executor, head, 'd' * 40, 'claude-reviewer')
             with patch.object(review_dispatch, '_preflight', side_effect=[preflight, preflight]), \
                     patch.object(review_dispatch.worker_dispatch, 'evaluate',
-                                 return_value=SimpleNamespace(allowed=True, reason_code='')):
+                                 return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                    patch.object(review_dispatch, '_resolve_github_login',
+                                 return_value='reviewer-user'):
                 return review_dispatch.dispatch_review(
                     store=self.store, task_id=TASK, executor_task='executor-d6',
                     pr_number=42, version=version,
@@ -97,6 +101,40 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(later['state'], 'DISPATCHED')
         self.assertEqual(len(self.store.get(TASK)['review_dispatch_claim']), 2)
         self.assertEqual(len(self.sent), 0)
+
+    def test_github_login_resolution_uses_authenticated_account_and_validates_output(self):
+        result = SimpleNamespace(returncode=0, stdout=b'authenticated-account\n')
+        with patch.object(review_dispatch.shutil, 'which', return_value='/bin/gh') as which, \
+                patch.object(review_dispatch.subprocess, 'run', return_value=result) as run:
+            self.assertEqual(review_dispatch._resolve_github_login(), 'authenticated-account')
+        which.assert_called_once_with('gh', path=review_dispatch.task_completion._GH_PATH)
+        self.assertEqual(run.call_args.args[0], [
+            '/bin/gh', 'api', 'user', '--jq', '.login'])
+        for invalid in (SimpleNamespace(returncode=1, stdout=b''),
+                        SimpleNamespace(returncode=0, stdout=b'not a login')):
+            with patch.object(review_dispatch.shutil, 'which', return_value='/bin/gh'), \
+                    patch.object(review_dispatch.subprocess, 'run', return_value=invalid), \
+                    self.assertRaises(LLMToolError) as raised:
+                review_dispatch._resolve_github_login()
+            self.assertEqual(raised.exception.review_dispatch_code,
+                             'REVIEWER_GITHUB_LOGIN_UNAVAILABLE')
+
+    def test_github_login_unavailable_prevents_reviewer_d6_creation(self):
+        error = LLMToolError('Reviewer dispatch refused; details omitted')
+        error.review_dispatch_code = 'REVIEWER_GITHUB_LOGIN_UNAVAILABLE'
+        with patch.object(review_dispatch, '_preflight',
+                          side_effect=[self.preflight, self.preflight]), \
+                patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                             return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch, '_resolve_github_login', side_effect=error):
+            with self.assertRaises(LLMToolError):
+                review_dispatch.dispatch_review(
+                    store=self.store, task_id=TASK, executor_task='executor-d6',
+                    pr_number=42, create_d6=lambda **kw: self.created.append(kw),
+                    dispatch_session=lambda **kw: self.sent.append(kw),
+                    prompt_renderer=lambda *_: 'bound prompt')
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.sent, [])
 
     def invoke_store(self, store):
         original = self.store
