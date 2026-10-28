@@ -1237,11 +1237,8 @@ class ChatTUI:
             return
         binding = outcome["binding"] if type(outcome["binding"]) is dict else {}
         self.append("Dedicated PM session " + chat_tui_pm.safe_text(binding.get("native_session_id"))
-                    + " created by pm_runtime (cwd " + chat_tui_pm.safe_text(binding.get("cwd"))
-                    + ") and saved as the binding; " + chat_tui_pm.binding_text(binding)
-                    + ". pm_runtime started `claude --session-id` in the background; the TUI has "
-                    "not verified that session. /pm connect connects to it; pm_runtime refuses "
-                    "it as live elsewhere while its transcript changed in the last 20 s.")
+                    + " dedicated binding created (cwd " + chat_tui_pm.safe_text(binding.get("cwd"))
+                    + "); the session starts on the first message. /pm connect connects to it.")
 
     def _pm_worker(self, target, *args):
         self.pm_pending = True
