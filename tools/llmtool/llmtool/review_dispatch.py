@@ -123,7 +123,7 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
     developer = task.get('developer')
     family = developer.get('provider_profile') if type(developer) is dict else None
-    if family in ('codex', 'company-gw', 'gw'):
+    if family in ('codex', 'opencode', 'company-gw', 'gw', 'agy'):
         reviewer_key = 'claude-reviewer'
     elif family == 'claude':
         reviewer_key = 'codex-reviewer'
@@ -149,7 +149,9 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
 
 
 def _codex_argv(executable, reviewer_root):
-    return [executable, 'exec', '--color', 'never', '--json', '--model',
+    return [executable, 'exec', '--no-daemon', '--ask-for-approval', 'never',
+            '--ignore-user-config', '--ignore-rules', '--ephemeral',
+            '--strict-config', '--color', 'never', '--json', '--model',
             _CODEX_REVIEW_MODEL, '-c', 'model_reasoning_effort=' + _CODEX_REVIEW_EFFORT,
             '-s', 'read-only', '--cd', str(reviewer_root), '-']
 
@@ -174,7 +176,7 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head):
             elif type(event) is dict and event.get('type') == 'item.completed':
                 item = event.get('item')
                 if type(item) is dict and item.get('type') == 'agent_message':
-                    if type(item.get('text')) is not str or final is not None:
+                    if type(item.get('text')) is not str:
                         _refuse('REVIEW_NOT_POSTED')
                     final = item['text']
     except (UnicodeError, ValueError, RecursionError):
@@ -192,7 +194,7 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head):
             verdict.get('head') != head or
             verdict.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED')):
         _refuse('REVIEW_NOT_POSTED')
-    return thread_id
+    return {'thread_id': thread_id, 'review_text': final, 'verdict': verdict['verdict']}
 
 
 def _dispatch_codex(*, reviewer_root, prompt, task, head):
@@ -203,7 +205,10 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head):
         result = subprocess.run(
             _codex_argv(executable, reviewer_root), cwd=str(reviewer_root),
             input=prompt.encode('utf-8'), stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, check=False,
+            stderr=subprocess.DEVNULL,
+            env={'PATH': os.pathsep.join((str(Path(executable).parent), '/usr/bin', '/bin')),
+                 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'NO_COLOR': '1'},
+            check=False,
             timeout=_CODEX_REVIEW_TIMEOUT)
     except subprocess.TimeoutExpired:
         _refuse('REVIEWER_TIMEOUT')
@@ -345,8 +350,11 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 reviewer_task, executor.common_dir,
                 allowed_states=task_completion._D6_EVIDENCE_STATES)
             run_codex = codex_runner or _dispatch_codex
-            session_id = run_codex(reviewer_root=reviewer.root, prompt=prompt,
-                                   task=task, head=head)
+            codex_result = run_codex(reviewer_root=reviewer.root, prompt=prompt,
+                                     task=task, head=head)
+            if type(codex_result) is not dict:
+                _refuse('REVIEW_NOT_POSTED')
+            session_id = codex_result.get('thread_id')
             if type(session_id) is not str or not session_id:
                 _refuse('REVIEW_NOT_POSTED')
             bind(task_id=reviewer_task, session_id=session_id, repo_root=repo_root)
@@ -359,6 +367,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
+        if reviewer_key == 'codex-reviewer':
+            return dict(dispatched, review_text=codex_result['review_text'],
+                        verdict=codex_result['verdict'])
         return dispatched
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())

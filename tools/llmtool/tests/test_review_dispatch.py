@@ -175,7 +175,8 @@ class ReviewDispatchTests(unittest.TestCase):
             create_args.append(kwargs)
         def run_codex(**kwargs):
             runner_args.append(kwargs)
-            return '0123456789abcdef'
+            return {'thread_id': '0123456789abcdef',
+                    'review_text': '{"verdict":"PASS"}', 'verdict': 'PASS'}
         with patch.object(review_dispatch.task_completion, 'read_d6_registration',
                           return_value=reviewer):
             result = self.invoke(
@@ -188,20 +189,25 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(runner_args[0]['head'], HEAD)
         self.assertEqual(self.sent, [])
         self.assertEqual(self.bound[0]['session_id'], '0123456789abcdef')
+        self.assertEqual(result['review_text'], '{"verdict":"PASS"}')
+        self.assertEqual(result['verdict'], 'PASS')
 
     def test_codex_argv_is_read_only_and_uses_required_profile_and_d6(self):
         verdict = {'task_id': TASK, 'run_id': 'r' * 32,
                    'contract_digest': 'd' * 64, 'head': HEAD, 'verdict': 'PASS'}
+        final_review = json.dumps(verdict)
         events = [
             {'type': 'thread.started', 'thread_id': '0123456789abcdef'},
             {'type': 'item.completed', 'item': {
-                'type': 'agent_message', 'text': json.dumps(verdict)}},
+                'type': 'agent_message', 'text': 'intermediate message'}},
+            {'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': final_review}},
         ]
         result = SimpleNamespace(returncode=0, stdout='\n'.join(
             json.dumps(event) for event in events).encode('utf-8'))
         with patch.object(review_dispatch.shutil, 'which', return_value='/bin/codex'), \
                 patch.object(review_dispatch.subprocess, 'run', return_value=result) as run:
-            session_id = review_dispatch._dispatch_codex(
+            review_result = review_dispatch._dispatch_codex(
                 reviewer_root='/repo/reviewer-d6', prompt='review prompt',
                 task={'task_id': TASK, 'run_id': 'r' * 32,
                       'task_binding': {'contract_digest': 'd' * 64}}, head=HEAD)
@@ -213,7 +219,14 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('--cd') + 1], '/repo/reviewer-d6')
         self.assertEqual(run.call_args.kwargs['cwd'], '/repo/reviewer-d6')
         self.assertEqual(run.call_args.kwargs['timeout'], 600)
-        self.assertEqual(session_id, '0123456789abcdef')
+        self.assertEqual(review_result, {'thread_id': '0123456789abcdef',
+                                         'review_text': final_review,
+                                         'verdict': 'PASS'})
+        self.assertEqual(run.call_args.kwargs['env']['PATH'], '/bin:/usr/bin:/bin')
+        for flag in ('--no-daemon', '--ignore-user-config', '--ignore-rules',
+                     '--ephemeral', '--strict-config'):
+            self.assertIn(flag, argv)
+        self.assertEqual(argv[argv.index('--ask-for-approval') + 1], 'never')
 
     def test_malformed_or_misbinding_codex_verdict_is_refused(self):
         raw = (b'{"type":"item.completed","item":{"type":"agent_message",'
@@ -251,7 +264,12 @@ class ReviewDispatchTests(unittest.TestCase):
             task['developer']['provider_profile'] = 'codex'
             self.assertEqual(review_dispatch._preflight(
                 self.store, TASK, 'executor-d6', 42, 1, task=task)[4], 'claude-reviewer')
-            task['developer']['provider_profile'] = 'opencode'
+            for family in ('opencode', 'company-gw', 'gw', 'agy'):
+                task['developer']['provider_profile'] = family
+                self.assertEqual(review_dispatch._preflight(
+                    self.store, TASK, 'executor-d6', 42, 1, task=task)[4],
+                    'claude-reviewer')
+            task['developer']['provider_profile'] = 'unknown'
             with self.assertRaises(LLMToolError) as raised:
                 review_dispatch._preflight(
                     self.store, TASK, 'executor-d6', 42, 1, task=task)

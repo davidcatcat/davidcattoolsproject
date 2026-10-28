@@ -12,6 +12,9 @@ _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _HEX32 = re.compile(r'[0-9a-f]{32}\Z')
 _VERDICT_VERSION_HEAD = re.compile(
     r'Verdict: (PASS|FIX|FAIL|BLOCKED) \| Version: v([1-9][0-9]{0,3}) \| HEAD: ([0-9a-f]{40})\Z')
+_CODEX_BINDING = re.compile(
+    r'LLMTOOL-REVIEW-BINDING v1 task=([0-9a-f]{32}) run=([0-9a-f]{32}) '
+    r'contract=([0-9a-f]{64}) head=([0-9a-f]{40})\Z')
 
 
 def _refuse(code):
@@ -37,17 +40,30 @@ def _comment_verdict(comment, *, head, version, task):
     marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
     marker_matches = marker is not None and marker.group(2) == status
     codex_formal_pass = False
+    codex_bound = False
+    if marker_matches and marker.group(1) == 'Codex':
+        developer = task.get('developer')
+        if type(developer) is not dict or developer.get('provider_profile') != 'claude':
+            return None
+        binding = _CODEX_BINDING.fullmatch(lines[2]) if len(lines) > 2 else None
+        task_binding = task.get('task_binding')
+        codex_bound = (
+            binding is not None and type(task_binding) is dict and
+            binding.group(1) == task.get('task_id') and
+            binding.group(2) == task.get('run_id') and
+            binding.group(3) == task_binding.get('contract_digest') and
+            binding.group(4) == head)
+        if not codex_bound:
+            return None
     # A Codex PASS can be formal only for a Claude-authored Task, and only
     # after the existing strict Claude validator accepts the same bound body.
     if marker_matches and marker.group(1) == 'Codex' and status == 'PASS':
-        developer = task.get('developer')
-        if type(developer) is dict and developer.get('provider_profile') == 'claude':
-            claude_marker = lines[0].replace('actor=Codex', 'actor=Claude', 1)
-            claude_body = body.replace(lines[0], claude_marker, 1)
-            codex_formal_pass = task_completion.is_formal_claude_pass(
-                claude_body, task_id=task['task_id'], run_id=task['run_id'],
-                contract_digest=task['task_binding']['contract_digest'],
-                result_sha=head)
+        claude_marker = lines[0].replace('actor=Codex', 'actor=Claude', 1)
+        claude_body = body.replace(lines[0], claude_marker, 1)
+        codex_formal_pass = task_completion.is_formal_claude_pass(
+            claude_body, task_id=task['task_id'], run_id=task['run_id'],
+            contract_digest=task['task_binding']['contract_digest'],
+            result_sha=head)
         if not codex_formal_pass:
             return None
     comment_id = comment.get('id')

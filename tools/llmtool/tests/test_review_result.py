@@ -50,9 +50,11 @@ def _comment(status='PASS', *, actor='Claude', head=HEAD, version=1,
     marker_status = 'PASS' if status == 'PASS' else 'FIX' if status == 'FIX' else 'FAIL'
     body = (f'<!-- activity: type=review_verdict actor={actor} target=PM status={marker_status} -->\n'
             f'Verdict: {stamp} | Version: v{version} | HEAD: {head}\n')
-    if actor in ('Claude', 'Codex') and status == 'PASS':
+    if actor in ('Claude', 'Codex'):
         body += (f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
-                 f'contract={CONTRACT} head={head}\nFORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n')
+                 f'contract={CONTRACT} head={head}\n')
+        if status == 'PASS':
+            body += 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
     body += extra
     return {'id': comment_id, 'body': body, 'created_at': created, 'updated_at': created,
             'user': {'login': 'shared-agent'}}
@@ -119,6 +121,23 @@ class ReviewResultTests(unittest.TestCase):
             developer={'provider_profile': 'claude'})
         comment = _comment(actor='Codex')
         comment['body'] = comment['body'].replace(f'task={TASK}', 'task=wrong')
+        self.assertEqual(self.run_result([comment])['state'], 'NOT_READY')
+
+    def test_bound_codex_nonpass_is_recorded_only_for_claude_task(self):
+        record = self.store.get(TASK)
+        self.store.compare_and_update(
+            TASK, expected={'record_sha256': record['record_sha256']},
+            developer={'provider_profile': 'claude'})
+        self.assertEqual(self.run_result([_comment('FIX', actor='Codex')])['state'],
+                         'REVIEW_FAIL')
+
+    def test_unbound_codex_nonpass_is_ignored(self):
+        record = self.store.get(TASK)
+        self.store.compare_and_update(
+            TASK, expected={'record_sha256': record['record_sha256']},
+            developer={'provider_profile': 'claude'})
+        comment = _comment('FIX', actor='Codex')
+        comment['body'] = comment['body'].replace(f'run={RUN}', 'run=wrong')
         self.assertEqual(self.run_result([comment])['state'], 'NOT_READY')
 
     def test_codex_pass_stays_advisory_for_codex_and_gw_tasks(self):
