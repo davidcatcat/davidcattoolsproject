@@ -164,3 +164,11 @@ Owner 步驟（Terminal.app 2.14，再在 Warp 重做一次）：
 - `tools/llmtool/tests/test_chat_tui.py`：`ConversationViewTests`（8）、`ScrollSelectTests`（9），取代 3 個游標模型測試，更新 2 個狀態列字串。
 - `tools/llmtool/README.md` TUI 段落。
 - 本報告。
+
+## 11. Codex Review v1（PR #606）兩項 P2 的處理
+
+1. **剪貼簿無上限且阻塞 UI 執行緒**（`chat_tui_view.py` `copy_to_clipboard`）。修法：`ConversationView.copy()` 先算 UTF-8 位元組數，超過 `COPY_LIMIT_BYTES`（1 MiB）直接拒絕並在狀態列顯示 `選取 N KB 超過複製上限 1024 KB`；未超過時在 daemon 執行緒 `llmtool-clipboard` 執行 pbcopy（原有 3 s timeout），UI 迴圈不等待，狀態列期間顯示 `複製中…`，完成後經 `app.invalidate`（thread-safe）更新為 `已複製 N 字`／`複製失敗`。`wait_copy()` 供測試 join。測試：`test_copy_runs_off_the_ui_thread_and_refuses_oversized_selections`（慢 copier 期間 `end_drag` 立即返回、狀態 `複製中…`、執行緒名稱；上限 8 bytes 時 12 bytes 的選取被拒、6 bytes 的照常複製）。
+2. **折行以 code point 計寬，ZWJ 表情、旗幟、組合字可能被拆開**（`Wrapper.line_rows`）。修法：以 `wcwidth.iter_graphemes`（wcwidth 0.9.2，prompt_toolkit 既有依賴，已在 `worktree-env.lock`；舊版 wcwidth 無此函式時退回模組內的保守叢集規則：組合字、ZWJ 及其後字、變體選擇子、膚色修飾、tag、區域指示字成對）切成字素叢集，列只在叢集邊界斷開；`offset_at` 把落在叢集內的欄位對應到叢集起點，選取永不切半。**寬度刻意用 prompt_toolkit 渲染器的算法**（逐 code point `get_cwidth` 相加，例如 👨‍👩‍👧 = 2+0+2+0+2 = 6 格、🇹🇼 = 4 格），而不是 `wcswidth` 的 2 格：渲染器是逐 code point 擺放的，若算得比它畫的少，該列會溢出被截掉。這是 prompt_toolkit 全 TUI（輸入框、狀態列）既有的表情寬度假設，本次不改變。未新增依賴。測試：`test_wrapping_and_clicks_keep_grapheme_clusters_whole`（ZWJ 家庭、旗幟、e+組合重音、❤️ VS16、CJK；寬度 4–24 全部不拆、不溢出、拼回原文；叢集內點擊回到起點；拖曳複製整個叢集）。
+   PTY：pyte 無法模擬 ZWJ/VS16（畫面出現錯位），故改由真實 `llmtool chat --tui` 程序在 80/73/45 欄的 PTY 中轉存面板實際排版列（`pty_emoji2.py`）：三種寬度各 132/134/158 列，含叢集的列 21/14/20，**拆開的叢集 0，超寬的列 0**。
+
+`tests.test_chat_tui`：151/151 PASS。

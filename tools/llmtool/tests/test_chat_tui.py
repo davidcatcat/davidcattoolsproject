@@ -3083,6 +3083,7 @@ class ConversationViewTests(unittest.TestCase):
         self.assertEqual(view.status(), '已選 %d 字' % (view.head - start))
         text = view.end_drag(view.head)
         self.assertEqual(text, view.text[start:view.head])
+        self.assertTrue(view.wait_copy())
         self.assertEqual(copies, [text])
         self.assertIn('\n', text)
         self.assertIn('中文長行測試', text)
@@ -3102,6 +3103,7 @@ class ConversationViewTests(unittest.TestCase):
         self.assertIsNone(view.selected_range())
         view.begin_drag(2)
         self.assertEqual(view.end_drag(2), 'hello')
+        view.wait_copy()
         self.assertEqual(copies, ['hello'])
         self.assertEqual(view.selected_range(), (0, 5))
         view.begin_drag(7)
@@ -3115,8 +3117,73 @@ class ConversationViewTests(unittest.TestCase):
         view.layout(10, 2)
         view.begin_drag(0)
         self.assertEqual(view.end_drag(3), 'abc')
+        self.assertTrue(view.wait_copy())
         self.assertTrue(view.copy_failed)
         self.assertIn('複製失敗', view.status())
+
+    def test_copy_runs_off_the_ui_thread_and_refuses_oversized_selections(self):
+        import threading
+        started, release, seen = threading.Event(), threading.Event(), []
+
+        def slow_copier(text):
+            seen.append(threading.current_thread().name)
+            started.set()
+            release.wait(5)
+            return True
+        view = chat_tui_view.ConversationView(get_cwidth, copier=slow_copier)
+        view.set_text('中文' * 10)
+        view.layout(20, 2)
+        view.begin_drag(0)
+        self.assertEqual(view.end_drag(4), '中文中文')      # returns at once: the copy is pending
+        self.assertTrue(started.wait(2))
+        self.assertEqual(view.status(), '複製中…')
+        self.assertTrue(view.copy_pending())
+        release.set()
+        self.assertTrue(view.wait_copy())
+        self.assertEqual(seen, ['llmtool-clipboard'])
+        self.assertEqual(view.status(), '已複製 4 字')
+        with patch('llmtool.chat_tui_view.COPY_LIMIT_BYTES', 8):
+            calls = []
+            view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: calls.append(t) or True)
+            view.set_text('中文' * 10)
+            view.layout(20, 2)
+            view.begin_drag(0)
+            self.assertEqual(view.end_drag(4), '中文中文')   # 12 UTF-8 bytes > 8: refused
+            self.assertEqual(calls, [])
+            self.assertTrue(view.copy_failed)
+            self.assertEqual(view.status(), '選取 0 KB 超過複製上限 0 KB')
+            view.begin_drag(0)
+            self.assertEqual(view.end_drag(2), '中文')       # 6 bytes: copied
+            self.assertTrue(view.wait_copy())
+            self.assertEqual(calls, ['中文'])
+
+    def test_wrapping_and_clicks_keep_grapheme_clusters_whole(self):
+        family, flag, accented, heart = ('\U0001F468\u200d\U0001F469\u200d\U0001F467',
+                                        '\U0001F1F9\U0001F1FC', 'e\u0301', '\u2764\ufe0f')
+        line = 'ab' + family + 'cd' + flag + accented + 'f中' + heart + 'g'
+        wrapper = chat_tui_view.Wrapper(get_cwidth)
+        self.assertEqual([line[s:e] for s, e, _w in wrapper.clusters(line)],
+                         ['a', 'b', family, 'c', 'd', flag, accented, 'f', '中', heart, 'g'])
+        # Widths are what prompt_toolkit's renderer draws (per code point), so rows never overflow.
+        self.assertEqual([w for _s, _e, w in wrapper.clusters(line)],
+                         [1, 1, 6, 1, 1, 4, 1, 1, 2, 1, 1])
+        for width in range(4, 25):
+            rows = [line[s:e] for s, e in wrapper.line_rows(line, width)]
+            self.assertEqual(''.join(rows), line)
+            for row in rows:
+                for cluster in (family, flag, accented, heart):
+                    self.assertFalse(0 < sum(1 for c in cluster if c in row) < len(cluster),
+                                     'width %d split %r in %r' % (width, cluster, row))
+                self.assertFalse(row.endswith('\u200d') or row.startswith('\u0301'))
+                self.assertLessEqual(sum(get_cwidth(c) for c in row), max(width, 6))
+        view, copies = self.make(line, width=8, height=4)
+        self.assertEqual(view.offset_at(0, 2), 2)       # family starts at column 2
+        self.assertEqual(view.offset_at(0, 5), 2)       # inside the family: its start
+        self.assertEqual(view.offset_at(1, 3), line.index(flag))   # inside the flag
+        view.begin_drag(view.offset_at(0, 3))
+        self.assertEqual(view.end_drag(view.offset_at(1, 3)), family + 'cd')
+        view.wait_copy()
+        self.assertEqual(copies, [family + 'cd'])
 
     def test_clipboard_tool_is_called_with_the_exact_text(self):
         with patch('llmtool.chat_tui_view.shutil.which', return_value='/usr/bin/pbcopy'), \
@@ -3244,6 +3311,7 @@ class ScrollSelectTests(Base):
             self.assertLessEqual(int(tops['held'][:3]), int(tops['before'][:3]) - 3)
 
         def released(ui):
+            self.assertTrue(ui.view.wait_copy())
             text = ui.view.selected_text()
             start, end = ui.view.selected_range()
             _line, row_start, _row_end = ui.view.rows[ui.view.row_of(start)]
@@ -3373,10 +3441,12 @@ class ScrollSelectTests(Base):
         async def selected(ui):
             await self.settle(ui)
             self.assertTrue(ui.view.selected_range())
+            self.assertTrue(ui.view.wait_copy())
             self.assertEqual(len(self.copies), 1)
 
         async def after_ctrl_c(ui):
             await self.settle(ui)
+            self.assertTrue(ui.view.wait_copy())
             self.assertIsNone(ui.view.selected_range())
             self.assertEqual(self.copies, [self.copies[0], self.copies[0]])
             self.assertFalse(ui.quit_pending)

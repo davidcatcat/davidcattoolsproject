@@ -30,7 +30,14 @@ import bisect
 import shutil
 import subprocess
 import sys
+import threading
 import time
+import unicodedata
+
+try:
+    from wcwidth import iter_graphemes as _iter_graphemes   # prompt_toolkit dependency (0.9.x)
+except ImportError:  # older wcwidth: a conservative cluster rule below
+    _iter_graphemes = None
 
 WHEEL_ROWS = 1            # Rows per wheel event: Terminal.app sends one event per scrolled line.
 AUTOSCROLL_SECONDS = 0.05  # A drag held at or beyond the pane edge scrolls one row per tick.
@@ -38,6 +45,32 @@ COPIED_SECONDS = 3.0      # How long the status bar reports a copy.
 DOUBLE_CLICK_SECONDS = 0.35
 TAB_WIDTH = 4
 CACHE_LINES = 4096        # Wrapped-line cache entries kept before it is cleared.
+COPY_LIMIT_BYTES = 1024 * 1024   # Largest selection handed to the clipboard tool (UTF-8 bytes).
+_ZWJ = "\u200d"
+
+
+def iter_graphemes(line):
+    """Grapheme clusters of ``line`` (wcwidth's segmentation; a small rule without it)."""
+    if _iter_graphemes is not None:
+        yield from _iter_graphemes(line)
+        return
+    cluster = ""
+    pending_join = False
+    for char in line:
+        code = ord(char)
+        joins = (pending_join or unicodedata.combining(char)
+                 or unicodedata.category(char) in ("Mn", "Me", "Mc")
+                 or char == _ZWJ or 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF
+                 or 0x1F3FB <= code <= 0x1F3FF or 0xE0020 <= code <= 0xE007F
+                 or (0x1F1E6 <= code <= 0x1F1FF and len(cluster) == 1
+                     and 0x1F1E6 <= ord(cluster) <= 0x1F1FF))
+        if cluster and not joins:
+            yield cluster
+            cluster = ""
+        cluster += char
+        pending_join = char == _ZWJ
+    if cluster:
+        yield cluster
 
 
 def copy_to_clipboard(text):
@@ -59,30 +92,52 @@ def copy_to_clipboard(text):
 
 
 class Wrapper:
-    """Wrap logical lines into rows of at most ``width`` columns; cached per line."""
+    """Wrap logical lines into rows of at most ``width`` columns; cached per line.
+
+    Rows break only between grapheme clusters (joined emoji, flags, base + combining
+    marks stay together) and a cluster's width is what prompt_toolkit's renderer will
+    use for it: the sum of ``get_cwidth`` over its code points. ``wcswidth`` would say a
+    ZWJ family is 2 cells, but the renderer places the code points one by one (2+0+2+0+2),
+    so counting fewer cells than it draws would overflow the row and get it cut.
+    """
 
     def __init__(self, cwidth):
         self._cwidth = cwidth
         self._cache = {}
+        self._clusters = {}
 
     def char_width(self, char):
         if char == "\t":
             return TAB_WIDTH
         return max(0, self._cwidth(char))
 
+    def clusters(self, line):
+        """[(start, end, width)] grapheme clusters of ``line`` (offsets into it)."""
+        found = self._clusters.get(line)
+        if found is not None:
+            return found
+        found = []
+        position = 0
+        for cluster in iter_graphemes(line):
+            found.append((position, position + len(cluster), sum(map(self.char_width, cluster))))
+            position += len(cluster)
+        if len(self._clusters) >= CACHE_LINES:
+            self._clusters.clear()
+        self._clusters[line] = found
+        return found
+
     def line_rows(self, line, width):
-        """[(start, end)] offsets into ``line`` of each row; a wide char never splits."""
+        """[(start, end)] offsets into ``line`` of each row; a cluster never splits."""
         key = (line, width)
         rows = self._cache.get(key)
         if rows is not None:
             return rows
         rows = []
         start = column = 0
-        for index, char in enumerate(line):
-            span = self.char_width(char)
+        for begin, _end, span in self.clusters(line):
             if column + span > width and column > 0:
-                rows.append((start, index))
-                start, column = index, 0
+                rows.append((start, begin))
+                start, column = begin, 0
             column += span
         if start < len(line) or not rows:
             rows.append((start, len(line)))   # a line that exactly fills its rows adds no blank row
@@ -123,6 +178,9 @@ class ConversationView:
         self._copier = copier
         self.copied = None      # (characters, monotonic time) of the last copy
         self.copy_failed = False
+        self.copy_error = None  # why the last copy failed (status text)
+        self._copy_thread = None
+        self.on_copied = None   # called (from the copy thread) when a copy finishes
         self._last_click = None  # (offset, monotonic time) of the last click without a drag
 
     # -- text and layout -------------------------------------------------------------
@@ -186,16 +244,27 @@ class ConversationView:
         return max(0, bisect.bisect_right(self._starts, offset) - 1)
 
     def offset_at(self, row, column):
-        """Text offset under screen column ``column`` of ``row``; past its end, the row end."""
+        """Text offset under screen column ``column`` of ``row``; past its end, the row end.
+
+        A column inside a cluster (the right half of a wide char, a joined emoji) maps to
+        the cluster start, so a selection never splits one.
+        """
         if not self.rows:
             return 0
         row = max(0, min(row, len(self.rows) - 1))
         _line, start, end = self.rows[row]
+        line_start = self.text.rfind("\n", 0, start) + 1
+        line_end = self.text.find("\n", start)
+        line_text = self.text[line_start:None if line_end < 0 else line_end]
         used = 0
-        for index in range(start, end):
-            span = self._wrapper.char_width(self.text[index])
+        for begin, _finish, span in self._wrapper.clusters(line_text):
+            offset = line_start + begin
+            if offset < start:
+                continue
+            if offset >= end:
+                break
             if used + span > column:
-                return index
+                return offset
             used += span
         return end
 
@@ -263,13 +332,41 @@ class ConversationView:
         return word
 
     def copy(self, text):
+        """Hand ``text`` to the clipboard tool on a worker thread; False if over the limit.
+
+        The UI loop never waits for pbcopy; ``status()`` says 複製中… meanwhile and
+        ``wait_copy()`` joins it (tests). A selection over COPY_LIMIT_BYTES is refused
+        and the status bar says so.
+        """
+        size = len(text.encode("utf-8"))
+        if size > COPY_LIMIT_BYTES:
+            self.copied, self.copy_failed = (len(text), time.monotonic()), True
+            self.copy_error = "選取 %d KB 超過複製上限 %d KB" % (size // 1024, COPY_LIMIT_BYTES // 1024)
+            return False
         copier = self._copier or copy_to_clipboard
-        try:
-            ok = bool(copier(text))
-        except Exception:
-            ok = False
-        self.copied, self.copy_failed = (len(text), time.monotonic()), not ok
-        return ok
+
+        def run():
+            try:
+                ok = bool(copier(text))
+            except Exception:
+                ok = False
+            self.copy_error = None if ok else "複製失敗 (無剪貼簿工具)"
+            self.copied, self.copy_failed = (len(text), time.monotonic()), not ok
+            if self.on_copied is not None:
+                self.on_copied()
+
+        self.copied, self.copy_failed, self.copy_error = (len(text), time.monotonic()), False, None
+        self._copy_thread = threading.Thread(target=run, name="llmtool-clipboard", daemon=True)
+        self._copy_thread.start()
+        return True
+
+    def copy_pending(self):
+        return self._copy_thread is not None and self._copy_thread.is_alive()
+
+    def wait_copy(self, timeout=5.0):
+        if self._copy_thread is not None:
+            self._copy_thread.join(timeout)
+        return not self.copy_pending()
 
     def copy_selection(self):
         text = self.selected_text()
@@ -280,8 +377,10 @@ class ConversationView:
     # -- status ------------------------------------------------------------------------
     def status(self):
         """Short status-bar field: copy result, selection size, or the reading position."""
+        if self.copy_pending():
+            return "複製中…"
         if self.copied is not None and time.monotonic() - self.copied[1] < COPIED_SECONDS:
-            return "複製失敗 (無剪貼簿工具)" if self.copy_failed else "已複製 %d 字" % self.copied[0]
+            return self.copy_error if self.copy_failed else "已複製 %d 字" % self.copied[0]
         span = self.selected_range()
         if span:
             return "已選 %d 字" % (span[1] - span[0])

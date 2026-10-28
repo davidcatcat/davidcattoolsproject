@@ -595,6 +595,7 @@ class ChatTUI:
         self.app.before_render += lambda _app: self._list_tick()
         self._default_mouse_binding = load_mouse_bindings().bindings[0]
         _enable_mouse_drag_reporting(self.app.output)
+        self.view.on_copied = self.app.invalidate   # thread-safe: shows 已複製 when pbcopy is done
 
     # -- rendering -----------------------------------------------------------------
     def status_text(self):
