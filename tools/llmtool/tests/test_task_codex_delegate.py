@@ -365,30 +365,10 @@ class CodexDelegateTests(unittest.TestCase):
             self._dispatch(task, registration=other_d6,
                 bound_registration=SimpleNamespace(**{
                     **vars(other_d6), 'native_session_id': '12345678-1234-4234-8234-123456789abc'}))
-        collected_result = {'task_id': task['task_id'], 'run_id': task['run_id'],
-            'executor_task_id': registration.task_id,
-            'executor_identity': registration.trusted_agent_id,
-            'executor_session_ref': registration.session_ref,
-            'executor_native_session_id': bound_registration.native_session_id,
-            'executor_native_session': 'VERIFIED', 'root': str(self.root),
-            'common_dir': self.common_dir, 'branch': registration.branch,
-            'source_sha': self.source_sha, 'result_head': None,
-            'result_mode': 'UNCOMMITTED_WORKTREE', 'changed_paths': ['src.py'],
-            'diff_sha256': 'e' * 64, 'status_sha256': 'f' * 64,
-            'file_manifest_sha256': 'a' * 64}
-        collect_calls = []
-
+        callback_args = []
         def callback_handler(task_id, executor_task_id, *, store):
-            with patch.object(task_completion, 'collect_executor_worktree_result',
-                              return_value=collected_result) as collect, \
-                 patch.object(task_submission_cli, '_recollect_direct_worktree'), \
-                 patch.object(task_submission_cli, '_active_pm_runtime', return_value=True), \
-                 patch.object(task_submission_cli, '_record_ready_event'), \
-                 redirect_stdout(io.StringIO()):
-                outcome = run_task_direct_result_event(
-                    task_id, executor_task_id, store=store)
-                collect_calls.append(collect.call_args.kwargs)
-                return outcome
+            callback_args.append((task_id, executor_task_id, store))
+            return 0
 
         with redirect_stdout(io.StringIO()):
             result, saved, callback = self._dispatch(task, registration=registration,
@@ -397,16 +377,38 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertIn('VALUE = 2', saved['developer']['artifact'])
-        self.assertEqual(saved['developer']['direct_result_callback']['state'],
-                         'PM_EVIDENCE_READY')
-        self.assertEqual(saved['developer']['direct_result_callback']['evidence']['source_sha'],
-                         self.source_sha)
-        self.assertEqual(saved['developer']['direct_result_callback']['evidence']['result_head'],
-                         result_head)
-        self.assertEqual(collect_calls[0]['source_sha'], self.source_sha)
-        self.assertEqual(collect_calls[0]['expected_result_head'], result_head)
-        self.assertNotIn('D6_TASK_BINDING_MISMATCH',
-                         saved['developer']['direct_result_callback']['missing_gates'])
+        self.assertEqual(len(callback_args), 1)
+        registry_path = (Path(self.common_dir) / 'llmtool-worktrees' /
+                         'executor-task-1.json')
+        registry = json.loads(registry_path.read_text(encoding='utf-8'))
+        registry['native_session_id'] = bound_registration.native_session_id
+        registry_path.write_text(json.dumps(registry), encoding='utf-8')
+        registry_path.chmod(0o600)
+
+        def bounded_test_result(*, root, source_sha, diff_sha256, **_kwargs):
+            return [{'path': 'src.py', 'status': 'PASS', 'exit_code': 0,
+                'source_sha': source_sha, 'result_head': None,
+                'diff_sha256': diff_sha256, 'output_sha256': 'b' * 64}]
+
+        task_id, executor_task_id, callback_store = callback_args[0]
+        with patch.object(task_completion, 'run_bounded_worktree_tests',
+                          side_effect=bounded_test_result), \
+             patch.object(task_submission_cli, '_active_pm_runtime', return_value=True), \
+             patch.object(task_submission_cli, '_record_ready_event'), \
+             redirect_stdout(io.StringIO()):
+            callback_result = run_task_direct_result_event(
+                task_id, executor_task_id, store=callback_store)
+        saved = self.store.get(task['task_id'])
+        direct_callback = saved['developer']['direct_result_callback']
+        self.assertEqual(callback_result, 0)
+        self.assertEqual(direct_callback['state'], 'PM_EVIDENCE_READY',
+                         direct_callback['missing_gates'])
+        self.assertEqual(direct_callback['missing_gates'], [])
+        self.assertEqual(direct_callback['evidence']['source_sha'], self.source_sha)
+        self.assertEqual(direct_callback['evidence']['result_head'], result_head)
+        self.assertEqual(direct_callback['evidence']['result']['source_sha'], self.source_sha)
+        self.assertEqual(direct_callback['evidence']['result']['changed_paths'], ['src.py'])
+        self.assertNotIn('D6_TASK_BINDING_MISMATCH', direct_callback['missing_gates'])
         callback.assert_called_once()
 
     def test_timeout_recovery_dispatch_rejects_committed_out_of_scope_diff(self):
