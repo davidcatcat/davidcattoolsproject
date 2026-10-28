@@ -26,7 +26,12 @@ ROOT = Path(__file__).resolve().parents[3]
 PROMPT = 'DG1_SYNTHETIC_PROMPT'
 PRIVATE = 'DG1_PRIVATE_STDERR'
 SECRET = 'DG1_SYNTHETIC_SECRET'
-PROCESS_WAIT_TIMEOUT = float(os.environ.get('LLMTOOL_TEST_PROCESS_WAIT_TIMEOUT', '30'))
+# Fixture helpers load this file with runpy in child processes. Keep their
+# import independent of the parent-only, load-tolerant test timeout setting.
+PROCESS_WAIT_TIMEOUT = (
+    30.0 if __name__ == '<run_path>'
+    else float(os.environ.get('LLMTOOL_TEST_PROCESS_WAIT_TIMEOUT', '30'))
+)
 # Source budget, per invocation (not per full suite): readiness 10s, provider
 # default 20s, wrapper drain 5s, disappearance 5s. Double that 40s envelope
 # for scheduling margin. Existing product assertions expire BEFORE this guard;
