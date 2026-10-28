@@ -29,6 +29,14 @@ def source_freshness():
         top = subprocess.run(['git', 'rev-parse', '--show-toplevel'], **common)
         if top.returncode != 0 or Path(top.stdout.strip()).resolve() != repo_root:
             return 'UNKNOWN'
+        try:
+            subprocess.run(
+                ['git', 'fetch', '--quiet', '--no-tags', 'origin', 'main'],
+                cwd=str(repo_root), capture_output=True, text=True,
+                timeout=_TIMEOUT_SECONDS, check=False,
+                env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
+        except (OSError, subprocess.TimeoutExpired):
+            pass
         head = subprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], **common)
         origin_main = subprocess.run(
             ['git', 'rev-parse', '--verify', 'refs/remotes/origin/main'], **common)
