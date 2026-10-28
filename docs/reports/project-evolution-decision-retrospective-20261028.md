@@ -451,7 +451,7 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 ### 9B.4 對 AI 團隊的要求（不需 Owner 管細節）
 
 1. 先量再做：一週內交用量分解表；沒有表不開新的「省 token」工程。
-2. 先砍最大項：規則文件瘦身、審查分級（OWNER_DECISION_REQUIRED）、Reviewer 復用 worktree 只讀 delta、Codex 契約放寬與上限可設、停 merge train（OWNER_DECISION_REQUIRED）。
+2. 先砍最大項：規則文件瘦身、審查分級（OWNER_DECISION_REQUIRED）、Reviewer 復用 worktree 只讀 delta（OWNER_DECISION_REQUIRED）、Codex 契約放寬與上限可設（OWNER_DECISION_REQUIRED；實作時必須保留既有的驗收、預算與安全防護）、停 merge train（OWNER_DECISION_REQUIRED）。
 3. ~~便宜模型退回實驗位置：只做合成題與批次小修~~（**已被下文 Owner 定性取代**；任何派工政策或路線切換的建議皆為 **OWNER_DECISION_REQUIRED**），不再以「省 token」為名立 P0。Owner 2026-10-28 已定性：gw 是公司自建 LLM、為省大型 AI token 的必做路線，但「不能節省，那就沒必要了」（9C.3 第 1 題），所以 gw 的下一步只有量測整題總成本（含失敗與修復、PM 準備 context、套 diff、Reviewer 審查）與「直接派 Codex」的整題成本；OpenCode／AGY 是省 token 用途、可以後接（9C.1 第 5 題）。
 4. 每個優化附前後數字；「做的事是不是產品」列入成本報告。
 
