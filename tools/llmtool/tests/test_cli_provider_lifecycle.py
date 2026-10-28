@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[3]
 PROMPT = 'DG1_SYNTHETIC_PROMPT'
 PRIVATE = 'DG1_PRIVATE_STDERR'
 SECRET = 'DG1_SYNTHETIC_SECRET'
+PROCESS_WAIT_TIMEOUT = float(os.environ.get('LLMTOOL_TEST_PROCESS_WAIT_TIMEOUT', '30'))
 # Source budget, per invocation (not per full suite): readiness 10s, provider
 # default 20s, wrapper drain 5s, disappearance 5s. Double that 40s envelope
 # for scheduling margin. Existing product assertions expire BEFORE this guard;
@@ -205,7 +206,7 @@ def _zombie_only_group(pgid, known_pids, pinned_pid=None):
     """Read complete membership, not just the previously captured descendants."""
     try:
         result = subprocess.run(['/bin/ps', '-A', '-o', 'pid=,pgid=,stat='],
-                                capture_output=True, text=True, timeout=5)
+                                capture_output=True, text=True, timeout=PROCESS_WAIT_TIMEOUT)
     except (OSError, subprocess.SubprocessError, ValueError):
         return False
     if (type(result.returncode) is not int or result.returncode != 0
@@ -306,7 +307,7 @@ def _interrupted_runner(directory, fault):
                 (directory / 'cleanup-ran').write_text('unexpected')
                 if fixture.poll() is None:
                     fixture.kill()
-                fixture.wait(timeout=5)
+                fixture.wait(timeout=PROCESS_WAIT_TIMEOUT)
             self.addCleanup(cleanup)
             # A real killed runner cannot reach its unittest cleanup.
             while True:
@@ -395,7 +396,7 @@ def _interruption_watchdog(directory, fault):
     finally:
         teardown()
         if runner is not None:
-            report['runner_exit'] = runner.wait(timeout=5)
+            report['runner_exit'] = runner.wait(timeout=PROCESS_WAIT_TIMEOUT)
             runner.stdin.close()
         if 'pids' in report:
             deadline = time.monotonic() + 5
@@ -449,7 +450,7 @@ class CLIProviderLifecycleTests(unittest.TestCase):
         # mistake kill(pid, 0) alone for a surviving/running process.
         result = subprocess.run(['/bin/ps', '-o', 'pid=,ppid=,pgid=,stat=', '-p',
                                  ','.join(map(str, pids))], capture_output=True, text=True,
-                                timeout=5)
+                                timeout=PROCESS_WAIT_TIMEOUT)
         if result.returncode not in (0, 1) or result.stderr:
             raise AssertionError('process-state probe failed')
         return {int(fields[0]): {'ppid': int(fields[1]), 'pgid': int(fields[2]), 'state': fields[3]}
@@ -479,7 +480,7 @@ class CLIProviderLifecycleTests(unittest.TestCase):
         try:
             if self.process is not None and self.process.poll() is None:
                 self.process.kill()
-                self.process.communicate(timeout=5)
+                self.process.communicate(timeout=PROCESS_WAIT_TIMEOUT)
         except BaseException as error:
             primary = error
         try:
@@ -497,7 +498,7 @@ class CLIProviderLifecycleTests(unittest.TestCase):
         finally:
             if self.process is not None:
                 try:
-                    self.process.wait(timeout=5)
+                    self.process.wait(timeout=PROCESS_WAIT_TIMEOUT)
                 except BaseException as error:
                     secondary.append(error)
                 for stream in (self.process.stdout, self.process.stderr):
@@ -625,7 +626,10 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         deadline = time.monotonic() + 10
         while not self.capture.exists():
             if self.process.poll() is not None or time.monotonic() >= deadline:
-                out, err = self.process.communicate(timeout=5)
+                try:
+                    out, err = self.process.communicate(timeout=PROCESS_WAIT_TIMEOUT)
+                except subprocess.TimeoutExpired:
+                    self._fail_after_process_timeout('synthetic provider readiness')
                 self.fail('synthetic provider did not reach readiness: ' + repr((out, err)))
             time.sleep(0.01)  # Readiness handshake, not a guessed signal delay.
         self.evidence = json.loads(self.capture.read_text())
@@ -633,6 +637,23 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         self.assertFalse(self.evidence['secret_inherited'])
         self.assertEqual(self.evidence['pgid'], self.evidence['pids'][0])
         self.assertNotIn(ROOT, Path(self.evidence['cwd']).parents)
+
+    def _fail_after_process_timeout(self, operation):
+        cleanup_error = None
+        try:
+            self.cleanup_owned_fixture()
+        except BaseException as failure:
+            cleanup_error = failure
+        detail = f'{operation} exceeded {PROCESS_WAIT_TIMEOUT:g}s; owned process cleanup attempted'
+        if cleanup_error is not None:
+            detail += f' ({type(cleanup_error).__name__})'
+        self.fail(detail)
+
+    def communicate(self, operation):
+        try:
+            return self.process.communicate(timeout=PROCESS_WAIT_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            self._fail_after_process_timeout(operation)
 
     def assert_private_omitted(self, out, err):
         self.assert_fixture_budget()
@@ -648,7 +669,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         self.assert_terminated(number)
 
     def assert_terminated(self, number):
-        out, err = self.process.communicate(timeout=5)
+        out, err = self.communicate('signal termination')
         deadline = time.monotonic() + 5
         while self.running(self.evidence['pids']) and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -664,14 +685,14 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
 
     def successful(self, provider):
         self.launch(provider, 'success')
-        out, err = self.process.communicate(timeout=5)
+        out, err = self.communicate('successful provider completion')
         self.assertEqual((self.process.returncode, out, err), (0, b'DG1_FINAL\n', b''))
         self.assertFalse(Path(self.evidence['cwd']).exists())
         self.assert_private_omitted(out, err)
 
     def timed_out(self, provider):
         self.launch(provider, timeout=1)
-        out, err = self.process.communicate(timeout=5)
+        out, err = self.communicate('provider timeout completion')
         self.assertEqual((self.process.returncode, out), (1, b''))
         self.assertIn(b'code=PROVIDER_TIMEOUT', err)
         self.assertIn(b'trace=not-saved', err)
@@ -720,7 +741,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         self.assertEqual(len(self.evidence['pids']), 3)
         self.process.send_signal(number)
         (self.directory / 'release').write_text('complete')
-        out, err = self.process.communicate(timeout=5)
+        out, err = self.communicate('inherited signal completion')
         self.assertEqual((self.process.returncode, out, err), (0, b'DG1_FINAL\n', b''))
         self.assertEqual(self.running(self.evidence['pids']), {})
         # Cooperative successful children/grandchildren are waited/reaped too.
@@ -748,7 +769,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         before = signal.getsignal(signal.SIGCHLD)
         self.launch(provider, 'release', ignored=signal.SIGCHLD)
         (self.directory / 'release').write_text('complete')
-        out, err = self.process.communicate(timeout=5)
+        out, err = self.communicate('inherited SIGCHLD completion')
         self.assertEqual((self.process.returncode, out, err), (0, b'DG1_FINAL\n', b''))
         self.assertEqual(self.states(self.evidence['pids']), {})
         self.assertFalse(Path(self.evidence['cwd']).exists())
@@ -801,7 +822,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
             with self.subTest(captured=captured):
                 process = Mock()
                 process.poll.return_value = None
-                failure = subprocess.TimeoutExpired('synthetic wrapper', 5)
+                failure = subprocess.TimeoutExpired('synthetic wrapper', PROCESS_WAIT_TIMEOUT)
                 process.communicate.side_effect = failure
                 evidence = {'pids': [123, 124, 125], 'pgid': 123, 'cwd': '/synthetic-runtime'}
                 fixture = CLIProviderLifecycleTests('runTest')
@@ -816,7 +837,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
                     self.assertIs(raised.exception, failure)
                     kill.assert_called_once_with(123, signal.SIGKILL)
                     process.kill.assert_called_once()
-                    process.wait.assert_called_once_with(timeout=5)
+                    process.wait.assert_called_once_with(timeout=PROCESS_WAIT_TIMEOUT)
                     process.stdout.close.assert_called_once()
                     process.stderr.close.assert_called_once()
                     remove.assert_called_once_with('/synthetic-runtime', ignore_errors=True)
@@ -837,9 +858,9 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         fixture.evidence = {'pids': [123], 'pgid': 123, 'cwd': '/synthetic-runtime'}
         fixture.process = Mock()
         fixture.process.poll.return_value = None
-        failure = subprocess.TimeoutExpired('synthetic wrapper', 5)
+        failure = subprocess.TimeoutExpired('synthetic wrapper', PROCESS_WAIT_TIMEOUT)
         fixture.process.communicate.side_effect = failure
-        fixture.process.wait.side_effect = subprocess.TimeoutExpired('synthetic reap', 5)
+        fixture.process.wait.side_effect = subprocess.TimeoutExpired('synthetic reap', PROCESS_WAIT_TIMEOUT)
         with patch.object(fixture, '_running', side_effect=OSError('synthetic inspection')), \
                 patch.object(os, 'killpg') as kill, patch.object(shutil, 'rmtree') as remove:
             with self.assertRaises(subprocess.TimeoutExpired) as raised:
@@ -877,7 +898,8 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
                     self.permission_cleanup(path)
                     kill.assert_called_once_with(123, signal.SIGKILL)
                     probe.assert_called_once_with(['/bin/ps', '-A', '-o', 'pid=,pgid=,stat='],
-                                                  capture_output=True, text=True, timeout=5)
+                                                  capture_output=True, text=True,
+                                                  timeout=PROCESS_WAIT_TIMEOUT)
 
     def test_darwin_permission_rejects_live_unknown_and_unverifiable_groups(self):
         cases = {
@@ -893,7 +915,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
             'changed-group': Mock(returncode=0, stderr='', stdout='123 456 Z\n124 123 Z\n'),
             'ps-failed': Mock(returncode=1, stderr='', stdout='123 123 Z\n'),
             'ps-warning': Mock(returncode=0, stderr='synthetic warning', stdout='123 123 Z\n'),
-            'timeout': subprocess.TimeoutExpired('/bin/ps', 5),
+            'timeout': subprocess.TimeoutExpired('/bin/ps', PROCESS_WAIT_TIMEOUT),
             'unavailable': OSError('synthetic unavailable'),
         }
         for path in ('watchdog', 'fixture'):
@@ -944,7 +966,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         fixture.evidence = {'pids': [123, 124], 'pgid': 123, 'cwd': '/mock-runtime'}
         fixture.process = Mock()
         fixture.process.poll.return_value = None
-        failure = subprocess.TimeoutExpired('synthetic wrapper', 5)
+        failure = subprocess.TimeoutExpired('synthetic wrapper', PROCESS_WAIT_TIMEOUT)
         fixture.process.communicate.side_effect = failure
         with patch.object(fixture, '_running', return_value={123: {'pgid': 123}}), \
                 patch.object(sys, 'platform', 'darwin'), \
@@ -956,7 +978,7 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
                 fixture.cleanup_owned_fixture()
             self.assertIs(raised.exception, failure)
             self.assertEqual(failure.fixture_cleanup_errors, ('PermissionError',))
-            fixture.process.wait.assert_called_once_with(timeout=5)
+            fixture.process.wait.assert_called_once_with(timeout=PROCESS_WAIT_TIMEOUT)
             fixture.process.stdout.close.assert_called_once()
             fixture.process.stderr.close.assert_called_once()
             remove.assert_called_once()
@@ -994,12 +1016,12 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             # Keep stdin OPEN; no prompt/readiness or fork can be reached.
-            self.assertEqual(process.wait(timeout=5), -signal.SIGALRM)
+            self.assertEqual(process.wait(timeout=PROCESS_WAIT_TIMEOUT), -signal.SIGALRM)
             self.assertFalse(self.capture.exists())
         finally:
             if process.returncode is None:
                 os.killpg(process.pid, signal.SIGKILL)
-                process.wait(timeout=5)
+                process.wait(timeout=PROCESS_WAIT_TIMEOUT)
             process.stdin.close()
 
     def interrupted_runner(self, fault='ordinary'):
@@ -1014,11 +1036,11 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
             # communicate would close its stdin too early: that is the watchdog's
             # owner-liveness pipe. Wait with pipes open; report is bounded JSON.
             watchdog.wait(timeout=28)
-            out, err = watchdog.communicate(timeout=5)
+            out, err = watchdog.communicate(timeout=PROCESS_WAIT_TIMEOUT)
         finally:
             if watchdog.stdin is not None:
                 watchdog.stdin.close()  # EOF triggers fallback if outer test fails.
-            watchdog.wait(timeout=5)
+            watchdog.wait(timeout=PROCESS_WAIT_TIMEOUT)
             for stream in (watchdog.stdout, watchdog.stderr):
                 stream.close()
         report = json.loads(out)
@@ -1052,10 +1074,10 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
             close_fds=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         try:
             watchdog.wait(timeout=28)
-            out, err = watchdog.communicate(timeout=5)
+            out, err = watchdog.communicate(timeout=PROCESS_WAIT_TIMEOUT)
         finally:
             watchdog.stdin.close()
-            watchdog.wait(timeout=5)
+            watchdog.wait(timeout=PROCESS_WAIT_TIMEOUT)
             watchdog.stdout.close()
             watchdog.stderr.close()
         report = json.loads(out)
