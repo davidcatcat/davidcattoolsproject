@@ -4,6 +4,7 @@ import fcntl
 import atexit
 import json
 import os
+import re
 import shlex
 import signal
 import stat
@@ -125,6 +126,46 @@ def _screen_stream_text(value):
     if screened.startswith('[REDACTED_SENSITIVE_OUTPUT]') or _emitted_sensitive(screened):
         return '[withheld]'
     return screened
+
+
+_STREAM_SECRET_START = re.compile(
+    r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
+    r'\b(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
+    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
+    r'\bxox[abprs]-[A-Za-z0-9-]*|\b(?:bearer|basic)\s+\S*|'
+    r'\beyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
+_STREAM_AUTH_URL = re.compile(
+    r'\b[a-z][a-z0-9+.-]*://[^/\s?#]*:[^/\s?#]*@?[^/\s?#]*$', re.IGNORECASE)
+
+
+def _stream_safe_end(value):
+    """Return the prefix boundary before any trailing, unfinished secret token."""
+    safe_end = len(value)
+    for match in _STREAM_SECRET_START.finditer(value):
+        tail = value[match.start():]
+        # Complete matches have already been redacted by _screen_stream_text.
+        # Keep an unredacted candidate only while it can still grow into a token.
+        if ('[REDACTED]' not in tail and '[REDACTED_SENSITIVE_OUTPUT]' not in tail and
+                not any(char.isspace() for char in tail)):
+            safe_end = min(safe_end, match.start())
+        elif match.group(0).startswith('-----BEGIN') and '-----END' not in tail:
+            safe_end = min(safe_end, match.start())
+    # A delta can end in the middle of a marker (for example "gh" + "p_").
+    # Hold only that partial marker so the next delta can be screened as a whole.
+    markers = ('-----BEGIN', 'github_pat_', 'AKIA', 'ASIA', 'sk-', 'ghp_',
+               'gho_', 'ghu_', 'ghs_', 'ghr_', 'xox', 'eyJ', 'bearer', 'basic')
+    lowered = value.lower()
+    for marker in markers:
+        marker = marker.lower()
+        for size in range(1, len(marker)):
+            start = len(value) - size
+            if lowered.endswith(marker[:size]) and (
+                    start == 0 or not (value[start - 1].isalnum() or value[start - 1] == '_')):
+                safe_end = min(safe_end, start)
+    auth_url = _STREAM_AUTH_URL.search(value)
+    if auth_url is not None:
+        safe_end = min(safe_end, auth_url.start())
+    return safe_end
 
 
 def _bounded_stream_append(current, value):
@@ -714,8 +755,35 @@ class PMRuntime:
             value.update(fields)
             return value
 
+        def flush_block(index, force=False):
+            buffered = blocks.get(index, '')
+            if buffered == '[withheld]':
+                return None
+            screened = _screen_stream_text(buffered)
+            if screened == '[withheld]':
+                blocks[index] = '[withheld]'
+                return None
+            previous = emitted_lengths.get(index, 0)
+            safe_end = len(screened) if force else _stream_safe_end(screened)
+            safe_end = max(previous, safe_end)
+            if safe_end <= previous:
+                return None
+            piece = screened[previous:safe_end]
+            emitted_lengths[index] = safe_end
+            record['result_text'] = _bounded_stream_append(
+                record.get('result_text', ''), piece)
+            return emit('TEXT_DELTA', text=piece, block_index=index)
+
+        def flush_all_blocks():
+            for block_index in blocks:
+                event = flush_block(block_index, force=True)
+                if event is not None:
+                    yield event
+
         try:
             for raw in child.stdout:
+                if self._was_interrupted:
+                    yield from flush_all_blocks()
                 if self._closed:
                     return
                 if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_STREAM_LINE_BYTES:
@@ -765,22 +833,14 @@ class PMRuntime:
                                 if screened == '[withheld]':
                                     blocks[index] = '[withheld]'
                                 else:
-                                    # Retain the final token and nearby context across
-                                    # deltas; this catches credentials split at any byte.
-                                    boundary = max(screened.rfind(' '), screened.rfind('\n'),
-                                                   screened.rfind('\t'))
-                                    safe_end = max(0, boundary - 128)
-                                    marker = screened.rfind('-----BEGIN')
-                                    if marker >= 0 and '-----END' not in screened[marker:]:
-                                        safe_end = min(safe_end, marker)
-                                    previous = emitted_lengths.get(index, 0)
-                                    if safe_end > previous:
-                                        piece = screened[previous:safe_end]
-                                        emitted_lengths[index] = safe_end
-                                        record['result_text'] = _bounded_stream_append(
-                                            record.get('result_text', ''), piece)
-                                        yield emit('TEXT_DELTA', text=piece,
-                                                   block_index=index)
+                                    event = flush_block(index)
+                                    if event is not None:
+                                        yield event
+                    elif event.get('type') == 'content_block_stop':
+                        index = event.get('index', 0)
+                        flushed = flush_block(index, force=True)
+                        if flushed is not None:
+                            yield flushed
                 elif kind == 'assistant':
                     for position, item in enumerate(
                             _iter_content((line.get('message') or {}).get('content'))):
@@ -789,10 +849,13 @@ class PMRuntime:
                         if item.get('type') == 'text' and isinstance(item.get('text'), str):
                             index = item.get('index', position)
                             final_text = _screen_stream_text(item['text'])
-                            previous = emitted_lengths.get(index, 0)
                             if final_text == '[withheld]':
                                 blocks[index] = '[withheld]'
                             elif blocks.get(index) != '[withheld]':
+                                flushed = flush_block(index, force=True)
+                                if flushed is not None:
+                                    yield flushed
+                                previous = emitted_lengths.get(index, 0)
                                 remainder = final_text[min(previous, len(final_text)):]
                                 record['result_text'] = _bounded_stream_append(
                                     record.get('result_text', ''), remainder)
@@ -828,20 +891,8 @@ class PMRuntime:
                     result_text = _screen_stream_text(result) if isinstance(result, str) else ''
                     if result_text == '[withheld]':
                         result_text = ''
-                    # A result event closes the text blocks. Release any screened
-                    # tail held back to catch a credential split across deltas.
-                    for index, buffered in blocks.items():
-                        if buffered == '[withheld]':
-                            continue
-                        screened = _screen_stream_text(buffered)
-                        if screened == '[withheld]':
-                            continue
-                        previous = emitted_lengths.get(index, 0)
-                        if previous < len(screened):
-                            piece = screened[previous:]
-                            record['result_text'] = _bounded_stream_append(
-                                record.get('result_text', ''), piece)
-                            yield emit('TEXT_DELTA', text=piece, block_index=index)
+                    # The turn result closes any remaining text blocks.
+                    yield from flush_all_blocks()
                     if not result_text:
                         result_text = record.get('result_text', '')
                     usage = line.get('usage') if isinstance(line.get('usage'), dict) else {}

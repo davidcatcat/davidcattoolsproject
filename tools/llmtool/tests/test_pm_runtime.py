@@ -513,6 +513,25 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual([e['block_index'] for e in events if e['type'] == 'TEXT_DELTA'], [3, 3])
         runtime.close()
 
+    def test_block_stop_flushes_only_the_pending_secret_candidate(self):
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 4,
+             'delta': {'type': 'text_delta', 'text': 'Hi sk-'}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': 4}},
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'text', 'index': 4, 'text': 'Hi sk-'}]}},
+            {'type': 'result', 'result': 'Hi sk-'}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send('request'))
+        deltas = [event for event in events if event['type'] == 'TEXT_DELTA']
+        assistant_index = next(i for i, event in enumerate(events)
+                               if event['type'] == 'ASSISTANT_TEXT')
+        self.assertEqual([event['text'] for event in deltas], ['Hi ', 'sk-'])
+        self.assertEqual(deltas[-1]['block_index'], 4)
+        self.assertEqual(events[assistant_index - 1]['type'], 'TEXT_DELTA')
+        runtime.close()
+
     def test_split_credential_is_screened_before_text_events(self):
         prefix = ''.join(('s', 'k', '-'))
         credential = prefix + ('x' * 24)
