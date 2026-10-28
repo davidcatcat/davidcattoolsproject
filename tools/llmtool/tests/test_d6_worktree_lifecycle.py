@@ -211,6 +211,9 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self._git(root, "update-ref", "refs/remotes/origin/other-pr/head", self.base)
         self.assertIsNone(lifecycle._publication(root, "review/reviewer-pr-ref",
                                                  head, None))
+        self._git(root, "update-ref", "refs/remotes/origin/pr/530/head", head)
+        self.assertEqual(lifecycle._publication(root, "review/reviewer-pr-ref",
+                                                head, None), "origin_pr_head")
 
     def test_release_retain_requires_approved_comment_and_absent_unregistered_tree(self):
         root, record_path = self._registered_result_fixture("release-retain-test")
@@ -219,7 +222,8 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         lifecycle._replace_record(record_path, record)
         approval = "https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-12345"
 
-        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "TASKS_ROOT", self.tasks):
             error_output = io.StringIO()
             with contextlib.redirect_stderr(error_output):
                 self.assertEqual(lifecycle._main([

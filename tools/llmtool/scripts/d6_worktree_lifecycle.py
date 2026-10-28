@@ -1029,7 +1029,8 @@ def _publication(root, branch, head, squash, train_squash=None):
     refs = _task_git(root, "for-each-ref", "--format=%(refname)",
                      "refs/remotes/origin/").stdout.splitlines()
     for ref in refs:
-        if ref in (origin_branch, origin_main, "refs/remotes/origin/HEAD"):
+        if (ref in (origin_branch, origin_main, "refs/remotes/origin/HEAD") or
+                not re.fullmatch(r"refs/remotes/origin/pr/[^/]+/head", ref)):
             continue
         if has_ref(ref) and is_ancestor(head, ref):
             return "origin_pr_head"
@@ -1604,13 +1605,15 @@ def _parse_release_retain(values):
     return approvals
 
 
-def release_retained_records(*, canonical_root, approvals, workspace_root=TASKS_ROOT):
+def release_retained_records(*, canonical_root, approvals, workspace_root=None):
     """Release Owner-approved RETAIN_BLOCKED records for already absent trees."""
     if (type(approvals) is not dict or not approvals or
             any(not TASK_ID_RE.fullmatch(task_id or "") or
                 type(approval) is not str or not OWNER_APPROVAL_RE.fullmatch(approval)
                 for task_id, approval in approvals.items())):
         _stop("D6_TASK_INPUT_INVALID")
+    if workspace_root is None:
+        workspace_root = TASKS_ROOT
     workspace_root = Path(workspace_root)
     if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
