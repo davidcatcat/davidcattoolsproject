@@ -177,8 +177,10 @@ class ProviderIntegrationTests(unittest.TestCase):
         metadata = json.loads(first[1])
         self.assertEqual(tuple(metadata), PROVIDER_REGISTRY.names())
         for name, values in metadata.items():
-            self.assertEqual(values, client_type(name).CAPABILITIES.to_dict())
-            for capability in ("streaming", "shell", "git", "code_edit"):
+            implementation = client_type(name).CAPABILITIES
+            self.assertEqual(values, implementation.to_dict())
+            self.assertIs(values["streaming"], implementation.streaming)
+            for capability in ("shell", "git", "code_edit"):
                 self.assertIs(values[capability], False)
             if name.endswith("-cli"):
                 self.assertEqual([key for key, value in values.items() if value], ["chat"])

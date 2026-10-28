@@ -2441,6 +2441,143 @@ class BoundedPMCleanupTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class PMTypewriterTests(Base):
+    """Received PM text is queued and released at ticks, in order, and flushed at once on
+    block end, turn end and interrupt; without a running loop the tick is driven by hand."""
+
+    def setUp(self):
+        super().setUp()
+        self.pipe = create_pipe_input()
+        self.pipe.__enter__()
+        self.addCleanup(self.pipe.__exit__, None, None, None)
+        self.ui = chat_tui.ChatTUI(self.session, input=self.pipe, output=DummyOutput())
+        self.ui.pm_turn_active, self.ui.pm_turn_started = True, time.monotonic()
+        self.ui.pm_state, self.ui.pm_mode = 'working', True
+
+    def delta(self, text, index=0):
+        self.ui.pm_event({'type': 'TEXT_DELTA', 'text': text, 'block_index': index})
+
+    def shown(self):
+        """Text of the last PM block as the pane shows it (None: no block opened)."""
+        text = self.ui.conversation.text
+        if '\nPM:' not in text:
+            return None
+        rest = text[text.rindex('\nPM:') + 4:]
+        return rest[1:] if rest.startswith('\n') else rest
+
+    def test_text_is_released_in_order_a_few_characters_per_tick(self):
+        # CJK text: an ASCII word is shown only once complete (screen_stream), as before.
+        ui = self.ui
+        self.delta('一二三四五六')
+        self.assertEqual(self.shown(), '')            # the PM: header opens at once
+        self.assertEqual(ui.pm_queue, '一二三四五六')
+        ui._pm_tick()
+        self.assertEqual(self.shown(), '一二')
+        self.delta('七八九十')                        # a later burst joins the queue in order
+        self.assertEqual(ui.pm_queue, '三四五六七八九十')
+        ui._pm_tick()
+        ui._pm_tick()
+        self.assertEqual(self.shown(), '一二三四五六')
+        self.ui.pm_event({'type': 'ASSISTANT_TEXT', 'text': '一二三四五六七八九十'})
+        self.assertEqual(self.shown(), '一二三四五六七八九十')  # block end flushes the rest at once
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        self.assertEqual(ui.conversation.text.count('一二三四五六七八九十'), 1)   # no duplication
+
+    def test_long_queue_drains_within_the_lag_bound(self):
+        ui = self.ui
+        text = ''.join(chr(0x4e00 + i % 200) for i in range(330))   # 330 CJK characters
+        self.delta(text)
+        ticks = 0
+        while ui.pm_queue:
+            ui._pm_tick()
+            ticks += 1
+            self.assertLessEqual(ticks, chat_tui.PM_MAX_LAG_TICKS)
+        self.assertEqual(ticks, chat_tui.PM_MAX_LAG_TICKS)   # 10 per tick, never 2
+        self.assertEqual(self.shown(), text)
+        self.assertEqual(ui._pm_rate, chat_tui.PM_CHARS_PER_TICK)   # back to the base rate
+        ui._pm_tick()                                         # an idle tick is harmless
+        self.assertEqual(self.shown(), text)
+        self.delta('甲乙')
+        self.delta('丙' * 100)                                # a burst while behind raises it
+        self.assertEqual(ui._pm_rate, 4)
+        self.assertGreaterEqual(chat_tui.PM_CHARS_PER_TICK / chat_tui.PM_TICK_SECONDS, 40)
+        self.assertLessEqual(chat_tui.PM_CHARS_PER_TICK / chat_tui.PM_TICK_SECONDS, 80)
+        self.assertLessEqual(chat_tui.PM_MAX_LAG_TICKS * chat_tui.PM_TICK_SECONDS, 1.0)
+
+    def test_turn_end_flushes_everything_before_the_summary(self):
+        ui = self.ui
+        self.delta('hello world')
+        ui.pm_event({'type': 'TURN_END', 'status': 'COMPLETED', 'usage': {}})
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        text = ui.conversation.text
+        self.assertIn('PM:\nhello world\n\n  — PM turn COMPLETED', text)
+
+    def test_interrupt_and_turn_finish_flush_the_queue(self):
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        self.delta('partial answer')
+        ui.interrupt_pm()
+        ui.pm_runtime.interrupt.assert_called_once_with()
+        self.assertIn('PM:\npartial answer\n\nllmtool: interrupt sent to the PM',
+                      ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+        ui.pm_turn_active, ui.pm_interrupted = True, False
+        self.delta('tail', index=1)
+        ui.finish_pm_turn()                           # a turn that ends without TURN_END
+        self.assertIn('PM:\ntail', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        self.assertEqual(ui.pm_state, 'idle')
+
+    def test_new_block_tool_and_other_output_flush_the_previous_block(self):
+        ui = self.ui
+        self.delta('first block', index=0)
+        self.delta('second', index=1)                  # a new content block
+        self.assertIn('PM:\nfirst block\n\nPM:', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, 'second')
+        ui.pm_event({'type': 'TOOL_USE', 'tool_use_id': 't', 'name': 'Read'})
+        self.assertIn('PM:\nsecond\n\n  · tool Read', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+
+    def test_split_secret_is_screened_at_every_tick(self):
+        key = _fake_key()
+        ui = self.ui
+        seen = []
+        original = ui._pm_render
+
+        def render(final):
+            original(final)
+            seen.append(ui.conversation.text)
+        ui._pm_render = render
+        self.delta('your key is ' + key + ' — rotate it')
+        while ui.pm_queue:
+            ui._pm_tick()
+        ui.pm_event({'type': 'ASSISTANT_TEXT', 'text': 'your key is ' + key + ' — rotate it'})
+        self.assertTrue(seen)
+        for text in seen:
+            self.assertNotIn(key[3:9], text)
+        self.assertIn('your key is [REDACTED] — rotate it', ui.conversation.text)
+
+    def test_tick_is_scheduled_on_the_running_loop(self):
+        ui = self.ui
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+
+        async def main():
+            self.delta('甲乙丙丁')
+            self.assertIsNotNone(ui._pm_tick_handle)
+            await asyncio.sleep(chat_tui.PM_TICK_SECONDS * 6)
+            self.assertEqual(self.shown(), '甲乙丙丁')
+            self.assertIsNone(ui._pm_tick_handle)      # nothing left: no tick pending
+            self.delta('戊己')
+            ui.close_pm()                              # exit cancels a pending tick
+            self.assertIsNone(ui._pm_tick_handle)
+        loop.run_until_complete(main())
+        self.assertEqual(ui.pm_queue, '戊己')          # exit path leaves the queue; no render
+
+
 class PMConversationTests(BoundedPMTest):
     """The real pm_runtime S2 against a scripted fake `claude`; ChatSession is never used.
 
@@ -2530,7 +2667,8 @@ class PMConversationTests(BoundedPMTest):
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
             self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8]
-                         + ' idle | 滾輪/Fn+↑↓ 捲動對話 | F6 滑鼠:開 | F1')   # no chat fields
+                         + ' 暖機中… | 滾輪/Fn+↑↓ 捲動對話 | F6 滑鼠:開 | F1')   # no chat fields
+            self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
             self.assertIn('PM history: no stored turns', ui.conversation.text)
@@ -2539,9 +2677,12 @@ class PMConversationTests(BoundedPMTest):
             self.assertIn('--include-partial-messages', argv)
 
         async def partial(ui):
+            # The fake holds after 'Hello ': the text reached the pane through typewriter
+            # ticks on the loop, not through an end-of-block flush.
             await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text, 'first delta')
             self.assertTrue(ui.pm_turn_active)
             self.assertIn('working', ui.status_text())
+            self.assertNotIn('暖機中', ui.status_text())   # first output ended the warm-up view
             self.assertNotIn('Hello 老闆', ui.conversation.text)   # streamed, not yet complete
             self.fakes[0].gate.set()
 
@@ -2562,6 +2703,47 @@ class PMConversationTests(BoundedPMTest):
                          ['請問進度？'])
         self.assertEqual(self.session.history, [])
         self.client.complete.assert_not_called()
+
+    def test_warm_up_status_lasts_until_the_first_turns_first_output(self):
+        # Owner W40/W41 (A: no warm-up message is sent): the status shows 暖機中… from connect
+        # until the first turn produces output; later turns show working as before.
+        self.turns = [['HOLD', _delta('早安'), _assistant({'type': 'text', 'text': '早安'}),
+                       _result('早安')],
+                      [_delta('再次'), 'HOLD', _assistant({'type': 'text', 'text': '再次'}),
+                       _result('再次')]]
+
+        def warm_idle(ui):
+            self.assertTrue(ui.pm_warm)
+            self.assertIn('暖機中…', ui.status_text())
+            self.assertNotIn('idle', ui.status_text())
+            self.assertNotIn('暖機', ui.conversation.text)   # status only; nothing was sent
+            self.assertEqual(len(self.fakes[0].users()), 0)
+
+        async def warm_working(ui):
+            await self.until(ui, lambda ui: len(self.fakes[0].users()) == 1, 'turn sent')
+            self.assertTrue(ui.pm_turn_active)
+            self.assertRegex(ui.status_text(), '暖機中… [0-9]+\\.[0-9]s')
+            self.assertNotIn('working', ui.status_text())
+            self.fakes[0].gate.set()
+
+        def answered(ui):
+            self.assertFalse(ui.pm_warm)
+            self.assertIn('PM:\n早安', ui.conversation.text)
+            self.assertIn(' idle ', ui.status_text())
+            self.assertNotIn('暖機', ui.status_text())
+
+        async def second(ui):
+            await self.until(ui, lambda ui: 'PM:\n再次' in ui.conversation.text, 'second delta')
+            self.assertIn('working', ui.status_text())
+            self.assertNotIn('暖機', ui.status_text())
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, warm_idle, '早安\r', warm_working,
+                            self.turn_done, answered, '再來\r', second, self.turn_done,
+                            '/pm disconnect\r',
+                            lambda ui: self.until(ui, lambda ui: ui.pm_runtime is None)])
+        self.assertFalse(ui.pm_warm)
+        self.assertEqual(len(self.fakes[0].users()), 2)   # the Owner's two drafts, nothing else
 
     def test_repeated_enter_resize_and_redraw_send_one_turn(self):
         self.turns = [_full_turn(hold=True)]
