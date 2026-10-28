@@ -3903,19 +3903,20 @@ class OfficeViewTests(unittest.TestCase):
                 mon.OfficeRow("公司 gw", mon.ATTENTION, "沒派工", 3600, 70, kind="worker"),
                 *runners, queue,
                 mon.OfficeRow("EC2 remote-test", mon.PAUSED, "paused", None, 80, kind="worker")]
-        # Expanded: the line follows the runners' top band (#2 works, green; #1 is
-        # gray and listed later); the title counts members only.
+        # Expanded: the line follows the last runner row shown (#2 works, green;
+        # #1 is gray and listed later), never between them (PR #614 review);
+        # the title counts members only.
         view = mon.office_view(rows, expand=True)
         lines = [text for text, _ in view]
-        self.assertEqual(names(lines), ["mac ci runner #2", "mac ci 兩台共用", "公司 gw",
-                                        "mac ci runner #1", "EC2 remote-test"])
+        self.assertEqual(names(lines), ["mac ci runner #2", "公司 gw", "mac ci runner #1",
+                                        "mac ci 兩台共用", "EC2 remote-test"])
         self.assertTrue(lines[0].startswith("辦公室 · 2 位工作中 · 共 5 位"), lines[0])
         shared = next(text for text, _ in view if text.startswith("mac ci 兩台共用"))
         self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", shared)
         self.assertFalse(shared.rstrip().endswith("前"))   # no time of its own
         # Its colour is the runners' most urgent band (green while #2 works)...
         self.assertEqual(dict(view)[shared], "+")
-        # Folded: #1 is gray and folded; the line stays, under the runner still shown.
+        # Folded: #1 is gray and folded; the line stays, right under the only runner shown.
         folded = mon.office_lines(rows)
         self.assertEqual(names(folded), ["mac ci runner #2", "mac ci 兩台共用", "公司 gw", "… 灰色 2 項"])
         # Both runners idle: gray rows fold, the queue line does not (jobs wait).

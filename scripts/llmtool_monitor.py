@@ -4332,9 +4332,9 @@ def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRo
     dimmed parent never drags a working subagent down. With fold, every gray
     row (its whole group gray too) becomes one count at the end of its section
     (Owner 2026-10-28: green and yellow stay on screen, key a unfolds). A
-    shared line (kind shared) is not ranked or folded: it goes right under the
-    rows it is about, in their top band, or last of all when they are all
-    folded away (W47)."""
+    shared line (kind shared) is not ranked or folded: it goes right after the
+    last shown row it is about (PR #614 review: never between the runner rows),
+    or last of all when they are all folded away (W47)."""
     keys = {row.key for row in rows if row.key}
     children: dict[str, list[OfficeRow]] = {}
     for row in rows:
@@ -4365,10 +4365,9 @@ def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRo
     def section(items: list[OfficeRow], shared: tuple | list = ()) -> list[tuple[str, OfficeRow]]:
         out: list[tuple[str, OfficeRow]] = []
         hidden = sum(walk(row, 0, out) for row in ordered(items, 0))
-        for line in shared:   # under the last shown row of its rows' top band
-            about = [(i, band(row, 0)) for i, (_, row) in enumerate(out) if row.name.startswith(line.group)]
-            top = min((rank for _, rank in about), default=GRAY)
-            out.insert(max([i + 1 for i, rank in about if rank == top], default=len(out)), ("", line))
+        for line in shared:   # after the last shown row it is about, whatever its band
+            out.insert(max([i + 1 for i, (_, row) in enumerate(out) if row.name.startswith(line.group)],
+                           default=len(out)), ("", line))
         if hidden:
             out.append(("", OfficeRow(f"… 灰色 {hidden} 項", "", "（已摺疊，按 a 展開）", None, 10 ** 6)))
         return out
