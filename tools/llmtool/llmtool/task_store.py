@@ -190,19 +190,20 @@ _DEVELOPER_SHAPES = (
 _DEVELOPER_TASK_ID_SHAPES = tuple(
     shape | _DEVELOPER_EXECUTOR_TASK_FIELDS for shape in _DEVELOPER_SHAPES
 )
+_DEVELOPER_BASE_SHAPES = (*_DEVELOPER_SHAPES, *_DEVELOPER_TASK_ID_SHAPES)
 _DEVELOPER_EXTENSION_SHAPES = tuple(
-    shape | extension for shape in _DEVELOPER_SHAPES
+    shape | extension for shape in _DEVELOPER_BASE_SHAPES
     for extension in (frozenset(('normalizations',)),
                       frozenset(('rejected_output_capture',)),
                       frozenset(('normalizations', 'rejected_output_capture')))
 )
 _DEVELOPER_BLOCKED_REASON_SHAPES = tuple(
     shape | frozenset(('blocked_reason',))
-    for shape in (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
+    for shape in (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
 )
 _DEVELOPER_PROGRESS_SHAPES = tuple(
     shape | frozenset(('progress',))
-    for shape in (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+    for shape in (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
                   *_DEVELOPER_BLOCKED_REASON_SHAPES)
 )
 _DIRECT_EXECUTION_FIELDS = frozenset((
@@ -968,7 +969,7 @@ def _validate(record):
             _fail()
         developer = record['developer']
         if developer is not None:
-            assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_TASK_ID_SHAPES,
+            assignment_shapes = (*_DEVELOPER_BASE_SHAPES,
                                  *_DEVELOPER_EXTENSION_SHAPES,
                                  *_DEVELOPER_BLOCKED_REASON_SHAPES,
                                  *_DEVELOPER_PROGRESS_SHAPES)
