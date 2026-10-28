@@ -27,6 +27,7 @@ EXPECTED = {
     "shell": False,
     "git": False,
 }
+OPENAI_COMPATIBLE_EXPECTED = {**EXPECTED, "streaming": True}
 CLAUDE_EXPECTED = {
     "chat": True, "large_context": False, "reasoning_control": False,
     "streaming": False, "code_edit": False, "shell": False, "git": False,
@@ -66,7 +67,7 @@ class CapabilityTests(unittest.TestCase):
     def test_production_registry_matches_implementation(self):
         self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "codex-cli", "openai", "openai-compatible"))
         self.assertIs(client_type("openai-compatible"), OpenAICompatibleClient)
-        self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), EXPECTED)
+        self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), OPENAI_COMPATIBLE_EXPECTED)
         self.assertEqual(get_provider_capabilities("openai").to_dict(), EXPECTED)
         self.assertEqual(get_provider_capabilities("claude-cli").to_dict(), CLAUDE_EXPECTED)
 
@@ -74,7 +75,7 @@ class CapabilityTests(unittest.TestCase):
         with patch.object(OpenAICompatibleClient, "__init__", side_effect=AssertionError), \
                 patch.object(OpenAICompatibleClient, "validate_ready", side_effect=AssertionError), \
                 patch.object(OpenAICompatibleClient, "validate_options", side_effect=AssertionError):
-            self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), EXPECTED)
+            self.assertEqual(get_provider_capabilities("openai-compatible").to_dict(), OPENAI_COMPATIBLE_EXPECTED)
 
     def test_unsupported_types_fail_safely(self):
         for value in ("anthropic", "future-cli", "secret-value", None, []):
@@ -176,7 +177,7 @@ class ProvidersSafetyTests(unittest.TestCase):
             for name, values in (
                 ("claude-cli", CLAUDE_EXPECTED), ("codex-cli", CLAUDE_EXPECTED),
                 ("openai", EXPECTED),
-                ("openai-compatible", EXPECTED),
+                ("openai-compatible", OPENAI_COMPATIBLE_EXPECTED),
             )
         )
         self.assertEqual(self.run_offline(["providers"]), expected)
@@ -190,7 +191,7 @@ class ProvidersSafetyTests(unittest.TestCase):
             "claude-cli": CLAUDE_EXPECTED,
             "codex-cli": CLAUDE_EXPECTED,
             "openai": EXPECTED,
-            "openai-compatible": EXPECTED,
+            "openai-compatible": OPENAI_COMPATIBLE_EXPECTED,
         }
         self.assertEqual(parsed, expected)
         self.assertEqual(list(parsed), list(expected))
