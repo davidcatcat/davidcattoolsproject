@@ -509,6 +509,62 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(task_submission_cli._developer_output_rejection(
             diff, ['allowed.py']), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
 
+    def test_timeout_with_changes_records_digest_against_task_base(self):
+        raw = (b'diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+               b'@@ -1 +1 @@\n-before\n+after\n')
+        base_sha = 'b' * 40
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['src.py'], raw)):
+            code, evidence = task_submission_cli._codex_timeout_outcome(
+                'CODEX_TIMEOUT', True, self.root, base_sha)
+        self.assertEqual(code, 'CODEX_TIMEOUT_WITH_CHANGES')
+        self.assertEqual(evidence, {
+            'changed_paths': ['src.py'],
+            'diff_sha256': hashlib.sha256(raw).hexdigest(),
+            'base_sha': base_sha,
+        })
+
+    def test_timeout_without_changes_keeps_existing_timeout_outcome(self):
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=([], b'')):
+            code, evidence = task_submission_cli._codex_timeout_outcome(
+                'CODEX_TIMEOUT', True, self.root, 'b' * 40)
+        self.assertEqual(code, 'CODEX_TIMEOUT')
+        self.assertIsNone(evidence)
+
+    def test_followup_uses_cumulative_task_base_diff(self):
+        base_sha = 'b' * 40
+        raw = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+               '@@ -1 +1 @@\n-before\n+after\n').encode()
+        previous = {
+            'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+            'error_code': 'CODEX_TIMEOUT_WITH_CHANGES',
+            'execution': {'status': 'TIMEOUT', 'diff_base_sha': base_sha,
+                          'diff_sha256': hashlib.sha256(raw).hexdigest()},
+            'source_sha': base_sha, 'executor_task_id': 'executor-1',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['works'],
+        }
+        self.assertTrue(task_submission_cli._codex_timeout_recovery(
+            previous, executor_task_id='executor-1', source_sha=base_sha,
+            read_paths=['src.py'], write_paths=['src.py'], acceptance=['works']))
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['src.py'], raw)) as diff:
+            rejection, artifact = task_submission_cli._codex_cumulative_diff_rejection(
+                self.root, base_sha, ['src.py'])
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, raw.decode())
+        diff.assert_called_once_with(self.root, base_sha)
+
+    def test_followup_cumulative_diff_refuses_out_of_scope_path(self):
+        raw = (b'diff --git a/private.py b/private.py\n--- a/private.py\n'
+               b'+++ b/private.py\n@@ -1 +1 @@\n-before\n+after\n')
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['private.py'], raw)):
+            rejection, _ = task_submission_cli._codex_cumulative_diff_rejection(
+                self.root, 'b' * 40, ['src.py'])
+        self.assertEqual(rejection, 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+
     def test_invalid_thread_event_is_not_accepted(self):
         raw = self.events(self.final, thread_id='not-a-native-thread')
         self.write_fake(raw)
