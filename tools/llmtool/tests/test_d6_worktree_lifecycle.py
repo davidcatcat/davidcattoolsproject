@@ -189,6 +189,81 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(plan["publication"], "origin_main")
         self.assertEqual(plan["reasons"], [])
 
+    def test_detached_reviewer_head_published_on_another_origin_pr_branch(self):
+        root, record_path = self._registered_result_fixture("reviewer-pr-ref")
+        head = self._commit_file(root, "reviewed\n", "reviewed head")
+        self._git(root, "branch", "review/reviewer-pr-ref", head)
+        self._git(root, "checkout", "--detach", head)
+        self._git(root, "update-ref", "refs/remotes/origin/pr/529/head", head)
+        record = lifecycle._read_registry_record(record_path)
+        record.update(branch="review/reviewer-pr-ref", head_sha=head)
+        lifecycle._replace_record(record_path, record)
+
+        with patch.object(lifecycle, "_live_pids", return_value=[]):
+            plan = lifecycle._retire_plan(
+                "reviewer-pr-ref", record, canonical_root=self.source,
+                common_dir=self.source / ".git", workspace_root=self.tasks,
+                squash=None)
+        self.assertEqual(plan["publication"], "origin_pr_head")
+        self.assertEqual(plan["reasons"], [])
+
+        self._git(root, "update-ref", "-d", "refs/remotes/origin/pr/529/head")
+        self._git(root, "update-ref", "refs/remotes/origin/other-pr/head", self.base)
+        self.assertIsNone(lifecycle._publication(root, "review/reviewer-pr-ref",
+                                                 head, None))
+
+    def test_release_retain_requires_approved_comment_and_absent_unregistered_tree(self):
+        root, record_path = self._registered_result_fixture("release-retain-test")
+        record = lifecycle._read_registry_record(record_path)
+        record["state"] = "RETAIN_BLOCKED"
+        lifecycle._replace_record(record_path, record)
+        approval = "https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-12345"
+
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            error_output = io.StringIO()
+            with contextlib.redirect_stderr(error_output):
+                self.assertEqual(lifecycle._main([
+                    "--release-retain", "release-retain-test=" +
+                    "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-12345",
+                    "--repo-root", str(self.source)]), 1)
+            self.assertIn("D6_TASK_INPUT_INVALID", error_output.getvalue())
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(lifecycle._main([
+                    "--release-retain", "release-retain-test=" + approval,
+                    "--repo-root", str(self.source)]), 1)
+            self.assertEqual(lifecycle._read_registry_record(record_path)["state"],
+                             "RETAIN_BLOCKED")
+            self.assertIn("D6_RELEASE_RETAIN_WORKTREE_PRESENT", output.getvalue())
+
+            subprocess.run(["/usr/bin/git", "worktree", "unlock", str(root)],
+                           cwd=self.source, check=True, capture_output=True)
+            subprocess.run(["/usr/bin/git", "worktree", "remove", str(root)],
+                           cwd=self.source, check=True, capture_output=True)
+            self.assertFalse(root.exists())
+            self.assertNotIn("worktree " + str(root), self._git(
+                self.source, "worktree", "list", "--porcelain"))
+
+            with contextlib.redirect_stdout(output := io.StringIO()):
+                self.assertEqual(lifecycle._main([
+                    "--release-retain", "release-retain-test=" + approval,
+                    "--release-retain", "release-retain-test=" + approval,
+                    "--repo-root", str(self.source)]), 1)
+            self.assertEqual(lifecycle._read_registry_record(record_path)["state"],
+                             "RETAIN_BLOCKED")
+            self.assertEqual(lifecycle._parse_release_retain([
+                "release-retain-test=" + approval]),
+                {"release-retain-test": approval})
+
+            with contextlib.redirect_stdout(output := io.StringIO()):
+                self.assertEqual(lifecycle._main([
+                    "--release-retain", "release-retain-test=" + approval,
+                    "--repo-root", str(self.source)]), 0)
+            released = lifecycle._read_registry_record(record_path)
+            self.assertEqual(released["state"], "RETIRED_EXTERNALLY")
+            self.assertEqual(released["owner_approval_ref"], approval)
+
     def test_reconcile_registry_dry_run_execute_and_safety_boundaries(self):
         missing_root, missing_path = self._registered_result_fixture("missing-record")
         retained_root, retained_path = self._registered_result_fixture("retained-record")
