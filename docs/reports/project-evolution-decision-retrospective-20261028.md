@@ -4,18 +4,18 @@
 - **審查者：** Independent Auditor（Claude Fable 5.1）。本報告與 [Report A（技術稽核）](full-repository-technical-audit-20261028.md) 共用證據索引；管理方法建議見 [Report C（Product Owner Playbook）](product-owner-playbook-ai-development-20261028.md)；精簡結論見 [Executive Decision Brief](executive-decision-brief-20261028.md)。
 - **證據來源：** Git 歷史（899 commits）、GitHub PR（437）與 Issues（517）、Owner 決策留言（#120 31 則、#289 22 則、#352 12 則、#290 9 則、#304 7 則、#425 5 則，皆為 PM 代記）、`docs/meetings`、`docs/decisions`、`docs/history`、ROADMAP 124 個版本、AGENTS.md 30 個版本、`reports/` 186 份。
 - **HISTORY_INCOMPLETE 聲明：** Owner 與 ChatGPT Coordinator、Codex PM、Claude PM 之間的私人對話**無法存取**。所有「Owner 決策」皆來自 PM／Coordinator 在 GitHub 或文件中的轉述（部分含 verbatim 引述）。凡未見 verbatim 引述者，本報告標為 INFERENCE 或 HISTORY_INCOMPLETE，不補故事。**Owner 在 GitHub 與 TaskStore 之外的個人操作（例如是否親手在本機試用 TUI）同樣無法觀察；凡以「紀錄中沒有」推得的 Owner 行為結論，一律標 INFERENCE（缺席證據），不當作已確認事實。**
-- **版本：** v4（2026-10-28 補入 Owner 對省 token 路線的說明：新增 9B、DEC-008／029 改為 REASONABLE AT THE TIME、撤銷「未要求 demo」）；v3（2026-10-28 Owner 身份重判：新增 5.1 決策責任重判、第 6 章改以 Sponsor 標準、新增 9A AI Management Failure Register、第 15／16／19 章改寫）；v2（2026-10-28 自我校正：Owner 評估改以 FACT／INFERENCE／OPINION 逐項標示；涉及 Gate／Reviewer／Dispatch／Roadmap 的建議標 OWNER_DECISION_REQUIRED；數字型建議改為待驗證目標；新增 Post-Snapshot 註記）。
+- **版本：** v5（2026-10-28 依 Owner 對審查者三輪共二十九項質疑的答覆更新：新增 9C「Owner 答覆紀錄與修正」、PR #50 改為 Owner 本意的 dogfooding、「委託模式切換」撤銷、「目標先後未定」改寫、新增 F15／F16、gw 改列「以量測為條件的必做路線」、TUI 第一版範圍、預算與聯絡方式補入；第 18 章 Post-Snapshot 註記更新至 main `3677806`）；v4（2026-10-28 補入 Owner 對省 token 路線的說明：新增 9B、DEC-008／029 改為 REASONABLE AT THE TIME、撤銷「未要求 demo」）；v3（2026-10-28 Owner 身份重判：新增 5.1 決策責任重判、第 6 章改以 Sponsor 標準、新增 9A AI Management Failure Register、第 15／16／19 章改寫）；v2（2026-10-28 自我校正：Owner 評估改以 FACT／INFERENCE／OPINION 逐項標示；涉及 Gate／Reviewer／Dispatch／Roadmap 的建議標 OWNER_DECISION_REQUIRED；數字型建議改為待驗證目標；新增 Post-Snapshot 註記）。
 - 證據標記：**FACT**／**INFERENCE**／**COUNTERFACTUAL**／**OPINION**／**UNKNOWN**；建議標記 **OWNER_DECISION_REQUIRED**（不取代 AGENTS.md 或 Owner 決策）。
 
 ---
 
 ## 1. Executive Summary
 
-這個專案從 2026-09-27 的「個人工具箱 + Agent skills」開始，31 天內經歷四次產品定位轉向：**公司 LLM 唯讀 CLI（09-28）→ 通用 LLM CLI 與 orchestration 基礎（09-28 Roadmap）→ llmtool 自我開發、以 Codex／Claude 為 Worker 並節省 token（10-08 PR #50）→ 使用者直接操作的通用 AI 協作工具（10-21 會議）**。每一次轉向都在前一輪基礎設施完成後發生，而不是在開始前釐清，於是累積了大量為舊定位服務的程式與文件（F1 Git 容器化、S1b fake-only、ai-loop、token benchmark 30 份報告、A7–A9）。
+這個專案從 2026-09-27 的「個人工具箱 + Agent skills」開始，31 天內產品定位變化三次：**公司 LLM 唯讀 CLI（09-28）→ 通用 LLM CLI 與 orchestration 基礎（09-28 Roadmap）→ 使用者直接操作的通用 AI 協作工具（10-21 會議）**。10-08 PR #50 的「llmtool 自我開發」在 v1–v4 被算作另一次轉向；Owner 於 2026-10-28 說明那是 Owner 本意：llmtool 進度卡住，所以要讓 llmtool 早點進入開發 llmtool 的環節，直接測試每個 AI 的功能（dogfooding，見 9C.1 第 1 題）。它因此不是定位偏離，而是 Owner「先把工具用起來」的要求；偏離的是 AI 把這個要求展開成 cost-first C0–C3、F1 Git 容器化與 fake-only 契約。每一次變化都在前一輪基礎設施完成後發生，於是累積了大量為舊定位服務的程式與文件（F1 Git 容器化、S1b fake-only、ai-loop、token benchmark 30 份報告、A7–A9）。
 
 最關鍵的管理模式（FACT）：Owner 以需求方的方式表達（「開放 worktree 吧」「opencode 先停用吧」「agy 納入 llmtool 吧」），由 AI（ChatGPT／Codex／Claude）展開成數千字的契約、gate 與 Roadmap，而**沒有任何紀錄顯示 AI 同時提出更簡單的替代方案、停損條件或影響分析**（第 5.1 節）。Owner 對**方向**的判斷多數正確且誠實（堅持真實證據、拒絕假 PASS、關掉 Web-first、三次先於 AI 發現偏離，見 6.1），Owner 在 10-09 就明確要求 AI 自行協調、不要把技術判斷丟回來；AI 在同一天診斷出「AI 自製 gate、把 Owner 拉進迴圈」的模式，之後仍重複三次。
 
-結論（OPINION）：整體方向正確；最嚴重的錯誤不是任何單一技術選擇，而是「**先建框架、後定 MVP、沒有人負責使用者驗收**」這個反覆出現的模式。以 Sponsor 標準衡量，這主要是 AI PM／CTO／QA 的專業責任（第 6、9A 章）；Owner 的責任限於目標先後未定、委託模式切換（第 15 章；v4 撤銷「未要求 demo」，見 9B）。
+結論（OPINION）：整體方向正確；最嚴重的錯誤不是任何單一技術選擇，而是「**先建框架、後定 MVP、沒有人負責使用者驗收**」這個反覆出現的模式。以 Sponsor 標準衡量，這主要是 AI PM／CTO／QA 的專業責任（第 6、9A 章）；Owner 的責任在 v5 後只剩一項次要項，而且是 Owner 自述的「新東西一直加，做不完」（第 15 章；v4 撤銷「未要求 demo」，v5 撤銷「委託模式切換」並改寫「目標先後未定」，見 9B、9C）。
 
 ---
 
@@ -144,14 +144,14 @@
 | DEC-008 | 10-05～09 | 公司模型 token benchmark Round 1–3 | Owner 有意投資／AI 執行 | REASONABLE AT THE TIME（Owner 前期投資；30 份報告的規模與無回收分析為 AI 責任，見 9B） |
 | DEC-009 | 10-06～09 | A11b F1 Git 容器化（fixture-only Git ADD、supervisor group） | AI 提案／Owner 接受 | **POOR**（為 F2 鋪路，F2 從未授權；Worker 自行 Git 使之無必要） |
 | DEC-010 | 10-07～10 | ai-loop 臨時控制器（分支、6-Low disposition、Git launcher） | AI | QUESTIONABLE（第二套編排器；未合併；今仍在文件） |
-| DEC-011 | 10-08 | PR #50：llmtool 自我開發 + token 節省為產品目標 | Owner（轉述） | REASONABLE AT THE TIME；但使「PM AI」成為唯一使用者 |
+| DEC-011 | 10-08 | PR #50：llmtool 自我開發 + token 節省為產品目標 | Owner（2026-10-28 確認：dogfooding 本意） | REASONABLE（Owner 要求早點用 llmtool 測各 AI 是對的；AI 展開為 cost-first C0–C3／F1 為 AI 責任，9C.1 第 1 題） |
 | DEC-012 | 10-09 | Owner 退出 relay loop；P0 升級只限目標／root／Mac | Owner | GOOD |
 | DEC-013 | 10-10 | #92 兩次修復停損、SEV 分級 | Owner/AI | GOOD（runtime 落實不足） |
 | DEC-014 | 10-11～16 | #120 S1a／S1b／B fake-only 基礎設施（~20 PR） | AI 提案／Coordinator 推動 | **POOR**（10-20 封存） |
 | DEC-015 | 10-11 | #99 CI 去重、exact-head | Owner/AI | GOOD |
 | DEC-016 | 10-13 | Codex danger-full-access 授權 | Owner | REASONABLE（有審計紀錄） |
 | DEC-017 | 10-17 | #172 D-001～D-007 架構原則 | Owner 逐項同意 | **GOOD** |
-| DEC-018 | 10-19 | D7 OpenCode PRIMARY／Codex PAUSED → D8 翌日恢復 | Owner（額度驅動） | QUESTIONABLE（反覆） |
+| DEC-018 | 10-19 | D7 OpenCode PRIMARY／Codex PAUSED → D8 翌日恢復 | Owner 下令；起因是 AI 從未監看額度（9C.1 第 3 題） | QUESTIONABLE（反覆；根因在 AI 未監看與未自動改派，不在 Owner） |
 | DEC-019 | 10-19 | D6 動態 worktree「做完刪除」 | Owner | GOOD 意圖／執行一半 |
 | DEC-020 | 10-19 | Owner outcome reporting v1.1 | Owner | GOOD |
 | DEC-021 | 10-20 | D8 取消 per-call 核准；文件瘦身 #234／#235 | Owner | GOOD |
@@ -160,12 +160,12 @@
 | DEC-024 | 10-22～23 | worker-dispatch.json + Python gate | Owner/AI | GOOD（硬編碼待修） |
 | DEC-025 | 10-23～24 | monitor office view 大量投入 | Owner 需求 | REASONABLE（可見性有價值；但在閉環之前） |
 | DEC-026 | 10-25 | self-hosted Mac + EC2、停用 GitHub-hosted | Owner | GOOD（費用）／新瓶頸 |
-| DEC-027 | 10-25 | Claude 成為 PM | Owner | REASONABLE（HISTORY_INCOMPLETE 動機）；切換成本高 |
-| DEC-028 | 10-26 | Codex 暫停／全部暫停／全部恢復（同日） | Owner | QUESTIONABLE |
+| DEC-027 | 10-25 | Claude 成為 PM | Owner | REASONABLE（Owner 2026-10-28 說明：Codex 當 PM「非常死板，不會主動」，是品質問題；9C.1 第 6 題）；切換成本高 |
+| DEC-028 | 10-26 | Codex 暫停／全部暫停／全部恢復（同日） | Owner 下令；AI 未監看額度（9C.1 第 3 題） | QUESTIONABLE（同 DEC-018） |
 | DEC-029 | 10-26～27 | EC2 offload 升 P0、優先於 TUI | Owner 有意投資 | REASONABLE AT THE TIME（當時無可用 TUI 可優先；回收分析缺失為 AI CTO 責任，見 9B） |
 | DEC-030 | 10-27 | High Debug `gpt-6.1-sol` 規則 + runtime | Owner | QUESTIONABLE（閉環未通前先做升級路徑） |
 | DEC-031 | 10-27 | merge trains | PM | QUESTIONABLE（雙 CI、重複 PR） |
-| DEC-032 | 10-28 | AGY 納入 llmtool、開源模式 provider-neutral | Owner | REASONABLE 方向／QUESTIONABLE 時機 |
+| DEC-032 | 10-28 | AGY 納入 llmtool、開源模式 provider-neutral | Owner（自己提出，9C.2 第 8 題） | REASONABLE 方向／QUESTIONABLE 時機（Owner 2026-10-28 確認 AGY／OpenCode 是省 token 用途、可以後接；9C.1 第 5 題） |
 | DEC-033 | 10-28 | UI Agent ALLOWED「要推 TUI 進度」 | Owner | GOOD（晚） |
 | DEC-034 | 10-26 | CliNest 獨立計畫 | Owner？（HISTORY_INCOMPLETE） | INSUFFICIENT EVIDENCE |
 
@@ -241,7 +241,7 @@
 | ai-loop（DEC-010） | AI（Coordinator） | AI | 無 | Claude 10-09 回顧已指出 E1–E6 | 否 | 建了第二套編排器 | AI Coordinator |
 | D6 Worktree（DEC-019） | Owner 一句話（verbatim） | AI（13 KB 規範、3 腳本） | 無 | 無 | 否 | 「做完刪除」未同步交付；容量無人管 | AI PM／Developer |
 | PM 自動接續（R1–R5） | Owner 10-09「你們 AI 自行協調好就好」（verbatim） | AI（文件先行，runtime 分片） | 無 | 無 | 有（Owner 已明示需求） | 文件≠runtime；PM 自己不用 | AI PM |
-| 多 Developer 路線（DEC-018／032） | Owner 提出 OpenCode／AGY／gw 想法；額度事件觸發切換 | AI 展開為政策與 adapter | 無影響分析 | 無「主鏈未通先不加」的提醒 | 否 | PM 未做影響分析；Owner 同日多項新路線 | AI PM（主）／Owner（次） |
+| 多 Developer 路線（DEC-018／032） | Owner：gw 是公司自建 LLM、為省大型 AI token 的必做路線；OpenCode／AGY 是 Owner 為省 Claude／Codex token 找的方案、可後接（9C.1 第 5 題）；額度事件觸發切換 | AI 展開為政策與 adapter | 無影響分析；未區分「必做」與「可後接」 | 無「主鏈未通先不加」的提醒 | 否 | PM 未做影響分析、未把 gw 與 OpenCode／AGY 分級；Owner 同日多項新路線 | AI PM（主）／Owner（次） |
 | Company LLM（DEC-008） | Owner「省高階模型費用」（轉述） | AI（benchmark 三輪、30 份報告） | 有（round 1–3 量測） | 有（+104%、−39.8%） | 有 | 投入規模；量測後仍作為路線 | AI PM／CTO（規模控制） |
 | EC2 Offload P0（DEC-029） | Owner（#417／#425，省 token、Mac 慢） | AI | 無（未提「先縮 Mac CI 範圍」） | 「省 token NOT VERIFIED」事後才報 | 部分 | 無量測指標即 P0 | AI PM／CTO（主）／Owner（P0 插隊，次） |
 | TUI 優先級（DEC-005／023） | Owner 10-21 定 CLI 優先 | AI 寫 A3.5 延後 TUI | 無 | 無 | — | 10-21 前無 AI 提出入口優先 | AI PM |
@@ -273,9 +273,9 @@
 
 | 能力（Sponsor 層級） | 評分 | 證據 | 說明 |
 |---|---|---|---|
-| Product Vision 與方向判斷 | 7 | 6.1 表；10-21 產品定義 | 方向一致且三次先於 AI 發現偏離；定位四次轉向中有兩次是 AI 提案（PR #50、#249） |
-| 目標一致性（「省錢」vs「可用」的先後） | 5 | PR #50、#290、#417／#425 | 兩個目標並列未定先後，驅動 gw 三輪、EC2 P0；AI PM 應追問，但 Owner 可更早定序（Owner 責任之一） |
-| 委託方式的一致性 | 5 | 10-09「原則上以需求方我一定會approve」與 10-19～10-27 的逐條暫停／恢復指令 | 在全權委託與逐條指令間切換，PM 難以建立穩定自主規則（Owner 責任之二） |
+| Product Vision 與方向判斷 | 7 | 6.1 表；10-21 產品定義；9C.1 第 1 題 | 方向一致且多次先於 AI 發現偏離；PR #50 的 dogfooding 是 Owner 本意（v5 改正），定位變化中 AI 提案的是 #249 |
+| 目標一致性（「省錢」vs「可用」的先後） | NOT_RATED（v5） | 9B Owner 說明；9C.1 第 2、5 題 | Owner 其實已定序：先做 CI／EC2 等省 token 工程，再做功能；gw 必做、OpenCode／AGY 可後接。未定的是「省 token 工程做到哪裡算夠」的停損，這是 AI CTO 該提出的（F15）。v4「Owner 責任之一」撤銷 |
+| 委託方式的一致性 | NOT_RATED（v5） | 9C.1 第 3 題：「AI 都沒有去注意過 token 額度啊」 | 10-19～10-27 的逐條暫停／恢復指令不是 Owner 收回委託，而是 AI 從未監看額度、Owner 看到 5 小時／週額度用光才不得不介入；v4「Owner 責任之二」撤銷，改列 F15 |
 | 要求可用交付物的檢查點 | NOT_RATED（v4） | Owner 說明當時沒有可操作的東西 | 不看 TUI 是正確判斷；「可 demo 的里程碑」應由 AI PM 提出（9A F8） |
 | 在資訊不足下的決策品質 | 6 | 5.1 表：多數決策無選項比較、無風險說明 | 在 AI 未提供替代方案的情況下，Owner 的核准屬合理信任專業建議 |
 | 風險與安全底線 | 7 | no paid fallback、D8a、runner 隔離、拒絕假 PASS | 保留 |
@@ -299,10 +299,10 @@
 ### 6.4 A–E 問題的重新回答
 
 **A 需求表達：** Owner 的需求是正常的需求方表達（想法、情境、不滿）。缺少情境與驗收標準是 AI PM 應補足而未補足的工作（F1、F8、F13）。前後矛盾的案例（10-19 暫停 Codex、10-20 恢復）是 AI 把技術狀態呈現為 Owner 決策所致。
-**B 優先順序：** 優先順序反覆主要由額度事件與 AI 的呈現方式驅動；Owner 真正主動的優先變更是 EC2 P0（10-27）與同日多項新路線（10-28），這兩項 Owner 負次要責任，PM 未做影響分析負主要責任。
+**B 優先順序：** 優先順序反覆主要由額度事件與 AI 的呈現方式驅動；Owner 真正主動的優先變更是 EC2 P0（10-27，v4 已改評為有意投資）與同日多項新路線（10-28，Owner 確認是自己提的）。後者 Owner 負次要責任，PM 未做影響分析負主要責任；Owner 已說明 OpenCode／AGY 可後接，所以 AI 當時只要回一句影響分析就能避免。
 **C 決策方法：** Owner 在無替代方案與無風險說明的情況下核准，屬合理信任；「過度相信 AI」的另一面是 AI 未提供可供不信任的資訊。
-**D AI 管理：** Owner 的授權充分（D8、#77）；問題是 AI 未把授權轉成自主流程，反而把每句話變成 policy PR。Owner 的責任是委託方式切換。
-**E 完整性：** MVP 定義晚是 AI PM 未提出；沒有驗收流程是 AI QA 未建立；「以 PR／CI 判斷」是 AI 報告給 Owner 的單位。Owner 可改進的是要求定期 demo。
+**D AI 管理：** Owner 的授權充分（D8、#77）；問題是 AI 未把授權轉成自主流程，反而把每句話變成 policy PR。v4 寫的「Owner 的責任是委託方式切換」於 v5 撤銷：Owner 說明 AI 從未監看額度，逐條指令是被迫補位（9C.1 第 3 題）。
+**E 完整性：** MVP 定義晚是 AI PM 未提出；沒有驗收流程是 AI QA 未建立；「以 PR／CI 判斷」是 AI 報告給 Owner 的單位。Owner 不要定期 demo 與報告（9C.1 第 10 題）；對策是 AI 隨時能 demo、隨時能答進度，並把「卡住」當 issue 主動找 Owner，不是排程。
 
 ---
 
@@ -333,8 +333,8 @@
 
 | 角色 | 負責 | 不負責 |
 |---|---|---|
-| Owner | 每週一次：vision 確認、優先序、需求驗收（親自操作 TUI）、預算上限、重大風險 | 額度、模型名、Reviewer 帳號、每個 Task、參數 |
-| PM（Claude session） | 拆解、record-pm、追蹤 advance 輸出、處理 BLOCKED、開 PR 與合併、週報 | 手打 runtime 子命令（交驅動器）、代記決策（Owner 在 TUI 核准） |
+| Owner | 想到就問（不排程）：vision 確認、優先序、看 demo 說符合與否、預算上限（每月 USD 300）、重大風險；收 issue | 額度、模型名、Reviewer 帳號、每個 Task、參數、定期進度報告 |
+| PM（Claude session） | 拆解、record-pm、追蹤 advance 輸出、處理 BLOCKED、開 PR 與合併、隨時可答的一頁狀態、卡住時主動開 issue 找 Owner | 手打 runtime 子命令（交驅動器）、代記決策（Owner 在 TUI 核准）、定期推送報告 |
 | Developer（Codex direct） | 實作＋自測＋自審＋一次自修；回報 DONE／BLOCKED | 跑全套測試（交 EC2）、審查自己 |
 | Reviewer（cross-family） | 只審 runtime／安全相關 PR；復用 D6；只讀 delta | docs／test-only PR（CI + 抽樣） |
 | llmtool Core | 狀態、終態、驅動、事件消費、retry 上限、D6 自動 retire、容量告警 | 語意判斷；替 PM 寫決定 |
@@ -391,14 +391,19 @@
 | F12 | 全程 | 文件當記憶體用，長到 598 KB | 所有 AI | 瘦身並執行 §6.5 | 持續累加 | Owner 三次反映 | — | 每 session 約 15 萬 tokens | 1、6 | AI CTO |
 | F13 | 10-28 | 「agy 納入」當天排 Slice A/B，未分析延誤 | AI PM | 影響分析再排 | 直接派 | 否 | 否 | 第四條路線 | 5 | AI PM |
 | F14 | 全程 | Codex 31% 無可用產出、gw 真實題 4/5→0/1，未早期量化告知 | AI Developer／PM | 量化能力限制並報告 | 持續派工 | 部分（#290、#466） | 部分 | 重複派工成本 | 1、5 | AI PM |
+| F15（v5） | 10-05～10-27 | AI 從未監看 Codex／Claude 額度，monitor 也不顯示額度；Owner 自己盯 usage、看到 5 小時／週額度用光才下令換 PM 或暫停，並自己想出 CI、EC2 等省 token 方案交給 AI（Owner verbatim：「AI 都沒有去注意過 token 額度啊」「省 token 的決定都是由我…才會想方案給 AI」） | AI PM／CTO | 監看用量、先做用量分解與回收估算、額度用盡在 Developer 路線內自動改派 | 等 Owner 說 | 否 | 否 | 8 次角色反覆；投資去向無人分析 | 5、6 | AI PM／CTO |
+| F16（v5） | 10-11～16 | 「fake-only」方案未以白話告知 Owner；Owner 不知道 fake-only 是什麼，因為 AI 有方案就相信做得到（Owner verbatim：「我不知道什麼是 fake-only…你們講的技術術語…並不是全部都知道」） | Coordinator／PM | 一句白話：「這兩週做出來的東西不能真的叫 AI，要到 X 才能」並給選項 | 用術語描述契約 | 否（告知不可理解等於未告知） | 否 | Owner 在不知情下核准兩週後封存的工作 | 2、5 | AI PM |
 
 **分類 7：無符合案例。** 審查未找到 AI 明確警告後 Owner 仍堅持的紀錄。
+
+**F15／F16 來源：** Owner 2026-10-28 對審查者質疑的答覆（9C）；Owner 與各 AI 的私下對話仍 HISTORY_INCOMPLETE。
 
 ### 9A.1 AI 能力限制（坦白說明）
 
 - **沒有跨 session 的持續記憶與情境感。** AI 用規則文件當記憶，這是文件膨脹到 598 KB 的根本原因；解法是確定性驅動器保存狀態，不是更多規則。
 - **預設傾向是順從與擴寫。** Owner 一句話會被展開成數千字；需要硬性輸出格式（三選項＋最小版本＋停損）抵消。
-- **無人值守連續運作目前不可靠。** PM session 中斷、額度、CLI 版本變動都會中斷流程；需要每週一次人類檢查點（看 demo），但那不是當 PM。
+- **無人值守連續運作目前不可靠。** PM session 中斷、額度、CLI 版本變動都會中斷流程。Owner 不要排程報告（9C.1 第 10 題），所以對策改為：驅動器自動接回中斷；AI 每日自檢 NOW 進度並保持「隨時可 demo」；卡住超過 AI PM 在文件中定義的天數即主動開 issue 找 Owner。
+- **不會自動平行工作。** Owner 指出 Claude PM 仍要被提醒才開 subagent 或平行派工（9C.3 第 4 題）；Codex PM 完全不平行。對策是把「可平行的工作先平行」寫進 PM 的硬性流程，而不是靠 Owner 提醒。
 - **AI Reviewer 只能審給它的輸入。** 沒有「使用者操作」這個輸入時，它無法驗可用性；需要把 E2E 操作紀錄列為審查輸入。
 
 ## 9B. 省 token 路線：投資與回收（v4，依 Owner 2026-10-28 說明補入）
@@ -430,6 +435,7 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 | 10-21 | `gpt-6.1-sol` / Medium 臨時正式 Reviewer（Claude 額度用盡） | 10-25 後改回跨家族配對 |
 | 10-24 | AGY 要求 `claude-sonnet-5-5-medium`，後改 `argon medium` | 一個測試加速任務；PR #481 關閉 |
 | 10-25 | `gpt-6-luna` / high 為 Developer | 現行主要 Developer；31% 派工無可用產出 |
+| 至 10-25 | Codex 擔任 PM | Owner 評（2026-10-28）：「非常死板，不會主動」「完全不會自動平行工作，只會先做當下給的提示，用字用詞語法必須…很精準正確，邏輯才會去執行，不算是智能 pm，只能當作初階 pm 工作」；10-25 換 Claude |
 | 10-26 | OpenCode `nemotron-3.5-lightning-free` | 93 秒、158 個 completion token、空輸出 |
 
 **判斷：** 「便宜模型做 PM／Reviewer／Developer 品質差」是 Owner 以實驗得到的正確結論，不是 Owner 的錯誤。
@@ -438,15 +444,101 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 
 1. **教訓沒有變成規則。** 10-06 已得「低價模型不等於省」，但 gw 於 10-21、10-26、10-27 再派三輪、OpenCode 三次恢復、AGY 10-28 納入；每次重試都是 PM＋Developer＋Reviewer＋CI 全套成本。AI PM 應在 10-06 後就寫成「便宜模型只做合成題與批次小修」的硬規則，而不是讓 Owner 以一句話逐次暫停。（9A 分類 6）
 2. **投資去錯地方。** 訂閱額度的主要消耗在：每個 session 重讀約 15 萬 tokens 規則文件、每個 PR 正式審（含數行文件）、PR 碎分與重複、31% 無效派工、llmtool 在開發 llmtool；這些與模型單價無關，換便宜模型省不到。沒有任何 AI 先做用量分解（PM／Reviewer／Developer／文件讀取各佔多少）就開了四條工程線。（9A 分類 5、6）
-3. **投資前沒有回收分析。** 沒有紀錄顯示任何 AI 在投資前告訴 Owner「哪些會回本、哪些不會、何時回本」，投資後也只有 #466 一次量測且自承 NOT VERIFIED。這是 AI CTO 的責任；Owner 在沒有這份分析下批准屬合理信任。
+3. **投資前沒有回收分析（v5 由 INFERENCE 升為 FACT）。** Owner 2026-10-28 確認：沒有任何 AI 給過「哪些會回本、大概多久」的估算；CI、EC2 這些方案是 Owner 看到額度用光後自己想出來交給 AI 的（9C.1 第 2 題）。投資後只有 #466 一次量測且自承 NOT VERIFIED。這是 AI CTO 的責任（F15）；Owner 在沒有這份分析下批准屬合理信任。
 4. **Owner 不看 TUI 是正確判斷。** 當時沒有可操作的東西；v3 9A「Owner 未要求 demo」一條改為「AI PM 未提出任何可 demo 的里程碑」。
+5. **Codex 不適合 PM 是角色適配，不是便宜模型問題（v5）。** Owner 的描述（被動、不平行、要精準措辭）與本機數據一致：Codex 派工規格鬆時 31% 無產出，規格窄時成功。結論：Codex 適合有邊界、規格精準的 Developer 工作；PM 需要主動追問與平行派工，目前只有 Claude 做到，且仍要 Owner 提醒它開 subagent（9C.3 第 4 題）。
 
 ### 9B.4 對 AI 團隊的要求（不需 Owner 管細節）
 
 1. 先量再做：一週內交用量分解表；沒有表不開新的「省 token」工程。
 2. 先砍最大項：規則文件瘦身、審查分級（OWNER_DECISION_REQUIRED）、Reviewer 復用 worktree 只讀 delta、Codex 契約放寬與上限可設、停 merge train（OWNER_DECISION_REQUIRED）。
-3. 便宜模型退回實驗位置：只做合成題與批次小修，不再以「省 token」為名立 P0；AGY 是否納入由 Owner 以產品需求（多 AI 分工）而非額度備援決定。
+3. 便宜模型退回實驗位置：只做合成題與批次小修，不再以「省 token」為名立 P0。Owner 2026-10-28 已定性：gw 是公司自建 LLM、為省大型 AI token 的必做路線，但「不能節省，那就沒必要了」（9C.3 第 1 題），所以 gw 的下一步只有量測「PM 準備 context＋套 diff＋審查」與「直接派 Codex」的總成本；OpenCode／AGY 是省 token 用途、可以後接（9C.1 第 5 題）。
 4. 每個優化附前後數字；「做的事是不是產品」列入成本報告。
+
+## 9C. Owner 答覆紀錄與報告修正（v5，2026-10-28）
+
+審查者在 v4 之後向 Owner 提出三輪質疑（11＋9＋9 項），Owner 逐項作答。本節記錄答覆要點（Owner verbatim 節錄）與對報告的修正；Owner 與各 AI 的私下對話仍 HISTORY_INCOMPLETE。證據等級：Owner 的陳述為 FACT（Owner 自述）；審查者據此的判斷為 OPINION；9C.5 為審查者唯讀查證的 FACT。
+
+### 9C.1 第一輪（v4 的十一項質疑）
+
+| # | 質疑 | Owner 答覆（要點） | 報告修正 |
+|---|---|---|---|
+| 1 | PR #50「llmtool 自我開發」是 Owner 本意還是 AI 詮釋？ | Owner 本意：「llmtool 進度前面卡住，應該是我要 llmtool 早點加入開發 llmtool 的環節，直接測試與每個 AI 的功能」 | 第 1 章「四次轉向」改為三次；DEC-011 改列 Owner 決策、REASONABLE；6.2 Product Vision 證據改正 |
+| 2 | 省 token 投資前 AI 有沒有給回收估算？ | 沒有。「省 token 的決定都是由我因為常常注意 token 的 usage，然後 5hr 或 weekly 被用光，然後又叫 AI 換 PM，才會想方案給 AI，看能不能解決，例如 CI、EC2」 | 9B.3 第 3 點由 INFERENCE 升為 FACT；新增 F15 |
+| 3 | 八次暫停／恢復是 Owner 主動還是 AI 問的？ | 「什麼意思，AI 都沒有去注意過 token 額度啊」 | 「委託模式切換」從 Owner 責任撤銷；DEC-018／028 責任欄改寫；6.2「委託方式的一致性」NOT_RATED |
+| 4 | F1／fake-only 那兩週 Owner 知道是假的嗎？ | 「我不知道什麼是 fake-only，反正你們有方案，我就認為你們做得到，就決定了。…有時候你們講的技術術語，在使用者和 owner 來說並不是全部都知道的，所以…叫你們用白話來跟我解釋」 | 新增 F16（術語未白話告知＝未告知）；Report C 新增白話規則 |
+| 5 | 多條 Developer 路線是產品需求還是額度備援？ | gw 是公司自建 LLM、主要路線、必須實作（「牽涉到我的公司工作」）；OpenCode／AGY 是 Owner 為省 Claude／Codex token 後來找的方案（AGY 原本就訂閱、OpenCode 免費），「如果開發階段 token 有省，當然可以後來才接入」 | 5.1 多路線列改寫；「凍結新路線」改為「AGY／OpenCode 可後接；gw 不凍結」；第 18 章清單修正 |
+| 6 | 10-25 PM 從 Codex 換 Claude 的主因？ | 品質：「codex 對於 pm 工作非常死板，不會主動」 | DEC-027 動機由 HISTORY_INCOMPLETE 改為 FACT（Owner 自述）；9B.2 加一列 |
+| 7 | TUI 第一版的最低期待？ | 「提需求，到我想要的，對話要能即時回答我，就跟我跟在 claude tui 跟你對話一樣」 | 即時 PM 對話進入第一版範圍（Report A 第 22 章、Brief 問題九） |
+| 8 | 「關閉介面後工作繼續」是硬需求嗎？ | 不是本機第一版硬需求：「要在我的電腦的話不是硬需求，我起碼會 cli 啟動，開著 tui」；除非 AI 跑在雲端 | Developer 子行程改為獨立 session 的工作降級（Report A 第 22 章） |
+| 9 | 每月預算上限？ | 「300 美金吧」 | Report C 第 2 章填入；Owner 不願進一步說明含不含訂閱（9C.2 第 3 題），Playbook 改為「AI 列支出表、Owner 自行對照」 |
+| 10 | 希望 AI 多常找你？ | 「自動報告進度嗎？先不用，我自己想到就會問」 | 週報改為「隨時可答的一頁狀態」；每週 demo 改為「問到就要有」；9A.1 對策改寫 |
+| 11 | 這類獨立審查多久一次？ | 「不用定期，不用排程」 | 不列審查排程 |
+
+### 9C.2 第二輪（九項）
+
+| # | 質疑 | Owner 答覆（要點） | 報告修正 |
+|---|---|---|---|
+| 1 | gw「必須能實作」指什麼？整條鏈只能用公司 gw？ | 「gw 就是公司自建 llm…把公司 llm 加入 developer 流程，幫開發項目節省大型 ai 的 token，所以必須實作」；沒有「整條鏈只能用 gw」；gw 須經公司 VPN；「我從來沒有說過公司資料不能進 codex, claude」 | gw 定性為「省 token 的 Developer 路線、必做」；不新增「公司資料」安全邊界條目（9C.3 第 3 題：公司工作不在本專案範圍） |
+| 2 | TUI 的 PM 是誰？ | 「tui 可以設定是誰，怎麼設定，你們 ai 提供給我方式」 | 第一版 PM 為可設定；9C.3 第 6 題確認先接 Claude |
+| 3 | 300 美金含不含訂閱？ | 「你為什麼要知道這個？你知道了能幹嘛？」 | 不再追問；Playbook 改為 AI 列支出表 |
+| 4 | Owner 自認做錯的事？ | 「新東西一直加，做不完吧，但是新東西也是一開始沒想到的，其他我覺得身為老闆，我沒錯」 | 第 15 章 Owner 唯一一項改為 Owner 自述的「新東西一直加」；審查者判斷見 9C.4 |
+| 5 | 額度用完 AI 可自動改派嗎？monitor 顯示額度嗎？ | 「額度用完，pm 就自動被停用，包括跟我溝通都不行了吧」；「llmtool monitor 沒有顯示額度」 | 9C.4 記錄 PM 額度為單點故障與三個選項；F15 補「monitor 無額度顯示」 |
+| 6 | 「主動」的標準？ | Codex PM「很被動…完全不會自動平行工作，只會先做當下給的提示，用字用詞語法必須…很精準正確，邏輯才會去執行，不算是智能 pm，只能當作初階 pm 工作」 | 9B.2／9B.3 補 Codex 不適合 PM 的角色適配結論 |
+| 7 | AI 卡住好幾天要不要知道？ | 「要知道，但是不應該是我去主動發現…這類叫做 issue，這跟定期報告 report 是不同一件事情」；找 Owner 的規則「應該有定義在文件裡面」 | Report C 第 7 章：issue 與 report 分開；門檻由 AI PM 寫進文件 |
+| 8 | 10-28 四項決定是誰提的？ | 「自己想的」 | 維持「Owner 同日多項新路線」為 Owner 次要項 |
+| 9 | 有人告訴過 Owner llmtool 沒被用來開發 llmtool 嗎？ | 「那是初期，不就功能還不齊全還在做嗎，是要派什麼工」 | 審查者撤回此質疑：本機 229 個 Task 經 llmtool 派給 Codex，派工確有 dogfooding；未用的是 review-dispatch／repair／advance（F9 維持為 AI PM 項，不是告知失職） |
+
+### 9C.3 第三輪（九項）
+
+| # | 質疑 | Owner 答覆（要點） | 報告修正 |
+|---|---|---|---|
+| 1 | gw 量出來不省，還必做嗎？ | 「不能節省，那就沒必要了，因為現在市面上很多產品類似」；並問 thinking 開啟後的測試結果 | gw 改為「以量測為條件的必做路線」；thinking 開啟後結果見 9C.5 |
+| 2 | gw 只能走 VPN，EC2／CI 碰不到？ | 「gw 走公司 vpn，ec2 和 ci 碰得到」 | 記為 Owner 陳述；repo 內無 CI／EC2 對 gw 的任何執行紀錄（workflows 中無 gw），標 UNVERIFIED |
+| 3 | 公司對程式碼送外部 AI 的規定？ | 「什麼程式碼？這是我的項目…後面公司相關的工作，不在此討論範圍內」 | 不新增安全邊界條目；記錄「公司工作不在本專案範圍」 |
+| 4 | Claude 當 PM 三天滿意嗎？ | 「claude pm 不錯，除了偶而還是要叫他去開 subagent，或是平行把工作分下去一起做」 | 失職登記 10-25～28 不列 Owner 不滿；審查者對 PR 數量／merge train 的批評保留為 OPINION；9A.1 新增「不會自動平行」 |
+| 5 | 第一版圈哪些？ | 「必須要能使用公司 llm，搭配其他 ai，一起進行其他項目開發，省 token」 | NOW 的 Owner 版本：gw 在鏈內、與其他 AI 協作、**用於其他專案**、省 token；可攜性（硬編碼、Claude Code 耦合、安裝）因「其他項目」升級為第一版相關（9C.4 第 4 點、Report A 第 22 章） |
+| 6 | 第一版 PM 先接 Claude Code 就夠？ | 「claude pm，可以」 | 第一版 PM＝Claude Code session（pm_runtime）；provider-neutral PM 排後 |
+| 7 | 「卡住」門檻？ | 「AI 卡住好幾天我要不要知道，這不就是門檻了嗎」；規則應定義在文件 | Report C 第 7 章由 AI PM 定義具體天數並寫進文件（審查者建議 24 小時為待驗證目標） |
+| 8 | 磁碟 13 GB、374 worktree 現在清？ | 「我應該今天已經叫 claude 清理了」 | 已查證：worktree 374→32、registry ACTIVE 330→25、磁碟可用 13→28 GB（9C.5） |
+| 9 | 「新東西一直加」裡哪件不該加？ | 「目前沒有，你可以告訴我什麼不該加，而且有些項目是後面才要做，也就是 tui 能驗收之後」 | 審查者的取消候選與第二版清單見 9C.6 |
+
+### 9C.4 審查者據答覆的判斷（OPINION）
+
+1. **Owner 的責任結論。** 三輪答覆後，v1–v4 歸給 Owner 的項目只剩 Owner 自己承認的一項：「新東西一直加，做不完」。審查者同意這是事實，但以 Sponsor 標準這不算錯：中途有新想法是需求方的正常行為，AI 的責任是回一句「這會讓 NOW 延後多久」並把它排到 TUI 驗收之後，而 Owner 本次已主動說「有些項目是後面才要做」。因此本報告不再列任何 Owner 主要責任；次要責任一項（10-28 同日多項新路線的時機）保留，因為 Owner 確認是自己提的。這不是「Owner 全對」：真正的結論是**在 AI 沒有提供替代方案、停損、影響分析與白話說明的情況下，Owner 做的每個決定都是合理信任**，問題全在 AI 沒有給出可供不信任的資訊。
+2. **PM 額度是單點故障。** Owner 指出 Claude 額度用完時 PM 連溝通都停。所以「額度用盡自動改派」只能救 Developer／Reviewer 路線（Codex、gw、OpenCode），救不了 PM。三個選項：(a) 等額度回復；(b) 留一個初階備援 PM 只回報狀態、不做決定（Owner 對 Codex PM 的評價顯示它能做到這個層級）；(c) 把 PM 每次載入的規則文件砍到最小，讓額度撐更久。審查者建議 (c)＋(a)；是否允許 AI 在 Developer 路線間自動改派仍是 OWNER_DECISION_REQUIRED（worker-dispatch 開關目前為 Owner 專屬）。
+3. **Codex 不適合 PM 是角色適配，不是便宜模型問題。** Owner 的描述（被動、不平行、要精準措辭）與本機數據一致（Codex 派工規格鬆時 31% 無產出）。結論：Codex 適合有邊界、規格精準的 Developer 工作；PM 需要主動追問與平行派工，目前只有 Claude 做到，且仍要 Owner 提醒它開 subagent。
+4. **「其他項目開發」改變第一版的範圍。** Owner 第三輪第 5 題說第一版要「一起進行其他項目開發」。這表示 llmtool 不能只在本 repo 可用：硬編碼路徑（AUDIT-006）、`issues/289` URL 比對、Claude Code 專屬行為（AUDIT-007）與安裝方式（A13）從「90 天」提前為第一版相關。這是 v5 對 Report A 第 22 章最大的修正。
+
+### 9C.5 查證結果（FACT，2026-10-28 於 Owner Mac 唯讀查證；main `3677806`）
+
+| 項目 | v4 時 | 現在 | 依據 |
+|---|---|---|---|
+| Git worktree 數 | 374 | **32** | `git worktree list` |
+| D6 registry | 489 筆，ACTIVE 330 | 580 筆，ACTIVE **25**、REMOVED 305、RETIRED_EXTERNALLY 214、RETAIN_BLOCKED 34 | `.git/llmtool-worktrees/*.json` 狀態欄位 |
+| Mac 根磁碟可用 | 13 GB | **28 GB** | `df` |
+| 保留的 35 個 worktree | — | PR #545 逐一審計：SUPERSEDED 29、CONFLICTING 3、USEFUL 3（待 Owner 於 #352 決定） | #545 |
+| gw thinking 開 | 0/1（max_tokens 4096 被截斷） | **2/2**（max_tokens 16384；#522、#523 已合併）；thinking 關 4/5；合計 6/8 | #290 留言 2026-10-27 20:50 UTC |
+| gw thinking 開的成本 | — | 每題 1.0–1.4 萬 completion tokens、74–92 秒；thinking 關同類題 1.2K–8.4K tokens、2–4 秒（多 5–10 倍） | 同上 |
+| gw 是否省大型 AI token | 未量 | **仍未量**：沒有任何紀錄比較「PM 準備 context＋套 diff＋審查」與「直接派 Codex」的總成本；proposal 模式不能新增檔案（llmtool 缺口） | 同上 |
+| EC2／CI 能否連 gw | — | Owner 陳述可以；repo 內 workflows 無 gw、所有 gw 執行都在 PM 的 Mac（UNVERIFIED） | `git grep` origin/main |
+| `task advance`（#519） | OPEN | **已合併**（train 13b `2341fae`）；#538 補 REVIEW_NOT_POSTED；#542 completion 接受 advance 派審的 verdict | PR #533、#538、#546 |
+| TUI 即時 PM 對話 | 無 | `chat_tui.py` 已接 `pm_runtime`（S2 #524、S2b #549、TUI PM 窗格 S4 #544）：`/pm new`、串流回覆、`/pm history` | origin/main `chat_tui.py` |
+| Mac CI | 排程全跑 | 排程觸發已移除（#556／#557）、CLI 契約測試改 in-process（#548） | main log |
+
+**對 Owner 第三輪第 1 題的直接回答：** thinking 開啟後，上限提高到 16384 的兩題都成功，品質沒有問題；代價是每題一萬多 tokens、一分多鐘。但「有沒有幫大型 AI 省 token」還沒有人量，因為每一題都是 Claude PM 準備 context、套 diff、再由 Claude 審查，這部分的 Claude 成本從未被記下來。依 Owner「不能節省就沒必要」的條件，gw 路線的下一步只有一件事：**量這個數字**，量出來再決定。
+
+### 9C.6 審查者對「什麼不該加」的回答（OPINION；全部 OWNER_DECISION_REQUIRED）
+
+Owner 要求審查者直接說。依「TUI 驗收之後才做」的原則：
+
+| 分類 | 項目 | 理由 |
+|---|---|---|
+| **建議取消** | A11b F2（llmtool 自己做 Git）、ai-loop 引用、A2.3、review_authority／review_exchange／review_bundle／test_triage_worker 封存模組、Mac CI verifier-of-verifier、CliNest（除非 Owner 另有產品用途） | 已封存或與「Worker 自行 Git」原則相衝；0 使用 |
+| **第二版（TUI 驗收後）** | OpenCode、AGY、Telegram、Web、GitHub events inbox、High Debug 自動化、provider-neutral PM、開源發布 | Owner 已說可後接；主鏈未驗收前每條都是分散 |
+| **第一版但排在主鏈之後** | gw 經同一條鏈接入並量測是否省 token；可攜性（硬編碼→config、安裝）因「其他項目開發」進入第一版 | Owner 第三輪第 5 題 |
+| **第一版** | TUI 即時 PM 對話（已合併，待 E2E）、Codex 派工、EC2 測試、Reviewer、一次退修、PR 與合併、COMPLETED 顯示 | Owner 第一輪第 7 題 |
+
 
 ---
 
@@ -533,9 +625,10 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 
 ## 15. Owner Weaknesses（v3 重判：以 Sponsor 標準）
 
-1. **「省錢」與「可用」兩個目標並列未定先後**（FACT：PR #50、#290、#417 皆以省 token 為目標）。這驅動了 gw 三輪、EC2 P0、多路線；AI PM 應追問，但 Owner 可以更早定序。
-2. **全權委託與逐條指令之間切換**（FACT：10-09「原則上以需求方我一定會approve」；10-19～10-27 多次具體暫停／恢復指令）。PM 因此無法建立穩定的自主規則。
-3. ~~沒有要求定期的「可用交付物」檢查點~~ **撤銷（v4）**：Owner 說明當時「根本還沒有一個東西可以去實作」，不看 TUI 是正確判斷；缺失改歸 AI PM「未提出任何可 demo 的里程碑」（9A F8）。Owner 可改進的僅剩前兩項。
+1. ~~「省錢」與「可用」兩個目標並列未定先後~~ **改寫（v5）**：Owner 其實已定序（先做省 token 的內部工程，再做功能；gw 必做、OpenCode／AGY 可後接，9C.1 第 2、5 題）。未定的是省 token 工程的停損點與回收估算，這是 AI CTO 的工作（F15），不是 Owner 的。
+2. ~~全權委託與逐條指令之間切換~~ **撤銷（v5）**：Owner 說明 AI 從未監看額度（9C.1 第 3 題），10-19～10-27 的逐條指令是 Owner 看到額度用光後的補位，不是收回委託。改列 F15。
+3. ~~沒有要求定期的「可用交付物」檢查點~~ **撤銷（v4）**：Owner 說明當時「根本還沒有一個東西可以去實作」，不看 TUI 是正確判斷；缺失改歸 AI PM「未提出任何可 demo 的里程碑」（9A F8）。
+4. **（v5 僅存的一項，Owner 自述）「新東西一直加，做不完」**（FACT：Owner 2026-10-28；10-28 同日 AGY 納入、provider-neutral、web search、UI Agent 四項為 Owner 自己提出）。審查者判斷：以 Sponsor 標準這不是錯，中途有新想法是需求方的正常行為；AI 的責任是回一句「這會讓 NOW 延後多久」並排到 TUI 驗收之後（F13），Owner 本次也已說「有些項目是後面才要做」。列為次要項，不列主要責任（9C.4）。
 
 **撤銷的 v1 批評：** 「需求缺驗收標準」「讓 AI 把一句話放大成框架」「沒有停損」「沒親手驗收」「以 PR 數判斷進度」。這些是 AI PM／CTO／QA 的專業責任，已移至 6.3 與 9A。
 
@@ -545,18 +638,18 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 
 原則：Owner 只做 Sponsor 的事，其餘由 AI 承擔（分工見 [Report C](product-owner-playbook-ai-development-20261028.md)）。
 
-1. **一次只宣告一個 NOW。** 目前：多個目標並列（省錢、可用、開源、多路線）。新做法：一句話「現在只做一條鏈 E2E」；其餘由 AI PM 標 FROZEN 並在你提新想法時回影響分析。判準：週報的第一行是 NOW 的可用進度。（Roadmap 順序為 OWNER_DECISION_REQUIRED，本項正是該決策）
-2. **設預算上限，而不是逐次決定額度。** 目前：每次額度事件都要你說話。新做法：每月 token／CI／雲預算一個數字；額度用盡由 AI 在 ALLOWED 路線內改派，超過預算才通知你。
-3. **每週看一次 demo，說「符合／不符合」。** 目前：進度以 PR 與 CI 呈現。新做法：AI PM 每週交一個可操作的東西；你只需操作並回答符合與否；做不到 demo 是 PM 的失敗。
+1. **一次只宣告一個 NOW。** Owner 2026-10-28 已給（9C.3 第 5 題）：「必須要能使用公司 llm，搭配其他 ai，一起進行其他項目開發，省 token」。AI PM 要做的是把這句話展開成第一版清單（9C.6）並把其餘標 FROZEN；你提新想法時它回影響分析。判準：你問「現在能用什麼」時，AI 第一句就是 NOW 的可用進度。（Roadmap 順序為 OWNER_DECISION_REQUIRED，本項正是該決策）
+2. **設預算上限，而不是逐次決定額度。** Owner 已給：每月 USD 300（9C.1 第 9 題）。AI 要做的是每月列一張實際支出表（訂閱、EC2、API）放在狀態頁讓你對照；Developer／Reviewer 額度用盡由 AI 在 ALLOWED 路線內改派（OWNER_DECISION_REQUIRED：dispatch 開關目前為 Owner 專屬）；PM 自己的額度用盡是單點故障，對策見 9C.4 第 2 點。
+3. **想到就問，問到就要有 demo。** Owner 不要排程報告（9C.1 第 10 題）。新做法：AI PM 隨時維持一個可操作的東西；你任何時候問「現在能用什麼」，當下就能操作並回答符合與否；拿不出來是 PM 的失敗。
 4. **只接受決策單格式。** 目前：技術細節直接丟給你。新做法：AI 給你的任何決策請求必須用 Report C 的決策單（要決定什麼／為什麼需要你／推薦／替代／風險／不決定的後果）；不符格式直接退回。
-5. **明說委託模式。** 目前：全權委託與逐條指令切換。新做法：對每類事情明說「你們決定」或「問我」；AI PM 把它寫成分工表（Report C A–E），之後不再逐條問。
+5. **聽不懂就退回，要求白話。** 目前：fake-only 這類詞沒被解釋就被核准（F16）。新做法：AI 的任何提案必須先用一句白話說「做完你能／不能做什麼」；你聽不懂就退回「用白話說」，這是 AI 的問題不是你的。
 
 ---
 
 ## 17. Recommended Governance Improvements（建議；標示者需 Owner 決策，不修改現行政策）
 
 - 單一入口文件（短）：vision、NOW、FROZEN、本週 Owner 任務、成本看板連結。（工程建議）
-- Owner 決策改為每週批次（除安全／支出）。（OWNER_DECISION_REQUIRED：Owner 決策紀錄規則）
+- Owner 決策不排程：只在需要時以決策單提出；「卡住」類 issue 主動找 Owner，進度 report 不主動送（Owner 2026-10-28）。（OWNER_DECISION_REQUIRED：Owner 決策紀錄規則）
 - 分級流程：docs／test-only／runtime。（OWNER_DECISION_REQUIRED：AGENTS.md 審查與 CI gate）
 - Reviewer 復用 D6；docs PR 不需正式審。（OWNER_DECISION_REQUIRED：D6 lifecycle 與審查規則）
 - 技術狀態自動化（額度、runner、磁碟）。（OWNER_DECISION_REQUIRED：dispatch 切換方式）
@@ -579,13 +672,14 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 | 分類 | 項目 |
 |---|---|
 | **立即** | TUI Task mode + Tasks view（#505／#510／#512，**已於 snapshot 後經 #513 合併**）；`task advance` + 終態（#519，OPEN）；D6 經 gate 的安全退場；Codex retry；一個 Owner 任務 E2E；文件瘦身第一輪 |
-| **延後**（OWNER_DECISION_REQUIRED） | provider-neutral route 接入 `task delegate`（#500 契約已於 #513 合併）、AGY、OpenCode、gw 真實題、High Debug 自動化、GitHub events inbox、Telegram、Web、A13、CliNest |
+| **NEXT**（主鏈 E2E 之後第一項；Owner 2026-10-28） | gw 經同一條 TUI→PM→Developer 鏈接入，並量測「PM 準備 context＋套 diff＋審查」對「直接派 Codex」的總成本（Owner：不能節省就沒必要）；可攜性（硬編碼→config、安裝）因「其他項目開發」進入第一版 |
+| **延後**（OWNER_DECISION_REQUIRED） | provider-neutral route 接入 `task delegate`（#500 契約已於 #513 合併）、AGY、OpenCode（Owner 2026-10-28：省 token 用途，可後接）、High Debug 自動化、GitHub events inbox、Telegram、Web、CliNest |
 | **取消**（OWNER_DECISION_REQUIRED） | A11b F2、ai-loop 引用、A2.3、review_authority／review_exchange／review_bundle／test_triage_worker 封存、Mac CI verifier-of-verifier |
-| **Owner 重決** | Reviewer 分級（docs／test-only 免正式審）；Mac CI 範圍縮小；merge train 停用；是否保留 gw 作為路線；CliNest 是否獨立 |
+| **Owner 重決** | Reviewer 分級（docs／test-only 免正式審）；Mac CI 範圍縮小；merge train 停用；gw 量測後是否保留（Owner 已給條件）；CliNest 是否獨立 |
 
 ### Post-Snapshot 註記（main `3621aa4`，#513，2026-10-27 20:25 UTC）
 
-Snapshot 之後 merge train 11 合併了 TUI Task mode／Task list／事件時間軸（#505／#510／#512）、`pm_runtime`（#506）、gw probe 與設定（#508／#509／#511）與 provider-neutral developer route 契約（#500）。這改變了上表「立即」一列的狀態，不改變本報告對歷史決策的評價；AUDIT-001 的核心（TUI 仍不驅動開發流程）依 Report A 第 26 章仍成立。
+Snapshot 之後 merge train 11 合併了 TUI Task mode／Task list／事件時間軸（#505／#510／#512）、`pm_runtime`（#506）、gw probe 與設定（#508／#509／#511）與 provider-neutral developer route 契約（#500）。**v5 更新（main `3677806`，train 12–19）：** `task advance`（#519）、pm_runtime S2／S2b 與 TUI PM 窗格（#524／#549／#544）、completion 接受 advance 派審 verdict（#542）已合併；worktree 已清理（374→32）；gw thinking 開啟後真實題 2/2。細節見 9C.5 與 Report A 第 26 章。這改變了上表「立即」一列的狀態，不改變本報告對歷史決策的評價；「從 TUI 提交後是否真的走完一條鏈」仍未有 E2E 紀錄。
 
 ---
 
@@ -593,7 +687,8 @@ Snapshot 之後 merge train 11 合併了 TUI Task mode／Task list／事件時�
 
 - **方向正確，順序錯誤。** 原則與零件品質高；入口與組裝最晚。
 - **最嚴重的五個錯誤：** M1 MVP 太晚（AI PM）、M2／M5 框架先於入口並封存（AI CTO）、M6 多路線分散（AI PM 未做影響分析；Owner 同日多項新路線為次要）、M9 額度驅動反覆（AI PM 把技術狀態呈現為 Owner 決策）、M3 流程中沒有使用者驗收環節（AI QA／PM）。
-- **責任分佈（OPINION，依可見紀錄）：** 技術問題（God module、契約過嚴、無終態、容量）屬 AI 實作與 AI PM；方案選擇問題（F1、fake-only、五套授權、多路線）屬 AI CTO／Coordinator，且無紀錄顯示曾向 Owner 提出替代方案或停損；流程問題（merge train、每輪 D6、docs 全 gate、policy PR）屬 AI PM。Owner 的責任限於兩項：目標先後未定、委託模式切換（「未要求 demo」已於 v4 撤銷，見 9B.3）。**沒有找到 Owner 在明確警告後仍堅持錯誤方案的案例。**
+- **責任分佈（OPINION，依可見紀錄）：** 技術問題（God module、契約過嚴、無終態、容量）屬 AI 實作與 AI PM；方案選擇問題（F1、fake-only、五套授權、多路線）屬 AI CTO／Coordinator，且無紀錄顯示曾向 Owner 提出替代方案或停損；流程問題（merge train、每輪 D6、docs 全 gate、policy PR）屬 AI PM。Owner 的責任（v5）只剩一項 Owner 自述的次要項：「新東西一直加」（10-28 同日多項新路線）；「目標先後未定」改寫、「委託模式切換」撤銷（第 15 章、9C）。**沒有找到 Owner 在明確警告後仍堅持錯誤方案的案例；也沒有找到 AI 給過替代方案、停損或白話說明而 Owner 選錯的案例。**
+- **Owner 已給的硬條件（9C）：** 第一版＝在 TUI 提需求、PM 像 Claude TUI 一樣即時回話、拿到想要的結果，且能用公司 LLM 搭配其他 AI 開發其他專案、省 token；第一版 PM 先接 Claude Code；關閉介面後繼續不是本機第一版的硬需求；預算每月 USD 300；不要排程的報告與審查，Owner 想到就問；卡住要當 issue 主動找 Owner；gw 不能省就不要。
 - **過度工程：** 是，集中在治理層；由 AI 提案、AI 建造、AI 未叫停。
 - **絕對不會再做：** F1 容器化、fake-only 契約、ai-loop 第二編排器、30 份 benchmark 報告、五套授權。
 - **最有價值的成果：** TaskStore＋D6＋Codex direct＋EC2 receipt＋CI 隔離＋nlf。
