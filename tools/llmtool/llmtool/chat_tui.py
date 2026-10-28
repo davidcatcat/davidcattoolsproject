@@ -35,7 +35,11 @@ KEY_HELP = """Keys
                         choose, Enter puts the entry in the draft without running it,
                         Esc cancels and leaves the draft unchanged
   Tab, Shift-Tab        Switch focus between input and conversation
-  PageUp/PageDown       Scroll conversation (arrows also scroll when it is focused)
+  PageUp/PageDown       Scroll conversation (Fn+↑/↓ on a Mac keyboard; arrows also scroll
+                        when it is focused)
+  Mouse wheel           Scroll conversation (mouse reporting is on by default)
+  F6                    Toggle mouse reporting: off lets the terminal select and copy text by
+                        dragging as usual (iTerm2 also selects with Option-drag while it is on)
   F1                    Toggle this help (shown in place of the conversation)
   F2                    Toggle the last Task detail (Esc also closes it)
   F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
@@ -43,21 +47,14 @@ KEY_HELP = """Keys
                         %d s while shown (local TaskStore read only, no AI call)
   F4                    Toggle recent events across Tasks (/task events): newest first;
                         F5 or r refreshes, Esc closes; never acknowledges or polls
+  Esc (during a reply)  Interrupt the chat reply: a streamed reply stops at its next chunk
+                        and the text shown so far stays, marked interrupted; a provider
+                        that answers in one piece returns first, then that reply is shown
+                        marked interrupted. Ctrl-C interrupts first, a second Ctrl-C exits
   Ctrl-C, Ctrl-D        Exit (Ctrl-D only with empty input)
-A request in progress cannot be cancelled; exit waits for it to finish or time out.
+A Task submit in progress cannot be cancelled; exit waits for it to finish or time out.
 
-Formal task commands (separate from ordinary chat; results come only from llmtool Core)
-  /task mode PROFILE    Task mode: Enter submits each non-command draft as a formal PM
-                        Task to PM provider PROFILE (no implicit default); "task>" prompt
-  /task mode off        Back to chat mode: Enter sends to the chat provider again
-  /task submit --provider PROFILE REQUEST
-                        Submit one Task explicitly (also from chat mode, and to resend a
-                        request Task mode refused as a repeat)
-  /task show TASK_ID    Open a Task's detail
-  /task list            Open the Task list (stage, update time, request) from TaskStore
-  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
-
-Real-time PM conversation (the dedicated PM session, through pm_runtime only)
+Talk to the PM: the dedicated Claude Code PM (/pm …) is the product entry
   /pm new [CWD]         Create a dedicated PM session (pm_runtime create_dedicated_pm; CWD
                         defaults to the current directory) and save it as the binding
   /pm connect [SESSION [CWD]]  Connect to the dedicated PM session: the saved binding when
@@ -67,7 +64,20 @@ Real-time PM conversation (the dedicated PM session, through pm_runtime only)
   /pm                   Show the connected PM and its state
   Esc (during a turn)   Interrupt the PM turn; Ctrl-C interrupts first, a second Ctrl-C exits
 PM replies stream in as pm_runtime reports them; tool use is one line per tool and never
-shows tool input or output. Chat replies are never sent to or shown as the PM.
+shows tool input or output. PM thinking is never shown as the answer: the PM field says
+思考中… meanwhile. Chat replies are never sent to or shown as the PM.
+
+Formal task commands (developer/test path, separate from ordinary chat; results come
+only from llmtool Core and nothing is dispatched)
+  /task submit --provider PROFILE REQUEST
+                        開發測試用：只登記，不會派工 — records one Task in Core (also from
+                        chat mode, and to resend a request Task mode refused as a repeat)
+  /task mode PROFILE    Task mode: Enter submits each non-command draft as a formal PM
+                        Task to PM provider PROFILE (no implicit default); "task>" prompt
+  /task mode off        Back to chat mode: Enter sends to the chat provider again
+  /task show TASK_ID    Open a Task's detail
+  /task list            Open the Task list (stage, update time, request) from TaskStore
+  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
 A Task receipt shows the PM provider, Task ID, Run ID and state recorded by Core;
 已建立／待派工 means no Developer has been dispatched. A chat reply is never a Task.
 Stage and next responsible are derived by the TUI from Core fields; values Core does
@@ -84,21 +94,30 @@ SLASH_COMMANDS = (
     ("/history", "/history", "Show user/assistant turns"),
     ("/exit", "/exit", "Exit"),
     ("/quit", "/quit", "Exit"),
-    ("/task submit", "/task submit --provider ", "Submit a task: --provider PROFILE REQUEST"),
+    ("/pm connect", "/pm connect", "Talk to the PM: connect to the dedicated PM session"),
+    ("/pm new", "/pm new", "Create a dedicated PM session (pm_runtime binding)"),
+    ("/pm disconnect", "/pm disconnect", "End the PM connection"),
+    ("/pm history", "/pm history", "Turns pm_runtime stored for this PM"),
+    ("/task submit", "/task submit --provider ",
+     "開發測試用：只登記，不會派工 (--provider PROFILE REQUEST)"),
     ("/task show", "/task show ", "Show a task by TASK_ID"),
     ("/task mode", "/task mode ", "Task mode for drafts: PROFILE, or off"),
     ("/task list", "/task list", "Task list with status from TaskStore"),
     ("/task events", "/task events", "Recent Task events from TaskStore"),
-    ("/pm connect", "/pm connect", "Real-time PM: connect to the dedicated PM session"),
-    ("/pm new", "/pm new", "Create a dedicated PM session (pm_runtime binding)"),
-    ("/pm disconnect", "/pm disconnect", "End the PM connection"),
-    ("/pm history", "/pm history", "Turns pm_runtime stored for this PM"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
-STATUS_FIELDS = ("mode", "provider", "model", "state", "usage", "help")
-STATUS_DROP_ORDER = ("help", "usage", "model", "provider")
+STATUS_FIELDS = ("mode", "provider", "model", "state", "usage", "scroll", "mouse", "help")
+STATUS_DROP_ORDER = ("mouse", "help", "usage", "scroll", "model", "provider")
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
+# PM typewriter: the CLI emits text in bursts (0.6–1 s apart); received text is queued and
+# released every tick at PM_CHARS_PER_TICK (≈67 chars/s). A long queue raises the rate to
+# len/PM_MAX_LAG_TICKS until it empties, so the pane never lags the stream by more than
+# about PM_MAX_LAG_TICKS ticks (≈1 s). The end of a block, of the turn or an interrupt
+# flushes everything at once: total time unchanged.
+PM_TICK_SECONDS = 0.03
+PM_CHARS_PER_TICK = 2
+PM_MAX_LAG_TICKS = 33
 
 
 def slash_matches(text):
@@ -233,8 +252,20 @@ class ChatTUI:
         self.busy = False
         self.quit_pending = False
         self.show_help = False
+        # Mouse reporting: on, the wheel scrolls the conversation; off (F6), the terminal's
+        # own drag-select and copy work. The Application reads this filter every render.
+        self.mouse_enabled = True
+        self._view_at_bottom = True  # conversation view state at the last render (see _follow_tick)
         self.worker = None
         self.worker_kind = None
+        # Chat request interrupt (Esc or the first Ctrl-C): the worker's cancel event,
+        # whether it was requested, and the reply block still streaming into the pane.
+        self.send_cancel = None
+        self.send_interrupted = False
+        self.stream_raw = None       # text of the streaming chat reply (None: no block open)
+        self.stream_head = 0         # where that block's "assistant:" header starts in the pane
+        self.stream_start = 0        # where that block's text starts in the pane
+        self.stream_seen = False     # chunks of the current reply were already shown
         self.menu_items = []
         self.menu_index = 0
         self.menu_offset = 0
@@ -271,6 +302,10 @@ class ChatTUI:
         self.pm_interrupted = False
         self.pm_block_raw = None     # raw text of the streaming PM block (None: no block open)
         self.pm_block_start = 0      # where that block's displayed text starts in the pane
+        self.pm_queue = ""           # received PM text not yet released to the pane
+        self._pm_tick_handle = None  # loop.call_later handle of the next typewriter tick
+        self._pm_rate = PM_CHARS_PER_TICK   # characters released per tick (raised when behind)
+        self.pm_warm = False         # connected, nothing received yet: the PM process is cold
         # Exit/connect hand-off: a runtime opened by the connect worker but not yet adopted
         # is closed by whichever side sees the other first (close_pm or the worker).
         self._pm_lock = threading.Lock()
@@ -284,7 +319,9 @@ class ChatTUI:
             text=terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
                                     + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."
                                     + "\nChat mode talks to the chat provider directly; it is not a PM."
-                                    + " /task mode PROFILE sends drafts to a PM as formal Tasks."),
+                                    + " /pm connect (or /pm new) talks to the dedicated PM."
+                                    + " /task submit is for development testing only: it records"
+                                    + " a Task and dispatches nothing."),
             read_only=True, scrollbar=True, wrap_lines=True, focus_on_click=True,
             height=Dimension(min=1, weight=1))
         self.conversation.buffer.cursor_position = len(self.conversation.text)
@@ -367,10 +404,15 @@ class ChatTUI:
             self.close_menu()
 
         pm_turn = Condition(lambda: self.pm_turn_active)
+        chat_request = Condition(lambda: self.busy and self.worker_kind == "chat")
 
         @keys.add("escape", filter=input_focused & pm_turn & ~picker_shown)
         def _pm_interrupt(event):
             self.interrupt_pm()
+
+        @keys.add("escape", filter=input_focused & chat_request & ~picker_shown)
+        def _send_interrupt(event):
+            self.interrupt_send()
 
         @keys.add("escape", filter=showing_detail & ~picker_shown)
         def _detail_close(event):
@@ -433,6 +475,10 @@ class ChatTUI:
         def _events(event):
             self.toggle_events(not self.show_events)
 
+        @keys.add("f6")
+        def _mouse(event):
+            self.toggle_mouse()
+
         @keys.add("escape", filter=events_focused & showing_events)
         def _events_close(event):
             self.toggle_events(False)
@@ -468,7 +514,8 @@ class ChatTUI:
 
         self.app = Application(
             layout=Layout(root, focused_element=self.input), key_bindings=keys, full_screen=True,
-            mouse_support=False, refresh_interval=0.5, input=input, output=output,
+            mouse_support=Condition(lambda: self.mouse_enabled), refresh_interval=0.5,
+            input=input, output=output,
             style=Style.from_dict({"status": "reverse", "help": "italic", "rule": "fg:ansibrightblack",
                                    "menu": "bg:ansibrightblack fg:ansiwhite",
                                    "menu.current": "reverse",
@@ -481,6 +528,8 @@ class ChatTUI:
         self.app.before_render += lambda _app: self._sync_picker()
         # A shown list re-reads TaskStore when stale; redraws never read more often.
         self.app.before_render += lambda _app: self._list_tick()
+        # Wheel-scrolled back to the bottom: follow new output again.
+        self.app.before_render += lambda _app: self._follow_tick()
 
     # -- rendering -----------------------------------------------------------------
     def status_text(self):
@@ -490,10 +539,11 @@ class ChatTUI:
         state = session.state
         if self.busy:
             started = session.request_started
+            verb = "interrupting" if self.send_interrupted else "working"
             if started is None:
-                state = "working"
+                state = verb
             else:
-                state = "working %.1fs" % max(0.0, time.monotonic() - started)
+                state = "%s %.1fs" % (verb, max(0.0, time.monotonic() - started))
         elif state == "error":
             state = "error (" + (session.last_error_code or "unclassified") + ")"
         if self.quit_pending:
@@ -515,6 +565,8 @@ class ChatTUI:
             "model": "m:" + compact(reported or model or "default", 14),
             "state": compact(state, 14),
             "usage": "t:" + compact(_tokens(session.last_usage), 14),
+            "scroll": ("滾輪/Fn+↑↓ 捲動對話" if self.mouse_enabled else "Fn+↑↓ 捲動對話"),
+            "mouse": "F6 滑鼠:" + ("開" if self.mouse_enabled else "關"),
             "help": "F1",
         }
         width = max(1, self.app.output.get_size().columns)
@@ -523,7 +575,7 @@ class ChatTUI:
                  if key != "mode" or self.task_profile or self.pm_mode]
         if self.pm_mode:
             # Chat provider/model/usage are not the PM's; in PM mode only the PM field shows.
-            shown = ["mode", "help"]
+            shown = ["mode", "scroll", "mouse", "help"]
         for name in STATUS_DROP_ORDER:
             if self._get_cwidth(" | ".join(fields[key] for key in shown)) <= width:
                 break
@@ -622,7 +674,8 @@ class ChatTUI:
         # The detail and events panes are text areas with Esc-prefixed bindings, so a
         # lone Esc (close) would otherwise wait the full default timeout.
         shown = (sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
-                 or self.events_visible() or self.pm_turn_active)
+                 or self.events_visible() or self.pm_turn_active
+                 or (self.busy and self.worker_kind == "chat"))
         self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
     def move_menu(self, direction):
@@ -686,6 +739,7 @@ class ChatTUI:
         New output closes the Task detail so it is never hidden behind that pane.
         """
         self._pm_finalize()  # Any other output ends the streaming PM block (shown in full).
+        block = self._stream_detach()  # A streaming chat reply stays one block, below.
         if self.show_detail:
             self.toggle_detail(False)
         if self.show_list or self.show_events:
@@ -699,7 +753,28 @@ class ChatTUI:
         new = old + ("\n\n" if old else "") + safe
         position = len(new) if follow else buffer.cursor_position
         buffer.set_document(self._Document(new, position), bypass_readonly=True)
+        if block is not None:
+            self._stream_attach(block)
         self.app.invalidate()
+
+    def _follow_tick(self):
+        """Resume following new output when the view arrives back at the bottom.
+
+        The wheel moves the caret only as far as the view needs, so after wheeling back
+        down a later reply would be appended out of sight. Only the transition counts:
+        a first PageUp leaves the view at the bottom with the caret one page up, and that
+        caret must stay. A focused conversation keeps its caret too (arrows move it).
+        """
+        if self.show_help or self.show_detail or self.show_list or self.show_events:
+            return
+        info = self.conversation.window.render_info
+        if info is None:
+            return
+        at_bottom = info.vertical_scroll + info.window_height >= info.content_height
+        arrived, self._view_at_bottom = at_bottom and not self._view_at_bottom, at_bottom
+        if arrived and self.app.layout.has_focus(self.input):
+            buffer = self.conversation.buffer
+            buffer.cursor_position = len(buffer.text)
 
     def scroll(self, direction):
         buffer = self.conversation.buffer
@@ -720,6 +795,16 @@ class ChatTUI:
                 else self.list_window if self.show_list
                 else self.events if self.show_events else self.conversation)
         layout.focus(pane if layout.has_focus(self.input) else self.input)
+
+    def toggle_mouse(self):
+        """F6: mouse reporting on (wheel scrolls) or off (terminal drag-select/copy works)."""
+        self.mouse_enabled = not self.mouse_enabled
+        if self.mouse_enabled:
+            self.append("llmtool: mouse on; the wheel scrolls the conversation. F6 turns it off"
+                        " to select and copy text with the terminal")
+        else:
+            self.append("llmtool: mouse off; drag to select and copy text with the terminal."
+                        " Fn+↑/↓ (PageUp/PageDown) scroll; F6 turns the wheel back on")
 
     def toggle_help(self):
         self.show_help = not self.show_help
@@ -1109,17 +1194,27 @@ class ChatTUI:
     def start_send(self, text):
         self.busy = True
         self.worker_kind = "chat"
+        self.send_cancel = threading.Event()
+        self.send_interrupted = False
+        self.stream_seen = False
         self.append("you:\n" + text)
         self._loop = asyncio.get_running_loop()
-        self.worker = threading.Thread(target=self._request, args=(text, self._loop),
+        self.worker = threading.Thread(target=self._request,
+                                       args=(text, self.send_cancel, self._loop),
                                        name="llmtool-chat-request")
         self.worker.start()
 
-    def _request(self, text, loop):
-        """Worker thread: one immutable captured input; ChatSession owns rollback."""
+    def _request(self, text, cancel, loop):
+        """Worker thread: one immutable captured input; ChatSession owns rollback.
+
+        Streamed reply text is posted to the event loop chunk by chunk; the cancel
+        event (Esc / first Ctrl-C) is read by ChatSession between chunks.
+        """
+        def on_text(chunk):
+            self._post(loop, self.stream_text, chunk)
         try:
             with background_cli_invocation():
-                outcome = (True, self.session.send(text))
+                outcome = (True, self.session.send(text, on_text=on_text, cancel=cancel))
         except LLMToolError as exc:
             outcome = (False, str(exc))
         except BaseException:
@@ -1140,15 +1235,68 @@ class ChatTUI:
                 self.set_detail(result["detail"])
         self._finish(render)
 
+    def stream_text(self, text):
+        """Event-loop callback: show one streamed chunk of the chat reply in place."""
+        if not (self.busy and self.worker_kind == "chat") or not text:
+            return
+        if self.stream_raw is None:
+            self._stream_attach("")
+        self.stream_raw += text
+        self.stream_seen = True
+        self._block_render(self.stream_start, terminal_safe_text(self.stream_raw))
+
+    def _stream_attach(self, raw):
+        """Open the chat reply block at the end of the pane with the text so far."""
+        self.stream_head = len(self.conversation.buffer.text)
+        self.append("assistant:")
+        self.stream_raw = raw
+        self.stream_start = len(self.conversation.buffer.text) + 1   # after "\n"
+        if raw:
+            self._block_render(self.stream_start, terminal_safe_text(raw))
+
+    def _stream_detach(self):
+        """Take an open chat reply block off the pane end; append() puts it back
+        below the new output, so an interrupt notice never splits the reply."""
+        raw = self.stream_raw
+        if raw is None:
+            return None
+        self.stream_raw = None
+        buffer = self.conversation.buffer
+        head = buffer.text[:self.stream_head]
+        buffer.set_document(self._Document(head, min(buffer.cursor_position, len(head))),
+                            bypass_readonly=True)
+        return raw
+
+    def _stream_finalize(self):
+        """End the chat reply block where it is; its text stays as shown."""
+        self.stream_raw = None
+
     def finish_send(self, outcome):
         """Runs as an event-loop callback, where an exception would bypass run()."""
         ok, text = outcome
-        self._finish(lambda: self.append(("assistant:\n" if ok else "llmtool: ") + (text or "")))
+
+        def render():
+            streamed = self.stream_seen   # shown chunk by chunk: never printed again
+            self._stream_finalize()
+            if not ok:
+                self.append("llmtool: " + (text or ""))
+                return
+            if not streamed:
+                self.append("assistant:\n" + (text or ""))
+            if self.session.last_interrupted:
+                self.append("llmtool: reply interrupted"
+                            + (" after the text above; it stays in history as shown"
+                               if streamed else
+                               "; the provider answered in one piece, so the whole reply"
+                               " above is kept in history"))
+        self._finish(render)
 
     def _finish(self, render):
         self.busy = False
         self.worker = None
         self.worker_kind = None
+        self.send_cancel = None
+        self.send_interrupted = False
         if self._received_signal is not None:
             self.app.exit(result=0)
             return
@@ -1166,6 +1314,12 @@ class ChatTUI:
         state = self.pm_state or chat_tui_task.UNKNOWN
         if state == "working" and self.pm_turn_started is not None:
             state = "working %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+            if self.pm_warm:   # first turn, nothing received yet: cold start, not a slow PM
+                state = "暖機中… %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+        elif state == "idle" and self.pm_warm:
+            state = "暖機中…"
+        elif state == "thinking":
+            state = "思考中…"
         return "PM:" + compact(session_id, 8) + " " + compact(state, 18)
 
     def run_pm_command(self, text):
@@ -1237,11 +1391,8 @@ class ChatTUI:
             return
         binding = outcome["binding"] if type(outcome["binding"]) is dict else {}
         self.append("Dedicated PM session " + chat_tui_pm.safe_text(binding.get("native_session_id"))
-                    + " created by pm_runtime (cwd " + chat_tui_pm.safe_text(binding.get("cwd"))
-                    + ") and saved as the binding; " + chat_tui_pm.binding_text(binding)
-                    + ". pm_runtime started `claude --session-id` in the background; the TUI has "
-                    "not verified that session. /pm connect connects to it; pm_runtime refuses "
-                    "it as live elsewhere while its transcript changed in the last 20 s.")
+                    + " dedicated binding created (cwd " + chat_tui_pm.safe_text(binding.get("cwd"))
+                    + "); the session starts on the first message. /pm connect connects to it.")
 
     def _pm_worker(self, target, *args):
         self.pm_pending = True
@@ -1331,6 +1482,8 @@ class ChatTUI:
         self.pm_binding = outcome.get("binding")
         self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
+        # Status shows 暖機中… until the first turn's first output; W41 A: no warm-up message.
+        self.pm_warm = True
         self.append("PM mode: Enter sends each draft in real time to the PM session "
                     + self.pm_target[0] + " (claude-code, cwd "
                     + chat_tui_pm.safe_text(str(self.pm_target[1]))
@@ -1358,7 +1511,7 @@ class ChatTUI:
     def finish_pm_disconnect(self):
         self.pm_pending = False
         self.pm_runtime, self.pm_target, self.pm_mode, self.pm_state = None, None, False, None
-        self.pm_binding = None
+        self.pm_binding, self.pm_warm = None, False
         self.append("PM disconnected; chat mode (Enter sends to chat provider "
                     + self.session.provider + ", not a PM)")
 
@@ -1407,30 +1560,67 @@ class ChatTUI:
         self._post(loop, self.finish_pm_turn)
 
     def _pm_extend(self, text):
-        """Stream text into the current PM block; every update is screened (see
-        chat_tui_pm.screen_stream), so the pane shows only redacted, settled text."""
+        """Queue text for the current PM block; the typewriter tick releases it. Every
+        update is screened (see chat_tui_pm.screen_stream), so the pane shows only
+        redacted, settled text."""
         if not text:
             return
         if self.pm_block_raw is None:
             self.append("PM:")
             self.pm_block_raw = ""
             self.pm_block_start = len(self.conversation.buffer.text) + 1   # after "\n"
-        self.pm_block_raw += text
+        self.pm_queue += text
+        self._pm_rate = max(self._pm_rate, -(-len(self.pm_queue) // PM_MAX_LAG_TICKS))
+        self._pm_schedule_tick()
+
+    def _pm_schedule_tick(self):
+        if self._pm_tick_handle is not None or not self.pm_queue:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return   # No loop (unit tests): _pm_tick is driven directly; a flush empties it.
+        self._pm_tick_handle = loop.call_later(PM_TICK_SECONDS, self._pm_tick)
+
+    def _pm_tick(self):
+        """Release a slice of the queued PM text, in order; more per tick when behind."""
+        self._pm_tick_handle = None
+        if self.pm_block_raw is None or not self.pm_queue:
+            self.pm_queue, self._pm_rate = "", PM_CHARS_PER_TICK
+            return
+        self.pm_block_raw += self.pm_queue[:self._pm_rate]
+        self.pm_queue = self.pm_queue[self._pm_rate:]
+        if not self.pm_queue:
+            self._pm_rate = PM_CHARS_PER_TICK
         self._pm_render(final=False)
+        self._pm_schedule_tick()
+
+    def _pm_flush(self):
+        """Release every queued character now (block/turn end, interrupt, other output)."""
+        if self._pm_tick_handle is not None:
+            self._pm_tick_handle.cancel()
+            self._pm_tick_handle = None
+        if self.pm_queue and self.pm_block_raw is not None:
+            self.pm_block_raw += self.pm_queue
+        self.pm_queue, self._pm_rate = "", PM_CHARS_PER_TICK
 
     def _pm_render(self, final):
+        self._block_render(self.pm_block_start,
+                           terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final)))
+
+    def _block_render(self, start, shown):
+        """Replace the pane text from a streaming block's start with its current text."""
         buffer = self.conversation.buffer
         old = buffer.text
         follow = buffer.cursor_position >= len(old)
-        head = old[:self.pm_block_start - 1]
-        shown = terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final))
-        new = head + "\n" + shown
+        new = old[:start - 1] + "\n" + shown
         position = len(new) if follow else min(buffer.cursor_position, len(new))
         buffer.set_document(self._Document(new, position), bypass_readonly=True)
         self.app.invalidate()
 
     def _pm_finalize(self):
         """End the streaming block: show its full screened text, held-back tail included."""
+        self._pm_flush()
         if self.pm_block_raw is None:
             return
         self._pm_render(final=True)
@@ -1438,7 +1628,16 @@ class ChatTUI:
 
     def pm_event(self, event):
         kind = event.get("type")
-        if kind == "TEXT_DELTA" and type(event.get("text")) is str:
+        if kind != "THINKING" and self.pm_state == "thinking":
+            self.pm_state = "working"   # Thinking ended: text, a tool or the end follows.
+        if kind in ("TEXT_DELTA", "ASSISTANT_TEXT", "TOOL_USE", "TURN_END", "RUNTIME_ERROR"):
+            self.pm_warm = False        # The process answered: the cold start is over.
+        if kind == "THINKING":
+            # Status only: thinking content never reaches the pane (pm_runtime sends none).
+            if self.pm_state == "working":
+                self.pm_state = "thinking"
+            self.app.invalidate()
+        elif kind == "TEXT_DELTA" and type(event.get("text")) is str:
             index = event.get("block_index")
             if self.pm_block_raw is not None and index != self.pm_block_index:
                 self._pm_finalize()   # A new content block starts a new PM block.
@@ -1471,11 +1670,12 @@ class ChatTUI:
             self.append(chat_tui_pm.replay_text(event))
         elif kind == "TURN_END":
             elapsed = max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic()))
-            self.append(chat_tui_pm.turn_end_text(event, elapsed))
+            self.append(chat_tui_pm.turn_end_text(event, elapsed))   # append() flushes first
 
     def finish_pm_turn(self):
+        self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
         self.pm_turn_active, self.pm_turn_started = False, None
-        if self.pm_state in ("working", "interrupting"):
+        if self.pm_state in ("working", "thinking", "interrupting"):
             self.pm_state = "idle"
         self.app.invalidate()
 
@@ -1483,7 +1683,7 @@ class ChatTUI:
         if not self.pm_turn_active or self.pm_interrupted or self.pm_runtime is None:
             return
         self.pm_interrupted, self.pm_state = True, "interrupting"
-        self.append("llmtool: interrupt sent to the PM; waiting for the turn to end")
+        self.append("llmtool: interrupt sent to the PM; waiting for the turn to end")   # flushes
         try:
             self.pm_runtime.interrupt()
         except LLMToolError as exc:
@@ -1498,9 +1698,32 @@ class ChatTUI:
             self._pm_exiting = True
             runtimes = [self.pm_runtime, self._pm_unadopted]
             self.pm_runtime, self._pm_unadopted = None, None
+        if self._pm_tick_handle is not None:
+            self._pm_tick_handle.cancel()
+            self._pm_tick_handle = None
         for runtime in runtimes:
             if runtime is not None:
                 self._close_runtime(runtime)
+
+    def interrupt_send(self):
+        """Esc or the first Ctrl-C during a chat request: ask the worker to stop.
+
+        The request stays single-flight until the worker ends: a streamed reply ends
+        at its next chunk, a reply that arrives in one piece ends when the provider
+        returns. Nothing is killed; no provider call is made.
+        """
+        if not (self.busy and self.worker_kind == "chat") or self.send_interrupted:
+            return False
+        self.send_interrupted = True
+        if self.send_cancel is not None:
+            self.send_cancel.set()
+        if self.stream_raw is not None:
+            self.append("llmtool: interrupt requested; the reply stops at its next chunk")
+        else:
+            self.append("llmtool: interrupt requested; a streamed reply stops at its next chunk,"
+                        " a reply that arrives in one piece is shown marked interrupted when"
+                        " the provider returns")
+        return True
 
     def request_quit(self):
         self.close_menu()  # Ctrl-C/Ctrl-D: also restores the default Esc timeout.
@@ -1508,11 +1731,20 @@ class ChatTUI:
             self.interrupt_pm()
             self.append("llmtool: Ctrl-C again exits (the PM connection is closed on exit)")
             return
+        if self.busy and self.worker_kind == "chat" and not self.send_interrupted:
+            self.interrupt_send()
+            self.append("llmtool: Ctrl-C again exits")
+            return
         if self.busy:
             if not self.quit_pending:
                 self.quit_pending = True
-                self.append("llmtool: exit requested; the in-flight request cannot be cancelled. "
-                            "Exiting when it finishes or reaches the provider timeout.")
+                if self.worker_kind == "chat":
+                    self.append("llmtool: exit requested; exiting when the interrupted request "
+                                "ends or reaches the provider timeout.")
+                else:
+                    self.append("llmtool: exit requested; the in-flight request cannot be "
+                                "cancelled. Exiting when it finishes or reaches the provider "
+                                "timeout.")
             return
         self.app.exit(result=0)
 

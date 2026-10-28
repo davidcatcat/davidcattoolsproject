@@ -1,9 +1,11 @@
 import dataclasses
+import importlib.util
 import io
 import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -16,7 +18,7 @@ from llmtool import task_completion
 from llmtool import task_submission_cli
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import (
-    _record, run_task_codex_delegate, run_task_direct_result_event,
+    run_task_codex_delegate, run_task_direct_result_event,
 )
 
 
@@ -26,7 +28,9 @@ class CodexDelegateTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
         self.repo = self.base / 'repo'
-        self.root = self.base / 'executor'
+        self.workspace_root = self.base / 'workspaces'
+        self.workspace_root.mkdir()
+        self.root = self.workspace_root / 'executor-task-1'
         self.bin = self.base / 'bin'
         self.bin.mkdir()
         self.store = TaskStore(self.base / 'tasks')
@@ -37,7 +41,8 @@ class CodexDelegateTests(unittest.TestCase):
             check=True, capture_output=True, text=True).stdout.strip()
 
     @staticmethod
-    def _completion_git(root, args, *, limit=1024 * 1024):
+    def _completion_git(root, args, *, limit=1024 * 1024, allow_exit_1=False,
+                        return_exit_code=False):
         # Apple Git calls confstr for its temp path; retain the normal Git
         # reader's fixed environment while supplying this test process's valid
         # temporary directory so stderr remains a meaningful failure signal.
@@ -53,9 +58,11 @@ class CodexDelegateTests(unittest.TestCase):
             '-c', 'core.pager=cat', '-c', 'color.ui=false', '-c', 'protocol.allow=never')
         process = subprocess.run(['/usr/bin/git', '--no-pager', *safe, *args],
             cwd=root, env=env, stdin=subprocess.DEVNULL, capture_output=True, check=False)
-        if process.returncode or process.stderr or len(process.stdout) > limit:
+        allowed_codes = (0, 1) if allow_exit_1 else (0,)
+        if process.returncode not in allowed_codes or process.stderr or len(process.stdout) > limit:
             raise AssertionError('fixture Git read failed')
-        return process.stdout
+        return ((process.stdout, process.returncode) if return_exit_code
+                else process.stdout)
 
     def _registered_worktree(self):
         self.repo.mkdir()
@@ -94,7 +101,7 @@ class CodexDelegateTests(unittest.TestCase):
             'trusted_agent_id': 'executor-agent', 'session_ref': 'executor-session',
             'root_realpath': str(self.root),
             'physical_identity': {'device': root_stat.st_dev, 'inode': root_stat.st_ino,
-                                  'uid': root_stat.st_uid},
+                                  'uid': root_stat.st_uid, 'mode': '0o700'},
             'git_common_dir': common_dir, 'branch': 'feat/codex-delegate',
             'base_sha': self.source_sha, 'head_sha': self.source_sha,
             'state': 'ACTIVE', 'lock_state': 'LOCKED', 'native_session_id': 'executor-native',
@@ -112,17 +119,16 @@ class CodexDelegateTests(unittest.TestCase):
 
     def _task(self):
         request = 'Codex direct fixture task'
-        task = _record(new_id(), new_id(), 'pm-' + new_id(), 'pm-profile', request,
-            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
-            backend='NO_NATIVE_SESSION_ID_EXPOSED',
-            request_sha=hashlib.sha256(request.encode()).hexdigest())
-        task.update(response='PM bounded task.',
-            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
-                              'base_url': None},
-            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
-                'goal': 'Edit src.py.', 'acceptance': ['src.py is changed']})
-        self.store.create(task)
-        return task
+        response = json.dumps({'schema_version': 1, 'summary': 'PM bounded task.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW',
+                'goal': 'Edit src.py.', 'acceptance': ['src.py is changed']}},
+            separators=(',', ':'))
+        return task_submission_cli.run_task_record_pm(
+            Namespace(pm_session_id=None, pm_runtime=None, pm_cwd=None),
+            store=self.store,
+            input_stream=io.StringIO(json.dumps(
+                {'request': request, 'response': response}, separators=(',', ':'))),
+            return_record=True)
 
     def _fake_codex(self, *, ignored=False, bytecode=False, overwrite_ignored=None):
         final = {'status': 'DONE', 'summary': 'updated', 'tests': [],
@@ -166,7 +172,8 @@ class CodexDelegateTests(unittest.TestCase):
 
     def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None,
                   overwrite_ignored=None, malformed_diff=None, callback_handler=None,
-                  registration=None, bound_registration=None):
+                  registration=None, bound_registration=None, codex_error=None,
+                  codex_result=None):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
@@ -175,16 +182,20 @@ class CodexDelegateTests(unittest.TestCase):
             egress_basis='approved bounded fixture')
         snapshot = (SimpleNamespace(root=registration.root,
             common_dir=registration.common_dir, branch=registration.branch,
-            head=registration.source_sha) if registration else None)
+            head=getattr(registration, 'result_sha', registration.source_sha))
+            if registration else None)
         original_cwd = os.getcwd()
         try:
             os.chdir(self.root)
             git_reader = self._completion_git
-            def read_git(root, args, *, limit=1024 * 1024):
+            def read_git(root, args, *, limit=1024 * 1024, allow_exit_1=False,
+                         return_exit_code=False):
                 if (malformed_diff is not None and tuple(args[:2]) ==
                         ('diff', '--binary')):
                     return malformed_diff.encode('utf-8')
-                return git_reader(root, args, limit=limit)
+                return git_reader(root, args, limit=limit,
+                                  allow_exit_1=allow_exit_1,
+                                  return_exit_code=return_exit_code)
             with patch.dict(os.environ, {'PATH': str(self.bin) + os.pathsep + os.environ['PATH']}), \
                     patch('llmtool.task_submission_cli._codex_developer_profile',
                           return_value=({'model': 'gpt-6-luna'}, 'high')), \
@@ -209,12 +220,338 @@ class CodexDelegateTests(unittest.TestCase):
                           return_value='BOUND') if registration else
                      patch('llmtool.task_submission_cli._bind_codex_native_session',
                           wraps=task_submission_cli._bind_codex_native_session)), \
+                    (patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                           side_effect=codex_error) if codex_error is not None else
+                     patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                           return_value=codex_result) if codex_result is not None else
+                     patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                           wraps=task_submission_cli.codex_direct_developer.run)), \
                     patch('llmtool.task_submission_cli.run_task_direct_result_event',
                           side_effect=callback_handler, return_value=0) as callback:
                 result = run_task_codex_delegate(args, store=self.store)
         finally:
             os.chdir(original_cwd)
         return result, self.store.get(task['task_id']), callback
+
+    def test_blocked_result_preserves_typed_reason(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='BLOCKED', summary='blocked safely', tests=(),
+            self_review='checked', blocked_reason='cannot safely edit',
+            exit_code=0, thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='a' * 64, elapsed_ms=1, cleanup_status='CONFIRMED',
+            usage=None)
+        with redirect_stdout(io.StringIO()):
+            _result, saved, callback = self._dispatch(task, codex_result=result)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['developer']['error_code'], 'CODEX_BLOCKED')
+        self.assertEqual(saved['developer']['blocked_reason'], 'cannot safely edit')
+        self.assertEqual(saved['developer']['execution']['status'], 'BLOCKED')
+        callback.assert_not_called()
+
+    def test_capture_write_failure_keeps_typed_rejection(self):
+        developer = {'assignment_id': new_id(), 'state': 'DEVELOPER_DISPATCHING'}
+
+        class RecordingStore:
+            def update(self, task_id, *, developer):
+                self.saved = dict(developer)
+                return self.saved
+
+        store = RecordingStore()
+        with patch.object(task_submission_cli, '_capture_rejected_output',
+                          side_effect=OSError('capture unavailable')):
+            saved = task_submission_cli._persist_developer_output_rejection(
+                store, 'task-id', developer, 'DEVELOPER_OUTPUT_INVALID_DIFF',
+                None, 'bad diff')
+        self.assertEqual(saved['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['error_code'], 'DEVELOPER_OUTPUT_INVALID_DIFF')
+        self.assertNotIn('rejected_output_capture', saved)
+
+        class CaptureRejectingStore:
+            def __init__(self):
+                self.calls = []
+
+            def update(self, task_id, *, developer):
+                self.calls.append(dict(developer))
+                if 'rejected_output_capture' in developer:
+                    raise OSError('capture record unavailable')
+                return dict(developer)
+
+        store = CaptureRejectingStore()
+        with patch.object(task_submission_cli, '_capture_rejected_output',
+                          return_value={'ref': 'rejected-developer-output/a.txt',
+                                        'sha256': 'a' * 64}):
+            saved = task_submission_cli._persist_developer_output_rejection(
+                store, 'task-id', dict(developer), 'DEVELOPER_OUTPUT_INVALID_DIFF',
+                None, 'bad diff')
+        self.assertEqual(len(store.calls), 2)
+        self.assertIn('rejected_output_capture', store.calls[0])
+        self.assertNotIn('rejected_output_capture', saved)
+        self.assertEqual(saved['state'], 'DEVELOPER_OUTPUT_REJECTED')
+
+    def test_timeout_with_changes_is_persisted_by_dispatch_task_store(self):
+        task = self._task()
+
+        def timeout(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_TIMEOUT', attempted=True, cleanup_status='CONFIRMED')
+
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, codex_error=timeout)
+        developer = saved['developer']
+        self.assertEqual(result, 1)
+        self.assertEqual(developer['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(developer['error_code'], 'CODEX_TIMEOUT_WITH_CHANGES')
+        self.assertEqual(developer['executor_task_id'], 'executor-task-1')
+        self.assertEqual(developer['execution']['diff_base_sha'], self.source_sha)
+        self.assertRegex(developer['execution']['diff_sha256'], r'^[0-9a-f]{64}$')
+        callback.assert_not_called()
+
+    def test_same_d6_followup_dispatch_accepts_committed_timeout_diff(self):
+        task = self._task()
+
+        # The dispatch starts from an advanced D6 HEAD while the registry base
+        # remains at the original Task worktree source.
+        (self.root / 'src.py').write_text('VALUE = 1\n# approved branch progress\n')
+        self._git('add', 'src.py')
+        self._git('commit', '-m', 'approved branch progress')
+        dispatch_source = self._git('rev-parse', 'HEAD')
+        registry_path = (Path(self.common_dir) / 'llmtool-worktrees' /
+                         'executor-task-1.json')
+        registry = json.loads(registry_path.read_text(encoding='utf-8'))
+        report_path = (self.root / 'tools' / 'llmtool' /
+                       '.d6-bootstrap-report.json')
+        report = json.loads(report_path.read_text(encoding='utf-8'))
+        report.update(head_sha=dispatch_source, tooling_sha=self.source_sha)
+        report_bytes = (json.dumps(report, sort_keys=True,
+            separators=(',', ':')) + '\n').encode('utf-8')
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        registry['head_sha'] = dispatch_source
+        registry['env2_approved_tooling_sha'] = None
+        registry['env2_pass_marker'].update(
+            submitted_head_sha=dispatch_source, current_head_sha=dispatch_source,
+            tooling_sha=self.source_sha,
+            report_sha256=hashlib.sha256(report_bytes).hexdigest())
+        registry_path.write_text(json.dumps(registry), encoding='utf-8')
+        registry_path.chmod(0o600)
+
+        def timeout(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_TIMEOUT', attempted=True, cleanup_status='CONFIRMED')
+
+        with redirect_stdout(io.StringIO()):
+            _result, _saved, _callback = self._dispatch(task, codex_error=timeout)
+        self._git('add', 'src.py')
+        self._git('commit', '-m', 'record timeout result')
+        result_head = self._git('rev-parse', 'HEAD')
+        lifecycle_path = (Path(__file__).resolve().parents[1] / 'scripts' /
+                          'd6_worktree_lifecycle.py')
+        spec = importlib.util.spec_from_file_location('d6_worktree_lifecycle_fixture',
+                                                       lifecycle_path)
+        lifecycle = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = lifecycle
+        spec.loader.exec_module(lifecycle)
+        registry = json.loads(registry_path.read_text(encoding='utf-8'))
+
+        def bootstrap_result(root, task_id):
+            report_path = Path(root) / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
+            report = json.loads(report_path.read_text(encoding='utf-8'))
+            # The result head advances for this continuation, while the
+            # ENV-2 tooling remains bound to the registered base source.
+            report.update(head_sha=result_head, tooling_sha=self.source_sha)
+            report_bytes = (json.dumps(report, sort_keys=True,
+                separators=(',', ':')) + '\n').encode('utf-8')
+            report_path.write_bytes(report_bytes)
+            report_path.chmod(0o600)
+            current = json.loads(registry_path.read_text(encoding='utf-8'))
+            current['env2_pass_marker'].update(
+                submitted_head_sha=result_head, current_head_sha=result_head,
+                tooling_sha=self.source_sha,
+                report_sha256=hashlib.sha256(report_bytes).hexdigest())
+            registry_path.write_text(json.dumps(current), encoding='utf-8')
+            registry_path.chmod(0o600)
+
+        with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
+                patch.object(lifecycle, '_bootstrap', side_effect=bootstrap_result):
+            recorded_head = lifecycle.record_result(task_id='executor-task-1',
+                canonical_root=self.repo, root=self.root,
+                workspace_root=self.workspace_root)
+        self.assertEqual(recorded_head, result_head)
+        registration, snapshot = task_completion.bind_executor_task(
+            'executor-task-1', expected_common_dir=self.common_dir, root=self.root)
+        self.assertNotEqual(registration.source_sha, dispatch_source)
+        self.assertEqual(snapshot.head, result_head)
+        bound_registration = dataclasses.replace(registration,
+            native_session_id='12345678-1234-4234-8234-123456789abc')
+        other_d6 = SimpleNamespace(**{
+            **vars(registration), 'task_id': 'other-d6'})
+        with self.assertRaises(task_completion.LLMToolError):
+            self._dispatch(task, registration=other_d6,
+                bound_registration=SimpleNamespace(**{
+                    **vars(other_d6), 'native_session_id': '12345678-1234-4234-8234-123456789abc'}))
+        callback_args = []
+        def callback_handler(task_id, executor_task_id, *, store):
+            callback_args.append((task_id, executor_task_id, store))
+            return 0
+
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, registration=registration,
+                bound_registration=bound_registration,
+                callback_handler=callback_handler)
+        self.assertEqual(result, 0)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertIn('VALUE = 2', saved['developer']['artifact'])
+        self.assertEqual(len(callback_args), 1)
+        registry_path = (Path(self.common_dir) / 'llmtool-worktrees' /
+                         'executor-task-1.json')
+        registry = json.loads(registry_path.read_text(encoding='utf-8'))
+        registry['native_session_id'] = bound_registration.native_session_id
+        registry_path.write_text(json.dumps(registry), encoding='utf-8')
+        registry_path.chmod(0o600)
+
+        def bounded_test_result(*, root, source_sha, diff_sha256, **_kwargs):
+            return [{'path': 'src.py', 'status': 'PASS', 'exit_code': 0,
+                'source_sha': source_sha, 'result_head': None,
+                'diff_sha256': diff_sha256, 'output_sha256': 'b' * 64}]
+
+        task_id, executor_task_id, callback_store = callback_args[0]
+        with patch.object(task_completion, 'run_bounded_worktree_tests',
+                          side_effect=bounded_test_result), \
+             patch.object(task_submission_cli, '_active_pm_runtime', return_value=True), \
+             patch.object(task_submission_cli, '_record_ready_event'), \
+             redirect_stdout(io.StringIO()):
+            callback_result = run_task_direct_result_event(
+                task_id, executor_task_id, store=callback_store)
+        saved = self.store.get(task['task_id'])
+        direct_callback = saved['developer']['direct_result_callback']
+        self.assertEqual(callback_result, 0)
+        self.assertEqual(direct_callback['state'], 'PM_EVIDENCE_READY',
+                         direct_callback['missing_gates'])
+        self.assertEqual(direct_callback['missing_gates'], [])
+        self.assertEqual(direct_callback['evidence']['source_sha'], dispatch_source)
+        self.assertEqual(direct_callback['evidence']['result_head'], result_head)
+        self.assertEqual(direct_callback['evidence']['result']['source_sha'], dispatch_source)
+        self.assertEqual(direct_callback['evidence']['result']['changed_paths'], ['src.py'])
+        self.assertNotIn('D6_TASK_BINDING_MISMATCH', direct_callback['missing_gates'])
+        callback.assert_called_once()
+
+    def test_timeout_recovery_dispatch_rejects_committed_out_of_scope_diff(self):
+        task = self._task()
+
+        def timeout(**_kwargs):
+            (self.root / 'private.py').write_text('VALUE = 2\n')
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_TIMEOUT', attempted=True, cleanup_status='CONFIRMED')
+
+        with redirect_stdout(io.StringIO()):
+            _result, _saved, _callback = self._dispatch(task, codex_error=timeout)
+        self._git('add', 'private.py')
+        self._git('commit', '-m', 'record out of scope timeout result')
+        result_head = self._git('rev-parse', 'HEAD')
+        registration = task_completion.D6Registration(
+            task_id='executor-task-1', trusted_agent_id='executor-agent',
+            session_ref='executor-session', root=str(self.root),
+            common_dir=self.common_dir, branch='feat/codex-delegate',
+            source_sha=self.source_sha, result_sha=result_head, state='ACTIVE',
+            lock_state='LOCKED', device=0, inode=0, uid=os.getuid(),
+            native_session_id=None, github_login=None, env2_pass_marker=None,
+            env2_approved_tooling_sha=None)
+        bound_registration = dataclasses.replace(registration,
+            native_session_id='12345678-1234-4234-8234-123456789abc')
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, registration=registration,
+                bound_registration=bound_registration)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        callback.assert_not_called()
+
+    def test_timeout_recovery_requires_recorded_same_d6_result_head(self):
+        previous = {
+            'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+            'error_code': 'CODEX_TIMEOUT_WITH_CHANGES',
+            'execution': {'status': 'TIMEOUT', 'diff_base_sha': self.source_sha,
+                          'diff_sha256': 'a' * 64},
+            'source_sha': self.source_sha, 'executor_task_id': 'executor-task-1',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['src.py is changed'],
+        }
+        updated_head = 'b' * 40
+        args = dict(executor_task_id='executor-task-1', source_sha=self.source_sha,
+            result_head=updated_head, registration_source_sha=self.source_sha,
+            registration_result_sha=updated_head, read_paths=['src.py'],
+            write_paths=['src.py'], acceptance=['src.py is changed'])
+        self.assertTrue(task_submission_cli._codex_timeout_recovery(previous, **args))
+        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'executor_task_id': 'other-d6'}))
+        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'registration_result_sha': self.source_sha}))
+        self.assertTrue(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'registration_source_sha': 'c' * 40}))
+        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'write_paths': ['other.py']}))
+        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+            previous, **{**args, 'acceptance': ['other criterion']}))
+
+    def test_timeout_recovery_rejects_sibling_of_timed_out_source_before_launch(self):
+        task = self._task()
+
+        # The timed-out attempt starts at A, which descends from the registry
+        # base. Move the D6 back to the base and create sibling B, so the
+        # registry base is an ancestor of B but A is not.
+        (self.root / 'src.py').write_text('VALUE = 1  # attempt A\n')
+        self._git('add', 'src.py')
+        self._git('commit', '-m', 'attempt A source')
+        attempt_source = self._git('rev-parse', 'HEAD')
+        registry = task_completion.D6Registration(
+            task_id='executor-task-1', trusted_agent_id='executor-agent',
+            session_ref='executor-session', root=str(self.root),
+            common_dir=self.common_dir, branch='feat/codex-delegate',
+            source_sha=self.source_sha, result_sha=attempt_source, state='ACTIVE',
+            lock_state='LOCKED', device=0, inode=0, uid=os.getuid(),
+            native_session_id=None, github_login=None, env2_pass_marker=None,
+            env2_approved_tooling_sha=None)
+
+        def timeout(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_TIMEOUT', attempted=True, cleanup_status='CONFIRMED')
+
+        with redirect_stdout(io.StringIO()):
+            _result, saved, _callback = self._dispatch(
+                task, registration=registry, codex_error=timeout)
+        self.assertEqual(saved['developer']['error_code'],
+                         'CODEX_TIMEOUT_WITH_CHANGES')
+
+        self._git('reset', '--hard', self.source_sha)
+        (self.root / 'src.py').write_text('VALUE = 3  # sibling B\n')
+        self._git('add', 'src.py')
+        self._git('commit', '-m', 'sibling B result')
+        sibling_head = self._git('rev-parse', 'HEAD')
+        sibling_registration = dataclasses.replace(
+            registry, result_sha=sibling_head)
+        bound_registration = dataclasses.replace(sibling_registration,
+            native_session_id='12345678-1234-4234-8234-123456789abc')
+        with patch('llmtool.task_submission_cli.codex_direct_developer.run') as launch:
+            with self.assertRaises(task_completion.LLMToolError) as caught:
+                self._dispatch(task, registration=sibling_registration,
+                    bound_registration=bound_registration)
+        self.assertEqual(caught.exception.completion_code,
+                         'CODEX_TIMEOUT_SOURCE_NOT_ANCESTOR')
+        launch.assert_not_called()
+
+    def test_normal_worktree_snapshot_rejects_head_different_from_source(self):
+        with patch.object(task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='b' * 40)):
+            with self.assertRaises(task_completion.LLMToolError) as caught:
+                task_completion._worktree_snapshot(
+                    root=self.root, source_sha=self.source_sha,
+                    read_paths=['src.py'], write_paths=['src.py'])
+        self.assertEqual(caught.exception.completion_code,
+                         'WORKTREE_SOURCE_HEAD_MISMATCH')
 
     def test_direct_codex_rejects_malformed_hunk_strictly_and_captures_it(self):
         task = self._task()
@@ -371,6 +708,9 @@ class CodexDelegateTests(unittest.TestCase):
                          saved['developer']['direct_result_callback']['missing_gates'])
         self.assertEqual(collect.call_args.kwargs['expected_native_session_id'],
                          bound_registration.native_session_id)
+        self.assertIsNone(collect.call_args.kwargs['expected_result_head'])
+        self.assertIsNone(saved['developer']['direct_result_callback']['evidence'][
+            'result_head'])
         callback.assert_called_once()
 
     def test_bound_codex_session_rejects_other_registration_changes(self):

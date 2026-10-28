@@ -79,20 +79,47 @@ def observe_claude_session(native_session_id, cwd, environ=None):
     if (len(cwd) > 1024 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in cwd) or
             not os.path.isdir(cwd)):
         raise LLMToolError('PM working directory is invalid')
-    path = claude_session_file(native_session_id, cwd, environ)
+    _check_session_path(claude_session_file(native_session_id, cwd, environ),
+                        allow_missing=False)
+    return cwd
+
+
+def claude_session_present(native_session_id, cwd, environ=None):
+    """Whether this user's transcript for ``cwd`` exists; False only when it is genuinely missing.
+
+    The components that do exist are checked exactly like
+    ``observe_claude_session`` (this user's plain directories and file, no
+    symlinks, without following any), so a first open may start the session
+    with ``--session-id`` only when the transcript is absent from a real,
+    unlinked location rather than hidden behind a symlink.
+    """
+    return _check_session_path(claude_session_file(native_session_id, cwd, environ),
+                               allow_missing=True)
+
+
+def _check_session_path(path, *, allow_missing):
     # Every component from the configuration directory down must be this
-    # user's real directory or file; a symlink anywhere is refused.
+    # user's real directory or file; a symlink anywhere is refused.  Each
+    # component is inspected without following symlinks, parents first, so a
+    # symlinked or dangling parent is refused before its children are judged
+    # missing.  With ``allow_missing`` a genuinely absent component ends the
+    # walk as "transcript not present"; a dangling symlink is still a symlink.
     for component, regular in ((path.parents[2], False), (path.parents[1], False),
                                (path.parent, False), (path, True)):
         try:
             info = component.lstat()
+        except FileNotFoundError:
+            if allow_missing:
+                return False
+            raise LLMToolError(
+                'Claude Code PM session was not found for this directory') from None
         except OSError:
             raise LLMToolError(
                 'Claude Code PM session was not found for this directory') from None
         kind = stat.S_ISREG(info.st_mode) if regular else stat.S_ISDIR(info.st_mode)
         if not kind or info.st_uid != os.getuid():
             raise LLMToolError('Claude Code PM session path is not a plain user path')
-    return cwd
+    return True
 
 
 def recovery(record):

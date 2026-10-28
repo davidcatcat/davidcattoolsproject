@@ -323,7 +323,7 @@ registry 只有 `openai-compatible`；A2.2 新增官方 `openai` provider。Capa
 技術能力，不是 authorization、policy 或 approval。不得把 capability 寫入 deployment
 config，也不得據此執行 shell、修改檔案或操作 Git。
 
-`openai-compatible` 宣告 chat、large-context workflow、reasoning control 為 true，streaming、
+`openai-compatible` 宣告 chat、large-context workflow、reasoning control、streaming 為 true，
 code edit、shell、git 為 false。`large_context` 不代表固定 context window；實際限制取決於
 model/deployment。`reasoning_control` 只代表此實作可使用可選的
 `provider_options.enable_thinking` 擴充，並映射到 `chat_template_kwargs.enable_thinking`；

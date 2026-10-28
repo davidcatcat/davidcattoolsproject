@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmtool import chat_tui, chat_tui_pm
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
-from llmtool.providers.base import Reply
+from llmtool.providers.base import ProviderCapabilities, Reply
 from llmtool.providers.cli_lifecycle import tui_cli_signal_scope
 
 try:
@@ -62,6 +62,45 @@ def core_view_json(task_id, **fields):
 class TTY(io.StringIO):
     def isatty(self):
         return True
+
+
+STREAMING = ProviderCapabilities(chat=True, large_context=False, reasoning_control=False,
+                                 streaming=True, code_edit=False, shell=False, git=False)
+
+
+class FakeStream:
+    """A client that streams: the first chunk at once, the rest after gate is set."""
+
+    CAPABILITIES = STREAMING
+
+    def __init__(self, chunks, gate=None):
+        self.chunks = chunks
+        self.gate = gate
+        self.closed = False
+        self.yielded = []
+        self.complete = Mock(side_effect=AssertionError('complete() must not be used'))
+
+    def stream(self, messages):
+        try:
+            for index, chunk in enumerate(self.chunks):
+                if index == 1 and self.gate is not None:
+                    self.gate.wait(5)
+                self.yielded.append(chunk)
+                yield chunk
+        finally:
+            self.closed = True
+        return {'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3}
+
+
+def lone_escape(ui):
+    """Feed a lone Esc and the key-processor timeout flush, as a terminal would."""
+    from prompt_toolkit.key_binding.key_processor import _Flush as timeout_flush
+    processor = ui.app.key_processor
+    with set_app(ui.app):
+        processor.feed(KeyPress(Keys.Escape, '\x1b'))
+        processor.process_keys()
+        processor.feed(timeout_flush)
+        processor.process_keys()
 
 
 class Base(unittest.TestCase):
@@ -173,6 +212,14 @@ class WidgetTests(Base):
             await asyncio.sleep(0.01)
         raise AssertionError('request did not finish')
 
+    @staticmethod
+    async def until(ui, condition, what='condition'):
+        for _ in range(300):
+            if condition(ui):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(what + ' not reached')
+
     def test_starts_without_provider_call_and_exits_cleanly(self):
         ui, result = self.drive([])
         self.assertEqual(result, 0)
@@ -261,12 +308,13 @@ class WidgetTests(Base):
         }
         self.factory.return_value = CodexCLIProvider(provider, self.session.config["generation"])
         with patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)):
-            ui, result = self.drive(["問題\r", "\x03", self.idle])
+            ui, result = self.drive(["問題\r", "\x03", "\x03", self.idle])
         self.assertEqual(result, 0)
         self.assertTrue(ui.quit_pending)
         self.assertIn("assistant:\n中文回覆", ui.conversation.text)
         self.assertEqual([turn["content"] for turn in self.session.history], ["問題", "中文回覆"])
-        self.assertEqual(self.session.state, "idle")
+        # The first Ctrl-C asked for an interrupt; the one-piece reply is kept, marked.
+        self.assertEqual(self.session.state, "interrupted")
         with self.assertRaises(ProcessLookupError):
             os.kill(int((self.temp_root / "codex.pid").read_text()), 0)
 
@@ -437,8 +485,8 @@ class WidgetTests(Base):
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
-                                  '/exit', '/quit', '/task submit', '/task show', '/task mode', '/task list', '/task events',
-                                  '/pm connect', '/pm new', '/pm disconnect', '/pm history'])
+                                  '/exit', '/quit', '/pm connect', '/pm new', '/pm disconnect', '/pm history',
+                                  '/task submit', '/task show', '/task mode', '/task list', '/task events'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
@@ -502,6 +550,26 @@ class WidgetTests(Base):
 
     def test_help_documents_the_slash_picker(self):
         self.assertIn('Esc closes the picker', chat_tui.KEY_HELP)
+
+    def test_help_lists_pm_first_and_marks_task_submit_as_dev_test_only(self):
+        # Owner decision 022:A (#525): /pm is the product entry; /task submit stays, labelled.
+        help_text = chat_tui.KEY_HELP
+        self.assertLess(help_text.index('Talk to the PM'), help_text.index('/task submit'))
+        self.assertLess(help_text.index('/pm new'), help_text.index('/task submit'))
+        self.assertIn('開發測試用：只登記，不會派工', help_text.split('/task submit', 1)[1][:200])
+        self.assertIn('Esc (during a reply)', help_text)
+        self.assertNotIn('A request in progress cannot be cancelled', help_text)
+        picker = chat_tui.SLASH_COMMANDS
+        labels = [c[0] for c in picker]
+        self.assertLess(labels.index('/pm connect'), labels.index('/task submit'))
+        self.assertIn('開發測試用：只登記，不會派工', dict((c[0], c[2]) for c in picker)['/task submit'])
+        self.assertEqual(dict((c[0], c[1]) for c in picker)['/task submit'], '/task submit --provider ')
+        ui, _ = self.drive(['/help\r'])
+        shown = ui.conversation.text.split('> /help', 1)[1]
+        self.assertLess(shown.index('/pm new'), shown.index('/task submit'))
+        self.assertIn('開發測試用：只登記，不會派工', shown)
+        self.assertIn('/pm connect (or /pm new) talks to the dedicated PM', ui.conversation.text)
+        self.factory.assert_not_called()
 
     def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
         # Rule: Enter only completes a draft that differs from the chosen suggestion and
@@ -600,7 +668,7 @@ class WidgetTests(Base):
         def wrapped(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 16)
-            self.assertIn('/pm history', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('/task events', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('(12 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
@@ -768,7 +836,7 @@ class WidgetTests(Base):
                 widths[columns] = ui.status_text()
             ui.quit_pending = False
         self.drive([measure], size=size)
-        self.assertEqual(widths[80], 'p:first | m:test | exit pending | t:UNKNOWN | F1')
+        self.assertEqual(widths[80], 'p:first | m:test | exit pending | t:UNKNOWN | 滾輪/Fn+↑↓ 捲動對話 | F1')
         self.assertEqual(widths[40], 'p:first | m:test | exit pending')
         self.assertEqual(widths[20], 'exit pending')
         self.assertEqual(widths[8], 'exit pe…')
@@ -911,18 +979,265 @@ class WidgetTests(Base):
         release = threading.Event()
         self.client.complete.side_effect = lambda messages: (release.wait(5), Reply('late reply', {}))[1]
 
+        def interrupting(ui):
+            self.assertFalse(ui.app.is_done)
+            self.assertFalse(ui.quit_pending)
+            self.assertTrue(ui.send_interrupted)
+            self.assertIn('interrupt requested', ui.conversation.text)
+            self.assertIn('Ctrl-C again exits', ui.conversation.text)
+            self.assertIn('interrupting', ui.status_text())
+
         def pending(ui):
             self.assertFalse(ui.app.is_done)
             self.assertTrue(ui.quit_pending)
-            self.assertIn('cannot be cancelled', ui.conversation.text)
+            self.assertIn('exit requested', ui.conversation.text)
             self.assertIn('exit pending', ui.status_text())
 
         async def finish(ui):
             release.set()
             await self.idle(ui)
-        ui, result = self.drive(['question\r', '\x03', pending, finish])
+        ui, result = self.drive(['question\r', '\x03', interrupting, '\x03', pending, finish])
         self.assertEqual(result, 0)
         self.assertEqual(self.session.history[-1]['content'], 'late reply')
+        self.assertIn('assistant:\nlate reply', ui.conversation.text)
+        self.assertIn('answered in one piece', ui.conversation.text)
+
+    def test_escape_interrupts_a_streaming_reply_and_keeps_the_partial_text(self):
+        # Owner #304: Esc during a reply must stop it, like the PM pane does.
+        gate = threading.Event()
+        fake = FakeStream(['Hello', ' world', ' never shown'], gate)
+        self.factory.return_value = fake
+
+        async def streaming(ui):
+            await self.until(ui, lambda ui: ui.stream_raw is not None)
+            self.assertIn('assistant:\nHello', ui.conversation.text)
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+            self.assertIn('working', ui.status_text())
+
+        async def escaped(ui):
+            self.assertTrue(ui.send_interrupted)
+            self.assertIn('interrupting', ui.status_text())
+            gate.set()                      # one more chunk arrives, then the stream stops
+            await self.idle(ui)
+
+        def after(ui):
+            self.assertEqual(ui.input.text, '')
+            self.assertFalse(ui.busy)
+            self.assertIn('assistant:\nHello world\n\nllmtool: reply interrupted after the text above',
+                          ui.conversation.text)
+            self.assertNotIn('never shown', ui.conversation.text)
+            self.assertIn('interrupted', ui.status_text())
+            self.assertGreater(ui._default_timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+
+        ui, result = self.drive(['question\r', streaming, lone_escape, escaped, after,
+                                 lambda ui: self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen),
+                                 '/status\r'])
+        self.assertEqual(result, 0)
+        self.assertEqual([t['content'] for t in self.session.history], ['question', 'Hello world'])
+        self.assertEqual(self.session.state, 'interrupted')
+        self.assertTrue(self.session.last_interrupted)
+        self.assertTrue(fake.closed)
+        self.assertEqual(fake.yielded, ['Hello', ' world'])
+        self.assertIn('state: interrupted', ui.conversation.text)
+        fake.complete.assert_not_called()
+
+    def test_ctrl_c_interrupts_a_streaming_reply_and_a_second_ctrl_c_exits(self):
+        gates = [threading.Event(), threading.Event()]
+        fakes = [FakeStream(['one', ' two', ' three'], gates[0]),
+                 FakeStream(['uno', ' dos', ' tres'], gates[1])]
+        self.factory.side_effect = fakes
+
+        async def streaming(ui):
+            await self.until(ui, lambda ui: ui.stream_raw is not None)
+
+        async def first_ctrl_c(ui):
+            ui.request_quit()
+            self.assertFalse(ui.app.is_done)
+            self.assertFalse(ui.quit_pending)
+            self.assertIn('Ctrl-C again exits', ui.conversation.text)
+            gates[0].set()
+            await self.idle(ui)
+            self.assertIn('reply interrupted after the text above', ui.conversation.text)
+            self.assertFalse(ui.quit_pending)
+
+        def second_ctrl_c(ui):
+            ui.request_quit()
+            ui.request_quit()
+            self.assertTrue(ui.quit_pending)
+            self.assertFalse(ui.app.is_done)
+            gates[1].set()
+
+        ui, result = self.drive(['first\r', streaming, first_ctrl_c,
+                                 'second\r', streaming, second_ctrl_c, self.idle])
+        self.assertEqual(result, 0)
+        self.assertTrue(ui.quit_pending)
+        self.assertEqual([t['content'] for t in self.session.history],
+                         ['first', 'one two', 'second', 'uno dos'])
+        self.assertEqual(ui.conversation.text.count('assistant:\n'), 2)
+        # The Ctrl-C notices went above the reply block, which stayed in one piece.
+        self.assertIn('llmtool: Ctrl-C again exits\n\nassistant:\none two\n\nllmtool: reply interrupted',
+                      ui.conversation.text)
+        self.assertTrue(all(fake.closed for fake in fakes))
+
+    def test_streaming_reply_completes_normally_without_interrupt(self):
+        fake = FakeStream(['Hel', 'lo ', '測試'])
+        self.factory.return_value = fake
+        ui, result = self.drive(['q\r', self.idle,
+                                 lambda ui: self.assertIn('t:1+2=3', ui.status_text())])
+        self.assertEqual(result, 0)
+        self.assertEqual(ui.conversation.text.count('assistant:'), 1)
+        self.assertIn('assistant:\nHello 測試', ui.conversation.text)
+        self.assertNotIn('interrupted', ui.conversation.text)
+        self.assertEqual(self.session.history[-1]['content'], 'Hello 測試')
+        self.assertEqual(self.session.state, 'idle')
+        self.assertFalse(self.session.last_interrupted)
+
+    def test_escape_before_any_streamed_text_leaves_history_unchanged(self):
+        gate = threading.Event()
+
+        class SlowStart(FakeStream):
+            def stream(self, messages):
+                gate.wait(5)                  # blocks before the first chunk is requested
+                return super().stream(messages)
+
+        fake = SlowStart(['late'])
+        self.factory.return_value = fake
+
+        async def busy(ui):
+            await self.until(ui, lambda ui: ui.busy)
+            lone_escape(ui)
+            self.assertIn('interrupt requested', ui.conversation.text)
+            gate.set()
+            await self.idle(ui)
+
+        ui, result = self.drive(['q\r', busy])
+        self.assertEqual(result, 0)
+        self.assertIn('llmtool: reply interrupted before any text arrived; history unchanged',
+                      ui.conversation.text)
+        self.assertNotIn('assistant:', ui.conversation.text)
+        self.assertEqual(self.session.history, [])
+        self.assertEqual(self.session.state, 'interrupted')
+        self.assertEqual(fake.yielded, [])      # cancel seen before the first chunk was asked for
+
+    def test_escape_during_a_one_piece_reply_keeps_it_marked_interrupted(self):
+        # All current providers answer in one piece: Esc is acknowledged at once, the
+        # reply is kept when it lands, and the prompt is free again.
+        release = threading.Event()
+        self.client.complete.side_effect = lambda messages: (release.wait(5), Reply('whole', {}))[1]
+
+        async def busy(ui):
+            await self.until(ui, lambda ui: ui.busy)
+            await self.until(ui, lambda ui: ui.app.timeoutlen == chat_tui.ESC_SEQUENCE_TIMEOUT)
+            lone_escape(ui)
+            self.assertIn('interrupt requested', ui.conversation.text)
+            self.assertIn('interrupting', ui.status_text())
+            lone_escape(ui)              # a repeat is a no-op
+            self.assertEqual(ui.conversation.text.count('interrupt requested'), 1)
+            release.set()
+            await self.idle(ui)
+
+        ui, result = self.drive(['q\r', busy, 'next\r', self.idle])
+        self.assertEqual(result, 0)
+        self.assertIn('assistant:\nwhole\n\nllmtool: reply interrupted; the provider answered in one piece',
+                      ui.conversation.text)
+        self.assertEqual([t['content'] for t in self.session.history], ['q', 'whole', 'next', 'whole'])
+        self.assertEqual(self.session.state, 'idle')   # the next request reset the status
+
+    def test_mouse_wheel_scrolls_the_conversation_and_f6_toggles_mouse_reporting(self):
+        # Owner #304: the scrollbar and wheel did nothing (mouse_support was off) and the
+        # scroll keys were not discoverable; the wheel must never recall input history.
+        seen = {}
+
+        async def fill(ui):
+            ui.append("\n".join("old line %d" % i for i in range(80)))
+            await asyncio.sleep(0.15)
+            info = ui.conversation.window.render_info
+            self.assertGreater(info.vertical_scroll, 0)        # bottom shown; old lines above
+            seen['bottom'] = info.vertical_scroll
+            self.assertTrue(ui.mouse_enabled)
+            self.assertTrue(ui.app.mouse_support())
+            self.assertIn('滾輪/Fn+↑↓ 捲動對話', ui.status_text())
+            self.assertIn('F6 滑鼠:開', ui.status_text())
+
+        async def scrolled_up(ui):
+            await asyncio.sleep(0.1)
+            seen['up'] = ui.conversation.window.render_info.vertical_scroll
+            self.assertLess(seen['up'], seen['bottom'])
+            self.assertEqual(ui.input.text, 'draft')          # no history recall, draft intact
+            ui.append('new while scrolled back')              # a scrolled-back view is kept
+            await asyncio.sleep(0.1)
+            self.assertEqual(ui.conversation.window.render_info.vertical_scroll, seen['up'])
+
+        async def scrolled_down(ui):
+            for _ in range(3):                                # a render after the arrival
+                ui.app.invalidate()
+                await asyncio.sleep(0.1)
+            info = ui.conversation.window.render_info
+            self.assertGreater(info.vertical_scroll, seen['up'])
+            self.assertEqual(ui.input.text, 'draft')
+            # Back at the bottom: the caret follows the end again, so new output shows.
+            self.assertGreaterEqual(info.vertical_scroll + info.window_height, info.content_height)
+            self.assertEqual(ui.conversation.buffer.cursor_position, len(ui.conversation.text))
+            ui.append('new at the bottom')
+            await asyncio.sleep(0.1)
+            info = ui.conversation.window.render_info
+            self.assertGreaterEqual(info.vertical_scroll + info.window_height, info.content_height)
+            self.assertEqual(ui.conversation.buffer.cursor_position, len(ui.conversation.text))
+
+        async def mouse_off(ui):
+            await asyncio.sleep(0.1)
+            self.assertFalse(ui.mouse_enabled)
+            self.assertFalse(ui.app.mouse_support())
+            self.assertIn('mouse off; drag to select and copy text with the terminal',
+                          ui.conversation.text)
+            status = ui.status_text()
+            self.assertIn('Fn+↑↓ 捲動對話', status)
+            self.assertNotIn('滾輪', status)
+            self.assertIn('F6 滑鼠:關', status)
+            self.assertLessEqual(get_cwidth(status), 80)
+
+        wheel_up, wheel_down, f6 = '\x1b[<64;10;5M', '\x1b[<65;10;5M', '\x1b[17~'
+        ui, result = self.drive(['draft', fill, wheel_up * 5, scrolled_up, wheel_down * 9,
+                                 scrolled_down, f6, mouse_off, f6,
+                                 lambda ui: self.assertTrue(ui.mouse_enabled)],
+                                size=[Size(rows=24, columns=80)])
+        self.assertEqual(result, 0)
+        self.assertIn('mouse on; the wheel scrolls the conversation', ui.conversation.text)
+        self.assertIn('Mouse wheel', chat_tui.KEY_HELP)
+        self.assertIn('F6', chat_tui.KEY_HELP)
+        self.factory.assert_not_called()
+
+    def test_pageup_from_input_keeps_its_caret_and_pagedown_resumes_following(self):
+        long_reply = '\n'.join('row %d' % i for i in range(200))
+        self.client.complete.return_value = Reply(long_reply, {})
+
+        async def paged_up(ui):
+            for _ in range(3):
+                ui.app.invalidate()
+                await asyncio.sleep(0.1)
+            buffer = ui.conversation.buffer
+            self.assertLess(buffer.cursor_position, len(buffer.text))   # not snapped back
+            self.caret = buffer.cursor_position
+            ui.append('new while paged up')
+            await asyncio.sleep(0.1)
+            self.assertEqual(buffer.cursor_position, self.caret)
+
+        async def paged_down(ui):
+            for _ in range(3):
+                ui.app.invalidate()
+                await asyncio.sleep(0.1)
+            buffer = ui.conversation.buffer
+            self.assertEqual(buffer.cursor_position, len(buffer.text))
+
+        ui, _ = self.drive(['question\r', self.idle, '\x1b[5~', paged_up, '\x1b[5~', paged_up,
+                            '\x1b[6~' * 60, paged_down])
+        self.assertTrue(ui.app.layout.has_focus(ui.input))
+
+    def test_escape_while_idle_or_during_a_task_does_nothing_new(self):
+        ui, _ = self.drive([lone_escape, lambda ui: self.assertFalse(ui.send_interrupted)])
+        self.assertNotIn('interrupt requested', ui.conversation.text)
+        self.assertFalse(ui.interrupt_send())
+        self.factory.assert_not_called()
 
     def test_request_failure_is_sanitized_and_recoverable(self):
         self.client.complete.side_effect = [RuntimeError('PRIVATE stderr'), Reply('ok', {})]
@@ -1875,6 +2190,15 @@ def _delta(text, index=0):
                                               'delta': {'type': 'text_delta', 'text': text}}}
 
 
+def _thinking(index=0, text='PRIVATE_REASONING'):
+    """A thinking block start and delta, as Claude Code streams them before the answer."""
+    return [{'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': index,
+                                               'content_block': {'type': 'thinking', 'thinking': ''}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': index,
+                                               'delta': {'type': 'thinking_delta', 'thinking': text}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': index}}]
+
+
 def _tool_result(tool_id, content, is_error):
     return {'type': 'user', 'message': {'content': [
         {'type': 'tool_result', 'tool_use_id': tool_id, 'content': content, 'is_error': is_error}]}}
@@ -2117,6 +2441,143 @@ class BoundedPMCleanupTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class PMTypewriterTests(Base):
+    """Received PM text is queued and released at ticks, in order, and flushed at once on
+    block end, turn end and interrupt; without a running loop the tick is driven by hand."""
+
+    def setUp(self):
+        super().setUp()
+        self.pipe = create_pipe_input()
+        self.pipe.__enter__()
+        self.addCleanup(self.pipe.__exit__, None, None, None)
+        self.ui = chat_tui.ChatTUI(self.session, input=self.pipe, output=DummyOutput())
+        self.ui.pm_turn_active, self.ui.pm_turn_started = True, time.monotonic()
+        self.ui.pm_state, self.ui.pm_mode = 'working', True
+
+    def delta(self, text, index=0):
+        self.ui.pm_event({'type': 'TEXT_DELTA', 'text': text, 'block_index': index})
+
+    def shown(self):
+        """Text of the last PM block as the pane shows it (None: no block opened)."""
+        text = self.ui.conversation.text
+        if '\nPM:' not in text:
+            return None
+        rest = text[text.rindex('\nPM:') + 4:]
+        return rest[1:] if rest.startswith('\n') else rest
+
+    def test_text_is_released_in_order_a_few_characters_per_tick(self):
+        # CJK text: an ASCII word is shown only once complete (screen_stream), as before.
+        ui = self.ui
+        self.delta('一二三四五六')
+        self.assertEqual(self.shown(), '')            # the PM: header opens at once
+        self.assertEqual(ui.pm_queue, '一二三四五六')
+        ui._pm_tick()
+        self.assertEqual(self.shown(), '一二')
+        self.delta('七八九十')                        # a later burst joins the queue in order
+        self.assertEqual(ui.pm_queue, '三四五六七八九十')
+        ui._pm_tick()
+        ui._pm_tick()
+        self.assertEqual(self.shown(), '一二三四五六')
+        self.ui.pm_event({'type': 'ASSISTANT_TEXT', 'text': '一二三四五六七八九十'})
+        self.assertEqual(self.shown(), '一二三四五六七八九十')  # block end flushes the rest at once
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        self.assertEqual(ui.conversation.text.count('一二三四五六七八九十'), 1)   # no duplication
+
+    def test_long_queue_drains_within_the_lag_bound(self):
+        ui = self.ui
+        text = ''.join(chr(0x4e00 + i % 200) for i in range(330))   # 330 CJK characters
+        self.delta(text)
+        ticks = 0
+        while ui.pm_queue:
+            ui._pm_tick()
+            ticks += 1
+            self.assertLessEqual(ticks, chat_tui.PM_MAX_LAG_TICKS)
+        self.assertEqual(ticks, chat_tui.PM_MAX_LAG_TICKS)   # 10 per tick, never 2
+        self.assertEqual(self.shown(), text)
+        self.assertEqual(ui._pm_rate, chat_tui.PM_CHARS_PER_TICK)   # back to the base rate
+        ui._pm_tick()                                         # an idle tick is harmless
+        self.assertEqual(self.shown(), text)
+        self.delta('甲乙')
+        self.delta('丙' * 100)                                # a burst while behind raises it
+        self.assertEqual(ui._pm_rate, 4)
+        self.assertGreaterEqual(chat_tui.PM_CHARS_PER_TICK / chat_tui.PM_TICK_SECONDS, 40)
+        self.assertLessEqual(chat_tui.PM_CHARS_PER_TICK / chat_tui.PM_TICK_SECONDS, 80)
+        self.assertLessEqual(chat_tui.PM_MAX_LAG_TICKS * chat_tui.PM_TICK_SECONDS, 1.0)
+
+    def test_turn_end_flushes_everything_before_the_summary(self):
+        ui = self.ui
+        self.delta('hello world')
+        ui.pm_event({'type': 'TURN_END', 'status': 'COMPLETED', 'usage': {}})
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        text = ui.conversation.text
+        self.assertIn('PM:\nhello world\n\n  — PM turn COMPLETED', text)
+
+    def test_interrupt_and_turn_finish_flush_the_queue(self):
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        self.delta('partial answer')
+        ui.interrupt_pm()
+        ui.pm_runtime.interrupt.assert_called_once_with()
+        self.assertIn('PM:\npartial answer\n\nllmtool: interrupt sent to the PM',
+                      ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+        ui.pm_turn_active, ui.pm_interrupted = True, False
+        self.delta('tail', index=1)
+        ui.finish_pm_turn()                           # a turn that ends without TURN_END
+        self.assertIn('PM:\ntail', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        self.assertEqual(ui.pm_state, 'idle')
+
+    def test_new_block_tool_and_other_output_flush_the_previous_block(self):
+        ui = self.ui
+        self.delta('first block', index=0)
+        self.delta('second', index=1)                  # a new content block
+        self.assertIn('PM:\nfirst block\n\nPM:', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, 'second')
+        ui.pm_event({'type': 'TOOL_USE', 'tool_use_id': 't', 'name': 'Read'})
+        self.assertIn('PM:\nsecond\n\n  · tool Read', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+
+    def test_split_secret_is_screened_at_every_tick(self):
+        key = _fake_key()
+        ui = self.ui
+        seen = []
+        original = ui._pm_render
+
+        def render(final):
+            original(final)
+            seen.append(ui.conversation.text)
+        ui._pm_render = render
+        self.delta('your key is ' + key + ' — rotate it')
+        while ui.pm_queue:
+            ui._pm_tick()
+        ui.pm_event({'type': 'ASSISTANT_TEXT', 'text': 'your key is ' + key + ' — rotate it'})
+        self.assertTrue(seen)
+        for text in seen:
+            self.assertNotIn(key[3:9], text)
+        self.assertIn('your key is [REDACTED] — rotate it', ui.conversation.text)
+
+    def test_tick_is_scheduled_on_the_running_loop(self):
+        ui = self.ui
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+
+        async def main():
+            self.delta('甲乙丙丁')
+            self.assertIsNotNone(ui._pm_tick_handle)
+            await asyncio.sleep(chat_tui.PM_TICK_SECONDS * 6)
+            self.assertEqual(self.shown(), '甲乙丙丁')
+            self.assertIsNone(ui._pm_tick_handle)      # nothing left: no tick pending
+            self.delta('戊己')
+            ui.close_pm()                              # exit cancels a pending tick
+            self.assertIsNone(ui._pm_tick_handle)
+        loop.run_until_complete(main())
+        self.assertEqual(ui.pm_queue, '戊己')          # exit path leaves the queue; no render
+
+
 class PMConversationTests(BoundedPMTest):
     """The real pm_runtime S2 against a scripted fake `claude`; ChatSession is never used.
 
@@ -2130,10 +2591,10 @@ class PMConversationTests(BoundedPMTest):
         from llmtool import pm_runtime
         self.pm_runtime = pm_runtime
         self.state = self.temp_root.resolve() / 'pm-state'
-        self.observe = patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
-                                    side_effect=lambda session, cwd, environ=None: cwd)
-        self.observe.start()
-        self.addCleanup(self.observe.stop)
+        self.observe_patcher = patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
+                                            side_effect=lambda session, cwd, environ=None: cwd)
+        self.observe = self.observe_patcher.start()
+        self.addCleanup(self.observe_patcher.stop)
         self.turns = [_full_turn()]
         test = self
 
@@ -2205,7 +2666,9 @@ class PMConversationTests(BoundedPMTest):
 
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
-            self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8] + ' idle | F1')   # no chat fields
+            self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8]
+                         + ' 暖機中… | 滾輪/Fn+↑↓ 捲動對話 | F6 滑鼠:開 | F1')   # no chat fields
+            self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
             self.assertIn('PM history: no stored turns', ui.conversation.text)
@@ -2214,9 +2677,12 @@ class PMConversationTests(BoundedPMTest):
             self.assertIn('--include-partial-messages', argv)
 
         async def partial(ui):
+            # The fake holds after 'Hello ': the text reached the pane through typewriter
+            # ticks on the loop, not through an end-of-block flush.
             await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text, 'first delta')
             self.assertTrue(ui.pm_turn_active)
             self.assertIn('working', ui.status_text())
+            self.assertNotIn('暖機中', ui.status_text())   # first output ended the warm-up view
             self.assertNotIn('Hello 老闆', ui.conversation.text)   # streamed, not yet complete
             self.fakes[0].gate.set()
 
@@ -2237,6 +2703,47 @@ class PMConversationTests(BoundedPMTest):
                          ['請問進度？'])
         self.assertEqual(self.session.history, [])
         self.client.complete.assert_not_called()
+
+    def test_warm_up_status_lasts_until_the_first_turns_first_output(self):
+        # Owner W40/W41 (A: no warm-up message is sent): the status shows 暖機中… from connect
+        # until the first turn produces output; later turns show working as before.
+        self.turns = [['HOLD', _delta('早安'), _assistant({'type': 'text', 'text': '早安'}),
+                       _result('早安')],
+                      [_delta('再次'), 'HOLD', _assistant({'type': 'text', 'text': '再次'}),
+                       _result('再次')]]
+
+        def warm_idle(ui):
+            self.assertTrue(ui.pm_warm)
+            self.assertIn('暖機中…', ui.status_text())
+            self.assertNotIn('idle', ui.status_text())
+            self.assertNotIn('暖機', ui.conversation.text)   # status only; nothing was sent
+            self.assertEqual(len(self.fakes[0].users()), 0)
+
+        async def warm_working(ui):
+            await self.until(ui, lambda ui: len(self.fakes[0].users()) == 1, 'turn sent')
+            self.assertTrue(ui.pm_turn_active)
+            self.assertRegex(ui.status_text(), '暖機中… [0-9]+\\.[0-9]s')
+            self.assertNotIn('working', ui.status_text())
+            self.fakes[0].gate.set()
+
+        def answered(ui):
+            self.assertFalse(ui.pm_warm)
+            self.assertIn('PM:\n早安', ui.conversation.text)
+            self.assertIn(' idle ', ui.status_text())
+            self.assertNotIn('暖機', ui.status_text())
+
+        async def second(ui):
+            await self.until(ui, lambda ui: 'PM:\n再次' in ui.conversation.text, 'second delta')
+            self.assertIn('working', ui.status_text())
+            self.assertNotIn('暖機', ui.status_text())
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, warm_idle, '早安\r', warm_working,
+                            self.turn_done, answered, '再來\r', second, self.turn_done,
+                            '/pm disconnect\r',
+                            lambda ui: self.until(ui, lambda ui: ui.pm_runtime is None)])
+        self.assertFalse(ui.pm_warm)
+        self.assertEqual(len(self.fakes[0].users()), 2)   # the Owner's two drafts, nothing else
 
     def test_repeated_enter_resize_and_redraw_send_one_turn(self):
         self.turns = [_full_turn(hold=True)]
@@ -2295,6 +2802,29 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(result, 0)
         self.assertIsNone(ui.pm_runtime)
         self.assertTrue(self.fakes[0].closed_stdin)   # close() ran on exit
+
+    def test_pm_thinking_is_status_only_and_never_shown_as_the_answer(self):
+        # Owner #304: reasoning must not render as the PM answer; at most a 思考中… status.
+        self.turns = [_thinking() + ['HOLD', _delta('台北101', index=1),
+                      _assistant({'type': 'thinking', 'thinking': 'PRIVATE_REASONING', 'signature': 's'},
+                                 {'type': 'text', 'text': '台北101'}),
+                      _result('台北101')]]
+
+        async def thinking(ui):
+            await self.until(ui, lambda ui: ui.pm_state == 'thinking', 'thinking status')
+            self.assertIn('思考中…', ui.status_text())
+            self.assertNotIn('\nPM:\n', ui.conversation.text)   # nothing reached the pane
+            self.assertNotIn('PRIVATE_REASONING', ui.conversation.text)
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, '說出台北觀光地點\r', thinking,
+                            self.turn_done])
+        text = ui.conversation.text
+        self.assertIn('PM:\n台北101', text)
+        self.assertNotIn('PRIVATE_REASONING', text)
+        self.assertNotIn('思考中', text)
+        self.assertEqual(ui.pm_state, 'idle')
+        self.assertNotIn('思考中', ui.status_text())
 
     def test_pm_status_field_fits_a_narrow_terminal(self):
         size = [Size(rows=24, columns=80)]
@@ -2419,8 +2949,9 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
                             self.connect(), self.connected])
         created = self.api.current_binding()['native_session_id']
-        self.assertIn('Dedicated PM session ' + created + ' created by pm_runtime', ui.conversation.text)
-        self.assertIn('the TUI has not verified that session', ui.conversation.text)
+        self.assertIn('Dedicated PM session ' + created + ' dedicated binding created',
+                      ui.conversation.text)
+        self.assertIn('the session starts on the first message', ui.conversation.text)
         self.assertEqual(ui.pm_target[0], created)
         argv = self.fakes[-1].argv
         self.assertEqual(argv[argv.index('--session-id') + 1], created)
@@ -2457,6 +2988,13 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('  · tool Read: done', text)
         self.assertNotIn('file content', text)
 
+    def test_fresh_binding_connects_without_transcript(self):
+        ui, _ = self.drive([self.connect(), self.connected])
+        self.assertTrue(ui.pm_mode)
+        self.assertFalse(self.observe.called)
+        self.assertFalse(self.binding['session_started'])
+        self.assertIn('--session-id', self.fakes[0].argv)
+
     def test_same_send_key_is_replayed_not_resent(self):
         fixed = Mock(hex='k' * 32)
         self.turns = [[_delta('first answer '), _result('first answer')], [_result('never')]]
@@ -2484,7 +3022,11 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(self.fakes[0].users(), [])
 
     def test_connect_errors_show_code_and_recovery(self):
-        self.observe.stop()
+        binding = self.pm_runtime.current_binding(self.session_id, state_root=self.state)
+        binding['session_started'] = True
+        self.pm_runtime._write_json_atomic(
+            self.state, self.pm_runtime._binding_path(self.state, self.session_id), binding)
+        self.observe_patcher.stop()
         with patch.object(self.pm_runtime.active_pm_inbox, 'observe_claude_session',
                           side_effect=chat_tui.LLMToolError('PRIVATE path detail')):
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
@@ -2492,7 +3034,7 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('PM not connected. PM runtime error PM_SESSION_INVALID', ui.conversation.text)
         self.assertNotIn('PRIVATE', ui.conversation.text)
         self.assertFalse(ui.pm_mode)
-        self.observe.start()
+        self.observe_patcher.start()
         holder = self.make_runtime(self.session_id, str(self.temp_root)).open()   # another driver holds it
         try:
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
