@@ -502,7 +502,7 @@ sequenceDiagram
 | 壓力測試 | 128 路並行無限流；約 1.9K tok/s |
 | 本機 27 個 gw Task | 多為 `DEVELOPER_OUTPUT_INVALID_ENVELOPE`／`INVALID_DIFF` |
 
-**判斷（OPINION）：** gw 適合「單檔、≤20 行、有明確測試、PM 已準備好完整檔案內容」的工作；PM 準備成本（讀檔、組 context、套 patch、跑測試）往往高於 Codex 直接做。不應作為一般 Developer 路線；可作為批次小修（測試樣板、文件表格）與合成題評測。Reviewer FAIL rate、修復次數、總時間：**UNKNOWN**（無完整樣本）。
+**判斷（OPINION）：** gw 適合「單檔、≤20 行、有明確測試、PM 已準備好完整檔案內容」的工作；PM 準備成本（讀檔、組 context、套 patch、跑測試）與 Codex 直接做的比較：**UNKNOWN**（PM 與 Reviewer 成本尚未量測，見 #290）。不應作為一般 Developer 路線；可作為批次小修（測試樣板、文件表格）與合成題評測。Reviewer FAIL rate、修復次數、總時間：**UNKNOWN**（無完整樣本）。
 
 ### 11.5 Token 最佳化
 
@@ -512,7 +512,7 @@ sequenceDiagram
 | 過度呼叫高階模型 | Reviewer 用 Claude（Opus 級）審 2–3 行文件 PR；High Debug 用 `gpt-6.1-sol` | 文件 PR 改 docs check 自動通過＋抽樣審（OWNER_DECISION_REQUIRED：變更 AGENTS.md 文件 PR 需正式審查的規則）；High Debug 僅在 RCA 不明時 |
 | 重複審查 | 每次 rereview 重新建 Reviewer D6（189 個）並重讀整個 PR | Reviewer 復用同一 D6，只讀 delta（OWNER_DECISION_REQUIRED：D6 lifecycle 規範要求每個 Reviewer 有自己的 D6 record） |
 | 全文 Repo 掃描 | PM 每次 session 讀 AGENTS／ROADMAP／WORKFLOW／README（約 15 萬 tokens） | 文件瘦身（第 15 章） |
-| 低價模型失敗後增加成本 | gw 10/11 拒絕、OpenCode 1/8 成功，之後改派 Codex | 低價路線只做合成題或離線批次 |
+| 低價模型失敗後增加成本 | gw 10/11 拒絕、OpenCode 1/8 成功，之後改派 Codex | ~~低價路線只做合成題或離線批次~~（**已被 §22 與 #290 的 Owner 授權取代**：gw 可接有邊界的真實小任務並量測整題總成本；任何路線變更為 **OWNER_DECISION_REQUIRED**） |
 | 無價值交接 | 「merge train」PR 再開一次 PR（#441／#443／#444 三個相同 PR；#451／#464／#469 三次） | 直接合併已 PASS 的 PR；train 只在 CI 排隊時（OWNER_DECISION_REQUIRED：合併流程屬 Integrator 授權範圍） |
 | AI 做確定性工作 | PM 手打 `task inbox`／`remote-test`／`review-dispatch`／merge | `task advance` 驅動器（PR #519 方向正確） |
 

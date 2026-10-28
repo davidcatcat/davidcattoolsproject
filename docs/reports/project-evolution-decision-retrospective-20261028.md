@@ -421,7 +421,7 @@
 | 派工規格變窄、只開一個測試模組（10-27） | **有，而且最大** | 每 Task prompt 0.85M → 0.52M；cache 命中 1% → 92% |
 | 公司模型 benchmark 三輪（10-05～06） | **沒有** | 結論「低價模型不等於省」（+104%、單一路徑 −39.8%）；之後未改變派工方式 |
 | OpenCode 免費模型當 Developer（10-19、10-24、10-26） | **沒有** | 8 次 1 成功；失敗後改派 Codex，等於多付一次 |
-| company-gw 當 Developer（10-21、10-26、10-27） | **尚無** | 合成題 6/6；真實題 4/5、thinking 開 0/1；只適合數行小改，PM 準備 context 成本常高於 Codex 直接做 |
+| company-gw 當 Developer（10-21、10-26、10-27） | **尚無** | 合成題 6/6；真實題 4/5、thinking 開 0/1；目前樣本只涵蓋數行小改；PM 準備 context 與 Codex 直接做的成本比較為 **UNKNOWN**（尚未量測） |
 
 ### 9B.2 便宜模型的試驗紀錄（FACT；Owner 私下試用 HISTORY_INCOMPLETE）
 
