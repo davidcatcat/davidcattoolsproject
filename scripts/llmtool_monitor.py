@@ -1629,7 +1629,8 @@ class OfficeRow:
     order: int
     key: str = ""       # identity other rows can name as their group
     group: str = ""     # key of the agent that started this one ("" = top level)
-    kind: str = "agent"   # agent | subagent | worker
+    kind: str = "agent"   # agent | subagent | worker | shared (a line about the worker rows
+    #                       whose name starts with its group, shown under them, never folded)
     tui: bool = False     # a Codex thread opened from the terminal CLI
     cli: bool = False     # an interactive Claude session started from the terminal CLI
     # What is known about the member, kept apart from the display text:
@@ -3322,8 +3323,10 @@ def runner_rows(processes: list[Process], now: float, root=None,
                 ci: list | None = None, user_of=process_user) -> list[OfficeRow]:
     """One row per self-hosted GitHub Actions runner (Issue #99): running or
     not, kept apart from this account or not, its current or last job,
-    restarts and where its logs are; the CI queue on the first row. `root` is
-    the folder (or list of folders) where a stopped runner is looked for."""
+    restarts and where its logs are. The runners share one GitHub queue, so
+    the waiting jobs are one line of their own under the runner rows (W47),
+    not a note on runner #1. `root` is the folder (or list of folders) where
+    a stopped runner is looked for."""
     roots = [root] if isinstance(root, str) else list(root or [])
     listeners = sorted((p for p in processes if p.role == "Actions runner"), key=lambda p: p.pid)
     found = []   # (root, listener or None)
@@ -3341,8 +3344,23 @@ def runner_rows(processes: list[Process], now: float, root=None,
     rows = []
     for number, (place, listener) in enumerate(found, 1):
         rows.append(_runner_row(place, listener, processes, now, isolation, ci or [],
-                                number, len(found), queue=number == 1))
+                                number, len(found)))
+    waiting = [run[1] for run in ci or [] if run[0] != "in_progress"]
+    if rows and waiting:
+        rows.append(ci_queue_row(waiting, len(rows)))
     return rows
+
+
+def ci_queue_row(waiting: list[str], runners: int) -> OfficeRow:
+    """The jobs GitHub has not given to any Mac runner yet, said once for all
+    of them: 「mac ci 兩台共用  排隊 N 個：A、B、C…」. Its colour follows the
+    runner rows and the fold never hides it (office_view, _tree)."""
+    name = ("mac ci 兩台共用" if runners == 2 else f"mac ci {runners} 台共用" if runners > 2
+            else "mac ci 排隊")
+    detail = (f"排隊 {len(waiting)} 個：" + "、".join(waiting[:3])
+              + ("…" if len(waiting) > 3 else ""))
+    return OfficeRow(name, "", detail, None, 80 + runners + 1, group=RUNNER_ROW, kind="shared",
+                     evidence="GitHub")
 
 
 def _runner_name(place: str) -> str:
@@ -3357,7 +3375,10 @@ def _runner_name(place: str) -> str:
     return name if RUNNER_NAME.fullmatch(name) else ""
 
 
-def _runner_row(root, listener, processes, now, isolation, ci, number, total, queue):
+RUNNER_ROW = "mac ci runner"   # the Mac runner rows' name; the shared queue line sits under them
+
+
+def _runner_row(root, listener, processes, now, isolation, ci, number, total):
     lines = _runner_log(root)
     starts = sum(text == "Listening for Jobs" and now - when < 86400 for when, text in lines)
     jobs = [(when, text[len("Running job: "):]) for when, text in lines if text.startswith("Running job: ")]
@@ -3405,16 +3426,12 @@ def _runner_row(root, listener, processes, now, isolation, ci, number, total, qu
     if ends and not busy:
         when, name, result = ends[-1]
         notes.append(f"上一個工作：{name} {RUNNER_RESULTS.get(result, result)}（{_ago(now - when)}）")
-    waiting = [run[1] for run in ci if run[0] != "in_progress"] if queue else []
-    if waiting:
-        notes.append(f"排隊 {len(waiting)} 個：" + "、".join(waiting[:3])
-                     + ("…" if len(waiting) > 3 else ""))
     if starts > 1:
         notes.append(f"近 24 小時啟動 {starts} 次")
     logs, home = os.path.join(root, "_diag"), os.path.expanduser("~")
     if os.access(logs, os.R_OK | os.X_OK):   # a folder the Owner cannot open is no help
         notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs))
-    name = "mac ci runner" + (f" #{number}" if total > 1 else "")
+    name = RUNNER_ROW + (f" #{number}" if total > 1 else "")
     return OfficeRow(name, state, "；".join(notes), age, 80 + number, key=runner, kind="worker",
                      evidence="程序", alert=alert)
 
@@ -4314,7 +4331,10 @@ def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRo
     stable within a band, and a group is ranked by its most urgent member so a
     dimmed parent never drags a working subagent down. With fold, every gray
     row (its whole group gray too) becomes one count at the end of its section
-    (Owner 2026-10-28: green and yellow stay on screen, key a unfolds)."""
+    (Owner 2026-10-28: green and yellow stay on screen, key a unfolds). A
+    shared line (kind shared) is not ranked or folded: it goes right after the
+    last shown row it is about (PR #614 review: never between the runner rows),
+    or last of all when they are all folded away (W47)."""
     keys = {row.key for row in rows if row.key}
     children: dict[str, list[OfficeRow]] = {}
     for row in rows:
@@ -4342,22 +4362,25 @@ def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRo
         out.append(("  " * (depth - 1) + "└ " if depth else "", row))
         return sum(walk(child, depth + 1, out) for child in ordered(below(row, depth), depth + 1))
 
-    def section(items: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
+    def section(items: list[OfficeRow], shared: tuple | list = ()) -> list[tuple[str, OfficeRow]]:
         out: list[tuple[str, OfficeRow]] = []
         hidden = sum(walk(row, 0, out) for row in ordered(items, 0))
+        for line in shared:   # after the last shown row it is about, whatever its band
+            out.insert(max([i + 1 for i, (_, row) in enumerate(out) if row.name.startswith(line.group)],
+                           default=len(out)), ("", line))
         if hidden:
             out.append(("", OfficeRow(f"… 灰色 {hidden} 項", "", "（已摺疊，按 a 展開）", None, 10 ** 6)))
         return out
 
     out: list[tuple[str, OfficeRow]] = []
-    agents = [row for row in rows if row.group not in keys and row.kind != "worker"]
-    if any(row.kind != "worker" or row.group in keys for row in rows):
+    agents = [row for row in rows if row.group not in keys and row.kind not in ("worker", "shared")]
+    if any(row.kind not in ("worker", "shared") or row.group in keys for row in rows):
         out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
         out += section(agents)
     workers = [row for row in rows if row.kind == "worker" and row.group not in keys]
     if workers:
         out.append(("—", OfficeRow(STATUS_SECTION, "", "", None, 0)))
-        out += section(workers)
+        out += section(workers, [row for row in rows if row.kind == "shared"])
     return out
 
 
@@ -4430,6 +4453,15 @@ def _row_style(state: str) -> str:
     return "+" if state == WORKING else "!" if state in ALERT_STATES else "dim"
 
 
+def _line_style(row: OfficeRow, rows: list[OfficeRow]) -> str:
+    """A shared line takes the most urgent colour of the rows it is about
+    (the Mac runners' band); every other row is coloured by its own state."""
+    if row.kind != "shared":
+        return _row_style(row.state)
+    about = [_row_style(other.state) for other in rows if other.name.startswith(row.group)]
+    return min(about, key=BANDS.index, default="dim")
+
+
 def office_view(rows: list[OfficeRow], error: str | None = None,
                 width: int | None = None, expand: bool = False,
                 pending: list[OwnerPending] | None = None,
@@ -4440,7 +4472,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     the gray rows are folded into one count per section (key a in the TUI).
     pending: GitHub requests waiting for the Owner, shown first."""
     working = sum(row.state == WORKING for row in rows)
-    out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
+    members = sum(row.kind != "shared" for row in rows)   # a shared line is not a member
+    out = [(f"辦公室 · {working} 位工作中 · 共 {members} 位", "title")]
     now = time.time() if now is None else now
     pending = list(pending or [])
     texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
@@ -4510,8 +4543,9 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         line = f"{_pad(prefix + _shown(row), name_cols)}{_pad(row.state, 8)}{pieces[0]}"
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
-        out.append((line.rstrip(), _row_style(row.state)))
-        out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
+        style = _line_style(row, rows)
+        out.append((line.rstrip(), style))
+        out += [(" " * (name_cols + 8) + piece, style) for piece in pieces[1:]]
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
     if scope:
         legend.append(scope)

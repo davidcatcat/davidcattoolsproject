@@ -3421,11 +3421,16 @@ class OfficeViewTests(unittest.TestCase):
             {"status": "completed", "name": "old", "head_sha": "c" * 40},
             {"status": "queued", "name": "Mac Runner Smoke Test", "head_sha": "d" * 40,
              "pull_requests": [], "head_branch": "main", "created_at": "2026-10-25T11:56:00Z"}]})
-        named, = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside, ci=ci)
+        named, queue = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside, ci=ci)
         self.assertTrue(named.detail.startswith(
-            "執行中：llmtool Mac CI（PR #339 @aaaaaaa）（10 分鐘）；專用帳號 ghrunner；已開 1 小時；"
-            "排隊 2 個：llmtool Mac CI（PR #334 @bbbbbbb）、Mac Runner Smoke Test（main @ddddddd）"),
+            "執行中：llmtool Mac CI（PR #339 @aaaaaaa）（10 分鐘）；專用帳號 ghrunner；已開 1 小時"),
             named.detail)
+        # The queue is one shared line under the runner (W47), not a note on its row.
+        self.assertNotIn("排隊", named.detail)
+        self.assertEqual((queue.name, queue.state, queue.kind, queue.age, queue.group),
+                         ("mac ci 排隊", "", "shared", None, "mac ci runner"))
+        self.assertEqual(queue.detail,
+                         "排隊 2 個：llmtool Mac CI（PR #334 @bbbbbbb）、Mac Runner Smoke Test（main @ddddddd）")
         # Logs this account cannot read: the job process alone says it is working.
         unread, = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside)
         self.assertEqual(unread.state, mon.WORKING)
@@ -3513,20 +3518,37 @@ class OfficeViewTests(unittest.TestCase):
         where = {30: roots[0], 40: roots[1]}
         rows = mon.runner_rows([one, two, job], now, roots, where.get,
                                {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci)
+        # Both runners share one GitHub queue: it is said once, on a line of its
+        # own after the runner rows, and on neither runner (Owner, W47).
         self.assertEqual([(r.name, r.state) for r in rows],
-                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.WORKING)])
+                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.WORKING),
+                          ("mac ci 兩台共用", "")])
         # Their GitHub names, so the GitHub runner rows leave them out.
-        self.assertEqual([r.key for r in rows], ["davidproject-self-action", "davidproject-self-action-2"])
-        self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", rows[0].detail)
+        self.assertEqual([r.key for r in rows], ["davidproject-self-action", "davidproject-self-action-2", ""])
+        self.assertNotIn("排隊", rows[0].detail)
+        self.assertEqual((rows[2].kind, rows[2].detail), ("shared", "排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）"))
         self.assertTrue(rows[1].detail.startswith(
             "執行中：llmtool Mac CI（PR #343 @aaaaaaa）（3 分鐘）；專用帳號 ghrunner2"), rows[1].detail)
         self.assertNotIn("排隊", rows[1].detail)
         self.assertTrue(rows[1].detail.endswith(f"日誌：{roots[1]}/_diag"))
-        # Runner 2 stopped: its own row says so; runner 1 is unaffected.
+        # Runner 2 stopped: its own row says so; runner 1 is unaffected. An
+        # empty queue gets no line.
         rows = mon.runner_rows([one], now, roots, where.get, {30: "專用帳號 ghrunner"}.get, ci=[])
         self.assertEqual([(r.name, r.state) for r in rows],
                          [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.STOPPED)])
         self.assertEqual(rows[1].alert, "CI runner davidproject-self-action-2 沒在跑")
+        # Only running jobs, none waiting: no line either.
+        rows = mon.runner_rows([one, two, job], now, roots, where.get,
+                               {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci[:1])
+        self.assertEqual([r.name for r in rows], ["mac ci runner #1", "mac ci runner #2"])
+
+    def test_shared_ci_queue_line_names_the_runner_count_and_truncates_like_the_old_note(self):
+        waiting = [f"job {n}" for n in range(1, 6)]
+        line = mon.ci_queue_row(waiting, 2)
+        self.assertEqual((line.name, line.detail), ("mac ci 兩台共用", "排隊 5 個：job 1、job 2、job 3…"))
+        self.assertEqual(mon.ci_queue_row(waiting[:3], 2).detail, "排隊 3 個：job 1、job 2、job 3")
+        self.assertEqual(mon.ci_queue_row(waiting[:1], 1).name, "mac ci 排隊")
+        self.assertEqual(mon.ci_queue_row(waiting[:1], 3).name, "mac ci 3 台共用")
 
     def test_cli_working_in_another_folder_gets_its_running_session(self):
         now = self.NOW
@@ -3869,6 +3891,46 @@ class OfficeViewTests(unittest.TestCase):
                          ["opencode developer", "公司 gw", "… 灰色 2 項"])
         # the live section above has nothing gray and so no fold line of its own
         self.assertEqual("\n".join(lines).count("灰色"), 1)
+
+    def test_shared_ci_queue_line_sits_under_the_runner_rows_and_is_never_folded(self):
+        def names(lines):
+            start = lines.index(f"── {mon.STATUS_SECTION} ──") + 1
+            return [line.split("  ")[0] for line in lines[start:-1]]
+        queue = mon.ci_queue_row(["llmtool Mac CI（PR #341 @bbbbbbb）"], 2)
+        runners = [mon.OfficeRow("mac ci runner #1", mon.IDLE, "閒置，等工作", 60, 81, kind="worker"),
+                   mon.OfficeRow("mac ci runner #2", mon.WORKING, "執行中：x", 10, 82, kind="worker")]
+        rows = [mon.OfficeRow("codex 主對話", mon.WORKING, "指揮", 5, 10, key="T1"),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, "沒派工", 3600, 70, kind="worker"),
+                *runners, queue,
+                mon.OfficeRow("EC2 remote-test", mon.PAUSED, "paused", None, 80, kind="worker")]
+        # Expanded: the line follows the last runner row shown (#2 works, green;
+        # #1 is gray and listed later), never between them (PR #614 review);
+        # the title counts members only.
+        view = mon.office_view(rows, expand=True)
+        lines = [text for text, _ in view]
+        self.assertEqual(names(lines), ["mac ci runner #2", "公司 gw", "mac ci runner #1",
+                                        "mac ci 兩台共用", "EC2 remote-test"])
+        self.assertTrue(lines[0].startswith("辦公室 · 2 位工作中 · 共 5 位"), lines[0])
+        shared = next(text for text, _ in view if text.startswith("mac ci 兩台共用"))
+        self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", shared)
+        self.assertFalse(shared.rstrip().endswith("前"))   # no time of its own
+        # Its colour is the runners' most urgent band (green while #2 works)...
+        self.assertEqual(dict(view)[shared], "+")
+        # Folded: #1 is gray and folded; the line stays, right under the only runner shown.
+        folded = mon.office_lines(rows)
+        self.assertEqual(names(folded), ["mac ci runner #2", "mac ci 兩台共用", "公司 gw", "… 灰色 2 項"])
+        # Both runners idle: gray rows fold, the queue line does not (jobs wait).
+        idle = [replace(runners[1], state=mon.IDLE), runners[0], queue]
+        view = mon.office_view([rows[0], rows[1], *idle, rows[-1]])
+        texts = [text for text, _ in view]
+        self.assertEqual(names(texts), ["公司 gw", "mac ci 兩台共用", "… 灰色 3 項"])
+        self.assertEqual(dict(view)[next(t for t in texts if t.startswith("mac ci 兩台共用"))], "dim")
+        # One runner: no section header games, the line simply follows it.
+        one = [mon.OfficeRow("mac ci runner", mon.STOPPED, "沒在跑", None, 81, kind="worker",
+                             alert="CI runner 沒在跑"), mon.ci_queue_row(["a", "b"], 1)]
+        view = mon.office_view(one)
+        self.assertEqual(names([t for t, _ in view]), ["mac ci runner", "mac ci 排隊"])
+        self.assertEqual(view[-2][1], "!")   # yellow like the stopped runner it waits for
 
     def test_wrap_breaks_at_punctuation_and_never_starts_with_a_closing_mark(self):
         text = "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒（回應格式錯誤）"
