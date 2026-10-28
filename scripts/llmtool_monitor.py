@@ -4304,33 +4304,63 @@ LIVE_SECTION = "即時（讀得到 session 紀錄）"
 STATUS_SECTION = "只看得到狀態（依派工紀錄和程序推算）"
 
 
-def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
-    """(prefix, row) in display order: each agent followed by what it started."""
+BANDS = ("?", "+", "!", "dim")   # row colours top to bottom: red, green, yellow, gray
+GRAY = BANDS.index("dim")
+
+
+def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRow]]:
+    """(prefix, row) in display order: each agent followed by what it started.
+    Each section is ordered by colour band (red, green, yellow, gray; see BANDS),
+    stable within a band, and a group is ranked by its most urgent member so a
+    dimmed parent never drags a working subagent down. With fold, every gray
+    row (its whole group gray too) becomes one count at the end of its section
+    (Owner 2026-10-28: green and yellow stay on screen, key a unfolds)."""
     keys = {row.key for row in rows if row.key}
     children: dict[str, list[OfficeRow]] = {}
     for row in rows:
         if row.group in keys:
             children.setdefault(row.group, []).append(row)
+
+    def below(row: OfficeRow, depth: int) -> list[OfficeRow]:
+        return children.get(row.key, []) if row.key and depth < 3 else []
+
+    def band(row: OfficeRow, depth: int) -> int:
+        return min([BANDS.index(_row_style(row.state)),
+                    *(band(child, depth + 1) for child in below(row, depth))])
+
+    def ordered(items: list[OfficeRow], depth: int) -> list[OfficeRow]:
+        return sorted(items, key=lambda row: band(row, depth))   # stable: band only
+
+    def size(row: OfficeRow, depth: int) -> int:
+        return 1 + sum(size(child, depth + 1) for child in below(row, depth))
+
+    def walk(row: OfficeRow, depth: int, out: list) -> int:
+        """Appends the row and its group to out; returns how many gray rows were
+        folded away instead (every gray member when fold is on)."""
+        if fold and band(row, depth) == GRAY:
+            return size(row, depth)
+        out.append(("  " * (depth - 1) + "└ " if depth else "", row))
+        return sum(walk(child, depth + 1, out) for child in ordered(below(row, depth), depth + 1))
+
+    def section(items: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
+        out: list[tuple[str, OfficeRow]] = []
+        hidden = sum(walk(row, 0, out) for row in ordered(items, 0))
+        if hidden:
+            out.append(("", OfficeRow(f"… 灰色 {hidden} 項", "", "（已摺疊，按 a 展開）", None, 10 ** 6)))
+        return out
+
     out: list[tuple[str, OfficeRow]] = []
+    agents = [row for row in rows if row.group not in keys and row.kind != "worker"]
     if any(row.kind != "worker" or row.group in keys for row in rows):
         out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
-
-    def walk(row: OfficeRow, depth: int) -> None:
-        out.append(("  " * (depth - 1) + "└ " if depth else "", row))
-        for child in children.get(row.key, []) if row.key and depth < 3 else []:
-            walk(child, depth + 1)
-
-    for row in rows:
-        if row.group not in keys and row.kind != "worker":
-            walk(row, 0)
+        out += section(agents)
     workers = [row for row in rows if row.kind == "worker" and row.group not in keys]
     if workers:
         out.append(("—", OfficeRow(STATUS_SECTION, "", "", None, 0)))
-        out += [("", row) for row in workers]
+        out += section(workers)
     return out
 
 
-RECENT_DONE = 5 * 60   # finished subagent work older than this is folded into one line
 REVIEW_NO_VERDICT = frozenset({NO_VERDICT})
 ALERT_STATES = (STALLED, STOPPED, ATTENTION)
 
@@ -4371,30 +4401,6 @@ def _review_alerts(rows: list[OfficeRow]) -> list[str]:
     return out
 
 
-def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
-    """Finished subagent work older than RECENT_DONE becomes one line per parent.
-    The newest finished review of each PR stays, so its verdict is not hidden."""
-    keys = {row.key for row in rows if row.key}
-    newest: dict[str, OfficeRow] = {}
-    for row in rows:
-        if row.key == "review" and row.state == DONE and row.task:
-            held = newest.get(row.task.split()[1])
-            if held is None or (row.age or 0.0) < (held.age or 0.0):
-                newest[row.task.split()[1]] = row
-    kept, folded = [], {}
-    for row in rows:
-        if (row.state == DONE and row.group in keys and row.age is not None
-                and row.age > RECENT_DONE and row not in newest.values()):
-            folded[row.group] = folded.get(row.group, 0) + 1
-        else:
-            kept.append(row)
-    for group, count in folded.items():
-        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前完成；按 a 展開"
-        kept.append(OfficeRow(f"… 另 {count} 項已完成", "", when, None, 10 ** 6,
-                              group=group, kind="subagent"))
-    return kept
-
-
 DETAIL_COLS = 44   # detail width when the screen width is not known
 DETAIL_MAX = 72    # widest detail column: longer text wraps, the time stays near it
 BREAK_AFTER = "；，、 "   # preferred places to continue on the next line
@@ -4430,7 +4436,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 now: float | None = None, scope: str = "") -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     With a screen width, each detail is cut so the time column stays visible.
-    expand lists older finished work too instead of folding it into one line.
+    Rows are ordered red, green, yellow, gray in each section; without expand
+    the gray rows are folded into one count per section (key a in the TUI).
     pending: GitHub requests waiting for the Owner, shown first."""
     working = sum(row.state == WORKING for row in rows)
     out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
@@ -4484,7 +4491,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
-    tree = _tree(rows if expand else _fold_done(rows))
+    tree = _tree(rows, fold=not expand)
     name_cols = max(_width(prefix + _shown(row)) for prefix, row in tree if prefix != "—") + 2
     # The detail column is as wide as the longest detail, up to DETAIL_MAX and
     # what the screen leaves, so the time stays near its text on a wide screen.
@@ -4597,7 +4604,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
     view, offset, next_poll = "office", 0, 0.0
-    expanded = False   # office view: also list older finished work (key a)
+    expanded = False   # office view: gray rows folded (default) or listed (key a)
 
     def put(y: int, text: str, attr: int = 0) -> None:
         h, w = stdscr.getmaxyx()
@@ -4667,7 +4674,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             for row, (line, style) in enumerate(lines[offset:offset + body]):
                 put(3 + row, line, styles.get(style, 0))
             hint = ("Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  "
-                    f"a: {'收起' if expanded else '展開'}已完成  q: quit")
+                    f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))

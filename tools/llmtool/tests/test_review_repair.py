@@ -449,7 +449,11 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(args.pm_session_id, task['pm_provenance']['pm_native_session_id'])
         self.assertEqual(args.pm_cwd, task['pm_provenance']['pm_cwd'])
         self.assertEqual(envelope['request'], f'REPAIR 1/3 of {TASK}')
-        assignment = json.loads(envelope['response'])['developer_assignment']
+        response = json.loads(envelope['response'])
+        self.assertEqual(set(response), {'schema_version', 'summary', 'developer_assignment'})
+        self.assertTrue(response['summary'].startswith('LLMTOOL_RUNTIME recorded bounded'))
+        self.assertIn('no PM or provider decision was made', response['summary'])
+        assignment = response['developer_assignment']
         self.assertEqual(assignment['route'], 'codex')
         self.assertEqual(assignment['goal'], task['pm_assignment']['goal'])
         self.assertIn('comment id 9', assignment['acceptance'][-1])

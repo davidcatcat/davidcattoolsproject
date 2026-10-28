@@ -766,6 +766,26 @@ class TaskStoreTests(unittest.TestCase):
         self.assertTrue(lock.is_file())
         self.assertFalse(any(path.name.endswith('.tmp') for path in self.root.iterdir()))
 
+    def test_transient_atomic_replace_contention_retries_update(self):
+        value = record()
+        self.store.create(value)
+        original_replace = os.replace
+        attempts = []
+
+        def contend_once(source, destination, **kwargs):
+            attempts.append((source, destination))
+            if len(attempts) == 1:
+                raise OSError(errno.EBUSY, 'transient filesystem contention')
+            return original_replace(source, destination, **kwargs)
+
+        with patch.object(task_store_module.os, 'replace', side_effect=contend_once):
+            updated = self.store.update(value['task_id'], state='PM_UNAVAILABLE',
+                                        error_code='PROVIDER_TIMEOUT')
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(updated['state'], 'PM_UNAVAILABLE')
+        self.assertEqual(self.store.get(value['task_id']), updated)
+
     def _start_lock_holder(self, lock_path):
         script = (
             'import fcntl, os, sys; '

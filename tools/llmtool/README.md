@@ -681,8 +681,11 @@ llmtool task submit --provider my-pm "Add a health-check command to the service 
 llmtool task show 0123456789abcdef0123456789abcdef
 ```
 
-`task submit` requires an explicitly configured provider profile; it never picks a
-default or falls back to another provider. It creates a local Task, Run and logical
+`task submit` (and `/task submit` in `chat --tui`) is the developer/test intake
+path — 開發測試用：只登記，不會派工: it records a Task and dispatches nothing. The
+product entry for talking to the PM is the dedicated Claude Code PM (`/pm new`,
+`/pm connect` in `chat --tui`). `task submit` requires an explicitly configured
+provider profile; it never picks a default or falls back to another provider. It creates a local Task, Run and logical
 PM Session record before calling the provider. The returned Task ID can be used
 with `task show` in a later CLI process. Records live under
 `~/.local/state/llmtool/tasks` with owner-only directory/file permissions. Request
@@ -1654,17 +1657,23 @@ shell, Git or file-write permission. Layout: a scrollable conversation pane, a
 persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
 Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
 on the first/last input line recall earlier inputs from this process only; Tab
-switches focus between input and conversation; PageUp/PageDown scroll; F1 toggles
-key help; Ctrl-C (or Ctrl-D on empty input) exits with status 0. Resize and wide
+switches focus between input and conversation; PageUp/PageDown (Fn+↑/↓ on a Mac
+keyboard) or the mouse wheel scroll the conversation (mouse reporting is on by
+default; F6 turns it off so the terminal's own drag-select and copy work); F1
+toggles key help; Ctrl-C (or Ctrl-D on empty input) exits with status 0. Resize and wide
 Unicode are handled by the terminal UI. Model output, reported model names and
 errors are untrusted and rendered through the same control-character escaping as
 TTY line mode. New output only auto-scrolls when the conversation caret is at the
-end, so a scrolled-back position is preserved.
+end, so a scrolled-back position is preserved; wheeling back down to the bottom
+resumes following.
 
 One request is in flight at a time: Enter while busy keeps the typed input and
-sends nothing; commands such as `/provider` are not run while busy. A request
-cannot be cancelled: exit while busy is marked pending and happens once the
-request finishes or reaches the provider's own timeout. If prompt-toolkit 3.x is
+sends nothing; commands such as `/provider` are not run while busy. Esc, or the
+first Ctrl-C, interrupts a chat reply: a provider that streams stops at its next
+chunk and the text shown so far stays in history marked interrupted; a provider
+that answers in one piece (all current providers) returns first, and that reply is
+then shown marked interrupted. A second Ctrl-C marks exit pending, which happens
+once the request ends or reaches the provider's own timeout. If prompt-toolkit 3.x is
 absent, or stdin/stdout is not a terminal (pipes, redirects), `--tui` prints a
 notice to stderr and runs the line chat before any UI starts. If the UI fails
 after starting, it prints a sanitized error and exits 1; it never replays input
