@@ -3754,6 +3754,7 @@ class OfficeViewTests(unittest.TestCase):
 
     def test_office_orders_each_section_red_green_yellow_gray_and_keeps_order_within_a_band(self):
         self.assertEqual(mon.BANDS, ("?", "+", "!", "dim"))   # Owner 2026-10-28: 紅、綠、黃、灰
+        # no real state is red yet; the "?" band is exercised in the next test
         rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待", 30, 10, key="T1"),
                 mon.OfficeRow("claude reviewer", mon.STALLED, "review", 1000, 11),
                 mon.OfficeRow("codex developer", mon.WORKING, "coding", 3, 12),
@@ -3769,6 +3770,41 @@ class OfficeViewTests(unittest.TestCase):
         styles = [style for _, style in mon.office_view(rows, expand=True)
                   if style in ("+", "!", "dim")][:-1]   # the legend is dimmed too
         self.assertEqual(styles, ["!", "!", "+", "+", "!", "!", "dim", "dim", "dim"])   # 2 ⚠ lines first
+
+    def test_office_puts_a_red_row_ahead_of_green_rows_in_both_sections(self):
+        # _row_style never yields "?" today (Codex review of PR #575): to exercise
+        # the red band, one sentinel state is styled "?" from outside, without
+        # touching how _row_style decides the other colours.
+        RED = "紅測試"
+        real = mon._row_style
+        rows = [mon.OfficeRow("codex developer", mon.WORKING, "coding", 3, 10),
+                mon.OfficeRow("claude reviewer", mon.STALLED, "review", 1000, 11),
+                mon.OfficeRow("claude pm", mon.IDLE, "等待", 100, 12, cli=True),
+                mon.OfficeRow("codex 主對話", RED, "crashed", 5, 13),           # listed last, red
+                mon.OfficeRow("agy", mon.WORKING, "gw task", 8, 20, kind="worker"),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, "沒派工", 3600, 21, kind="worker"),
+                mon.OfficeRow("EC2 remote-test", RED, "down", 9, 22, kind="worker")]   # listed last, red
+        with patch.object(mon, "_row_style", lambda state: "?" if state == RED else real(state)):
+            listed = mon.office_view(rows, expand=True)
+            folded = self._listed(rows)
+        texts = [text for text, _ in listed]
+        live, status = texts.index(f"── {mon.LIVE_SECTION} ──"), texts.index(f"── {mon.STATUS_SECTION} ──")
+        names = [text.split("  ")[0] for text in texts if text and not text.startswith(("── ", "⚠", "ℹ"))]
+        view = dict(listed)
+        # red first in the live section: ahead of the green developer and the yellow reviewer
+        self.assertEqual(texts[live + 1].split("  ")[0], "codex 主對話")
+        self.assertEqual(view[texts[live + 1]], "?")
+        self.assertEqual(names[1:5], ["codex 主對話", "codex developer", "claude reviewer", "claude pm"])
+        # red first in the Worker section too, ahead of the green agy and the yellow gw
+        self.assertEqual(texts[status + 1].split("  ")[0], "EC2 remote-test")
+        self.assertEqual(view[texts[status + 1]], "?")
+        self.assertEqual(names[5:8], ["EC2 remote-test", "agy", "公司 gw"])
+        # folding gray rows leaves the red rows in place at the top of each section
+        self.assertEqual([line.split("  ")[0] for line in folded],
+                         ["codex 主對話", "codex developer", "claude reviewer", "… 灰色 1 項",
+                          "EC2 remote-test", "agy", "公司 gw"])
+        # the patch is gone: a real state still never reaches the red band
+        self.assertEqual(mon._row_style(RED), "dim")
 
     def test_office_keeps_groups_together_and_ranks_a_group_by_its_most_urgent_member(self):
         rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待", 30, 10, key="T1"),
