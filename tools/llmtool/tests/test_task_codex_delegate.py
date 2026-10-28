@@ -365,12 +365,48 @@ class CodexDelegateTests(unittest.TestCase):
             self._dispatch(task, registration=other_d6,
                 bound_registration=SimpleNamespace(**{
                     **vars(other_d6), 'native_session_id': '12345678-1234-4234-8234-123456789abc'}))
+        collected_result = {'task_id': task['task_id'], 'run_id': task['run_id'],
+            'executor_task_id': registration.task_id,
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': bound_registration.native_session_id,
+            'executor_native_session': 'VERIFIED', 'root': str(self.root),
+            'common_dir': self.common_dir, 'branch': registration.branch,
+            'source_sha': self.source_sha, 'result_head': None,
+            'result_mode': 'UNCOMMITTED_WORKTREE', 'changed_paths': ['src.py'],
+            'diff_sha256': 'e' * 64, 'status_sha256': 'f' * 64,
+            'file_manifest_sha256': 'a' * 64}
+        collect_calls = []
+
+        def callback_handler(task_id, executor_task_id, *, store):
+            with patch.object(task_completion, 'collect_executor_worktree_result',
+                              return_value=collected_result) as collect, \
+                 patch.object(task_submission_cli, '_recollect_direct_worktree'), \
+                 patch.object(task_submission_cli, '_active_pm_runtime', return_value=True), \
+                 patch.object(task_submission_cli, '_record_ready_event'), \
+                 redirect_stdout(io.StringIO()):
+                outcome = run_task_direct_result_event(
+                    task_id, executor_task_id, store=store)
+                collect_calls.append(collect.call_args.kwargs)
+                return outcome
+
         with redirect_stdout(io.StringIO()):
             result, saved, callback = self._dispatch(task, registration=registration,
-                bound_registration=bound_registration)
+                bound_registration=bound_registration,
+                callback_handler=callback_handler)
         self.assertEqual(result, 0)
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertIn('VALUE = 2', saved['developer']['artifact'])
+        self.assertEqual(saved['developer']['direct_result_callback']['state'],
+                         'PM_EVIDENCE_READY')
+        self.assertEqual(saved['developer']['direct_result_callback']['evidence']['source_sha'],
+                         self.source_sha)
+        self.assertEqual(saved['developer']['direct_result_callback']['evidence']['result_head'],
+                         result_head)
+        self.assertEqual(collect_calls[0]['source_sha'], self.source_sha)
+        self.assertEqual(collect_calls[0]['expected_result_head'], result_head)
+        self.assertNotIn('D6_TASK_BINDING_MISMATCH',
+                         saved['developer']['direct_result_callback']['missing_gates'])
         callback.assert_called_once()
 
     def test_timeout_recovery_dispatch_rejects_committed_out_of_scope_diff(self):
@@ -586,6 +622,9 @@ class CodexDelegateTests(unittest.TestCase):
                          saved['developer']['direct_result_callback']['missing_gates'])
         self.assertEqual(collect.call_args.kwargs['expected_native_session_id'],
                          bound_registration.native_session_id)
+        self.assertIsNone(collect.call_args.kwargs['expected_result_head'])
+        self.assertIsNone(saved['developer']['direct_result_callback']['evidence'][
+            'result_head'])
         callback.assert_called_once()
 
     def test_bound_codex_session_rejects_other_registration_changes(self):

@@ -1559,7 +1559,8 @@ def _direct_result_tests(task, evidence, result, developer):
         read_paths=developer['read_paths'], write_paths=developer['write_paths'])
 
 
-def _direct_result_callback(task, registration, source_sha, *, test_policy=None):
+def _direct_result_callback(task, registration, source_sha, *, result_head=None,
+                            test_policy=None):
     binding = task['task_binding']
     evidence = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
@@ -1571,7 +1572,8 @@ def _direct_result_callback(task, registration, source_sha, *, test_policy=None)
         'executor_native_session': ('VERIFIED' if registration.native_session_id else 'UNKNOWN'),
         'execution_mode': 'DIRECT_D6', 'root': registration.root,
         'common_dir': registration.common_dir, 'branch': registration.branch,
-        'source_sha': source_sha, 'verification_state': 'NOT_STARTED',
+        'source_sha': source_sha, 'result_head': result_head,
+        'verification_state': 'NOT_STARTED',
         'test_policy': (test_policy if test_policy in ('REMOTE_RECEIPT', 'LOCAL')
                         else _remote_receipt_test_policy(task)),
     }
@@ -2523,7 +2525,9 @@ def run_task_codex_delegate(args, *, store):
         'artifact_sha256': None, 'usage': None, 'error_code': None,
         'execution': None, 'created_at': _timestamp(),
         'direct_result_callback': _direct_result_callback(
-            task, registration, task_source_sha, test_policy=test_policy),
+            task, registration, task_source_sha,
+            result_head=(snapshot.head if recovering_timeout else None),
+            test_policy=test_policy),
     }
     completion = {
         'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
@@ -3535,6 +3539,7 @@ def _recollect_direct_worktree(task, developer, callback, expected_result):
         task_id=callback['executor_task_id'],
         expected_common_dir=evidence['common_dir'], expected_root=evidence['root'],
         expected_branch=evidence['branch'], source_sha=evidence['source_sha'],
+        expected_result_head=evidence.get('result_head'),
         task_binding=task['task_binding'],
         expected_agent=evidence['executor_identity'],
         expected_session_ref=evidence['executor_session_ref'],
@@ -4061,6 +4066,7 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
                 task_id=executor_task_id,
                 expected_common_dir=evidence['common_dir'], expected_root=evidence['root'],
                 expected_branch=evidence['branch'], source_sha=evidence['source_sha'],
+                expected_result_head=evidence.get('result_head'),
                 task_binding=task['task_binding'],
                 expected_agent=evidence['executor_identity'],
                 expected_session_ref=evidence['executor_session_ref'],
