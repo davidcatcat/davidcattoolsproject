@@ -2706,6 +2706,11 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                          if type(claim) is dict else 0)
         if [claim.get('attempt') for claim in ordered] != list(range(1, len(ordered) + 1)):
             invalid()
+        dispatched = [claim for claim in ordered
+                      if type(claim) is dict and claim.get('state') == 'DISPATCHED']
+        if any(type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'FAILED')
+               for claim in ordered):
+            invalid()
         original = task.get('developer')
         if type(original) is not dict or original.get('source_sha') != source_sha:
             invalid()
@@ -2718,10 +2723,9 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 registration.source_sha != source_sha):
             invalid()
         artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
-                      source_sha, ordered[0].get('head_sha'))]
-        for index, claim in enumerate(ordered):
-            if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
-                invalid()
+                      source_sha,
+                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
+        for index, claim in enumerate(dispatched):
             repair_id = claim.get('repair_task_id')
             if type(repair_id) is not str:
                 invalid()
@@ -2734,8 +2738,8 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                     developer.get('state') != 'DEVELOPER_RESPONDED' or
                     developer.get('source_sha') != claim.get('head_sha')):
                 invalid()
-            next_head = (ordered[index + 1].get('head_sha')
-                         if index + 1 < len(ordered) else registration.result_sha)
+            next_head = (dispatched[index + 1].get('head_sha')
+                         if index + 1 < len(dispatched) else registration.result_sha)
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
                               claim.get('head_sha'), next_head))
         for segment_artifact, segment_digest, _, _ in artifacts:

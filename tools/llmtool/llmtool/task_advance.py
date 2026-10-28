@@ -29,7 +29,7 @@ def _events(related):
     return value if type(value) is list else []
 
 
-def derive_state(repair_record):
+def derive_repair_state(repair_record):
     """Normalize a repair Task record into the state used by the advance loop."""
     if type(repair_record) is not dict:
         return 'UNKNOWN'
@@ -112,6 +112,9 @@ def decide(record, d6, pr, related):
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'UNKNOWN'):
                 return 'REPAIR_OUTCOME_UNKNOWN'
+            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
+                    current_repair.get('repair_state') == 'RECORD_UNAVAILABLE'):
+                return 'DEVELOPER_ATTENTION'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'RESPONDED'):
                 return 'REPAIR_RESULT_NOT_PUBLISHED'
@@ -308,7 +311,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         repair_record = None
         try:
             repair_record = store.get(claim['repair_task_id'])
-            repair_state = (derive_state(repair_record)
+            repair_state = (derive_repair_state(repair_record)
                             if type(repair_record) is dict else 'RECORD_UNAVAILABLE')
         except Exception:
             repair_state = 'RECORD_UNAVAILABLE'
@@ -318,7 +321,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         review_outcomes = _review_outcomes(record, _claims(record), get)
         related['events'] = list(related['events']) + review_outcomes
     except Exception:
-        review_outcomes = []
+        # Advance may proceed from persisted reviewer events when GitHub is unavailable.
+        pass
     merged = _merged_review_target(record, _claims(record), related['events'], pr,
                                     integration_pr, get)
     if merged is not None:
@@ -379,6 +383,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
     elif step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
+        # decide() is the pre-check: RECORD_UNAVAILABLE must surface before cwd/runtime checks.
         if type(d6) is not dict or type(cwd or os.getcwd()) != str or os.path.realpath(cwd or os.getcwd()) != os.path.realpath(d6['root']):
             step, codes = 'NEEDS_CWD', ['NEEDS_CWD']
         else:

@@ -112,7 +112,7 @@ class TaskAdvanceTests(unittest.TestCase):
         review_claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
         for repair_record, derived, action in expected:
             with self.subTest(repair_record=repair_record):
-                self.assertEqual(task_advance.derive_state(repair_record), derived)
+                self.assertEqual(task_advance.derive_repair_state(repair_record), derived)
                 related = {
                     'events': [{'source': 'REVIEWER', 'source_sha': HEAD,
                                 'version': 1, 'outcome': 'REVIEW_FAIL'}],
@@ -330,8 +330,9 @@ class TaskAdvanceTests(unittest.TestCase):
 
         store = Store()
         called = []
-        def retry(**_kwargs):
-            called.append(store.record['review_repair_claims'][0]['state'])
+        def retry(**kwargs):
+            called.append((store.record['review_repair_claims'][0]['state'],
+                           kwargs.get('retry_claim_id')))
             print('{"repair_task_id":"4' + '4' * 31 + '"}')
             return {'ignored': True}
         with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
@@ -345,7 +346,7 @@ class TaskAdvanceTests(unittest.TestCase):
                 github_get=lambda _path: [])
         self.assertEqual(result['step'], 'REPAIR_RETRY')
         self.assertEqual(result['result'], {'repair_task_id': '4' * 32})
-        self.assertEqual(called, ['DISPATCHED'])
+        self.assertEqual(called, [('DISPATCHED', '3' * 32)])
         self.assertEqual(store.record['review_repair_claims'][0]['state'], 'DISPATCHED')
 
     def test_repair_retry_limit_error_is_reported_after_failed_claim(self):
@@ -454,6 +455,43 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(result['step'], 'CLOSED')
         self.assertEqual(len(saved), 1)
         self.assertEqual(saved[0][-2:], ('MERGED', 'd' * 40))
+
+    def test_verified_merge_closes_when_d6_binding_is_unavailable(self):
+        class Store:
+            def __init__(self, record):
+                self.record = record
+            def get(self, _task_id):
+                return self.record
+
+        ready = base_record(review_dispatch_claim=[{
+            'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}],
+            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
+                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+        merged_review = {'number': 17, 'merged': True,
+                         'head': {'sha': HEAD}, 'merge_commit_sha': 'd' * 40}
+        integration = {'number': 27, 'merged': True,
+                       'head': {'sha': 'c' * 40}, 'merge_commit_sha': 'e' * 40}
+        for integration_pr, pr_value, expected_number, expected_sha in (
+                (None, merged_review, 17, 'd' * 40),
+                (27, PR, 27, 'e' * 40)):
+            with self.subTest(integration_pr=integration_pr):
+                saved = []
+                def pr_snapshot(number, _get):
+                    return pr_value if number == 17 else integration
+                with patch.object(task_advance, '_d6_snapshot', return_value={
+                        'state': 'D6_BINDING_UNAVAILABLE',
+                        'code': 'D6_BINDING_UNAVAILABLE'}), \
+                     patch.object(task_advance, '_pr_snapshot', side_effect=pr_snapshot), \
+                     patch.object(task_advance, '_review_outcomes', return_value=[{
+                         'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                         'outcome': 'REVIEW_PASS'}]):
+                    result = task_advance.advance(task_id=ready['task_id'], store=Store(ready),
+                        pr_number=17, integration_pr=integration_pr,
+                        github_get=lambda _url: {'status': 'ahead'},
+                        record_github_event_call=lambda *args: saved.append(args))
+                self.assertEqual(result['step'], 'CLOSED')
+                self.assertEqual(saved[0][4], expected_number)
+                self.assertEqual(saved[0][-2:], ('MERGED', expected_sha))
 
     def test_integration_compare_uses_real_github_path_validator(self):
         from llmtool.task_completion import _GITHUB_API_PATH

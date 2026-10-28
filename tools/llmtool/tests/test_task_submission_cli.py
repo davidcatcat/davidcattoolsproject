@@ -160,6 +160,50 @@ class TaskSubmissionCLITests(unittest.TestCase):
             code = run_task_submit(self.args)
         return code, json.loads(out.getvalue()), client, resolve
 
+    def test_completion_repair_chain_skips_failed_attempt_before_successful_retry(self):
+        from types import SimpleNamespace
+
+        source_sha, failed_head, retry_head, result_head = (
+            'a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        original_artifact = 'diff --git a/sample.py b/sample.py\n'
+        repair_artifact = 'diff --git a/sample.py b/sample.py\n'
+        repair_id = '4' * 32
+        task = {
+            'developer': {'source_sha': source_sha, 'write_paths': ['sample.py'],
+                          'artifact': original_artifact,
+                          'artifact_sha256': hashlib.sha256(
+                              original_artifact.encode()).hexdigest()},
+            'review_repair_claims': [
+                {'attempt': 1, 'state': 'FAILED', 'head_sha': failed_head,
+                 'repair_task_id': '3' * 32},
+                {'attempt': 2, 'state': 'DISPATCHED', 'head_sha': retry_head,
+                 'repair_task_id': repair_id},
+            ],
+        }
+        repair = {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                'source_sha': retry_head, 'artifact': repair_artifact,
+                                'artifact_sha256': hashlib.sha256(
+                                    repair_artifact.encode()).hexdigest()}}
+        class Store:
+            def get(self, task_id):
+                if task_id == repair_id:
+                    return repair
+                raise AssertionError('failed repair Task must not be loaded')
+
+        registration = SimpleNamespace(root='/repo/task', branch='task-branch',
+                                       source_sha=source_sha, result_sha=result_head)
+        with patch.object(submission_cli.task_completion, 'read_d6_registration',
+                          return_value=registration):
+            artifacts = submission_cli._completion_repair_artifact_segments(
+                task, Store(), executor_task='executor', common_dir='/repo/.git',
+                root='/repo/task', branch='task-branch', source_sha=source_sha)
+        self.assertEqual(artifacts, [
+            (original_artifact, task['developer']['artifact_sha256'],
+             source_sha, retry_head),
+            (repair_artifact, repair['developer']['artifact_sha256'],
+             retry_head, result_head),
+        ])
+
     def test_trusted_bootstrap_helper_requires_clean_pinned_dispatcher_source(self):
         dispatcher_root = Path(self.temp.name).resolve() / 'dispatcher'
         helper = dispatcher_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
