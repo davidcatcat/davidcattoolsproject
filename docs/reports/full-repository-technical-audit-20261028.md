@@ -487,7 +487,7 @@ sequenceDiagram
 
 ### 11.3 多帳號／多模型耦合
 
-- PM 身份 = Claude Code session UUID；`observe_claude_session` 要求 transcript 存在於 `CLAUDE_CONFIG_DIR/projects/<cwd-encoded>/`；Reviewer 派工 `account_mode` 讀 `CLAUDE_CONFIG_DIR`；Owner 目前 PM／Reviewer／Developer 全在 `~/.claude-account2`。換帳號、換機器、換 CLI 版本都會改變 llmtool 行為（AUDIT-007、031）。
+- PM 身份 = Claude Code session UUID；`observe_claude_session` 要求 transcript 存在於 `CLAUDE_CONFIG_DIR/projects/<cwd-encoded>/`；Reviewer 派工 `account_mode` 讀 `CLAUDE_CONFIG_DIR`；Owner 目前 PM／Reviewer／Developer 全在同一個已設定的 Claude 帳號 profile。換帳號、換機器、換 CLI 版本都會改變 llmtool 行為（AUDIT-007、031）。
 - 與 CliNest 的關係：CliNest（PR #392）定位是「多帳號 CLI/TUI 管理」的獨立產品；llmtool 內部的帳號耦合應透過 config 抽象解決，而非把 CliNest 併入。
 
 ### 11.4 Company gw（FACT）
@@ -597,7 +597,7 @@ sequenceDiagram
 | 10-26 vs 10-27 每 Task 平均 prompt | 0.85M → 0.52M；cache 命中 1% → 92% | #466 報告 |
 | Claude PM／Reviewer tokens | UNKNOWN（無紀錄） | — |
 | GitHub-hosted Actions（已停用） | 09-27～10-10：749 runs／1,339 jobs／約 2,461 Linux-equiv 分鐘；USD UNKNOWN | docs/ci/billing-and-cost.md |
-| company gw | 合成題 7.6K；真實題 1.2K–8.4K | #290 |
+| company gw | 合成題 7.6K；真實題（thinking 關）每題合計 1.2K–8.4K、2–4 秒 | #290 |
 | EC2 offload 節省 | NOT VERIFIED（樣本 6／10） | #466 |
 
 **最大的隱形成本（OPINION）：** 不是 provider token，而是 PM（Claude）每個 session 重讀約 15 萬 tokens 政策文件、每個 PR 的多輪 Reviewer、以及 Owner 轉述決策（#289 有 73 則留言、#120 有 31 則 Owner decision 紀錄）。這些都沒有被量測。
@@ -685,7 +685,7 @@ sequenceDiagram
 | 每個 PR：D6 + Task + 正式審查 + Mac CI + EC2 CI + docs CI + merge train | 分級：docs-only → docs CI + 抽樣審；test-only／小修 → EC2 CI + 自審；runtime → 正式審 + EC2 + Mac subset | **OWNER_DECISION_REQUIRED**（AGENTS.md 要求文件 PR 亦須正式審查；Mac gate 為 Owner #425 決策） |
 | Reviewer 每輪新 D6 | 一個 Reviewer D6 per PR，rereview 只讀 delta | **OWNER_DECISION_REQUIRED**（D6 lifecycle 規範） |
 | PM 手動串接 8 個子命令 | `task advance` 驅動器 + TUI 顯示 | 工程建議（PR #519 方向） |
-| 4 條 Developer 路線 | 1 條主路線（Codex direct）+ 1 條實驗（gw 合成題）；其餘暫停 | **OWNER_DECISION_REQUIRED**（`worker-dispatch.json` 只能由 Owner 指示變更） |
+| 4 條 Developer 路線 | ~~1 條主路線（Codex direct）+ 1 條實驗（gw 合成題）；其餘暫停~~（**已被 §22 現行優先表與 #290 的 Owner 決定取代**：gw 接主鏈並量測整題總成本） | **OWNER_DECISION_REQUIRED**（`worker-dispatch.json` 只能由 Owner 指示變更） |
 | Owner 決策靠 PM 代記 73 則留言 | 每週一次決策清單；日常技術選擇不上 GitHub | **OWNER_DECISION_REQUIRED**（Owner 10-28 決策紀錄規則） |
 
 ---

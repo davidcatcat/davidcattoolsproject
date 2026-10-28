@@ -1,9 +1,9 @@
-# Report C — Owner Playbook：以最少管理負擔取得可用產品（v5）
+# Report C — Owner Playbook：以最少管理負擔取得可用產品（v6）
 
 - **日期：** 2026-10-28　**Snapshot：** `139a62c0483560be4e7a0aadd76c82652a8a2cd9`
 - **對象：** 本專案的 Owner（需求方、出資者、最終決策者）與 AI 團隊。
 - **依據：** [Report A（技術稽核）](full-repository-technical-audit-20261028.md)、[Report B（演變與決策回顧，含 9A AI Management Failure Register 與 9C Owner 答覆紀錄）](project-evolution-decision-retrospective-20261028.md)。
-- **版本：** v5（2026-10-28 依 ChatGPT 顧問審查（advisory，非正式 verdict；Owner 2026-10-28 轉交）五項修正：等待逾時不得視為授權、`task advance` 實際範圍、gw 整題成本含修復、現行優先表統一、Codex PM 適配只保留 Owner 自述）；v4（2026-10-28 依 Owner 三輪答覆更新：Owner 已給 NOW、預算、聯絡方式、第一版 PM；週報改為隨時可答的狀態頁；issue 與 report 分開；新增白話規則與 gw 量測條件）。v3 把 Owner 定位為 Sponsor；v1／v2 把需求分析、驗收標準、Scope、停損等寫成 Owner 責任，是錯誤前提，已撤銷。本版核心原則：**讓 Owner 以最少的管理負擔，取得高品質的產品交付；日常產品管理、工程管理、技術品質與交付管理由 AI 團隊主動承擔。**
+- **版本：** v6（2026-10-28 依 ChatGPT 顧問審查（advisory，非正式 verdict；Owner 2026-10-28 轉交）五項修正：等待逾時不得視為授權、`task advance` 實際範圍、gw 整題成本含修復、現行優先表統一、Codex PM 適配只保留 Owner 自述）；v4（2026-10-28 依 Owner 三輪答覆更新：Owner 已給 NOW、預算、聯絡方式、第一版 PM；週報改為隨時可答的狀態頁；issue 與 report 分開；新增白話規則與 gw 量測條件）。v3 把 Owner 定位為 Sponsor；v1／v2 把需求分析、驗收標準、Scope、停損等寫成 Owner 責任，是錯誤前提，已撤銷。本版核心原則：**讓 Owner 以最少的管理負擔，取得高品質的產品交付；日常產品管理、工程管理、技術品質與交付管理由 AI 團隊主動承擔。**
 - 本文全部為建議。涉及既有 Gate、Reviewer 配對、Dispatch 政策或 Roadmap 的項目標 **OWNER_DECISION_REQUIRED**，採用與否由 Owner 決定；AI 不得據此直接改政策。文中數字除 Owner 已給者外皆為待驗證目標。
 
 ---
