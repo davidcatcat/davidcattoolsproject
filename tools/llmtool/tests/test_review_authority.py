@@ -858,7 +858,7 @@ class ForegroundEntryTests(unittest.TestCase):
         from llmtool.providers import cli_lifecycle
         for mode in ('timeout','descendant','stderr','invalid-inner','private','spoof','exit'):
             with self.subTest(mode=mode):
-                timeout=1 if mode=='timeout' else LOAD_TOLERANT_TIMEOUT_SECONDS
+                timeout=1 if mode in ('timeout','descendant') else LOAD_TOLERANT_TIMEOUT_SECONDS
                 h=self.harness(mode=mode,timeout=timeout);started=time.monotonic()
                 observations=[]
                 actual_absent=cli_lifecycle._group_absent
