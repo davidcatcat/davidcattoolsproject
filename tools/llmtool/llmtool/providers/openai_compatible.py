@@ -224,8 +224,22 @@ class OpenAICompatibleClient:
         if not isinstance(choices, list):
             raise cls._stream_invalid()
         if not choices:
-            if finished and any(obj.get(field) not in (None, "") for field in ("content", "text")):
-                raise cls._stream_invalid()
+            if finished:
+                allowed_fields = {
+                    "choices", "usage", "id", "object", "created", "model",
+                    "system_fingerprint",
+                }
+                if set(obj) - allowed_fields:
+                    raise cls._stream_invalid()
+                pending_values = list(obj.items())
+                while pending_values:
+                    field, value = pending_values.pop()
+                    if field in ("content", "text"):
+                        raise cls._stream_invalid()
+                    if isinstance(value, dict):
+                        pending_values.extend(value.items())
+                    elif isinstance(value, list):
+                        pending_values.extend((None, item) for item in value)
             return [], False
         if finished or not isinstance(choices[0], dict):
             raise cls._stream_invalid()
