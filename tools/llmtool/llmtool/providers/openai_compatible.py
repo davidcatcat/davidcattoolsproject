@@ -17,6 +17,19 @@ def _reject_json_constant(value):
     raise ValueError("non-standard JSON number")
 
 
+def _unique_json_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _is_nonnegative_int(value):
+    return type(value) is int and value >= 0
+
+
 class NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -117,9 +130,7 @@ class OpenAICompatibleClient:
                                 if not finished:
                                     raise self._stream_incomplete()
                                 return
-                            if finished:
-                                raise self._stream_invalid()
-                            chunks, event_finished = self._stream_event(event_data)
+                            chunks, event_finished = self._stream_event(event_data, finished)
                             for chunk in chunks:
                                 yield chunk
                             finished = finished or event_finished
@@ -143,9 +154,7 @@ class OpenAICompatibleClient:
                                 if not finished:
                                     raise self._stream_incomplete()
                                 return
-                            if finished:
-                                raise self._stream_invalid()
-                            chunks, event_finished = self._stream_event(event_data)
+                            chunks, event_finished = self._stream_event(event_data, finished)
                             for chunk in chunks:
                                 yield chunk
                             finished = finished or event_finished
@@ -212,44 +221,103 @@ class OpenAICompatibleClient:
         )
 
     @classmethod
-    def _stream_event(cls, event_data):
+    def _stream_event(cls, event_data, finished=False):
         try:
             payload = "\n".join(event_data)
-            if payload == "[DONE]":
-                return
-            obj = json.loads(payload, parse_constant=_reject_json_constant)
+            obj = json.loads(
+                payload,
+                parse_constant=_reject_json_constant,
+                object_pairs_hook=_unique_json_object,
+            )
         except (ValueError, UnicodeError, RecursionError):
             raise cls._stream_invalid() from None
         if not isinstance(obj, dict):
             raise cls._stream_invalid()
-        if obj.get("error") is not None:
+        allowed_event_fields = {
+            "choices", "usage", "id", "object", "created", "model",
+            "system_fingerprint", "prompt_text", "prompt_token_ids",
+        }
+        if set(obj) - allowed_event_fields or "choices" not in obj:
+            raise cls._stream_invalid()
+        if any(obj[field] is not None for field in ("prompt_text", "prompt_token_ids")
+               if field in obj):
+            raise cls._stream_invalid()
+        for field in ("id", "object", "model"):
+            if field in obj and not isinstance(obj[field], str):
+                raise cls._stream_invalid()
+        if "created" in obj and not _is_nonnegative_int(obj["created"]):
+            raise cls._stream_invalid()
+        if "system_fingerprint" in obj and obj["system_fingerprint"] is not None \
+                and not isinstance(obj["system_fingerprint"], str):
             raise cls._stream_invalid()
         choices = obj.get("choices")
-        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        if not isinstance(choices, list):
             raise cls._stream_invalid()
-        finish_reason = choices[0].get("finish_reason")
+        if finished:
+            if choices or "usage" not in obj or not cls._valid_stream_usage(obj["usage"]):
+                raise cls._stream_invalid()
+            return [], False
+        if "usage" in obj and obj["usage"] is not None:
+            raise cls._stream_invalid()
+        if len(choices) != 1 or not isinstance(choices[0], dict):
+            raise cls._stream_invalid()
+        choice = choices[0]
+        allowed_choice_fields = {
+            "delta", "index", "finish_reason", "stop_reason", "logprobs", "token_ids",
+        }
+        if set(choice) - allowed_choice_fields or "delta" not in choice:
+            raise cls._stream_invalid()
+        if "token_ids" in choice and choice["token_ids"] is not None:
+            raise cls._stream_invalid()
+        if "index" in choice and (type(choice["index"]) is not int or choice["index"] != 0):
+            raise cls._stream_invalid()
+        if "stop_reason" in choice and choice["stop_reason"] is not None:
+            raise cls._stream_invalid()
+        if "logprobs" in choice and choice["logprobs"] is not None:
+            raise cls._stream_invalid()
+        finish_reason = choice.get("finish_reason")
+        if finish_reason not in (None, "stop", "length"):
+            raise cls._stream_invalid()
+        delta = choice["delta"]
+        if not isinstance(delta, dict):
+            raise cls._stream_invalid()
+        allowed_delta_fields = {"role", "content", "reasoning", "reasoning_content"}
+        if set(delta) - allowed_delta_fields:
+            raise cls._stream_invalid()
+        if "role" in delta and delta["role"] != "assistant":
+            raise cls._stream_invalid()
+        for field in ("content", "reasoning", "reasoning_content"):
+            if field in delta and delta[field] is not None and not isinstance(delta[field], str):
+                raise cls._stream_invalid()
+        content = delta.get("content")
         if finish_reason == "length":
             raise coded_error(
                 "incomplete result (finish_reason=length); increase max_tokens",
                 'MODEL_OUTPUT_INCOMPLETE', 'provider.openai-compatible',
             )
-        if finish_reason is not None and finish_reason != "stop":
-            raise cls._stream_invalid()
-        delta = choices[0].get("delta")
-        if not isinstance(delta, dict):
-            raise cls._stream_invalid()
-        content = delta.get("content")
-        if content is None:
-            return [], finish_reason == "stop"
-        if not isinstance(content, str):
-            raise cls._stream_invalid()
-        try:
-            content.encode("utf-8")
-        except UnicodeError:
-            raise cls._stream_invalid() from None
         if content:
             return [content], finish_reason == "stop"
         return [], finish_reason == "stop"
+
+    @staticmethod
+    def _valid_stream_usage(usage):
+        if not isinstance(usage, dict):
+            return False
+        allowed_fields = {"prompt_tokens", "completion_tokens", "total_tokens",
+                          "completion_tokens_details"}
+        if set(usage) - allowed_fields:
+            return False
+        token_fields = {"prompt_tokens", "completion_tokens", "total_tokens"}
+        if not token_fields.intersection(usage):
+            return False
+        if any(not _is_nonnegative_int(usage[field]) for field in token_fields if field in usage):
+            return False
+        if "completion_tokens_details" in usage:
+            details = usage["completion_tokens_details"]
+            if not isinstance(details, dict) or set(details) != {"reasoning_tokens"} \
+                    or not _is_nonnegative_int(details["reasoning_tokens"]):
+                return False
+        return True
 
     def send(self, data):
         """POST already-encoded bytes once, so callers can digest/cap exactly what is sent."""
