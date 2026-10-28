@@ -494,7 +494,7 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 | # | 質疑 | Owner 答覆（要點） | 報告修正 |
 |---|---|---|---|
 | 1 | gw 量出來不省，還必做嗎？ | 「不能節省，那就沒必要了，因為現在市面上很多產品類似」；並問 thinking 開啟後的測試結果 | gw 改為「以量測為條件的必做路線」；thinking 開啟後結果見 9C.5 |
-| 2 | gw 只能走 VPN，EC2／CI 碰不到？ | 「gw 走公司 vpn，ec2 和 ci 碰得到」 | 記為 Owner 陳述；repo 內無 CI／EC2 對 gw 的任何執行紀錄（workflows 中無 gw），標 UNVERIFIED |
+| 2 | gw 只能走 VPN，EC2／CI 碰不到？ | 「gw 走公司 vpn，ec2 和 ci 碰得到」；Owner 隨後澄清（v6.1）：「我的電腦連上公司 vpn 後，可以連到公司 llm，可以連到 ec2 vm」 | 審查者原先誤讀為「EC2／CI 能連 gw」，撤回。正確理解：Owner 的 Mac 開 VPN 後同時連得到 gw 與 EC2；gw 派工從 Mac 發出，EC2 測試也從 Mac 發起。這與 Owner「本機第一版會開著 CLI／TUI」一致，所以 gw 路線需要 Mac 與 VPN 在線不是問題（FACT：Owner 自述） |
 | 3 | 公司對程式碼送外部 AI 的規定？ | 「什麼程式碼？這是我的項目…後面公司相關的工作，不在此討論範圍內」 | 不新增安全邊界條目；記錄「公司工作不在本專案範圍」 |
 | 4 | Claude 當 PM 三天滿意嗎？ | 「claude pm 不錯，除了偶而還是要叫他去開 subagent，或是平行把工作分下去一起做」 | 失職登記 10-25～28 不列 Owner 不滿；審查者對 PR 數量／merge train 的批評保留為 OPINION；9A.1 新增「不會自動平行」 |
 | 5 | 第一版圈哪些？ | 「必須要能使用公司 llm，搭配其他 ai，一起進行其他項目開發，省 token」 | NOW 的 Owner 版本：gw 在鏈內、與其他 AI 協作、**用於其他專案**、省 token；可攜性（硬編碼、Claude Code 耦合、安裝）因「其他項目」升級為第一版相關（9C.4 第 4 點、Report A 第 22 章） |
@@ -521,7 +521,7 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 | gw thinking 開 | 0/1（max_tokens 4096 被截斷） | 兩題**最終通過**（max_tokens 16384；#522、#523 已合併；on-2 第一次失敗、第二次才過），不足以推論一般任務品質；thinking 關 4/5；合計 6/8 | #290 留言 2026-10-27 20:50 UTC |
 | gw thinking 開的成本（v6 分列單次與整題） | — | **單次呼叫** 9,816–14,472 completion tokens、74–92 秒；**整題**含失敗與修復：on-2 兩次合計 27,799 completion tokens（總 32,583）、184 秒，on-3 一次 9,816（總 14,182）、74 秒；thinking 關同類題單次 1.2K–8.4K tokens、2–4 秒。PM 準備 context、套 diff、Reviewer 審查的成本未記 | 同上 |
 | gw 是否省大型 AI token | 未量 | **仍未量**：沒有任何紀錄比較「PM 準備 context＋套 diff＋審查」與「直接派 Codex」的總成本；proposal 模式不能新增檔案（llmtool 缺口） | 同上 |
-| EC2／CI 能否連 gw | — | Owner 陳述可以；repo 內 workflows 無 gw、所有 gw 執行都在 PM 的 Mac（UNVERIFIED） | `git grep` origin/main |
+| gw 的連線拓樸 | — | Owner 澄清：Mac 開公司 VPN 後連得到 gw 與 EC2；gw 派工與 EC2 測試都從 Mac 發起。repo 內 workflows 無 gw、所有 gw 執行都在 PM 的 Mac，與此一致。EC2／CI 本身是否能連 gw 未主張、也未驗證 | Owner 2026-10-28 澄清；`git grep` origin/main |
 | `task advance`（#519） | OPEN | **已合併**（train 13b `2341fae`）；#538 補 REVIEW_NOT_POSTED；#542 completion 接受 advance 派審的 verdict。**範圍（v6 更正）：** 每次呼叫只做一個審查或結案動作；不做第一次派工、不跑測試、不開 PR（NEEDS_PUBLISH）、不合併（WAITING_INTEGRATION）。不等於全自動閉環 | PR #533、#538、#546；`task_advance.py` |
 | TUI 即時 PM 對話 | 無 | `chat_tui.py` 已接 `pm_runtime`（S2 #524、S2b #549、TUI PM 窗格 S4 #544）：`/pm new`、串流回覆、`/pm history` | origin/main `chat_tui.py` |
 | Mac CI | 排程全跑 | 排程觸發已移除（#556／#557）、CLI 契約測試改 in-process（#548） | main log |
