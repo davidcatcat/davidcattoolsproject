@@ -1,7 +1,9 @@
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+import time
 import unittest
 import warnings
 from unittest.mock import patch
@@ -83,15 +85,43 @@ class SourceFreshnessTests(unittest.TestCase):
 
     def test_fetch_timeout_falls_back_to_existing_tracking_ref(self):
         self._stale()
-        original_run = subprocess.run
+        original_popen = subprocess.Popen
 
-        def run_with_fetch_timeout(argv, *args, **kwargs):
+        class TimedOutFetch:
+            pid = 12345
+            timed_out = False
+
+            def communicate(self, timeout=None):
+                if not self.timed_out:
+                    self.timed_out = True
+                    raise subprocess.TimeoutExpired(['git', 'fetch'], timeout)
+                return '', ''
+
+        def popen_with_fetch_timeout(argv, *args, **kwargs):
             if argv[:2] == ['git', 'fetch']:
-                raise subprocess.TimeoutExpired(argv, timeout=5)
-            return original_run(argv, *args, **kwargs)
+                return TimedOutFetch()
+            return original_popen(argv, *args, **kwargs)
 
-        with patch.object(freshness.subprocess, 'run', side_effect=run_with_fetch_timeout):
+        with patch.object(freshness.subprocess, 'Popen', side_effect=popen_with_fetch_timeout), \
+                patch.object(freshness.os, 'killpg', side_effect=ProcessLookupError):
             self.assertEqual(freshness.source_freshness(), 'STALE')
+
+    def test_fetch_timeout_kills_child_holding_stdout(self):
+        self._stale()
+        original_popen = subprocess.Popen
+
+        def popen_with_fake_git(argv, *args, **kwargs):
+            if argv[:2] == ['git', 'fetch']:
+                # The child inherits the captured stdout pipe and outlives fake git.
+                code = ('import subprocess, time; '
+                        'subprocess.Popen(["/bin/sleep", "30"]); time.sleep(30)')
+                return original_popen([sys.executable, '-c', code], *args, **kwargs)
+            return original_popen(argv, *args, **kwargs)
+
+        started = time.monotonic()
+        with patch.object(freshness.subprocess, 'Popen', side_effect=popen_with_fake_git):
+            self.assertEqual(freshness.source_freshness(), 'STALE')
+        self.assertLess(time.monotonic() - started, freshness._TIMEOUT_SECONDS + 2)
 
     def test_dirty(self):
         (self.root / 'tracked.txt').write_text('dirty\n')

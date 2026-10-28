@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+import signal
 import subprocess
 import warnings
 
@@ -18,6 +19,26 @@ _ERROR_CODES = {
 }
 
 
+def _fetch_origin_main(repo_root):
+    """Fetch origin/main, stopping the full process group if it times out."""
+    argv = ['git', 'fetch', '--quiet', '--no-tags', 'origin', 'main']
+    try:
+        process = subprocess.Popen(
+            argv, cwd=str(repo_root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'},
+            start_new_session=True)
+    except OSError:
+        return
+    try:
+        process.communicate(timeout=_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.communicate()
+
+
 def source_freshness():
     """Return OK, STALE, DIRTY, or UNKNOWN for the installed package checkout."""
     try:
@@ -29,14 +50,7 @@ def source_freshness():
         top = subprocess.run(['git', 'rev-parse', '--show-toplevel'], **common)
         if top.returncode != 0 or Path(top.stdout.strip()).resolve() != repo_root:
             return 'UNKNOWN'
-        try:
-            subprocess.run(
-                ['git', 'fetch', '--quiet', '--no-tags', 'origin', 'main'],
-                cwd=str(repo_root), capture_output=True, text=True,
-                timeout=_TIMEOUT_SECONDS, check=False,
-                env={**os.environ, 'GIT_TERMINAL_PROMPT': '0'})
-        except (OSError, subprocess.TimeoutExpired):
-            pass
+        _fetch_origin_main(repo_root)
         head = subprocess.run(['git', 'rev-parse', '--verify', 'HEAD'], **common)
         origin_main = subprocess.run(
             ['git', 'rev-parse', '--verify', 'refs/remotes/origin/main'], **common)
