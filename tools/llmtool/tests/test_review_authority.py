@@ -597,15 +597,15 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         real=claude_cli.ClaudeCLIProvider._invoke_review_job
         def slow(provider,*args,**kwargs):
             out=real(provider,*args,**kwargs)
-            advance(seconds)          # the review took `seconds` of real time
+            advance(seconds)          # advance the injected host clock, without sleeping
             if after: after()
             return out
         with patch.object(claude_cli.ClaudeCLIProvider,'_invoke_review_job',slow):
             return h.run()
 
     def test_post_call_check_survives_a_review_longer_than_five_seconds(self):
-        # D2: the pinned pre-observation is necessarily >5 s old after a real call.
-        h=self.harness()
+        # D2: inject >5 s of review time; leave room for shared-runner process startup.
+        h=self.harness(timeout=120)
         result=self.run_with_long_call(h,30)
         self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
         self.assertEqual(result['provider_calls'],1)
