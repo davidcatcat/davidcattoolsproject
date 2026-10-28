@@ -27,6 +27,17 @@ MAX_HISTORY_TURNS = 200
 _ADAPTERS = {'claude-code': 'claude'}
 _LIVE_WINDOW_SECONDS = 20
 _STDERR_LIMIT = 65536
+# Fixed tool set for the PM process (claude CLI 2.1.312: --strict-mcp-config uses only the
+# servers in --mcp-config, so claude.ai connectors can no longer join mid-session and
+# invalidate the prompt cache). Permission policy is unchanged (--permission-prompts none).
+PM_MCP_CONFIG = '{"mcpServers":{}}'
+# Owner #304: no one-line "what I am about to do" text when the PM uses no tool. Passed
+# with --append-system-prompt on every launch; the CLI snapshots the system prompt on a
+# conversation's first request, so an already started session picks it up after compaction.
+PM_SESSION_INSTRUCTION = (
+    'llmtool PM session rule: when you answer without calling any tool, reply with the '
+    'answer itself and nothing before it; never open with a one-line preamble about what '
+    'you are about to do. A short preamble is fine only in turns where you call tools.')
 _active_runtimes = set()
 _signal_handlers_installed = False
 _previous_signal_handlers = {}
@@ -571,7 +582,9 @@ class PMRuntime:
                             transcript_present else '--session-id')
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
                     'stream-json', '--verbose', '--include-partial-messages', session_flag,
-                    self.pm_session_id, '--permission-prompts', 'none']
+                    self.pm_session_id, '--permission-prompts', 'none',
+                    '--strict-mcp-config', '--mcp-config', PM_MCP_CONFIG,
+                    '--append-system-prompt', PM_SESSION_INSTRUCTION]
             runner = self.runner
             if runner is None:
                 import subprocess

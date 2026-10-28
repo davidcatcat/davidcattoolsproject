@@ -161,7 +161,9 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(argv, ['claude', '-p', '--input-format', 'stream-json',
                                 '--output-format', 'stream-json', '--verbose',
                                 '--include-partial-messages', '--session-id', SESSION,
-                                '--permission-prompts', 'none'])
+                                '--permission-prompts', 'none',
+                                '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                                '--append-system-prompt', pm_runtime.PM_SESSION_INSTRUCTION])
         self.assertEqual(cwd, self.cwd)
         self.assertEqual([event['type'] for event in events],
                          ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TOOL_USE', 'TOOL_RESULT', 'TURN_END'])
@@ -172,6 +174,29 @@ class PMRuntimeTests(unittest.TestCase):
         page = pm_runtime.read_history(SESSION, state_root=self.root)
         self.assertEqual(page['turns'][0]['status'], 'COMPLETED')
         self.assertEqual(page['turns'][0]['owner_text'], 'Owner request')
+
+    def test_argv_fixes_tool_set_and_adds_pm_instruction_on_every_launch(self):
+        # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated
+        # the prompt cache, so the PM process runs with a fixed, empty MCP set (claude CLI
+        # 2.1.312 --strict-mcp-config + --mcp-config); #304: the PM answers without a
+        # preamble when it uses no tool (--append-system-prompt). Permission policy unchanged.
+        runtime = self.runtime(FakeProcess())
+        runtime.open()
+        runtime.close()
+        argv = self.calls[-1][0]
+        self.assertIn('--strict-mcp-config', argv)
+        self.assertEqual(json.loads(argv[argv.index('--mcp-config') + 1]), {'mcpServers': {}})
+        self.assertEqual(argv[argv.index('--mcp-config') + 1], pm_runtime.PM_MCP_CONFIG)
+        instruction = argv[argv.index('--append-system-prompt') + 1]
+        self.assertEqual(instruction, pm_runtime.PM_SESSION_INSTRUCTION)
+        self.assertIn('preamble', instruction)
+        self.assertIn('without calling any tool', instruction)
+        self.assertEqual(argv[argv.index('--permission-prompts') + 1], 'none')
+        self.assertNotIn('--dangerously-skip-permissions', argv)
+        self.assertNotIn('--permission-mode', argv)
+        self.assertEqual(argv.count('--strict-mcp-config'), 1)
+        self.assertEqual(argv.count('--append-system-prompt'), 1)
+        self.assertEqual(argv.index('--permission-prompts'), argv.index(SESSION) + 1)
 
     def test_busy_lock_does_not_start_second_process(self):
         first, second = self.runtime(), self.runtime()
