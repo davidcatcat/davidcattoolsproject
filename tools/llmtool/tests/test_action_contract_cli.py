@@ -312,6 +312,7 @@ class ContractCLITests(unittest.TestCase):
                     reader, writer = os.pipe()
                     os.close(reader)  # No reader exists before the child writes.
                     try:
+                        # Keep a child process so the kernel exercises a real closed pipe.
                         result = self.launch([*args, *extra], stdout=writer)
                     finally:
                         os.close(writer)
@@ -336,17 +337,18 @@ class ContractCLITests(unittest.TestCase):
                       '--state',str(paths[2]),'--nonce','8'*64,'--now','150',*extra], 'NOT_AUTHORIZED')]
                 for args, status in cases:
                     with self.subTest(name=name, command=args[0], json=bool(extra)):
-                        result = self.launch(args)
-                        self.assertEqual((result.returncode,result.stderr), (0,''))
+                        result, output, error, _ = self.invoke(args, tripwires=False)
+                        self.assertEqual((result,error), (0,''))
                         if extra:
-                            data = json.loads(result.stdout)
+                            data = json.loads(output)
                             self.assertEqual(data['status'], status)
                             self.assertFalse(data['authorized'])
                         else:
-                            self.assertIn(status, result.stdout)
-                            self.assertIn('authorized=false', result.stdout)
-                        self.assertNotIn(str(self.root), result.stdout)
+                            self.assertIn(status, output)
+                            self.assertIn('authorized=false', output)
+                        self.assertNotIn(str(self.root), output)
             self.assertEqual(before, self.snapshot())
+        # Keep a child process here to verify relative-path resolution from its cwd.
         result = self.launch(['action','validate','--file','./action.json','--json'], cwd=self.root)
         self.assertEqual((result.returncode,result.stderr), (0,''))
         self.assertFalse(json.loads(result.stdout)['authorized'])
@@ -375,8 +377,8 @@ class ContractCLITests(unittest.TestCase):
         for filename in unsafe:
             for args in self.input_cases(filename):
                 with self.subTest(filename=filename, switch=args):
-                    result = self.launch(args)
-                    self.assertEqual((result.returncode,result.stdout,result.stderr),
+                    result, output, error, _ = self.invoke(args, tripwires=False)
+                    self.assertEqual((result,output,error),
                         (1,'','llmtool: ACTION_INPUT_INVALID; details omitted\n'))
         # Invalid spellings cannot be passed through execve (NUL), so use cli.main.
         for filename in ('PRIVATE\0.json', 'PRIVATE\n.json', 'PRIVATE\x7f.json',
@@ -393,15 +395,16 @@ class ContractCLITests(unittest.TestCase):
         directory = self.root/'My Projects'; directory.mkdir()
         malformed = directory/'malformed.json'; malformed.write_text('{PRIVATE')
         for args in self.input_cases(str(malformed)):
-            result = self.launch(args)
-            self.assertEqual((result.returncode,result.stdout,result.stderr),
+            result, output, error, _ = self.invoke(args, tripwires=False)
+            self.assertEqual((result,output,error),
                 (1,'','llmtool: ACTION_CONTRACT_INVALID; details omitted\n'))
         for target in ('a b.py', '$HOME/file', 'file;touch', '.git/config', 'key.pem'):
             raw = fixtures.changed_leaf(self.action.to_dict(), ('payload','target','path'), target)
             raw['scope'] = [target]
             self.action_file.write_text(json.dumps(raw))
-            result = self.launch(['action','validate','--file',str(self.action_file),'--json'])
-            self.assertEqual((result.returncode,result.stdout,result.stderr),
+            result, output, error, _ = self.invoke(
+                ['action','validate','--file',str(self.action_file),'--json'])
+            self.assertEqual((result,output,error),
                 (1,'','llmtool: ACTION_CONTRACT_INVALID; details omitted\n'))
 
     def test_unexpected_internal_errors_sanitized_and_no_traceback(self):
@@ -442,6 +445,7 @@ class ContractCLITests(unittest.TestCase):
         before=self.snapshot()
         for launcher in ((sys.executable,'-m','llmtool'),
                          (sys.executable,str(repo/'tools'/'llmtool'/'llmtool.py'))):
+            # Keep real launches to verify entry points and the isolated hostile PATH.
             result=subprocess.run([*launcher,'action','validate','--file',str(self.action_file),'--json'],
                 cwd=repo,env=env,capture_output=True,text=True,timeout=10)
             self.assertEqual((result.returncode,result.stderr),(0,''))
