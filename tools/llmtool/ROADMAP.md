@@ -6,7 +6,7 @@ Current collaboration and execution authority is in [AGENTS.md](../../AGENTS.md)
 
 | Milestone | Status | Evidence PR/issue |
 | --- | --- | --- |
-| A0–A10 | DONE and merged; A2.3 Anthropic HTTP API: 不做 — Claude is used via the Claude Code CLI; the paid API is billed separately and has no current need. | A2.4–A2.6 and A0–A10 status recorded in the [roadmap archive](../../docs/history/llmtool-roadmap-archive-20261028.md). |
+| A0–A10 | DONE and merged; A2.3 Anthropic HTTP API: 不做 per Owner decision 033:A ([#525 c6468216854](https://github.com/davidcatcat/davidcattoolsproject/pull/525#issuecomment-6468216854); sheet [c6467792563](https://github.com/davidcatcat/davidcattoolsproject/pull/525#issuecomment-6467792563)) — Claude is used via the Claude Code CLI; the paid API is billed separately and has no current need. | A2.4–A2.6 and A0–A10 status recorded in the [roadmap archive](../../docs/history/llmtool-roadmap-archive-20261028.md). |
 | A11a — Observability & Diagnostics | DONE and merged. | [PR #26](https://github.com/davidcatcat/davidcattoolsproject/pull/26) |
 | P1 — Failure Usage Preservation | DONE and merged. | [PR #39](https://github.com/davidcatcat/davidcattoolsproject/pull/39) |
 | A11b — Execution, Approval & Recovery | IN PROGRESS; F2 general user-repository mutation is NOT AUTHORIZED. | [PR #32](https://github.com/davidcatcat/davidcattoolsproject/pull/32), [PR #43](https://github.com/davidcatcat/davidcattoolsproject/pull/43), [PR #49](https://github.com/davidcatcat/davidcattoolsproject/pull/49), [PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84), [issue #97](https://github.com/davidcatcat/davidcattoolsproject/issues/97) |

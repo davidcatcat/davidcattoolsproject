@@ -11,7 +11,7 @@ The formal Reviewer is from the other model family than the Developer under [AGE
 
 ## Historical role and stop decisions
 
-Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the 2026-10-21 Developer routing in [ai-team delivery](../../skills/ai-team-delivery/SKILL.md). D4 screening/admission applies to the llmtool-driven Host route; D4 Live Smoke is not a prerequisite for direct Developer sessions. The parked-source archive/removal scope is recorded in the [Roadmap](ROADMAP.md#historical-role-decisions) and [README](README.md#archived-parked-implementations).
+Earlier D7 role order and one-round S3 wording are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); current tasks follow D6/D8/D8a and the 2026-10-21 Developer routing in [ai-team delivery](../../skills/ai-team-delivery/SKILL.md). D4 screening/admission applies to the llmtool-driven Host route; D4 Live Smoke is not a prerequisite for direct Developer sessions. The parked-source archive/removal scope is recorded in the [Roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#historical-role-decisions) and [README](README.md#archived-parked-implementations).
 
 
 
@@ -314,7 +314,7 @@ Native, T1, F2/S2, A11b and Owner Full Access/never are unchanged.
 
 ### Supervised self-hosting dogfood (M1)
 
-M1a/M1b/M2 map to [A11c.1 delivery stages](ROADMAP.md#supervised-self-hosting-delivery-within-a11c1-m1).
+M1a/M1b/M2 map to [A11c.1 delivery stages](../../docs/history/llmtool-roadmap-archive-20261028.md#supervised-self-hosting-delivery-within-a11c1-m1).
 They do not replace S1a/S1b/S2, waive F2/Host/provider gates, or retire ai-loop.
 Follow the existing [team policy](../../skills/ai-team-delivery/SKILL.md) and
 [safe-git](../../skills/safe-git/SKILL.md); Owner decisions in Issue #120 remain
@@ -576,7 +576,7 @@ The Cloud exception does not permit other Mac paths or agent-created project cop
 This section is engineering guidance and future A11b/A11c design; it does not
 implement a task engine, hooks, automatic routing, retry, fallback or escalation.
 Current A9/A10 fail-fast contracts and A11a metadata-only diagnostics are unchanged.
-The [roadmap](ROADMAP.md#architecture-refinement--planning-only) assigns runtime
+The [roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#architecture-refinement--planning-only) assigns runtime
 Task Contract enforcement/execution gates to A11b and route-by-task integration,
 independent verification and bounded repair to A11c. Context budgets and cost
 routing require later design. The separately gated S1a preparation exception below
@@ -585,7 +585,7 @@ does not authorize production integration or introduce another milestone.
 ### S1a offline task event inspection contract
 
 The Coordinator-adopted [Issue #120](https://github.com/davidcatcat/davidcattoolsproject/issues/120)
-split and [roadmap](ROADMAP.md#issue-120-staged-preparation--s1a-then-s1b-then-s2)
+split and [roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#issue-120-staged-preparation--s1a-then-s1b-then-s2)
 permit S1a while A11b remains incomplete. **First** publish a separate Draft docs
 PR changing only ROADMAP.md/WORKFLOW.md, obtain non-author Claude CLI Security +
 Functional contract review and applicable exact-head CI, and have the authorized

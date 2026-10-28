@@ -1,12 +1,12 @@
 # LLMTool Roadmap archive — 2026-10-28
 
-This archive preserves the complete roadmap text removed from [the current roadmap](../../tools/llmtool/ROADMAP.md) verbatim. The archived text is a historical snapshot; consult the current roadmap for current status.
+This archive preserves the complete roadmap text removed from [the current roadmap](../../tools/llmtool/ROADMAP.md) verbatim. The archived text is a historical snapshot; consult the current roadmap for current status. Only relative link targets were rewritten so they resolve from `docs/history/`; all other text is unchanged.
 
 # LLMTool Roadmap
 
-> Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file owns product status and milestone evidence. Historical D1–D7 role text is archived at [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md).
+> Current collaboration, role and privacy authority is in [AGENTS.md](../../AGENTS.md); this file owns product status and milestone evidence. Historical D1–D7 role text is archived at [policy history](llmtool-agent-policy-legacy-20261020.md).
 
-> **B/C parked-source archive (2026-10-20):** F1 Git containment/patch preflight and dormant Codex pickup/audit modules and exclusive tests have been removed from this source tree. References below to those implementations are historical design/acceptance records. Restoration point: [`d41600ff98568770fb918fdf4a3309dd144a0dfe`](https://github.com/davidcatcat/davidcattoolsproject/tree/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool); see [the removal/restoration scope](README.md#archived-parked-implementations). Shared authorization policy/ledger and the active OpenCode chain remain; F2 remains NOT AUTHORIZED.
+> **B/C parked-source archive (2026-10-20):** F1 Git containment/patch preflight and dormant Codex pickup/audit modules and exclusive tests have been removed from this source tree. References below to those implementations are historical design/acceptance records. Restoration point: [`d41600ff98568770fb918fdf4a3309dd144a0dfe`](https://github.com/davidcatcat/davidcattoolsproject/tree/d41600ff98568770fb918fdf4a3309dd144a0dfe/tools/llmtool); see [the removal/restoration scope](../../tools/llmtool/README.md#archived-parked-implementations). Shared authorization policy/ledger and the active OpenCode chain remain; F2 remains NOT AUTHORIZED.
 
 ## D4 live status — 2026-10-21
 
@@ -14,11 +14,11 @@ The D4 route is **NOT LIVE VERIFIED; 2 attempts, no inference**. Attempt one fai
 
 ## Worker dispatch authority and live technical state
 
-The Owner-controlled dispatch switches are maintained in [worker-dispatch.json](worker-dispatch.json). The [local monitor](../../scripts/llmtool_monitor.py) reports observed technical state separately; the PM must check both before dispatch. Neither record changes permanent role rules in [AGENTS.md](../../AGENTS.md). See the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md) for unavailable Workers and task reassignment.
+The Owner-controlled dispatch switches are maintained in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json). The [local monitor](../../scripts/llmtool_monitor.py) reports observed technical state separately; the PM must check both before dispatch. Neither record changes permanent role rules in [AGENTS.md](../../AGENTS.md). See the [PM Continuation Contract](../../skills/ai-team-delivery/pm-continuation.md) for unavailable Workers and task reassignment.
 
 ## Historical role decisions
 
-D1–D7 role allocations and superseded stop conditions are preserved in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md). Current authority is summarized above.
+D1–D7 role allocations and superseded stop conditions are preserved in [policy history](llmtool-agent-policy-legacy-20261020.md). Current authority is summarized above.
 
 
 Provider 決定如何連模型或 runtime；Role 決定 workflow 職責，例如 grinder、validator、
@@ -66,7 +66,7 @@ The 2026-10-09 C0–C3 labels introduced by [PR #50](https://github.com/davidcat
 
 ### Owner outcome acceptance and reporting — approved 2026-10-19
 
-The Owner approved **evidence-based reporting at meaningful outcomes, routine Integrator autonomy, useful Mac delivery before 24-hour unattended hosting, and a Mac-supervised M2 pilot**. The single management contract is [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md). Its G1 (M1b adopted code), G2 (real Worker), G3 (M2 full independent-agent loop), and G4 (three-work-package Mac pilot with Owner GO/LIMITED GO/NO-GO) are **reporting checkpoints within A11c**, not new product milestones, gate waivers or an extra coordinator. Integrator publishes verifiable outcome reports, material Owner decision briefs and one compact weekly status; GitHub publication is not a verified ChatGPT/Owner notification. Existing A11b/F2, provider/Host, native and independent review permissions remain unchanged.
+The Owner approved **evidence-based reporting at meaningful outcomes, routine Integrator autonomy, useful Mac delivery before 24-hour unattended hosting, and a Mac-supervised M2 pilot**. The single management contract is [Owner outcome reporting v1.1](../governance/llmtool_owner_outcome_reporting_v1_1_20261019.md). Its G1 (M1b adopted code), G2 (real Worker), G3 (M2 full independent-agent loop), and G4 (three-work-package Mac pilot with Owner GO/LIMITED GO/NO-GO) are **reporting checkpoints within A11c**, not new product milestones, gate waivers or an extra coordinator. Integrator publishes verifiable outcome reports, material Owner decision briefs and one compact weekly status; GitHub publication is not a verified ChatGPT/Owner notification. Existing A11b/F2, provider/Host, native and independent review permissions remain unchanged.
 
 ### Owner-accepted collaboration architecture and mobile Codex Cloud lane (2026-10-17)
 
@@ -246,7 +246,7 @@ QA/F2/provider gates remain unchanged. See [safe-git](../../skills/safe-git/SKIL
 Status: **D6 POLICY APPROVED; Mac create/cleanup automation NOT LIVE VERIFIED**.
 This is an operating-policy simplification, not a new A milestone.
 
-Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
+Follow the [llmtool development workflow](../../tools/llmtool/WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
 Cloud work before handing off checks that require the user's Mac. Mock/CI success
 does not replace required live verification. Preserve unrelated user work and
@@ -261,7 +261,7 @@ This development policy does not change llmtool provider capabilities or runtime
 ## Cross-milestone Cloud development and local acceptance
 
 Codex Cloud 開發流程是 A0–A12 共用的工程規範，不新增 milestone、不代表新增
-llmtool executor 或 remote frontend。完整步驟見 [WORKFLOW.md](WORKFLOW.md)。
+llmtool executor 或 remote frontend。完整步驟見 [WORKFLOW.md](../../tools/llmtool/WORKFLOW.md)。
 
 - 任務開始先列出 Cloud-capable / Mac-required / not-required 驗收項目。
 - Cloud 可完成開發、review、offline/mock tests、build、CI 與已授權的 feature branch/PR。
@@ -448,7 +448,7 @@ External ChatGPT review PASS; A4 status is documented below.
 
 ### A3.5 UX follow-up — Codex/Claude-style interactive terminal (Owner request, 2026-10-20)
 
-**Owner-accepted UI boundary:** TUI is strictly a view/input frontend over existing llmtool Core. It renders trustworthy Core-provided content and forwards existing authorized UI actions; it MUST NOT build PM reasoning, task scheduling, provider integration, background execution/recovery, Git/PR logic, persistence, access-policy decisions, billing or a second controller. A desired screen without a Core source stays `UI_DEPENDENCY_NOT_AVAILABLE`, disabled or clearly UNKNOWN. Full decision and priority list: [2026-10-22 TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md).
+**Owner-accepted UI boundary:** TUI is strictly a view/input frontend over existing llmtool Core. It renders trustworthy Core-provided content and forwards existing authorized UI actions; it MUST NOT build PM reasoning, task scheduling, provider integration, background execution/recovery, Git/PR logic, persistence, access-policy decisions, billing or a second controller. A desired screen without a Core source stays `UI_DEPENDENCY_NOT_AVAILABLE`, disabled or clearly UNKNOWN. Full decision and priority list: [2026-10-22 TUI UI/UX meeting](../meetings/2026-10-22-llmtool-tui-ui-ux-decision.md).
 
 **Current source status:** UX-1 and UX-2 **have implementation in main** (`chat_tui.py`, `chat.py`, `README.md`; see [PR #218](https://github.com/davidcatcat/davidcattoolsproject/pull/218)). Full native acceptance for later UX items is not inferred from source presence; the opt-in `llmtool chat --tui` remains distinct from a production A11c Task interface. It has a scrollable conversation, multiline input, F1 help and truthful last-call Provider/model/usage/elapsed status; history is memory-only. This corrects the previous blanket `PLANNED / NOT IMPLEMENTED` statement; no full multi-Agent TUI delivery is claimed.
 
@@ -1186,7 +1186,7 @@ real-repository mutation, satisfy A11c.2, or retire the temporary ai-loop.
 | --- | --- |
 | **S1a — DONE/MERGED via PR #128** | Deterministic Task Event validation, state replay and read-only handoff preview: `llmtool task inspect --contract <file> --expect <file> --events <file> --observed-at <UTC-time> --json`. Independent expectation input pins identity/source/epoch; bounded explicit files and stdout only; no agent launch, provider call, Git/PR mutation, command execution or implicit ledger write. |
 | **S1b — Product A fake-only MERGED via PR #131** | Proposed one foreground task review command, paired immutable preparation/final TaskContracts, actual read-only identity collector, exact-SHA packet and structured Security/Functional verdict. Independent contract review + merge precede a separately pinned product task; actual provider invocation additionally requires authentic host/route permission. No authority is inherited from S1a. |
-| **S1b-B — B1 fake-first source MERGED via PR #133; native/production enablement gated** | [B contract](WORKFLOW.md#s1b-production-enablement-b-contract-draft) accepted via PR #130; A fake-only merged via PR #131. B1 implements typed host composition, static-policy validation and provider-only layout in the same ReceiptLedger under its task-specific scope. Native fake fixture plan APPROVE; actual fake tests are separate from product review/T1 release acceptance. D1 v1 unchanged. Public factory remains unavailable; no production Host installation/ledger, data export or real Claude call. T2/T3 and real handoff remain NOT_AUTHORIZED/BLOCKED. |
+| **S1b-B — B1 fake-first source MERGED via PR #133; native/production enablement gated** | [B contract](../../tools/llmtool/WORKFLOW.md#s1b-production-enablement-b-contract-draft) accepted via PR #130; A fake-only merged via PR #131. B1 implements typed host composition, static-policy validation and provider-only layout in the same ReceiptLedger under its task-specific scope. Native fake fixture plan APPROVE; actual fake tests are separate from product review/T1 release acceptance. D1 v1 unchanged. Public factory remains unavailable; no production Host installation/ledger, data export or real Claude call. T2/T3 and real handoff remain NOT_AUTHORIZED/BLOCKED. |
 | **S2 — future separate authority/execution contract** | Permission-controlled llmtool-executed repair/execution retains A11b approval, sandbox, recovery/audit, budgets and **F2 for any direct llmtool repository mutation**. Separately authorized Developer CLI source edits/Commit/Push are Worker-owned Git actions, not evidence that llmtool F2 passed. No automatic merge authority. |
 
 S1a reuses the existing `task_verification.TaskContract`/`TaskBinding` and A11a
@@ -1213,11 +1213,11 @@ reviewed source `c9c8747b59ac49b18dbc521e8af9ac7f803212fe`, merge
 APPROVE and exact-source/post-merge Python 3.9/3.14 CI PASS. N4 physical-path
 guidance uses `/private/tmp` (no symlink ancestors); N5 current status is corrected
 here and in WORKFLOW, with README deferred to the next authorized product touch.
-See the [S1a validation and delivery contract](WORKFLOW.md#s1a-offline-task-event-inspection-contract).
+See the [S1a validation and delivery contract](../../tools/llmtool/WORKFLOW.md#s1a-offline-task-event-inspection-contract).
 
 **S1b contract accepted via PR #129; no provider grant:** the accepted
 [handoff](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127091068)
-is concretized in the [normative draft contract](WORKFLOW.md#s1b-foreground-review-contract-draft).
+is concretized in the [normative draft contract](../../tools/llmtool/WORKFLOW.md#s1b-foreground-review-contract-draft).
 Product A now implements foreground `task review` validation and fake-only
 packet/verdict testing. Real Claude text/no-tools remains BLOCKED pending B;
 actual automatic handoff is NOT DELIVERED. Product A fake-only review was accepted
@@ -1236,7 +1236,7 @@ separately pinned product task are required before authoring product code.
 **S1b Production Enablement (B), B1 source merged / enablement gated:** the merged
 [A/B ordered delivery contract](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6127970737)
 schedules B in parallel with Product A. Its normative draft is the
-[B contract](WORKFLOW.md#s1b-production-enablement-b-contract-draft). An automatic
+[B contract](../../tools/llmtool/WORKFLOW.md#s1b-production-enablement-b-contract-draft). An automatic
 no-tools review starts as shadow/pre-review only and never replaces independent
 Security/Functional APPROVE; promotion needs 0 false-APPROVE on seeded defects.
 Unknown usage stays UNKNOWN; no savings claim. This grants no code scope,
@@ -1326,7 +1326,7 @@ observed Owner relays separately from initial task authorization; missing usage
 or intervention evidence stays UNKNOWN. Documents, fake tests and historical
 smoke results do not satisfy a new real-task acceptance. Company Live, real
 Step-0 and Native Gate B still require their separate explicit authorizations.
-See [the foreground workflow](WORKFLOW.md#supervised-self-hosting-dogfood-m1).
+See [the foreground workflow](../../tools/llmtool/WORKFLOW.md#supervised-self-hosting-dogfood-m1).
 
 ### A11c.1a — Local Reviewer subagent and work-package pilot (2026-10-14)
 
@@ -1338,7 +1338,7 @@ Separate A11c integration acceptance must **actually** demonstrate Codex-to-Clau
 
 This is an adapter proposal inside existing A11c.1, not another milestone or
 controller. The normative sequence, binding, replay/cleanup rules and future
-test matrix are in [WORKFLOW](WORKFLOW.md#a11c1-cross-cli-handoff-adapter-proposal-issue-120).
+test matrix are in [WORKFLOW](../../tools/llmtool/WORKFLOW.md#a11c1-cross-cli-handoff-adapter-proposal-issue-120).
 READY_FOR_REVIEW is a cue mapped to existing SUCCESS + WAITING_REVIEW and
 HandoffRecord, not a TaskContract/TaskState schema change. PASS requires both
 bound Security and Functional APPROVE; CHANGES_REQUESTED maps to the existing
