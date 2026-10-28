@@ -11,7 +11,7 @@ from unittest import mock
 REPO_ROOT = pathlib.Path(__file__).resolve().parents[3]
 LADDER_ROOT = REPO_ROOT / "tools" / "llmtool" / "eval" / "gw_ladder"
 SCRIPT = REPO_ROOT / "tools" / "llmtool" / "scripts" / "gw_ladder.py"
-LEVELS = [f"L{number}" for number in range(1, 7)]
+LEVELS = [f"L{number}" for number in range(1, 10)]
 
 
 def load_scorer():

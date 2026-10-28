@@ -1,0 +1,69 @@
+--- a/store.py
++++ b/store.py
+@@ -1,17 +1,24 @@
+ def prepare_rules(rules):
+     """Return independent rule rows after checking their shared shape.
+ 
+     Selection code can then focus on matching and ordering decisions.
+     """
+     if not isinstance(rules, list):
+         raise ValueError("rules must be a list")
+     prepared = []
+     for rule in rules:
+         if (not isinstance(rule, dict) or
+                 not isinstance(rule.get("name"), str)):
+             raise ValueError("each rule needs name and conditions")
+         conditions = rule.get("conditions")
+         if not isinstance(conditions, dict):
+             raise ValueError("each rule needs name and conditions")
+         prepared.append(dict(rule))
+     return prepared
++
++
++def validate_priority(rule):
++    priority = rule.get("priority")
++    if isinstance(priority, bool) or not isinstance(priority, int):
++        raise ValueError("priority must be an integer")
++    return priority
+--- a/helper.py
++++ b/helper.py
+@@ -1,9 +1,13 @@
+ def matches(record, rule):
+     """Check whether every condition agrees with the supplied record.
+ 
+     An empty condition mapping matches any record.
+     """
+     for field, expected in rule["conditions"].items():
+         if record.get(field) != expected:
+             return False
+     return True
++
++
++def highest_priority(rules):
++    return max(rules, key=lambda rule: rule["priority"])
+--- a/target.py
++++ b/target.py
+@@ -1,11 +1,18 @@
+-from helper import matches
+-from store import prepare_rules
++from helper import highest_priority, matches
++from store import prepare_rules, validate_priority
+ 
+ 
+-def select_rule(record, rules):
++def select_rule(record, rules, mode="first"):
+     """Return the name of the first matching rule, or None when absent."""
+-    prepared = prepare_rules(rules)
++    if mode not in ("first", "priority"):
++        raise ValueError("mode must be 'first' or 'priority'")
++    prepared = prepare_rules(rules)
++    if mode == "priority":
++        for rule in prepared:
++            validate_priority(rule)
+     found = [rule for rule in prepared if matches(record, rule)]
+     if not found:
+         return None
+-    return found[0]["name"]
++    if mode == "first":
++        return found[0]["name"]
++    return highest_priority(found)["name"]

@@ -1,0 +1,27 @@
+--- a/store.py
++++ b/store.py
+@@ -1,11 +1,11 @@
+ def latest_entry(entries):
+     """Return the most recently appended item.
+ 
+     An empty list has no entry and produces None.
+     """
+     if not entries:
+         return None
+-    return entries[0]
++    return entries[-1]
+ 
+ 
+ def snapshot_entries(entries):
+--- a/target.py
++++ b/target.py
+@@ -1,8 +1,7 @@
+ from helper import current_value
+ 
+ 
+ def report_latest(history):
+     """Build the public latest-value report from a chronological history."""
+-    candidates = history[1:]
+-    present, value = current_value(candidates)
++    present, value = current_value(history)
+     return {"value": value, "present": present}

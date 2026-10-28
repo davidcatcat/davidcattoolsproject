@@ -83,7 +83,7 @@ def score(level, root):
 
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("level", choices=[f"L{number}" for number in range(1, 7)])
+    parser.add_argument("level", choices=[f"L{number}" for number in range(1, 10)])
     parser.add_argument("--root", required=True, type=Path)
     args = parser.parse_args(argv)
     print(json.dumps(score(args.level, args.root), separators=(",", ":")))
