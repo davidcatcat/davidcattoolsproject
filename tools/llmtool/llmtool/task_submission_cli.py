@@ -873,6 +873,7 @@ def _patch_paths(patch):
         # helper; other mode changes remain rejected.
         new_file = False
         deleted_file = False
+        empty_file_operation = None
         if index < len(lines) and lines[index].startswith('new file mode '):
             if lines[index] != 'new file mode 100644':
                 raise _DeveloperOutputUnsupported('DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
@@ -885,8 +886,20 @@ def _patch_paths(patch):
             index += 1
         elif index < len(lines) and lines[index].startswith(_MODE_METADATA):
             raise ValueError
+        index_count = 0
         while index < len(lines) and lines[index].startswith(_INDEX_METADATA):
+            index_count += 1
             index += 1
+        if ((new_file or deleted_file) and index == len(lines) and
+                index_count == 1 and
+                re.fullmatch(r'index [0-9a-f]+\.\.[0-9a-f]+(?: 100644)?',
+                             lines[index - 1])):
+            # Git omits file headers and hunks when the added/deleted blob is
+            # empty. Source-pinned proposal admission verifies the corresponding
+            # path state and empty contents; direct admission uses Git's diff.
+            empty_file_operation = 'new_empty' if new_file else 'deleted_empty'
+            paths[path] = empty_file_operation
+            continue
         if index + 2 >= len(lines):
             raise ValueError
         expected_old = '--- /dev/null' if new_file else '--- a/' + path
@@ -988,7 +1001,7 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Tr
         return 'DEVELOPER_OUTPUT_INVALID_DIFF'
     if not set(paths).issubset(set(write_paths)):
         return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
-    if not allow_new_files and any(operation == 'new'
+    if not allow_new_files and any(operation in ('new', 'new_empty')
                                    for operation in paths.values()):
         return 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
     return None
@@ -1017,20 +1030,22 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
         except ValueError:
             return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
         special = {path: operation for path, operation in operations.items()
-                   if operation in ('new', 'deleted')}
+                   if operation in ('new', 'deleted', 'new_empty', 'deleted_empty')}
         for path, operation in special.items():
             source = source_files.get(path)
             existing_paths = getattr(source_files, 'existing_paths', None)
-            if (operation == 'new' and
+            if (operation in ('new', 'new_empty') and
                     ((existing_paths is not None and path in existing_paths) or
                      (existing_paths is None and source != ''))):
                 return None, (), 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
-            if (operation == 'deleted' and existing_paths is not None and
+            if (operation in ('deleted', 'deleted_empty') and existing_paths is not None and
                     path not in existing_paths):
                 return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
             regular_paths = getattr(source_files, 'regular_paths', None)
-            if (operation == 'deleted' and regular_paths is not None and
+            if (operation in ('deleted', 'deleted_empty') and regular_paths is not None and
                     path not in regular_paths):
+                return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
+            if (operation == 'deleted_empty' and source != ''):
                 return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
         if special:
             # The source-pinned apply check validates deletion content and the
