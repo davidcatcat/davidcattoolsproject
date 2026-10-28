@@ -7,7 +7,7 @@
   - production：`cli.py`、`diagnostics_cli.py`、`diagnostics_reader.py`、`diagnostics_runtime.py`、`diagnostics_store.py`（+229）、`doctor.py`、`terminal.py`；
   - 新增 5 個 regression 測試檔，共 26 個測試；
   - 新增 [bugfix validation report](llmtool_a11a_bugfix_validation_20261005.md)。
-- **對照：** [A11a full bug hunt](llmtool_a11a_full_bug_hunt_20261005.md) 的 B1–B7。
+- **對照：** [A11a full bug hunt](https://github.com/davidcatcat/davidcattoolsproject/blob/feddc7e/reports/llmtool_a11a_full_bug_hunt_20261005.md) 的 B1–B7。
 - **方式：**
   - 在 canonical repo 進行，沒有使用 worktree、clone 或專案副本。repo 當時已經在 PR #26 的分支。
   - 逐行閱讀 diff。
