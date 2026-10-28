@@ -123,6 +123,7 @@ class PMRuntimeTests(unittest.TestCase):
             {'type': 'result', 'result': 'Done', 'usage': {'input_tokens': 1}}))
         runtime = self.runtime(process)
         runtime.open()
+        self.observe.assert_not_called()
         events = list(runtime.send('Owner request'))
         argv, cwd, _ = self.calls[0]
         self.assertEqual(argv, ['claude', '-p', '--input-format', 'stream-json',
@@ -260,14 +261,19 @@ class PMRuntimeTests(unittest.TestCase):
 
     def test_completed_first_turn_marks_binding_for_resume_on_next_open(self):
         process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
-        runtime = self.runtime(process)
+        runtime = self.runtime(process, clock=time.time)
         runtime.open()
         list(runtime.send('first request'))
         runtime.close()
         binding = pm_runtime.current_binding(SESSION, state_root=self.root)
         self.assertTrue(binding['session_started'])
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{}', encoding='utf-8')
+        self.observe.stop()
 
-        later = self.runtime(FakeProcess())
+        later = self.runtime(FakeProcess(), clock=time.time)
         later.open()
         argv = self.calls[-1][0]
         self.assertIn('--resume', argv)
@@ -330,10 +336,10 @@ class PMRuntimeTests(unittest.TestCase):
 
     def test_open_refuses_non_dedicated_session(self):
         (self.root / (SESSION + '.binding.json')).unlink()
+        self.observe.stop()
         with self.assertRaises(LLMToolError) as raised:
             self.runtime().open()
-        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_NOT_DEDICATED')
-        self.assertIn('create', str(raised.exception))
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
 
     def test_open_failure_after_lifecycle_registration_unregisters(self):
         register = pm_runtime._register_lifecycle
