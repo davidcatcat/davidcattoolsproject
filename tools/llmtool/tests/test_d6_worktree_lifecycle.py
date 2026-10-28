@@ -365,6 +365,20 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual({key: value for key, value in after.items()
                           if key != "native_session_id"}, before)
 
+    def test_bind_native_session_finalizes_pending_session_ref(self):
+        root, record_path = self._registered_result_fixture("bind-pending-session")
+        record = lifecycle._read_registry_record(record_path)
+        record["session_ref"] = "pending-bind-pending-session"
+        lifecycle._replace_record(record_path, record)
+        native_session_id = "12345678-1234-4234-8234-123456789abc"
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            lifecycle.bind_native_session(task_id="bind-pending-session",
+                native_session_id=native_session_id, canonical_root=self.source,
+                workspace_root=self.tasks)
+        after = lifecycle._read_registry_record(record_path)
+        self.assertEqual(after["session_ref"], native_session_id)
+        self.assertEqual(after["native_session_id"], native_session_id)
+
     def test_bind_native_session_refuses_overwrite_and_bad_format(self):
         root, record_path = self._registered_result_fixture("bind-native-refused")
         before = lifecycle._read_registry_record(record_path)
