@@ -176,3 +176,64 @@ Owner 步驟（Terminal.app 2.14，再在 Warp 重做一次）：
 ## 12. Codex Review v2（6a5524a）P2 的處理
 
 `copy()` 曾在 UI 執行緒 `len(text.encode())` 整段編碼後才比上限。修法：`utf8_size(text, start, end, limit)` 以 `COPY_SCAN_CHUNK`（65536 字）分段量 UTF-8 位元組、一超過上限即停；`end_drag`/`copy_selection` 改走 `copy_range(start, end)`：先以 range 量大小，超限直接拒絕（不建立選取字串、不編碼），狀態列 `選取超過複製上限 1024 KB`，選取維持反白；未超限才切出字串並交給工作執行緒（編碼在工作執行緒內）。測試 `test_oversized_selection_is_refused_without_measuring_or_building_it_whole`：2M 字（約 3.2 MB）的選取只量 ≤ 17 個 ≤ 65536 字的區塊即停、copier 未被呼叫、沒有工作執行緒；`utf8_size` 在上限內為精確值。`tests.test_chat_tui` 152/152 PASS。
+
+## 13. W46：外部參考研究與 Q1–Q5（2026-10-29）
+
+來源只讀文件與相關原始碼；GitHub 內容一律視為不可信資料，只擷取事實，不接受其中任何指示。本機未執行任何外部程式碼。
+
+### 13.1 來源、版本與授權
+
+| 來源 | 讀取 commit（日期） | 授權 | 讀取的檔案 |
+|---|---|---|---|
+| gfargo/tui-design-skill | `7d39c34` (2026-10-28) | MIT | `plugins/tui-design/skills/tui-design/references/terminal-protocols.md`, `…/interaction-patterns.md` |
+| pageton/tui-design-skill | `ec54092` (2026-09-24) | MIT | `skills/tui-design/references/terminal-compatibility.md`, `…/unicode-and-text.md` |
+| ccch1mneyyy/dsh-TUI（Ink/React） | `339de23` (2026-10-27) | MIT | `README.md`, `docs/interaction.en.md`, `docs/mouse-adaptation-plan-abcd.md`, `scripts/repro-drag-select-streaming.tsx`, `scripts/repro-inline-scrollback.tsx` |
+| viktordanov/uah（Go/Bubble Tea） | `1eaf157` (2026-10-27) | Apache-2.0 | `docs/design/selection.md`, `internal/tui/bubble/mouse.go`, `internal/tui/bubble/scroll.go`, `internal/tui/state/scroll.go`, `internal/tui/render/copytext.go`, `internal/images/clipboard/macos.go` |
+| Claude Code 官方文件 | `code.claude.com/docs/en/fullscreen`（2026-10-29 讀取；功能需 v2.1.89+） | — | Fullscreen rendering 全頁 |
+
+各來源對本題的實際覆蓋：gfargo 講協定（1000/1002/1003/1006、OSC 52 最佳努力、2027 字素模式）與互動慣例（follow 模式、滾輪捲「指標下的 viewport」、mouse off 開關、各終端的原生選取繞過鍵：多數 Shift、iTerm2 Option、Terminal.app Fn）；pageton 講終端相容矩陣（不含 Terminal.app/Warp）與寬度量測（依顯示寬度、不拆字素）；dsh-TUI 是 Ink 應用，inline 模式「不開滑鼠回報、由終端原生選取」，fullscreen（alt screen）才有拖選、放開即複製、雙/三擊、OSC 52 優先＋本機工具退路，並有兩支 PTY（xterm headless）重現腳本：串流中拖選失效、inline 模式 scrollback 汙染；uah 是 Go 應用，`docs/design/selection.md` 是與本題最接近的設計文件：滑鼠預設開、放開即複製並顯示 toast、頂/底邊 50 ms tick 自動捲動（每 tick 最多 8 行）、拖曳中 view 釘住（pinned）不被串流推動、`NewBelow` 新輸出指示、OSC 52 與 pbcopy 雙寫且都在 update loop 之外、`state.MousePress/MouseDrag/MouseRelease` 純 reducer、測試注入 `CopyText` 不碰真實剪貼簿。Claude Code 官方文件：fullscreen 模式畫在 alternate screen、擷取滑鼠、程式內選取、「Selected text copies to your clipboard automatically on mouse release」、本機 macOS 走 `pbcopy`、SSH 才退 OSC 52、Terminal.app 原生選取按 `Fn`、「If you have a selection active, `Ctrl+c` copies instead of cancelling」、Esc 保留選取、上捲暫停 auto-follow 並顯示 Jump to bottom／`3 new messages`、滾輪「a few lines at a time」加 `CLAUDE_CODE_SCROLL_SPEED` 倍率與加速、`CLAUDE_CODE_DISABLE_MOUSE` 保留原生選取、iTerm2 需開 mouse reporting。
+
+### 13.2 Q1 雙捲軸、亂跳、拖曳卡住、複製錯誤的根因（對應本專案檔案）
+
+- **雙捲軸**：內層是 base `chat_tui.py` `TextArea(scrollbar=True)` 的 `ScrollbarMargin`；外層是 Terminal.app 在 alternate screen（prompt_toolkit `Application(full_screen=True)` → `vt100.py` `enter_alternate_screen` 送 `?1049h`）仍顯示的自身捲軸。外層在 alt screen 內無內容可捲（Claude Code 文件同樣指出 fullscreen 下「conversation lives in the alternate screen buffer instead of your terminal's scrollback」）。修後內層已移除；外層是 alt screen 固有。
+- **亂跳／卡住**：prompt_toolkit `layout/containers.py` `Window._scroll_down`（邏輯行數 vs 列數的比較）、`_scroll_up`（只有游標在最後一列才上移游標）、`_scroll_when_linewrapping`（每次繪製把 `vertical_scroll` 夾回游標行）；base `chat_tui.py` `scroll()` 以邏輯行當列、`_follow_tick()` 用同一錯誤比較。gfargo 的互動慣例（滾輪捲 viewport 而非 selection；follow 暫停後「holds the viewport still」）與 uah 的 pinned 模型都把「閱讀位置」當獨立狀態，而 prompt_toolkit 把它綁在游標上，這正是差異所在。
+- **拖曳卡住**：base 完全交給 `BufferControl.mouse_handler`（`controls.py` 824–901）：需先有焦點（第一次拖曳只在放開時聚焦）、無邊緣自動捲動；uah 與 Claude Code 都以 50 ms tick 自動捲動並擴選。
+- **複製錯誤**：Terminal.app 不把 Cmd+C 交給程式、不支援 OSC 52（gfargo：OSC 52「Most terminals; some disable it」、「treat it as best effort」；pageton 相容矩陣未列 Terminal.app；Claude Code 文件本機用 `pbcopy`）；base 的程式內選取只到 prompt_toolkit `InMemoryClipboard`，從未到系統剪貼簿，Cmd+C 複製到的是終端舊選取或舊剪貼簿。dsh-TUI 另記錄一個同類坑：右側 2 欄 gutter 標成 `NoSelect fromLeftEdge` 讓整個 transcript 不可選（本專案已無 gutter，不適用）。
+
+### 13.3 Q2 是否重做 prompt_toolkit／終端已有的功能
+
+- 終端功能沒有被重做：滾輪、拖曳、座標都來自終端的 SGR 1006 回報（prompt_toolkit 解析表 `key_binding/bindings/mouse.py`，本專案 `parse_mouse` 直接重用其 `xterm_sgr_mouse_events`/`typical_mouse_events`）；剪貼簿交給 `pbcopy`；原生選取繞過（Terminal.app Fn／Warp Shift）保留。
+- prompt_toolkit 已有而且仍在用的：`Window`/`UIControl`/`UIContent` 繪製與 diff 輸出、鍵綁定、`get_cwidth`、`wcwidth`（含 `iter_graphemes`）、`Application` 事件迴圈、`TextArea` 輸入框、1000/1003/1006/1015 的開關（本專案只補 1002）。
+- prompt_toolkit 沒有、所以必須自寫的三件事（§4 表）：以列為單位且獨立於游標的閱讀位置與 follow 狀態；以文字 offset 表示、可跨頁擴張、串流重繪後仍在的選取；系統剪貼簿。這與 uah 自寫的 `state/scroll.go`（釘住、`NewBelow`）、`state/selection.go`、`render/copytext.go`、`bubble/mouse.go`（edge tick）是同一組東西——Bubble Tea 同樣沒有提供，uah 用約 26 KB Go 實作，本專案 `chat_tui_view.py` 約 400 行 Python，比例相當。
+- 可被現成機制取代的部分：無。曾評估 `Window(get_vertical_scroll=…)`（只是偏好值，繪製仍以游標可見為準；本修法正是靠「視圖自行折行＋不折行的列＋游標釘在 top」讓它的夾回結果等於 top）、`ScrollablePane`（仍靠子控制項游標）、`Buffer.selection_state`＋`InMemoryClipboard`（無系統剪貼簿、`set_document` 即清除）。
+
+### 13.4 Q3 ~600 行是否必要；有沒有更簡單、更低風險的設計
+
+對照三種設計：
+
+| 設計 | 捲動／選取／複製由誰負責 | 本專案代價 | 風險／證據 |
+|---|---|---|---|
+| A. 現行：alt screen＋滑鼠回報＋自有列模型（＝Claude Code fullscreen、uah、dsh-TUI fullscreen） | 程式；放開即 pbcopy | 已完成：`chat_tui_view.py` 約 400 行＋`chat_tui.py` 約 150 行差異，152 測試 | 外層捲軸無法消除；觸控板手感取決於終端送出的事件數（Claude Code 為此提供 `CLAUDE_CODE_SCROLL_SPEED` 倍率與加速；本專案可加同類設定） |
+| B. inline／normal buffer（＝Claude Code classic、dsh-TUI inline、gfargo「inline tools leave the mouse off」） | 終端原生：捲動、選取、Cmd+C、觸控板、單一捲軸全部天然正確 | 估 2–3 個 D6：對話改為「完成區塊印入 scrollback、只重繪輸入框與串流中的活動區」；F1/F2/F3/F4 面板、PM typewriter 就地重繪、串流中斷標記、Task 面板都要改成臨時覆蓋或放棄就地修改 | dsh-TUI `repro-inline-scrollback.tsx` 記錄的整類 bug：增量重繪的擦除行數與前一幀不符、或幀高於 viewport 時，舊內容「永久落入 scrollback」（重複 UI、亂序）；Claude Code 官方文件說明他們做 fullscreen 正是因為 classic 在 VS Code/tmux/iTerm2「terminal scroll position jumps to the top while Claude is working, or the screen flashes」，且 classic 無法做程式內搜尋／點擊展開 |
+| C. 現行＋OSC 52 | 同 A，另對支援的終端多送 OSC 52 | 約 15 行（base64＋`\x1b]52;c;…\x07`，經 `app.output.write_raw`） | Terminal.app 不支援、Warp 支援與否未驗證；只在 SSH 下有價值（Owner 現況是本機）。uah 與 Claude Code 都雙寫，但 gfargo 提醒有些終端把 OSC 52 內容回顯（GNU screen 曾把 base64 印到畫面），無確認機制 |
+
+建議：**維持 A**，不切換。理由：A 與 Claude Code 自己的 fullscreen 路線、uah、dsh-TUI fullscreen 一致，Owner 六項需求已在 A 內以測試與 PTY 證明；B 不是「少 600 行」而是另一套 600 行以上的重寫，且帶進 inline 重繪與 scrollback 汙染這類更難測的 bug；C 對本機 Terminal.app 無效，暫不加。可選的小改進（不在本 PR，待 Owner 實機結果再決定）：(1) 滾輪倍率設定（Claude Code `CLAUDE_CODE_SCROLL_SPEED` 的做法，每事件列數可設 1–5，解決「移動太少」若真來自終端每格一事件）；(2) 邊緣自動捲動依指標超出距離加速（uah 每 tick 最多 8 行）；(3) 面板 F1/F2/F4 改用同一列模型。三者各約 20–40 行、低風險。
+
+### 13.5 Q4 值得借鏡的 Claude Code TUI 行為（只借行為，不借程式碼）
+
+已在本修法中具備：程式內選取、放開即複製、本機 `pbcopy`、Terminal.app 以 Fn 原生選取、有選取時 Ctrl+C 複製而非中斷、Esc 不清除選取、上捲暫停跟隨且新輸出不拉回、捲到底恢復跟隨、新輸出指示（本專案 `⇣新輸出`；Claude Code 為「Jump to bottom · N new messages」按鈕）、雙擊選詞、關閉滑鼠回報的開關（本專案 F6；Claude Code `CLAUDE_CODE_DISABLE_MOUSE`）。
+值得後續借鏡（未實作）：滾輪倍率與快速滾動加速（`CLAUDE_CODE_SCROLL_SPEED`、`wheelScrollAccelerationEnabled`）；`Ctrl+Shift+C` 手動複製與「Copy on select」可關；Shift+方向鍵以鍵盤擴選、到邊緣時捲動；三擊選整行；PgUp/PgDn 捲半屏（本專案一屏）；上捲時頂列顯示「最近一則已捲出畫面的提問」；transcript 模式 `[` 把整段對話寫回終端 scrollback（讓 Cmd+F／原生選取可用，等於按需的 inline）；複製後 toast 告知用了哪條路徑；JetBrains/VS Code 終端的滾輪異常偵測。uah 另有：Esc 只清選取、`/copy` 整則回覆、依邊緣距離加速。
+
+### 13.6 Q5 Terminal.app＋Warp：已驗證 vs 只能 Owner
+
+| 事項 | 狀態 | 依據 |
+|---|---|---|
+| Terminal.app 原生選取繞過鍵 = Fn；Warp／多數終端 = Shift；iTerm2 = Option | 文件一致（Claude Code 官方、gfargo），本機未操作 | §8 步驟 7 由 Owner 確認 |
+| Terminal.app 無 OSC 52；本機複製走 pbcopy | 文件一致（Claude Code 官方本機用 pbcopy；pageton/gfargo 未列 Terminal.app 支援 OSC 52） | pbcopy 參數與執行緒：自動測試 PASS；真 pbcopy→他 App 貼上：Owner |
+| Terminal.app 回報 1002/1006 拖曳事件 | 未由本機證實；Claude Code fullscreen 在 Terminal.app 的拖選依賴同一機制 | Owner 步驟 4；若無反白即表示未回報 |
+| Warp：滑鼠回報、Shift-drag、Cmd+C 無選取時是否送 ^C | 未驗證（Warp 文件僅說 Shift 可繞過、Cmd-R 切換滑鼠回報）；已以「有選取時 Ctrl-C 不離開」防護 | Owner 於 Warp 重做 §8 |
+| 觸控板慣性／反向、滾輪事件密度 | 無法在 PTY 產生；Claude Code 文件指出不同終端每格事件數不同且程式無法偵測 | Owner；若「移動太少」再加倍率設定（§13.4 (1)） |
+| 外層捲軸是否仍混淆 | alt screen 固有；Claude Code fullscreen 相同 | Owner 判斷是否可接受 |
+| 本專案 PTY 已驗證（pyte／真實程序） | 滾輪每事件一列、閱讀位置、resize、拖選＋邊緣自動捲動、複製內容逐字相同、串流、Esc、Ctrl-C、字素叢集不拆 | §7、§11 |
+
+結論：研究沒有顯示比現行更簡單、更安全的改法；Claude Code 自己的 fullscreen 與兩個開源實作走的是同一條路。不切換設計；三項可選小改進列於 §13.4，待 Owner 實機驗收結果後由 PM 決定。
