@@ -118,6 +118,25 @@ def _safe_result_text(value):
     return value
 
 
+def _screen_stream_text(value):
+    """Redact credential-like text before it crosses the runtime event boundary."""
+    from .task_submission_cli import _redact_rejected_output
+    screened = _redact_rejected_output(value)
+    if screened.startswith('[REDACTED_SENSITIVE_OUTPUT]') or _emitted_sensitive(screened):
+        return '[withheld]'
+    return screened
+
+
+def _bounded_stream_append(current, value):
+    """Keep persisted partial output within the public message size bound."""
+    value = value.encode('utf-8', 'ignore').decode('utf-8')
+    room = MAX_MESSAGE_BYTES - len(current.encode('utf-8'))
+    if room <= 0:
+        return current
+    addition = value.encode('utf-8')[:room].decode('utf-8', 'ignore')
+    return current + addition
+
+
 def _history_path(root, key):
     return root / (key + '.history.json')
 
@@ -234,6 +253,15 @@ def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runne
     except Exception:
         raise _error('PM_PROCESS_START_FAILED', 'Claude PM session could not be started') from None
     try:
+        # The create command only establishes the native session. Never leave its
+        # CLI process around to be mistaken for a second live owner by open().
+        try:
+            return_code = process.wait(timeout=10)
+        except Exception:
+            _stop_started_process(process)
+            raise _error('PM_PROCESS_START_FAILED', 'Claude PM session did not exit after creation') from None
+        if return_code not in (None, 0):
+            raise _error('PM_PROCESS_START_FAILED', 'Claude PM session creation failed')
         root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
         root = _ensure_state_dir(Path(root_arg))
         binding = {'runtime': 'claude-code', 'native_session_id': native_id, 'cwd': cwd,
@@ -665,6 +693,8 @@ class PMRuntime:
         with self._state_lock:
             record['status'] = status
             record['ended_at'] = _timestamp(self.clock)
+            if not result_text and record.get('result_text'):
+                result_text = record['result_text']
             record['result_text'] = _safe_result_text(result_text)
             record['usage'] = usage if isinstance(usage, dict) else {}
             self._persist_turn(record)
@@ -674,6 +704,8 @@ class PMRuntime:
     def _events(self, record):
         child = self._child
         event_seq = 0
+        blocks = {}
+        emitted_lengths = {}
 
         def emit(kind, **fields):
             nonlocal event_seq
@@ -723,14 +755,49 @@ class PMRuntime:
                     if event.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta':
                         text = delta.get('text')
                         if isinstance(text, str):
-                            yield emit('TEXT_DELTA', text=text,
-                                       block_index=event.get('index', 0))
+                            index = event.get('index', 0)
+                            blocks[index] = blocks.get(index, '') + text
+                            buffered = blocks[index]
+                            if len(buffered.encode('utf-8', 'ignore')) > MAX_MESSAGE_BYTES:
+                                blocks[index] = '[withheld]'
+                            else:
+                                screened = _screen_stream_text(buffered)
+                                if screened == '[withheld]':
+                                    blocks[index] = '[withheld]'
+                                else:
+                                    # Retain the final token and nearby context across
+                                    # deltas; this catches credentials split at any byte.
+                                    boundary = max(screened.rfind(' '), screened.rfind('\n'),
+                                                   screened.rfind('\t'))
+                                    safe_end = max(0, boundary - 128)
+                                    marker = screened.rfind('-----BEGIN')
+                                    if marker >= 0 and '-----END' not in screened[marker:]:
+                                        safe_end = min(safe_end, marker)
+                                    previous = emitted_lengths.get(index, 0)
+                                    if safe_end > previous:
+                                        piece = screened[previous:safe_end]
+                                        emitted_lengths[index] = safe_end
+                                        record['result_text'] = _bounded_stream_append(
+                                            record.get('result_text', ''), piece)
+                                        yield emit('TEXT_DELTA', text=piece,
+                                                   block_index=index)
                 elif kind == 'assistant':
-                    for item in _iter_content((line.get('message') or {}).get('content')):
+                    for position, item in enumerate(
+                            _iter_content((line.get('message') or {}).get('content'))):
                         if not isinstance(item, dict):
                             continue
                         if item.get('type') == 'text' and isinstance(item.get('text'), str):
-                            yield emit('ASSISTANT_TEXT', text=item['text'], final=True)
+                            index = item.get('index', position)
+                            final_text = _screen_stream_text(item['text'])
+                            previous = emitted_lengths.get(index, 0)
+                            if final_text == '[withheld]':
+                                blocks[index] = '[withheld]'
+                            elif blocks.get(index) != '[withheld]':
+                                remainder = final_text[min(previous, len(final_text)):]
+                                record['result_text'] = _bounded_stream_append(
+                                    record.get('result_text', ''), remainder)
+                                emitted_lengths[index] = len(final_text)
+                            yield emit('ASSISTANT_TEXT', text=final_text, final=True)
                         elif item.get('type') == 'tool_use':
                             tool_id, name = item.get('id'), item.get('name')
                             if isinstance(name, str):
@@ -758,7 +825,25 @@ class PMRuntime:
                         'ERROR' if line.get('is_error') or line.get('subtype') in
                         ('error', 'error_during_execution') else 'COMPLETED')
                     result = line.get('result', '')
-                    result_text = result if isinstance(result, str) else ''
+                    result_text = _screen_stream_text(result) if isinstance(result, str) else ''
+                    if result_text == '[withheld]':
+                        result_text = ''
+                    # A result event closes the text blocks. Release any screened
+                    # tail held back to catch a credential split across deltas.
+                    for index, buffered in blocks.items():
+                        if buffered == '[withheld]':
+                            continue
+                        screened = _screen_stream_text(buffered)
+                        if screened == '[withheld]':
+                            continue
+                        previous = emitted_lengths.get(index, 0)
+                        if previous < len(screened):
+                            piece = screened[previous:]
+                            record['result_text'] = _bounded_stream_append(
+                                record.get('result_text', ''), piece)
+                            yield emit('TEXT_DELTA', text=piece, block_index=index)
+                    if not result_text:
+                        result_text = record.get('result_text', '')
                     usage = line.get('usage') if isinstance(line.get('usage'), dict) else {}
                     if status == 'ERROR':
                         lower = result_text.lower()
@@ -869,12 +954,13 @@ class PMRuntime:
             raise error
 
 
-def read_history(pm_session_id, *, after=0, limit=50, state_root=None):
+def read_history(pm_session_id, *, after=0, limit=50, latest=None, state_root=None):
     try:
         key = active_pm_inbox.pm_session_key(pm_session_id)
     except LLMToolError:
         raise _error('PM_SESSION_INVALID', 'PM session ID is invalid') from None
-    if type(after) is not int or after < 0 or type(limit) is not int or limit < 1:
+    if (type(after) is not int or after < 0 or type(limit) is not int or limit < 1 or
+            (latest is not None and (type(latest) is not int or latest < 1))):
         raise _error('PM_HISTORY_QUERY_INVALID', 'PM history paging is invalid')
     root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
     root = _ensure_state_dir(Path(root_arg))
@@ -902,7 +988,11 @@ def read_history(pm_session_id, *, after=0, limit=50, state_root=None):
         finally:
             if fd >= 0:
                 os.close(fd)
-    selected = [turn for turn in turns if isinstance(turn, dict) and
-                type(turn.get('seq')) is int and turn['seq'] > after][:limit]
+    if latest is None:
+        selected = [turn for turn in turns if isinstance(turn, dict) and
+                    type(turn.get('seq')) is int and turn['seq'] > after][:limit]
+    else:
+        selected = [turn for turn in turns if isinstance(turn, dict) and
+                    type(turn.get('seq')) is int][-latest:]
     next_after = selected[-1]['seq'] if selected else after
     return {'pm_session_id': pm_session_id, 'turns': selected, 'next_after': next_after}

@@ -212,16 +212,21 @@ class PMRuntimeTests(unittest.TestCase):
         second = pm_runtime.read_history(SESSION, after=first['next_after'],
                                          state_root=self.root)
         self.assertEqual([turn['seq'] for turn in first['turns'] + second['turns']], [1, 2])
+        latest = pm_runtime.read_history(SESSION, latest=1, state_root=self.root)
+        self.assertEqual([turn['seq'] for turn in latest['turns']], [2])
         with self.assertRaises(LLMToolError) as raised:
             self.runtime(runtime='codex').open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
 
     def test_create_and_read_dedicated_binding(self):
         calls = []
+        processes = []
 
         def starter(argv, cwd, env):
             calls.append((argv, cwd, env))
-            return FakeProcess()
+            process = FakeProcess()
+            processes.append(process)
+            return process
 
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
                                                  environ={'HOME': self.temp.name},
@@ -229,7 +234,35 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(calls[0][0][:1], ['claude'])
         self.assertEqual(calls[0][0][1], '--session-id')
         self.assertEqual(calls[0][0][2], binding['native_session_id'])
+        self.assertEqual(processes[0].wait_calls, 1)
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
+
+    def test_create_then_connect_does_not_treat_creator_as_live_session(self):
+        created = []
+
+        def starter(argv, cwd, env):
+            process = FakeProcess()
+            created.append(process)
+            return process
+
+        binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
+                                                 runner=starter)
+        process = FakeProcess()
+        calls = []
+
+        def runner(argv, cwd, env):
+            calls.append(argv)
+            return process
+
+        with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
+            runtime = pm_runtime.PMRuntime(
+                binding['native_session_id'], cwd=self.cwd, runner=runner,
+                state_root=self.root, environ={'HOME': self.temp.name}, clock=time.time)
+            self.runtimes.add(runtime)
+            runtime.open()
+        self.assertEqual(created[0].wait_calls, 1)
+        self.assertEqual(len(calls), 1)
+        runtime.close()
 
     def test_create_failure_stops_child_and_retry_starts_one_process(self):
         write_json_atomic = pm_runtime._write_json_atomic
@@ -478,6 +511,41 @@ class PMRuntimeTests(unittest.TestCase):
         rebuilt = final['text'] if final.get('final') else deltas + final['text']
         self.assertEqual(rebuilt, 'Hello')
         self.assertEqual([e['block_index'] for e in events if e['type'] == 'TEXT_DELTA'], [3, 3])
+        runtime.close()
+
+    def test_split_credential_is_screened_before_text_events(self):
+        prefix = ''.join(('s', 'k', '-'))
+        credential = prefix + ('x' * 24)
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 2,
+             'delta': {'type': 'text_delta', 'text': 'Reply ' + credential[:8]}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 2,
+             'delta': {'type': 'text_delta', 'text': credential[8:]}}},
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'text', 'index': 2, 'text': 'Reply ' + credential}] }},
+            {'type': 'result', 'result': 'Reply ' + credential}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send('request'))
+        self.assertNotIn(credential, repr(events))
+        for event in events:
+            if event['type'] in ('TEXT_DELTA', 'ASSISTANT_TEXT'):
+                self.assertFalse(pm_runtime._emitted_sensitive(event['text']))
+        runtime.close()
+
+    def test_interrupt_persists_screened_streamed_text(self):
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'text_delta', 'text': 'Partial reply so far.'}}},
+            {'type': 'result', 'subtype': 'error', 'result': ''}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = runtime.send('request')
+        runtime.interrupt()
+        result = list(events)
+        self.assertEqual(result[-1]['status'], 'INTERRUPTED')
+        page = pm_runtime.read_history(SESSION, state_root=self.root)
+        self.assertEqual(page['turns'][0]['result_text'], 'Partial reply so far.')
         runtime.close()
 
     def test_tool_result_reason_is_fixed_and_does_not_expose_payload(self):
