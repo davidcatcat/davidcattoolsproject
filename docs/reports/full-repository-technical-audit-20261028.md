@@ -886,7 +886,7 @@ flowchart LR
 | # | 項目 | 原因 | 成果 | 範圍 | 依賴 | 風險 | 工作量 | 驗收 | 影響既有 | 順序 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | P0-1 | 合併並修正 TUI Task mode（#505）+ Tasks／detail（#510／#512） | AUDIT-001 | TUI 可提交、看任務 | chat_tui*、tests | CI 修綠 | 低 | M | 34 項 PTY 實測 + CI 綠 | 否 | 1 |
-| P0-2 | `task advance` 驅動器（#519）+ 終態（AUDIT-014） | AUDIT-002／014 | 無人工串接 | task_advance、task_status | #519 審查 | 中 | M | 10 個 Task 自動推進 | 否 | 2 |
+| P0-2 | `task advance` 驅動器（#519）+ 終態（AUDIT-014）（**已被 §26.1 取代**） | AUDIT-002／014 | 每次呼叫推進一個審查、修正、完成或結案步驟；首次派工、發布 PR 與合併仍由人工執行（見 §26.1） | task_advance、task_status | #519 審查 | 中 | M | 每次呼叫完成一個審查／修正／完成／結案動作且不重複派工；首次派工、發布與合併由 PM 手動執行 | 否 | 2 |
 | P0-3 | 以現有 retire 工具對通過 D6 退場 gate 的候選批次退場（Reviewer D6 復用為 OWNER_DECISION_REQUIRED） | AUDIT-003 | ACTIVE 與磁碟用量明顯下降（待驗證目標） | d6 scripts | — | 中（誤刪；靠 gate 防範） | S | RETAIN_BLOCKED 有逐筆處置；可用空間回到 PM 實測的安全水位 | 否 | 1 |
 | P0-4 | 一個真實 Owner 任務 E2E（TUI → merge → COMPLETED） | 產品驗收 | 第一次真正閉環 | — | P0-1～3 | — | S | Owner 操作紀錄 | — | 3 |
 | P0-5 | 暫停可後接的路線（AGY、OpenCode、Telegram、Web、CliNest；Owner 2026-10-28 確認可後接）；gw 不暫停，但排在 P0-4 之後接入並量測是否省 token（Owner：不能省就不要） | 聚焦 | 釋放 PM／Reviewer 容量 | 政策 | **OWNER_DECISION_REQUIRED**（Roadmap 與 dispatch 切換） | 低 | — | 期間內無可後接路線的 PR | — | 0 |

@@ -671,7 +671,7 @@ Owner 要求審查者直接說。依「TUI 驗收之後才做」的原則：
 
 | 分類 | 項目 |
 |---|---|
-| **立即** | TUI Task mode + Tasks view（#505／#510／#512，**已於 snapshot 後經 #513 合併**）；`task advance` + 終態（#519，OPEN）；D6 經 gate 的安全退場；Codex retry；一個 Owner 任務 E2E；文件瘦身第一輪 |
+| **立即** | TUI Task mode + Tasks view（#505／#510／#512，**已於 snapshot 後經 #513 合併**）；`task advance` + 終態（#519；snapshot 當時 OPEN，之後經 #533 合併，每次呼叫推進一個動作）；D6 經 gate 的安全退場；Codex retry；一個 Owner 任務 E2E；文件瘦身第一輪 |
 | **NEXT**（主鏈 E2E 之後第一項；Owner 2026-10-28） | gw 經同一條 TUI→PM→Developer 鏈接入，並量測「PM 準備 context＋套 diff＋審查」對「直接派 Codex」的總成本（Owner：不能節省就沒必要）；可攜性（硬編碼→config、安裝）因「其他項目開發」進入第一版 |
 | **延後**（OWNER_DECISION_REQUIRED） | provider-neutral route 接入 `task delegate`（#500 契約已於 #513 合併）、AGY、OpenCode（Owner 2026-10-28：省 token 用途，可後接）、High Debug 自動化、GitHub events inbox、Telegram、Web、CliNest |
 | **取消**（OWNER_DECISION_REQUIRED） | A11b F2、ai-loop 引用、A2.3、review_authority／review_exchange／review_bundle／test_triage_worker 封存、Mac CI verifier-of-verifier |

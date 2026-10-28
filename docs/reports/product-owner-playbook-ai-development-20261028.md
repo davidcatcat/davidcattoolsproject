@@ -15,7 +15,7 @@
 | **A. Owner 必須親自決定** | Owner | 產品方向與定位；一個 NOW；預算上限；安全與資料外送邊界；新帳號／新付費服務；看 demo 後說符合／不符合；AI 明說能力不足時決定替代方案 | 技術架構、模組設計、工作包拆解、PR 順序、CI 策略、worktree、Agent 交接、催 PM、找架構缺陷、寫技術規格、QA／CI 驗證、監看額度 |
 | **B. AI PM 主動完成** | PM session | 把 Owner 的每句話轉成需求確認單；MVP 與範圍；新想法影響分析；Roadmap；驗收標準；隨時可 demo；一頁狀態隨時可答；卡住時主動開 issue；可平行的工作先平行 | 不得把需求原樣展開成實作；不得把技術狀態呈現為 Owner 決策；不得主動推送定期報告 |
 | **C. AI CTO／Architect 主動完成** | 同一 PM session 或獨立 session | 每個架構／治理提案附三選項（含不做）、最小版本、停損、一句白話；過度工程預警；技術債、容量、成本與額度看板；對 PM 與 Owner 說「不建議，因為…」 | 不得只回答「可以實作」；不得用術語代替說明 |
-| **D. AI Engineering 自動完成** | 驅動器＋Developer＋Reviewer＋PM 的手動步驟 | 派工、測試、審查派送、修復重派、結案記錄、發布與合併、worktree 退場、Developer／Reviewer 額度改派、CI 選擇、事件消費（目前 `task advance` 只涵蓋審查派送到結案，其餘仍是 PM／Worker 手動，見第 6 章） | 不得經 Owner |
+| **D. AI Engineering 自動完成** | 驅動器＋Developer＋Reviewer＋PM 的手動步驟 | 派工、測試、審查派送、修復重派、結案記錄、發布與合併、worktree 退場、Developer／Reviewer 額度改派、CI 選擇、事件消費（目前 `task advance` 只涵蓋審查派送到結案，其餘仍是 PM／Worker 手動，見第 6 章） | 在既有授權、派工政策、Reviewer、CI 與合併 gate 之內自動進行，不需 Owner 逐件經手；任何政策或 gate 變更仍須 Owner 決定 |
 | **E. 只有 issue 才通知 Owner** | PM | 預估超過預算；安全事件；同一問題兩次修復失敗；卡住超過文件定義的天數；需要新帳號／新支出；AI 能力不足以完成某項工作；Owner 定義的方向與現況衝突 | 其餘不通知；進度 report 等 Owner 問 |
 
 不一定需要四個獨立 AI。最小配置：一個 PM session 同時承擔 B 與 C，但 C 的輸出格式（第 4 章）是硬性要求；D 由確定性程式承擔；Reviewer 加「可用性驗收」。
