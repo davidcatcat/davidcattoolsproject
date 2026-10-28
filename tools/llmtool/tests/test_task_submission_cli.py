@@ -1373,6 +1373,22 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
 
+    def test_captured_source_files_allow_an_ordinary_modify_proposal(self):
+        source_files = submission_cli._text_developer_source_files(
+            self.executor_root, self.executor_head, ['sample.py'])
+        self.assertIsInstance(source_files, submission_cli._DeveloperSourceFiles)
+        self.assertIn('sample.py', source_files.existing_paths)
+        source = source_files['sample.py']
+        old_line = source.splitlines()[0]
+        new_line = old_line + '  # updated'
+        proposal = ('diff --git a/sample.py b/sample.py\n'
+                    '--- a/sample.py\n+++ b/sample.py\n'
+                    f'@@ -1 +1 @@\n-{old_line}\n+{new_line}\n')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            proposal, ['sample.py'], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, proposal)
+
     def test_codex_delegate_missing_developer_profile_fails_closed_without_pm_fallback(self):
         task = self._pm_task_with_codex_assignment()
         output = io.StringIO()
@@ -2171,7 +2187,7 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
             'closing fence after the diff': (good + '```\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'deleted file': (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
                              f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n',
-                             'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                             None),
             'rename': (f'diff --git a/{target} b/tools/llmtool/renamed.py\nrename from {target}\n'
                        'rename to tools/llmtool/renamed.py\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'path outside write_paths': (good.replace(target, 'tools/llmtool/other.py'),
@@ -2185,14 +2201,67 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
                 header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', None),
             'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
                          f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
-                         'DEVELOPER_OUTPUT_INVALID_DIFF'),
-            'new executable file': (f'diff --git a/dev/null b/{target}\nnew file mode 100755\n'
+                         None),
+            'new executable file': (f'diff --git a/{target} b/{target}\nnew file mode 100755\n'
                                     f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
-                                    'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                                    'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'),
+            'new symlink': (f'diff --git a/{target} b/{target}\nnew file mode 120000\n'
+                            f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+target\n',
+                            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'),
+            'deleted executable file': (
+                f'diff --git a/{target} b/{target}\ndeleted file mode 100755\n'
+                f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n',
+                'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'),
         }
         for label, (text, expected) in shapes.items():
             with self.subTest(label):
                 self.assertEqual(rejection(text, [target]), expected)
+
+    def test_file_operation_scope_and_source_existence(self):
+        target = 'tools/llmtool/new.py'
+        outside = 'tools/llmtool/outside.py'
+        new_file = (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
+                    f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n')
+        deletion = (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
+                    f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n')
+        outside_new = new_file.replace(target, outside)
+        self.assertEqual(submission_cli._developer_output_rejection(
+            outside_new, [target]), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files={target: ''})[2], None)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files={target: 'already exists\n'})[2],
+            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+        self.assertEqual(submission_cli._developer_normalized_output(
+            deletion, [target], source_files={target: 'old\n'})[2], None)
+
+        existing_empty = submission_cli._DeveloperSourceFiles()
+        existing_empty[target] = ''
+        existing_empty.existing_paths.add(target)
+        existing_empty.regular_paths.add(target)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files=existing_empty)[2],
+            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+
+    def test_proposal_can_mix_new_files_with_existing_file_modifications(self):
+        target = 'tools/llmtool/existing.py'
+        added = 'tools/llmtool/new.py'
+        mixed = (
+            f'diff --git a/{target} b/{target}\n'
+            f'--- a/{target}\n+++ b/{target}\n'
+            '@@ -1 +1 @@\n-old\n+updated\n'
+            f'diff --git a/{added} b/{added}\nnew file mode 100644\n'
+            f'--- /dev/null\n+++ b/{added}\n'
+            '@@ -0,0 +1 @@\n+new file\n')
+        source_files = submission_cli._DeveloperSourceFiles()
+        source_files[target] = 'old\n'
+        source_files.existing_paths.add(target)
+        source_files.regular_paths.add(target)
+        source_files[added] = ''
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            mixed, [target, added], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, mixed)
 
     def test_unsafe_shapes_remain_rejected(self):
         target = 'tools/llmtool/example.py'
@@ -2271,14 +2340,6 @@ class ModeMetadataRejectionTests(unittest.TestCase):
                 metadata=('old mode 100644\n', 'new mode 100755\n'), hunk=False),
             'solo old mode': self._section(metadata=('old mode 100644\n',)),
             'solo new mode': self._section(metadata=('new mode 100755\n',)),
-            'new file mode': (
-                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
-                'new file mode 100644\n'
-                f'--- /dev/null\n+++ b/{self.TARGET}\n@@ -0,0 +1 @@\n+new\n'),
-            'deleted file mode': (
-                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
-                'deleted file mode 100644\n'
-                f'--- a/{self.TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'),
             'mode change in a later section': clean + self._section(
                 path=self.SECOND, metadata=('old mode 100644\n', 'new mode 100755\n')),
             'mode change in an earlier section': self._section(
