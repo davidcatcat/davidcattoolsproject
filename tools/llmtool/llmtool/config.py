@@ -27,6 +27,8 @@ DEFAULTS = {
     "generation": {"temperature": 0, "max_tokens": 2000},
     "active_provider": "default",
 }
+CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS = 600
+CODEX_DIRECT_MAX_TIMEOUT_SECONDS = 1800
 # Paths beginning with 'provider' apply only to the explicitly selected profile.
 ENV_OPTIONS = {
     "LLMTOOL_BASE_URL": ("provider", "base_url"),
@@ -123,7 +125,7 @@ def _provider_name(name):
 
 
 def _apply_user(config, fragment):
-    _fields(fragment, {"providers", "generation", "active_provider", "diagnostics"}, "user config")
+    _fields(fragment, {"providers", "generation", "active_provider", "diagnostics", "codex_direct"}, "user config")
     if "diagnostics" in fragment:
         from .diagnostics_settings import parse_diagnostics_settings
         parse_diagnostics_settings(fragment["diagnostics"])
@@ -142,6 +144,12 @@ def _apply_user(config, fragment):
     if "generation" in fragment:
         _fields(fragment["generation"], DEFAULTS["generation"], "user generation")
         config["generation"].update(fragment["generation"])
+    if "codex_direct" in fragment:
+        _fields(fragment["codex_direct"], {"timeout_seconds"}, "user codex_direct")
+        config["codex_direct"] = {
+            "timeout_seconds": CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS,
+            **fragment["codex_direct"],
+        }
 
 
 def _apply_project(config, fragment):
@@ -199,6 +207,13 @@ def _timeout_seconds(value):
     return result
 
 
+def validate_codex_direct_timeout(value):
+    """Validate the configured direct Codex wall clock limit."""
+    if type(value) is not int or not 1 <= value <= CODEX_DIRECT_MAX_TIMEOUT_SECONDS:
+        raise LLMToolError("codex_direct.timeout_seconds must be an integer from 1 through 1800")
+    return value
+
+
 def _validate_provider(provider, profile_name):
     implementation = client_type(provider["type"])
     options = provider["provider_options"]
@@ -254,6 +269,9 @@ def _validate(config):
     generation["temperature"] = _number(generation["temperature"], "temperature")
     if not 0 <= generation["temperature"] <= 2:
         raise LLMToolError("temperature must be between 0 and 2")
+    direct_config = config.get("codex_direct")
+    if direct_config is not None:
+        validate_codex_direct_timeout(direct_config["timeout_seconds"])
 
 
 def _inspection_env_name(name):
@@ -299,10 +317,19 @@ def _config_view(cli=None, environ=None, cwd=None, home=None, *, inspection=Fals
 def resolve_config(cli=None, environ=None, cwd=None, home=None, require_configured=False):
     """Resolve a viewable config; model requests must require readiness as well."""
     config, _ = _config_view(cli, environ, cwd, home)
+    config.pop("codex_direct", None)
     if require_configured:
         provider = selected_provider(config)
         client_type(provider["type"]).validate_ready(provider)
     return config
+
+
+def codex_direct_timeout(cwd=None, home=None):
+    """Return the configured direct Codex timeout without changing config output."""
+    config, _ = _config_view(cwd=cwd, home=home)
+    direct_config = config.get("codex_direct", {})
+    return validate_codex_direct_timeout(
+        direct_config.get("timeout_seconds", CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS))
 
 
 def inspect_config(*, environ=None, cwd=None, home=None):

@@ -173,7 +173,7 @@ class CodexDelegateTests(unittest.TestCase):
     def _dispatch(self, task, *, ignored=False, bytecode=False, bootstrap_error=None,
                   overwrite_ignored=None, malformed_diff=None, callback_handler=None,
                   registration=None, bound_registration=None, codex_error=None,
-                  codex_result=None):
+                  codex_result=None, codex_timeout=600, run_observer=None):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
@@ -196,9 +196,18 @@ class CodexDelegateTests(unittest.TestCase):
                 return git_reader(root, args, limit=limit,
                                   allow_exit_1=allow_exit_1,
                                   return_exit_code=return_exit_code)
+            run_patch = (
+                patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                      side_effect=codex_error) if codex_error is not None else
+                patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                      return_value=codex_result) if codex_result is not None else
+                patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                      wraps=task_submission_cli.codex_direct_developer.run))
             with patch.dict(os.environ, {'PATH': str(self.bin) + os.pathsep + os.environ['PATH']}), \
                     patch('llmtool.task_submission_cli._codex_developer_profile',
                           return_value=({'model': 'gpt-6-luna'}, 'high')), \
+                    patch('llmtool.task_submission_cli.codex_direct_timeout',
+                          return_value=codex_timeout), \
                     patch('llmtool.task_submission_cli._bootstrap_registered_d6',
                           side_effect=bootstrap_error), \
                     (patch.object(task_completion, 'bind_executor_task',
@@ -220,18 +229,26 @@ class CodexDelegateTests(unittest.TestCase):
                           return_value='BOUND') if registration else
                      patch('llmtool.task_submission_cli._bind_codex_native_session',
                           wraps=task_submission_cli._bind_codex_native_session)), \
-                    (patch('llmtool.task_submission_cli.codex_direct_developer.run',
-                           side_effect=codex_error) if codex_error is not None else
-                     patch('llmtool.task_submission_cli.codex_direct_developer.run',
-                           return_value=codex_result) if codex_result is not None else
-                     patch('llmtool.task_submission_cli.codex_direct_developer.run',
-                           wraps=task_submission_cli.codex_direct_developer.run)), \
+                    run_patch as codex_run, \
                     patch('llmtool.task_submission_cli.run_task_direct_result_event',
                           side_effect=callback_handler, return_value=0) as callback:
                 result = run_task_codex_delegate(args, store=self.store)
+                if run_observer is not None:
+                    run_observer(codex_run.call_args)
         finally:
             os.chdir(original_cwd)
         return result, self.store.get(task['task_id']), callback
+
+    def test_configured_timeout_matches_packet_and_runner(self):
+        task = self._task()
+        calls = []
+        result, _saved, _callback = self._dispatch(
+            task, codex_timeout=900, run_observer=calls.append)
+        self.assertEqual(result, 0)
+        self.assertEqual(len(calls), 1)
+        call = calls[0]
+        self.assertEqual(call.kwargs['timeout'], 900)
+        self.assertIn('"wall_clock_seconds":900', call.kwargs['prompt'])
 
     def test_blocked_result_preserves_typed_reason(self):
         task = self._task()

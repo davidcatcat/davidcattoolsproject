@@ -18,7 +18,9 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from .chat import reply_usage
-from .config import api_key, resolve_profile_config, selected_provider, yaml_module
+from .config import (CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS, api_key,
+                     codex_direct_timeout, resolve_profile_config,
+                     selected_provider, yaml_module)
 from .errors import LLMToolError
 from .providers import create_client
 from .providers.cli_lifecycle import CLIHostTermination
@@ -2094,7 +2096,8 @@ def run_task_opencode_delegate(args, *, store):
 
 def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
                          acceptance, pm_goal, model, reasoning_effort,
-                         repair_packet=None, timeout_recovery=None):
+                         repair_packet=None, timeout_recovery=None,
+                         timeout=CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS):
     contract = task.get('task_contract')
     if type(contract) is not dict:
         raise LLMToolError('Codex Developer Task Contract is unavailable')
@@ -2119,7 +2122,7 @@ def _codex_direct_prompt(task, *, source_sha, read_paths, write_paths,
         'acceptance': acceptance,
         'test_commands': test_commands,
         'test_policy': test_policy,
-        'budget': {'wall_clock_seconds': codex_direct_developer.MAX_WALL_CLOCK_SECONDS,
+        'budget': {'wall_clock_seconds': timeout,
                    'stdout_bytes': codex_direct_developer.MAX_OUTPUT_BYTES,
                    'stderr_bytes': codex_direct_developer.MAX_STDERR_BYTES,
                    'repair_attempts': 1},
@@ -2516,6 +2519,7 @@ def run_task_codex_delegate(args, *, store):
     _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     provider, reasoning_effort = _codex_developer_profile()
+    effective_timeout = codex_direct_timeout(cwd=registration.root)
     prompt = _codex_direct_prompt(task, source_sha=task_source_sha,
         read_paths=read_paths, write_paths=write_paths, acceptance=acceptance,
         pm_goal=(pm_assignment['goal'] if args.selection_source == 'PM'
@@ -2524,7 +2528,8 @@ def run_task_codex_delegate(args, *, store):
         repair_packet=getattr(args, 'repair_packet', None),
         timeout_recovery=({'base_sha': task_source_sha,
                            'diff_sha256': previous_developer['execution']['diff_sha256']}
-                          if recovering_timeout else None))
+                          if recovering_timeout else None),
+        timeout=effective_timeout)
     _screen_text(prompt, codex_direct_developer.MAX_PROMPT_BYTES)
     prompt_size = len(prompt.encode('utf-8'))
     if prompt_size > codex_direct_developer.MAX_PROMPT_BYTES:
@@ -2618,6 +2623,7 @@ def run_task_codex_delegate(args, *, store):
             model=provider['model'], reasoning_effort=reasoning_effort,
             dispatch_store=store, dispatch_task_id=task['task_id'],
             prelaunch_validate=validate_binding,
+            timeout=effective_timeout,
             dispatch_action=('TIMEOUT_CONTINUATION' if recovering_timeout else 'DISPATCH'))
     except worker_dispatch.WorkerDispatchDenied as exc:
         developer.update(state='DEVELOPER_UNAVAILABLE', provider_type='codex-cli',
