@@ -171,6 +171,32 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.direct_codex_code, 'CODEX_FINAL_JSON_INVALID')
         self.assertEqual(caught.exception.native_session_id, self.THREAD)
 
+    def test_invalid_final_json_with_d6_changes_has_distinct_code(self):
+        raw = json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) + '\n'
+        raw += json.dumps({'type': 'item.completed', 'item': {
+            'type': 'agent_message', 'text': '{broken'}}) + '\n'
+        self.write_fake(raw)
+        with patch.object(direct, '_d6_has_changes', return_value=True), \
+                self.assertRaises(direct.DirectCodexError) as caught:
+            self.run_fake()
+        self.assertEqual(caught.exception.direct_codex_code,
+                         'CODEX_FINAL_JSON_INVALID_WITH_CHANGES')
+
+    def test_final_json_rejects_extra_keys(self):
+        final = dict(self.final, extra='not allowed')
+        with self.assertRaises(direct.DirectCodexError) as caught:
+            direct._result_from_events(self.events(final).encode('utf-8'))
+        self.assertEqual(caught.exception.direct_codex_code,
+                         'CODEX_FINAL_JSON_INVALID')
+
+    def test_fenced_final_json_and_object_test_items_are_normalized(self):
+        final = dict(self.final, tests=[{'test_one.py': 'passed', 'test_two.py': 'not run'}])
+        raw = json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) + '\n'
+        raw += json.dumps({'type': 'item.completed', 'item': {
+            'type': 'agent_message', 'text': '```json\n' + json.dumps(final) + '\n```'}})
+        _, result, _ = direct._result_from_events(raw.encode('utf-8'))
+        self.assertEqual(result['tests'], ['test_one.py: passed; test_two.py: not run'])
+
     def test_signal_ended_run_without_final_message_is_interrupted(self):
         # Emit malformed partial output before the signal. The interruption
         # outcome must take precedence over JSONL/final-message validation.
