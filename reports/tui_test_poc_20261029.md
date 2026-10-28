@@ -9,7 +9,7 @@ Harness 與證據：`tools/llmtool/tui-poc/`（`poc.mjs`、`tui_child.py`、`run
 
 ## 1. 結論（建議：不採用為正式 gate；保留為可選的本機除錯工具）
 
-- tui-test 0.1.1 **能**在真實 PTY 中啟動 `llmtool chat --tui`、送 SGR 滾輪 / 按住拖曳放開 / 單獨 Esc / F6 / resize，讀回畫面文字與每格樣式（含反白），並產生 trace / SVG / asciicast。W42 分支 A–H 全部 PASS（H4 PM 串流未跑）；main 重現原始缺陷 C（滾輪卡住 1/15）、D（拖曳無選取）、G（resize 失去閱讀位置），**工具能區分修前修後**。
+- tui-test 0.1.1 **能**在真實 PTY 中啟動 `llmtool chat --tui`、送 SGR 滾輪 / 按住拖曳放開 / 單獨 Esc / F6 / resize，讀回畫面文字與每格樣式（含反白），並產生 trace / SVG / asciicast。W42 分支 A–H 除兩項例外外均 PASS：H1b（F6 關閉滑鼠後的行為）為 NOT_SUPPORTED（工具的滑鼠編碼器不看 App 的 DEC mode），H4（PM 串流）為 NOT_VERIFIED（未跑）；main 重現原始缺陷 C（滾輪卡住 1/15）、D（拖曳無選取）、G（resize 失去閱讀位置），**工具能區分修前修後**。
 - 但三個事實讓它不適合成為本 repo 的 gate：
   1. **滑鼠不看 DEC mode**：工具的滑鼠編碼器（`crates/tui-test/src/input/mouse.rs`）無條件送 SGR；App 關閉滑鼠回報（F6）後仍收到滾輪與移動事件，無法驗證「關閉後交回終端機選取」這條路徑（H1b）。
   2. **剪貼簿看不到**：`getClipboard()` 只讀 OSC 52 的 session 剪貼簿；本 TUI 用 `pbcopy` 寫 macOS 系統剪貼簿，工具永遠讀到空字串。E 的 PASS 靠 harness 把 `copy_to_clipboard` 改寫成寫檔（與 pyte 配方相同的替身），**不是工具功能**；真實 pbcopy → 其他 App 貼上仍需 Owner 實機驗收。
@@ -35,7 +35,7 @@ Harness 與證據：`tools/llmtool/tui-poc/`（`poc.mjs`、`tui_child.py`、`run
 | 平台 | Mac ✓（本次）。Linux：有 linux-x64-gnu/musl 預編譯包，EC2 **未驗證**（本 PoC 未跑 EC2） |
 | 維護風險 | 0.1.x、API 兩個月內從 beta 改版；JS 綁定靠 FFI + ABI 版本檢查（`tui_abi_version`），平台包與主包版本必須一致；Owner 的 Mac 若換 arm64 需另一個 optional 包 |
 
-## 3. 情境結果：main 26575a1 vs W42 6a5524a（80×24，alacritty 後端；3 次重跑結果一致）
+## 3. 情境結果：main 26575a1 vs W42 6a5524a（80×24，alacritty 後端；證據分支只保存每個版本各一次執行的結果 JSON，Developer 回報另有重跑但未保存收據，因此「重跑一致」未經證據支持）
 
 | # | 情境 | main | W42 | 證據（`tui-poc/evidence/*-evidence.md`） |
 | --- | --- | --- | --- | --- |
