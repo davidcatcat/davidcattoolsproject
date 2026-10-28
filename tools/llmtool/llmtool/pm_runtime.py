@@ -1,9 +1,14 @@
 """Bounded driver for an already-running Claude Code PM session."""
 
 import fcntl
+import atexit
 import json
 import os
+import re
+import shlex
+import signal
 import stat
+import subprocess
 import tempfile
 import threading
 import time
@@ -20,6 +25,12 @@ MAX_MESSAGE_BYTES = 16384
 MAX_STREAM_LINE_BYTES = 1024 * 1024
 MAX_HISTORY_TURNS = 200
 _ADAPTERS = {'claude-code': 'claude'}
+_LIVE_WINDOW_SECONDS = 20
+_STDERR_LIMIT = 65536
+_active_runtimes = set()
+_signal_handlers_installed = False
+_previous_signal_handlers = {}
+_atexit_registered = False
 
 
 def _error(code, message):
@@ -108,8 +119,304 @@ def _safe_result_text(value):
     return value
 
 
+def _screen_stream_text(value):
+    """Redact credential-like text before it crosses the runtime event boundary."""
+    from .task_submission_cli import _redact_rejected_output
+    screened = _redact_rejected_output(value)
+    if screened.startswith('[REDACTED_SENSITIVE_OUTPUT]') or _emitted_sensitive(screened):
+        return '[withheld]'
+    return screened
+
+
+_STREAM_SECRET_START = re.compile(
+    r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
+    r'\b(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
+    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]*|'
+    r'\bxox[abprs]-[A-Za-z0-9-]*|\b(?:bearer|basic)\s+\S*|'
+    r'\beyJ[A-Za-z0-9_.-]*', re.IGNORECASE)
+_STREAM_URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
+
+
+def _stream_safe_end(value):
+    """Return the prefix boundary before any trailing, unfinished secret token."""
+    safe_end = len(value)
+    for match in _STREAM_SECRET_START.finditer(value):
+        tail = value[match.start():]
+        # Complete matches have already been redacted by _screen_stream_text.
+        # Keep an unredacted candidate only while it can still grow into a token.
+        if ('[REDACTED]' not in tail and '[REDACTED_SENSITIVE_OUTPUT]' not in tail and
+                not any(char.isspace() for char in tail)):
+            safe_end = min(safe_end, match.start())
+        elif match.group(0).startswith('-----BEGIN') and '-----END' not in tail:
+            safe_end = min(safe_end, match.start())
+    # A delta can end in the middle of a marker (for example "gh" + "p_").
+    # Hold only that partial marker so the next delta can be screened as a whole.
+    markers = ('-----BEGIN', 'github_pat_', 'AKIA', 'ASIA', 'sk-', 'ghp_',
+               'gho_', 'ghu_', 'ghs_', 'ghr_', 'xox', 'eyJ', 'bearer', 'basic')
+    lowered = value.lower()
+    for marker in markers:
+        marker = marker.lower()
+        for size in range(1, len(marker)):
+            start = len(value) - size
+            if lowered.endswith(marker[:size]) and (
+                    start == 0 or not (value[start - 1].isalnum() or value[start - 1] == '_')):
+                safe_end = min(safe_end, start)
+    token_start = max((index for index, char in enumerate(value) if char.isspace()),
+                      default=-1) + 1
+    tail = value[token_start:]
+    for scheme in _STREAM_URL_SCHEME.finditer(tail):
+        start, end = scheme.span()
+        if ((start == 0 or not (tail[start - 1].isalnum() or tail[start - 1] == '_')) and
+                tail.startswith('://', end)):
+            authority = tail[end + 3:]
+            authority_end = min((position for marker in '/?#'
+                                 if (position := authority.find(marker)) >= 0),
+                                default=len(authority))
+            if ':' in authority[:authority_end]:
+                safe_end = min(safe_end, token_start + start)
+                break
+    return safe_end
+
+
+def _bounded_stream_append(current, value):
+    """Keep persisted partial output within the public message size bound."""
+    value = value.encode('utf-8', 'ignore').decode('utf-8')
+    room = MAX_MESSAGE_BYTES - len(current.encode('utf-8'))
+    if room <= 0:
+        return current
+    addition = value.encode('utf-8')[:room].decode('utf-8', 'ignore')
+    return current + addition
+
+
 def _history_path(root, key):
     return root / (key + '.history.json')
+
+
+def _runtime_state_path(root, key):
+    return root / (key + '.runtime.json')
+
+
+def _binding_path(root, native_session_id):
+    return root / (native_session_id + '.binding.json')
+
+
+def _stop_started_process(process, timeout=2):
+    """Stop a newly started PM process and its session within a bounded time."""
+    if process is None:
+        return
+    is_popen = isinstance(process, subprocess.Popen)
+    try:
+        if is_popen:
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=timeout)
+        return
+    except Exception:
+        pass
+    try:
+        if is_popen:
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except Exception:
+        pass
+    try:
+        process.wait(timeout=timeout)
+    except Exception:
+        pass
+
+
+def _write_json_atomic(root, path, value):
+    fd, temporary = tempfile.mkstemp(prefix='.pm-runtime-', dir=root)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+            fd = -1
+            json.dump(value, stream, ensure_ascii=True, sort_keys=True,
+                      separators=(',', ':'))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except OSError:
+        raise _error('PM_BINDING_WRITE_FAILED', 'PM session binding could not be saved') from None
+    finally:
+        if fd >= 0:
+            os.close(fd)
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def current_binding(pm_session_id=None, *, state_root=None):
+    """Read a persisted dedicated-session binding, or the most recently created one."""
+    root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+    root = _ensure_state_dir(Path(root_arg))
+    if pm_session_id is not None:
+        native_id = pm_session_id
+    else:
+        pointer = root / 'current-binding.json'
+        try:
+            with pointer.open(encoding='utf-8') as stream:
+                native_id = json.load(stream).get('native_session_id')
+        except (OSError, ValueError, AttributeError):
+            return None
+    if type(native_id) is not str or not active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native_id):
+        return None
+    path = _binding_path(root, native_id)
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        with os.fdopen(fd, encoding='utf-8') as stream:
+            binding = json.load(stream)
+    except (OSError, ValueError):
+        return None
+    expected = {'runtime': 'claude-code', 'native_session_id': native_id,
+                'dedicated': True}
+    if (not isinstance(binding, dict) or any(binding.get(k) != v for k, v in expected.items()) or
+            type(binding.get('dedicated')) is not bool or type(binding.get('cwd')) is not str or
+            type(binding.get('created_at')) is not str):
+        return None
+    return binding
+
+
+def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runner=None):
+    """Start a fresh Claude session and durably bind it as the dedicated PM."""
+    try:
+        cwd = os.path.normpath(os.path.abspath(cwd))
+        if not os.path.isdir(cwd):
+            raise ValueError()
+    except (OSError, TypeError, ValueError):
+        raise _error('PM_SESSION_INVALID', 'PM working directory is invalid') from None
+    native_id = str(uuid.uuid4())
+    argv = ['claude', '--session-id', native_id]
+    env = dict(os.environ if environ is None else environ)
+    try:
+        if runner is None:
+            process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        start_new_session=True, close_fds=True)
+        else:
+            process = runner(argv, cwd, env)
+    except Exception:
+        raise _error('PM_PROCESS_START_FAILED', 'Claude PM session could not be started') from None
+    try:
+        # The create command only establishes the native session. Never leave its
+        # CLI process around to be mistaken for a second live owner by open().
+        try:
+            return_code = process.wait(timeout=10)
+        except Exception:
+            _stop_started_process(process)
+            raise _error('PM_PROCESS_START_FAILED', 'Claude PM session did not exit after creation') from None
+        if return_code not in (None, 0):
+            raise _error('PM_PROCESS_START_FAILED', 'Claude PM session creation failed')
+        root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+        root = _ensure_state_dir(Path(root_arg))
+        binding = {'runtime': 'claude-code', 'native_session_id': native_id, 'cwd': cwd,
+                   'dedicated': True, 'created_at': _timestamp(clock or time.time)}
+        _write_json_atomic(root, _binding_path(root, native_id), binding)
+        _write_json_atomic(root, root / 'current-binding.json',
+                           {'native_session_id': native_id})
+    except Exception:
+        _stop_started_process(process)
+        raise
+    return binding
+
+
+def _session_live_elsewhere(native_id, transcript, now, created_at=None,
+                            *, ignore_recent_transcript=False):
+    try:
+        listing = subprocess.check_output(['ps', '-axo', 'pid=,command='],
+                                          stderr=subprocess.DEVNULL, timeout=2)
+        for line in listing.decode('utf-8', 'replace').splitlines():
+            try:
+                _, command = line.strip().split(None, 1)
+                argv = shlex.split(command)
+            except (ValueError, IndexError):
+                continue
+            if (argv and os.path.basename(argv[0]).lower() == 'claude' and
+                    native_id in argv[1:]):
+                return True
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        modified = transcript.stat().st_mtime
+        is_newer_than_binding = created_at is None or modified > created_at
+        if ignore_recent_transcript:
+            return False
+        return is_newer_than_binding and 0 <= now - modified <= _LIVE_WINDOW_SECONDS
+    except OSError:
+        return False
+
+
+def _terminate_all(signum=None, frame=None):
+    previous = _previous_signal_handlers.get(signum, signal.SIG_DFL)
+    if previous is None:
+        previous = signal.SIG_DFL
+    close_error = None
+    for runtime in tuple(_active_runtimes):
+        try:
+            runtime.close()
+        except Exception as exc:
+            if close_error is None:
+                close_error = exc
+    if signum is None or previous is signal.SIG_IGN:
+        if close_error is not None:
+            raise close_error
+        return
+    if callable(previous):
+        previous(signum, frame)
+        if close_error is not None:
+            raise close_error
+        return
+    # The old disposition is now restored by the final runtime close. Re-sending
+    # the signal lets the operating system apply its original default action.
+    os.kill(os.getpid(), signum)
+    if close_error is not None:
+        raise close_error
+
+
+def _restore_signal_handlers():
+    global _signal_handlers_installed
+    for signum, handler in tuple(_previous_signal_handlers.items()):
+        try:
+            # Do not overwrite a handler installed by another owner while this
+            # runtime was open. The cache can be stale if that owner replaced
+            # our handler, so the live disposition is authoritative.
+            if signal.getsignal(signum) is _terminate_all:
+                signal.signal(signum, signal.SIG_DFL if handler is None else handler)
+        except (ValueError, OSError):
+            pass
+    _previous_signal_handlers.clear()
+    _signal_handlers_installed = False
+
+
+def _unregister_lifecycle(runtime):
+    _active_runtimes.discard(runtime)
+    if not _active_runtimes:
+        _restore_signal_handlers()
+
+
+def _register_lifecycle(runtime):
+    global _signal_handlers_installed, _atexit_registered
+    _active_runtimes.add(runtime)
+    for signum in (signal.SIGTERM, signal.SIGHUP):
+        try:
+            current = signal.getsignal(signum)
+            if current is not _terminate_all:
+                _previous_signal_handlers[signum] = current
+                signal.signal(signum, _terminate_all)
+        except (ValueError, OSError):
+            pass
+    _signal_handlers_installed = any(
+        signal.getsignal(signum) is _terminate_all
+        for signum in (signal.SIGTERM, signal.SIGHUP))
+    if _signal_handlers_installed and not _atexit_registered:
+        atexit.register(_terminate_all)
+        _atexit_registered = True
 
 
 class PMRuntime:
@@ -131,8 +438,12 @@ class PMRuntime:
         self._state_lock = threading.RLock()
         self._turn = None
         self._closed = False
+        self._has_owned_session = False
         self._was_interrupted = False
         self._unknown_lines = 0
+        self._stderr_buffer = bytearray()
+        self._stderr_thread = None
+        self._idempotency = {}
 
     def __enter__(self):
         return self.open()
@@ -205,6 +516,35 @@ class PMRuntime:
             except FileNotFoundError:
                 pass
 
+    def _recent_clean_close(self, now):
+        path = _runtime_state_path(self._root, self._key)
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        except (FileNotFoundError, OSError):
+            return False
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                return False
+            with os.fdopen(fd, 'r', encoding='utf-8') as stream:
+                fd = -1
+                state = json.load(stream)
+            closed_at = datetime.fromisoformat(state['clean_closed_at']).timestamp()
+            return 0 <= now - closed_at <= _LIVE_WINDOW_SECONDS
+        except (KeyError, TypeError, ValueError, UnicodeError, OSError):
+            return False
+        finally:
+            if fd >= 0:
+                os.close(fd)
+
+    def _record_clean_close(self):
+        path = _runtime_state_path(self._root, self._key)
+        try:
+            _write_json_atomic(self._root, path,
+                               {'clean_closed_at': _timestamp(self.clock)})
+        except LLMToolError:
+            raise _error('PM_STATE_WRITE_FAILED', 'PM runtime state could not be saved') from None
+
     def open(self):
         if self._child is not None:
             return self
@@ -230,6 +570,36 @@ class PMRuntime:
             raise _error('PM_SESSION_BUSY', 'PM session lock could not be acquired') from None
         self._key, self._root, self._lock_fd = key, root, lock_fd
         try:
+            turns = self._history_read()
+            recovered = False
+            recovery_time = _timestamp(self.clock)
+            for turn in turns:
+                if isinstance(turn, dict) and turn.get('status') == 'ACTIVE':
+                    turn['status'] = 'INTERRUPTED'
+                    turn['ended_at'] = recovery_time
+                    recovered = True
+            if recovered:
+                self._history_write(turns)
+            for turn in turns:
+                if isinstance(turn, dict) and isinstance(turn.get('idempotency_key'), str):
+                    self._idempotency[turn['idempotency_key']] = turn
+            binding = current_binding(self.pm_session_id, state_root=root)
+            if binding is None or binding.get('cwd') != cwd:
+                raise _error('PM_SESSION_NOT_DEDICATED',
+                             'PM session is not dedicated; create a dedicated PM session and retry')
+            transcript = active_pm_inbox.claude_session_file(self.pm_session_id, cwd, self.environ)
+            clock_value = self.clock()
+            now = clock_value.timestamp() if isinstance(clock_value, datetime) else float(clock_value)
+            try:
+                created_at = datetime.fromisoformat(binding['created_at']).timestamp()
+            except (ValueError, TypeError, OverflowError):
+                created_at = None
+            recently_closed = self._recent_clean_close(now)
+            if _session_live_elsewhere(
+                    self.pm_session_id, transcript, now, created_at,
+                    ignore_recent_transcript=self._has_owned_session or recently_closed):
+                raise _error('PM_SESSION_LIVE_ELSEWHERE',
+                             'PM session appears active elsewhere; close it before using pm_runtime')
             env = dict(os.environ if self.environ is None else self.environ)
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
                     'stream-json', '--verbose', '--include-partial-messages', '--resume',
@@ -239,14 +609,34 @@ class PMRuntime:
                 import subprocess
                 runner = lambda args, cwd, env: subprocess.Popen(
                     args, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL, bufsize=0)
+                    stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
             self._child = runner(argv, cwd, env)
+            self._stderr_buffer = bytearray()
+            if getattr(self._child, 'stderr', None) is not None:
+                self._stderr_thread = threading.Thread(target=self._capture_stderr, daemon=True)
+                self._stderr_thread.start()
             self.cwd = cwd
             self._closed = False
+            _register_lifecycle(self)
+            self._has_owned_session = True
             return self
+        except LLMToolError:
+            try:
+                self.close(timeout=0)
+            except Exception:
+                _unregister_lifecycle(self)
+                self._release_lock()
+                self._child = None
+            self._key = self._root = None
+            raise
         except Exception:
-            self._release_lock()
-            self._child = None
+            try:
+                self.close(timeout=0)
+            except Exception:
+                _unregister_lifecycle(self)
+                self._release_lock()
+                self._child = None
+            self._key = self._root = None
             raise _error('PM_PROCESS_START_FAILED', 'PM runtime process could not be started') from None
 
     def _release_lock(self):
@@ -266,7 +656,34 @@ class PMRuntime:
             except (OSError, BrokenPipeError, AttributeError):
                 raise _error('PM_PROCESS_EXITED', 'PM runtime process is unavailable') from None
 
-    def send(self, text):
+    def _capture_stderr(self):
+        stream = getattr(self._child, 'stderr', None)
+        if stream is None:
+            return
+        try:
+            while True:
+                chunk = stream.read(4096)
+                if not chunk:
+                    return
+                self._stderr_buffer.extend(chunk)
+                if len(self._stderr_buffer) > _STDERR_LIMIT:
+                    del self._stderr_buffer[:-_STDERR_LIMIT]
+        except (OSError, ValueError):
+            return
+
+    def _stderr_excerpt(self):
+        value = bytes(self._stderr_buffer[-4096:]).decode('utf-8', 'replace')
+        return '[withheld]' if _emitted_sensitive(value) else value
+
+    def is_alive(self):
+        if self._child is None or self._closed:
+            return False
+        try:
+            return self._child.poll() is None
+        except Exception:
+            return False
+
+    def send(self, text, idempotency_key=None):
         if (type(text) is not str or not text or
                 any((unicodedata.category(char) == 'Cc' and char not in '\t\n') or
                     unicodedata.category(char) == 'Cf' for char in text)):
@@ -280,6 +697,15 @@ class PMRuntime:
         with self._state_lock:
             if self._closed or self._child is None:
                 raise _error('PM_RUNTIME_CLOSED', 'PM runtime is not open')
+            if idempotency_key is not None:
+                if (type(idempotency_key) is not str or not idempotency_key or
+                        len(idempotency_key.encode('utf-8')) > 256 or
+                        any(unicodedata.category(c) in ('Cc', 'Cf') for c in idempotency_key)):
+                    raise _error('PM_IDEMPOTENCY_KEY_INVALID', 'PM idempotency key is invalid')
+                existing = self._idempotency.get(idempotency_key)
+                if existing is not None:
+                    return iter(({'type': 'TURN_REPLAY', 'turn_id': existing['turn_id'],
+                                  'seq': existing['seq'], 'status': existing['status']},))
             if self._turn is not None:
                 raise _error('PM_TURN_ACTIVE', 'PM turn is already active')
             turns = self._history_read()
@@ -287,10 +713,12 @@ class PMRuntime:
                 (turn.get('seq', 0) for turn in turns if isinstance(turn, dict)), default=0) + 1,
                 'started_at': _timestamp(self.clock), 'ended_at': None,
                 'owner_text': text, 'status': 'ACTIVE', 'result_text': '',
-                'tool_names': [], 'usage': {}}
+                'tool_names': [], 'usage': {}, 'idempotency_key': idempotency_key}
             turns.append(record)
             self._history_write(turns)
             self._turn = record
+            if idempotency_key is not None:
+                self._idempotency[idempotency_key] = record
             try:
                 self._write_line({'type': 'user', 'message': {'role': 'user', 'content': [
                     {'type': 'text', 'text': text}]}})
@@ -316,6 +744,8 @@ class PMRuntime:
         with self._state_lock:
             record['status'] = status
             record['ended_at'] = _timestamp(self.clock)
+            if not result_text and record.get('result_text'):
+                result_text = record['result_text']
             record['result_text'] = _safe_result_text(result_text)
             record['usage'] = usage if isinstance(usage, dict) else {}
             self._persist_turn(record)
@@ -324,77 +754,191 @@ class PMRuntime:
 
     def _events(self, record):
         child = self._child
+        event_seq = 0
+        blocks = {}
+        withheld_blocks = set()
+        emitted_lengths = {}
+
+        def emit(kind, **fields):
+            nonlocal event_seq
+            value = {'type': kind, 'turn_id': record['turn_id'], 'seq': event_seq}
+            event_seq += 1
+            value.update(fields)
+            return value
+
+        def flush_block(index, force=False):
+            if index in withheld_blocks:
+                return None
+            buffered = blocks.get(index, '')
+            screened = _screen_stream_text(buffered)
+            if screened == '[withheld]':
+                withheld_blocks.add(index)
+                return None
+            previous = emitted_lengths.get(index, 0)
+            safe_end = len(screened) if force else _stream_safe_end(screened)
+            safe_end = max(previous, safe_end)
+            if safe_end <= previous:
+                return None
+            piece = screened[previous:safe_end]
+            emitted_lengths[index] = safe_end
+            record['result_text'] = _bounded_stream_append(
+                record.get('result_text', ''), piece)
+            return emit('TEXT_DELTA', text=piece, block_index=index)
+
+        def flush_all_blocks():
+            for block_index in blocks:
+                event = flush_block(block_index, force=True)
+                if event is not None:
+                    yield event
+
         try:
             for raw in child.stdout:
+                if self._was_interrupted:
+                    yield from flush_all_blocks()
                 if self._closed:
                     return
                 if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_STREAM_LINE_BYTES:
-                    yield {'type': 'RUNTIME_ERROR', 'code': 'PM_STREAM_INVALID'}
+                    yield emit('RUNTIME_ERROR', code='PM_STREAM_INVALID')
                     self._terminate_child()
                     self._finish(record, 'ERROR')
-                    yield {'type': 'TURN_END', 'turn_id': record['turn_id'], 'status': 'ERROR',
-                           'result_text': '', 'usage': {}}
+                    yield emit('TURN_END', status='ERROR', result_text='', usage={})
                     return
                 try:
                     line = json.loads(bytes(raw).decode('utf-8'))
                 except (ValueError, UnicodeError):
                     line = None
                 if not isinstance(line, dict):
-                    yield {'type': 'RUNTIME_ERROR', 'code': 'PM_STREAM_INVALID'}
+                    yield emit('RUNTIME_ERROR', code='PM_STREAM_INVALID')
                     self._terminate_child()
                     self._finish(record, 'ERROR')
-                    yield {'type': 'TURN_END', 'turn_id': record['turn_id'], 'status': 'ERROR',
-                           'result_text': '', 'usage': {}}
+                    yield emit('TURN_END', status='ERROR', result_text='', usage={})
                     return
                 if _contains_different_session(line, self.pm_session_id):
-                    self._terminate_child()
-                    self._finish(record, 'ERROR')
-                    self._release_lock()
-                    self._closed = True
-                    raise _error('PM_SESSION_FORKED', 'Claude Code started a different PM session')
+                    fork_error = _error(
+                        'PM_SESSION_FORKED', 'Claude Code started a different PM session')
+                    try:
+                        self._finish(record, 'ERROR')
+                    except Exception:
+                        with self._state_lock:
+                            if self._turn is record:
+                                self._turn = None
+                    try:
+                        self.close()
+                    except Exception:
+                        pass
+                    raise fork_error
                 kind = line.get('type')
                 if kind == 'stream_event':
                     event = line.get('event') or {}
                     delta = event.get('delta') or {}
-                    if event.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta':
+                    if event.get('type') == 'message_start':
+                        blocks.clear()
+                        withheld_blocks.clear()
+                        emitted_lengths.clear()
+                    elif event.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta':
                         text = delta.get('text')
                         if isinstance(text, str):
-                            yield {'type': 'TEXT_DELTA', 'text': text}
+                            index = event.get('index', 0)
+                            if index in withheld_blocks:
+                                continue
+                            blocks[index] = blocks.get(index, '') + text
+                            buffered = blocks[index]
+                            if len(buffered.encode('utf-8', 'ignore')) > MAX_MESSAGE_BYTES:
+                                withheld_blocks.add(index)
+                            else:
+                                screened = _screen_stream_text(buffered)
+                                if screened == '[withheld]':
+                                    withheld_blocks.add(index)
+                                else:
+                                    event = flush_block(index)
+                                    if event is not None:
+                                        yield event
+                    elif event.get('type') == 'content_block_stop':
+                        index = event.get('index', 0)
+                        flushed = flush_block(index, force=True)
+                        if flushed is not None:
+                            yield flushed
                 elif kind == 'assistant':
-                    for item in _iter_content((line.get('message') or {}).get('content')):
+                    for position, item in enumerate(
+                            _iter_content((line.get('message') or {}).get('content'))):
                         if not isinstance(item, dict):
                             continue
                         if item.get('type') == 'text' and isinstance(item.get('text'), str):
-                            yield {'type': 'ASSISTANT_TEXT', 'text': item['text']}
+                            index = item.get('index', position)
+                            if index in withheld_blocks:
+                                continue
+                            final_text = _screen_stream_text(item['text'])
+                            if final_text == '[withheld]':
+                                withheld_blocks.add(index)
+                                continue
+                            elif index not in withheld_blocks:
+                                flushed = flush_block(index, force=True)
+                                if flushed is not None:
+                                    yield flushed
+                                previous = emitted_lengths.get(index, 0)
+                                remainder = final_text[min(previous, len(final_text)):]
+                                record['result_text'] = _bounded_stream_append(
+                                    record.get('result_text', ''), remainder)
+                                blocks[index] = final_text
+                                emitted_lengths[index] = len(final_text)
+                            yield emit('ASSISTANT_TEXT', text=final_text, final=True)
                         elif item.get('type') == 'tool_use':
                             tool_id, name = item.get('id'), item.get('name')
                             if isinstance(name, str):
                                 if name not in record['tool_names']:
                                     record['tool_names'].append(name)
-                                yield {'type': 'TOOL_USE', 'tool_use_id': tool_id, 'name': name}
+                                yield emit('TOOL_USE', tool_use_id=tool_id, name=name)
                 elif kind == 'user':
                     for item in _iter_content((line.get('message') or {}).get('content')):
                         if isinstance(item, dict) and item.get('type') == 'tool_result':
-                            yield {'type': 'TOOL_RESULT', 'tool_use_id': item.get('tool_use_id'),
-                                   'is_error': bool(item.get('is_error', False))}
+                            is_error = bool(item.get('is_error', False))
+                            permission = (item.get('permission_denial') or item.get('permission') or
+                                          item.get('permission_denied'))
+                            content = item.get('content', '')
+                            permission_text = content.lower() if isinstance(content, str) else ''
+                            denied = bool(permission) or (is_error and any(
+                                word in permission_text for word in ('permission denied',
+                                                                     "doesn't want to proceed",
+                                                                     'denied by user')))
+                            reason = ('PERMISSION_DENIED' if denied else
+                                      'TOOL_ERROR' if is_error else 'OK')
+                            yield emit('TOOL_RESULT', tool_use_id=item.get('tool_use_id'),
+                                       reason=reason, is_error=is_error)
                 elif kind == 'result':
                     status = 'INTERRUPTED' if self._was_interrupted else (
                         'ERROR' if line.get('is_error') or line.get('subtype') in
                         ('error', 'error_during_execution') else 'COMPLETED')
                     result = line.get('result', '')
-                    result_text = result if isinstance(result, str) else ''
+                    result_text = _screen_stream_text(result) if isinstance(result, str) else ''
+                    if result_text == '[withheld]':
+                        result_text = ''
+                    # The turn result closes any remaining text blocks.
+                    yield from flush_all_blocks()
+                    if not result_text:
+                        result_text = record.get('result_text', '')
                     usage = line.get('usage') if isinstance(line.get('usage'), dict) else {}
+                    if status == 'ERROR':
+                        lower = result_text.lower()
+                        code = ('PM_QUOTA_EXHAUSTED' if any(word in lower for word in
+                                ('quota exceeded', 'usage limit', 'rate limit', 'hit your limit'))
+                                else 'PM_PROCESS_EXITED')
+                        yield emit('RUNTIME_ERROR', code=code, stderr=self._stderr_excerpt())
                     self._finish(record, status, result_text, usage)
-                    yield {'type': 'TURN_END', 'turn_id': record['turn_id'], 'status': status,
-                           'result_text': _safe_result_text(result_text), 'usage': usage}
+                    yield emit('TURN_END', status=status,
+                               result_text=_safe_result_text(result_text), usage=usage)
                     return
                 else:
                     self._unknown_lines += 1
             if self._turn is record:
-                yield {'type': 'RUNTIME_ERROR', 'code': 'PM_PROCESS_EXITED'}
+                if self._stderr_thread is not None:
+                    self._stderr_thread.join(timeout=1)
+                stderr = self._stderr_excerpt()
+                lower = stderr.lower()
+                code = ('PM_QUOTA_EXHAUSTED' if any(word in lower for word in
+                        ('quota exceeded', 'usage limit', 'rate limit')) else 'PM_PROCESS_EXITED')
+                yield emit('RUNTIME_ERROR', code=code, stderr=stderr)
                 self._finish(record, 'ERROR')
-                yield {'type': 'TURN_END', 'turn_id': record['turn_id'], 'status': 'ERROR',
-                       'result_text': '', 'usage': {}}
+                yield emit('TURN_END', status='ERROR', result_text='', usage={})
         finally:
             self._was_interrupted = False
 
@@ -411,37 +955,50 @@ class PMRuntime:
         if child is None:
             return
         try:
-            child.terminate()
+            if isinstance(child, subprocess.Popen):
+                os.killpg(child.pid, signal.SIGTERM)
+            else:
+                child.terminate()
         except Exception:
             pass
 
     def close(self, timeout=5):
         with self._state_lock:
-            if self._closed and self._lock_fd is None:
+            if (self._closed and self._lock_fd is None and self._child is None and
+                    self not in _active_runtimes and self._turn is None):
                 return
             self._closed = True
             child = self._child
             active_turn = self._turn
+        error = None
+        had_child = child is not None
         if active_turn is not None:
-            self._finish(active_turn, 'INTERRUPTED')
+            try:
+                self._finish(active_turn, 'INTERRUPTED')
+            except Exception as exc:
+                error = exc
         try:
             if child is not None:
                 try:
                     child.stdin.close()
                 except Exception:
                     pass
+                self._terminate_child()
                 try:
                     child.wait(timeout=timeout)
                 except Exception:
                     try:
-                        child.terminate()
+                        self._terminate_child()
                     except Exception:
                         pass
                     try:
                         child.wait(timeout=timeout)
                     except Exception:
                         try:
-                            child.kill()
+                            if isinstance(child, subprocess.Popen):
+                                os.killpg(child.pid, signal.SIGKILL)
+                            else:
+                                child.kill()
                         except Exception:
                             pass
                         try:
@@ -449,16 +1006,33 @@ class PMRuntime:
                         except Exception:
                             pass
         finally:
-            self._release_lock()
             self._child = None
+            try:
+                _unregister_lifecycle(self)
+            except Exception as exc:
+                if error is None:
+                    error = exc
+            if error is None and had_child and self._key is not None:
+                try:
+                    self._record_clean_close()
+                except Exception as exc:
+                    error = exc
+            try:
+                self._release_lock()
+            except Exception as exc:
+                if error is None:
+                    error = exc
+        if error is not None:
+            raise error
 
 
-def read_history(pm_session_id, *, after=0, limit=50, state_root=None):
+def read_history(pm_session_id, *, after=0, limit=50, latest=None, state_root=None):
     try:
         key = active_pm_inbox.pm_session_key(pm_session_id)
     except LLMToolError:
         raise _error('PM_SESSION_INVALID', 'PM session ID is invalid') from None
-    if type(after) is not int or after < 0 or type(limit) is not int or limit < 1:
+    if (type(after) is not int or after < 0 or type(limit) is not int or limit < 1 or
+            (latest is not None and (type(latest) is not int or latest < 1))):
         raise _error('PM_HISTORY_QUERY_INVALID', 'PM history paging is invalid')
     root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
     root = _ensure_state_dir(Path(root_arg))
@@ -486,7 +1060,11 @@ def read_history(pm_session_id, *, after=0, limit=50, state_root=None):
         finally:
             if fd >= 0:
                 os.close(fd)
-    selected = [turn for turn in turns if isinstance(turn, dict) and
-                type(turn.get('seq')) is int and turn['seq'] > after][:limit]
+    if latest is None:
+        selected = [turn for turn in turns if isinstance(turn, dict) and
+                    type(turn.get('seq')) is int and turn['seq'] > after][:limit]
+    else:
+        selected = [turn for turn in turns if isinstance(turn, dict) and
+                    type(turn.get('seq')) is int][-latest:]
     next_after = selected[-1]['seq'] if selected else after
     return {'pm_session_id': pm_session_id, 'turns': selected, 'next_after': next_after}

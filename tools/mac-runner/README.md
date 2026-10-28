@@ -32,6 +32,12 @@ After installing, run the **Mac Runner Smoke Test** workflow and check the
 job log shows `runner isolation: dedicated account ghrunner` and
 `runner admission: ...`.
 
+## Mac CI runs
+
+Pull requests run the Mac CI coverage selected for their changes. The PM
+triggers `workflow_dispatch` after each merge train to run the full main suite.
+The Mac CI workflow has no scheduled trigger.
+
 ## A second runner (`davidproject-self-action-2`, trial)
 
     sudo bash tools/mac-runner/install.sh --account ghrunner2 \

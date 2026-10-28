@@ -160,6 +160,50 @@ class TaskSubmissionCLITests(unittest.TestCase):
             code = run_task_submit(self.args)
         return code, json.loads(out.getvalue()), client, resolve
 
+    def test_completion_repair_chain_skips_failed_attempt_before_successful_retry(self):
+        from types import SimpleNamespace
+
+        source_sha, failed_head, retry_head, result_head = (
+            'a' * 40, 'b' * 40, 'c' * 40, 'd' * 40)
+        original_artifact = 'diff --git a/sample.py b/sample.py\n'
+        repair_artifact = 'diff --git a/sample.py b/sample.py\n'
+        repair_id = '4' * 32
+        task = {
+            'developer': {'source_sha': source_sha, 'write_paths': ['sample.py'],
+                          'artifact': original_artifact,
+                          'artifact_sha256': hashlib.sha256(
+                              original_artifact.encode()).hexdigest()},
+            'review_repair_claims': [
+                {'attempt': 1, 'state': 'FAILED', 'head_sha': failed_head,
+                 'repair_task_id': '3' * 32},
+                {'attempt': 2, 'state': 'DISPATCHED', 'head_sha': retry_head,
+                 'repair_task_id': repair_id},
+            ],
+        }
+        repair = {'developer': {'state': 'DEVELOPER_RESPONDED',
+                                'source_sha': retry_head, 'artifact': repair_artifact,
+                                'artifact_sha256': hashlib.sha256(
+                                    repair_artifact.encode()).hexdigest()}}
+        class Store:
+            def get(self, task_id):
+                if task_id == repair_id:
+                    return repair
+                raise AssertionError('failed repair Task must not be loaded')
+
+        registration = SimpleNamespace(root='/repo/task', branch='task-branch',
+                                       source_sha=source_sha, result_sha=result_head)
+        with patch.object(submission_cli.task_completion, 'read_d6_registration',
+                          return_value=registration):
+            artifacts = submission_cli._completion_repair_artifact_segments(
+                task, Store(), executor_task='executor', common_dir='/repo/.git',
+                root='/repo/task', branch='task-branch', source_sha=source_sha)
+        self.assertEqual(artifacts, [
+            (original_artifact, task['developer']['artifact_sha256'],
+             source_sha, retry_head),
+            (repair_artifact, repair['developer']['artifact_sha256'],
+             retry_head, result_head),
+        ])
+
     def test_trusted_bootstrap_helper_requires_clean_pinned_dispatcher_source(self):
         dispatcher_root = Path(self.temp.name).resolve() / 'dispatcher'
         helper = dispatcher_root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
@@ -1373,6 +1417,22 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(saved['dispatch_audit'][-1]['decision'], 'ALLOWED')
         self.assertEqual(saved['dispatch_audit'][-1]['reason_code'], 'OWNER_POLICY_ALLOWED')
 
+    def test_captured_source_files_allow_an_ordinary_modify_proposal(self):
+        source_files = submission_cli._text_developer_source_files(
+            self.executor_root, self.executor_head, ['sample.py'])
+        self.assertIsInstance(source_files, submission_cli._DeveloperSourceFiles)
+        self.assertIn('sample.py', source_files.existing_paths)
+        source = source_files['sample.py']
+        old_line = source.splitlines()[0]
+        new_line = old_line + '  # updated'
+        proposal = ('diff --git a/sample.py b/sample.py\n'
+                    '--- a/sample.py\n+++ b/sample.py\n'
+                    f'@@ -1 +1 @@\n-{old_line}\n+{new_line}\n')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            proposal, ['sample.py'], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, proposal)
+
     def test_codex_delegate_missing_developer_profile_fails_closed_without_pm_fallback(self):
         task = self._pm_task_with_codex_assignment()
         output = io.StringIO()
@@ -2171,7 +2231,7 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
             'closing fence after the diff': (good + '```\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'deleted file': (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
                              f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n',
-                             'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                             None),
             'rename': (f'diff --git a/{target} b/tools/llmtool/renamed.py\nrename from {target}\n'
                        'rename to tools/llmtool/renamed.py\n', 'DEVELOPER_OUTPUT_INVALID_DIFF'),
             'path outside write_paths': (good.replace(target, 'tools/llmtool/other.py'),
@@ -2185,14 +2245,140 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
                 header + '@@ -1,4 +1,4 @@\n keep\n-old\n+new\n keep\n', None),
             'new file': (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
                          f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
-                         'DEVELOPER_OUTPUT_INVALID_DIFF'),
-            'new executable file': (f'diff --git a/dev/null b/{target}\nnew file mode 100755\n'
+                         None),
+            'new executable file': (f'diff --git a/{target} b/{target}\nnew file mode 100755\n'
                                     f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n',
-                                    'DEVELOPER_OUTPUT_INVALID_DIFF'),
+                                    'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'),
+            'new symlink': (f'diff --git a/{target} b/{target}\nnew file mode 120000\n'
+                            f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+target\n',
+                            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'),
+            'deleted executable file': (
+                f'diff --git a/{target} b/{target}\ndeleted file mode 100755\n'
+                f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n',
+                'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'),
         }
         for label, (text, expected) in shapes.items():
             with self.subTest(label):
                 self.assertEqual(rejection(text, [target]), expected)
+
+    def test_file_operation_scope_and_source_existence(self):
+        target = 'tools/llmtool/new.py'
+        outside = 'tools/llmtool/outside.py'
+        new_file = (f'diff --git a/{target} b/{target}\nnew file mode 100644\n'
+                    f'--- /dev/null\n+++ b/{target}\n@@ -0,0 +1 @@\n+new\n')
+        deletion = (f'diff --git a/{target} b/{target}\ndeleted file mode 100644\n'
+                    f'--- a/{target}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n')
+        outside_new = new_file.replace(target, outside)
+        self.assertEqual(submission_cli._developer_output_rejection(
+            outside_new, [target]), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files={target: ''})[2], None)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files={target: 'already exists\n'})[2],
+            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+        self.assertEqual(submission_cli._developer_normalized_output(
+            deletion, [target], source_files={target: 'old\n'})[2], None)
+
+        existing_empty = submission_cli._DeveloperSourceFiles()
+        existing_empty[target] = ''
+        existing_empty.existing_paths.add(target)
+        existing_empty.regular_paths.add(target)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            new_file, [target], source_files=existing_empty)[2],
+            'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+
+    def test_empty_file_git_metadata_shape_is_admitted_safely(self):
+        target = 'tools/llmtool/new.py'
+        outside = 'tools/llmtool/outside.py'
+        empty_add = (f'diff --git a/{target} b/{target}\n'
+                     'new file mode 100644\n'
+                     'index 0000000..e69de29\n')
+        empty_delete = (f'diff --git a/{target} b/{target}\n'
+                        'deleted file mode 100644\n'
+                        'index e69de29..0000000\n')
+        empty_add_files = submission_cli._DeveloperSourceFiles()
+        empty_add_files[target] = ''
+        artifact, _normalizations, rejection = submission_cli._developer_normalized_output(
+            empty_add, [target], source_files=empty_add_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, empty_add)
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            empty_add, [target]))
+        self.assertEqual(submission_cli._developer_output_rejection(
+            empty_add.replace(target, outside), [target]),
+            'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+
+        empty_delete_files = submission_cli._DeveloperSourceFiles()
+        empty_delete_files[target] = ''
+        empty_delete_files.existing_paths.add(target)
+        empty_delete_files.regular_paths.add(target)
+        artifact, _normalizations, rejection = submission_cli._developer_normalized_output(
+            empty_delete, [target], source_files=empty_delete_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, empty_delete)
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            empty_delete, [target]))
+
+        nonempty_delete_files = submission_cli._DeveloperSourceFiles()
+        nonempty_delete_files[target] = 'content\n'
+        nonempty_delete_files.existing_paths.add(target)
+        nonempty_delete_files.regular_paths.add(target)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            empty_delete, [target], source_files=nonempty_delete_files)[2],
+            'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+
+        wrong_add_mode = empty_add.replace('new file mode 100644',
+                                           'new file mode 100755')
+        wrong_delete_mode = empty_delete.replace('deleted file mode 100644',
+                                                 'deleted file mode 100755')
+        self.assertEqual(submission_cli._developer_output_rejection(
+            wrong_add_mode, [target]), 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+        self.assertEqual(submission_cli._developer_output_rejection(
+            wrong_delete_mode, [target]), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+
+    def test_empty_file_entry_before_another_diff_is_admitted(self):
+        empty = 'tools/llmtool/__init__.py'
+        modified = 'tools/llmtool/example.py'
+        mixed = (
+            f'diff --git a/{empty} b/{empty}\n'
+            'new file mode 100644\n'
+            'index 0000000..e69de29\n'
+            f'diff --git a/{modified} b/{modified}\n'
+            f'--- a/{modified}\n+++ b/{modified}\n'
+            '@@ -1 +1 @@\n-old\n+new\n')
+        source_files = submission_cli._DeveloperSourceFiles()
+        source_files[empty] = ''
+        source_files[modified] = 'old\n'
+        source_files.existing_paths.add(modified)
+        source_files.regular_paths.add(modified)
+
+        artifact, _normalizations, rejection = submission_cli._developer_normalized_output(
+            mixed, [empty, modified], source_files=source_files)
+
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, mixed)
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            mixed, [empty, modified]))
+
+    def test_proposal_can_mix_new_files_with_existing_file_modifications(self):
+        target = 'tools/llmtool/existing.py'
+        added = 'tools/llmtool/new.py'
+        mixed = (
+            f'diff --git a/{target} b/{target}\n'
+            f'--- a/{target}\n+++ b/{target}\n'
+            '@@ -1 +1 @@\n-old\n+updated\n'
+            f'diff --git a/{added} b/{added}\nnew file mode 100644\n'
+            f'--- /dev/null\n+++ b/{added}\n'
+            '@@ -0,0 +1 @@\n+new file\n')
+        source_files = submission_cli._DeveloperSourceFiles()
+        source_files[target] = 'old\n'
+        source_files.existing_paths.add(target)
+        source_files.regular_paths.add(target)
+        source_files[added] = ''
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            mixed, [target, added], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, mixed)
 
     def test_unsafe_shapes_remain_rejected(self):
         target = 'tools/llmtool/example.py'
@@ -2271,14 +2457,6 @@ class ModeMetadataRejectionTests(unittest.TestCase):
                 metadata=('old mode 100644\n', 'new mode 100755\n'), hunk=False),
             'solo old mode': self._section(metadata=('old mode 100644\n',)),
             'solo new mode': self._section(metadata=('new mode 100755\n',)),
-            'new file mode': (
-                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
-                'new file mode 100644\n'
-                f'--- /dev/null\n+++ b/{self.TARGET}\n@@ -0,0 +1 @@\n+new\n'),
-            'deleted file mode': (
-                f'diff --git a/{self.TARGET} b/{self.TARGET}\n'
-                'deleted file mode 100644\n'
-                f'--- a/{self.TARGET}\n+++ /dev/null\n@@ -1 +0,0 @@\n-old\n'),
             'mode change in a later section': clean + self._section(
                 path=self.SECOND, metadata=('old mode 100644\n', 'new mode 100755\n')),
             'mode change in an earlier section': self._section(

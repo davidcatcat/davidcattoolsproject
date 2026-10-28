@@ -544,6 +544,13 @@ def add_task_submission_parsers(actions):
     complete.add_argument('--executor-task', required=True, help='registered D6 Executor task id bound at delegation')
     complete.add_argument('--reviewer-task', help='registered D6 independent Reviewer task id (omit for the initial Executor-result callback)')
     complete.add_argument('--pr', type=int, help='public GitHub pull request number (omit for the initial Executor-result callback)')
+    advance = actions.add_parser('advance', help='Advance one Task through its next review or closure step')
+    advance.add_argument('task_id', help='existing durable Task ID')
+    advance.add_argument('--pr', type=int, help='public GitHub pull request number')
+    advance.add_argument('--integration-pr', type=int,
+                         help='merged integration PR containing the reviewed head')
+    advance.add_argument('--reviewer-session-done', action='store_true',
+                         help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
     review_prompt = actions.add_parser(
         'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
     review_prompt.add_argument('task_id', help='existing durable Task ID')
@@ -734,6 +741,17 @@ def run_task_review_dispatch(args, *, store=None):
     return _print(result)
 
 
+def run_task_advance(args, *, store=None, **adapters):
+    """Thin CLI adapter for one idempotent Task advancement step."""
+    from .task_advance import advance
+    result = advance(task_id=args.task_id, store=TaskStore() if store is None else store,
+        pr_number=getattr(args, 'pr', None),
+        integration_pr=getattr(args, 'integration_pr', None),
+        reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
+    _print(result)
+    return 1 if result.get('codes') else 0
+
+
 def run_task_review_result(args, *, store=None, github_get=None):
     """Thin CLI adapter for the durable Reviewer result collector."""
     from .review_result import record_review_result
@@ -783,6 +801,23 @@ _INDEX_METADATA = 'index '
 _MODE_METADATA = ('old mode ', 'new mode ', 'new file mode ', 'deleted file mode ')
 
 
+class _DeveloperOutputUnsupported(ValueError):
+    """A recognized file operation that the text-diff contract does not support."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+class _DeveloperSourceFiles(dict):
+    """Source text plus the set of paths that existed at the bound revision."""
+
+    def __init__(self):
+        super().__init__()
+        self.existing_paths = set()
+        self.regular_paths = set()
+
+
 def _assignment_paths(read_paths, write_paths):
     def valid(path):
         return (type(path) is str and 0 < len(path) <= 512 and
@@ -815,7 +850,7 @@ def _patch_paths(patch):
     if type(patch) is not str or not patch or not patch.startswith('diff --git '):
         raise ValueError
     lines = patch.splitlines()
-    paths = set()
+    paths = {}
     index = 0
     while index < len(lines):
         match = _DIFF_HEADER.fullmatch(lines[index])
@@ -831,24 +866,48 @@ def _patch_paths(patch):
             raise ValueError
         if path in paths:
             raise ValueError
-        paths.add(path)
         index += 1
 
         # Accept only ordinary index metadata for tracked files. A newly
         # created file has the exact no-index shape emitted by our capture
         # helper; other mode changes remain rejected.
-        new_file = (index < len(lines) and lines[index] == 'new file mode 100644')
-        if new_file:
+        new_file = False
+        deleted_file = False
+        empty_file_operation = None
+        if index < len(lines) and lines[index].startswith('new file mode '):
+            if lines[index] != 'new file mode 100644':
+                raise _DeveloperOutputUnsupported('DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+            new_file = True
+            index += 1
+        elif index < len(lines) and lines[index].startswith('deleted file mode '):
+            if lines[index] != 'deleted file mode 100644':
+                raise _DeveloperOutputUnsupported('DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+            deleted_file = True
             index += 1
         elif index < len(lines) and lines[index].startswith(_MODE_METADATA):
             raise ValueError
+        index_count = 0
         while index < len(lines) and lines[index].startswith(_INDEX_METADATA):
+            index_count += 1
             index += 1
+        if ((new_file or deleted_file) and
+                (index == len(lines) or lines[index].startswith('diff --git ')) and
+                index_count == 1 and
+                re.fullmatch(r'index [0-9a-f]+\.\.[0-9a-f]+(?: 100644)?',
+                             lines[index - 1])):
+            # Git omits file headers and hunks when the added/deleted blob is
+            # empty. Source-pinned proposal admission verifies the corresponding
+            # path state and empty contents; direct admission uses Git's diff.
+            empty_file_operation = 'new_empty' if new_file else 'deleted_empty'
+            paths[path] = empty_file_operation
+            continue
         if index + 2 >= len(lines):
             raise ValueError
         expected_old = '--- /dev/null' if new_file else '--- a/' + path
-        if lines[index] != expected_old or lines[index + 1] != '+++ b/' + path:
+        expected_new = '+++ /dev/null' if deleted_file else '+++ b/' + path
+        if lines[index] != expected_old or lines[index + 1] != expected_new:
             raise ValueError
+        paths[path] = 'new' if new_file else 'deleted' if deleted_file else 'modified'
         index += 2
         hunks = 0
         changed = False
@@ -858,6 +917,9 @@ def _patch_paths(patch):
                 raise ValueError
             old_remaining = int(hunk.group(2) or '1')
             new_remaining = int(hunk.group(4) or '1')
+            if ((new_file and old_remaining != 0) or
+                    (deleted_file and new_remaining != 0)):
+                raise ValueError
             index += 1
             old_seen = new_seen = 0
             while (index < len(lines) and
@@ -869,10 +931,10 @@ def _patch_paths(patch):
                 if line.startswith(' '):
                     old_seen += 1
                     new_seen += 1
-                elif line.startswith('-'):
+                elif line.startswith('-') and not new_file:
                     old_seen += 1
                     changed = True
-                elif line.startswith('+'):
+                elif line.startswith('+') and not deleted_file:
                     new_seen += 1
                     changed = True
                 else:
@@ -914,7 +976,7 @@ def _added_diff_content(value):
     return '\n'.join(added)
 
 
-def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=False):
+def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=True):
     """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
@@ -934,13 +996,15 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Fa
         return 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
     try:
         paths = _patch_paths(value)
+    except _DeveloperOutputUnsupported as exc:
+        return exc.code
     except ValueError:
         return 'DEVELOPER_OUTPUT_INVALID_DIFF'
-    if not paths.issubset(set(write_paths)):
+    if not set(paths).issubset(set(write_paths)):
         return 'DEVELOPER_OUTPUT_OUT_OF_SCOPE'
-    if not allow_new_files and any(
-            line.startswith('new file mode ') for line in value.splitlines()):
-        return 'DEVELOPER_OUTPUT_INVALID_DIFF'
+    if not allow_new_files and any(operation in ('new', 'new_empty')
+                                   for operation in paths.values()):
+        return 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
     return None
 
 
@@ -960,8 +1024,36 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
     if source_files is None and normalized_rejection is not None:
         return None, (), normalized_rejection
     if source_files is not None:
+        try:
+            operations = _patch_paths(normalized)
+        except _DeveloperOutputUnsupported as exc:
+            return None, (), exc.code
+        except ValueError:
+            return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
+        special = {path: operation for path, operation in operations.items()
+                   if operation in ('new', 'deleted', 'new_empty', 'deleted_empty')}
+        for path, operation in special.items():
+            source = source_files.get(path)
+            existing_paths = getattr(source_files, 'existing_paths', None)
+            if (operation in ('new', 'new_empty') and
+                    ((existing_paths is not None and path in existing_paths) or
+                     (existing_paths is None and source != ''))):
+                return None, (), 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED'
+            if (operation in ('deleted', 'deleted_empty') and existing_paths is not None and
+                    path not in existing_paths):
+                return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
+            regular_paths = getattr(source_files, 'regular_paths', None)
+            if (operation in ('deleted', 'deleted_empty') and regular_paths is not None and
+                    path not in regular_paths):
+                return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
+            if (operation == 'deleted_empty' and source != ''):
+                return None, (), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED'
+        if special:
+            # The source-pinned apply check validates deletion content and the
+            # empty source side of additions below.
+            return normalized, tuple(tokens), None
         anchored, anchor_tokens, valid_anchor = reanchor_developer_output(
-            normalized, write_paths, source_files, return_valid=True)
+            normalized, write_paths, dict(source_files), return_valid=True)
         if not valid_anchor:
             return None, (), 'DEVELOPER_OUTPUT_INVALID_DIFF'
         anchored_rejection = _strict_developer_output_rejection(anchored, write_paths)
@@ -973,7 +1065,7 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
 
 
 def _developer_output_rejection(value, write_paths, *, normalize=False,
-                                allow_new_files=False):
+                                allow_new_files=True):
     """Classify output strictly unless a text-proposal route opts into salvage."""
     if not normalize:
         return _strict_developer_output_rejection(value, write_paths,
@@ -1219,9 +1311,23 @@ def _opencode_developer_prompt(task, *, source_sha, read_paths, write_paths,
 
 def _text_developer_source_files(root, source_sha, write_paths):
     """Read only allowed source blobs from the bound D6 revision."""
-    files = {}
+    files = _DeveloperSourceFiles()
     for path in write_paths:
         try:
+            entry = task_completion._git(
+                root, ('ls-tree', '-z', source_sha, '--', path), limit=4096)
+            if not entry:
+                files[path] = ''
+                continue
+            metadata, listed_path = entry.rstrip(b'\0').split(b'\t', 1)
+            mode, object_type, _object_id = metadata.decode('ascii').split(' ')
+            if listed_path.decode('utf-8', 'strict') != path:
+                return None
+            if object_type != 'blob' or mode not in ('100644', '100755'):
+                return None
+            files.existing_paths.add(path)
+            if mode == '100644':
+                files.regular_paths.add(path)
             raw = task_completion._git(
                 root, ('show', f'{source_sha}:{path}'), limit=8 * 1024 * 1024)
             files[path] = raw.decode('utf-8', 'strict')
@@ -2688,6 +2794,11 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                          if type(claim) is dict else 0)
         if [claim.get('attempt') for claim in ordered] != list(range(1, len(ordered) + 1)):
             invalid()
+        dispatched = [claim for claim in ordered
+                      if type(claim) is dict and claim.get('state') == 'DISPATCHED']
+        if any(type(claim) is not dict or claim.get('state') not in ('DISPATCHED', 'FAILED')
+               for claim in ordered):
+            invalid()
         original = task.get('developer')
         if type(original) is not dict or original.get('source_sha') != source_sha:
             invalid()
@@ -2700,10 +2811,9 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                 registration.source_sha != source_sha):
             invalid()
         artifacts = [(original.get('artifact'), original.get('artifact_sha256'),
-                      source_sha, ordered[0].get('head_sha'))]
-        for index, claim in enumerate(ordered):
-            if type(claim) is not dict or claim.get('state') != 'DISPATCHED':
-                invalid()
+                      source_sha,
+                      dispatched[0].get('head_sha') if dispatched else registration.result_sha)]
+        for index, claim in enumerate(dispatched):
             repair_id = claim.get('repair_task_id')
             if type(repair_id) is not str:
                 invalid()
@@ -2716,8 +2826,8 @@ def _completion_repair_artifact_segments(task, store, *, executor_task, common_d
                     developer.get('state') != 'DEVELOPER_RESPONDED' or
                     developer.get('source_sha') != claim.get('head_sha')):
                 invalid()
-            next_head = (ordered[index + 1].get('head_sha')
-                         if index + 1 < len(ordered) else registration.result_sha)
+            next_head = (dispatched[index + 1].get('head_sha')
+                         if index + 1 < len(dispatched) else registration.result_sha)
             artifacts.append((developer.get('artifact'), developer.get('artifact_sha256'),
                               claim.get('head_sha'), next_head))
         for segment_artifact, segment_digest, _, _ in artifacts:
