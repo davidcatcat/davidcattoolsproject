@@ -832,6 +832,12 @@ class PMRuntime:
                         flushed = flush_block(index, force=True)
                         if flushed is not None:
                             yield flushed
+                    elif event.get('type') == 'content_block_start':
+                        # Thinking never becomes answer text (only text_delta and text
+                        # items do); the UI may show a status while the PM thinks.
+                        block = event.get('content_block') or {}
+                        if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
+                            yield emit('THINKING')
                 elif kind == 'assistant':
                     for position, item in enumerate(
                             _iter_content((line.get('message') or {}).get('content'))):

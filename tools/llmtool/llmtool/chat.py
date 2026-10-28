@@ -12,6 +12,7 @@ from .errors import LLMToolError
 from .inputs import INPUT_LIMIT
 from .prompts import chat_messages
 from .providers import client_type, create_client
+from .providers.base import ProviderCapabilities, Reply
 from .skills import discover_skills, load_skill
 from .terminal import human_output
 
@@ -25,6 +26,10 @@ HELP = """/help                 Show commands
 
 
 UNKNOWN = "UNKNOWN"
+
+
+class ChatInterrupted(LLMToolError):
+    """A chat request was interrupted before any reply text could be kept."""
 # Only these transports read "model" from the provider response body; CLI
 # providers echo their configured value, which is not evidence of the served model.
 _REPORTED_MODEL_TYPES = frozenset(("openai", "openai-compatible"))
@@ -47,6 +52,44 @@ def reply_usage(metadata):
         return validate_provider_usage({name: metadata[name] for name in PROVIDER_USAGE_FIELDS})
     except Exception:
         return None
+
+
+def _streams(client):
+    """True only for a client whose declared capabilities say it streams and that
+    exposes stream(messages); a provider is never probed for it."""
+    capabilities = getattr(client, "CAPABILITIES", None)
+    return (type(capabilities) is ProviderCapabilities and capabilities.streaming
+            and callable(getattr(client, "stream", None)))
+
+
+def _stream_reply(chunks, on_text, cancel):
+    """Collect str chunks until the stream ends or cancel is set between chunks.
+
+    Returns (text, metadata, interrupted); metadata is the generator's return value
+    when it has one. The stream is closed on every exit so a provider can release
+    its connection. A chunk that is not text is an invalid reply.
+    """
+    iterator = iter(chunks)
+    parts = []
+    try:
+        while not (cancel is not None and cancel.is_set()):
+            try:
+                chunk = next(iterator)
+            except StopIteration as stop:
+                return "".join(parts), stop.value, False
+            if type(chunk) is not str:
+                raise LLMToolError("invalid chat reply")
+            if chunk:
+                parts.append(chunk)
+                on_text(chunk)
+        return "".join(parts), None, True
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
 
 
 def _reported_model(provider_type, metadata):
@@ -89,6 +132,7 @@ class ChatSession:
         self.last_usage = None
         self.last_reported_model = None
         self.last_error_code = None
+        self.last_interrupted = False
 
     @property
     def provider(self):
@@ -132,7 +176,16 @@ class ChatSession:
         candidate = None if name == "none" else load_skill(name)
         self.skill = candidate
 
-    def send(self, text):
+    def send(self, text, on_text=None, cancel=None):
+        """One user turn; returns the reply text kept in history.
+
+        on_text(chunk) receives reply text as it streams when the selected client
+        declares streaming; cancel is a threading.Event the caller sets to interrupt.
+        A stream stops at the next chunk after cancel is set and the partial text is
+        kept as the assistant turn with state "interrupted" (ChatInterrupted when no
+        text arrived yet: history unchanged). A client without streaming returns its
+        whole reply, which is kept and marked interrupted when cancel was set.
+        """
         if not self.active:
             raise LLMToolError("chat session is closed")
         if not text.strip():
@@ -154,9 +207,22 @@ class ChatSession:
         self.state = "working"
         try:
             provider_type = selected_provider(config)["type"]
-            reply = create_client(config, api_key(config)).complete(messages)
+            client = create_client(config, api_key(config))
+            if on_text is not None and _streams(client):
+                content, metadata, interrupted = _stream_reply(client.stream(messages), on_text, cancel)
+                reply = Reply(content, metadata if type(metadata) is dict else {})
+            else:
+                reply = client.complete(messages)
+                interrupted = cancel is not None and cancel.is_set()
             if not isinstance(reply.content, str) or not reply.content.strip():
+                if interrupted:
+                    raise ChatInterrupted("reply interrupted before any text arrived; history unchanged")
                 raise LLMToolError("invalid chat reply")
+        except ChatInterrupted:
+            self._request_failed(started, None)
+            self.state = "interrupted"
+            self.last_interrupted = True
+            raise
         except LLMToolError as exc:
             self._request_failed(started, _error_code(exc))
             raise
@@ -176,7 +242,8 @@ class ChatSession:
         self.last_usage = usage
         self.last_reported_model = reported
         self.request_started = None
-        self.state = "idle"
+        self.last_interrupted = interrupted
+        self.state = "interrupted" if interrupted else "idle"
         return reply.content
 
     def _request_failed(self, started, code):
