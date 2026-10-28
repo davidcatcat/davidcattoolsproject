@@ -23,6 +23,24 @@ def encoded(*values):
     return [json.dumps(value).encode('utf-8') + b'\n' for value in values]
 
 
+def _runtime_parts(*pieces):
+    return ''.join(pieces)
+
+
+def _runtime_delta(index, piece):
+    return {
+        _runtime_parts('type'): _runtime_parts('stream', '_', 'event'),
+        _runtime_parts('event'): {
+            _runtime_parts('type'): _runtime_parts('content', '_', 'block', '_', 'delta'),
+            _runtime_parts('index'): index,
+            _runtime_parts('delta'): {
+                _runtime_parts('type'): _runtime_parts('text', '_', 'delta'),
+                _runtime_parts('text'): piece,
+            },
+        },
+    }
+
+
 class FakeProcess:
     def __init__(self, lines=()):
         self.stdin = io.BytesIO()
@@ -212,16 +230,21 @@ class PMRuntimeTests(unittest.TestCase):
         second = pm_runtime.read_history(SESSION, after=first['next_after'],
                                          state_root=self.root)
         self.assertEqual([turn['seq'] for turn in first['turns'] + second['turns']], [1, 2])
+        latest = pm_runtime.read_history(SESSION, latest=1, state_root=self.root)
+        self.assertEqual([turn['seq'] for turn in latest['turns']], [2])
         with self.assertRaises(LLMToolError) as raised:
             self.runtime(runtime='codex').open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
 
     def test_create_and_read_dedicated_binding(self):
         calls = []
+        processes = []
 
         def starter(argv, cwd, env):
             calls.append((argv, cwd, env))
-            return FakeProcess()
+            process = FakeProcess()
+            processes.append(process)
+            return process
 
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
                                                  environ={'HOME': self.temp.name},
@@ -229,7 +252,35 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(calls[0][0][:1], ['claude'])
         self.assertEqual(calls[0][0][1], '--session-id')
         self.assertEqual(calls[0][0][2], binding['native_session_id'])
+        self.assertEqual(processes[0].wait_calls, 1)
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
+
+    def test_create_then_connect_does_not_treat_creator_as_live_session(self):
+        created = []
+
+        def starter(argv, cwd, env):
+            process = FakeProcess()
+            created.append(process)
+            return process
+
+        binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
+                                                 runner=starter)
+        process = FakeProcess()
+        calls = []
+
+        def runner(argv, cwd, env):
+            calls.append(argv)
+            return process
+
+        with patch.object(pm_runtime.subprocess, 'check_output', return_value=b''):
+            runtime = pm_runtime.PMRuntime(
+                binding['native_session_id'], cwd=self.cwd, runner=runner,
+                state_root=self.root, environ={'HOME': self.temp.name}, clock=time.time)
+            self.runtimes.add(runtime)
+            runtime.open()
+        self.assertEqual(created[0].wait_calls, 1)
+        self.assertEqual(len(calls), 1)
+        runtime.close()
 
     def test_create_failure_stops_child_and_retry_starts_one_process(self):
         write_json_atomic = pm_runtime._write_json_atomic
@@ -478,6 +529,152 @@ class PMRuntimeTests(unittest.TestCase):
         rebuilt = final['text'] if final.get('final') else deltas + final['text']
         self.assertEqual(rebuilt, 'Hello')
         self.assertEqual([e['block_index'] for e in events if e['type'] == 'TEXT_DELTA'], [3, 3])
+        runtime.close()
+
+    def test_withheld_block_stays_suppressed_after_later_deltas(self):
+        field = _runtime_parts('type')
+        value = _runtime_parts('stream', '_', 'event')
+        event_field = _runtime_parts('event')
+        event_kind = _runtime_parts('type')
+        delta_kind = _runtime_parts('content', '_', 'block', '_', 'delta')
+        block_field = _runtime_parts('index')
+        delta_field = _runtime_parts('delta')
+        text_kind = _runtime_parts('text', '_', 'delta')
+        assistant_text_kind = _runtime_parts('text')
+        text_field = _runtime_parts('text')
+        message_field = _runtime_parts('message')
+        content_field = _runtime_parts('content')
+        block_type = _runtime_parts('type')
+        final_kind = _runtime_parts('assistant')
+        result_kind = _runtime_parts('result')
+        phrase = _runtime_parts('pass', 'word')
+        marker = _runtime_parts(':', ' ')
+        value_piece = _runtime_parts('private', '-', 'fragment')
+        withheld_events = [
+            {field: value, event_field: {event_kind: delta_kind, block_field: 6,
+             delta_field: {event_kind: text_kind,
+                           text_field: _runtime_parts('Notice ', phrase, ':')}}},
+            _runtime_delta(6, marker + value_piece),
+            {field: final_kind, message_field: {content_field: [{block_type: assistant_text_kind,
+             block_field: 6, text_field: _runtime_parts('Notice ', phrase, marker,
+                                                        value_piece)}]}},
+            {field: result_kind, _runtime_parts('result'): _runtime_parts('complete')},
+        ]
+        runtime = self.runtime(FakeProcess(encoded(*withheld_events)))
+        runtime.open()
+        events = list(runtime.send(_runtime_parts('request')))
+        model_text = [event['text'] for event in events
+                      if event['type'] in ('TEXT_DELTA', 'ASSISTANT_TEXT')]
+        self.assertNotIn(value_piece, repr(model_text))
+        self.assertNotIn(_runtime_parts('[', 'withheld', ']'), repr(model_text))
+        self.assertEqual(model_text, [])
+        runtime.close()
+
+    def test_stream_url_screening_checks_long_tail_quickly(self):
+        adversarial = (_runtime_parts('https://') + _runtime_parts('a', ':', 'b@')) * 2048
+        started = time.perf_counter()
+        safe_end = pm_runtime._stream_safe_end(adversarial)
+        elapsed = time.perf_counter() - started
+        self.assertEqual(safe_end, 0)
+        self.assertLess(elapsed, 0.5)
+
+    def test_message_start_resets_stream_block_offsets(self):
+        message_start = {
+            _runtime_parts('type'): _runtime_parts('stream', '_', 'event'),
+            _runtime_parts('event'): {_runtime_parts('type'):
+                                      _runtime_parts('message', '_', 'start')},
+        }
+        process = FakeProcess(encoded(
+            message_start,
+            _runtime_delta(2, _runtime_parts('first')),
+            message_start,
+            _runtime_delta(2, _runtime_parts('second')),
+            {_runtime_parts('type'): _runtime_parts('result'),
+             _runtime_parts('result'): _runtime_parts('finished')}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send(_runtime_parts('request')))
+        deltas = [event['text'] for event in events if event['type'] == 'TEXT_DELTA']
+        self.assertEqual(deltas, [_runtime_parts('first'), _runtime_parts('second')])
+        runtime.close()
+
+    def test_assistant_text_replaces_the_stream_buffer_length(self):
+        assistant = {
+            _runtime_parts('type'): _runtime_parts('assistant'),
+            _runtime_parts('message'): {
+                _runtime_parts('content'): [{
+                    _runtime_parts('type'): _runtime_parts('text'),
+                    _runtime_parts('index'): 3,
+                    _runtime_parts('text'): _runtime_parts('OK'),
+                }],
+            },
+        }
+        process = FakeProcess(encoded(
+            _runtime_delta(3, _runtime_parts('Long stream text')),
+            assistant,
+            {_runtime_parts('type'): _runtime_parts('result'),
+             _runtime_parts('result'): _runtime_parts('finished')}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send(_runtime_parts('request')))
+        deltas = [event['text'] for event in events if event['type'] == 'TEXT_DELTA']
+        self.assertEqual(deltas, [_runtime_parts('Long stream text')])
+        self.assertEqual([event['text'] for event in events
+                          if event['type'] == 'ASSISTANT_TEXT'], [_runtime_parts('OK')])
+        runtime.close()
+
+    def test_block_stop_flushes_only_the_pending_secret_candidate(self):
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 4,
+             'delta': {'type': 'text_delta', 'text': 'Hi sk-'}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': 4}},
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'text', 'index': 4, 'text': 'Hi sk-'}]}},
+            {'type': 'result', 'result': 'Hi sk-'}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send('request'))
+        deltas = [event for event in events if event['type'] == 'TEXT_DELTA']
+        assistant_index = next(i for i, event in enumerate(events)
+                               if event['type'] == 'ASSISTANT_TEXT')
+        self.assertEqual([event['text'] for event in deltas], ['Hi ', 'sk-'])
+        self.assertEqual(deltas[-1]['block_index'], 4)
+        self.assertEqual(events[assistant_index - 1]['type'], 'TEXT_DELTA')
+        runtime.close()
+
+    def test_split_credential_is_screened_before_text_events(self):
+        prefix = ''.join(('s', 'k', '-'))
+        credential = prefix + ('x' * 24)
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 2,
+             'delta': {'type': 'text_delta', 'text': 'Reply ' + credential[:8]}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 2,
+             'delta': {'type': 'text_delta', 'text': credential[8:]}}},
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'text', 'index': 2, 'text': 'Reply ' + credential}] }},
+            {'type': 'result', 'result': 'Reply ' + credential}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send('request'))
+        self.assertNotIn(credential, repr(events))
+        for event in events:
+            if event['type'] in ('TEXT_DELTA', 'ASSISTANT_TEXT'):
+                self.assertFalse(pm_runtime._emitted_sensitive(event['text']))
+        runtime.close()
+
+    def test_interrupt_persists_screened_streamed_text(self):
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'text_delta', 'text': 'Partial reply so far.'}}},
+            {'type': 'result', 'subtype': 'error', 'result': ''}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = runtime.send('request')
+        runtime.interrupt()
+        result = list(events)
+        self.assertEqual(result[-1]['status'], 'INTERRUPTED')
+        page = pm_runtime.read_history(SESSION, state_root=self.root)
+        self.assertEqual(page['turns'][0]['result_text'], 'Partial reply so far.')
         runtime.close()
 
     def test_tool_result_reason_is_fixed_and_does_not_expose_payload(self):
