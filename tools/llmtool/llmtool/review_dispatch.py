@@ -149,7 +149,7 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
 
 
 def _codex_argv(executable, reviewer_root):
-    return [executable, 'exec', '--no-daemon', '--ask-for-approval', 'never',
+    return [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
             '--ignore-user-config', '--ignore-rules', '--ephemeral',
             '--strict-config', '--color', 'never', '--json', '--model',
             _CODEX_REVIEW_MODEL, '-c', 'model_reasoning_effort=' + _CODEX_REVIEW_EFFORT,
@@ -196,7 +196,7 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
             type(verdict.get('review')) is not str or
             len(verdict['review'].encode('utf-8', 'replace')) > 65536):
         _refuse('REVIEW_NOT_POSTED')
-    lines = [line.strip() for line in verdict['review'].splitlines() if line.strip()]
+    lines = [line for line in verdict['review'].splitlines() if line.strip()]
     status = verdict['verdict']
     displayed_status = 'PASS' if status == 'PASS' else 'FAIL'
     marker_status = 'PASS' if status == 'PASS' else 'FIX'
@@ -220,7 +220,7 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1):
         result = subprocess.run(
             _codex_argv(executable, reviewer_root), cwd=str(reviewer_root),
             input=prompt.encode('utf-8'), stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             env={'PATH': os.pathsep.join((str(Path(executable).parent), '/usr/bin', '/bin')),
                  'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'NO_COLOR': '1'},
             check=False,
@@ -230,7 +230,17 @@ def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1):
     except OSError:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
     if result.returncode:
-        _refuse('REVIEW_NOT_POSTED')
+        raw_stderr = result.stderr[:65536] if type(result.stderr) is bytes else b''
+        excerpt = raw_stderr.decode('utf-8', 'replace')
+        if excerpt.strip():
+            try:
+                from .task_submission_cli import _screen_text
+                excerpt = _screen_text(excerpt, 65536)
+            except LLMToolError:
+                excerpt = ''
+        message = ('Codex Reviewer exited unsuccessfully; details omitted' if not excerpt else
+                   'Codex Reviewer exited unsuccessfully: ' + excerpt)
+        _refuse('REVIEW_NOT_POSTED', message)
     binding = task.get('task_binding')
     if type(binding) is not dict:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')

@@ -1,7 +1,6 @@
 import hashlib
 import json
 import io
-import re
 from contextlib import redirect_stderr
 from pathlib import Path
 import tempfile
@@ -9,7 +8,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from llmtool import cli, review_dispatch, task_store, task_submission_cli
+from llmtool import cli, review_dispatch, review_result, task_store, task_submission_cli
 from llmtool.errors import LLMToolError
 
 
@@ -233,20 +232,28 @@ class ReviewDispatchTests(unittest.TestCase):
                      '--ephemeral', '--strict-config'):
             self.assertIn(flag, argv)
         self.assertEqual(argv[argv.index('--ask-for-approval') + 1], 'never')
-        self.assertLess(argv.index('exec'), argv.index('--no-daemon'))
-        self.assertLess(argv.index('exec'), argv.index('--ask-for-approval'))
+        self.assertEqual(argv[1:5], [
+            '--no-daemon', '--ask-for-approval', 'never', 'exec'])
+        developer_argv = task_submission_cli.codex_direct_developer._argv(
+            '/bin/codex', '/repo/reviewer-d6', 'gpt-6-luna', 'high',
+            pycache_prefix='/tmp/codex-reviewer-pycache',
+            command_path='/bin:/usr/bin')
+        self.assertEqual(argv[1:5], developer_argv[1:5])
 
-    def test_codex_flags_follow_exec_command_help_shape(self):
-        global_help = ('Usage: codex [OPTIONS] [PROMPT] [COMMAND]\n\n'
-                       'Commands:\n  exec  Run Codex non-interactively\n')
-        exec_help = ('Usage: codex exec [OPTIONS] [PROMPT]\n\nOptions:\n'
-                     '  --no-daemon\n  --ask-for-approval <POLICY>\n')
-        self.assertRegex(global_help, r'(?m)^\s+exec\s+')
-        exec_options = set(re.findall(r'(?m)^\s+(--[a-z-]+)', exec_help))
-        self.assertTrue({'--no-daemon', '--ask-for-approval'}.issubset(exec_options))
-        argv = review_dispatch._codex_argv('/bin/codex', '/repo/reviewer-d6')
-        self.assertEqual(argv[1], 'exec')
-        self.assertTrue(all(argv.index(flag) > argv.index('exec') for flag in exec_options))
+    def test_nonzero_codex_exit_keeps_only_screened_bounded_stderr(self):
+        fake_stderr = b'codex reviewer failed safely'
+        result = SimpleNamespace(returncode=2, stdout=b'', stderr=fake_stderr)
+        with patch.object(review_dispatch.shutil, 'which', return_value='/bin/codex'), \
+                patch.object(review_dispatch.subprocess, 'run', return_value=result), \
+                patch.object(task_submission_cli, '_screen_text',
+                             wraps=task_submission_cli._screen_text) as screen:
+            with self.assertRaises(LLMToolError) as raised:
+                review_dispatch._dispatch_codex(
+                    reviewer_root='/repo/reviewer-d6', prompt='review prompt',
+                    task={'task_id': TASK}, head=HEAD)
+        screen.assert_called_once_with(fake_stderr.decode('utf-8'), 65536)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        self.assertIn(fake_stderr.decode('utf-8'), str(raised.exception))
 
     def test_codex_review_parser_requires_standard_bound_review_text(self):
         raw = _codex_event_stream(_codex_review_text(version=2))
@@ -255,6 +262,14 @@ class ReviewDispatchTests(unittest.TestCase):
             head=HEAD, version=2)
         self.assertEqual(parsed['review_text'], _codex_review_text(version=2))
         self.assertEqual(parsed['verdict'], 'PASS')
+        classified = review_result._comment_verdict(
+            {'body': parsed['review_text'], 'id': 1,
+             'created_at': '2026-10-27T01:00:00Z'},
+            head=HEAD, version=2,
+            task={'task_id': TASK, 'run_id': 'r' * 32,
+                  'task_binding': {'contract_digest': 'd' * 64},
+                  'developer': {'provider_profile': 'claude'}})
+        self.assertEqual(classified[2], 'REVIEW_PASS')
         malformed = _codex_event_stream(_codex_review_text().replace(
             'actor=Codex', 'actor=Claude'))
         with self.assertRaises(LLMToolError) as raised:
@@ -262,6 +277,18 @@ class ReviewDispatchTests(unittest.TestCase):
                 malformed, task_id=TASK, run_id='r' * 32,
                 contract_digest='d' * 64, head=HEAD)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+
+        for review_text in (_codex_review_text().replace(
+                'actor=Codex ', ' actor=Codex ', 1),
+                _codex_review_text().replace(
+                    'Verdict: PASS', ' Verdict: PASS', 1)):
+            with self.subTest(review_text=review_text):
+                with self.assertRaises(LLMToolError) as raised:
+                    review_dispatch._parse_codex_review(
+                        _codex_event_stream(review_text), task_id=TASK,
+                        run_id='r' * 32, contract_digest='d' * 64, head=HEAD)
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'REVIEW_NOT_POSTED')
 
     def test_malformed_or_misbinding_codex_verdict_is_refused(self):
         raw = (b'{"type":"item.completed","item":{"type":"agent_message",'
@@ -421,9 +448,9 @@ def _real_store(tmp_path):
 def _codex_review_text(*, run_id='r' * 32, contract='d' * 64, version=1):
     return ('<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
             f'Verdict: PASS | Version: v{version} | HEAD: {HEAD}\n'
-            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
             f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={run_id} '
-            f'contract={contract} head={HEAD}')
+            f'contract={contract} head={HEAD}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT')
 
 
 def _codex_event_stream(review_text):
