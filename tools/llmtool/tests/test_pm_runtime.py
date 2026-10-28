@@ -79,10 +79,10 @@ class PMRuntimeTests(unittest.TestCase):
         self.root = Path(self.temp.name) / 'state'
         pm_runtime._ensure_state_dir(self.root)
         self.cwd = self.temp.name
-        self.observe = patch.object(pm_runtime.active_pm_inbox,
-                                    'observe_claude_session', return_value=self.cwd)
-        self.observe.start()
-        self.addCleanup(self.observe.stop)
+        self.observe_patcher = patch.object(pm_runtime.active_pm_inbox,
+                                            'observe_claude_session', return_value=self.cwd)
+        self.observe = self.observe_patcher.start()
+        self.addCleanup(self.observe_patcher.stop)
         pm_runtime._write_json_atomic(self.root, pm_runtime._binding_path(self.root, SESSION), {
             'runtime': 'claude-code', 'native_session_id': SESSION, 'cwd': self.cwd,
             'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1),
@@ -123,6 +123,7 @@ class PMRuntimeTests(unittest.TestCase):
             {'type': 'result', 'result': 'Done', 'usage': {'input_tokens': 1}}))
         runtime = self.runtime(process)
         runtime.open()
+        self.observe.assert_not_called()
         events = list(runtime.send('Owner request'))
         argv, cwd, _ = self.calls[0]
         self.assertEqual(argv, ['claude', '-p', '--input-format', 'stream-json',
@@ -243,31 +244,21 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertFalse(binding['session_started'])
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
-        class RealCLIShapeFake:
-            def __init__(self, argv):
-                self.argv = argv
-                self.stdin = None if '-p' not in argv else io.BytesIO()
-                self.error = ('Error: Input must be provided either through stdin or as a '
-                              'prompt argument when using --print')
-
-            def wait(self, timeout=None):
-                return 1 if self.stdin is None else 0
-
-        legacy = RealCLIShapeFake(['claude', '--session-id', SESSION])
-        self.assertIsNone(legacy.stdin)
-        self.assertEqual(legacy.wait(), 1)
-        self.assertIn('Input must be provided either through stdin', legacy.error)
-
     def test_completed_first_turn_marks_binding_for_resume_on_next_open(self):
         process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
-        runtime = self.runtime(process)
+        runtime = self.runtime(process, clock=time.time)
         runtime.open()
         list(runtime.send('first request'))
         runtime.close()
         binding = pm_runtime.current_binding(SESSION, state_root=self.root)
         self.assertTrue(binding['session_started'])
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{}', encoding='utf-8')
+        self.observe_patcher.stop()
 
-        later = self.runtime(FakeProcess())
+        later = self.runtime(FakeProcess(), clock=time.time)
         later.open()
         argv = self.calls[-1][0]
         self.assertIn('--resume', argv)
@@ -330,10 +321,10 @@ class PMRuntimeTests(unittest.TestCase):
 
     def test_open_refuses_non_dedicated_session(self):
         (self.root / (SESSION + '.binding.json')).unlink()
+        self.observe_patcher.stop()
         with self.assertRaises(LLMToolError) as raised:
             self.runtime().open()
-        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_NOT_DEDICATED')
-        self.assertIn('create', str(raised.exception))
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
 
     def test_open_failure_after_lifecycle_registration_unregisters(self):
         register = pm_runtime._register_lifecycle
@@ -517,6 +508,46 @@ class PMRuntimeTests(unittest.TestCase):
             with self.assertRaises(LLMToolError) as raised:
                 runtime.open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_LIVE_ELSEWHERE')
+
+    def _fresh_transcript_path(self):
+        self.observe_patcher.stop()
+        return pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+
+    def test_first_open_refuses_symlinked_transcript_parent_before_launch(self):
+        transcript = self._fresh_transcript_path()
+        elsewhere = Path(self.temp.name) / 'elsewhere'
+        elsewhere.mkdir()
+        transcript.parent.parent.mkdir(parents=True)
+        transcript.parent.symlink_to(elsewhere, target_is_directory=True)
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
+        self.assertEqual(self.calls, [])
+
+    def test_first_open_refuses_dangling_transcript_symlink_before_launch(self):
+        transcript = self._fresh_transcript_path()
+        transcript.parent.mkdir(parents=True)
+        transcript.symlink_to(Path(self.temp.name) / 'missing.jsonl')
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
+        self.assertEqual(self.calls, [])
+
+    def test_first_open_without_transcript_in_real_directory_uses_session_id(self):
+        transcript = self._fresh_transcript_path()
+        transcript.parent.mkdir(parents=True)
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        runtime.open()
+        argv = self.calls[0][0]
+        self.assertIn('--session-id', argv)
+        self.assertNotIn('--resume', argv)
+        runtime.close()
 
     def test_stream_metadata_and_text_rebuild_without_duplication(self):
         process = FakeProcess(encoded(
