@@ -2287,6 +2287,79 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
             new_file, [target], source_files=existing_empty)[2],
             'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
 
+    def test_empty_file_git_metadata_shape_is_admitted_safely(self):
+        target = 'tools/llmtool/new.py'
+        outside = 'tools/llmtool/outside.py'
+        empty_add = (f'diff --git a/{target} b/{target}\n'
+                     'new file mode 100644\n'
+                     'index 0000000..e69de29\n')
+        empty_delete = (f'diff --git a/{target} b/{target}\n'
+                        'deleted file mode 100644\n'
+                        'index e69de29..0000000\n')
+        empty_add_files = submission_cli._DeveloperSourceFiles()
+        empty_add_files[target] = ''
+        artifact, _normalizations, rejection = submission_cli._developer_normalized_output(
+            empty_add, [target], source_files=empty_add_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, empty_add)
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            empty_add, [target]))
+        self.assertEqual(submission_cli._developer_output_rejection(
+            empty_add.replace(target, outside), [target]),
+            'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+
+        empty_delete_files = submission_cli._DeveloperSourceFiles()
+        empty_delete_files[target] = ''
+        empty_delete_files.existing_paths.add(target)
+        empty_delete_files.regular_paths.add(target)
+        artifact, _normalizations, rejection = submission_cli._developer_normalized_output(
+            empty_delete, [target], source_files=empty_delete_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, empty_delete)
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            empty_delete, [target]))
+
+        nonempty_delete_files = submission_cli._DeveloperSourceFiles()
+        nonempty_delete_files[target] = 'content\n'
+        nonempty_delete_files.existing_paths.add(target)
+        nonempty_delete_files.regular_paths.add(target)
+        self.assertEqual(submission_cli._developer_normalized_output(
+            empty_delete, [target], source_files=nonempty_delete_files)[2],
+            'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+
+        wrong_add_mode = empty_add.replace('new file mode 100644',
+                                           'new file mode 100755')
+        wrong_delete_mode = empty_delete.replace('deleted file mode 100644',
+                                                 'deleted file mode 100755')
+        self.assertEqual(submission_cli._developer_output_rejection(
+            wrong_add_mode, [target]), 'DEVELOPER_OUTPUT_NEW_FILE_UNSUPPORTED')
+        self.assertEqual(submission_cli._developer_output_rejection(
+            wrong_delete_mode, [target]), 'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+
+    def test_empty_file_entry_before_another_diff_is_admitted(self):
+        empty = 'tools/llmtool/__init__.py'
+        modified = 'tools/llmtool/example.py'
+        mixed = (
+            f'diff --git a/{empty} b/{empty}\n'
+            'new file mode 100644\n'
+            'index 0000000..e69de29\n'
+            f'diff --git a/{modified} b/{modified}\n'
+            f'--- a/{modified}\n+++ b/{modified}\n'
+            '@@ -1 +1 @@\n-old\n+new\n')
+        source_files = submission_cli._DeveloperSourceFiles()
+        source_files[empty] = ''
+        source_files[modified] = 'old\n'
+        source_files.existing_paths.add(modified)
+        source_files.regular_paths.add(modified)
+
+        artifact, _normalizations, rejection = submission_cli._developer_normalized_output(
+            mixed, [empty, modified], source_files=source_files)
+
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, mixed)
+        self.assertIsNone(submission_cli._developer_output_rejection(
+            mixed, [empty, modified]))
+
     def test_proposal_can_mix_new_files_with_existing_file_modifications(self):
         target = 'tools/llmtool/existing.py'
         added = 'tools/llmtool/new.py'
