@@ -502,7 +502,7 @@ sequenceDiagram
 | 壓力測試 | 128 路並行無限流；約 1.9K tok/s |
 | 本機 27 個 gw Task | 多為 `DEVELOPER_OUTPUT_INVALID_ENVELOPE`／`INVALID_DIFF` |
 
-**判斷（OPINION）：** gw 適合「單檔、≤20 行、有明確測試、PM 已準備好完整檔案內容」的工作；PM 準備成本（讀檔、組 context、套 patch、跑測試）與 Codex 直接做的比較：**UNKNOWN**（PM 與 Reviewer 成本尚未量測，見 #290）。不應作為一般 Developer 路線；可作為批次小修（測試樣板、文件表格）與合成題評測。Reviewer FAIL rate、修復次數、總時間：**UNKNOWN**（無完整樣本）。
+**判斷（OPINION）：** gw 適合「單檔、≤20 行、有明確測試、PM 已準備好完整檔案內容」的工作；PM 準備成本（讀檔、組 context、套 patch、跑測試）與 Codex 直接做的比較：**UNKNOWN**（PM 與 Reviewer 成本尚未量測，見 #290）。（以下為 snapshot 時的 OPINION，已被 §22 與 #290 的 Owner 決定部分取代；路線範圍變更為 **OWNER_DECISION_REQUIRED**）不應作為一般 Developer 路線；可作為批次小修（測試樣板、文件表格）與合成題評測。Reviewer FAIL rate、修復次數、總時間：**UNKNOWN**（無完整樣本）。
 
 ### 11.5 Token 最佳化
 
