@@ -1238,7 +1238,7 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
     result_head = source_sha if expected_result_head is None else expected_result_head
     if (type(result_head) is not str or _HEX40.fullmatch(result_head) is None or
             registration.root != expected_root or registration.branch != expected_branch or
-            registration.result_sha != result_head or registration.source_sha != source_sha or
+            registration.result_sha != result_head or
             registration.trusted_agent_id != expected_agent or
             registration.session_ref != expected_session_ref or
             registration.native_session_id != expected_native_session_id or
@@ -1266,6 +1266,8 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
     validate_env2_pass_marker(registration, expected_root=expected_root,
                               current_head=live['source_sha'])
     try:
+        _git(registration.root, ('merge-base', '--is-ancestor',
+                                 registration.source_sha, source_sha), limit=4096)
         _git(registration.root, ('merge-base', '--is-ancestor', source_sha,
                                  result_head), limit=4096)
     except LLMToolError:

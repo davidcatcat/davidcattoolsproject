@@ -1117,7 +1117,8 @@ def _codex_timeout_recovery(previous, *, executor_task_id, source_sha,
         re.fullmatch(r'[0-9a-f]{40}', previous['source_sha']) and
         source_sha == previous['source_sha'] and
         type(result_head) is str and re.fullmatch(r'[0-9a-f]{40}', result_head) and
-        registration_source_sha == previous['source_sha'] and
+        type(registration_source_sha) is str and
+        re.fullmatch(r'[0-9a-f]{40}', registration_source_sha) and
         registration_result_sha == result_head and
         previous.get('executor_task_id') == executor_task_id and
         previous.get('read_paths') == read_paths and

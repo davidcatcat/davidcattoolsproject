@@ -307,6 +307,32 @@ class CodexDelegateTests(unittest.TestCase):
     def test_same_d6_followup_dispatch_accepts_committed_timeout_diff(self):
         task = self._task()
 
+        # The dispatch starts from an advanced D6 HEAD while the registry base
+        # remains at the original Task worktree source.
+        (self.root / 'src.py').write_text('VALUE = 1\n# approved branch progress\n')
+        self._git('add', 'src.py')
+        self._git('commit', '-m', 'approved branch progress')
+        dispatch_source = self._git('rev-parse', 'HEAD')
+        registry_path = (Path(self.common_dir) / 'llmtool-worktrees' /
+                         'executor-task-1.json')
+        registry = json.loads(registry_path.read_text(encoding='utf-8'))
+        report_path = (self.root / 'tools' / 'llmtool' /
+                       '.d6-bootstrap-report.json')
+        report = json.loads(report_path.read_text(encoding='utf-8'))
+        report.update(head_sha=dispatch_source, tooling_sha=self.source_sha)
+        report_bytes = (json.dumps(report, sort_keys=True,
+            separators=(',', ':')) + '\n').encode('utf-8')
+        report_path.write_bytes(report_bytes)
+        report_path.chmod(0o600)
+        registry['head_sha'] = dispatch_source
+        registry['env2_approved_tooling_sha'] = None
+        registry['env2_pass_marker'].update(
+            submitted_head_sha=dispatch_source, current_head_sha=dispatch_source,
+            tooling_sha=self.source_sha,
+            report_sha256=hashlib.sha256(report_bytes).hexdigest())
+        registry_path.write_text(json.dumps(registry), encoding='utf-8')
+        registry_path.chmod(0o600)
+
         def timeout(**_kwargs):
             (self.root / 'src.py').write_text('VALUE = 2\n')
             raise task_submission_cli.codex_direct_developer.DirectCodexError(
@@ -324,12 +350,7 @@ class CodexDelegateTests(unittest.TestCase):
         lifecycle = importlib.util.module_from_spec(spec)
         sys.modules[spec.name] = lifecycle
         spec.loader.exec_module(lifecycle)
-        registry_path = (Path(self.common_dir) / 'llmtool-worktrees' /
-                         'executor-task-1.json')
         registry = json.loads(registry_path.read_text(encoding='utf-8'))
-        registry['env2_approved_tooling_sha'] = None
-        registry_path.write_text(json.dumps(registry), encoding='utf-8')
-        registry_path.chmod(0o600)
 
         def bootstrap_result(root, task_id):
             report_path = Path(root) / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
@@ -357,6 +378,7 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(recorded_head, result_head)
         registration, snapshot = task_completion.bind_executor_task(
             'executor-task-1', expected_common_dir=self.common_dir, root=self.root)
+        self.assertNotEqual(registration.source_sha, dispatch_source)
         self.assertEqual(snapshot.head, result_head)
         bound_registration = dataclasses.replace(registration,
             native_session_id='12345678-1234-4234-8234-123456789abc')
@@ -463,7 +485,7 @@ class CodexDelegateTests(unittest.TestCase):
             previous, **{**args, 'executor_task_id': 'other-d6'}))
         self.assertFalse(task_submission_cli._codex_timeout_recovery(
             previous, **{**args, 'registration_result_sha': self.source_sha}))
-        self.assertFalse(task_submission_cli._codex_timeout_recovery(
+        self.assertTrue(task_submission_cli._codex_timeout_recovery(
             previous, **{**args, 'registration_source_sha': 'c' * 40}))
         self.assertFalse(task_submission_cli._codex_timeout_recovery(
             previous, **{**args, 'write_paths': ['other.py']}))
