@@ -1028,9 +1028,9 @@ def _publication(root, branch, head, squash, train_squash=None):
         return "origin_branch"
     refs = _task_git(root, "for-each-ref", "--format=%(refname)",
                      "refs/remotes/origin/").stdout.splitlines()
+    # The origin fetch refspec maps PR source branches to ordinary tracking refs.
     for ref in refs:
-        if (ref in (origin_branch, origin_main, "refs/remotes/origin/HEAD") or
-                not re.fullmatch(r"refs/remotes/origin/pr/[^/]+/head", ref)):
+        if ref in (origin_branch, origin_main, "refs/remotes/origin/HEAD"):
             continue
         if has_ref(ref) and is_ancestor(head, ref):
             return "origin_pr_head"

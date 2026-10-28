@@ -189,12 +189,12 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(plan["publication"], "origin_main")
         self.assertEqual(plan["reasons"], [])
 
-    def test_detached_reviewer_head_published_on_another_origin_pr_branch(self):
+    def test_detached_reviewer_head_published_on_another_origin_branch(self):
         root, record_path = self._registered_result_fixture("reviewer-pr-ref")
         head = self._commit_file(root, "reviewed\n", "reviewed head")
         self._git(root, "branch", "review/reviewer-pr-ref", head)
         self._git(root, "checkout", "--detach", head)
-        self._git(root, "update-ref", "refs/remotes/origin/pr/529/head", head)
+        self._git(root, "update-ref", "refs/remotes/origin/feature/529", head)
         record = lifecycle._read_registry_record(record_path)
         record.update(branch="review/reviewer-pr-ref", head_sha=head)
         lifecycle._replace_record(record_path, record)
@@ -207,11 +207,11 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(plan["publication"], "origin_pr_head")
         self.assertEqual(plan["reasons"], [])
 
-        self._git(root, "update-ref", "-d", "refs/remotes/origin/pr/529/head")
+        self._git(root, "update-ref", "-d", "refs/remotes/origin/feature/529")
         self._git(root, "update-ref", "refs/remotes/origin/other-pr/head", self.base)
         self.assertIsNone(lifecycle._publication(root, "review/reviewer-pr-ref",
                                                  head, None))
-        self._git(root, "update-ref", "refs/remotes/origin/pr/530/head", head)
+        self._git(root, "update-ref", "refs/remotes/origin/feature/530", head)
         self.assertEqual(lifecycle._publication(root, "review/reviewer-pr-ref",
                                                 head, None), "origin_pr_head")
 
