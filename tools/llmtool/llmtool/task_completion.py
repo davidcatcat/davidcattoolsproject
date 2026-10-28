@@ -1131,10 +1131,10 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     }
 
 
-def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
+def _worktree_snapshot(*, root, source_sha, read_paths, write_paths, expected_head=None):
     """Hash a registered uncommitted result without promoting it to a commit."""
     snapshot = collect_git_snapshot(root)
-    if snapshot.head != source_sha:
+    if snapshot.head != (source_sha if expected_head is None else expected_head):
         _stop('WORKTREE_SOURCE_HEAD_MISMATCH')
     status = _git(root, ('status', '--porcelain=v1', '-z', '--untracked-files=all'),
                    limit=1024 * 1024)
@@ -1228,14 +1228,18 @@ def _worktree_snapshot(*, root, source_sha, read_paths, write_paths):
 
 def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_root,
                                      expected_branch, source_sha, task_binding,
+                                     expected_result_head=None,
                                      expected_agent, expected_session_ref,
                                      expected_native_session_id, write_paths, read_paths,
                                      artifact, artifact_sha256):
     """Bind a real D6 uncommitted diff and refuse to call it a result commit."""
     registration = read_d6_registration(task_id, expected_common_dir,
                                         allowed_states=_D6_EVIDENCE_STATES)
-    if (registration.root != expected_root or registration.branch != expected_branch or
-            registration.result_sha != source_sha or registration.trusted_agent_id != expected_agent or
+    result_head = source_sha if expected_result_head is None else expected_result_head
+    if (type(result_head) is not str or _HEX40.fullmatch(result_head) is None or
+            registration.root != expected_root or registration.branch != expected_branch or
+            registration.result_sha != result_head or
+            registration.trusted_agent_id != expected_agent or
             registration.session_ref != expected_session_ref or
             registration.native_session_id != expected_native_session_id or
             type(source_sha) is not str or _HEX40.fullmatch(source_sha) is None):
@@ -1254,15 +1258,18 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
     if any(path not in set(write_paths) for path in untracked):
         _stop('WORKTREE_UNTRACKED_FILES')
     live = _worktree_snapshot(root=registration.root, source_sha=source_sha,
-                              read_paths=read_paths, write_paths=write_paths)
+                              read_paths=read_paths, write_paths=write_paths,
+                              expected_head=result_head)
     if (live['common_dir'] != registration.common_dir or
-            live['branch'] != registration.branch):
+            live['branch'] != registration.branch or live['source_sha'] != result_head):
         _stop('D6_TASK_BINDING_MISMATCH')
     validate_env2_pass_marker(registration, expected_root=expected_root,
                               current_head=live['source_sha'])
     try:
-        _git(registration.root, ('merge-base', '--is-ancestor', registration.source_sha,
-                                 source_sha), limit=4096)
+        _git(registration.root, ('merge-base', '--is-ancestor',
+                                 registration.source_sha, source_sha), limit=4096)
+        _git(registration.root, ('merge-base', '--is-ancestor', source_sha,
+                                 result_head), limit=4096)
     except LLMToolError:
         _stop('D6_TASK_BINDING_MISMATCH')
     if (type(artifact) is not str or type(artifact_sha256) is not str or
