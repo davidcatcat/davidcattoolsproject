@@ -886,7 +886,7 @@ flowchart LR
 | # | 項目 | 原因 | 成果 | 範圍 | 依賴 | 風險 | 工作量 | 驗收 | 影響既有 | 順序 |
 |---|---|---|---|---|---|---|---|---|---|---|
 | P0-1 | 合併並修正 TUI Task mode（#505）+ Tasks／detail（#510／#512） | AUDIT-001 | TUI 可提交、看任務 | chat_tui*、tests | CI 修綠 | 低 | M | 34 項 PTY 實測 + CI 綠 | 否 | 1 |
-| P0-2 | `task advance` 驅動器（#519）+ 終態（AUDIT-014）（**已被 §26.1 取代**） | AUDIT-002／014 | 每次呼叫推進一個審查、修正、完成或結案步驟；首次派工、發布 PR 與合併仍由人工執行（見 §26.1） | task_advance、task_status | #519 審查 | 中 | M | 10 個 Task 自動推進 | 否 | 2 |
+| P0-2 | `task advance` 驅動器（#519）+ 終態（AUDIT-014） | AUDIT-002／014 | 無人工串接 | task_advance、task_status | #519 審查 | 中 | M | 10 個 Task 自動推進 | 否 | 2 |
 | P0-3 | 以現有 retire 工具對通過 D6 退場 gate 的候選批次退場（Reviewer D6 復用為 OWNER_DECISION_REQUIRED） | AUDIT-003 | ACTIVE 與磁碟用量明顯下降（待驗證目標） | d6 scripts | — | 中（誤刪；靠 gate 防範） | S | RETAIN_BLOCKED 有逐筆處置；可用空間回到 PM 實測的安全水位 | 否 | 1 |
 | P0-4 | 一個真實 Owner 任務 E2E（TUI → merge → COMPLETED） | 產品驗收 | 第一次真正閉環 | — | P0-1～3 | — | S | Owner 操作紀錄 | — | 3 |
 | P0-5 | 暫停可後接的路線（AGY、OpenCode、Telegram、Web、CliNest；Owner 2026-10-28 確認可後接）；gw 不暫停，但排在 P0-4 之後接入並量測是否省 token（Owner：不能省就不要） | 聚焦 | 釋放 PM／Reviewer 容量 | 政策 | **OWNER_DECISION_REQUIRED**（Roadmap 與 dispatch 切換） | 低 | — | 期間內無可後接路線的 PR | — | 0 |
@@ -1005,7 +1005,7 @@ flowchart LR
 | AUDIT-002 WP3 runtime 未使用 | 未變 | **`task advance` 已合併**（#519，train 13b `2341fae`）；#538 加 REVIEW_NOT_POSTED；#542 completion 接受 advance 派審 verdict。**範圍（v4 更正）：** 原始碼自述每次呼叫只做一個審查或結案動作（DISPATCH_REVIEW、RECORD_REVIEW_RESULT、REPAIR_RETRY／REPAIR_REVIEW、RUN_TASK_COMPLETE）；不做第一次派工、不跑測試、不開 PR（NEEDS_PUBLISH）、不合併（WAITING_INTEGRATION，確認 GitHub 已合併才記 MERGED）。「已合併驅動器」不等於全自動閉環。本機 store 未重新統計，使用次數 UNKNOWN | PR #533、#538、#546；origin/main `task_advance.py` |
 | AUDIT-014 無終態 | 未變 | 隨 #519 合併而有驅動器；終態是否完整未重新核對（UNKNOWN） | — |
 | AUDIT-003 D6 堆積 | 未變 | **已清理。** worktree 374→32；registry 580 筆中 ACTIVE 25、REMOVED 305、RETIRED_EXTERNALLY 214、RETAIN_BLOCKED 34；根磁碟可用 13→28 GB；PR #545 逐一審計保留的 35 個（SUPERSEDED 29、CONFLICTING 3、USEFUL 3，待 Owner 於 #352 決定）。High 可降為 Medium；自動退場仍未驗證 | 本機 `git worktree list`、registry 狀態欄位、`df`、#545 |
-| AUDIT-029 gw | Info | thinking 開、max_tokens 16384 後兩題**最終通過**（#522、#523 已合併；on-2 第一次失敗、第二次才過），不足以推論一般任務品質；thinking 關 4/5；合計 6/8。成本（v4 更正，分列單次與整題）：**單次呼叫** 9,816–14,472 completion tokens、74–92 秒；**整題**含失敗與修復：on-2 兩次合計 27,799 completion tokens（總 32,583）、184 秒，on-3 一次 9,816（總 14,182）、74 秒；thinking 關同類題單次 1.2K–8.4K tokens、2–4 秒。Claude PM 準備 context／套 diff／Reviewer 審查的成本未記，**所以省不省大型 AI token 仍未量**；proposal 模式不能新增檔案（llmtool 缺口）。Owner 稱 EC2／CI 可經 VPN 連 gw，repo 內無執行紀錄（UNVERIFIED） | #290 留言 2026-10-27 20:50 UTC |
+| AUDIT-029 gw | Info | thinking 開、max_tokens 16384 後兩題**最終通過**（#522、#523 已合併；on-2 第一次失敗、第二次才過），不足以推論一般任務品質；thinking 關 4/5；合計 6/8。成本（v4 更正，分列單次與整題）：**單次呼叫** 9,816–14,472 completion tokens、74–92 秒；**整題**含失敗與修復：on-2 兩次合計 27,799 completion tokens（總 32,583）、184 秒，on-3 一次 9,816（總 14,182）、74 秒；thinking 關同類題單次 1.2K–8.4K tokens、2–4 秒。Claude PM 準備 context／套 diff／Reviewer 審查的成本未記，**所以省不省大型 AI token 仍未量**；proposal 模式不能新增檔案（llmtool 缺口）。連線拓樸（Owner 2026-10-28 澄清，v4.1）：Owner 的 Mac 開公司 VPN 後連得到 gw 與 EC2，gw 派工與 EC2 測試都從 Mac 發起；審查者原先誤讀為「EC2／CI 能連 gw」，撤回。所有 gw 執行都在 PM 的 Mac，與此一致 | #290 留言 2026-10-27 20:50 UTC |
 | AUDIT-021 Mac CI 慢 | — | 排程觸發移除（#556／#557）、CLI 契約測試改 in-process（#548）；平均時間未重新量 | main log |
 | AUDIT-006／007 可攜性 | 未變 | 程式未變；**優先序提前**：Owner 要求第一版能用於其他專案（第 22 章） | Report B 9C.3 第 5 題 |
 
