@@ -1,6 +1,6 @@
 # Company gw capability ladder
 
-This offline ladder measures company gw on six synthetic Python tasks, from a one-line correction through a behavior-preserving refactor. The fixtures use standard-library Python only and contain no private data. Each level's `TASK.md` is the complete prompt; the `hidden_test.py` and `reference.patch` files are evaluator material and must not be included in gw's input.
+This offline ladder measures company gw on nine synthetic Python tasks, from a one-line correction through multi-file logic changes. The fixtures use standard-library Python only and contain no private data. Each level's `TASK.md` is the complete prompt; the `hidden_test.py` and `reference.patch` files are evaluator material and must not be included in gw's input.
 
 ## Run a level
 
@@ -11,6 +11,14 @@ python3 tools/llmtool/scripts/gw_ladder.py L1 --root .
 ```
 
 The scorer prints one JSON object containing `level`, `result` (`PASS`, `FAIL`, or `ERROR`), `ran`, and `failures`. It runs the hidden unittest with isolated Python (`-I -B`) and a 60-second limit. It does not import proposed output in the scorer process or make network requests.
+
+## L7–L9 multi-file tasks
+
+For L7, read `TASK.md`, `target.py`, `helper.py`, and `store.py`; allow writes to `target.py` and `store.py`. It measures tracing a visible pipeline symptom to a data-store defect and removing a caller workaround.
+
+For L8, read `TASK.md`, `target.py`, `helper.py`, and `store.py`; allow writes to all three source files. It measures adding priority-based rule selection with stable ties and exact input validation.
+
+For L9, read `TASK.md`, `target.py`, `helper.py`, and `store.py`; allow writes to all three source files. It measures stable topological scheduling while preserving dependency constraints and existing behavior.
 
 ## Ladder stop rule
 

@@ -1,0 +1,56 @@
+--- a/store.py
++++ b/store.py
+@@ -1,10 +1,20 @@
+ def _copy_needs(task, dependencies):
+     return list(dependencies.get(task, []))
+ 
+ 
+ def build_graph(tasks, dependencies):
+     """Build each task's list of prerequisites in declaration order."""
++    if (not isinstance(tasks, list) or
++            any(not isinstance(task, str) for task in tasks) or
++            len(set(tasks)) != len(tasks) or not isinstance(dependencies, dict)):
++        raise ValueError("dependencies must refer to listed tasks")
++    task_set = set(tasks)
++    for task, needs in dependencies.items():
++        if (task not in task_set or not isinstance(needs, list) or
++                any(not isinstance(need, str) or need not in task_set
++                    for need in needs)):
++            raise ValueError("dependencies must refer to listed tasks")
+     graph = {}
+     for task in tasks:
+         graph[task] = _copy_needs(task, dependencies)
+     return graph
+--- a/helper.py
++++ b/helper.py
+@@ -1,5 +1,4 @@
+-def ready_tasks(graph, completed):
+-    """Return unfinished tasks whose prerequisites are all complete."""
+-    ready = [task for task, needs in graph.items()
+-             if task not in completed and set(needs) <= completed]
+-    return sorted(ready)
++def ready_tasks(graph, completed, declared_order):
++    """Preserve declaration order while filtering by completed work."""
++    return [task for task in declared_order
++            if task not in completed and set(graph[task]) <= completed]
+--- a/target.py
++++ b/target.py
+@@ -1,17 +1,17 @@
+ from helper import ready_tasks
+ from store import build_graph
+ 
+ 
+ def schedule(tasks, dependencies):
+     """Return a stable topological order for the supplied task graph."""
+     graph = build_graph(tasks, dependencies)
+     completed = set()
+     result = []
+     while len(completed) < len(tasks):
+-        ready = ready_tasks(graph, completed)
++        ready = ready_tasks(graph, completed, tasks)
+         if not ready:
+             raise ValueError("dependency cycle")
+         task = ready[0]
+         completed.add(task)
+         result.append(task)
+     return result
