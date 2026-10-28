@@ -8,7 +8,7 @@
 - **可觀察 Reasoning Effort：** UNKNOWN（執行環境未向模型揭露此設定）。
 - **審查工具與限制：** 唯讀 `git`、`gh` API、本機 TaskStore 與 D6 registry 的**彙總統計**（只讀取狀態欄位，不讀取 prompt／diff 內容）、GitHub Actions run 紀錄。**本機測試執行：NOT_RUN**（Owner 於審查中拒絕在 Mac 上執行測試，改以 CI 紀錄為證據）。未存取任何私人對話、憑證或客戶資料。
 - **姊妹報告：** [Report B — Project Evolution & Decision Retrospective](project-evolution-decision-retrospective-20261028.md)、[Report C — Product Owner Playbook](product-owner-playbook-ai-development-20261028.md)、[Executive Decision Brief](executive-decision-brief-20261028.md)。
-- **版本：** v3（2026-10-28 依 Owner 三輪答覆更新：第 22 章優先序改寫（gw 以量測為條件必做、AGY／OpenCode 可後接、即時 PM 對話進入第一版、背景續跑降級、可攜性因「其他項目開發」提前）；第 26 章新增 26.1 至 main `3677806`：`task advance` 與 TUI 即時 PM 已合併、worktree 已清理、gw thinking 開啟 2/2）；v2（2026-10-28 Audit Quality Review 自我校正；修正 Finding 計數、統計適用範圍、worktree 清理方案、建議與授權的區分，並新增第 26 章 Post-Snapshot Status Update）。原始 Snapshot 的歷史事實未改寫。
+- **版本：** v4（2026-10-28 依 ChatGPT 顧問審查（advisory，非正式 verdict；Owner 2026-10-28 轉交）五項修正：等待逾時不得視為授權、`task advance` 實際範圍、gw 整題成本含修復、現行優先表統一、Codex PM 適配只保留 Owner 自述）；v3（2026-10-28 依 Owner 三輪答覆更新：第 22 章優先序改寫（gw 以量測為條件必做、AGY／OpenCode 可後接、即時 PM 對話進入第一版、背景續跑降級、可攜性因「其他項目開發」提前）；第 26 章新增 26.1 至 main `3677806`：`task advance` 與 TUI 即時 PM 已合併、worktree 已清理、gw thinking 開啟 2/2）；v2（2026-10-28 Audit Quality Review 自我校正；修正 Finding 計數、統計適用範圍、worktree 清理方案、建議與授權的區分，並新增第 26 章 Post-Snapshot Status Update）。原始 Snapshot 的歷史事實未改寫。
 
 > 證據標記：**FACT**（有直接證據）、**INFERENCE**（由證據推論）、**OPINION**（專業判斷）、**UNKNOWN**（資料不足）。所有「本機統計」指 2026-10-28 於 Owner Mac 上以唯讀方式彙總的 `~/.local/state/llmtool/tasks`（279 筆）與 `.git/llmtool-worktrees`（489 筆）；其適用範圍與限制見 2.4。
 >
@@ -920,7 +920,7 @@ flowchart LR
 |---|---|---|
 | **30 天** | P0 全部；一條鏈 E2E；D6 安全退場；文件瘦身第一輪 | Owner 用 TUI 完成 3 個真實任務；ACTIVE D6 與磁碟用量明顯下降（通過 gate 的退場）；政策文件體積明顯下降 |
 | **60 天** | P1：模組拆分、retry、PM 通道統一、硬編碼移除、Mac CI 縮短 | Mac PR job 時間明顯低於現行中位數 23 分；Task 終態比例以實測基準比較；在第二台 Mac（或另一使用者帳號）跑通 |
-| **90 天** | P2 + A13 前置：wheel、LICENSE、USER.md、可選 EC2；重新評估 AGY／gw／Web | 外部使用者依 USER.md 安裝並完成一個任務（本機模式，無 EC2） |
+| **90 天** | P2 + A13 前置：wheel、LICENSE、USER.md、可選 EC2；重新評估 AGY／Web（v4：gw 已移至第 22 章現行優先表第 2 項，不再在此重評；可攜性亦提前） | 外部使用者依 USER.md 安裝並完成一個任務（本機模式，無 EC2） |
 
 ---
 
@@ -952,7 +952,18 @@ flowchart LR
 **四週計畫：** 第 1 週 D6 安全退場 + TUI PR 修綠合併；第 2 週 advance + 終態 + retry；第 3 週 E2E ×3 + 修 bug；第 4 週 拆模組 + 文件瘦身 + 硬編碼 config。
 **v3 註記：** 第 1、2 週的項目在 2026-10-28 已大多合併（26.1）；Owner 對第一版的要求是「在 TUI 提需求、PM 像 Claude TUI 一樣即時回話」（即時 PM 對話已合併，#544／#549，待 E2E）與「用公司 LLM 搭配其他 AI 開發其他專案」（可攜性提前）。因此四週計畫改為：第 1 週 Owner 親手跑一個真實任務 E2E（TUI → PM 即時對話 → Codex → EC2 → Reviewer → PR → COMPLETED）並修出現的 bug；第 2 週 gw 經同一條鏈接入並量測省不省；第 3 週 硬編碼→config、在第二個專案目錄跑一次；第 4 週 拆模組 + 文件瘦身。四週仍為待驗證目標。
 **一名 Developer + 一名 Reviewer：** Developer = Codex direct（唯一路線）；Reviewer = Claude（唯一路線）；PM = Claude Code session（Owner 對話）；Reviewer 只審 runtime PR，docs／test-only PR 由 EC2 CI + 自審放行（**OWNER_DECISION_REQUIRED**：與 AGENTS.md 現行審查規則不同）。
-**減少 Token／CI：** Mac 只跑 Mac 專屬（OWNER_DECISION_REQUIRED）；減少 merge train 雙 CI（OWNER_DECISION_REQUIRED）；Reviewer 復用 D6 只讀 delta（OWNER_DECISION_REQUIRED）；政策文件瘦身；gw 只做合成評測（OWNER_DECISION_REQUIRED：#290 取樣計畫為 Owner 決策）；Codex `--read-path` 限縮（工程建議）。
+**減少 Token／CI：** Mac 只跑 Mac 專屬（OWNER_DECISION_REQUIRED）；減少 merge train 雙 CI（OWNER_DECISION_REQUIRED）；Reviewer 復用 D6 只讀 delta（OWNER_DECISION_REQUIRED）；政策文件瘦身；~~gw 只做合成評測~~（v2 建議，**已被下方現行優先表第 2 項取代**：gw 接入主鏈並量測整題成本；#290 取樣計畫仍為 Owner 決策）；Codex `--read-path` 限縮（工程建議）。
+
+**現行優先表（v4，取代本章與第 23 章中與之衝突的所有舊建議；舊文保留為歷史）：**
+
+| 順序 | 項目 | 狀態 |
+|---|---|---|
+| 1 | Owner 親手跑一個真實任務走完主鏈：TUI → PM 即時對話 → Codex direct → EC2 測試 → Reviewer → PR → 合併 → COMPLETED | 零件大致已合併（26.1）；`task advance` 只涵蓋審查派送到結案，派工、發布、合併仍手動；尚無 E2E 紀錄 |
+| 2 | gw 經同一條鏈接入，量測**整題**成本（含失敗與修復、PM context、套 diff、Reviewer）對直接派 Codex | 必做；Owner 條件「不能節省就沒必要」，量完再決定去留（OWNER_DECISION_REQUIRED） |
+| 3 | 可攜性：硬編碼→config、`issues/289` URL、Claude Code 耦合、在第二個專案目錄跑一次 | 第一版（Owner：「一起進行其他項目開發」） |
+| 4 | Codex retry 與契約放寬、拆模組、文件瘦身 | 第一版後段 |
+| 5 | AGY、OpenCode、Telegram、Web、CliNest、High Debug 自動化、GitHub events inbox | 第二版（Owner 確認可後接；OWNER_DECISION_REQUIRED） |
+| 6 | 「關閉介面後工作繼續」（Developer 子行程獨立 session） | P2（Owner：本機第一版非硬需求） |
 
 **本章為審查者個人技術判斷（OPINION），不是 Roadmap、不是授權。**
 
@@ -991,11 +1002,11 @@ flowchart LR
 | Finding | 26 章狀態 | 現在 | 依據 |
 |---|---|---|---|
 | AUDIT-001 使用者入口止於 intake | 部分改善 | **顯著改善，待 E2E 驗證。** `chat_tui.py` 已接 `pm_runtime`（S2 #524、S2b #549、TUI PM 窗格 S4 #544）：`/pm new` 建立專屬 PM session、PM 回覆串流顯示、`/pm history`。這正是 Owner 2026-10-28 說的第一版驗收（即時回話）。尚無任何「從 TUI 提需求到 COMPLETED」的操作紀錄，Critical 降為 High 的條件是一次 Owner E2E | origin/main `chat_tui.py`、PR #546 |
-| AUDIT-002 WP3 runtime 未使用 | 未變 | **`task advance` 已合併**（#519，train 13b `2341fae`）；#538 加 REVIEW_NOT_POSTED；#542 completion 接受 advance 派審 verdict。本機 store 未重新統計，使用次數 UNKNOWN | PR #533、#538、#546 |
+| AUDIT-002 WP3 runtime 未使用 | 未變 | **`task advance` 已合併**（#519，train 13b `2341fae`）；#538 加 REVIEW_NOT_POSTED；#542 completion 接受 advance 派審 verdict。**範圍（v4 更正）：** 原始碼自述每次呼叫只做一個審查或結案動作（DISPATCH_REVIEW、RECORD_REVIEW_RESULT、REPAIR_RETRY／REPAIR_REVIEW、RUN_TASK_COMPLETE）；不做第一次派工、不跑測試、不開 PR（NEEDS_PUBLISH）、不合併（WAITING_INTEGRATION，確認 GitHub 已合併才記 MERGED）。「已合併驅動器」不等於全自動閉環。本機 store 未重新統計，使用次數 UNKNOWN | PR #533、#538、#546；origin/main `task_advance.py` |
 | AUDIT-014 無終態 | 未變 | 隨 #519 合併而有驅動器；終態是否完整未重新核對（UNKNOWN） | — |
 | AUDIT-003 D6 堆積 | 未變 | **已清理。** worktree 374→32；registry 580 筆中 ACTIVE 25、REMOVED 305、RETIRED_EXTERNALLY 214、RETAIN_BLOCKED 34；根磁碟可用 13→28 GB；PR #545 逐一審計保留的 35 個（SUPERSEDED 29、CONFLICTING 3、USEFUL 3，待 Owner 於 #352 決定）。High 可降為 Medium；自動退場仍未驗證 | 本機 `git worktree list`、registry 狀態欄位、`df`、#545 |
-| AUDIT-029 gw | Info | thinking 開、max_tokens 16384 後真實題 **2/2**（#522、#523 已合併）；thinking 關 4/5；合計 6/8。thinking 開每題 1.0–1.4 萬 completion tokens、74–92 秒（多 5–10 倍）。**省不省大型 AI token 仍未量**（Claude PM 準備 context／套 diff／審查的成本未記）；proposal 模式不能新增檔案（llmtool 缺口）。Owner 稱 EC2／CI 可經 VPN 連 gw，repo 內無執行紀錄（UNVERIFIED） | #290 留言 2026-10-27 20:50 UTC |
+| AUDIT-029 gw | Info | thinking 開、max_tokens 16384 後兩題**最終通過**（#522、#523 已合併；on-2 第一次失敗、第二次才過），不足以推論一般任務品質；thinking 關 4/5；合計 6/8。成本（v4 更正，分列單次與整題）：**單次呼叫** 9,816–14,472 completion tokens、74–92 秒；**整題**含失敗與修復：on-2 兩次合計 27,799 completion tokens（總 32,583）、184 秒，on-3 一次 9,816（總 14,182）、74 秒；thinking 關同類題單次 1.2K–8.4K tokens、2–4 秒。Claude PM 準備 context／套 diff／Reviewer 審查的成本未記，**所以省不省大型 AI token 仍未量**；proposal 模式不能新增檔案（llmtool 缺口）。Owner 稱 EC2／CI 可經 VPN 連 gw，repo 內無執行紀錄（UNVERIFIED） | #290 留言 2026-10-27 20:50 UTC |
 | AUDIT-021 Mac CI 慢 | — | 排程觸發移除（#556／#557）、CLI 契約測試改 in-process（#548）；平均時間未重新量 | main log |
 | AUDIT-006／007 可攜性 | 未變 | 程式未變；**優先序提前**：Owner 要求第一版能用於其他專案（第 22 章） | Report B 9C.3 第 5 題 |
 
-**結論（v3）：** 零件已經齊到可以做第一次真實 E2E 的程度；下一個有意義的證據不是更多 PR，而是 Owner 在 TUI 跑完一個任務的操作紀錄。
+**結論（v4）：** 零件大致齊到可以嘗試第一次真實 E2E，但派工、發布、合併仍是手動步驟；下一個有意義的證據不是更多 PR，而是 Owner 在 TUI 跑完一個任務的操作紀錄，並記下哪些步驟是人手做的。
