@@ -1521,7 +1521,7 @@ class OfficeViewTests(unittest.TestCase):
                 (codex, "codex-reviewer", ("codex reviewer", "reviewer")),
                 (codex, "codex-high-debug-gpt-6.1-sol", ("codex developer", "developer")),
                 (codex, {"x": 1}, ("codex developer", "developer")),   # unreadable id, not a -crv- name
-                (claude, "claude-developer-ui", ("claude developer", "developer")),
+                (claude, "claude-developer-ui", ("claude ui", "ui")),   # as SESSION_ROLE reads it
                 (claude, "claude-pm-1ec9782e", ("claude pm", "pm")),
                 (claude, {"x": 1}, ("claude", ""))):   # other families claim no role
             with self.subTest(agent=agent, family=proc.role):
@@ -1547,6 +1547,48 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((rows["codex developer"].role, rows["codex developer"].task),
                          ("developer", "task wp-1"))
         self.assertNotIn("codex", rows)
+
+    def test_claude_session_in_a_d6_shows_the_role_its_record_binds(self):
+        # #565 v2: the D6 record's agent beats the launcher name and the old
+        # "developer by placement" default; without either, no role is claimed.
+        for agent, launcher, expected in (
+                ("claude-reviewer", "claude-developer-g8", ("claude reviewer", "reviewer")),
+                ("claude-developer-ui-486c15a4", None, ("claude ui", "ui")),
+                ("codex-developer-gpt-6-luna", None, ("claude developer", "developer")),
+                ({"x": 1}, "claude-reviewer", ("claude reviewer", "reviewer")),   # launcher record
+                ({"x": 1}, None, ("claude", ""))):
+            with self.subTest(agent=agent, launcher=launcher):
+                self._register("wp-1", str(self.task), trusted_agent_id=agent)
+                entries = [{"type": "user", "cwd": str(self.task), "entrypoint": "cli"}]
+                if launcher:
+                    entries.append({"type": "agent-name", "agentName": launcher, "sessionId": "s"})
+                entries.append({"type": "ai-title", "aiTitle": "title s"})
+                self._write(self.claude / "proj" / "s.jsonl", entries, age=600)
+                row = next(row for row in self.rows() if row.task == "task wp-1")
+                self.assertEqual((row.name, row.role), expected)
+
+    def test_opencode_session_in_a_d6_shows_the_role_its_record_binds(self):
+        cli = mon.Process(40, 1, 40, "30:00", "S+", "OpenCode CLI", "opencode", "")
+        running = (str(self.task), "Issue 271 fix", self.NOW - 10, self.NOW - 1800)
+        for agent, expected in (("opencode-developer-deepseek", "developer"),
+                                ("claude-reviewer", "reviewer"), ({"x": 1}, "")):
+            with self.subTest(agent=agent):
+                self._register("wp-1", str(self.task), trusted_agent_id=agent)
+                row, = mon._cli_rows([cli], [running], self.NOW, self.canonical,
+                                     {40: str(self.task)}.get, "opencode", "OpenCode CLIENT", 50, "")
+                self.assertEqual((row.role, row.task, row.state), (expected, "task wp-1", mon.WORKING))
+
+    def test_d6_role_reuses_the_registry_snapshot_the_placement_check_loaded(self):
+        # #565 v2 P3: no registry I/O per row. Once _place has loaded the
+        # registry for this refresh, the role comes from that snapshot even
+        # when the registry can no longer be stat'ed.
+        self._register("wp-1", str(self.task), trusted_agent_id="codex-reviewer")
+        self.assertEqual(mon._place(str(self.task), self.canonical), ("task", "wp-1"))
+        with patch.object(mon.os, "lstat", side_effect=OSError("no registry I/O expected")):
+            self.assertEqual(mon._d6_role(self.canonical, "wp-1", "developer"), "reviewer")
+        # With nothing loaded yet it reads the registry once itself.
+        mon._registry_cache.clear()
+        self.assertEqual(mon._d6_role(self.canonical, "wp-1", "developer"), "reviewer")
 
     def test_codex_session_in_a_d6_with_an_unreadable_agent_id_falls_back_to_the_crv_name(self):
         review = self.task.parent / "audit-20261028-crv2-06c5745"
@@ -2227,6 +2269,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertNotIn("secret-token", text)
 
     def test_claude_session_title_and_subagents(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")   # the D6 record names the role
         project = self.claude / "proj"
         self._write(project / "s1.jsonl", [
             {"type": "user", "cwd": self.canonical, "message": "PROMPT-SECRET"},
@@ -2255,6 +2298,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
     def test_claude_cli_registry_status_beats_the_session_file_guess(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")   # the D6 record names the role
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
             {"type": "tool_result", "content": "x"}]}}
         sessions = self.claude.parent / "sessions"
@@ -2281,6 +2325,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(row.detail.startswith("等人確認權限，要PM（Codex）回"), row.detail)
 
     def test_quiet_claude_session_whose_tool_result_is_unanswered_waits_on_the_model(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")   # the D6 record names the role
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
             {"type": "tool_result", "content": "FILE-SECRET"}]}}
         answered = {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
@@ -2405,6 +2450,7 @@ class OfficeViewTests(unittest.TestCase):
                                     "providerEnv": {"KEY": "CREDENTIAL-SECRET"}}), encoding="utf-8")
 
     def test_background_session_needing_a_person_is_listed_without_a_session_file(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")   # the D6 record names the role
         # A `claude --bg --resume` stopped at a menu: blocked, no session file yet.
         self._job("j1", "blocked")
         self._job("j3", "working")
