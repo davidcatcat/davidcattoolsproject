@@ -1755,6 +1755,28 @@ def registry_details(canonical: str) -> dict:
     return cached[2] if cached else {}
 
 
+# A role word anywhere in a bound agent id: codex-reviewer, claude-reviewer-agent,
+# codex-developer-gpt-6-luna, claude-developer-ui (the first word wins).
+D6_ROLE = re.compile(r"(?:^|[-_])(developer|reviewer|pm|ui)(?=$|[-_])")
+# A Codex review worktree is named <task>-crv<N>-<head> (review-change).
+CODEX_REVIEW_TASK = re.compile(r"-crv\d+-")
+
+
+def _d6_role(canonical: str, task_id: str, default: str = "") -> str:
+    """The role the D6 registry binds to a registered task: read from the
+    record's trusted_agent_id. When that id cannot be read (missing or
+    malformed), a -crv<N>- task name still marks a Codex review worktree;
+    otherwise the caller's default (Owner #564: every Codex row in a
+    registered D6 shows developer or reviewer from the registry)."""
+    agent = registry_details(canonical).get(task_id, ("", "", 0, 0, ""))[1]
+    found = D6_ROLE.search(agent)
+    if found:
+        return found.group(1)
+    if not agent and CODEX_REVIEW_TASK.search(task_id):
+        return "reviewer"
+    return default
+
+
 D6_STATES = {   # D6 record state -> plain words
     "ACTIVE": "進行中", "REPAIR": "修復中", "REVIEW_PENDING": "等審查",
     "RETAIN_BLOCKED": "保留待處置", "RETIRE_READY": "已驗收，可收尾",
@@ -2300,10 +2322,13 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
     title = _label(codex_title(history or {}, payload.get("id")))
     action = _codex_action(tail, canonical) if state == WORKING else ""
     sid = _codex_sid(payload.get("id"))
-    if place[0] == "task":   # a registered D6 root belongs to its one Developer
+    if place[0] == "task":
+        # A registered D6 root belongs to the one agent its record binds: the
+        # Codex Reviewer in a -crv- review worktree, else the Codex Developer.
+        role = _d6_role(canonical, place[1], "developer")
         return ("main", payload.get("id"),
-                OfficeRow("codex developer", state, action or title or _place_label(place), age, 10,
-                          key=key, tui=tui, role="developer", task=f"task {place[1]}",
+                OfficeRow(f"codex {role}", state, action or title or _place_label(place), age, 10,
+                          key=key, tui=tui, role=role, task=f"task {place[1]}",
                           evidence="codex 紀錄", sid=sid))
     if payload.get("originator") == "codex_exec":
         # A `codex exec` run, like a `claude -p` run: one call that exits when
@@ -4122,9 +4147,9 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         if not registered or os.path.realpath(cwd) != registered[0]:
             continue
         seen.add(place[1])
-        agent = registry_details(canonical).get(place[1], ("", "", 0, 0, ""))[1]
-        found = re.search(r"(?:^|[-_])(developer|reviewer|pm|ui)(?:[-_]agent)?$", agent)
-        role = found.group(1) if found else ""
+        # A Codex CLI in a registered D6 is its Developer unless the record
+        # binds a Reviewer; other families claim no role the record does not name.
+        role = _d6_role(canonical, place[1], "developer" if family == "codex" else "")
         age = _elapsed_seconds(proc.elapsed)
         out.append(OfficeRow(f"{family} {role}".rstrip(), WORKING, f"task {place[1]}（程序 cwd）",
                              age if age is not None else 0.0, 10,

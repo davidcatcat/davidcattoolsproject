@@ -1511,6 +1511,55 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(len(rows), 1)
         self.assertEqual((rows[0].name, rows[0].role), ("claude reviewer", "reviewer"))
 
+    def test_d6_process_role_is_read_from_the_whole_agent_id(self):
+        # Owner #564: the gw ladder Developer (codex-developer-gpt-6-luna) showed
+        # as a plain "codex" row because only an id ending in the role word counted.
+        codex = mon.Process(82, 1, 82, "00:12", "S", "Codex CLI", "codex", "")
+        claude = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+        for proc, agent, expected in (
+                (codex, "codex-developer-gpt-6-luna", ("codex developer", "developer")),
+                (codex, "codex-reviewer", ("codex reviewer", "reviewer")),
+                (codex, "codex-high-debug-gpt-6.1-sol", ("codex developer", "developer")),
+                (codex, {"x": 1}, ("codex developer", "developer")),   # unreadable id, not a -crv- name
+                (claude, "claude-developer-ui", ("claude developer", "developer")),
+                (claude, "claude-pm-1ec9782e", ("claude pm", "pm")),
+                (claude, {"x": 1}, ("claude", ""))):   # other families claim no role
+            with self.subTest(agent=agent, family=proc.role):
+                self._register("wp-1", str(self.task), trusted_agent_id=agent)
+                rows = mon._d6_process_rows([proc], [], self.canonical, lambda pid: str(self.task))
+                self.assertEqual([(row.name, row.role) for row in rows], [expected])
+                self.assertEqual(rows[0].detail, "task wp-1（程序 cwd）")
+
+    def test_codex_session_in_a_d6_shows_the_role_its_record_binds(self):
+        # Owner #564: the Codex Reviewer of PR #525 (registry trusted_agent_id
+        # codex-reviewer) was shown as "codex developer".
+        review = self.task.parent / "audit-20261028-crv1-06c5745"
+        os.makedirs(review)
+        self._register("audit-20261028-crv1-06c5745", str(review), trusted_agent_id="codex-reviewer")
+        self._register("wp-1", str(self.task), trusted_agent_id="codex-developer-gpt-6-luna")
+        self._codex("rev", {"id": "T1", "cwd": str(review), "thread_source": "user",
+                            "originator": "codex-tui"}, ["task_started"], age=30)
+        self._codex("dev", {"id": "T2", "cwd": str(self.task), "thread_source": "user",
+                            "originator": "codex-tui"}, ["task_started"], age=30)
+        rows = self.by_name(self.rows())
+        self.assertEqual((rows["codex reviewer"].role, rows["codex reviewer"].task),
+                         ("reviewer", "task audit-20261028-crv1-06c5745"))
+        self.assertEqual((rows["codex developer"].role, rows["codex developer"].task),
+                         ("developer", "task wp-1"))
+        self.assertNotIn("codex", rows)
+
+    def test_codex_session_in_a_d6_with_an_unreadable_agent_id_falls_back_to_the_crv_name(self):
+        review = self.task.parent / "audit-20261028-crv2-06c5745"
+        os.makedirs(review)
+        for task_id, root, expected in (("audit-20261028-crv2-06c5745", review, "reviewer"),
+                                        ("wp-1", self.task, "developer")):
+            with self.subTest(task=task_id):
+                self._register(task_id, str(root), trusted_agent_id={"x": 1})
+                self._codex(task_id, {"id": f"T-{task_id}", "cwd": str(root), "thread_source": "user",
+                                      "originator": "codex-tui"}, ["task_started"], age=30)
+                row = next(row for row in self.rows() if row.task == f"task {task_id}")
+                self.assertEqual((row.name, row.role), (f"codex {expected}", expected))
+
     def test_open_codex_cli_without_a_session_row_is_an_idle_member(self):
         launcher = mon.Process(81, 1, 81, "02:43:00", "S+", "Codex CLI (node launcher)", "node", "")
         codex = mon.Process(82, 81, 81, "02:43:00", "S+", "Codex CLI", "codex",
