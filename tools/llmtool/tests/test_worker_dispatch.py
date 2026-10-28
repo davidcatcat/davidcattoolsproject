@@ -623,19 +623,24 @@ class WorkerDispatchTests(unittest.TestCase):
 
     def test_codex_timeout_continuation_adapter_consumes_recorded_action(self):
         self._set_state('codex-developer', 'ALLOWED')
-        previous = self.developer(state='DEVELOPER_OUTCOME_UNKNOWN', provider='codex')
-        previous.update(provider_type='codex-cli', model='gpt-6-luna',
-                        executor_task_id='executor-task-1',
-                        error_code='CODEX_TIMEOUT_WITH_CHANGES',
-                        execution={'status': 'TIMEOUT', 'native_session_id': None,
+        pending = self.developer(state='DEVELOPER_PENDING', provider='codex')
+        pending.update(max_tokens=None, executor_task_id='executor-task-1')
+        self.store.compare_and_update(self.task['task_id'],
+            expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna',
+                       'executor_task_id': 'executor-task-1'}
+        self.store.update(self.task['task_id'], developer=dispatching)
+        previous = {**dispatching, 'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                        'error_code': 'CODEX_TIMEOUT_WITH_CHANGES',
+                        'execution': {'status': 'TIMEOUT', 'native_session_id': None,
                             'process_exit_code': None, 'stdout_sha256': None,
                             'elapsed_ms': 100, 'cleanup_status': 'CONFIRMED',
                             'usage_source': 'UNKNOWN', 'source_bytes': None,
                             'source_file_count': None, 'source_manifest_sha256': None,
                             'diff_sha256': 'c' * 64,
-                            'diff_base_sha': previous['source_sha']})
-        self.store.compare_and_update(self.task['task_id'],
-            expected={'developer': None}, developer=previous)
+                            'diff_base_sha': dispatching['source_sha']}}
+        self.store.update(self.task['task_id'], developer=previous)
         continued = {**previous, 'assignment_id': new_id(),
                      'state': 'DEVELOPER_DISPATCHING', 'session_id': 'dev-' + new_id(),
                      'artifact': None, 'artifact_sha256': None, 'usage': None,

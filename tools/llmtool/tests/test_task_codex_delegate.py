@@ -28,7 +28,9 @@ class CodexDelegateTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
         self.repo = self.base / 'repo'
-        self.root = self.base / 'executor'
+        self.workspace_root = self.base / 'workspaces'
+        self.workspace_root.mkdir()
+        self.root = self.workspace_root / 'executor-task-1'
         self.bin = self.base / 'bin'
         self.bin.mkdir()
         self.store = TaskStore(self.base / 'tasks')
@@ -349,7 +351,8 @@ class CodexDelegateTests(unittest.TestCase):
         with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
                 patch.object(lifecycle, '_bootstrap', side_effect=bootstrap_result):
             recorded_head = lifecycle.record_result(task_id='executor-task-1',
-                canonical_root=self.repo, root=self.root, workspace_root=self.base)
+                canonical_root=self.repo, root=self.root,
+                workspace_root=self.workspace_root)
         self.assertEqual(recorded_head, result_head)
         registration, snapshot = task_completion.bind_executor_task(
             'executor-task-1', expected_common_dir=self.common_dir, root=self.root)

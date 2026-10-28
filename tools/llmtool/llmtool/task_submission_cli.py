@@ -2667,6 +2667,8 @@ def run_task_codex_delegate(args, *, store):
         'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
         'source_bytes': None, 'source_file_count': None,
         'source_manifest_sha256': None}
+    output_rejection = None
+    rejection_persisted = False
     try:
         after_registration = task_completion.read_d6_registration(
             registration.task_id, registration.common_dir)
@@ -2696,9 +2698,11 @@ def run_task_codex_delegate(args, *, store):
         rejection = (ignored_rejection if ignored_rejection is not None else
                      rejection)
         if rejection is not None:
+            output_rejection = rejection
             developer.update(execution=execution)
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage, artifact)
+            rejection_persisted = True
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
                              execution=execution, usage=result.usage)
@@ -2712,15 +2716,22 @@ def run_task_codex_delegate(args, *, store):
                 error_code=None, execution=execution, usage=result.usage)
     except Exception:
         developer.pop('blocked_reason', None)
-        developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_RESULT_EVIDENCE_UNKNOWN',
-            execution={'status': 'UNKNOWN', 'native_session_id': result.thread_id,
-                'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
-                'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
-                'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
-                'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None})
+        if output_rejection is not None:
+            developer.update(state='DEVELOPER_OUTPUT_REJECTED',
+                artifact=None, artifact_sha256=None, error_code=output_rejection,
+                execution=execution, usage=result.usage)
+        else:
+            developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_RESULT_EVIDENCE_UNKNOWN',
+                execution={'status': 'UNKNOWN', 'native_session_id': result.thread_id,
+                    'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
+                    'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
+                    'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+                    'source_bytes': None, 'source_file_count': None,
+                    'source_manifest_sha256': None})
     try:
-        saved = store.update(task['task_id'], developer=developer, completion=completion)
+        if not rejection_persisted:
+            saved = store.update(task['task_id'], developer=developer,
+                                 completion=completion)
     except Exception:
         developer.pop('blocked_reason', None)
         developer.pop('progress', None)
