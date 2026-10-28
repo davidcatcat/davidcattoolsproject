@@ -642,7 +642,7 @@ def _validate(record):
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
-                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
                     (item.get('reviewer_task') is not None and
                      (type(item['reviewer_task']) is not str or
                       not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['reviewer_task']))) or
@@ -687,7 +687,7 @@ def _validate(record):
                      (item.get('attempt') != 3 or
                       type(item['high_debug_report_sha256']) is not str or
                       re.fullmatch(r'[0-9a-f]{64}', item['high_debug_report_sha256']) is None)) or
-                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN', 'FAILED') or
                     (item.get('comment_id') is not None and
                      (type(item['comment_id']) is not int or item['comment_id'] < 0)) or
                     type(item.get('packet_sha256')) is not str or
