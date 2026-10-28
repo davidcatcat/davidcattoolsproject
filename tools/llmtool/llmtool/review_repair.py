@@ -109,7 +109,8 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
     response = json.dumps({
         'schema_version': 1,
-        'summary': f"Bounded repair continuation {attempt}/3 for Task {task['task_id']}.",
+        'summary': (f"LLMTOOL_RUNTIME recorded bounded repair continuation {attempt}/3 "
+                    f"for Task {task['task_id']}; no PM or provider decision was made."),
         'developer_assignment': assignment,
     }, ensure_ascii=True, separators=(',', ':'))
     request = f"REPAIR {attempt}/3 of {task['task_id']}"
