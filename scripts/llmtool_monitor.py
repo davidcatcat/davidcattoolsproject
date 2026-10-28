@@ -1755,6 +1755,36 @@ def registry_details(canonical: str) -> dict:
     return cached[2] if cached else {}
 
 
+# A role word anywhere in a bound agent id: codex-reviewer, claude-reviewer-agent,
+# codex-developer-gpt-6-luna (the first word wins). `developer-ui` is the UI
+# Agent, as in SESSION_ROLE (Owner 2026-10-26).
+D6_ROLE = re.compile(r"(?:^|[-_])(?:developer-(ui)|(developer|reviewer|pm|ui))(?=$|[-_])")
+# A Codex review worktree is named <task>-crv<N>-<head> (review-change).
+CODEX_REVIEW_TASK = re.compile(r"-crv\d+-")
+
+
+def _d6_role(canonical: str, task_id: str, default: str = "") -> str:
+    """The role the D6 registry binds to a registered task: read from the
+    record's trusted_agent_id. When that id cannot be read (missing or
+    malformed), a -crv<N>- task name still marks a Codex review worktree;
+    otherwise the caller's default (Owner #564: every Codex row in a
+    registered D6 shows developer or reviewer from the registry; a Claude or
+    OpenCode row claims no role its record does not name).
+
+    Reads the registry snapshot the caller's placement check (_place ->
+    registered_tasks) loaded for this refresh, so it costs no registry I/O
+    of its own; the registry is read only when nothing has loaded it yet."""
+    cached = _registry_cache.get(os.path.join(canonical, ".git", "llmtool-worktrees"))
+    details = cached[2] if cached is not None else registry_details(canonical)
+    agent = details.get(task_id, ("", "", 0, 0, ""))[1]
+    found = D6_ROLE.search(agent)
+    if found:
+        return found.group(1) or found.group(2)
+    if not agent and CODEX_REVIEW_TASK.search(task_id):
+        return "reviewer"
+    return default
+
+
 D6_STATES = {   # D6 record state -> plain words
     "ACTIVE": "進行中", "REPAIR": "修復中", "REVIEW_PENDING": "等審查",
     "RETAIN_BLOCKED": "保留待處置", "RETIRE_READY": "已驗收，可收尾",
@@ -2267,7 +2297,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
         task = next((task_id for task_id, (_, ref) in registered_tasks(canonical).items()
                      if stem and re.search(rf"(?<![\w-])/root/{re.escape(stem)}(?![\w-])", ref)),
                     "")
-        role = "developer" if task else ""
+        role = _d6_role(canonical, task, "developer") if task else ""
         detail = (_humanize(stem) if stem else "（未命名工作）")
         if task:
             detail += f"（task {task}）"
@@ -2300,10 +2330,13 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
     title = _label(codex_title(history or {}, payload.get("id")))
     action = _codex_action(tail, canonical) if state == WORKING else ""
     sid = _codex_sid(payload.get("id"))
-    if place[0] == "task":   # a registered D6 root belongs to its one Developer
+    if place[0] == "task":
+        # A registered D6 root belongs to the one agent its record binds: the
+        # Codex Reviewer in a -crv- review worktree, else the Codex Developer.
+        role = _d6_role(canonical, place[1], "developer")
         return ("main", payload.get("id"),
-                OfficeRow("codex developer", state, action or title or _place_label(place), age, 10,
-                          key=key, tui=tui, role="developer", task=f"task {place[1]}",
+                OfficeRow(f"codex {role}", state, action or title or _place_label(place), age, 10,
+                          key=key, tui=tui, role=role, task=f"task {place[1]}",
                           evidence="codex 紀錄", sid=sid))
     if payload.get("originator") == "codex_exec":
         # A `codex exec` run, like a `claude -p` run: one call that exits when
@@ -2771,7 +2804,7 @@ def _claude_state(entry: dict, who: str, task: str, detail: str, age: float | No
 
 
 def _claude_row(entry: dict, state: str, detail: str, age, place, task: str, key: str,
-                sid: str, cli: bool = False) -> OfficeRow:
+                sid: str, canonical: str, cli: bool = False) -> OfficeRow:
     # The name and id its launcher gave it: what a PM looks for to
     # find the window that needs an answer.
     name = entry.get("name")
@@ -2779,10 +2812,12 @@ def _claude_row(entry: dict, state: str, detail: str, age, place, task: str, key
     running = entry.get("status") is not None
     if running:
         detail += f"｜{name}" if name else ""
-    # The launcher's name is the record that binds a role outside D6; a
-    # registered D6 root belongs to its one Developer.
+    # In a registered D6 root the record's bound agent names the role; the
+    # launcher's name is the record outside D6, or when the D6 record names
+    # none. Nothing else claims a role (Owner 2026-10-23, #565).
     named = SESSION_ROLE.fullmatch(name)
-    role = (named.group(1) or named.group(2)) if named else "developer" if task else ""
+    launcher = (named.group(1) or named.group(2)) if named else ""
+    role = (_d6_role(canonical, place[1]) or launcher) if place[0] == "task" else launcher
     # Only a running CLI says whether it has a terminal; a session moved to
     # the background keeps running without one.
     mode = ("背景" if entry.get("kind") == "bg" else "互動") if running else ""
@@ -2873,7 +2908,8 @@ def claude_rows(now: float, root=None,
             # session file still holds the name its launcher gave it.
             entry = {"name": next((item.get("agentName") for item in reversed(tail)
                                    if item.get("type") == "agent-name"), None)}
-        rows.append(_claude_row(entry, state, detail, age, place, task, key, sid, cli=first == "cli"))
+        rows.append(_claude_row(entry, state, detail, age, place, task, key, sid, canonical,
+                                cli=first == "cli"))
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
@@ -2911,7 +2947,7 @@ def claude_rows(now: float, root=None,
         state, detail, age = _claude_state(entry, who, task, "", None, now, [])
         if state == ATTENTION:
             rows.append(_claude_row(entry, state, detail + "（還沒有對話紀錄）", age, place,
-                                    task, f"claude:{sid}.jsonl", sid))
+                                    task, f"claude:{sid}.jsonl", sid, canonical))
     return rows
 
 
@@ -3155,9 +3191,11 @@ def _cli_rows(procs: list[Process], sessions: list[tuple], now: float, canonical
         if busy:
             place = _place(latest[0], canonical)
             task = f"task {place[1]}" if place and place[0] == "task" else ""
+            # The D6 record's bound agent names the role; none is guessed.
+            role = _d6_role(canonical, place[1]) if task else ""
             detail = f"{where}：{_label(latest[1], 28) or '執行中'}{note}"
             rows.append(OfficeRow(name, WORKING, detail, max(0.0, now - latest[2]), base + number,
-                                  kind="worker", role="developer" if task else "", task=task,
+                                  kind="worker", role=role, task=task,
                                   evidence="session 紀錄"))
         else:
             opened = _elapsed_seconds(proc.elapsed)
@@ -4122,9 +4160,9 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         if not registered or os.path.realpath(cwd) != registered[0]:
             continue
         seen.add(place[1])
-        agent = registry_details(canonical).get(place[1], ("", "", 0, 0, ""))[1]
-        found = re.search(r"(?:^|[-_])(developer|reviewer|pm|ui)(?:[-_]agent)?$", agent)
-        role = found.group(1) if found else ""
+        # A Codex CLI in a registered D6 is its Developer unless the record
+        # binds a Reviewer; other families claim no role the record does not name.
+        role = _d6_role(canonical, place[1], "developer" if family == "codex" else "")
         age = _elapsed_seconds(proc.elapsed)
         out.append(OfficeRow(f"{family} {role}".rstrip(), WORKING, f"task {place[1]}（程序 cwd）",
                              age if age is not None else 0.0, 10,

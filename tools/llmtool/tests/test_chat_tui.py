@@ -2135,23 +2135,13 @@ class PMConversationTests(BoundedPMTest):
         self.observe.start()
         self.addCleanup(self.observe.stop)
         self.turns = [_full_turn()]
-        self.created = []
         test = self
 
         class API(chat_tui_pm.PMRuntimeAPI):
             def runtime(self, session_id, cwd):
                 return test.make_runtime(session_id, cwd)
 
-        class CreatedProcess:
-            def wait(self, timeout=None):
-                return 0
-
-        def create_runner(argv, cwd, env):
-            self.created.append(argv)
-            return CreatedProcess()
-
-        self.api = API(state_root=self.state, environ={'HOME': str(self.temp_root)},
-                       create_runner=create_runner)
+        self.api = API(state_root=self.state, environ={'HOME': str(self.temp_root)})
         self.binding = self.api.create_dedicated(str(self.temp_root))
         self.session_id = self.binding['native_session_id']
 
@@ -2218,10 +2208,9 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8] + ' idle | F1')   # no chat fields
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
-            self.assertEqual(self.created, [['claude', '--session-id', self.session_id]])
             self.assertIn('PM history: no stored turns', ui.conversation.text)
             argv = self.fakes[0].argv
-            self.assertEqual(argv[argv.index('--resume') + 1], self.session_id)
+            self.assertEqual(argv[argv.index('--session-id') + 1], self.session_id)
             self.assertIn('--include-partial-messages', argv)
 
         async def partial(ui):
@@ -2429,13 +2418,12 @@ class PMConversationTests(BoundedPMTest):
         cwd = str(self.temp_root)
         ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
                             self.connect(), self.connected])
-        created = self.created[-1][2]
-        self.assertEqual(self.created[-1][:2], ['claude', '--session-id'])
+        created = self.api.current_binding()['native_session_id']
         self.assertIn('Dedicated PM session ' + created + ' created by pm_runtime', ui.conversation.text)
         self.assertIn('the TUI has not verified that session', ui.conversation.text)
         self.assertEqual(ui.pm_target[0], created)
         argv = self.fakes[-1].argv
-        self.assertEqual(argv[argv.index('--resume') + 1], created)
+        self.assertEqual(argv[argv.index('--session-id') + 1], created)
         ui, _ = self.drive(['/pm connect ' + created + ' ' + cwd + '\r', self.connected])
         self.assertEqual(ui.pm_target, (created, cwd))
 
