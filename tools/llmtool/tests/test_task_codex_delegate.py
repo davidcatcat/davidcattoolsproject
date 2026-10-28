@@ -335,7 +335,9 @@ class CodexDelegateTests(unittest.TestCase):
         def bootstrap_result(root, task_id):
             report_path = Path(root) / 'tools' / 'llmtool' / '.d6-bootstrap-report.json'
             report = json.loads(report_path.read_text(encoding='utf-8'))
-            report.update(head_sha=result_head, tooling_sha=result_head)
+            # The result head advances for this continuation, while the
+            # ENV-2 tooling remains bound to the registered base source.
+            report.update(head_sha=result_head, tooling_sha=self.source_sha)
             report_bytes = (json.dumps(report, sort_keys=True,
                 separators=(',', ':')) + '\n').encode('utf-8')
             report_path.write_bytes(report_bytes)
@@ -343,7 +345,7 @@ class CodexDelegateTests(unittest.TestCase):
             current = json.loads(registry_path.read_text(encoding='utf-8'))
             current['env2_pass_marker'].update(
                 submitted_head_sha=result_head, current_head_sha=result_head,
-                tooling_sha=result_head,
+                tooling_sha=self.source_sha,
                 report_sha256=hashlib.sha256(report_bytes).hexdigest())
             registry_path.write_text(json.dumps(current), encoding='utf-8')
             registry_path.chmod(0o600)
