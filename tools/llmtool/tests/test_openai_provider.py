@@ -349,9 +349,13 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertTrue(response.closed)
 
         for event in (
-            b'data: {"choices":[],"message":{"content":"late"}}\n\n',
-            b'data: {"choices":[],"unexpected":"value"}\n\n',
-            b'data: {"choices":[],"usage":{"details":{"text":"late"}}}\n\n',
+            b'data: {"choices":[]}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1},"message":{"content":"late"}}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1},"unexpected":"value"}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1,"details":{"text":"late"}}}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1,"total_tokens":2}}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":true}}\n\n',
+            b'data: {"choices":[{"delta":{}}],"usage":{"total_tokens":1}}\n\n',
         ):
             response = FakeResponse([
                 b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
@@ -390,8 +394,23 @@ class OpenAIProviderTests(unittest.TestCase):
         ])
         with self.assertRaises(LLMToolError) as caught:
             list(make_client(response).stream([{"role": "user", "content": "question"}]))
-        self.assertIn("ended before finish_reason=stop", str(caught.exception))
+        self.assertIn("invalid streaming data", str(caught.exception))
         self.assertTrue(response.closed)
+
+        for event in (
+            b'data: {"choices":[{"delta":{},"unexpected":null}]}\n\n',
+            b'data: {"choices":[{"delta":{"role":"user"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":2}}]}\n\n',
+            b'data: {"choices":[{"delta":{}},{"delta":{}}]}\n\n',
+            b'data: {"choices":[{"delta":{},"index":true}]}\n\n',
+            b'data: {"choices":[{"delta":{},"logprobs":{}}]}\n\n',
+            b'data: {"choices":[{"delta":{}}],"usage":{"total_tokens":0}}\n\n',
+        ):
+            response = FakeResponse([event])
+            with self.assertRaises(LLMToolError) as caught:
+                list(make_client(response).stream([{"role": "user", "content": "question"}]))
+            self.assertIn("invalid streaming data", str(caught.exception))
+            self.assertTrue(response.closed)
 
         response = FakeResponse([
             b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
