@@ -1,4 +1,4 @@
-"""Single non-streaming request; never execute tools or returned content."""
+"""OpenAI-compatible requests; never execute tools or returned content."""
 
 import http.client
 import json
@@ -96,6 +96,7 @@ class OpenAICompatibleClient:
         req = request.Request(url, data=data, headers=headers, method="POST")
         total = 0
         event_data = []
+        yielded_content = False
         try:
             response = self.opener.open(req, timeout=self.provider["timeout_seconds"])
             try:
@@ -113,9 +114,14 @@ class OpenAICompatibleClient:
                     if not line:
                         if event_data:
                             if event_data == ["[DONE]"]:
+                                if not yielded_content:
+                                    raise self._stream_invalid()
                                 return
                             for chunk in self._stream_event(event_data):
+                                yielded_content = True
                                 yield chunk
+                        if not yielded_content:
+                            raise self._stream_invalid()
                         return
                     total += len(line)
                     if total > RESPONSE_LIMIT:
@@ -131,8 +137,11 @@ class OpenAICompatibleClient:
                     if not line:
                         if event_data:
                             if event_data == ["[DONE]"]:
+                                if not yielded_content:
+                                    raise self._stream_invalid()
                                 return
                             for chunk in self._stream_event(event_data):
+                                yielded_content = True
                                 yield chunk
                             event_data = []
                         continue
@@ -143,8 +152,10 @@ class OpenAICompatibleClient:
                         raise self._stream_invalid()
                     if field == "data":
                         event_data.append(value[1:] if value.startswith(" ") else value)
-                    elif field == "retry" and value and not value.isdecimal():
-                        raise self._stream_invalid()
+                    elif field == "retry" and value:
+                        retry_value = value[1:] if value.startswith(" ") else value
+                        if not retry_value.isdecimal():
+                            raise self._stream_invalid()
             finally:
                 response.close()
         except error.HTTPError as exc:
@@ -203,6 +214,11 @@ class OpenAICompatibleClient:
         choices = obj.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise cls._stream_invalid()
+        if choices[0].get("finish_reason") == "length":
+            raise coded_error(
+                "incomplete result (finish_reason=length); increase max_tokens",
+                'MODEL_OUTPUT_INCOMPLETE', 'provider.openai-compatible',
+            )
         delta = choices[0].get("delta")
         if not isinstance(delta, dict):
             raise cls._stream_invalid()

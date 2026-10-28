@@ -293,10 +293,20 @@ class OpenAIProviderTests(unittest.TestCase):
 
             def __init__(self, lines):
                 self.lines = iter(lines)
+                self.pending = b""
                 self.closed = False
 
             def readline(self, limit):
-                line = next(self.lines, b"")
+                while b"\n" not in self.pending:
+                    chunk = next(self.lines, b"")
+                    if not chunk:
+                        break
+                    self.pending += chunk
+                if b"\n" in self.pending:
+                    line, self.pending = self.pending.split(b"\n", 1)
+                    line += b"\n"
+                else:
+                    line, self.pending = self.pending, b""
                 return line[:limit]
 
             def close(self):
@@ -313,6 +323,7 @@ class OpenAIProviderTests(unittest.TestCase):
 
         opened = []
         response = FakeResponse([
+            b'retry: 1000\n\n',
             b'data: {"choices":[{"delta":{"reasoning_content":"hidden"}}]}\n\n',
             b'data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n',
             b'data: {"choices":[{"delta":{"content":"world"}}]}\n\n',
@@ -327,6 +338,20 @@ class OpenAIProviderTests(unittest.TestCase):
         self.assertTrue(json.loads(req.data)["stream"])
         self.assertEqual(req.get_header("Accept"), "text/event-stream")
         self.assertEqual(timeout, 2)
+
+        response = FakeResponse([b"data: [DONE]\n\n"])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("invalid streaming data", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("incomplete result", str(caught.exception))
+        self.assertTrue(response.closed)
 
         response = FakeResponse([
             b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
