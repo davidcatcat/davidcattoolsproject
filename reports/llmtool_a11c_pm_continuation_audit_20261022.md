@@ -5,7 +5,7 @@
 - **Base:** `origin/main` `8b5b1eab65c868d1a33ce67b5c4af3c289cd3e6e`. D6 task `a11c-pm-continuation-20261022`.
 - **Normative outputs:**
   - [PM Continuation Contract](../skills/ai-team-delivery/pm-continuation.md): the single rule.
-  - [Worker availability table](../tools/llmtool/ROADMAP.md#worker-availability--live-status): live, dated state.
+  - [Worker availability table](../docs/history/llmtool-roadmap-archive-20261028.md#worker-availability--live-status): live, dated state.
   - [four-layer company-LLM availability rule](../skills/company-llm-delegation/SKILL.md#availability-classification).
   - [A11c work packages and runtime gaps](../docs/history/llmtool-roadmap-archive-20261028.md#a11c-work-packages-and-continuation-runtime-gaps).
 
