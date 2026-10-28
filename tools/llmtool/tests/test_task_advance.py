@@ -76,7 +76,7 @@ class TaskAdvanceTests(unittest.TestCase):
         related['repair_claims'][0]['repair_state'] = 'UNKNOWN'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'REPAIR_OUTCOME_UNKNOWN')
-        related['repair_claims'][0]['repair_state'] = 'UNAVAILABLE'
+        related['repair_claims'][0]['repair_state'] = 'RECORD_UNAVAILABLE'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'DEVELOPER_ATTENTION')
         related['repair_claims'][0]['repair_state'] = 'RESPONDED'
@@ -131,12 +131,15 @@ class TaskAdvanceTests(unittest.TestCase):
                                        'repair_task_id': '3' * 32}])
             def __init__(self, unreadable=False):
                 self.unreadable = unreadable
+                self.writes = 0
             def get(self, task_id):
                 if task_id == '3' * 32:
                     if self.unreadable:
                         raise OSError('unreadable')
                     return None
                 return self.record
+            def compare_and_update(self, *_args, **_kwargs):
+                self.writes += 1
 
         for unreadable in (False, True):
             with self.subTest(unreadable=unreadable):
@@ -150,6 +153,7 @@ class TaskAdvanceTests(unittest.TestCase):
                         pr_number=17, github_get=lambda _path: [])
                 self.assertEqual(result['step'], 'DEVELOPER_ATTENTION')
                 self.assertEqual(result['codes'], ['REPAIR_TASK_RECORD_UNAVAILABLE'])
+                self.assertEqual(store.writes, 0)
 
     def test_nonblocked_unknown_repair_has_specific_actionable_code(self):
         class Store:

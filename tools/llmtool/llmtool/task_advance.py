@@ -110,9 +110,6 @@ def decide(record, d6, pr, related):
                     current_repair.get('repair_state') in ('RUNNING', 'PENDING')):
                 return 'WAITING_REPAIR'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
-                    current_repair.get('repair_state') == 'UNAVAILABLE'):
-                return 'DEVELOPER_ATTENTION'
-            if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'UNKNOWN'):
                 return 'REPAIR_OUTCOME_UNKNOWN'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
@@ -311,11 +308,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         repair_record = None
         try:
             repair_record = store.get(claim['repair_task_id'])
-            repair_state = derive_state(repair_record)
+            repair_state = (derive_state(repair_record)
+                            if type(repair_record) is dict else 'RECORD_UNAVAILABLE')
         except Exception:
-            repair_state = 'UNAVAILABLE'
-        if type(repair_record) is not dict:
-            repair_state = 'UNAVAILABLE'
+            repair_state = 'RECORD_UNAVAILABLE'
         repair_claims.append(dict(claim, repair_state=repair_state))
     related['repair_claims'] = repair_claims
     try:
@@ -499,13 +495,13 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                               if type(item) is dict and item.get('head_sha') ==
                               (d6.get('result_head') if type(d6) is dict else None) and
                               item.get('state') == 'DISPATCHED'), None)
-        if type(active_repair) is dict and active_repair.get('repair_state') == 'UNAVAILABLE':
+        if type(active_repair) is dict and active_repair.get('repair_state') == 'RECORD_UNAVAILABLE':
             codes.append('REPAIR_TASK_RECORD_UNAVAILABLE')
         else:
             codes.append('DEVELOPER_ATTENTION')
     elif step in ('REPAIR_OUTCOME_UNKNOWN', 'REPAIR_RESULT_NOT_PUBLISHED'):
         codes.append(step)
-    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR', 'REPAIR_RETRY',
+    elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR',
                   'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
         codes.append(step)
     next_action = ('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
