@@ -444,7 +444,10 @@ class ConversationView:
             self._copy_next = (self._copy_generation, text)
             self.copied, self.copy_failed, self.copy_error = (len(text), time.monotonic()), False, None
             self.copy_note = None
-            if self._copy_thread is None or not self._copy_thread.is_alive():
+            # "queue empty -> worker exits" (below) and "enqueue -> ensure a worker" happen
+            # under this one lock: a worker that is about to exit has already cleared the
+            # reference, so a request arriving now always gets a worker.
+            if self._copy_thread is None:
                 self._copy_thread = threading.Thread(target=self._copy_worker,
                                                      name="llmtool-clipboard", daemon=True)
                 self._copy_thread.start()
@@ -455,6 +458,7 @@ class ConversationView:
         while True:
             with self._copy_lock:
                 if self._copy_next is None:
+                    self._copy_thread = None   # under the lock: the next copy() starts a worker
                     return
                 generation, text = self._copy_next
                 self._copy_next = None
@@ -471,12 +475,20 @@ class ConversationView:
                 self.on_copied()
 
     def copy_pending(self):
-        return self._copy_thread is not None and self._copy_thread.is_alive()
+        with self._copy_lock:
+            return self._copy_thread is not None
 
     def wait_copy(self, timeout=5.0):
-        if self._copy_thread is not None:
-            self._copy_thread.join(timeout)
-        return not self.copy_pending()
+        """Wait until every queued copy has been processed (tests)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._copy_lock:
+                thread = self._copy_thread
+            if thread is None:
+                return True
+            thread.join(max(0.0, deadline - time.monotonic()))
+            if thread.is_alive():
+                return False
 
     def copy_selection(self):
         span = self.selected_range()

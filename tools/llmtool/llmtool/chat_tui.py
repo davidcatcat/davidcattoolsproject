@@ -568,7 +568,7 @@ class ChatTUI:
         def _interrupt(event):
             # Warp may send Ctrl-C for Cmd+C: with a selection, copy it again and clear it
             # instead of interrupting or exiting (a second Ctrl-C then acts as usual).
-            if self.view.selected_range() and not self.show_help:
+            if self.view.selected_range() and self.conversation_visible():
                 self.view.copy_selection()
                 self.view.clear_selection()
                 self.view.copy_note = "選取已清除，再按 Ctrl-C 中斷/離開"
@@ -961,10 +961,16 @@ class ChatTUI:
             self.append("llmtool: mouse off; drag to select and copy text with the terminal."
                         " Fn+↑/↓ (PageUp/PageDown) scroll; F6 turns the wheel back on")
 
+    def _leave_conversation(self):
+        """Any pane switch ends a drag, its auto-scroll timer and the selection, so nothing
+        hidden keeps scrolling, extending or capturing Ctrl-C."""
+        self._autoscroll_stop()
+        self._drag_pointer = None
+        self.view.clear_selection()
+
     def toggle_help(self):
         self.show_help = not self.show_help
-        self._autoscroll_stop()
-        self.view.dragging = False   # a drag cannot continue across the pane switch
+        self._leave_conversation()
         # Never leave focus on a hidden pane; the help pane itself scrolls when focused.
         # Closing help over the list or events pane gives it focus back, so Esc closes it.
         pane = (self.list_window if self.list_visible()
@@ -977,6 +983,7 @@ class ChatTUI:
         if show and not self.detail.text:
             self.append("llmtool: no Task detail loaded yet; use /task show TASK_ID")
             show = False
+        self._leave_conversation()
         self.show_detail = show
         # Closing a detail opened from the list goes back to the list.
         self.app.layout.focus(self.list_window if self.show_list and not show else self.input)
@@ -984,6 +991,7 @@ class ChatTUI:
 
     # -- Task list (TaskStore reads only; never a provider or network call) ----------
     def toggle_list(self, show):
+        self._leave_conversation()
         self.show_list = show
         if show:
             self.show_detail = False
@@ -997,6 +1005,7 @@ class ChatTUI:
 
     def toggle_events(self, show):
         """Recent events across Tasks; shares the list's TaskStore reader and interval."""
+        self._leave_conversation()
         self.show_events = show
         if show:
             self.show_list = False

@@ -3256,6 +3256,49 @@ class ConversationViewTests(unittest.TestCase):
         fresh.layout(45, 21)
         self.assertEqual(view.rows, fresh.rows)
 
+    def test_copy_worker_exit_and_enqueue_are_atomic(self):
+        # Codex review v4: a copy arriving after the worker saw an empty queue but before its
+        # thread died found the old thread "alive", started no worker, and was never copied.
+        import threading
+        order = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: order.append(t) or True)
+        view.set_text('x')
+        view.layout(10, 2)
+
+        class StillAlive:            # the old worker thread object, not yet finished
+            def is_alive(self):
+                return True
+
+            def join(self, timeout=None):
+                pass
+        view._copy_thread = StillAlive()
+        view._copy_next = None
+        view._copy_worker()                                   # the worker's last pass
+        self.assertIsNone(view._copy_thread)                  # cleared under the lock
+        self.assertTrue(view.copy('late'))                    # so this starts a worker
+        self.assertTrue(view.wait_copy())
+        self.assertEqual(order, ['late'])
+        # Stress: requests from two threads are never lost and the last one wins.
+        done = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: done.append(t) or True)
+        view.set_text('x')
+        view.layout(10, 2)
+
+        def burst(tag):
+            for i in range(200):
+                view.copy('%s%03d' % (tag, i))
+        threads = [threading.Thread(target=burst, args=(tag,)) for tag in 'ab']
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        last = view._copy_next[1] if view._copy_next else None
+        self.assertTrue(view.wait_copy())
+        self.assertIsNone(view._copy_next)
+        self.assertIsNone(view._copy_thread)
+        self.assertTrue(done[-1] in ('a199', 'b199') or done[-1] == last)
+        self.assertEqual(view.status(), '已複製 4 字')
+
     def test_oversized_selection_is_refused_without_measuring_or_building_it_whole(self):
         # Codex review v2: the limit check must not encode (or slice) the whole selection on
         # the UI thread. Measured chunks are bounded and the scan stops at the first excess.
@@ -3631,6 +3674,42 @@ class ScrollSelectTests(Base):
         ui, result = self.drive([lambda ui: ui.append(SHORT_LINES), press(3, 2), drag(3, 4),
                                  release(3, 4), selected, '\x03', after_ctrl_c])
         self.assertEqual(result, 0)   # the drive's final Ctrl-C (no selection) still exits
+
+    def test_pane_switch_ends_drag_timer_and_selection_so_ctrl_c_interrupts_again(self):
+        # Codex review v4: with F2/F3/F4 open, a hidden selection kept capturing Ctrl-C, and a
+        # pending edge auto-scroll timer could keep scrolling and extending it.
+        async def dragging_at_edge(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.dragging)
+            self.assertIsNotNone(ui._autoscroll_handle)
+            self.assertTrue(ui.view.selected_range())
+
+        async def events_pane(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.show_events)
+            self.assertFalse(ui.conversation_visible())
+            self.assertIsNone(ui._autoscroll_handle)
+            self.assertFalse(ui.view.dragging)
+            self.assertIsNone(ui.view.selected_range())
+
+        async def selected_then_list(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.selected_range())
+            ui.toggle_list(True)
+            await self.settle(ui)
+            self.assertIsNone(ui.view.selected_range())
+            self.assertFalse(ui.conversation_visible())
+
+        async def exited(ui):
+            await self.settle(ui)
+            self.assertFalse(ui.app.is_running)              # Ctrl-C in the list pane exited
+
+        ui, result = self.drive([lambda ui: ui.append(SHORT_LINES), press(5, 11), drag(5, 10),
+                                 drag(5, 1), dragging_at_edge, '\x1b[14~', events_pane,
+                                 '\x1b[14~', press(3, 2), drag(3, 4), release(3, 4),
+                                 selected_then_list, '\x03', exited])
+        self.assertEqual(result, 0)
+        self.assertEqual(len(self.copies), 1)                 # only the drag release copied
 
     def test_clicks_on_the_pane_keep_input_focus_and_wheel_never_recalls_history(self):
         async def check(ui):

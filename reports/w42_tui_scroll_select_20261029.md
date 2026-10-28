@@ -253,3 +253,11 @@ Owner 步驟（Terminal.app 2.14，再在 Warp 重做一次）：
 - **O3 來回 resize 每次往上漂一列**：根因為每次重折後把錨點重設為新頂列的起點。修法：重折後保留原錨點 offset（`_clamp(keep_anchor=True)`），只有使用者捲動或夾限改變了頂列才更新錨點。測試 `test_resize_keeps_the_text_at_the_top_of_the_view` 加入 80→45→80 三次往返 `top` 不變。
 
 `tests.test_chat_tui` 156/156 PASS。
+
+## 16. Codex Review v4（bc417cb）三項的處理
+
+1. **P2 複製工作執行緒競態**：「佇列空→工作執行緒結束」與「入列→確保有工作執行緒」改為同一把鎖下的原子操作：工作執行緒看到佇列空時在鎖內先把 `_copy_thread` 清為 None 再返回；`copy()` 在鎖內以 `_copy_thread is None` 判斷是否啟動新執行緒（不再看 `is_alive()`）；`copy_pending()`/`wait_copy()` 也以鎖下的參照為準。測試 `test_copy_worker_exit_and_enqueue_are_atomic`：模擬「舊執行緒物件仍 alive 但已走完最後一輪」的狀態，之後的 `copy('late')` 必定被處理；另以兩個執行緒各 200 次連發壓力測試，結束時佇列與參照皆空、狀態描述最後一筆。
+2. **P2 Ctrl-C 在 F2/F3/F4 面板被隱藏的選取吃掉**：Ctrl-C 只在 `conversation_visible()` 且有選取時走複製路徑；任何面板切換（`toggle_help/detail/list/events`）都呼叫 `_leave_conversation()` 清除選取與拖曳狀態。
+3. **P3 開 detail/list/events 未停止邊緣自動捲動**：同一個 `_leave_conversation()` 停止計時器、清除拖曳指標與選取。測試 `test_pane_switch_ends_drag_timer_and_selection_so_ctrl_c_interrupts_again`：拖到邊緣（計時器已排程）後按 F4，計時器為 None、`dragging` False、選取 None；再選取後開列表面板，選取被清除，Ctrl-C 直接離開程式；整個流程只有拖曳放開那一次複製。
+
+`tests.test_chat_tui` 158/158 PASS。
