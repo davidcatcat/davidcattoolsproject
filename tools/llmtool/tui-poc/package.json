@@ -1,0 +1,14 @@
+{
+  "name": "llmtool-tui-poc",
+  "private": true,
+  "version": "0.0.1",
+  "description": "PoC: drive the real llmtool chat --tui with @microsoft/tui-test (Owner W46 part b)",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "poc": "node poc.mjs"
+  },
+  "dependencies": {
+    "@microsoft/tui-test": "0.1.1"
+  }
+}
