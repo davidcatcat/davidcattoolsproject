@@ -261,8 +261,6 @@ WORKER_AVAILABILITY_NAME = '.worker-availability.json'
 WORKER_AVAILABILITY_LOCK_NAME = '.worker-availability.lock'
 WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
-# Updates serialize validation and durable writes under this per-Task lock.
-# Leave enough bounded time for queued writers to complete on a busy host.
 TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
 _TASK_STORE_CONTENTION_ERRNOS = frozenset(
@@ -1847,8 +1845,18 @@ class TaskStore:
                         follow_symlinks=False)
                 os.unlink(temporary, dir_fd=directory)
             else:
-                os.replace(temporary, name, src_dir_fd=directory,
-                           dst_dir_fd=directory)
+                deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        os.replace(temporary, name, src_dir_fd=directory,
+                                   dst_dir_fd=directory)
+                        break
+                    except OSError as exc:
+                        if not _is_contention_error(exc):
+                            raise
+                        if time.monotonic() >= deadline:
+                            _fail('TASK_STORE_BUSY')
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             os.fsync(directory)
         except FileExistsError:
             _fail('TASK_STORE_CONFLICT')
