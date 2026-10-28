@@ -2014,8 +2014,52 @@ class PMAdapterTests(unittest.TestCase):
         self.assertEqual(pm.error_code(ValueError('PRIVATE')), 'UNKNOWN')
 
 
+PM_TEST_LIMIT = 120   # seconds; a PM test that runs longer dumps every stack and exits
+
+
+class BoundedPMTest(Base):
+    """Every PM test is bounded: past PM_TEST_LIMIT the process dumps all thread stacks
+    and exits, so CI fails with a traceback instead of hanging. Fake processes, their
+    pipes and the TUI's PM worker threads are cleaned up after every test."""
+
+    def setUp(self):
+        super().setUp()
+        import faulthandler
+        faulthandler.dump_traceback_later(PM_TEST_LIMIT, exit=True)
+        self.addCleanup(faulthandler.cancel_dump_traceback_later)
+        self.fakes = []
+        self.addCleanup(self._release_fakes)
+
+    def _release_fakes(self):
+        for fake in self.fakes:
+            fake.gate.set()            # a held turn ends
+            fake._end()                # its stdout reaches EOF
+        for thread in threading.enumerate():
+            if thread.name.startswith('llmtool-chat-pm'):
+                thread.join(5)
+        for fake in self.fakes:
+            try:
+                fake.stdout.close()
+            except OSError:
+                pass
+
+    def run_ui(self, main):
+        """Run one TUI session on its own loop, bounded; never waits on executor shutdown."""
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(asyncio.wait_for(main(), 60))
+        finally:
+            pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.wait(pending, timeout=5))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+            loop.close()
+
+
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
-class PMConversationTests(Base):
+class PMConversationTests(BoundedPMTest):
     """The real pm_runtime S2 against a scripted fake `claude`; ChatSession is never used.
 
     The dedicated binding is created by pm_runtime.create_dedicated_pm (its runner only
@@ -2031,7 +2075,7 @@ class PMConversationTests(Base):
         self.observe = patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
                                     side_effect=lambda session, cwd, environ=None: cwd)
         self.observe.start()
-        self.fakes = []
+        self.addCleanup(self.observe.stop)
         self.turns = [_full_turn()]
         self.created = []
         test = self
@@ -2080,7 +2124,7 @@ class PMConversationTests(Base):
                 return result
 
             with tui_cli_signal_scope(ui._handle_signal):
-                return ui, asyncio.run(main())
+                return ui, self.run_ui(main)
 
     @staticmethod
     async def until(ui, condition, what='condition'):
@@ -2340,7 +2384,7 @@ class PMConversationTests(Base):
         from llmtool import active_pm_inbox
         transcript = active_pm_inbox.claude_session_file(
             self.session_id, self.binding['cwd'], {'HOME': str(self.temp_root)})
-        transcript.parent.mkdir(parents=True)
+        transcript.parent.mkdir(parents=True, exist_ok=True)
         transcript.write_text('{}\n')
         ui, _ = self.drive([self.connect(), self.pending_done])
         self.assertIn('PM runtime error PM_SESSION_LIVE_ELSEWHERE', ui.conversation.text)
@@ -2433,7 +2477,8 @@ class PMConversationTests(Base):
         self.assertTrue(self.fakes[0].closed_stdin)
 
     def test_run_closes_the_pm_runtime_even_when_the_app_fails(self):
-        ui = chat_tui.ChatTUI(self.session, input=None, output=DummyOutput(), pm_api=self.api)
+        with create_pipe_input() as pipe:   # never the real stdin (CI has no terminal)
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput(), pm_api=self.api)
         runtime = Mock()
         ui.pm_runtime = runtime
         ui.app.run = Mock(side_effect=RuntimeError('ui broke'))
