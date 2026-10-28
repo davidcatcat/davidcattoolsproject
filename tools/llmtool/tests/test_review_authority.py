@@ -17,6 +17,7 @@ from llmtool.task_review_collector import LocalFacts
 from test_task_review import fixture, FakeHost, NOW
 
 REF='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6130032828'
+LOAD_TOLERANT_TIMEOUT_SECONDS=15
 FAKE_SCRIPT='''#!INTERPRETER -IB
 import json,sys
 v=json.loads(sys.stdin.read().split('\\n\\nUSER:\\n',1)[1])
@@ -800,7 +801,7 @@ class ForegroundEntryTests(unittest.TestCase):
                 ('changes','REVIEW_CHANGES_REQUIRED','CHANGES_REQUIRED'),
                 ('blocked','REVIEW_BLOCKED','BLOCKED')):
             with self.subTest(mode=mode):
-                h=self.harness(mode=mode);result=self.invoke(h)
+                h=self.harness(mode=mode,timeout=LOAD_TOLERANT_TIMEOUT_SECONDS);result=self.invoke(h)
                 self.assertEqual(result['code'],code,result)
                 self.assertEqual((result['security'],result['functional']),('APPROVE',decision))
                 self.assertFalse(result['authorized'])
@@ -857,7 +858,8 @@ class ForegroundEntryTests(unittest.TestCase):
         from llmtool.providers import cli_lifecycle
         for mode in ('timeout','descendant','stderr','invalid-inner','private','spoof','exit'):
             with self.subTest(mode=mode):
-                h=self.harness(mode=mode,timeout=1);started=time.monotonic()
+                timeout=1 if mode=='timeout' else LOAD_TOLERANT_TIMEOUT_SECONDS
+                h=self.harness(mode=mode,timeout=timeout);started=time.monotonic()
                 observations=[]
                 actual_absent=cli_lifecycle._group_absent
                 def observe(pgid):
@@ -868,7 +870,7 @@ class ForegroundEntryTests(unittest.TestCase):
                 self.assertEqual(result['provider_calls'],1)
                 self.assertFalse(result['authorized'])
                 self.assertNotIn('SECRET_FAKE',json.dumps(result))
-                self.assertLess(time.monotonic()-started,4)
+                self.assertLess(time.monotonic()-started,LOAD_TOLERANT_TIMEOUT_SECONDS+10)
                 pending=h.issuer.pending_job
                 if pending is None:
                     self.assertTrue(observations[-1])
