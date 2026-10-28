@@ -902,7 +902,8 @@ class TaskCompletionTests(unittest.TestCase):
         case_number = [0]
 
         def evaluate(*, reviewer='codex-reviewer', author='claude',
-                     review_text=comment_body, binding_body=comment_body):
+                     review_text=comment_body, binding_body=comment_body,
+                     task_digest='3' * 64):
             case_number[0] += 1
             reviewer_root = self.base / ('reviewer-' + str(case_number[0]))
             self._git('worktree', 'add', '-b', 'review/' + reviewer + '-' + author,
@@ -913,13 +914,13 @@ class TaskCompletionTests(unittest.TestCase):
                 github_login='reviewer-user', state='REVIEW_PENDING')
             current_comment = dict(comment, body=binding_body)
             task = {'task_id': '1' * 32, 'run_id': '2' * 32,
-                    'task_binding': {'contract_digest': '3' * 64},
+                    'task_binding': {'contract_digest': task_digest},
                     'developer': {'provider_profile': author},
                     'review_dispatch_claim': [{
                         'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-task',
                         'version': 1, 'state': 'COMPLETED',
                         'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
-                            'contract_digest': '3' * 64, 'head': result_sha,
+                            'contract_digest': task_digest, 'head': result_sha,
                             'verdict': 'PASS', 'review_text': review_text}}]}
             api = self._github_response_sequence(result_sha, pr, [], checks,
                                                  comments=[current_comment])
@@ -938,6 +939,12 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(evaluate(binding_body=comment_body.replace('task=' + '1' * 32,
                            'task=' + '9' * 32))['evidence']['formal_review_state'], 'UNVERIFIED')
         self.assertEqual(evaluate(review_text=comment_body + '\nDifferent text')
+                         ['evidence']['formal_review_state'], 'UNVERIFIED')
+        mismatched_contract_body = comment_body.replace(
+            'contract=' + '3' * 64, 'contract=' + '4' * 64)
+        self.assertEqual(evaluate(task_digest='4' * 64,
+                                  binding_body=mismatched_contract_body,
+                                  review_text=mismatched_contract_body)
                          ['evidence']['formal_review_state'], 'UNVERIFIED')
 
     def test_review_binding_must_match_task_run_contract_and_result_head(self):

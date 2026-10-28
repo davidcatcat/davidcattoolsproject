@@ -1909,6 +1909,12 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             accepted_codex = False
             if reviewer.trusted_agent_id == 'codex-reviewer':
                 try:
+                    version_match = re.fullmatch(
+                        r'Verdict: PASS \| Version: v([1-9][0-9]{0,3}) '
+                        r'\| HEAD: [0-9a-f]{40}', raw_lines[1])
+                    if version_match is None:
+                        continue
+                    version = int(version_match.group(1))
                     if not codex_task_record_loaded:
                         from .task_store import TaskStore
                         codex_task_record = TaskStore().get(task_id)
@@ -1916,7 +1922,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     from . import review_result
                     classified = review_result._comment_verdict(
                         comment, head=result_sha,
-                        version=int(status.group(3)), task=codex_task_record)
+                        version=version, task=codex_task_record)
                     claims = codex_task_record.get('review_dispatch_claim')
                     if type(claims) is dict:
                         claims = [claims]
@@ -1927,12 +1933,13 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                                        claim.get('pr') == pr_number and
                                        claim.get('head_sha') == result_sha and
                                        claim.get('reviewer_task') == reviewer_task_id and
-                                       claim.get('version') == int(status.group(3)) and
+                                       claim.get('version') == version and
                                        claim.get('state') == 'COMPLETED' and
                                        type(claim.get('review_result')) is dict and
                                        claim['review_result'].get('task_id') == task_id and
                                        claim['review_result'].get('run_id') == run_id and
                                        type(task_binding) is dict and
+                                       task_binding.get('contract_digest') == contract_digest and
                                        claim['review_result'].get('contract_digest') ==
                                        task_binding.get('contract_digest') and
                                        claim['review_result'].get('head') == result_sha and
@@ -1951,7 +1958,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         classified[2] == 'REVIEW_PASS' and
                         len(matching_claims) == 1 and claim_lines and
                         claim_lines == comment_lines)
-                except Exception:
+                except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
                     accepted_codex = False
             if not accepted_codex:
                 continue  # Unbound or otherwise unverified Codex PASS stays advisory.
