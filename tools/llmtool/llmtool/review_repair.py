@@ -44,7 +44,8 @@ def _update_claim_state(store, task_id, claim, state):
 
 def _worker_key(profile):
     return {'company-gw': 'company-gw', 'codex': 'codex-developer',
-            'opencode': 'opencode-developer', 'claude': 'claude-developer'}.get(profile)
+            'opencode': 'opencode-developer', 'claude': 'claude-developer',
+            'agy': 'agy'}.get(profile)
 
 
 def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
@@ -62,7 +63,8 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
     args = Namespace(
         task_id=task['task_id'], provider=developer['provider_profile'],
-        mode='direct' if developer['provider_profile'] == 'codex' else 'proposal',
+        mode='direct' if developer['provider_profile'] in ('codex', 'agy') else 'proposal',
+        owner_ref=developer.get('owner_assignment_ref'),
         selection_source='PM',
         executor_task=executor_task, read_path=list(read_paths),
         write_path=list(write_paths), acceptance=list(acceptance),
@@ -82,7 +84,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
             type(provenance.get('pm_cwd')) is not str):
         _refuse('REPAIR_PM_SESSION_UNAVAILABLE')
     route = developer.get('provider_profile')
-    if route not in ('codex', 'opencode'):
+    if route not in ('codex', 'opencode', 'agy'):
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     pm_assignment = task.get('pm_assignment')
     if type(pm_assignment) is not dict or type(pm_assignment.get('goal')) is not str:
