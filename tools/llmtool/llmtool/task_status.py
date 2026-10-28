@@ -4,6 +4,7 @@ import json
 import re
 
 from .task_store import STATES, TaskStore
+from .task_index import TaskStatusIndex
 
 
 # Persisted states have meaning only where explicitly listed here. In particular,
@@ -118,19 +119,54 @@ def task_status(*, pm_session=None, limit=20, store=None):
                                    re.fullmatch(r'pm-[a-z0-9-]{1,60}', pm_session) is None):
         raise ValueError('invalid PM session')
     store = TaskStore() if store is None else store
+    index = TaskStatusIndex(store)
+    task_ids = store.task_ids()
+
+    def full_scan():
+        records = []
+        unreadable_count = 0
+        refreshed = TaskStatusIndex(store)
+        for task_id in task_ids:
+            try:
+                record = store.get(task_id)
+            except Exception:
+                unreadable_count += 1
+                refreshed.remember_full_scan(task_id)
+                continue
+            refreshed.remember_full_scan(task_id, record)
+            if pm_session is None or record.get('pm_session_id') == pm_session:
+                records.append(record)
+        if refreshed.changed:
+            refreshed._save()
+        records.sort(key=lambda item: item.get('created_at', ''), reverse=True)
+        return {'tasks': [_summary(item) for item in records[:limit]],
+                'unreadable': unreadable_count}
+
+    candidates, unreadable = index.scan(task_ids)
+    candidates = [item for item in candidates
+                  if pm_session is None or item[2] == pm_session]
+    candidates.sort(key=lambda item: item[1], reverse=True)
     records = []
-    unreadable = 0
-    # Read all IDs so unreadable newest records cannot hide older readable Tasks.
-    for task_id in store.task_ids():
+    for task_id, _, _ in candidates:
+        if len(records) >= limit:
+            break
         try:
-            record = store.get(task_id)
+            record, metadata_changed = index.reread(task_id)
         except Exception:
             unreadable += 1
             continue
+        if metadata_changed:
+            index.discard()
+            return full_scan()
         if pm_session is None or record.get('pm_session_id') == pm_session:
             records.append(record)
-    records.sort(key=lambda item: item.get('created_at', ''), reverse=True)
-    return {'tasks': [_summary(item) for item in records[:limit]],
+        elif len(records) < limit:
+            # The PM-session filter changed after the index scan; this is a
+            # stale-index condition just like a changed ordering timestamp.
+            index.discard()
+            return full_scan()
+    index.flush()
+    return {'tasks': [_summary(item) for item in records],
             'unreadable': unreadable}
 
 

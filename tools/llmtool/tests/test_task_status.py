@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -24,6 +25,16 @@ class MemoryTaskStore(TaskStore):
         if task_id in self.unreadable:
             raise ValueError('bad record')
         return next(dict(record) for record in self.records if record['task_id'] == task_id)
+
+
+class CountingTaskStore(TaskStore):
+    def __init__(self, root):
+        super().__init__(root)
+        self.get_calls = 0
+
+    def get(self, task_id):
+        self.get_calls += 1
+        return super().get(task_id)
 
 
 def record(root, **extra):
@@ -170,6 +181,69 @@ class TaskStatusTests(unittest.TestCase):
             with patch('sys.stdout', output):
                 self.assertEqual(main(['task', 'status', '--json']), 0)
         self.assertIn('"tasks":[]', output.getvalue())
+
+    def test_index_matches_full_scan_and_skips_unprinted_reads(self):
+        with tempfile.TemporaryDirectory() as root:
+            rows = [record(root, created_at=f'2026-10-2{i}T00:00:00Z',
+                           pm_session_id='pm-one' if i < 3 else 'pm-two')
+                    for i in range(1, 5)]
+            store = CountingTaskStore(Path(root) / 'tasks')
+            unreadable_id = 'f' * 32
+            (store.root / f'{unreadable_id}.json').write_text('invalid')
+
+            full = task_status.task_status(store=store, limit=2)
+            self.assertEqual(full['unreadable'], 1)
+            store.get_calls = 0
+            indexed = task_status.task_status(store=store, limit=2)
+            self.assertEqual(indexed, full)
+            self.assertEqual(store.get_calls, 2)
+
+            filtered = task_status.task_status(store=store, pm_session='pm-two')
+            index_path = Path(root) / 'task-status-index.json'
+            index_path.unlink()
+            without_index = task_status.task_status(store=store, pm_session='pm-two')
+            self.assertEqual(without_index, filtered)
+            self.assertEqual(len(rows), 4)
+
+    def test_changed_unprinted_record_is_revalidated(self):
+        with tempfile.TemporaryDirectory() as root:
+            rows = [record(root, created_at=f'2026-10-2{i}T00:00:00Z')
+                    for i in range(1, 4)]
+            store = CountingTaskStore(Path(root) / 'tasks')
+            task_status.task_status(store=store, limit=1)
+            old_record = min(rows, key=lambda item: item['created_at'])
+            os.utime(store.root / f"{old_record['task_id']}.json", None)
+            store.get_calls = 0
+            task_status.task_status(store=store, limit=1)
+            self.assertEqual(store.get_calls, 2)
+
+    def test_invalid_index_files_are_ignored(self):
+        with tempfile.TemporaryDirectory() as root:
+            record(root, created_at='2026-10-29T00:00:00Z')
+            store = CountingTaskStore(Path(root) / 'tasks')
+            expected = task_status.task_status(store=store)
+            index_path = Path(root) / 'task-status-index.json'
+
+            index_path.write_text('{')
+            self.assertEqual(task_status.task_status(store=store), expected)
+            index_path.write_text('{}')
+            index_path.chmod(0o644)
+            self.assertEqual(task_status.task_status(store=store), expected)
+            index_path.unlink()
+            target = Path(root) / 'index-target'
+            target.write_text('{}')
+            index_path.symlink_to(target)
+            self.assertEqual(task_status.task_status(store=store), expected)
+
+    def test_validator_fingerprint_change_invalidates_index(self):
+        with tempfile.TemporaryDirectory() as root:
+            record(root, created_at='2026-10-29T00:00:00Z')
+            store = CountingTaskStore(Path(root) / 'tasks')
+            task_status.task_status(store=store)
+            store.get_calls = 0
+            with patch('llmtool.task_index.validator_fingerprint', return_value='f' * 64):
+                task_status.task_status(store=store)
+            self.assertGreaterEqual(store.get_calls, 1)
 
 
 if __name__ == '__main__':
