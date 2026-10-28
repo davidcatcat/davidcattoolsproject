@@ -174,18 +174,41 @@ class TaskStatusIndex:
         }
         self.changed = True
 
-    def remember_full_scan(self, task_id, record=None):
-        """Refresh one entry after a required uncached read."""
-        if not self.enabled:
-            return
+    def remember_full_scan(self, task_id):
+        """Read one record and cache it only if its metadata stayed stable."""
+        path = self.store.root / (task_id + '.json')
+        before_key = None
         try:
-            key = _stat_key(self.store.root / (task_id + '.json'))
-            if record is None:
-                self._unreadable_entry(task_id, key)
-            else:
-                self._record_entry(task_id, key, record)
+            before_key = _stat_key(path)
         except Exception:
-            pass
+            if self.enabled:
+                self.entries.pop(task_id, None)
+                self.changed = True
+        try:
+            record = self.store.get(task_id)
+        except Exception:
+            try:
+                after_key = _stat_key(path)
+            except Exception:
+                after_key = None
+            if self.enabled:
+                if before_key == after_key:
+                    self._unreadable_entry(task_id, before_key)
+                else:
+                    self.entries.pop(task_id, None)
+                    self.changed = True
+            return None, False
+        try:
+            after_key = _stat_key(path)
+        except Exception:
+            after_key = None
+        if self.enabled:
+            if before_key is not None and before_key == after_key:
+                self._record_entry(task_id, after_key, record)
+            else:
+                self.entries.pop(task_id, None)
+                self.changed = True
+        return record, True
 
     def _unreadable_entry(self, task_id, key):
         if key is None:
@@ -202,11 +225,15 @@ class TaskStatusIndex:
         rows = []
         unreadable = 0
         for task_id in task_ids:
+            path = self.store.root / (task_id + '.json')
             key = None
             entry = None
+            try:
+                key = _stat_key(path)
+            except Exception:
+                pass
             if self.enabled:
                 try:
-                    key = _stat_key(self.store.root / (task_id + '.json'))
                     candidate = self.entries.get(task_id)
                     if candidate is not None and candidate['stat'] == list(key):
                         entry = candidate
@@ -218,35 +245,67 @@ class TaskStatusIndex:
                 else:
                     unreadable += 1
                 continue
+            before_key = key
             try:
                 record = self.store.get(task_id)
             except Exception:
                 unreadable += 1
-                if self.enabled:
-                    self._unreadable_entry(task_id, key)
-                continue
-            if self.enabled:
                 try:
-                    after_key = _stat_key(self.store.root / (task_id + '.json'))
-                    self._record_entry(task_id, after_key, record)
+                    after_key = _stat_key(path)
                 except Exception:
-                    pass
+                    after_key = None
+                if self.enabled:
+                    if before_key == after_key:
+                        self._unreadable_entry(task_id, before_key)
+                    else:
+                        self.entries.pop(task_id, None)
+                        self.changed = True
+                continue
+            try:
+                after_key = _stat_key(path)
+            except Exception:
+                after_key = None
+            if self.enabled:
+                if before_key is not None and before_key == after_key:
+                    self._record_entry(task_id, after_key, record)
+                else:
+                    self.entries.pop(task_id, None)
+                    self.changed = True
             rows.append((task_id, record.get('created_at', ''), record.get('pm_session_id')))
         return rows, unreadable
 
     def reread(self, task_id):
         """Revalidate a printed record and report metadata disagreement."""
         previous = self.entries.get(task_id) if self.enabled else None
-        record = self.store.get(task_id)
+        path = self.store.root / (task_id + '.json')
+        try:
+            before_key = _stat_key(path)
+        except Exception:
+            before_key = None
+        try:
+            record = self.store.get(task_id)
+        except Exception:
+            try:
+                after_key = _stat_key(path)
+            except Exception:
+                after_key = None
+            if self.enabled and before_key != after_key:
+                self.entries.pop(task_id, None)
+                self.changed = True
+            raise
+        try:
+            after_key = _stat_key(path)
+        except Exception:
+            after_key = None
         changed = (previous is not None and previous['readable'] and
                    (record.get('created_at', '') != previous['created_at'] or
                     record.get('pm_session_id') != previous['pm_session_id']))
         if self.enabled:
-            try:
-                key = _stat_key(self.store.root / (task_id + '.json'))
-                self._record_entry(task_id, key, record)
-            except Exception:
-                pass
+            if before_key is not None and before_key == after_key:
+                self._record_entry(task_id, after_key, record)
+            else:
+                self.entries.pop(task_id, None)
+                self.changed = True
         return record, changed
 
     def discard(self):

@@ -127,13 +127,10 @@ def task_status(*, pm_session=None, limit=20, store=None):
         unreadable_count = 0
         refreshed = TaskStatusIndex(store)
         for task_id in task_ids:
-            try:
-                record = store.get(task_id)
-            except Exception:
+            record, readable = refreshed.remember_full_scan(task_id)
+            if not readable:
                 unreadable_count += 1
-                refreshed.remember_full_scan(task_id)
                 continue
-            refreshed.remember_full_scan(task_id, record)
             if pm_session is None or record.get('pm_session_id') == pm_session:
                 records.append(record)
         if refreshed.changed:

@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from llmtool import task_status
 from llmtool.cli import main, parser_for_cli
+from llmtool.task_index import TaskStatusIndex
 from llmtool.task_store import TaskStore
 from test_task_store import record as valid_record
 
@@ -187,7 +188,7 @@ class TaskStatusTests(unittest.TestCase):
             rows = [record(root, created_at=f'2026-10-2{i}T00:00:00Z',
                            pm_session_id='pm-one' if i < 3 else 'pm-two')
                     for i in range(1, 5)]
-            store = CountingTaskStore(Path(root) / 'tasks')
+            store = CountingTaskStore(Path(root).resolve() / 'tasks')
             unreadable_id = 'f' * 32
             (store.root / f'{unreadable_id}.json').write_text('invalid')
 
@@ -209,7 +210,7 @@ class TaskStatusTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             rows = [record(root, created_at=f'2026-10-2{i}T00:00:00Z')
                     for i in range(1, 4)]
-            store = CountingTaskStore(Path(root) / 'tasks')
+            store = CountingTaskStore(Path(root).resolve() / 'tasks')
             task_status.task_status(store=store, limit=1)
             old_record = min(rows, key=lambda item: item['created_at'])
             os.utime(store.root / f"{old_record['task_id']}.json", None)
@@ -220,7 +221,7 @@ class TaskStatusTests(unittest.TestCase):
     def test_invalid_index_files_are_ignored(self):
         with tempfile.TemporaryDirectory() as root:
             record(root, created_at='2026-10-29T00:00:00Z')
-            store = CountingTaskStore(Path(root) / 'tasks')
+            store = CountingTaskStore(Path(root).resolve() / 'tasks')
             expected = task_status.task_status(store=store)
             index_path = Path(root) / 'task-status-index.json'
 
@@ -238,12 +239,33 @@ class TaskStatusTests(unittest.TestCase):
     def test_validator_fingerprint_change_invalidates_index(self):
         with tempfile.TemporaryDirectory() as root:
             record(root, created_at='2026-10-29T00:00:00Z')
-            store = CountingTaskStore(Path(root) / 'tasks')
+            store = CountingTaskStore(Path(root).resolve() / 'tasks')
             task_status.task_status(store=store)
             store.get_calls = 0
             with patch('llmtool.task_index.validator_fingerprint', return_value='f' * 64):
                 task_status.task_status(store=store)
             self.assertGreaterEqual(store.get_calls, 1)
+
+    def test_index_drops_entry_when_record_changes_during_read(self):
+        with tempfile.TemporaryDirectory() as root:
+            created = record(root, created_at='2026-10-29T00:00:00Z')
+
+            class ChangingTaskStore(CountingTaskStore):
+                def get(self, task_id):
+                    value = super().get(task_id)
+                    path = self.root / f'{task_id}.json'
+                    info = path.stat()
+                    os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000))
+                    return value
+
+            store = ChangingTaskStore(Path(root).resolve() / 'tasks')
+            index = TaskStatusIndex(store)
+            rows, unreadable = index.scan([created['task_id']])
+
+            self.assertEqual(rows, [(created['task_id'], created['created_at'],
+                                     created['pm_session_id'])])
+            self.assertEqual(unreadable, 0)
+            self.assertNotIn(created['task_id'], index.entries)
 
 
 if __name__ == '__main__':
