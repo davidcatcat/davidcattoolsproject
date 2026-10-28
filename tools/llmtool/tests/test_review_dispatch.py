@@ -249,7 +249,7 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertTrue(all(argv.index(flag) > argv.index('exec') for flag in exec_options))
 
     def test_codex_review_parser_requires_standard_bound_review_text(self):
-        raw = _codex_event_stream(_codex_review_text())
+        raw = _codex_event_stream(_codex_review_text(version=2))
         parsed = review_dispatch._parse_codex_review(
             raw, task_id=TASK, run_id='r' * 32, contract_digest='d' * 64,
             head=HEAD, version=2)

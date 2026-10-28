@@ -113,13 +113,14 @@ class ReviewResultTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_result(self, comments, **kwargs):
+    def run_result(self, comments, *, github_get=None, **kwargs):
         digest = self.store.get(TASK)['task_binding']['contract_digest']
         comments = [dict(comment, body=comment['body'].replace(CONTRACT, digest))
                     for comment in comments]
         return review_result.record_review_result(
             store=self.store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
-            github_get=lambda path: comments, **kwargs)
+            github_get=(lambda path: comments) if github_get is None else github_get,
+            **kwargs)
 
     def test_formal_claude_pass_is_recorded_and_replay_is_idempotent(self):
         first = self.run_result([_comment()])
