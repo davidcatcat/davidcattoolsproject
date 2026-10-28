@@ -238,16 +238,8 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
 
     def test_create_dedicated_binding_starts_no_process(self):
-        calls = []
-
-        def starter(argv, cwd, env):
-            calls.append((argv, cwd, env))
-            return FakeProcess()
-
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
-                                                 environ={'HOME': self.temp.name},
-                                                 clock=lambda: 1000, runner=starter)
-        self.assertEqual(calls, [])
+                                                 clock=lambda: 1000)
         self.assertFalse(binding['session_started'])
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
@@ -283,15 +275,7 @@ class PMRuntimeTests(unittest.TestCase):
         later.close()
 
     def test_create_then_connect_does_not_treat_creator_as_live_session(self):
-        created = []
-
-        def starter(argv, cwd, env):
-            process = FakeProcess()
-            created.append(process)
-            return process
-
-        binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
-                                                 runner=starter)
+        binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root)
         process = FakeProcess()
         calls = []
 
@@ -305,16 +289,34 @@ class PMRuntimeTests(unittest.TestCase):
                 state_root=self.root, environ={'HOME': self.temp.name}, clock=time.time)
             self.runtimes.add(runtime)
             runtime.open()
-        self.assertEqual(created[0].wait_calls, 0)
+        self.assertFalse(binding['session_started'])
         self.assertEqual(len(calls), 1)
+        self.assertIn('--session-id', calls[0])
+        self.assertNotIn('--resume', calls[0])
         runtime.close()
+
+    def test_completed_turn_binding_precedes_history_persist_for_crash_recovery(self):
+        process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
+        runtime = self.runtime(process)
+        runtime.open()
+        with patch.object(runtime, '_persist_turn', side_effect=OSError('simulated crash')):
+            with self.assertRaises(OSError):
+                list(runtime.send('first request'))
+        runtime.close()
+        binding = pm_runtime.current_binding(SESSION, state_root=self.root)
+        self.assertTrue(binding['session_started'])
+
+        later = self.runtime(FakeProcess())
+        later.open()
+        argv = self.calls[-1][0]
+        self.assertIn('--resume', argv)
+        self.assertNotIn('--session-id', argv)
+        later.close()
 
     def test_create_binding_write_failure_starts_no_child(self):
         write_json_atomic = pm_runtime._write_json_atomic
         state_root = self.root / 'write-failure'
         pm_runtime._ensure_state_dir(state_root)
-        calls = []
-
         def fail_write(root, path, value):
             if path.name.endswith('.binding.json'):
                 raise pm_runtime._error(
@@ -323,10 +325,8 @@ class PMRuntimeTests(unittest.TestCase):
 
         with patch.object(pm_runtime, '_write_json_atomic', side_effect=fail_write):
             with self.assertRaises(LLMToolError) as raised:
-                pm_runtime.create_dedicated_pm(
-                    self.cwd, state_root=state_root, runner=lambda *args: calls.append(args))
+                pm_runtime.create_dedicated_pm(self.cwd, state_root=state_root)
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_BINDING_WRITE_FAILED')
-        self.assertEqual(calls, [])
 
     def test_open_refuses_non_dedicated_session(self):
         (self.root / (SESSION + '.binding.json')).unlink()

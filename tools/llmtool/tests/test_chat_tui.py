@@ -2135,18 +2135,13 @@ class PMConversationTests(BoundedPMTest):
         self.observe.start()
         self.addCleanup(self.observe.stop)
         self.turns = [_full_turn()]
-        self.created = []
         test = self
 
         class API(chat_tui_pm.PMRuntimeAPI):
             def runtime(self, session_id, cwd):
                 return test.make_runtime(session_id, cwd)
 
-        def create_runner(argv, cwd, env):
-            self.created.append(argv)
-
-        self.api = API(state_root=self.state, environ={'HOME': str(self.temp_root)},
-                       create_runner=create_runner)
+        self.api = API(state_root=self.state, environ={'HOME': str(self.temp_root)})
         self.binding = self.api.create_dedicated(str(self.temp_root))
         self.session_id = self.binding['native_session_id']
 

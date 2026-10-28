@@ -200,36 +200,6 @@ def _binding_path(root, native_session_id):
     return root / (native_session_id + '.binding.json')
 
 
-def _stop_started_process(process, timeout=2):
-    """Stop a newly started PM process and its session within a bounded time."""
-    if process is None:
-        return
-    is_popen = isinstance(process, subprocess.Popen)
-    try:
-        if is_popen:
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except Exception:
-        pass
-    try:
-        process.wait(timeout=timeout)
-        return
-    except Exception:
-        pass
-    try:
-        if is_popen:
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-    except Exception:
-        pass
-    try:
-        process.wait(timeout=timeout)
-    except Exception:
-        pass
-
-
 def _write_json_atomic(root, path, value):
     fd, temporary = tempfile.mkstemp(prefix='.pm-runtime-', dir=root)
     try:
@@ -287,7 +257,7 @@ def current_binding(pm_session_id=None, *, state_root=None):
     return binding
 
 
-def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runner=None):
+def create_dedicated_pm(cwd, *, state_root=None, clock=None):
     """Reserve a fresh Claude session ID and durably bind it as the dedicated PM."""
     try:
         cwd = os.path.normpath(os.path.abspath(cwd))
@@ -731,13 +701,13 @@ class PMRuntime:
                 result_text = record['result_text']
             record['result_text'] = _safe_result_text(result_text)
             record['usage'] = usage if isinstance(usage, dict) else {}
-            self._persist_turn(record)
             if status == 'COMPLETED':
                 binding = current_binding(self.pm_session_id, state_root=self._root)
                 if binding is not None and not binding.get('session_started'):
                     binding['session_started'] = True
                     _write_json_atomic(self._root,
                                        _binding_path(self._root, self.pm_session_id), binding)
+            self._persist_turn(record)
             if self._turn is record:
                 self._turn = None
 
