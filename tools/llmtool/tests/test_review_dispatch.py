@@ -166,7 +166,7 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_claude_authored_task_dispatches_codex_in_reviewer_d6(self):
         self.store.data.update({
             'developer': {'provider_profile': 'claude'},
-            'run_id': 'r' * 32,
+            'run_id': 'c' * 32,
             'task_binding': {'contract_digest': 'd' * 64},
         })
         reviewer = SimpleNamespace(root='/repo/reviewer-d6')
@@ -196,8 +196,8 @@ class ReviewDispatchTests(unittest.TestCase):
                          'PASS')
 
     def test_codex_argv_is_read_only_and_uses_required_profile_and_d6(self):
-        review_text = _codex_review_text(run_id='r' * 32, contract='d' * 64)
-        verdict = {'task_id': TASK, 'run_id': 'r' * 32,
+        review_text = _codex_review_text(run_id='c' * 32, contract='d' * 64)
+        verdict = {'task_id': TASK, 'run_id': 'c' * 32,
                    'contract_digest': 'd' * 64, 'head': HEAD, 'verdict': 'PASS',
                    'review': review_text}
         final_review = json.dumps(verdict)
@@ -214,7 +214,7 @@ class ReviewDispatchTests(unittest.TestCase):
                 patch.object(review_dispatch.subprocess, 'run', return_value=result) as run:
             review_result = review_dispatch._dispatch_codex(
                 reviewer_root='/repo/reviewer-d6', prompt='review prompt',
-                task={'task_id': TASK, 'run_id': 'r' * 32,
+                task={'task_id': TASK, 'run_id': 'c' * 32,
                       'task_binding': {'contract_digest': 'd' * 64}}, head=HEAD)
         argv = run.call_args.args[0]
         self.assertIn('-s', argv)
@@ -258,7 +258,7 @@ class ReviewDispatchTests(unittest.TestCase):
     def test_codex_review_parser_requires_standard_bound_review_text(self):
         raw = _codex_event_stream(_codex_review_text(version=2))
         parsed = review_dispatch._parse_codex_review(
-            raw, task_id=TASK, run_id='r' * 32, contract_digest='d' * 64,
+            raw, task_id=TASK, run_id='c' * 32, contract_digest='d' * 64,
             head=HEAD, version=2)
         self.assertEqual(parsed['review_text'], _codex_review_text(version=2))
         self.assertEqual(parsed['verdict'], 'PASS')
@@ -266,7 +266,7 @@ class ReviewDispatchTests(unittest.TestCase):
             {'body': parsed['review_text'], 'id': 1,
              'created_at': '2026-10-27T01:00:00Z'},
             head=HEAD, version=2,
-            task={'task_id': TASK, 'run_id': 'r' * 32,
+            task={'task_id': TASK, 'run_id': 'c' * 32,
                   'task_binding': {'contract_digest': 'd' * 64},
                   'developer': {'provider_profile': 'claude'}})
         self.assertEqual(classified[2], 'REVIEW_PASS')
@@ -274,7 +274,7 @@ class ReviewDispatchTests(unittest.TestCase):
             'actor=Codex', 'actor=Claude'))
         with self.assertRaises(LLMToolError) as raised:
             review_dispatch._parse_codex_review(
-                malformed, task_id=TASK, run_id='r' * 32,
+                malformed, task_id=TASK, run_id='c' * 32,
                 contract_digest='d' * 64, head=HEAD)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
 
@@ -286,7 +286,7 @@ class ReviewDispatchTests(unittest.TestCase):
                 with self.assertRaises(LLMToolError) as raised:
                     review_dispatch._parse_codex_review(
                         _codex_event_stream(review_text), task_id=TASK,
-                        run_id='r' * 32, contract_digest='d' * 64, head=HEAD)
+                        run_id='c' * 32, contract_digest='d' * 64, head=HEAD)
                 self.assertEqual(raised.exception.review_dispatch_code,
                                  'REVIEW_NOT_POSTED')
 
@@ -307,7 +307,7 @@ class ReviewDispatchTests(unittest.TestCase):
             head=HEAD, root='/repo/worktree', common_dir='/repo/.git', branch='task',
             clean=True)
         task = {
-            'task_id': TASK, 'run_id': 'r' * 32,
+            'task_id': TASK, 'run_id': 'c' * 32,
             'task_binding': {'contract_digest': 'd' * 64},
             'developer': {'provider_profile': 'claude'},
             'completion': {'executor_task_id': 'executor-d6',
@@ -445,7 +445,7 @@ def _real_store(tmp_path):
     return store, task_id
 
 
-def _codex_review_text(*, run_id='r' * 32, contract='d' * 64, version=1):
+def _codex_review_text(*, run_id='c' * 32, contract='d' * 64, version=1):
     return ('<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
             f'Verdict: PASS | Version: v{version} | HEAD: {HEAD}\n'
             'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
@@ -454,7 +454,7 @@ def _codex_review_text(*, run_id='r' * 32, contract='d' * 64, version=1):
 
 
 def _codex_event_stream(review_text):
-    verdict = {'task_id': TASK, 'run_id': 'r' * 32,
+    verdict = {'task_id': TASK, 'run_id': 'c' * 32,
                'contract_digest': 'd' * 64, 'head': HEAD,
                'verdict': 'PASS', 'review': review_text}
     events = [
