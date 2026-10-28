@@ -178,7 +178,7 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
     'artifact_format', 'artifact', 'artifact_sha256', 'usage', 'error_code',
     'created_at',
 ))
-_DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution', 'progress'))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DEVELOPER_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
@@ -890,7 +890,7 @@ def _validate(record):
         if assignment is not None:
             if (type(assignment) is not dict or set(assignment) != _PM_ASSIGNMENT_FIELDS or
                     type(assignment['schema_version']) is not int or assignment['schema_version'] != 1 or
-                    assignment['route'] not in ('company-gw', 'codex', 'opencode', 'none') or
+                    assignment['route'] not in ('company-gw', 'codex', 'opencode', 'agy', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
                     len(assignment['goal'].encode('utf-8')) > 512 or
@@ -938,7 +938,7 @@ def _validate(record):
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
                     type(assignment) is not dict or
-                    assignment.get('route') not in ('company-gw', 'opencode', 'codex') or
+                    assignment.get('route') not in ('company-gw', 'opencode', 'codex', 'agy') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {
@@ -963,10 +963,10 @@ def _validate(record):
                     developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
-                                               'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude') or
+                                               'DEVELOPER_OUTPUT_REJECTED', 'BLOCKED') or
+                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude', 'agy') or
                     developer['provider_type'] not in (
-                        None, 'openai-compatible', 'codex-cli', 'opencode-cli') or
+                        None, 'openai-compatible', 'codex-cli', 'opencode-cli', 'agy-cli') or
                     developer['backend_session_semantics'] not in (
                         'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
@@ -990,9 +990,11 @@ def _validate(record):
             if 'owner_assignment_ref' in developer:
                 from .worker_dispatch import _OWNER_COMMENT_REF
                 ref = developer['owner_assignment_ref']
-                if (developer['provider_profile'] != 'claude' or
+                if (developer['provider_profile'] not in ('claude', 'agy') or
                         type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
                     _fail()
+            if developer['provider_profile'] == 'agy' and 'owner_assignment_ref' not in developer:
+                _fail()
             if 'normalizations' in developer:
                 tokens = developer['normalizations']
                 if (developer['state'] != 'DEVELOPER_RESPONDED' or
@@ -1028,6 +1030,11 @@ def _validate(record):
                         ('NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                      developer['max_tokens'] is not None)):
                 _fail()
+            if (developer['provider_profile'] == 'agy' and
+                    (developer['provider_type'] not in (None, 'agy-cli') or
+                     developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
+                     developer['max_tokens'] is not None)):
+                _fail()
             if (developer['provider_profile'] == 'claude' and
                     (developer['provider_type'] is not None or
                      developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
@@ -1037,7 +1044,7 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] not in ('opencode', 'codex') or
+                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
                             type(execution) is not dict or
                             set(execution) not in (
                                 _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS) or
@@ -1054,6 +1061,7 @@ def _validate(record):
                              (type(execution['native_session_id']) is not str or
                               re.fullmatch(
                                   r'ses_[A-Za-z0-9]{1,100}' if developer['provider_profile'] == 'opencode'
+                                  else r'[A-Za-z0-9_-]{8,128}' if developer['provider_profile'] == 'agy'
                                   else r'[0-9a-fA-F-]{16,64}',
                                   execution['native_session_id']) is None)) or
                             (execution['process_exit_code'] is not None and
@@ -1145,10 +1153,17 @@ def _validate(record):
             if 'blocked_reason' in developer:
                 reason = developer['blocked_reason']
                 execution = developer.get('execution')
-                if (developer['provider_profile'] != 'codex' or
-                        developer['state'] != 'DEVELOPER_OUTCOME_UNKNOWN' or
-                        developer['error_code'] != 'CODEX_BLOCKED' or
-                        type(execution) is not dict or execution.get('status') != 'BLOCKED' or
+                agy_isolation_block = (
+                    developer['provider_profile'] == 'agy' and
+                    developer['state'] == 'BLOCKED' and
+                    developer['error_code'] == 'BLOCKED_WRITE_ISOLATION' and
+                    reason == 'BLOCKED_WRITE_ISOLATION')
+                codex_block = (
+                    developer['provider_profile'] == 'codex' and
+                    developer['state'] == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                    developer['error_code'] == 'CODEX_BLOCKED' and
+                    type(execution) is dict and execution.get('status') == 'BLOCKED')
+                if (not (agy_isolation_block or codex_block) or
                         type(reason) is not str or
                         len(reason.encode('utf-8')) > 2048 or
                         any((ord(char) < 32 and char not in '\t\n\r') or
@@ -1160,14 +1175,36 @@ def _validate(record):
                 'company-gw': 'openai-compatible',
                 'codex': 'codex-cli',
                 'opencode': 'opencode-cli',
+                'agy': 'agy-cli',
             }.get(developer['provider_profile'])
             token_cap_required = not (
-                developer['provider_profile'] == 'codex' and
-                developer['provider_type'] == 'codex-cli')
+                developer['provider_profile'] in ('codex', 'agy') and
+                developer['provider_type'] in ('codex-cli', 'agy-cli'))
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
                 _fail()
+            if 'progress' in developer:
+                progress = developer['progress']
+                if (developer['provider_profile'] != 'agy' or
+                        developer['state'] != 'BLOCKED' or type(progress) is not dict or
+                        set(progress) != {'state', 'head_sha', 'changed_files',
+                                          'unfinished_checks', 'session_id'} or
+                        progress.get('state') != 'QUOTA_EXHAUSTED' or
+                        (progress.get('head_sha') != 'UNKNOWN' and
+                         (type(progress.get('head_sha')) is not str or
+                          re.fullmatch(r'[0-9a-f]{40}', progress['head_sha']) is None)) or
+                        type(progress.get('changed_files')) is not list or
+                        len(progress['changed_files']) > 200 or
+                        any(type(path) is not str or len(path) > 512
+                            for path in progress['changed_files']) or
+                        type(progress.get('unfinished_checks')) is not list or
+                        any(type(item) is not str or len(item) > 128
+                            for item in progress['unfinished_checks']) or
+                        (progress.get('session_id') is not None and
+                         (type(progress['session_id']) is not str or
+                          re.fullmatch(r'[A-Za-z0-9_-]{8,128}', progress['session_id']) is None))):
+                    _fail()
             if dev_state == 'DEVELOPER_DISPATCHING' and (
                     developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is not None or
@@ -1189,6 +1226,11 @@ def _validate(record):
                     developer['provider_type'] is None or artifact is None or
                     developer['error_code'] is not None or
                     (token_cap_required and developer['max_tokens'] is None)):
+                _fail()
+            if dev_state == 'BLOCKED' and (
+                    developer['provider_profile'] != 'agy' or
+                    developer['provider_type'] != 'agy-cli' or
+                    developer['error_code'] is None or artifact is not None):
                 _fail()
             if developer['provider_profile'] == 'opencode':
                 execution = developer.get('execution')
@@ -1219,7 +1261,7 @@ def _validate(record):
                     'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
-                if (developer['provider_profile'] not in ('opencode', 'codex') or
+                if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
                         type(callback) is not dict or
                         set(callback) not in (callback_fields, callback_fields | {'review_handoff'},
                             callback_fields | {'review_handoff', 'review_return'}) or

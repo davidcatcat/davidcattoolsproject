@@ -388,6 +388,7 @@ _PROVIDER_TYPES = {
     'codex': 'codex-cli',
     'opencode': 'opencode-cli',
     'claude': 'claude-cli',
+    'agy': 'agy-cli',
 }
 
 
@@ -482,6 +483,8 @@ def worker_key_for(provider_profile):
         return 'claude-reviewer'
     if provider_profile == 'codex':
         return 'codex-developer'
+    if provider_profile == 'agy':
+        return 'agy'
     if provider_profile == 'claude':
         return 'claude-developer'
     return None
