@@ -452,7 +452,7 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 
 1. 先量再做：一週內交用量分解表；沒有表不開新的「省 token」工程。
 2. 先砍最大項：規則文件瘦身、審查分級（OWNER_DECISION_REQUIRED）、Reviewer 復用 worktree 只讀 delta、Codex 契約放寬與上限可設、停 merge train（OWNER_DECISION_REQUIRED）。
-3. 便宜模型退回實驗位置：只做合成題與批次小修，不再以「省 token」為名立 P0。Owner 2026-10-28 已定性：gw 是公司自建 LLM、為省大型 AI token 的必做路線，但「不能節省，那就沒必要了」（9C.3 第 1 題），所以 gw 的下一步只有量測整題總成本（含失敗與修復、PM 準備 context、套 diff、Reviewer 審查）與「直接派 Codex」的整題成本；OpenCode／AGY 是省 token 用途、可以後接（9C.1 第 5 題）。
+3. ~~便宜模型退回實驗位置：只做合成題與批次小修~~（**已被下文 Owner 定性取代**；任何派工政策或路線切換的建議皆為 **OWNER_DECISION_REQUIRED**），不再以「省 token」為名立 P0。Owner 2026-10-28 已定性：gw 是公司自建 LLM、為省大型 AI token 的必做路線，但「不能節省，那就沒必要了」（9C.3 第 1 題），所以 gw 的下一步只有量測整題總成本（含失敗與修復、PM 準備 context、套 diff、Reviewer 審查）與「直接派 Codex」的整題成本；OpenCode／AGY 是省 token 用途、可以後接（9C.1 第 5 題）。
 4. 每個優化附前後數字；「做的事是不是產品」列入成本報告。
 
 ## 9C. Owner 答覆紀錄與報告修正（v5，2026-10-28）
@@ -519,7 +519,7 @@ Owner 指出曾試過 Sonnet、`gpt-5.6`／`sol`、以 `luna` 當 PM，品質很
 | Mac 根磁碟可用 | 13 GB | **28 GB** | `df` |
 | 保留的 35 個 worktree | — | PR #545 逐一審計：SUPERSEDED 29、CONFLICTING 3、USEFUL 3（待 Owner 於 #352 決定） | #545 |
 | gw thinking 開 | 0/1（max_tokens 4096 被截斷） | 兩題**最終通過**（max_tokens 16384；#522、#523 已合併；on-2 第一次失敗、第二次才過），不足以推論一般任務品質；thinking 關 4/5；合計 6/8 | #290 留言 2026-10-27 20:50 UTC |
-| gw thinking 開的成本（v6 分列單次與整題） | — | **單次呼叫** 9,816–14,472 completion tokens、74–92 秒；**整題**含失敗與修復：on-2 兩次合計 27,799 completion tokens（總 32,583）、184 秒，on-3 一次 9,816（總 14,182）、74 秒；thinking 關同類題單次 1.2K–8.4K tokens、2–4 秒。PM 準備 context、套 diff、Reviewer 審查的成本未記 | 同上 |
+| gw thinking 開的成本（v6 分列單次與整題） | — | **單次呼叫** 9,816–14,472 completion tokens、74–92 秒；**整題**含失敗與修復：on-2 兩次合計 27,799 completion tokens（總 32,583）、184 秒，on-3 一次 9,816（總 14,182）、74 秒；thinking 關同類題每題合計 1.2K–8.4K tokens、2–4 秒（#290 記錄為整題總數，非單次呼叫）。PM 準備 context、套 diff、Reviewer 審查的成本未記 | 同上 |
 | gw 是否省大型 AI token | 未量 | **仍未量**：沒有任何紀錄比較「PM 準備 context＋套 diff＋審查」與「直接派 Codex」的總成本；proposal 模式不能新增檔案（llmtool 缺口） | 同上 |
 | gw 的連線拓樸 | — | Owner 澄清：Mac 開公司 VPN 後連得到 gw 與 EC2；gw 派工與 EC2 測試都從 Mac 發起。repo 內 workflows 無 gw、所有 gw 執行都在 PM 的 Mac，與此一致。EC2／CI 本身是否能連 gw 未主張、也未驗證 | Owner 2026-10-28 澄清；`git grep` origin/main |
 | `task advance`（#519） | OPEN | **已合併**（train 13b `2341fae`）；#538 補 REVIEW_NOT_POSTED；#542 completion 接受 advance 派審的 verdict。**範圍（v6 更正）：** 每次呼叫只做一個審查或結案動作；不做第一次派工、不跑測試、不開 PR（NEEDS_PUBLISH）、不合併（WAITING_INTEGRATION）。不等於全自動閉環 | PR #533、#538、#546；`task_advance.py` |
