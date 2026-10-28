@@ -456,7 +456,26 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                 getattr(exc, 'completion_code', None) else
                 _refusal(exc, 'task_store_error_code')]
     elif step == 'REVIEWER_ATTENTION':
-        codes.append('REVIEWER_ATTENTION')
+        # A prior result check may already have persisted the synthetic
+        # REVIEW_BLOCKED event for a completed session with no posted verdict.
+        # Keep that recoverable state actionable on later advance calls.
+        claim = next((c for c in reversed(_claims(record)) if type(c) is dict and
+                      c.get('pr') == number and c.get('head_sha') == d6['result_head']), None)
+        missing_verdict = (reviewer_session_done and claim is not None and any(
+            type(event) is dict and event.get('source') == 'REVIEWER' and
+            event.get('source_sha') == claim.get('head_sha') and
+            event.get('version') == claim.get('version') and
+            (event.get('outcome') or event.get('state')) == 'REVIEW_BLOCKED'
+            for event in related['events']))
+        if missing_verdict:
+            step = 'REVIEW_NOT_POSTED'
+            codes.append('REVIEW_VERDICT_NOT_POSTED')
+            result = {'reviewer_task': claim.get('reviewer_task'),
+                      'reviewer_session_id': claim.get('native_session_id'),
+                      'pr': claim.get('pr'), 'head_sha': claim.get('head_sha'),
+                      'version': claim.get('version')}
+        else:
+            codes.append('REVIEWER_ATTENTION')
     elif step == 'REVIEW_NOT_POSTED':
         pass
     elif step == 'NEEDS_PUBLISH':

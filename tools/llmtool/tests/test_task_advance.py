@@ -167,6 +167,17 @@ class TaskAdvanceTests(unittest.TestCase):
                                             'pr': 17, 'head_sha': HEAD, 'version': 1})
         self.assertEqual(result['codes'], ['REVIEW_VERDICT_NOT_POSTED'])
 
+    def test_done_reviewer_with_persisted_missing_verdict_remains_actionable(self):
+        result = self._advance_dispatched_review(reviewer_session_done=True, outcomes=[{
+            'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+            'outcome': 'REVIEW_BLOCKED'}])
+        self.assertEqual(result['step'], 'REVIEW_NOT_POSTED')
+        self.assertEqual(result['next'], 'resume the reviewer to post its verdict')
+        self.assertEqual(result['result'], {'reviewer_task': 'reviewer-1',
+                                            'reviewer_session_id': 'session-1',
+                                            'pr': 17, 'head_sha': HEAD, 'version': 1})
+        self.assertEqual(result['codes'], ['REVIEW_VERDICT_NOT_POSTED'])
+
     def test_done_reviewer_with_current_head_pass_keeps_pass_path(self):
         result = self._advance_dispatched_review(reviewer_session_done=True, outcomes=[{
             'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
