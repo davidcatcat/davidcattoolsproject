@@ -96,7 +96,7 @@ class OpenAICompatibleClient:
         req = request.Request(url, data=data, headers=headers, method="POST")
         total = 0
         event_data = []
-        yielded_content = False
+        finished = False
         try:
             response = self.opener.open(req, timeout=self.provider["timeout_seconds"])
             try:
@@ -114,14 +114,17 @@ class OpenAICompatibleClient:
                     if not line:
                         if event_data:
                             if event_data == ["[DONE]"]:
-                                if not yielded_content:
-                                    raise self._stream_invalid()
+                                if not finished:
+                                    raise self._stream_incomplete()
                                 return
-                            for chunk in self._stream_event(event_data):
-                                yielded_content = True
+                            if finished:
+                                raise self._stream_invalid()
+                            chunks, event_finished = self._stream_event(event_data)
+                            for chunk in chunks:
                                 yield chunk
-                        if not yielded_content:
-                            raise self._stream_invalid()
+                            finished = finished or event_finished
+                        if not finished:
+                            raise self._stream_incomplete()
                         return
                     total += len(line)
                     if total > RESPONSE_LIMIT:
@@ -137,12 +140,15 @@ class OpenAICompatibleClient:
                     if not line:
                         if event_data:
                             if event_data == ["[DONE]"]:
-                                if not yielded_content:
-                                    raise self._stream_invalid()
+                                if not finished:
+                                    raise self._stream_incomplete()
                                 return
-                            for chunk in self._stream_event(event_data):
-                                yielded_content = True
+                            if finished:
+                                raise self._stream_invalid()
+                            chunks, event_finished = self._stream_event(event_data)
+                            for chunk in chunks:
                                 yield chunk
+                            finished = finished or event_finished
                             event_data = []
                         continue
                     if line.startswith(":"):
@@ -198,6 +204,13 @@ class OpenAICompatibleClient:
             'MODEL_RESPONSE_INVALID', 'provider.openai-compatible',
         )
 
+    @staticmethod
+    def _stream_incomplete():
+        return coded_error(
+            "gateway stream ended before finish_reason=stop",
+            'MODEL_OUTPUT_INCOMPLETE', 'provider.openai-compatible',
+        )
+
     @classmethod
     def _stream_event(cls, event_data):
         try:
@@ -214,17 +227,20 @@ class OpenAICompatibleClient:
         choices = obj.get("choices")
         if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
             raise cls._stream_invalid()
-        if choices[0].get("finish_reason") == "length":
+        finish_reason = choices[0].get("finish_reason")
+        if finish_reason == "length":
             raise coded_error(
                 "incomplete result (finish_reason=length); increase max_tokens",
                 'MODEL_OUTPUT_INCOMPLETE', 'provider.openai-compatible',
             )
+        if finish_reason is not None and finish_reason != "stop":
+            raise cls._stream_invalid()
         delta = choices[0].get("delta")
         if not isinstance(delta, dict):
             raise cls._stream_invalid()
         content = delta.get("content")
         if content is None:
-            return
+            return [], finish_reason == "stop"
         if not isinstance(content, str):
             raise cls._stream_invalid()
         try:
@@ -232,7 +248,8 @@ class OpenAICompatibleClient:
         except UnicodeError:
             raise cls._stream_invalid() from None
         if content:
-            yield content
+            return [content], finish_reason == "stop"
+        return [], finish_reason == "stop"
 
     def send(self, data):
         """POST already-encoded bytes once, so callers can digest/cap exactly what is sent."""
