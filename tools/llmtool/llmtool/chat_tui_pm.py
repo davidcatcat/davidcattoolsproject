@@ -72,9 +72,9 @@ class PMRuntimeAPI:
     """The pm_runtime S2 calls the TUI makes. Nothing here writes Core state except
     through pm_runtime itself (create_dedicated_pm, PMRuntime)."""
 
-    def __init__(self, *, state_root=None, runner=None, create_runner=None, environ=None):
+    def __init__(self, *, state_root=None, runner=None, environ=None):
         self.state_root, self.runner = state_root, runner
-        self.create_runner, self.environ = create_runner, environ
+        self.environ = environ
 
     def runtime(self, session_id, cwd):
         from .pm_runtime import PMRuntime
@@ -87,8 +87,7 @@ class PMRuntimeAPI:
 
     def create_dedicated(self, cwd):
         from .pm_runtime import create_dedicated_pm
-        return create_dedicated_pm(cwd, state_root=self.state_root, environ=self.environ,
-                                   runner=self.create_runner)
+        return create_dedicated_pm(cwd, state_root=self.state_root)
 
     def read_history(self, session_id):
         from .pm_runtime import read_history

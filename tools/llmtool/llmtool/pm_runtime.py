@@ -200,36 +200,6 @@ def _binding_path(root, native_session_id):
     return root / (native_session_id + '.binding.json')
 
 
-def _stop_started_process(process, timeout=2):
-    """Stop a newly started PM process and its session within a bounded time."""
-    if process is None:
-        return
-    is_popen = isinstance(process, subprocess.Popen)
-    try:
-        if is_popen:
-            os.killpg(process.pid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except Exception:
-        pass
-    try:
-        process.wait(timeout=timeout)
-        return
-    except Exception:
-        pass
-    try:
-        if is_popen:
-            os.killpg(process.pid, signal.SIGKILL)
-        else:
-            process.kill()
-    except Exception:
-        pass
-    try:
-        process.wait(timeout=timeout)
-    except Exception:
-        pass
-
-
 def _write_json_atomic(root, path, value):
     fd, temporary = tempfile.mkstemp(prefix='.pm-runtime-', dir=root)
     try:
@@ -278,13 +248,17 @@ def current_binding(pm_session_id=None, *, state_root=None):
                 'dedicated': True}
     if (not isinstance(binding, dict) or any(binding.get(k) != v for k, v in expected.items()) or
             type(binding.get('dedicated')) is not bool or type(binding.get('cwd')) is not str or
-            type(binding.get('created_at')) is not str):
+            type(binding.get('created_at')) is not str or
+            type(binding.get('session_started', False)) is not bool):
         return None
+    # Bindings written before session_started existed already went through the
+    # old creator process, so they must be resumed rather than initialized again.
+    binding.setdefault('session_started', True)
     return binding
 
 
-def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runner=None):
-    """Start a fresh Claude session and durably bind it as the dedicated PM."""
+def create_dedicated_pm(cwd, *, state_root=None, clock=None):
+    """Reserve a fresh Claude session ID and durably bind it as the dedicated PM."""
     try:
         cwd = os.path.normpath(os.path.abspath(cwd))
         if not os.path.isdir(cwd):
@@ -292,37 +266,14 @@ def create_dedicated_pm(cwd, *, state_root=None, environ=None, clock=None, runne
     except (OSError, TypeError, ValueError):
         raise _error('PM_SESSION_INVALID', 'PM working directory is invalid') from None
     native_id = str(uuid.uuid4())
-    argv = ['claude', '--session-id', native_id]
-    env = dict(os.environ if environ is None else environ)
-    try:
-        if runner is None:
-            process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                        start_new_session=True, close_fds=True)
-        else:
-            process = runner(argv, cwd, env)
-    except Exception:
-        raise _error('PM_PROCESS_START_FAILED', 'Claude PM session could not be started') from None
-    try:
-        # The create command only establishes the native session. Never leave its
-        # CLI process around to be mistaken for a second live owner by open().
-        try:
-            return_code = process.wait(timeout=10)
-        except Exception:
-            _stop_started_process(process)
-            raise _error('PM_PROCESS_START_FAILED', 'Claude PM session did not exit after creation') from None
-        if return_code not in (None, 0):
-            raise _error('PM_PROCESS_START_FAILED', 'Claude PM session creation failed')
-        root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
-        root = _ensure_state_dir(Path(root_arg))
-        binding = {'runtime': 'claude-code', 'native_session_id': native_id, 'cwd': cwd,
-                   'dedicated': True, 'created_at': _timestamp(clock or time.time)}
-        _write_json_atomic(root, _binding_path(root, native_id), binding)
-        _write_json_atomic(root, root / 'current-binding.json',
-                           {'native_session_id': native_id})
-    except Exception:
-        _stop_started_process(process)
-        raise
+    root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+    root = _ensure_state_dir(Path(root_arg))
+    binding = {'runtime': 'claude-code', 'native_session_id': native_id, 'cwd': cwd,
+               'dedicated': True, 'created_at': _timestamp(clock or time.time),
+               'session_started': False}
+    _write_json_atomic(root, _binding_path(root, native_id), binding)
+    _write_json_atomic(root, root / 'current-binding.json',
+                       {'native_session_id': native_id})
     return binding
 
 
@@ -601,8 +552,10 @@ class PMRuntime:
                 raise _error('PM_SESSION_LIVE_ELSEWHERE',
                              'PM session appears active elsewhere; close it before using pm_runtime')
             env = dict(os.environ if self.environ is None else self.environ)
+            session_flag = ('--resume' if binding.get('session_started') or
+                            transcript.exists() else '--session-id')
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
-                    'stream-json', '--verbose', '--include-partial-messages', '--resume',
+                    'stream-json', '--verbose', '--include-partial-messages', session_flag,
                     self.pm_session_id, '--permission-prompts', 'none']
             runner = self.runner
             if runner is None:
@@ -748,6 +701,12 @@ class PMRuntime:
                 result_text = record['result_text']
             record['result_text'] = _safe_result_text(result_text)
             record['usage'] = usage if isinstance(usage, dict) else {}
+            if status == 'COMPLETED':
+                binding = current_binding(self.pm_session_id, state_root=self._root)
+                if binding is not None and not binding.get('session_started'):
+                    binding['session_started'] = True
+                    _write_json_atomic(self._root,
+                                       _binding_path(self._root, self.pm_session_id), binding)
             self._persist_turn(record)
             if self._turn is record:
                 self._turn = None
