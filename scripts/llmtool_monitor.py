@@ -2514,6 +2514,25 @@ def _jsonl_tail(path: str) -> list:
     return [item for _, item in items]
 
 
+def _claude_activity_time(tail: list) -> float:
+    """Newest timestamp on a real Claude conversation entry, ignoring metadata."""
+    newest = 0.0
+    for item in tail:
+        if item.get("type") not in ("user", "assistant", "system"):
+            continue
+        stamp = item.get("timestamp")
+        if type(stamp) is not str:
+            continue
+        try:
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                continue
+            newest = max(newest, parsed.timestamp())
+        except (ValueError, OverflowError):
+            continue
+    return newest
+
+
 TURN_MARKERS = ("task_started", "task_complete", "turn_aborted")
 OFFICE_TURN_SCAN = 64 << 20   # how far before the tail a Codex turn marker is looked for
 _turn_cache: dict = {}        # {path: (scanned up to, marker)} for the part before the tail
@@ -3550,12 +3569,16 @@ def claude_rows(now: float, root=None,
     sessions = sorted((top, path) for top in claude_roots(root) for path in _session_files(top))
     for top, path in sessions:
         try:
-            age = max(0.0, now - os.path.getmtime(path))
+            file_age = max(0.0, now - os.path.getmtime(path))
         except OSError:
             continue
-        if age > OFFICE_WINDOW:
+        if file_age > OFFICE_WINDOW:
             continue
         tail = _jsonl_tail(path)
+        activity_at = _claude_activity_time(tail)
+        age = max(0.0, now - (activity_at or (now - file_age)))
+        if age > OFFICE_WINDOW:
+            continue
         cwd = next((item.get("cwd") for item in reversed(tail)
                     if type(item.get("cwd")) is str), None)
         place = _place(cwd, canonical)
