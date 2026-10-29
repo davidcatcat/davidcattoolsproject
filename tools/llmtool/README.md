@@ -1605,8 +1605,7 @@ exchanges as needed to keep the JSON file at or below 256 KiB. On save and load,
 sensitive-looking content is screened; detected content is represented as
 `[withheld]`. If the history file is unavailable or invalid, chat
 continues without saved history and reports that history could not be loaded or
-saved. `llmtool chat --no-history` disables disk loading and saving for that
-session while conversation remains in memory. This option also applies with
+saved. `llmtool chat --no-history` disables loading and saving of the normal `ChatSession` history file while retaining that conversation in memory; it does not disable independent PM, Task, cache, test-log or native CLI storage. This option also applies with
 `--tui`.
 
 **Switching providers sends retained conversation history to the newly selected
@@ -1653,7 +1652,7 @@ not bound the live session's in-memory history. Live smoke is NOT-TESTED.
 
 See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20).
 
-**TUI is presentation and interaction only.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. It uses the same local saved chat history as line mode by default; `--no-history` keeps turns in memory only. Closing the chat does **not** establish persistent Task resume or detached background work.
+**The TUI presents normal chat and also exposes separate PM and Task interfaces.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. Normal chat uses the same saved `ChatSession` history as line mode by default; `--no-history` disables only that history file, while PM and Task interfaces retain their independent persistence behavior. Closing the chat does **not** establish persistent Task resume or detached background work.
 
 Agreed UI backlog, not yet fully implemented: **P0** command picker/completion for already-supported commands, input history search, composer polish and compact selectable status; **P1** Markdown/code/diff and expandable evidence display plus optional read-only Task/Agent/GitHub/Usage/Approval screens **only if Core exposes trustworthy data**; **P2** themes, syntax highlighting and optional layouts. Key mappings such as Shift+Enter, Ctrl+R, Ctrl+G and Ctrl+O are proposals subject to terminal testing and backwards compatibility. Unknown or unsupported functions are hidden/disabled or marked UNKNOWN; TUI changes must not add provider, PM, execution, Git, approval, token accounting, database or background-worker behavior.
 
@@ -1665,9 +1664,7 @@ llmtool chat --tui
 ```
 
 `--tui` is opt-in; plain `llmtool chat` is unchanged and never imports the UI.
-It uses the same `ChatSession` (same commands, provider/skill rules, local saved
-history by default, error rollback); it adds no second chat core, tools,
-shell, Git or file-write permission. Layout: a scrollable conversation pane, a
+Normal chat mode uses the same `ChatSession`, provider/skill rules, saved-history default and error rollback as line mode. The TUI also calls separate PM runtime and Task APIs; their records and execution permissions follow those Core interfaces and are not controlled by `--no-history`. Layout: a scrollable conversation pane, a
 persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
 Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
 on the first/last input line recall earlier inputs from this process only; Tab
