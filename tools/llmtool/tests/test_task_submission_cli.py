@@ -1588,6 +1588,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n')
         client = FakeClient(Reply(patch_text, {
             'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
+            'served_model': 'qwen3.8-27b',
         }))
         store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
@@ -1675,6 +1676,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(developer['source_sha_binding'], 'D6_REGISTRY_OBSERVED')
         self.assertEqual(developer['artifact'], patch_text)
         self.assertEqual(developer['usage']['total_tokens'], 35)
+        self.assertEqual(developer['usage']['served_model'], 'qwen3.8-27b')
+        stored = store.get(task['task_id'])
+        self.assertEqual(stored['developer']['usage']['served_model'], 'qwen3.8-27b')
         self.assertEqual(developer['max_tokens'], 128)
         self.assertEqual(developer['execution_result'], {
             'status': 'UNVERIFIED', 'code': 'EXECUTOR_EVIDENCE_NOT_ATTACHED',

@@ -164,7 +164,9 @@ MAX_REMOTE_TEST_OUTCOMES = 32
 _REMOTE_TEST_OUTCOME_FIELDS = frozenset((
     'result', 'code', 'executor_task', 'sha', 'modules', 'at'))
 _USAGE_FIELDS = frozenset(('prompt_tokens', 'completion_tokens', 'total_tokens'))
-_OPTIONAL_USAGE_FIELDS = frozenset(('cached_prompt_tokens', 'reasoning_tokens', 'tool_calls'))
+_OPTIONAL_USAGE_FIELDS = frozenset((
+    'cached_prompt_tokens', 'reasoning_tokens', 'tool_calls', 'served_model'))
+_SERVED_MODEL = re.compile(r'[A-Za-z0-9_./:-]{1,128}')
 _DISPATCH_AUDIT_FIELDS = frozenset((
     'attempt_id', 'worker_key', 'action', 'decision', 'reason_code',
     'policy_sha256', 'at',
@@ -314,6 +316,11 @@ def _validate_usage(value):
             not fields.issubset(_USAGE_FIELDS | _OPTIONAL_USAGE_FIELDS)):
         raise ValueError('invalid usage fields')
     for name in _OPTIONAL_USAGE_FIELDS & fields:
+        if name == 'served_model':
+            if (type(value[name]) is not str or
+                    _SERVED_MODEL.fullmatch(value[name]) is None):
+                raise ValueError('invalid served model')
+            continue
         if type(value[name]) is not int or value[name] < 0:
             raise ValueError('invalid optional usage count')
     validate_provider_usage({name: value[name] for name in _USAGE_FIELDS})
