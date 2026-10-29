@@ -142,6 +142,9 @@ class TUIScenarioCase(unittest.TestCase):
     def ask(self, terminal, question, marker="END MARKER"):
         terminal.submit(question)
         terminal.wait_text(marker, question + " reply")
+        # The status row leaves "working" up to one refresh (0.5 s) after the text: since
+        # #630 saves history, finish_send no longer shares the last chunk's redraw.
+        terminal.wait_for(lambda rows: "working" not in rows[-1], question + " turn end")
         return terminal.wait_stable(question + " reply")
 
     # -- scenario bodies shared with the load run (S13) --------------------------------
