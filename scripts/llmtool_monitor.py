@@ -4217,8 +4217,10 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
                           None, 90, kind="worker", evidence="GitHub",
                           alert=f"GitHub runner 清單讀不到（{view.error}）")]
     rows, old = [], now - view.seen_at
-    linux_names = [name for name, system, _status, _busy, _labels in view.runners or []
-                   if name not in local and _runner_system(name, system) == "linux"]
+    linux_runners = [(name, system, status, busy, labels)
+                     for name, system, status, busy, labels in view.runners or []
+                     if name not in local and _runner_system(name, system) == "linux"]
+    linux_names = [runner[0] for runner in linux_runners]
     for number, (name, system, status, busy, labels) in enumerate(view.runners, 1):
         if name in local:
             continue
@@ -4256,12 +4258,12 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
     # an old queue as if it were still waiting.
     if old <= GITHUB_STALE and not view.error:
         _mac_waiting, linux_waiting, unassigned = _ci_queue_groups(view, local)
-        if linux_names and linux_waiting:
+        if linux_runners and linux_waiting:
             rows.append(ci_queue_row(linux_waiting, len(linux_names), "linux"))
         # Queue rows describe work waiting for a runner in this view. With no
         # non-local runners registered there is no remote queue to attribute;
         # the local Mac row owns its own matching queue.
-        if unassigned and linux_names:
+        if unassigned and linux_runners:
             rows.append(ci_queue_row(unassigned, 0, "unassigned"))
     return rows
 

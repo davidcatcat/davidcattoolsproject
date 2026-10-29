@@ -4191,8 +4191,12 @@ class GitHubRunnerTests(unittest.TestCase):
     def test_queued_jobs_are_shown_once_in_platform_rows_or_unassigned(self):
         mac = ("davidproject-self-action", "macOS", "online", False,
                ("self-hosted", "macOS", "x64"))
-        linux = self.linux("ec2-self-runner-1")
-        linux2 = self.linux("ec2-self-runner-2")
+        # CiView stores normalized runner tuples, not the raw API dictionaries
+        # returned by self.linux() for source fixtures.
+        linux = ("ec2-self-runner-1", "Linux", "online", False,
+                 ("self-hosted", "Linux", "X64", "ec2-llmtool"))
+        linux2 = ("ec2-self-runner-2", "Linux", "online", False,
+                  ("self-hosted", "Linux", "X64", "ec2-llmtool"))
         mac_job = (frozenset({"self-hosted", "macos"}), "Mac workflow: check")
         linux_job = (frozenset({"self-hosted", "linux", "ec2-llmtool"}), "Linux workflow: test")
         nowhere = (frozenset({"self-hosted", "special"}), "Unmatched workflow: test")
