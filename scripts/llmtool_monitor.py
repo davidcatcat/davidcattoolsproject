@@ -20,7 +20,9 @@ row each with a live state such as
 labels, titles and verdict words (see the office view section); a role is
 named only when a record binds it, never guessed. A session untouched for 6 hours is left out,
 and finished subagent work for 30 minutes; office data is rebuilt at most every
-5 seconds. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
+5 seconds, and a rebuild reads again only the session, registry, runner-log and
+llmtool records whose file changed (Issue #625); GitHub is read every 30 seconds,
+later while gh keeps failing. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
 running `llmtool task remote-test`, else its newest local receipt or outcome.
 
 Also lists the other members of every observed agent process group, plus their
@@ -83,6 +85,7 @@ class Process:
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
 
 
+@functools.lru_cache(maxsize=4096)
 def safe_name(command: str) -> str:
     """Executable basename only (no arguments, which may contain secrets)."""
     if command.startswith("(") and command.endswith(")"):
@@ -172,6 +175,7 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
     return None
 
 
+@functools.lru_cache(maxsize=4096)
 def classify(command: str) -> str | None:
     """Never return the command text; it might contain secrets."""
     if command.startswith("(") and command.endswith(")"):
@@ -221,6 +225,7 @@ HEX_SHA = re.compile(r"[0-9a-f]{40}")
 TEST_MODULE = re.compile(r"test_[a-z0-9_]{1,80}")
 
 
+@functools.lru_cache(maxsize=4096)
 def _remote_test_job(command: str) -> tuple:
     """(source, short task, short SHA, modules) of an `llmtool task remote-test`
     run ("cli") or of the ssh it starts ("ssh"); "" where unknown. Only tokens
@@ -1044,6 +1049,8 @@ MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 GITHUB_TIMEOUT = 20
 DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
 GITHUB_REFRESH = 30.0
+GITHUB_BACKOFF = 300.0   # the wait doubles after each failed read, up to this
+GITHUB_JOBS_TTL = 60.0   # an unfinished run's job list is reused while its updated_at stays the same, at most this long
 GITHUB_STALE = 3 * GITHUB_REFRESH   # older runner data is shown as 未確認, never as offline
 CI_JOB_READS = 5   # finished runs' job lists read per refresh (they are cached)
 CI_RUN_READS = 10  # unfinished runs whose job lists are read per refresh (oldest first)
@@ -1313,8 +1320,11 @@ class GitHubSource:
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.ci_view: CiView | None = None   # self-hosted runners; None until GitHub was read
         self._finished: dict = {}   # run id -> ci_finished_jobs(); a finished run never changes
+        self._jobs: dict = {}   # run id -> (updated_at, read at, jobs payload) of unfinished runs
         self.status = "GitHub：尚未讀取"
         self.fetched = None   # monotonic time of the last attempt
+        self.settled = None   # monotonic time the last attempt ended
+        self.wait = GITHUB_REFRESH   # seconds between attempts; grows while gh keeps failing
 
     def _get(self, path: str):
         gh = shutil.which("gh")
@@ -1330,12 +1340,19 @@ class GitHubSource:
             raise RuntimeError("回應過大")
         return json.loads(done.stdout)
 
+    def due(self) -> bool:
+        """Whether a new read may start: self.wait seconds since the last one
+        started and since it ended (a slow gh never runs back to back)."""
+        now = time.monotonic()
+        return not (self.fetched is not None and now - self.fetched < self.wait
+                    or self.settled is not None and now - self.settled < self.wait)
+
     def refresh_in_background(self) -> None:
         """Start one daemon fetch when due, so the screen never waits on the network."""
         thread = getattr(self, "_thread", None)
         if thread is not None and thread.is_alive():
             return
-        if self.fetched is not None and time.monotonic() - self.fetched < GITHUB_REFRESH:
+        if not self.due():
             return
         self.fetched = time.monotonic()
         self._thread = threading.Thread(target=self.refresh, kwargs={"force": True},
@@ -1343,10 +1360,10 @@ class GitHubSource:
         self._thread.start()
 
     def refresh(self, force: bool = False) -> None:
-        now = time.monotonic()
-        if not force and self.fetched is not None and now - self.fetched < GITHUB_REFRESH:
+        if not force and not self.due():
             return
-        self.fetched = now
+        self.fetched = time.monotonic()
+        failed = True
         since = self.clock() - self.window
         stamp = datetime.fromtimestamp(since, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         try:
@@ -1389,11 +1406,16 @@ class GitHubSource:
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
+            failed = False
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             # Keep the previous events; say plainly that they may be stale.
             detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
             self.status = f"GitHub：讀取失敗（{detail}），以下 GitHub 項目可能過時"
         self.refresh_ci()
+        # A failing gh (offline, rate limited, hung) is retried later each
+        # time, so the Mac is not forking it every 30 seconds for nothing.
+        self.wait = min(self.wait * 2, GITHUB_BACKOFF) if failed else GITHUB_REFRESH
+        self.settled = time.monotonic()
 
     def refresh_ci(self) -> None:
         """Runners and CI, read on their own: a failure only marks them 未確認."""
@@ -1407,9 +1429,25 @@ class GitHubSource:
             view = replace(view, runners=runners, seen_at=self.clock(), error="")
         self.ci_view = view   # the runners show now; their jobs follow below
         if self.want_ci or view.runners:
-            jobs_of = lambda run: self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
+            stamps: dict = {}   # run id -> updated_at from the runs list
+
+            def jobs_of(run):
+                # An unfinished run's job list is read again only once the
+                # run itself changed (or the cached list is a minute old).
+                cached, stamp = self._jobs.get(run), stamps.get(run)
+                if (cached is not None and stamp is not None and cached[0] == stamp
+                        and self.clock() - cached[1] < GITHUB_JOBS_TTL):
+                    return cached[2]
+                found = self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
+                if stamp is not None:
+                    self._jobs[run] = (stamp, self.clock(), found)
+                return found
             try:
                 payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
+                stamps = {run.get("id"): str(run.get("updated_at") or "")
+                          for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []
+                          if type(run) is dict and type(run.get("id")) is int and run.get("status") in CI_ACTIVE}
+                self._jobs = {run: item for run, item in self._jobs.items() if run in stamps}
                 queued, active = [], ci_runs(payload)
                 self.ci_runs = (ci_runner_names(active[:CI_RUN_READS], jobs_of, queued)
                                 + active[CI_RUN_READS:])
@@ -1573,13 +1611,24 @@ SCRIPT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_PATH = os.path.abspath(__file__)
 
 
+_digest_cache: tuple = ()   # (file key, digest) of the last hashed copy
+
+
 def script_digest() -> str:
-    """Short sha256 of this file as it is on disk now."""
+    """Short sha256 of this file as it is on disk now (hashed again only when
+    its size or mtime changed)."""
+    global _digest_cache
+    key = _file_key(SCRIPT_PATH)
+    if key is not None and _digest_cache and _digest_cache[0] == key:
+        return _digest_cache[1]
     try:
         with open(SCRIPT_PATH, "rb") as handle:
-            return hashlib.sha256(handle.read()).hexdigest()[:7]
+            digest = hashlib.sha256(handle.read()).hexdigest()[:7]
     except OSError:
         return "?"
+    if key is not None:
+        _digest_cache = (key, digest)
+    return digest
 
 
 _GIT_RUN = subprocess.run   # bound at import: GitHub source tests fake subprocess.run
@@ -1704,6 +1753,10 @@ def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
         names = os.listdir(registry)
     except OSError:
         names = []
+    # A record is parsed again only when its file changed; the others keep
+    # what the last read found for them (nothing when they were refused).
+    records = _registry_records if cached is not None else {}
+    kept: dict = {}
     for name in names:
         task_id = name[:-len(".json")]
         if not name.endswith(".json") or not AGENT_PATH.fullmatch(task_id):
@@ -1711,24 +1764,43 @@ def registered_tasks(canonical: str) -> dict[str, tuple[str, str]]:
         path = os.path.join(registry, name)
         try:
             file_st = os.lstat(path)
-            if (not stat.S_ISREG(file_st.st_mode) or file_st.st_uid != os.getuid()
-                    or file_st.st_mode & 0o077 or file_st.st_size > 64 << 10):
-                continue
-            with open(path, "rb") as handle:
-                record = json.loads(handle.read(64 << 10))
-        except (OSError, ValueError):
+        except OSError:
             continue
-        root = record.get("root_realpath") if type(record) is dict else None
-        if (type(root) is not str or not os.path.isabs(root) or os.path.realpath(root) != root
-                or record.get("task_id") != task_id or record.get("lock_state") != "LOCKED"
-                or record.get("state") in D6_GONE_STATES):
-            continue
-        ref = record.get("session_ref")
-        found[task_id] = (root, ref if type(ref) is str else "")
-        details[task_id] = _d6_detail(record, file_st.st_mtime)
+        key = (file_st.st_ino, file_st.st_size, file_st.st_mtime_ns, file_st.st_ctime_ns,
+               file_st.st_mode, file_st.st_uid)
+        entry = records.get(path)
+        if entry is None or entry[0] != key:
+            entry = (key, _registry_record(path, task_id, file_st))
+        kept[path] = entry
+        if entry[1] is not None:
+            found[task_id], details[task_id] = entry[1]
+    _registry_records.clear()
+    _registry_records.update(kept)
     _registry_cache.clear()
     _registry_cache[registry] = (stamp, found, details)
     return found
+
+
+_registry_records: dict = {}   # record path -> (file key, admitted (found, detail) or None)
+
+
+def _registry_record(path: str, task_id: str, file_st) -> tuple | None:
+    """What one D6 record grants: ((root, session_ref), detail), or None."""
+    try:
+        if (not stat.S_ISREG(file_st.st_mode) or file_st.st_uid != os.getuid()
+                or file_st.st_mode & 0o077 or file_st.st_size > 64 << 10):
+            return None
+        with open(path, "rb") as handle:
+            record = json.loads(handle.read(64 << 10))
+    except (OSError, ValueError):
+        return None
+    root = record.get("root_realpath") if type(record) is dict else None
+    if (type(root) is not str or not os.path.isabs(root) or os.path.realpath(root) != root
+            or record.get("task_id") != task_id or record.get("lock_state") != "LOCKED"
+            or record.get("state") in D6_GONE_STATES):
+        return None
+    ref = record.get("session_ref")
+    return (root, ref if type(ref) is str else ""), _d6_detail(record, file_st.st_mtime)
 
 
 BRANCH = re.compile(r"[A-Za-z0-9._/-]{1,200}")
@@ -1875,7 +1947,47 @@ META_FIELDS = ("id", "timestamp", "cwd", "originator", "thread_source", "parent_
                "agent_nickname", "agent_path")
 
 
+# Session records are read every office rebuild. A record that has not
+# changed (same inode, size and mtime) is not read or parsed again; one that
+# grew (the writers only append) is parsed from where the last read stopped.
+_head_cache: dict = {}   # path -> (file key, parsed first line)
+_entry_cache: dict = {}  # path -> (file key, first entrypoint)
+_tail_cache: dict = {}   # path -> tail state (see _jsonl_tail)
+TAIL_PROBE = 64          # bytes before the resume point that must still match
+CACHE_FILES = 256        # records remembered per cache, least recently used first out
+
+
+def _file_key(path: str):
+    """(dev, ino, size, mtime_ns, ctime_ns) of a record, or None when it cannot
+    be read. ctime is the kernel's own write stamp: a rewrite that keeps the
+    size and a set mtime still changes it."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+
+
+def _remember(cache: dict, path: str, value) -> None:
+    cache.pop(path, None)
+    cache[path] = value
+    while len(cache) > CACHE_FILES:
+        cache.pop(next(iter(cache)))
+
+
 def _jsonl_head(path: str):
+    key = _file_key(path)
+    cached = _head_cache.get(path)
+    if key is not None and cached is not None and cached[0] == key:
+        _remember(_head_cache, path, cached)
+        return cached[1]
+    found = _read_jsonl_head(path)
+    if key is not None:
+        _remember(_head_cache, path, (key, found))
+    return found
+
+
+def _read_jsonl_head(path: str):
     try:
         with open(path, "rb") as handle:
             raw = handle.readline(OFFICE_HEAD)
@@ -1901,6 +2013,18 @@ def _jsonl_head(path: str):
 
 def _first_entrypoint(path: str, lines: int = 64):
     """How a Claude session was first started ("cli" or "sdk-cli")."""
+    key = _file_key(path)
+    cached = _entry_cache.get(path)
+    if key is not None and cached is not None and cached[0] == key:
+        _remember(_entry_cache, path, cached)
+        return cached[1]
+    found = _read_first_entrypoint(path, lines)
+    if key is not None:
+        _remember(_entry_cache, path, (key, found))
+    return found
+
+
+def _read_first_entrypoint(path: str, lines: int = 64):
     try:
         with open(path, "rb") as handle:
             for _ in range(lines):
@@ -1918,27 +2042,68 @@ def _first_entrypoint(path: str, lines: int = 64):
     return None
 
 
-def _jsonl_tail(path: str) -> list:
-    try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as handle:
-            handle.seek(max(0, size - OFFICE_TAIL))
-            data = handle.read(OFFICE_TAIL)
-    except OSError:
-        return []
-    lines = data.split(b"\n")
-    if size > OFFICE_TAIL:
-        lines = lines[1:]   # the first line is cut
-    out = []
-    for raw in lines:
+def _parse_jsonl(data: bytes, base: int) -> tuple[list, int]:
+    """[(offset, item)] for the JSON object lines of data, which starts at
+    file offset base, and the offset where its last (maybe unfinished) line
+    starts: a read that resumes there sees that line whole."""
+    out, offset, raw = [], base, b""
+    for raw in data.split(b"\n"):
         if raw.strip():
             try:
                 item = json.loads(raw)
             except ValueError:
-                continue
+                item = None
             if type(item) is dict:
-                out.append(item)
-    return out
+                out.append((offset, item))
+        offset += len(raw) + 1
+    return out, base + len(data) - len(raw)
+
+
+def _jsonl_tail(path: str) -> list:
+    """The JSON object lines in the last OFFICE_TAIL bytes of a record (a cut
+    first line left out), as _jsonl_tail always returned them. Between calls
+    the parsed lines are kept per file: an unchanged file costs one stat, a
+    grown one is read from its last line on (the bytes just before it must
+    still match, so a rewritten file is read whole again)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return []
+    size, key = st.st_size, (st.st_dev, st.st_ino)
+    cutoff = size - OFFICE_TAIL if size > OFFICE_TAIL else -1   # keep lines starting after it
+    cached = _tail_cache.get(path)
+    if cached is not None and cached["key"] == key and cached["size"] == size \
+            and cached["mtime"] == (st.st_mtime_ns, st.st_ctime_ns):
+        _remember(_tail_cache, path, cached)
+        return [item for _, item in cached["items"]]
+    items = None
+    if cached is not None and cached["key"] == key and cached["size"] < size:
+        line, probe = cached["line"], cached["probe"]
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(line - len(probe))
+                chunk = handle.read(size - line + len(probe))
+        except OSError:
+            return []
+        if chunk[:len(probe)] == probe and len(chunk) == size - line + len(probe):
+            grown, last = _parse_jsonl(chunk[len(probe):], line)
+            items = [pair for pair in cached["items"] if pair[0] < line] + grown
+            probe = chunk[max(0, last - TAIL_PROBE - (line - len(probe))):last - (line - len(probe))]
+            line = last
+    if items is None:
+        start = max(0, size - OFFICE_TAIL)
+        try:
+            with open(path, "rb") as handle:
+                handle.seek(start)
+                data = handle.read(size - start)
+        except OSError:
+            return []
+        items, line = _parse_jsonl(data, start)
+        probe = data[max(0, line - TAIL_PROBE - start):line - start]
+    items = [pair for pair in items if pair[0] > cutoff]
+    _remember(_tail_cache, path, {"key": key, "size": size, "mtime": (st.st_mtime_ns, st.st_ctime_ns),
+                                  "items": items, "line": line, "probe": probe})
+    return [item for _, item in items]
 
 
 TURN_MARKERS = ("task_started", "task_complete", "turn_aborted")
@@ -2855,6 +3020,38 @@ def claude_sessions(root=None) -> list[str]:
     return [os.path.join(os.path.dirname(top), "sessions") for top in claude_roots(root)]
 
 
+_listing_cache: dict = {}   # project folder -> (folder mtime_ns, its *.jsonl names)
+
+
+def _session_files(top: str) -> list[str]:
+    """<top>/*/*.jsonl as glob lists it; a project folder whose mtime did not
+    change keeps its last listing (a new session file changes that mtime,
+    writes to an existing one do not)."""
+    found = []
+    try:
+        with os.scandir(top) as entries:
+            folders = [entry for entry in entries if not entry.name.startswith(".")
+                       and entry.is_dir()]
+    except OSError:
+        return found
+    for folder in folders:
+        try:
+            stamp = folder.stat().st_mtime_ns
+        except OSError:
+            continue
+        cached = _listing_cache.get(folder.path)
+        if cached is None or cached[0] != stamp:
+            try:
+                names = [name for name in os.listdir(folder.path)
+                         if name.endswith(".jsonl") and not name.startswith(".")]
+            except OSError:
+                names = []
+            cached = (stamp, names)
+            _remember(_listing_cache, folder.path, cached)
+        found += [os.path.join(folder.path, name) for name in cached[1]]
+    return found
+
+
 def claude_rows(now: float, root=None,
                 canonical: str | None = None, live: dict | None = None) -> list[OfficeRow]:
     """live: {session id: (registry entry, who answers)} of running CLIs; what
@@ -2863,8 +3060,7 @@ def claude_rows(now: float, root=None,
     written a session file."""
     canonical = canonical or canonical_root()
     rows, seen = [], set()
-    for path in sorted(path for top in claude_roots(root)
-                       for path in glob.glob(os.path.join(top, "*", "*.jsonl"))):
+    for path in sorted(path for top in claude_roots(root) for path in _session_files(top)):
         try:
             age = max(0.0, now - os.path.getmtime(path))
         except OSError:
@@ -3061,7 +3257,8 @@ def _elapsed_seconds(text: str) -> float | None:
 
 
 def _forget_cwds(processes: list[Process]) -> None:
-    alive = {p.pid for p in processes if p.role.removesuffix(" (node launcher)") in AGENT_CLI_ROLES}
+    """Keep a process's cwd while it lives (lsof is read once per PID)."""
+    alive = {p.pid for p in processes}
     for pid in [pid for pid in _cwd_cache if pid not in alive]:
         _cwd_cache.pop(pid, None)
 
@@ -3257,7 +3454,28 @@ def runner_roots() -> list:
     return found or [RUNNER_ROOT]
 
 
+_pid_facts: dict = {}   # (what, pid) -> answer, forgotten when the pid is gone (forget_pids)
+
+
+def _pid_fact(what: str, pid: int, read):
+    """read(pid) once per living pid: its user or isolation cannot change."""
+    key = (what, pid)
+    if key not in _pid_facts:
+        _pid_facts[key] = read(pid)
+    return _pid_facts[key]
+
+
+def forget_pids(processes: list[Process]) -> None:
+    alive = {p.pid for p in processes}
+    for key in [key for key in _pid_facts if key[1] not in alive]:
+        _pid_facts.pop(key, None)
+
+
 def process_user(pid: int) -> str | None:
+    return _pid_fact("user", pid, _read_process_user)
+
+
+def _read_process_user(pid: int) -> str | None:
     try:
         return subprocess.run(["/bin/ps", "-o", "user=", "-p", str(pid)], capture_output=True,
                               text=True, timeout=2, check=False).stdout.strip() or None
@@ -3272,6 +3490,10 @@ def process_isolation(pid: int) -> str | None:
     """How a process is kept from this account's data: "專用帳號 <name>" when
     it runs as another account, "沙箱" inside a macOS sandbox, "" when neither;
     None = cannot tell."""
+    return _pid_fact("isolation", pid, _read_process_isolation)
+
+
+def _read_process_isolation(pid: int) -> str | None:
     try:
         out = subprocess.run(["/bin/ps", "-o", "uid=,user=", "-p", str(pid)], capture_output=True,
                              text=True, timeout=2, check=False).stdout.split()
@@ -3294,17 +3516,22 @@ def _runner_log(root: str) -> list:
         return []
     lines = []
     for name in names[-10:]:
+        path = os.path.join(root, "_diag", name)
         # The log folder belongs to the runner account, whose jobs could put a
         # link, FIFO or device there: open without following or blocking,
         # read only a regular file, and at most its last OFFICE_TAIL bytes.
         try:
-            fd = os.open(os.path.join(root, "_diag", name),
-                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         except OSError:
             continue
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
+                continue
+            key = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            cached = _runner_log_cache.get(path)
+            if cached is not None and cached[0] == key:   # unchanged since the last read
+                lines += cached[1]
                 continue
             os.lseek(fd, max(0, info.st_size - OFFICE_TAIL), os.SEEK_SET)
             text = os.read(fd, OFFICE_TAIL).decode("utf-8", "replace")
@@ -3312,10 +3539,16 @@ def _runner_log(root: str) -> list:
             continue
         finally:
             os.close(fd)
+        parsed = []
         for found in RUNNER_LOG.finditer(text):
             when = datetime.strptime(found.group(1), "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
-            lines.append((when.timestamp(), found.group(2).strip()))
+            parsed.append((when.timestamp(), found.group(2).strip()))
+        _remember(_runner_log_cache, path, (key, parsed))
+        lines += parsed
     return lines
+
+
+_runner_log_cache: dict = {}   # log path -> (file key, parsed lines)
 
 
 def runner_rows(processes: list[Process], now: float, root=None,
@@ -3514,22 +3747,64 @@ DEVELOPER_RESULTS = {   # llmtool developer state / error code -> plain words
 }
 
 
+_llmtool_records: dict = {}   # record path -> (file key, the few fields the views use)
+LLMTOOL_RECORD_FIELDS = ("task_id", "state", "updated_at")
+LLMTOOL_RECORD_PARTS = {"developer": ("provider_profile", "state", "error_code"),
+                        "completion": ("executor_task_id", "state"), "pm_assignment": ("route",)}
+
+
+def _llmtool_record(path: str, st):
+    """The identifier, route, state and code fields of one llmtool task record
+    (never its request, response, contract or diff), parsed again only when
+    the file changed. None when it cannot be read or is not an object."""
+    key = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, st.st_ctime_ns)
+    cached = _llmtool_records.get(path)
+    if cached is not None and cached[0] == key:
+        return cached[1]
+    try:
+        with open(path, "rb") as handle:
+            record = json.loads(handle.read(1 << 20))
+    except (OSError, ValueError, RecursionError):
+        record = None
+    if type(record) is dict:
+        kept = {name: record.get(name) for name in LLMTOOL_RECORD_FIELDS}
+        for part, names in LLMTOOL_RECORD_PARTS.items():
+            inner = record.get(part)
+            kept[part] = ({name: inner.get(name) for name in names} if type(inner) is dict
+                          else None if inner is None else "")   # "" = present, not an object
+    else:
+        kept = None
+    _llmtool_records[path] = (key, kept)
+    return kept
+
+
+def _llmtool_paths(root: str) -> list[str]:
+    """The record files, with records that disappeared forgotten."""
+    paths = glob.glob(os.path.join(root, "*.json"))
+    if len(_llmtool_records) > len(paths) + 64:
+        for stale in set(_llmtool_records) - set(paths):
+            _llmtool_records.pop(stale, None)
+    return paths
+
+
 def llmtool_route_outcomes(now: float, root: str | None = None) -> dict:
     """{developer profile: (age, total, succeeded, latest words)} from llmtool's
     local task records. Only the developer route's profile, state and error
     code are read; requests, responses, prompts and diffs are never touched."""
     root = LLMTOOL_TASKS if root is None else root
     found: dict = {}
-    for path in glob.glob(os.path.join(root, "*.json")):
+    for path in _llmtool_paths(root):
         try:
-            age = max(0.0, now - os.path.getmtime(path))
-            if age > LLMTOOL_EVIDENCE_WINDOW:
-                continue
-            with open(path, "rb") as handle:
-                record = json.loads(handle.read(1 << 20))
-        except (OSError, ValueError, RecursionError):
+            st = os.stat(path)
+        except OSError:
             continue
-        developer = record.get("developer") if type(record) is dict else None
+        age = max(0.0, now - st.st_mtime)
+        if age > LLMTOOL_EVIDENCE_WINDOW:
+            continue
+        record = _llmtool_record(path, st)
+        if record is None:
+            continue
+        developer = record.get("developer")
         if type(developer) is not dict:
             continue
         profile, state, code = (developer.get("provider_profile"), developer.get("state"),
@@ -3564,17 +3839,17 @@ def llmtool_task_records(now: float, root: str | None = None) -> list[tuple[floa
     responses, contracts and diffs are never touched."""
     root = LLMTOOL_TASKS if root is None else root
     found = []
-    for path in glob.glob(os.path.join(root, "*.json")):
+    for path in _llmtool_paths(root):
         try:
-            if now - os.path.getmtime(path) > LLMTOOL_RECORD_WINDOW:
-                continue
-            with open(path, "rb") as handle:
-                record = json.loads(handle.read(1 << 20))
-        except (OSError, ValueError, RecursionError):
+            st = os.stat(path)
+        except OSError:
             continue
+        if now - st.st_mtime > LLMTOOL_RECORD_WINDOW:
+            continue
+        record = _llmtool_record(path, st)
         if type(record) is not dict:
             continue
-        updated = _github_time(record.get("updated_at")) or os.path.getmtime(path)
+        updated = _github_time(record.get("updated_at")) or st.st_mtime
         if now - updated > LLMTOOL_RECORD_WINDOW:
             continue
         developer = record.get("developer") if type(record.get("developer")) is dict else {}
@@ -4075,19 +4350,29 @@ def _claude_registered(sessions, processes: list[Process]) -> dict[int, dict] | 
         pid = name[:-len(".json")]
         if not name.endswith(".json") or not pid.isdigit() or int(pid) not in pids:
             continue
-        try:
-            path = os.path.join(directory, name)
-            written = os.path.getmtime(path)
-            with open(path, "rb") as handle:
-                entry = json.loads(handle.read(64 << 10))
-        except (OSError, ValueError):
-            continue
+        path = os.path.join(directory, name)
+        key = _file_key(path)
+        cached = _cli_registry_cache.get(path)
+        if key is not None and cached is not None and cached[0] == key:
+            written, entry = cached[1], cached[2]
+        else:
+            try:
+                written = os.path.getmtime(path)
+                with open(path, "rb") as handle:
+                    entry = json.loads(handle.read(64 << 10))
+            except (OSError, ValueError):
+                continue
+            if key is not None:
+                _remember(_cli_registry_cache, path, (key, written, entry))
         if type(entry) is dict and entry.get("pid") == int(pid) and type(entry.get("sessionId")) is str:
             # A crashed CLI of another account can leave a file for a PID the
             # OS has since reused: the running CLI keeps its own file fresh.
             if int(pid) not in found or written > found[int(pid)][0]:
                 found[int(pid)] = (written, dict(entry, jobState=_job_state(directory, entry)))
     return {pid: entry for pid, (_, entry) in found.items()}
+
+
+_cli_registry_cache: dict = {}   # <pid>.json path -> (file key, mtime, entry)
 
 
 def _job_state(sessions: str, entry: dict) -> str | None:
@@ -4225,6 +4510,7 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)
+    forget_pids(processes)
     opencode = opencode_rows(processes, now, canonical, opencode_db, cwd_of)
     rows += opencode + kilo_rows(processes, now, canonical, kilo_db, cwd_of)
     rows += _d6_process_rows(processes, rows, canonical, cwd_of)
@@ -4639,6 +4925,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             colors[key] = curses.color_pair(n)
     view, offset, next_poll = "office", 0, 0.0
     expanded = False   # office view: gray rows folded (default) or listed (key a)
+    next_draw, dirty = 0.0, True
 
     def put(y: int, text: str, attr: int = 0) -> None:
         h, w = stdscr.getmaxyx()
@@ -4654,70 +4941,16 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             if mon.github is not None:
                 mon.github.refresh_in_background()
             next_poll = time.monotonic() + interval
-        h, w = stdscr.getmaxyx()
-        body = max(1, h - 4)
-        stdscr.erase()
-        put(0, f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}",
-            colors.get("title", 0) | curses.A_BOLD)
-        if mon.stale:
-            put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
-                colors.get("!", 0) | curses.A_BOLD)
-        status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
-                  else summary(mon.processes, mon.lingering,
-                               ci_view=mon.github.ci_view if mon.github else None))
-        running = running_stages(mon.tasks)
-        status += f"  ·  llmtool stages running: {running}" if running else ""
-        put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)
-        if view == "log":
-            entries = list(mon.log)
-            offset = max(0, min(offset, len(entries) - body))
-            end = len(entries) - offset
-            for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
-                put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
-            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
-            if offset:
-                hint = f"[scrolled back {offset}]  " + hint
-        elif view == "tasks":
-            lines = d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""] + task_lines(mon.tasks)
-            offset = max(0, min(offset, len(lines) - body))
-            for row, line in enumerate(lines[offset:offset + body]):
-                attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
-                if "RUNNING" in line:
-                    attr |= colors.get("+", 0)
-                elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
-                    attr |= colors.get("!", 0)
-                put(3 + row, line, attr)
-            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
-        elif view == "activity":
-            lines = activity_lines(mon.tasks, github=mon.github, background=True)
-            offset = max(0, min(offset, len(lines) - body))
-            end = len(lines) - offset
-            for row, line in enumerate(lines[max(0, end - body):end]):
-                attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
-                put(3 + row, line, attr)
-            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
-            if offset:
-                hint = f"[scrolled back {offset}]  " + hint
-        elif view == "office":
-            lines = office_view(mon.office, mon.office_error, w - 1, expanded,
-                                pending=mon.github.pending if mon.github is not None else None,
-                                scope=mon.github.scope if mon.github is not None else "")
-            offset = max(0, min(offset, len(lines) - body))
-            styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
-                      "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
-            for row, (line, style) in enumerate(lines[offset:offset + body]):
-                put(3 + row, line, styles.get(style, 0))
-            hint = ("Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  "
-                    f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
-        else:
-            lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
-            offset = max(0, min(offset, len(lines) - body))
-            for row, line in enumerate(lines[offset:offset + body]):
-                put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
-            hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
-        put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
-        stdscr.refresh()
+            dirty = True
+        # The screen is painted after a poll or a key, else once a second for
+        # the clock; getch() still wakes every 100 ms so keys answer at once.
+        if dirty or time.monotonic() >= next_draw:
+            dirty, next_draw = False, time.monotonic() + DRAW_EVERY
+            offset = _paint_screen(stdscr, mon, view, offset, expanded, colors, put)
         key = stdscr.getch()
+        if key == -1:
+            continue
+        dirty = True
         if key in (ord("q"), ord("Q"), 27):
             return
         views = ("log", "tasks", "table", "activity", "office")
@@ -4732,12 +4965,89 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         elif key == curses.KEY_DOWN:
             offset -= 1 if view in FOLLOW_VIEWS else -1
         elif key == curses.KEY_PPAGE:
-            offset += body if view in FOLLOW_VIEWS else -body
+            offset += body_lines(stdscr) if view in FOLLOW_VIEWS else -body_lines(stdscr)
         elif key == curses.KEY_NPAGE:
-            offset -= body if view in FOLLOW_VIEWS else -body
+            offset -= body_lines(stdscr) if view in FOLLOW_VIEWS else -body_lines(stdscr)
         elif key in (curses.KEY_END, ord("G")):
             offset = 0
         offset = max(0, offset)
+
+
+DRAW_EVERY = 1.0   # seconds between repaints when nothing happened (the clock)
+
+
+def body_lines(stdscr) -> int:
+    return max(1, stdscr.getmaxyx()[0] - 4)
+
+
+def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
+    """One repaint of the current view (the loop above decides when);
+    returns the scroll offset clamped to the view."""
+    import curses
+    h, w = stdscr.getmaxyx()
+    body = max(1, h - 4)
+    stdscr.erase()
+    put(0, f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}",
+        colors.get("title", 0) | curses.A_BOLD)
+    if mon.stale:
+        put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
+            colors.get("!", 0) | curses.A_BOLD)
+    status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
+              else summary(mon.processes, mon.lingering,
+                           ci_view=mon.github.ci_view if mon.github else None))
+    running = running_stages(mon.tasks)
+    status += f"  ·  llmtool stages running: {running}" if running else ""
+    put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)
+    if view == "log":
+        entries = list(mon.log)
+        offset = max(0, min(offset, len(entries) - body))
+        end = len(entries) - offset
+        for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
+            put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
+        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+        if offset:
+            hint = f"[scrolled back {offset}]  " + hint
+    elif view == "tasks":
+        lines = d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""] + task_lines(mon.tasks)
+        offset = max(0, min(offset, len(lines) - body))
+        for row, line in enumerate(lines[offset:offset + body]):
+            attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
+            if "RUNNING" in line:
+                attr |= colors.get("+", 0)
+            elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
+                attr |= colors.get("!", 0)
+            put(3 + row, line, attr)
+        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
+    elif view == "activity":
+        lines = activity_lines(mon.tasks, github=mon.github, background=True)
+        offset = max(0, min(offset, len(lines) - body))
+        end = len(lines) - offset
+        for row, line in enumerate(lines[max(0, end - body):end]):
+            attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
+            put(3 + row, line, attr)
+        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+        if offset:
+            hint = f"[scrolled back {offset}]  " + hint
+    elif view == "office":
+        lines = office_view(mon.office, mon.office_error, w - 1, expanded,
+                            pending=mon.github.pending if mon.github is not None else None,
+                            scope=mon.github.scope if mon.github is not None else "")
+        offset = max(0, min(offset, len(lines) - body))
+        styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
+                  "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
+        for row, (line, style) in enumerate(lines[offset:offset + body]):
+            put(3 + row, line, styles.get(style, 0))
+        hint = ("Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  "
+                f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
+    else:
+        lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
+        offset = max(0, min(offset, len(lines) - body))
+        for row, line in enumerate(lines[offset:offset + body]):
+            put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
+        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
+    put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
+    stdscr.refresh()
+    return offset
 
 
 def main(argv: list[str] | None = None) -> int:

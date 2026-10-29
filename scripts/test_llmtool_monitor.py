@@ -4177,3 +4177,315 @@ class GitHubRunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _reference_tail(path, limit):
+    """_jsonl_tail as it read a record before caching (Issue #625): the whole
+    last `limit` bytes, parsed every time."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as handle:
+        handle.seek(max(0, size - limit))
+        data = handle.read(limit)
+    lines = data.split(b"\n")
+    if size > limit:
+        lines = lines[1:]
+    out = []
+    for raw in lines:
+        if raw.strip():
+            try:
+                item = json.loads(raw)
+            except ValueError:
+                continue
+            if type(item) is dict:
+                out.append(item)
+    return out
+
+
+class RefreshCostTests(unittest.TestCase):
+    """Issue #625: an office rebuild reads again only what changed, GitHub is
+    read at a bounded pace, and every cached answer equals a fresh read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        for cache in (mon._tail_cache, mon._head_cache, mon._entry_cache, mon._registry_cache,
+                      mon._registry_records, mon._llmtool_records, mon._runner_log_cache,
+                      mon._cli_registry_cache, mon._pid_facts, mon._listing_cache):
+            cache.clear()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _count_opens(self, path):
+        """Context manager counting open() calls on one path."""
+        real_open, opened = open, []
+
+        def counting(file, *args, **kwargs):
+            if file == path or str(file) == str(path):
+                opened.append(file)
+            return real_open(file, *args, **kwargs)
+        return patch("builtins.open", counting), opened
+
+    def test_tail_is_read_again_only_when_the_file_changed_and_then_matches_a_fresh_read(self):
+        path = self.root / "s.jsonl"
+        line = lambda n: json.dumps({"type": "user", "n": n, "t": "x" * (n % 7)}).encode() + b"\n"
+        with open(path, "wb") as handle:
+            handle.writelines(line(n) for n in range(40))
+        with patch.object(mon, "OFFICE_TAIL", 600):
+            first = mon._jsonl_tail(str(path))
+            self.assertEqual(first, _reference_tail(str(path), 600))
+            counter, opened = self._count_opens(str(path))
+            with counter:
+                self.assertEqual(mon._jsonl_tail(str(path)), first)   # unchanged: no read
+            self.assertEqual(opened, [])
+            # Appends, including a line finished in a later write, are followed.
+            with open(path, "ab") as handle:
+                handle.write(line(40) + b'{"type": "user", "n": 41')
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+            with open(path, "ab") as handle:
+                handle.write(b', "done": true}\n' + line(42))
+            grown = mon._jsonl_tail(str(path))
+            self.assertEqual(grown, _reference_tail(str(path), 600))
+            self.assertEqual(grown[-2]["n"], 41)
+            # A rewrite of the same size with the mtime put back is still seen
+            # (ctime), as is one that shrinks or changes the bytes before the tail.
+            stamp = os.stat(path)
+            with open(path, "wb") as handle:
+                handle.writelines(line(n + 100) for n in range(40))
+            os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+            with open(path, "r+b") as handle:   # same size, same growth: earlier bytes differ
+                handle.seek(0)
+                handle.write(line(100).replace(b'"n": 100', b'"n": 900'))
+                handle.seek(0, 2)
+                handle.write(line(7))
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+            with open(path, "wb") as handle:
+                handle.write(line(1))
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+        os.remove(path)
+        self.assertEqual(mon._jsonl_tail(str(path)), [])
+
+    def test_tail_cache_is_bounded(self):
+        for n in range(mon.CACHE_FILES + 5):
+            path = self.root / f"{n}.jsonl"
+            path.write_bytes(b'{"n": %d}\n' % n)
+            mon._jsonl_tail(str(path))
+        self.assertEqual(len(mon._tail_cache), mon.CACHE_FILES)
+        self.assertNotIn(str(self.root / "0.jsonl"), mon._tail_cache)   # the oldest left first
+
+    def test_head_and_entrypoint_follow_a_changed_file(self):
+        path = self.root / "r.jsonl"
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/a"}}) + "\n"
+                        + json.dumps({"entrypoint": "cli"}) + "\n")
+        self.assertEqual(mon._jsonl_head(str(path))["payload"]["cwd"], "/a")
+        self.assertEqual(mon._first_entrypoint(str(path)), "cli")
+        counter, opened = self._count_opens(str(path))
+        with counter:
+            mon._jsonl_head(str(path))
+            mon._first_entrypoint(str(path))
+        self.assertEqual(opened, [])
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/b"}}) + "\n"
+                        + json.dumps({"entrypoint": "sdk-cli"}) + "\n")
+        self.assertEqual(mon._jsonl_head(str(path))["payload"]["cwd"], "/b")
+        self.assertEqual(mon._first_entrypoint(str(path)), "sdk-cli")
+
+    def _registry(self, canonical, task_id, **fields):
+        registry = canonical / ".git" / "llmtool-worktrees"
+        registry.mkdir(parents=True, exist_ok=True)
+        os.chmod(registry, 0o700)
+        record = {"task_id": task_id, "root_realpath": os.path.realpath(self.root / task_id),
+                  "lock_state": "LOCKED", "state": "ACTIVE", "session_ref": "",
+                  "trusted_agent_id": "codex-developer"}
+        record.update(fields)
+        path = registry / f"{task_id}.json"
+        draft = registry / f".{task_id}.json.tmp"   # replaced atomically, as the registry writes
+        draft.write_text(json.dumps(record), encoding="utf-8")
+        os.chmod(draft, 0o600)
+        os.replace(draft, path)
+        return path
+
+    def test_registry_records_are_parsed_again_only_when_their_file_changed(self):
+        canonical = self.root / "repo"
+        a, b = self._registry(canonical, "wp-a"), self._registry(canonical, "wp-b")
+        found = mon.registered_tasks(str(canonical))
+        self.assertEqual(sorted(found), ["wp-a", "wp-b"])
+        self.assertEqual(mon.registry_details(str(canonical))["wp-a"][0], "ACTIVE")
+        # Another record changes: the folder mtime moves, only that record is opened.
+        time.sleep(0.01)
+        self._registry(canonical, "wp-b", state="REVIEW_PENDING")
+        counter, opened_a = self._count_opens(str(a))
+        with counter:
+            found = mon.registered_tasks(str(canonical))
+        self.assertEqual(opened_a, [])
+        self.assertEqual(mon.registry_details(str(canonical))["wp-b"][0], "REVIEW_PENDING")
+        self.assertEqual(sorted(found), ["wp-a", "wp-b"])
+        # A record that stops qualifying leaves, one that qualifies again returns.
+        self._registry(canonical, "wp-a", lock_state="UNLOCKED")
+        self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-b"])
+        self._registry(canonical, "wp-a")
+        self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-a", "wp-b"])
+        os.remove(b)
+        self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-a"])
+
+    def test_llmtool_records_are_parsed_once_until_they_change(self):
+        now = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 600))
+        record = {"task_id": "ab12cd34" * 4, "updated_at": stamp, "state": "PM_RESPONDED",
+                  "request": "REQUEST-SECRET", "pm_assignment": {"route": "company-gw"},
+                  "developer": {"provider_profile": "company-gw", "state": "DEVELOPER_RESPONDED",
+                                "artifact": "DIFF-SECRET"},
+                  "completion": {"state": "WAITING_EXECUTOR", "executor_task_id": "issue-9-dev"}}
+        path = self.root / "a.json"
+        path.write_text(json.dumps(record))
+        (self.root / "bad.json").write_text("not json")
+        first = mon.llmtool_task_records(now, str(self.root))
+        outcome = mon.llmtool_route_outcomes(now, str(self.root))
+        self.assertEqual(len(first), 1)
+        self.assertIn("派給 company-gw", first[0][1])
+        self.assertEqual(outcome["company-gw"][1:3], (1, 1))
+        self.assertNotIn("SECRET", json.dumps(mon._llmtool_records[str(path)][1]))   # content never kept
+        counter, opened = self._count_opens(str(path))
+        with counter:
+            self.assertEqual(mon.llmtool_task_records(now, str(self.root)), first)
+            self.assertEqual(mon.llmtool_route_outcomes(now, str(self.root)), outcome)
+        self.assertEqual(opened, [])
+        record["developer"]["state"] = "DEVELOPER_OUTPUT_REJECTED"
+        time.sleep(0.01)
+        path.write_text(json.dumps(record))
+        self.assertIn("輸出被拒", mon.llmtool_task_records(now, str(self.root))[0][1])
+        self.assertEqual(mon.llmtool_route_outcomes(now, str(self.root))["company-gw"][2], 0)
+        (self.root / "b.json").write_text(json.dumps(record))   # a new record is read
+        self.assertEqual(len(mon.llmtool_task_records(now, str(self.root))), 2)
+
+    def test_runner_log_is_parsed_again_only_when_it_changed(self):
+        diag = self.root / "_diag"
+        diag.mkdir()
+        log = diag / "Runner_20261025-110000-utc.log"
+        log.write_text("[x INFO Terminal] WRITE LINE: 2026-10-25 11:00:05Z: Listening for Jobs\n")
+        lines = mon._runner_log(str(self.root))
+        self.assertEqual([text for _, text in lines], ["Listening for Jobs"])
+        with patch.object(mon.os, "read", side_effect=AssertionError("read again")):
+            self.assertEqual(mon._runner_log(str(self.root)), lines)
+        with open(log, "a") as handle:
+            handle.write("[x INFO Terminal] WRITE LINE: 2026-10-25 11:10:00Z: Running job: check\n")
+        self.assertEqual([text for _, text in mon._runner_log(str(self.root))],
+                         ["Listening for Jobs", "Running job: check"])
+
+    def test_process_user_and_isolation_are_read_once_per_living_pid(self):
+        answers = iter(["ghrunner", "ghrunner2"])
+        fake = lambda argv, **kwargs: __import__("types").SimpleNamespace(
+            returncode=0, stdout=next(answers) + "\n", stderr="")
+        with patch.object(mon.subprocess, "run", side_effect=fake):
+            self.assertEqual(mon.process_user(4242), "ghrunner")
+            self.assertEqual(mon.process_user(4242), "ghrunner")   # remembered
+            mon.forget_pids([mon.Process(4242, 1, 4242, "01:00", "S", "Actions runner", "Runner", "", ())])
+            self.assertEqual(mon.process_user(4242), "ghrunner")   # still alive: kept
+            mon.forget_pids([])
+            self.assertEqual(mon.process_user(4242), "ghrunner2")  # gone and back: read again
+
+    def test_session_listing_follows_new_files(self):
+        top = self.root / "projects"
+        folder = top / "-Users-x-repo"
+        folder.mkdir(parents=True)
+        (folder / "a.jsonl").write_text("{}\n")
+        (folder / ".hidden.jsonl").write_text("{}\n")
+        self.assertEqual([os.path.basename(p) for p in mon._session_files(str(top))], ["a.jsonl"])
+        time.sleep(0.01)
+        (folder / "b.jsonl").write_text("{}\n")
+        self.assertEqual(sorted(os.path.basename(p) for p in mon._session_files(str(top))),
+                         ["a.jsonl", "b.jsonl"])
+        self.assertEqual(mon._session_files(str(self.root / "missing")), [])
+
+    def test_github_reads_are_spaced_from_the_end_and_back_off_while_gh_fails(self):
+        clock = [1000.0]
+        with patch.object(mon.time, "monotonic", lambda: clock[0]), \
+             patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            good = FakeRun((0, []), (0, []), (1, b""))
+            source = mon.GitHubSource("o/r", runner=good, clock=lambda: NOW)
+            self.assertTrue(source.due())
+            source.refresh()
+            self.assertEqual(source.wait, mon.GITHUB_REFRESH)
+            clock[0] += 29
+            self.assertFalse(source.due())
+            source.refresh()                      # not due: no call
+            self.assertEqual(len(good.calls), 3)
+            # A read that itself took 25 seconds: the next one waits 30 s after it ended.
+            slow = FakeRun((0, []), (0, []), (1, b""))
+            def slow_run(argv, **kwargs):
+                clock[0] += 25
+                return slow(argv, **kwargs)
+            source.runner = slow_run
+            clock[0] += 2
+            source.refresh()
+            ended = clock[0]
+            clock[0] = ended + 29
+            self.assertFalse(source.due())
+            clock[0] = ended + 30
+            self.assertTrue(source.due())
+            # gh failing: 60, 120, 240, 300 (cap) seconds between attempts, then back to 30.
+            source.runner = FakeRun()
+            waits = []
+            for _ in range(5):
+                source.refresh(force=True)
+                waits.append(source.wait)
+            self.assertEqual(waits, [60.0, 120.0, 240.0, 300.0, 300.0])
+            self.assertIn("讀取失敗", source.status)
+            clock[0] += 299
+            self.assertFalse(source.due())
+            clock[0] += 1
+            self.assertTrue(source.due())
+            source.runner = FakeRun((0, []), (0, []), (1, b""))
+            source.refresh()
+            self.assertEqual(source.wait, mon.GITHUB_REFRESH)
+
+    def test_unfinished_run_jobs_are_read_again_only_when_the_run_changed(self):
+        def runs(updated):
+            return {"workflow_runs": [{"id": 77, "status": "in_progress", "name": "CI", "updated_at": updated,
+                                       "head_sha": "a" * 40, "pull_requests": [{"number": 7}]}]}
+        jobs = {"jobs": [{"status": "in_progress", "runner_name": "mac-1", "name": "check"}]}
+        clock = [NOW]
+        fake = FakeRun((0, []), (0, []), (0, {"runners": []}), (0, runs("t1")), (0, jobs),
+                       (0, []), (0, []), (0, {"runners": []}), (0, runs("t1")),
+                       (0, []), (0, []), (0, {"runners": []}), (0, runs("t2")), (0, jobs))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=fake, clock=lambda: clock[0])
+            source.want_ci = True
+            source.refresh(force=True)
+            self.assertEqual(source.ci_runs[0][3], "mac-1")
+            clock[0] += 31
+            source.refresh(force=True)            # same updated_at: the job list is reused
+            self.assertEqual(source.ci_runs[0][3], "mac-1")
+            self.assertEqual(sum("/jobs" in argv[4] for argv, _ in fake.calls), 1)
+            clock[0] += 31
+            source.refresh(force=True)            # the run changed: read again
+            self.assertEqual(sum("/jobs" in argv[4] for argv, _ in fake.calls), 2)
+            self.assertEqual(source.ci_runs[0][3], "mac-1")
+            # The cached list is never older than GITHUB_JOBS_TTL even when the run looks the same.
+            fake.responses += [(0, []), (0, []), (0, {"runners": []}), (0, runs("t2")), (0, jobs)]
+            clock[0] += mon.GITHUB_JOBS_TTL + 1
+            source.refresh(force=True)
+            self.assertEqual(sum("/jobs" in argv[4] for argv, _ in fake.calls), 3)
+
+    def test_curses_screen_is_painted_after_polls_and_keys_not_every_tick(self):
+        import curses
+
+        class FakeScreen:
+            def __init__(self, keys):
+                self.keys, self.paints = list(keys), 0
+            def getmaxyx(self): return (40, 120)
+            def timeout(self, ms): pass
+            def keypad(self, flag): pass
+            def erase(self): pass
+            def addnstr(self, *args): pass
+            def refresh(self): self.paints += 1
+            def getch(self): return self.keys.pop(0) if self.keys else ord("q")
+        screen = FakeScreen([-1] * 30 + [curses.KEY_DOWN] + [-1] * 30 + [ord("q")])
+        monitor = mon.Monitor()
+        with patch.object(mon.Monitor, "poll", return_value=[]), \
+             patch.object(curses, "curs_set", lambda n: None), \
+             patch.object(curses, "has_colors", lambda: False), \
+             patch.object(mon, "DRAW_EVERY", 3600.0):
+            mon.run_curses(screen, 3600.0, False, monitor)
+        # One paint for the first poll, one after the key: never one per getch.
+        self.assertEqual(screen.paints, 2)
