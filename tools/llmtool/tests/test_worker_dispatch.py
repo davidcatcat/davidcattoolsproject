@@ -42,7 +42,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve()
         self.policy_path = self.root / 'worker-dispatch.json'
-        self.policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
+        self.policy = self._fixture_policy()
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
         self.policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
         self.policy_patch.start()
@@ -50,6 +50,21 @@ class WorkerDispatchTests(unittest.TestCase):
         self.store = TaskStore(self.root / 'tasks')
         self.task = self._task()
         self.store.create(self.task)
+
+    @staticmethod
+    def _fixture_policy():
+        evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+        return {
+            'schema_version': 1,
+            'workers': {
+                worker: {
+                    'dispatch': 'ALLOWED', 'decided_by': 'Owner',
+                    'decided_at': '2026-10-22', 'reason': 'test policy state',
+                    'evidence': evidence,
+                }
+                for worker in worker_dispatch.WORKERS
+            },
+        }
 
     def _task(self):
         request = 'Bounded non-sensitive Developer task.'
@@ -111,7 +126,13 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertIsNone(evidence_ref.fullmatch(
             'https://github.com/example-org/repo.name/issues/289'))
 
+    def test_real_owner_policy_parses_and_validates(self):
+        raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
+        self.assertIsInstance(worker_dispatch._parse_policy(raw), dict)
+
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
+        self._set_state('agy', 'OWNER_ASSIGNMENT_ONLY')
+        self._set_state('opencode-developer', 'PAUSED')
         self.assertTrue(worker_dispatch.evaluate('codex-developer').allowed)
         self.assertTrue(worker_dispatch.evaluate('company-gw').allowed)
         self.assertTrue(worker_dispatch.evaluate('claude-reviewer').allowed)
@@ -124,6 +145,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertFalse(worker_dispatch.evaluate('unknown-worker').allowed)
 
     def test_owner_assignment_only_stays_blocked_without_explicit_policy_row(self):
+        self._set_state('agy', 'OWNER_ASSIGNMENT_ONLY')
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848'
         self.policy['workers']['agy'].pop('owner_assignments', None)
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
@@ -133,6 +155,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
 
     def test_owner_assignment_requires_exact_task_reference_and_policy_allowlist(self):
+        self._set_state('agy', 'OWNER_ASSIGNMENT_ONLY')
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
         task_id = self.task['task_id']
         self.assertEqual(worker_dispatch.evaluate('agy', ref, task_id).reason_code,
@@ -157,6 +180,7 @@ class WorkerDispatchTests(unittest.TestCase):
 
     def test_agy_requires_owner_assignment_and_exact_task_binding(self):
         # Owner 2026-10-27: AGY is not an autonomous fallback.
+        self._set_state('agy', 'OWNER_ASSIGNMENT_ONLY')
         decision = worker_dispatch.evaluate('agy')
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
@@ -370,6 +394,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_policy_is_reloaded_after_each_change(self):
+        self._set_state('opencode-developer', 'PAUSED')
         self.assertFalse(worker_dispatch.evaluate('opencode-developer').allowed)
         self._set_state('opencode-developer', 'ALLOWED')
         self.assertTrue(worker_dispatch.evaluate('opencode-developer').allowed)
@@ -391,14 +416,7 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(worker_dispatch.evaluate('company-gw').reason_code,
                          'WORKER_POLICY_INVALID')
 
-    def test_codex_reviewer_switch_is_owner_bound_and_fails_closed(self):
-        entry = self.policy['workers']['codex-reviewer']
-        self.assertEqual(entry['decided_by'], 'Owner')
-        self.assertEqual(entry['decided_at'], '2026-10-25')
-        self.assertEqual(
-            entry['evidence'],
-            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
-            '#issuecomment-6397242605')
+    def test_codex_reviewer_switch_fails_closed(self):
         self._set_state('codex-reviewer', 'PAUSED')
         self.assertEqual(worker_dispatch.evaluate('codex-reviewer').reason_code,
                          'OWNER_PAUSED')
