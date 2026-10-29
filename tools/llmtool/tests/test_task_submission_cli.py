@@ -1433,6 +1433,35 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(rejection)
         self.assertEqual(artifact, proposal)
 
+    def test_captured_source_files_admit_allowed_addition_and_deletion(self):
+        added = 'tools/llmtool/new_module.py'
+        source_files = submission_cli._text_developer_source_files(
+            self.executor_root, self.executor_head, ['sample.py', added])
+        self.assertIsNotNone(source_files)
+        self.assertEqual(source_files[added], '')
+        self.assertNotIn(added, source_files.existing_paths)
+
+        new_file = (f'diff --git a/{added} b/{added}\nnew file mode 100644\n'
+                    f'--- /dev/null\n+++ b/{added}\n'
+                    '@@ -0,0 +1 @@\n+VALUE = 2\n')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            new_file, ['sample.py', added], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, new_file)
+        self.assertTrue(submission_cli._text_developer_apply_check(
+            self.executor_root, self.executor_head, artifact))
+
+        existing = source_files['sample.py']
+        deletion = ('diff --git a/sample.py b/sample.py\n'
+                    'deleted file mode 100644\n--- a/sample.py\n+++ /dev/null\n'
+                    f'@@ -1 +0,0 @@\n-{existing.rstrip()}\n')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            deletion, ['sample.py', added], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, deletion)
+        self.assertTrue(submission_cli._text_developer_apply_check(
+            self.executor_root, self.executor_head, artifact))
+
     def test_codex_delegate_missing_developer_profile_fails_closed_without_pm_fallback(self):
         task = self._pm_task_with_codex_assignment()
         output = io.StringIO()
