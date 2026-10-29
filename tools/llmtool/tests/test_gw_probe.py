@@ -5,6 +5,7 @@ import http.server
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -23,6 +24,7 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
     fail_models = False
     fail_large_context = False
     response_delay = 0
+    served_model = "fake-model"
 
     def log_message(self, _format, *args):
         return
@@ -51,7 +53,8 @@ class FakeHandler(http.server.BaseHTTPRequestHandler):
         limit = body.get("max_tokens")
         finish = "length" if limit in (4096, 16384, 32768) else "stop"
         completion = min(limit or 3, 12)
-        self._send({"model": "fake-model", "choices": [{"message": message, "finish_reason": finish}],
+        self._send({"model": type(self).served_model,
+                    "choices": [{"message": message, "finish_reason": finish}],
                     "usage": {"prompt_tokens": max(1, len(content) // 4),
                               "completion_tokens": completion,
                               "total_tokens": max(1, len(content) // 4) + completion}})
@@ -92,6 +95,7 @@ class FakeServer(unittest.TestCase):
         FakeHandler.fail_models = False
         FakeHandler.fail_large_context = False
         FakeHandler.response_delay = 0
+        FakeHandler.served_model = "fake-model"
         self.client = probe.ProbeClient(self.base_url, "fake-model", "sample-value")
 
     def test_each_probe_parses_fake_responses(self):
@@ -183,6 +187,53 @@ class FakeServer(unittest.TestCase):
         self.client = probe.ProbeClient("http://127.0.0.1:1", "fake-model", None, dry_run=True)
         self.assertEqual(probe.probe_models(self.client)["models"][0]["id"], "fake-model")
         self.assertEqual(FakeHandler.requests, [])
+
+    def test_main_reports_model_change_and_ok_for_same_model(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_path = root / "state" / "llmtool" / "gw_probe_model.json"
+            fake_key = "".join(("fake", "-", "key"))
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                with mock.patch.object(
+                    probe, "_config", return_value=(self.base_url, "fake-model", fake_key)
+                ):
+                    self.assertEqual(probe._model_state_path(), state_path)
+                    for expected, code in (("OK", 0), ("GW_MODEL_CHANGED", 2), ("OK", 0)):
+                        if expected == "GW_MODEL_CHANGED":
+                            FakeHandler.served_model = "qwen3.8-27b"
+                        stdout = io.StringIO()
+                        with contextlib.redirect_stdout(stdout):
+                            actual_code = probe.main([
+                                "--only", "thinking", "--base-url", self.base_url,
+                                "--model", "fake-model", "--out-dir", str(root / "out"),
+                            ])
+                        self.assertEqual(actual_code, code)
+                        self.assertEqual(json.loads(stdout.getvalue())["status"], expected)
+                saved = json.loads((root / "out" / "gw_probe.json").read_text())
+                self.assertEqual(saved["served_model"], "qwen3.8-27b")
+
+    def test_main_same_model_succeeds_when_state_directory_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_home = root / "state"
+            state_home.write_text("not a directory", encoding="utf-8")
+            fake_key = "".join(("fake", "-", "key"))
+            stdout = io.StringIO()
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                with mock.patch.object(
+                    probe, "_config", return_value=(self.base_url, "fake-model", fake_key)
+                ):
+                    with contextlib.redirect_stdout(stdout):
+                        code = probe.main([
+                            "--only", "thinking", "--base-url", self.base_url,
+                            "--model", "fake-model", "--out-dir", str(root / "out"),
+                        ])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["status"], "OK")
+
+    def test_probe_ignores_missing_or_oversized_served_model(self):
+        self.assertEqual(probe._record_served_model(None, Path("unused")), "UNKNOWN")
+        self.assertIsNone(probe._safe_served_model("x" * 129, None))
 
 
 if __name__ == "__main__":

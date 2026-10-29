@@ -250,6 +250,27 @@ class OpenAIProviderTests(unittest.TestCase):
                 OpenAIProvider.validate_ready(provider)
         self.assertEqual(self.server.requests, [])
 
+    def test_openai_compatible_records_only_bounded_screened_served_model(self):
+        provider = {
+            "type": "openai-compatible", "base_url": self.local_origin,
+            "model": "gw", "timeout_seconds": 1, "provider_options": {},
+        }
+        client = OpenAICompatibleClient(provider, {"temperature": 0, "max_tokens": 123}, FAKE_KEY)
+        response = {"choices": [{"finish_reason": "stop", "message": {"content": "answer"}}],
+                    "model": "qwen3.8-27b"}
+        self.server.reply = (200, response, {})
+        reply = client.complete([{"role": "user", "content": "question"}])
+        self.assertEqual(reply.metadata["served_model"], "qwen3.8-27b")
+
+        for model in (None, "x" * 129, FAKE_KEY):
+            with self.subTest(model=model):
+                response = {"choices": [{"finish_reason": "stop", "message": {"content": "answer"}}]}
+                if model is not None:
+                    response["model"] = model
+                self.server.reply = (200, response, {})
+                reply = client.complete([{"role": "user", "content": "question"}])
+                self.assertNotIn("served_model", reply.metadata)
+
     def test_factory_and_capability_registry_contain_only_real_providers(self):
         self.assertEqual(PROVIDER_REGISTRY.names(), ("claude-cli", "codex-cli", "openai", "openai-compatible"))
         self.assertEqual(get_provider_capabilities("openai").to_dict(), {

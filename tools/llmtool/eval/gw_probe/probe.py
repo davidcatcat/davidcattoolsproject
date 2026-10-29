@@ -19,6 +19,7 @@ from urllib.parse import urlsplit
 TIMEOUT_SECONDS = 30
 MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 MAX_CONTEXT_TOKENS = 300_000
+SERVED_MODEL_PATTERN = re.compile(r"[A-Za-z0-9_./:-]{1,128}")
 PROBES = ("models", "thinking", "tools", "determinism", "context", "output", "concurrency", "quality")
 
 
@@ -60,6 +61,7 @@ class ProbeClient:
         self.opener = request.build_opener(request.ProxyHandler({}), NoRedirect())
         self._fake_lock = threading.Lock()
         self._fake_count = 0
+        self._served_models = set()
 
     def send(self, method="POST", body=None, path="/v1/chat/completions", timeout=30):
         if self.dry_run:
@@ -102,6 +104,10 @@ class ProbeClient:
             if not isinstance(parsed, dict):
                 raise ValueError
             result["response"] = parsed
+            served_model = _safe_served_model(parsed.get("model"), self.key)
+            if served_model is not None:
+                with self._fake_lock:
+                    self._served_models.add(served_model)
         except (ValueError, UnicodeError, RecursionError):
             result["error_code"] = "INVALID_JSON"
         return result
@@ -128,6 +134,51 @@ class ProbeClient:
             choice["finish_reason"] = "length"
         return {"status": 200, "latency_seconds": 0.001, "response": {
             "model": self.model, "choices": [choice], "usage": usage, "request_number": count}}
+
+
+def _model_state_path():
+    state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+    return state_home / "llmtool" / "gw_probe_model.json"
+
+
+def _safe_served_model(value, credential_value):
+    if (not isinstance(value, str) or not SERVED_MODEL_PATTERN.fullmatch(value)
+            or (credential_value and credential_value in value)
+            or re.search(r"(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
+                         r"github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{20,})",
+                         value, re.IGNORECASE)):
+        return None
+    return value
+
+
+def _record_served_model(served_model, path=None):
+    """Compare and persist the last screened served model; return the public status."""
+    if served_model is None:
+        return "UNKNOWN"
+    path = _model_state_path() if path is None else Path(path)
+    previous = None
+    try:
+        if path.exists():
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if (not isinstance(state, dict) or set(state) != {"served_model"}
+                    or not isinstance(state["served_model"], str)
+                    or not SERVED_MODEL_PATTERN.fullmatch(state["served_model"])):
+                return "MODEL_STATE_ERROR"
+            previous = state["served_model"]
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return "MODEL_STATE_ERROR"
+    changed = previous is not None and previous != served_model
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps({"served_model": served_model}) + "\n", encoding="utf-8")
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        # State persistence is best effort. With no readable prior value, or with
+        # the same model already recorded, a write failure cannot imply a change.
+        return "GW_MODEL_CHANGED" if changed else "OK"
+    return "GW_MODEL_CHANGED" if changed else "OK"
 
 
 def _chat(client, messages, *, effort=None, thinking="unset", max_tokens=128, temperature=0, tools=None,
@@ -387,7 +438,11 @@ def main(argv=None):
         except Exception as exc:
             # A probe-level defect is recorded without exception text or request details.
             results[name] = {"error_code": "PROBE_ERROR", "error_type": type(exc).__name__}
-    output = {"status": "DONE", "model": model, "started_at": datetime.now(timezone.utc).isoformat(),
+    observed_models = sorted(client._served_models)
+    served_model = observed_models[0] if len(observed_models) == 1 else None
+    model_status = _record_served_model(served_model)
+    output = {"status": model_status, "model": model, "served_model": served_model,
+              "started_at": datetime.now(timezone.utc).isoformat(),
               "dry_run": args.dry_run, "probes": results}
     output = _redact(output, credential_value)
     out_dir = args.out_dir or Path(os.getenv("TMPDIR", "/tmp")) / "gw-probe"
@@ -397,6 +452,8 @@ def main(argv=None):
         markdown_path = out_dir / "gw_probe.md"
         json_path.write_text(json.dumps(output, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
         lines = ["# Company gw probe", "", "- Model: " + str(output["model"]),
+                 "- Served model: " + str(output["served_model"]),
+                 "- Model status: " + str(output["status"]),
                  "- Started: " + output["started_at"], "- Dry run: " + str(output["dry_run"]), "",
                  "| Probe | Summary |", "| --- | --- |"]
         for name, value in results.items():
@@ -414,9 +471,10 @@ def main(argv=None):
     except (OSError, ValueError):
         print(json.dumps({"status": "ERROR", "error": "OUTPUT_WRITE_ERROR"}), file=sys.stderr)
         return 2
-    print(json.dumps({"status": "DONE", "json": os.fspath(json_path), "markdown": os.fspath(markdown_path)},
+    print(json.dumps({"status": model_status, "served_model": served_model,
+                      "json": os.fspath(json_path), "markdown": os.fspath(markdown_path)},
                      ensure_ascii=False))
-    return 0
+    return 2 if model_status == "GW_MODEL_CHANGED" else 0
 
 
 if __name__ == "__main__":

@@ -481,6 +481,11 @@ class OpenAICompatibleClient:
         model = obj.get("model")
         if isinstance(model, str) and re.fullmatch(r"[A-Za-z0-9_./:-]{1,128}", model):
             metadata["model"] = "[redacted]" if self.key and self.key in model else model
+            if (not (self.key and self.key in model)
+                    and not re.search(r"(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
+                                      r"github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{20,})",
+                                      model, re.IGNORECASE)):
+                metadata["served_model"] = model
         # Success usage is the same complete, validated triplet as P1 failure
         # usage; partial or inconsistent usage stays unknown, never partial or 0.
         if provider_usage is not None:
