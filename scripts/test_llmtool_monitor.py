@@ -4177,3 +4177,910 @@ class GitHubRunnerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _reference_tail(path, limit):
+    """_jsonl_tail as it read a record before caching (Issue #625): the whole
+    last `limit` bytes, parsed every time."""
+    size = os.path.getsize(path)
+    with open(path, "rb") as handle:
+        handle.seek(max(0, size - limit))
+        data = handle.read(limit)
+    lines = data.split(b"\n")
+    if size > limit:
+        lines = lines[1:]
+    out = []
+    for raw in lines:
+        if raw.strip():
+            try:
+                item = json.loads(raw)
+            except ValueError:
+                continue
+            if type(item) is dict:
+                out.append(item)
+    return out
+
+
+class RefreshCostTests(unittest.TestCase):
+    """Issue #625: an office rebuild reads again only what changed, GitHub is
+    read at a bounded pace, and every cached answer equals a fresh read."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        for cache in (mon._tail_cache, mon._head_cache, mon._entry_cache, mon._registry_cache,
+                      mon._registry_records, mon._llmtool_records, mon._runner_log_cache,
+                      mon._cli_registry_cache, mon._pid_facts, mon._listing_cache):
+            cache.clear()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _count_opens(self, path):
+        """Context manager counting open() calls on one path."""
+        real_open, opened = open, []
+
+        def counting(file, *args, **kwargs):
+            if file == path or str(file) == str(path):
+                opened.append(file)
+            return real_open(file, *args, **kwargs)
+        return patch("builtins.open", counting), opened
+
+    def test_tail_is_read_again_only_when_the_file_changed_and_then_matches_a_fresh_read(self):
+        path = self.root / "s.jsonl"
+        line = lambda n: json.dumps({"type": "user", "n": n, "t": "x" * (n % 7)}).encode() + b"\n"
+        with open(path, "wb") as handle:
+            handle.writelines(line(n) for n in range(40))
+        with patch.object(mon, "OFFICE_TAIL", 600):
+            first = mon._jsonl_tail(str(path))
+            self.assertEqual(first, _reference_tail(str(path), 600))
+            counter, opened = self._count_opens(str(path))
+            with counter:
+                self.assertEqual(mon._jsonl_tail(str(path)), first)   # unchanged: no read
+            self.assertEqual(opened, [])
+            # Appends, including a line finished in a later write, are followed.
+            with open(path, "ab") as handle:
+                handle.write(line(40) + b'{"type": "user", "n": 41')
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+            with open(path, "ab") as handle:
+                handle.write(b', "done": true}\n' + line(42))
+            grown = mon._jsonl_tail(str(path))
+            self.assertEqual(grown, _reference_tail(str(path), 600))
+            self.assertEqual(grown[-2]["n"], 41)
+            # A rewrite of the same size with the mtime put back is still seen
+            # (ctime), as is one that shrinks or changes the bytes before the tail.
+            stamp = os.stat(path)
+            with open(path, "wb") as handle:
+                handle.writelines(line(n + 100) for n in range(40))
+            os.utime(path, ns=(stamp.st_atime_ns, stamp.st_mtime_ns))
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+            with open(path, "r+b") as handle:   # same size, same growth: earlier bytes differ
+                handle.seek(0)
+                handle.write(line(100).replace(b'"n": 100', b'"n": 900'))
+                handle.seek(0, 2)
+                handle.write(line(7))
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+            with open(path, "wb") as handle:
+                handle.write(line(1))
+            self.assertEqual(mon._jsonl_tail(str(path)), _reference_tail(str(path), 600))
+        os.remove(path)
+        self.assertEqual(mon._jsonl_tail(str(path)), [])
+
+    def test_tail_cache_is_bounded(self):
+        for n in range(mon.CACHE_FILES + 5):
+            path = self.root / f"{n}.jsonl"
+            path.write_bytes(b'{"n": %d}\n' % n)
+            mon._jsonl_tail(str(path))
+        self.assertEqual(len(mon._tail_cache), mon.CACHE_FILES)
+        self.assertNotIn(str(self.root / "0.jsonl"), mon._tail_cache)   # the oldest left first
+
+    def test_head_and_entrypoint_follow_a_changed_file(self):
+        path = self.root / "r.jsonl"
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/a"}}) + "\n"
+                        + json.dumps({"entrypoint": "cli"}) + "\n")
+        self.assertEqual(mon._jsonl_head(str(path))["payload"]["cwd"], "/a")
+        self.assertEqual(mon._first_entrypoint(str(path)), "cli")
+        counter, opened = self._count_opens(str(path))
+        with counter:
+            mon._jsonl_head(str(path))
+            mon._first_entrypoint(str(path))
+        self.assertEqual(opened, [])
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": "/b"}}) + "\n"
+                        + json.dumps({"entrypoint": "sdk-cli"}) + "\n")
+        self.assertEqual(mon._jsonl_head(str(path))["payload"]["cwd"], "/b")
+        self.assertEqual(mon._first_entrypoint(str(path)), "sdk-cli")
+
+    def _registry(self, canonical, task_id, **fields):
+        registry = canonical / ".git" / "llmtool-worktrees"
+        registry.mkdir(parents=True, exist_ok=True)
+        os.chmod(registry, 0o700)
+        record = {"task_id": task_id, "root_realpath": os.path.realpath(self.root / task_id),
+                  "lock_state": "LOCKED", "state": "ACTIVE", "session_ref": "",
+                  "trusted_agent_id": "codex-developer"}
+        record.update(fields)
+        path = registry / f"{task_id}.json"
+        draft = registry / f".{task_id}.json.tmp"   # replaced atomically, as the registry writes
+        draft.write_text(json.dumps(record), encoding="utf-8")
+        os.chmod(draft, 0o600)
+        os.replace(draft, path)
+        return path
+
+    def test_registry_records_are_parsed_again_only_when_their_file_changed(self):
+        canonical = self.root / "repo"
+        a, b = self._registry(canonical, "wp-a"), self._registry(canonical, "wp-b")
+        found = mon.registered_tasks(str(canonical))
+        self.assertEqual(sorted(found), ["wp-a", "wp-b"])
+        self.assertEqual(mon.registry_details(str(canonical))["wp-a"][0], "ACTIVE")
+        # Another record changes: the folder mtime moves, only that record is opened.
+        time.sleep(0.01)
+        self._registry(canonical, "wp-b", state="REVIEW_PENDING")
+        counter, opened_a = self._count_opens(str(a))
+        with counter:
+            found = mon.registered_tasks(str(canonical))
+        self.assertEqual(opened_a, [])
+        self.assertEqual(mon.registry_details(str(canonical))["wp-b"][0], "REVIEW_PENDING")
+        self.assertEqual(sorted(found), ["wp-a", "wp-b"])
+        # A record that stops qualifying leaves, one that qualifies again returns.
+        self._registry(canonical, "wp-a", lock_state="UNLOCKED")
+        self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-b"])
+        self._registry(canonical, "wp-a")
+        self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-a", "wp-b"])
+        os.remove(b)
+        self.assertEqual(sorted(mon.registered_tasks(str(canonical))), ["wp-a"])
+
+    def test_llmtool_records_are_parsed_once_until_they_change(self):
+        now = time.time()
+        stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - 600))
+        record = {"task_id": "ab12cd34" * 4, "updated_at": stamp, "state": "PM_RESPONDED",
+                  "request": "REQUEST-SECRET", "pm_assignment": {"route": "company-gw"},
+                  "developer": {"provider_profile": "company-gw", "state": "DEVELOPER_RESPONDED",
+                                "artifact": "DIFF-SECRET"},
+                  "completion": {"state": "WAITING_EXECUTOR", "executor_task_id": "issue-9-dev"}}
+        path = self.root / "a.json"
+        path.write_text(json.dumps(record))
+        (self.root / "bad.json").write_text("not json")
+        first = mon.llmtool_task_records(now, str(self.root))
+        outcome = mon.llmtool_route_outcomes(now, str(self.root))
+        self.assertEqual(len(first), 1)
+        self.assertIn("派給 company-gw", first[0][1])
+        self.assertEqual(outcome["company-gw"][1:3], (1, 1))
+        self.assertNotIn("SECRET", json.dumps(mon._llmtool_records[str(path)][1]))   # content never kept
+        counter, opened = self._count_opens(str(path))
+        with counter:
+            self.assertEqual(mon.llmtool_task_records(now, str(self.root)), first)
+            self.assertEqual(mon.llmtool_route_outcomes(now, str(self.root)), outcome)
+        self.assertEqual(opened, [])
+        record["developer"]["state"] = "DEVELOPER_OUTPUT_REJECTED"
+        time.sleep(0.01)
+        path.write_text(json.dumps(record))
+        self.assertIn("輸出被拒", mon.llmtool_task_records(now, str(self.root))[0][1])
+        self.assertEqual(mon.llmtool_route_outcomes(now, str(self.root))["company-gw"][2], 0)
+        (self.root / "b.json").write_text(json.dumps(record))   # a new record is read
+        self.assertEqual(len(mon.llmtool_task_records(now, str(self.root))), 2)
+
+    def test_runner_log_is_parsed_again_only_when_it_changed(self):
+        diag = self.root / "_diag"
+        diag.mkdir()
+        log = diag / "Runner_20261025-110000-utc.log"
+        log.write_text("[x INFO Terminal] WRITE LINE: 2026-10-25 11:00:05Z: Listening for Jobs\n")
+        lines = mon._runner_log(str(self.root))
+        self.assertEqual([text for _, text in lines], ["Listening for Jobs"])
+        with patch.object(mon.os, "read", side_effect=AssertionError("read again")):
+            self.assertEqual(mon._runner_log(str(self.root)), lines)
+        with open(log, "a") as handle:
+            handle.write("[x INFO Terminal] WRITE LINE: 2026-10-25 11:10:00Z: Running job: check\n")
+        self.assertEqual([text for _, text in mon._runner_log(str(self.root))],
+                         ["Listening for Jobs", "Running job: check"])
+
+    def test_process_user_and_isolation_are_read_once_per_living_pid(self):
+        answers = iter(["ghrunner", "ghrunner2"])
+        fake = lambda argv, **kwargs: __import__("types").SimpleNamespace(
+            returncode=0, stdout=next(answers) + "\n", stderr="")
+        with patch.object(mon.subprocess, "run", side_effect=fake):
+            self.assertEqual(mon.process_user(4242), "ghrunner")
+            self.assertEqual(mon.process_user(4242), "ghrunner")   # remembered
+            mon.forget_pids([mon.Process(4242, 1, 4242, "01:00", "S", "Actions runner", "Runner", "", ())])
+            self.assertEqual(mon.process_user(4242), "ghrunner")   # still alive: kept
+            mon.forget_pids([])
+            self.assertEqual(mon.process_user(4242), "ghrunner2")  # gone and back: read again
+
+    def test_session_listing_follows_new_files(self):
+        top = self.root / "projects"
+        folder = top / "-Users-x-repo"
+        folder.mkdir(parents=True)
+        (folder / "a.jsonl").write_text("{}\n")
+        (folder / ".hidden.jsonl").write_text("{}\n")
+        self.assertEqual([os.path.basename(p) for p in mon._session_files(str(top))], ["a.jsonl"])
+        time.sleep(0.01)
+        (folder / "b.jsonl").write_text("{}\n")
+        self.assertEqual(sorted(os.path.basename(p) for p in mon._session_files(str(top))),
+                         ["a.jsonl", "b.jsonl"])
+        self.assertEqual(mon._session_files(str(self.root / "missing")), [])
+
+    def test_github_reads_are_spaced_from_the_end_and_back_off_while_gh_fails(self):
+        clock = [1000.0]
+        with patch.object(mon.time, "monotonic", lambda: clock[0]), \
+             patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            good = FakeRun((0, []), (0, []), (1, b""))
+            source = mon.GitHubSource("o/r", runner=good, clock=lambda: NOW)
+            self.assertTrue(source.due())
+            source.refresh()
+            self.assertEqual(source.wait, mon.GITHUB_REFRESH)
+            clock[0] += 29
+            self.assertFalse(source.due())
+            source.refresh()                      # not due: no call
+            self.assertEqual(len(good.calls), 3)
+            # A read that itself took 25 seconds: the next one waits 30 s after it ended.
+            slow = FakeRun((0, []), (0, []), (1, b""))
+            def slow_run(argv, **kwargs):
+                clock[0] += 25
+                return slow(argv, **kwargs)
+            source.runner = slow_run
+            clock[0] += 2
+            source.refresh()
+            ended = clock[0]
+            clock[0] = ended + 29
+            self.assertFalse(source.due())
+            clock[0] = ended + 30
+            self.assertTrue(source.due())
+            # gh failing: 60, 120, 240, 300 (cap) seconds between attempts, then back to 30.
+            source.runner = FakeRun()
+            waits = []
+            for _ in range(5):
+                source.refresh(force=True)
+                waits.append(source.wait)
+            self.assertEqual(waits, [60.0, 120.0, 240.0, 300.0, 300.0])
+            self.assertIn("讀取失敗", source.status)
+            clock[0] += 299
+            self.assertFalse(source.due())
+            clock[0] += 1
+            self.assertTrue(source.due())
+            source.runner = FakeRun((0, []), (0, []), (1, b""))
+            source.refresh()
+            self.assertEqual(source.wait, mon.GITHUB_REFRESH)
+
+    def test_unfinished_run_jobs_are_read_again_only_when_the_run_changed(self):
+        def runs(updated):
+            return {"workflow_runs": [{"id": 77, "status": "in_progress", "name": "CI", "updated_at": updated,
+                                       "head_sha": "a" * 40, "pull_requests": [{"number": 7}]}]}
+        jobs = {"jobs": [{"status": "in_progress", "runner_name": "mac-1", "name": "check"}]}
+        clock = [NOW]
+        fake = FakeRun((0, []), (0, []), (0, {"runners": []}), (0, runs("t1")), (0, jobs),
+                       (0, []), (0, []), (0, {"runners": []}), (0, runs("t1")),
+                       (0, []), (0, []), (0, {"runners": []}), (0, runs("t2")), (0, jobs))
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source = mon.GitHubSource("o/r", runner=fake, clock=lambda: clock[0])
+            source.want_ci = True
+            source.refresh(force=True)
+            self.assertEqual(source.ci_runs[0][3], "mac-1")
+            clock[0] += 31
+            source.refresh(force=True)            # same updated_at: the job list is reused
+            self.assertEqual(source.ci_runs[0][3], "mac-1")
+            self.assertEqual(sum("/jobs" in argv[4] for argv, _ in fake.calls), 1)
+            clock[0] += 31
+            source.refresh(force=True)            # the run changed: read again
+            self.assertEqual(sum("/jobs" in argv[4] for argv, _ in fake.calls), 2)
+            self.assertEqual(source.ci_runs[0][3], "mac-1")
+            # The cached list is never older than GITHUB_JOBS_TTL even when the run looks the same.
+            fake.responses += [(0, []), (0, []), (0, {"runners": []}), (0, runs("t2")), (0, jobs)]
+            clock[0] += mon.GITHUB_JOBS_TTL + 1
+            source.refresh(force=True)
+            self.assertEqual(sum("/jobs" in argv[4] for argv, _ in fake.calls), 3)
+
+    def test_curses_screen_is_painted_after_polls_and_keys_not_every_tick(self):
+        import curses
+
+        class FakeScreen:
+            def __init__(self, keys):
+                self.keys, self.paints = list(keys), 0
+            def getmaxyx(self): return (40, 120)
+            def timeout(self, ms): pass
+            def keypad(self, flag): pass
+            def erase(self): pass
+            def addnstr(self, *args): pass
+            def refresh(self): self.paints += 1
+            def getch(self): return self.keys.pop(0) if self.keys else ord("q")
+        screen = FakeScreen([-1] * 30 + [curses.KEY_DOWN] + [-1] * 30 + [ord("q")])
+        monitor = mon.Monitor()
+        with patch.object(mon.Monitor, "poll", return_value=[]), \
+             patch.object(curses, "curs_set", lambda n: None), \
+             patch.object(curses, "has_colors", lambda: False), \
+             patch.object(mon, "DRAW_EVERY", 3600.0):
+            mon.run_curses(screen, 3600.0, False, monitor)
+        # One paint for the first poll, one after the key: never one per getch.
+        self.assertEqual(screen.paints, 2)
+
+
+class FakeKernel:
+    """Stands in for _Sysctl: a process list and the commands it may read."""
+
+    def __init__(self, procs, commands):
+        self.procs, self.commands, self.reads = list(procs), dict(commands), []
+
+    def processes(self):
+        return list(self.procs)
+
+    def command(self, pid):
+        self.reads.append(pid)
+        return self.commands.get(pid)
+
+
+def kproc(pid, ppid, start, comm=b"x", uid=None, pstat=2, pgid=None, **kwargs):
+    # uid None: this account, whatever it is (CI runs as a runner account)
+    uid = os.getuid() if uid is None else uid
+    return mon.KProc(pid, ppid, pgid or pid, int(start), 0, pstat, comm, uid, **kwargs)
+
+
+class _TableFixture:
+    """A ProcessTable over FakeKernel with a fake ps, ps -U and clocks."""
+
+    def setUp(self):
+        self.clock, self.wall, self.full, self.users = [100.0], [NOW], [], []
+        self.me = kproc(os.getpid(), os.getppid(), NOW - 50, b"Python", flag=mon.P_CONTROLT,
+                        tpgid=os.getpid())
+        self.agent = kproc(4000, 1, NOW - 3725, b"claude", flag=mon.P_CONTROLT, tpgid=4000,
+                           eflag=mon.EPROC_SLEADER)
+        self.kernel = FakeKernel([self.me, self.agent], {os.getpid(): "python monitor",
+                                                         4000: "claude --resume"})
+
+    def _table(self, ps_text):
+        def ps():
+            self.full.append(self.clock[0])
+            return ps_text() if callable(ps_text) else ps_text
+
+        def ps_users(uids):
+            self.users.append(set(uids))
+            return self.user_text
+        self.user_text = ""
+        return mon.ProcessTable(ps=ps, kernel=self.kernel, clock=lambda: self.clock[0],
+                                wall=lambda: self.wall[0], watched=frozenset({450}),
+                                ps_users=ps_users)
+
+    def _rows(self, table):
+        return [(pid, ppid, pgid, etime() if callable(etime) else etime, stat, command)
+                for pid, ppid, pgid, etime, stat, command in table.rows()]
+
+
+class ProcessTableTests(_TableFixture, unittest.TestCase):
+    """Issue #625: `ps -A` runs at most every PS_FULL_EVERY seconds; between
+    runs the same rows come from the kernel's process list."""
+
+    def test_rows_between_ps_runs_equal_what_ps_would_print(self):
+        table = self._table(f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+                            "4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        first = self._rows(table)
+        self.assertEqual(self.full, [100.0])
+        self.assertIn((4000, 1, 4000, "01:02:05", "Ss+", "claude --resume"), first)
+        self.clock[0] += 1
+        self.wall[0] += 1
+        self.assertEqual(self._rows(table)[1], (4000, 1, 4000, "01:02:06", "Ss+", "claude --resume"))
+        self.assertEqual(self.full, [100.0])   # no second ps
+        self.assertEqual(self.kernel.reads, [])   # commands ps printed are not read again
+        self.clock[0] += mon.PS_FULL_EVERY
+        table.rows()
+        self.assertEqual(len(self.full), 2)   # STAT and other accounts refreshed
+
+    def test_snapshot_from_kernel_rows_matches_parse_of_ps_text(self):
+        text = (f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+                "4000 1 4000 01:02:05 Ss+ claude --resume\n"
+                "4001 4000 4000 00:10 S /bin/zsh -c make\n")
+        self.kernel.procs.append(kproc(4001, 4000, NOW - 10, b"zsh", pgid=4000))
+        table = self._table(text)
+        table.rows()
+        self.assertEqual(mon.collect(table=table), mon.parse_processes(text, os.getpid()))
+
+    def test_new_process_command_is_read_once_and_exec_reads_it_again(self):
+        table = self._table(f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+                            "4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs.append(kproc(4100, 4000, NOW - 2, b"zsh", eflag=mon.EPROC_SLEADER))
+        self.kernel.commands[4100] = "/bin/zsh -c ls"
+        self.clock[0] += 1
+        self.wall[0] += 1
+        self.assertIn((4100, 4000, 4100, "00:03", "Ss", "/bin/zsh -c ls"), self._rows(table))
+        self.clock[0] += 1
+        self._rows(table)
+        self.assertEqual(self.kernel.reads, [4100])   # remembered
+        # exec: same pid and start, another program name -> read again
+        self.kernel.procs[-1] = kproc(4100, 4000, NOW - 2, b"git", eflag=mon.EPROC_SLEADER)
+        self.kernel.commands[4100] = "git status"
+        self.clock[0] += 1
+        self.assertIn("git status", [row[5] for row in self._rows(table)])
+        self.assertEqual(self.kernel.reads, [4100, 4100])
+
+    def test_other_accounts_newcomer_is_read_with_ps_u_at_a_bounded_pace(self):
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs += [kproc(5000, 1, NOW - 1, b"Runner.Worker", uid=450),
+                              kproc(5001, 1, NOW - 1, b"mdworker", uid=89)]
+        self.user_text = "5000 1 5000 00:01 S /Users/ghrunner/actions-runner/bin/Runner.Worker\n"
+        self.clock[0] += 1
+        rows = self._rows(table)
+        self.assertEqual(self.users, [{450}])   # only the runner account, never root/system
+        self.assertIn((5000, 1, 5000, "00:01", "S",
+                       "/Users/ghrunner/actions-runner/bin/Runner.Worker"), rows)
+        self.assertNotIn(5001, [row[0] for row in rows])   # a system daemon waits for ps -A
+        self.assertEqual(len(self.full), 1)
+        # Another newcomer within PS_MIN_GAP waits; after it, ps -U runs again.
+        self.kernel.procs.append(kproc(5002, 5000, NOW, b"bash", uid=450))
+        self.clock[0] += mon.PS_MIN_GAP / 2
+        self.assertNotIn(5002, [row[0] for row in self._rows(table)])
+        self.assertEqual(len(self.users), 1)
+        self.user_text += "5002 5000 5000 00:00 S /bin/bash -e step.sh\n"
+        self.clock[0] += mon.PS_MIN_GAP
+        self.assertIn(5002, [row[0] for row in self._rows(table)])
+        self.assertEqual(len(self.users), 2)
+        self.assertEqual(self.kernel.reads.count(5000), 1)   # an unreadable command is asked once
+
+    def test_a_process_that_becomes_a_zombie_is_shown_as_ps_shows_it(self):
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs[1] = kproc(4000, 1, NOW - 3725, b"claude", pstat=mon.SZOMB,
+                                     eflag=mon.EPROC_SLEADER)
+        self.clock[0] += 1
+        self.assertEqual([row[4:] for row in self._rows(table) if row[0] == 4000], [("Zs", "<defunct>")])
+
+    def test_kernel_list_that_does_not_show_this_process_falls_back_to_ps(self):
+        self.kernel.procs = [self.agent]   # wrong layout: our own pid is not there
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        table.rows()
+        self.assertEqual(len(self.full), 2)
+        self.assertIs(table.kernel, False)
+
+    def test_ps_elapsed_matches_ps_etime_format(self):
+        self.assertEqual([mon._ps_elapsed(s) for s in (0, 59, 61, 3600, 86399, 86400 + 61, 20 * 86400)],
+                         ["00:00", "00:59", "01:01", "01:00:00", "23:59:59", "01-00:01:01",
+                          "20-00:00:00"])
+
+    def test_real_kernel_rows_agree_with_ps_on_this_mac(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS sysctl layout")
+        kernel = mon._Sysctl()
+        procs = kernel.processes()
+        mine = [k for k in procs if k.pid == os.getpid()]
+        self.assertEqual([(k.ppid, k.uid) for k in mine], [(os.getppid(), os.getuid())])
+        self.assertTrue(mine[0].comm.lower().startswith(b"python"), mine[0].comm)
+        shown = subprocess.run(["/bin/ps", "-o", "pid=,ppid=,pgid=,etime=,stat=,command=", "-p",
+                                str(os.getpid())], capture_output=True, text=True).stdout
+        (pid, ppid, pgid, _, _, command), = mon.ps_rows(shown)
+        self.assertEqual((pid, ppid, pgid, command),
+                         (mine[0].pid, mine[0].ppid, mine[0].pgid, kernel.command(os.getpid())))
+
+
+def _reference_wrap(text, cols):
+    """_wrap before Issue #625: every prefix measured from scratch."""
+    pieces = []
+    while mon._width(text) > cols:
+        fit = 0
+        while mon._width(text[:fit + 1]) <= cols:
+            fit += 1
+        cut = max((i + 1 for i in range(fit) if text[i] in mon.BREAK_AFTER), default=0)
+        if cut < fit // 2:
+            cut = fit
+            while 1 < cut and text[cut] in mon.NO_LINE_START:
+                cut -= 1
+        pieces.append(text[:cut].rstrip())
+        text = text[cut:].lstrip(" ")
+    return pieces + [text]
+
+
+class RepaintCostTests(unittest.TestCase):
+    def test_cached_wrap_equals_the_old_algorithm_and_returns_a_fresh_list(self):
+        import random
+        rng = random.Random(625)
+        alphabet = "ab cd，；、。）」中文字工作test "
+        for _ in range(300):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 120)))
+            cols = rng.randint(4, 40)   # the views never wrap narrower than this
+            self.assertEqual(mon._wrap(text, cols), _reference_wrap(text, cols), (text, cols))
+        lines = mon._wrap("中文字工作 test，再一次", 6)
+        lines.append("mutated")
+        self.assertNotIn("mutated", mon._wrap("中文字工作 test，再一次", 6))
+
+
+TOKEN_HEAD = b"gh" + b"o" + b"_"   # a token-shaped fixture, never a literal token
+
+
+class DirectGitHubTests(unittest.TestCase):
+    """Issue #625: the running monitor reads GitHub over HTTPS with gh's own
+    token (one `gh auth token`), falling back to `gh api`."""
+
+    class Conn:
+        def __init__(self, script, log):
+            self.script, self.log = script, log
+
+        def request(self, method, path, headers):
+            self.log.append((method, path, headers))
+
+        def getresponse(self):
+            item = self.script.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            status, payload = item
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            return __import__("types").SimpleNamespace(
+                status=status, read=lambda n: body[:n], getheader=lambda name, default="": default)
+
+        def close(self):
+            pass
+
+    def _source(self, script, gh):
+        log = []
+        source = mon.GitHubSource("o/r", runner=gh, clock=lambda: NOW, direct=True)
+        source.connect = lambda: self.Conn(script, log)
+        return source, log
+
+    def test_reads_use_one_token_lookup_and_get_only(self):
+        gh = FakeRun((0, TOKEN_HEAD + b"a" * 36 + b"\n"))
+        source, log = self._source([(200, [comment(4, NOW - 30, "hello")]), (200, []),
+                                    (200, {"runners": []})], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source.refresh(force=True)
+        self.assertEqual([argv[1:3] for argv, _ in gh.calls], [["auth", "token"]])
+        self.assertEqual([(m, p.split("?")[0]) for m, p, _ in log],
+                         [("GET", "/repos/o/r/issues/comments"), ("GET", "/repos/o/r/pulls"),
+                          ("GET", "/repos/o/r/actions/runners")])
+        self.assertTrue(all(h["Authorization"] == "token " + TOKEN_HEAD.decode() + "a" * 36 for _, _, h in log))
+        self.assertEqual(len(source.events), 1)
+        self.assertNotIn(TOKEN_HEAD.decode(), source.status)
+
+    def _after_success(self, failure, gh_answers=((0, ["from gh"]),)):
+        """One good direct read, then `failure`: (reads, gh argv, direct log)."""
+        gh = FakeRun((0, TOKEN_HEAD + b"b" * 36), *gh_answers)
+        failures = list(failure) if isinstance(failure, list) else [failure]
+        source, log = self._source([(200, []), *failures, (200, ["direct again"])], gh)
+        clock = [1000.0]
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"), \
+             patch.object(mon.time, "monotonic", lambda: clock[0]):
+            reads = [source._get("repos/o/r/a"), source._get("repos/o/r/b")]
+            paused = len(log)
+            if len(gh.responses) == 0:
+                gh.responses.append((0, ["gh while paused"]))
+            reads.append(source._get("repos/o/r/c"))   # within the pause (or not paused)
+            clock[0] += mon.GITHUB_DIRECT_PAUSE + 1
+            gh.responses.insert(0, (0, TOKEN_HEAD + b"e" * 36))   # a dropped token is read again
+            reads.append(source._get("repos/o/r/d"))
+        return reads, [argv[1:5] for argv, _ in gh.calls], log, paused, source
+
+    def test_failed_direct_reads_after_a_success_ask_gh_and_pause_direct(self):
+        for failure in ((502, b""), (401, b""), (200, b"x" * (mon.GITHUB_LIMIT + 1)),
+                        (200, b"not json"),
+                        # the kept-alive connection is retried once, then a fresh one fails too
+                        [ConnectionResetError("reset"), OSError("unreachable")]):
+            with self.subTest(failure=str(failure)[:30]):
+                reads, gh_calls, log, paused, source = self._after_success(failure)
+                self.assertEqual(reads[:2], [[], ["from gh"]])
+                self.assertIn(["api", "-X", "GET", "repos/o/r/b"], gh_calls)
+                # Paused: the next read is gh's, with no direct request at all.
+                self.assertEqual(reads[2], ["gh while paused"])
+                self.assertIn(["api", "-X", "GET", "repos/o/r/c"], gh_calls)
+                # After GITHUB_DIRECT_PAUSE the direct path is tried again.
+                self.assertEqual(reads[3], ["direct again"])
+                self.assertTrue(source.direct)
+
+    def test_gh_failure_during_fallback_still_raises_for_the_refresh_backoff(self):
+        gh = FakeRun((0, TOKEN_HEAD + b"b" * 36), (1, b""))
+        source, _ = self._source([(200, []), (503, b"")], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source._get("repos/o/r/a")
+            with self.assertRaisesRegex(RuntimeError, r"gh api 失敗（exit 1）"):
+                source._get("repos/o/r/b")
+
+    def test_a_404_answer_is_read_with_gh_once_without_pausing(self):
+        gh = FakeRun((0, TOKEN_HEAD + b"f" * 36), (0, ["gh answer"]))
+        source, log = self._source([(200, []), (404, b""), (200, ["direct"])], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            self.assertEqual([source._get(f"repos/o/r/{n}") for n in "abc"],
+                             [[], ["gh answer"], ["direct"]])
+        self.assertEqual(len(log), 3)
+
+    def test_no_connection_before_any_answer_falls_back_to_gh_for_good(self):
+        gh = FakeRun((0, TOKEN_HEAD + b"d" * 36), (0, []), (0, []))
+        source, _ = self._source([OSError("proxy only")], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            self.assertEqual(source._get("repos/o/r/a"), [])
+            self.assertEqual(source._get("repos/o/r/b"), [])
+        self.assertFalse(source.direct)
+        self.assertEqual([argv[1] for argv, _ in gh.calls], ["auth", "api", "api"])
+
+    def test_no_token_falls_back_to_gh(self):
+        gh = FakeRun((1, b""), (0, []))
+        source, log = self._source([], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            self.assertEqual(source._get("repos/o/r/a"), [])
+        self.assertFalse(source.direct)
+        self.assertEqual(log, [])
+
+    def test_once_never_uses_the_direct_reader(self):
+        with patch.object(mon, "run_once", return_value=0) as once:
+            mon.main(["--once"])
+        self.assertFalse(once.call_args[0][0].direct)
+
+    def test_one_refresh_reads_each_run_jobs_once(self):
+        runs = {"workflow_runs": [
+            {"id": 7, "status": "completed", "conclusion": "success", "name": "CI",
+             "head_branch": "b", "updated_at": iso(NOW - 60)},
+            {"id": 8, "status": "in_progress", "name": "CI", "head_branch": "b",
+             "updated_at": iso(NOW - 5)}]}
+        jobs = {"jobs": [{"runner_name": "mac-1", "status": "completed", "conclusion": "success",
+                          "name": "check", "completed_at": iso(NOW - 70)}]}
+        fake = FakeRun((0, []), (0, []), (0, {"runners": []}), (0, runs), (0, jobs), (0, jobs), (0, jobs))
+        source = mon.GitHubSource("o/r", runner=fake, clock=lambda: NOW)
+        source.want_ci = True
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source.refresh(force=True)
+        reads = [argv[4] for argv, _ in fake.calls if "/jobs" in argv[4]]
+        self.assertEqual(len(reads), len(set(reads)))
+
+
+class TaskScanCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        mon._task_dir_cache.clear()
+        self.task = Path(self.tmp.name) / "llmtool-abc"
+        self.task.mkdir()
+        (self.task / "manifest.json").write_text(json.dumps({"task_id": "t-1", "branch": "b"}))
+        (self.task / "dev-attempt.json").write_text(json.dumps({"model": "openai/gpt-x"}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_records_are_parsed_again_only_when_one_changed(self):
+        pattern = str(Path(self.tmp.name) / "llmtool-*")
+        first = mon.scan_tasks(pattern)
+        self.assertEqual([(t.task_id, [s.result for s in t.stages]) for t in first], [("t-1", [""])])
+        opened = []
+        real_read = mon._read_json
+        with patch.object(mon, "_read_json", lambda path, *a: opened.append(path) or real_read(path, *a)):
+            self.assertEqual(mon.scan_tasks(pattern), first)
+            self.assertEqual(opened, [])
+            (self.task / "dev-result.json").write_text(json.dumps({"code": "DONE", "cleanup_confirmed": True}))
+            second = mon.scan_tasks(pattern)
+        self.assertEqual([(s.result, s.cleanup) for s in second[0].stages], [("DONE", "ok")])
+        self.assertTrue(opened)
+        mon._task_dir_cache.clear()
+        self.assertEqual(mon.scan_tasks(pattern), second)   # equals a fresh read
+
+    def test_place_is_recomputed_when_the_d6_registry_changes(self):
+        mon._place_cache.clear()
+        canonical = str(Path(self.tmp.name).resolve() / "repo")
+        cwd = str(Path(self.tmp.name).resolve() / "elsewhere" / "wp-1")
+        answers = iter([{}, {"wp-1": (cwd, "")}])
+        current = [next(answers)]
+        with patch.object(mon, "registered_tasks", lambda c: current[0]):
+            self.assertIsNone(mon._place(cwd, canonical))
+            self.assertIsNone(mon._place(cwd, canonical))   # same registry read: kept
+            current[0] = next(answers)
+            self.assertEqual(mon._place(cwd, canonical), ("task", "wp-1"))
+
+
+class SysctlBoundsTests(unittest.TestCase):
+    """Codex review #637: every sysctl length is checked against a cap before a
+    buffer is allocated and against the buffer before it is parsed; any bad
+    length means the monitor uses ps, without a large allocation or a crash."""
+
+    def _kernel(self, answers):
+        import ctypes
+        kernel = mon._Sysctl.__new__(mon._Sysctl)
+        kernel.ctypes, self.allocated, calls = ctypes, [], iter(answers)
+        real = ctypes.create_string_buffer
+
+        def buffer(size):
+            self.allocated.append(size)
+            return real(min(size, 1 << 16))   # never really allocate what a test claims
+        kernel.ctypes = __import__("types").SimpleNamespace(create_string_buffer=buffer)
+        kernel.args_buf = real(mon.PROCARGS_MAX)
+        kernel._call = lambda mib, buf, size: next(calls)(buf, size)
+        return kernel
+
+    def _falls_back_to_ps(self, kernel):
+        ran = []
+        table = mon.ProcessTable(ps=lambda: ran.append(1) or "4000 1 4000 00:01 S claude\n",
+                                 kernel=kernel, clock=lambda: 100.0 + len(ran), watched=frozenset())
+        self.assertEqual(table.rows()[0][0], 4000)
+        table.rows()
+        self.assertEqual(len(ran), 2)   # ps both times: the kernel list was refused
+
+    def test_oversized_size_query_allocates_nothing(self):
+        kernel = self._kernel([lambda buf, size: 1 << 40])
+        self.assertIsNone(kernel.processes())
+        self.assertEqual(self.allocated, [])
+        self._falls_back_to_ps(self._kernel([lambda buf, size: 1 << 40] * 2))
+
+    def test_second_length_larger_than_the_buffer_is_refused(self):
+        answers = [lambda buf, size: 10 * mon.KINFO_SIZE, lambda buf, size: size + mon.KINFO_SIZE]
+        kernel = self._kernel(answers)
+        self.assertIsNone(kernel.processes())
+        self.assertTrue(all(n <= mon.KINFO_MAX_BYTES for n in self.allocated))
+        self._falls_back_to_ps(self._kernel(answers * 2))
+
+    def test_misaligned_length_is_refused(self):
+        answers = [lambda buf, size: 10 * mon.KINFO_SIZE, lambda buf, size: 10 * mon.KINFO_SIZE - 1]
+        self.assertIsNone(self._kernel(answers).processes())
+        self._falls_back_to_ps(self._kernel(answers * 2))
+
+    def test_size_near_the_cap_allocates_at_most_the_cap(self):
+        kernel = self._kernel([lambda buf, size: mon.KINFO_MAX_BYTES, lambda buf, size: 0])
+        self.assertIsNone(kernel.processes())
+        self.assertEqual(self.allocated, [mon.KINFO_MAX_BYTES])
+
+    def test_procargs_lengths_are_bounded(self):
+        cap = mon.PROCARGS_MAX
+        argv = (1).to_bytes(4, sys.byteorder) + b"/bin/zsh\0\0zsh\0"
+        for answers in ([lambda b, s: cap + 1],                        # size query over the cap
+                        [lambda b, s: 64, lambda b, s: cap + 1],       # answer longer than the buffer
+                        [lambda b, s: 2]):                             # shorter than argc
+            self.assertIsNone(self._kernel(answers).command(4000))
+
+        def fill(buf, size):
+            buf[:len(argv)] = argv
+            return len(argv)
+        self.assertEqual(self._kernel([lambda b, s: len(argv), fill]).command(4000), "zsh")
+
+
+class ProcessTableFidelityTests(_TableFixture, unittest.TestCase):
+    """Codex review v2 (#637): fields rebuilt between ps runs follow ps's rules."""
+
+    def test_etime_uses_whole_seconds_like_ps(self):
+        # ps: time(NULL) - p_starttime.tv_sec. Started at .70, 0.6 s later at
+        # x+1.30: ps prints 00:01 (a fractional difference would say 00:00).
+        self.kernel.procs.append(mon.KProc(4200, 1, 4200, int(NOW), 700_000, 2, b"sleep", os.getuid()))
+        self.kernel.commands[4200] = "sleep 30"
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        self.wall[0] = NOW + 1.3
+        row, = [r for r in self._rows(table) if r[0] == 4200]
+        self.assertEqual(row[3], "00:01")
+        self.wall[0] = NOW + 1.99
+        self.assertEqual([r[3] for r in self._rows(table) if r[0] == 4200], ["00:01"])
+
+    def test_stat_flags_follow_the_kernel_between_ps_runs(self):
+        table = self._table("4000 1 4000 01:02:05 Rs+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Rs+")   # ps's letter, kernel flags
+        # The terminal's foreground group moves away and the process is reniced.
+        self.kernel.procs[1] = self.agent._replace(tpgid=999, nice=5)
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "RNs")
+        self.kernel.procs[1] = self.agent._replace(pstat=mon.SSTOP)   # SIGSTOP
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Ts+")
+        self.kernel.procs[1] = self.agent   # SIGCONT: back to the letter ps printed
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Rs+")
+        # A T that ps printed is never kept once the kernel says it runs again.
+        table.known[(4000, self.agent.start, 0, b"claude")] = ("T", "claude --resume")
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Ss+")
+
+    def test_each_ps_flag_rule(self):
+        k = kproc(1, 0, NOW)
+        cases = {"<": k._replace(nice=-5), "X": k._replace(flag=mon.P_TRACED),
+                 "E": k._replace(flag=mon.P_WEXIT), "V": k._replace(flag=mon.P_PPWAIT),
+                 "L": k._replace(flag=mon.P_SYSTEM), "": k._replace(flag=mon.P_CONTROLT, tpgid=9)}
+        self.assertEqual({flags: mon._ps_state(proc, "S")[1:] for flags, proc in cases.items()},
+                         {flags: flags for flags in cases})
+        self.assertEqual(mon._ps_state(k._replace(pstat=mon.SZOMB, flag=mon.P_WEXIT), "S"), "Z")
+
+    def test_command_ps_would_escape_is_taken_from_ps_u_once(self):
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs.append(kproc(4300, 4000, NOW - 1, b"zsh", pgid=4000))
+        self.kernel.commands[4300] = None   # what command() answers for "a\nb" or "中"
+        self.user_text = "4300 4000 4000 00:01 S /bin/zsh -c echo a\\012b\n"
+        self.clock[0] += 1
+        rows = self._rows(table)
+        self.assertEqual(self.users, [{os.getuid()}])
+        self.assertIn((4300, 4000, 4000, "00:01", "S", "/bin/zsh -c echo a\\012b"), rows)
+        # One that ps -U did not list either is not asked for again before ps -A.
+        self.kernel.procs.append(kproc(4301, 4000, NOW, b"zsh", pgid=4000))
+        self.clock[0] += mon.PS_MIN_GAP + 1
+        self._rows(table)
+        self.clock[0] += mon.PS_MIN_GAP + 1
+        self._rows(table)
+        self.assertEqual(len(self.users), 2)
+
+    def test_kernel_task_is_not_listed_as_ps_does_not(self):
+        self.kernel.procs.append(kproc(0, 0, NOW - 999, b"kernel_task", uid=0))
+        self.kernel.commands[0] = "kernel_task"
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        self.assertNotIn(0, [row[0] for row in self._rows(table)])
+
+    def test_sysctl_command_refuses_bytes_ps_would_escape(self):
+        import ctypes
+        kernel = mon._Sysctl.__new__(mon._Sysctl)
+        kernel.args_buf = ctypes.create_string_buffer(mon.PROCARGS_MAX)
+        for argv, expected in ((b"zsh\0-c\0ls", "zsh -c ls"), (b"zsh\0a\nb", None),
+                               (b"zsh\0\xe4\xb8\xad", None), (b"zsh\0tab\tx", None),
+                               (b"zsh\0del\x7f", None)):
+            raw = (argv.count(b"\0") + 1).to_bytes(4, sys.byteorder) + b"/bin/zsh\0\0" + argv + b"\0"
+
+            def answer(mib, buf, size, raw=raw):
+                if buf is not None:
+                    buf[:len(raw)] = raw
+                return len(raw)
+            kernel._call = answer
+            self.assertEqual(kernel.command(1), expected, argv)
+
+    def test_ps_output_with_invalid_utf8_does_not_break_the_poll(self):
+        def fake(argv, **kwargs):
+            self.assertEqual(kwargs.get("errors"), "replace")
+            return subprocess.CompletedProcess(argv, 0, stdout="1 0 1 00:01 Ss /bin/x\ufffd\n")
+        with patch.object(mon.subprocess, "run", fake):
+            self.assertEqual(mon.ps_rows(mon.run_ps())[0][5], "/bin/x\ufffd")
+            self.assertTrue(mon.run_ps_users({450}))
+
+
+DEEP_JSON = b"[" * 10_000 + b"]" * 10_000   # json.loads: RecursionError under Python 3.13
+
+
+class DeepJsonTests(unittest.TestCase):
+    """Codex review v3 (#637): JSON nested too deeply is a bad answer or a
+    bad record like any other, never an exception out of a refresh."""
+
+    def test_the_payload_really_raises_recursion_error(self):
+        with self.assertRaises(RecursionError):
+            json.loads(DEEP_JSON)
+
+    def test_direct_read_falls_back_to_gh_and_pauses(self):
+        tests = DirectGitHubTests()
+        reads, gh_calls, _, _, source = tests._after_success((200, DEEP_JSON))
+        self.assertEqual(reads, [[], ["from gh"], ["gh while paused"], ["direct again"]])
+        self.assertIn(["api", "-X", "GET", "repos/o/r/b"], gh_calls)
+
+    def test_gh_answer_nested_too_deeply_is_a_failed_refresh_not_a_crash(self):
+        source = mon.GitHubSource("o/r", runner=FakeRun((0, DEEP_JSON)), clock=lambda: NOW)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source.refresh(force=True)
+        self.assertIn("讀取失敗（ValueError）", source.status)
+        self.assertEqual(source.wait, mon.GITHUB_REFRESH * 2)   # the backoff still applies
+
+    def test_local_records_nested_too_deeply_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "r.json")
+            with open(path, "wb") as handle:
+                handle.write(DEEP_JSON)
+            os.chmod(path, 0o600)
+            st = os.stat(path)
+            self.assertIsNone(mon._read_json(path))                     # task evidence files
+            self.assertIsNone(mon._llmtool_record(path, st))            # llmtool task records
+            self.assertIsNone(mon._registry_record(path, "r", st))      # D6 registry records
+            tail = os.path.join(tmp, "s.jsonl")
+            with open(tail, "wb") as handle:
+                handle.write(b'{"type": "user"}\n' + DEEP_JSON + b"\n")
+            self.assertEqual(mon._jsonl_tail(tail), [{"type": "user"}])   # session files
+
+
+class PsArgvTests(unittest.TestCase):
+    """Codex review v4 (#637): `ps -U` asks for the same six columns as
+    `ps -A`, so ps_rows() keeps every runner-account row it prints."""
+
+    def test_ps_u_argv_has_all_six_columns_and_rows_parse(self):
+        seen = []
+
+        def fake(argv, **kwargs):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="5000 1 5000 00:01 S /Users/ghrunner/actions-runner/bin/Runner.Worker\n")
+        with patch.object(mon.subprocess, "run", fake):
+            rows = mon.ps_rows(mon.run_ps_users({451, 450}))
+            mon.run_ps()
+        self.assertEqual(seen[0], ["/bin/ps", "-U", "450,451", "-o",
+                                   "pid=,ppid=,pgid=,etime=,stat=,command="])
+        self.assertEqual(seen[0][-1], seen[1][-1])   # the same spec as ps -A
+        self.assertEqual(rows, [(5000, 1, 5000, "00:01", "S",
+                                 "/Users/ghrunner/actions-runner/bin/Runner.Worker")])
+
+    def test_real_ps_u_rows_parse_on_this_mac(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS ps")
+        rows = mon.ps_rows(mon.run_ps_users({os.getuid()}))
+        self.assertIn(os.getpid(), [row[0] for row in rows])
+        mine, = [row for row in rows if row[0] == os.getpid()]
+        self.assertEqual(mine[1:3], (os.getppid(), os.getpgrp()))
