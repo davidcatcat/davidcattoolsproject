@@ -377,6 +377,7 @@ class ChatTUI:
         self.pm_block_start = 0      # where that block's displayed text starts in the pane
         self.pm_queue = ""           # received PM text not yet released to the pane
         self.pm_tail = []            # notices shown below the open PM block (W55 F2-b)
+        self._owner_output = False   # output of an Owner key/command: never splits a PM block
         self._pm_tick_handle = None  # loop.call_later handle of the next typewriter tick
         self._pm_rate = PM_CHARS_PER_TICK   # characters released per tick (raised when behind)
         self.pm_warm = False         # connected, nothing received yet: the PM process is cold
@@ -866,8 +867,12 @@ class ChatTUI:
         """Add untrusted text; follow new output only if the caret was at the end.
 
         New output closes the Task detail so it is never hidden behind that pane. During a
-        PM turn the working line moves below it (not when it opens a PM text block).
+        PM turn the working line moves below it (not when it opens a PM text block). Output
+        of an Owner key or command while a PM block streams goes below that block (W55).
         """
+        if self._owner_output and self.pm_block_raw is not None:
+            self._pm_notice(text)
+            return
         self._pm_working_remove()   # The working line always stays the last thing shown.
         self._pm_finalize()  # Any other output ends the streaming PM block (shown in full).
         block = self._stream_detach()  # A streaming chat reply stays one block, below.
@@ -1236,6 +1241,13 @@ class ChatTUI:
 
     # -- actions -------------------------------------------------------------------
     def submit(self):
+        self._owner_output = True
+        try:
+            self._submit()
+        finally:
+            self._owner_output = False
+
+    def _submit(self):
         text = self.input.text
         if self.busy:
             # Single flight: the typed input stays in the editor, nothing is queued.
@@ -2226,6 +2238,13 @@ class ChatTUI:
         return True
 
     def request_quit(self):
+        self._owner_output = True
+        try:
+            self._request_quit()
+        finally:
+            self._owner_output = False
+
+    def _request_quit(self):
         self.close_menu()  # Ctrl-C/Ctrl-D: also restores the default Esc timeout.
         if self.pm_turn_active and not self.pm_interrupted:
             self.interrupt_pm("ctrl-c")   # also pauses the queue (finish_pm_turn)

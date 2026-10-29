@@ -2492,6 +2492,56 @@ class PMTypewriterTests(Base):
         self.assertEqual(text.count(notice), 1)
         self.assertEqual(ui.pm_tail, [])
 
+    def _command_during_streaming(self, command):
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        ui.pm_outbox.extend(['q1', 'q2'])
+        self.delta('這是不同的')
+        ui._pm_tick()
+        ui.input.buffer.text = command
+        ui.submit()
+        self.assertIsNotNone(ui.pm_block_raw)             # the reply block is still open
+        self.delta('，是我們如何運用')
+        while ui.pm_queue:
+            ui._pm_tick()
+        ui.pm_event({'type': 'TURN_END', 'status': 'COMPLETED', 'usage': {}})
+        text = ui.conversation.text
+        self.assertIn('PM:\n這是不同的，是我們如何運用\n\n> ' + command + '\n\n', text)
+        self.assertEqual(text.count('\nPM:\n'), 1)
+        return text
+
+    def test_queue_list_during_streaming_never_splits_the_reply(self):
+        # #652 Codex v1 P2: /pm queue appended mid-reply and split it.
+        text = self._command_during_streaming('/pm queue')
+        self.assertIn('> /pm queue\n\nPM 佇列：2 則\n  1. q1\n  2. q2', text)
+
+    def test_queue_clear_during_streaming_never_splits_the_reply(self):
+        text = self._command_during_streaming('/pm queue clear')
+        self.assertIn('llmtool: PM 佇列已清除 2 則（未送出）', text)
+        self.assertEqual(list(self.ui.pm_outbox), [])
+
+    def test_queue_send_during_streaming_never_splits_the_reply(self):
+        self.ui.pm_outbox_paused = 'Esc 中斷'
+        text = self._command_during_streaming('/pm queue send')
+        self.assertIn('llmtool: PM 佇列繼續：目前回合結束後送出下一則（共 2 則）', text)
+        self.assertIsNone(self.ui.pm_outbox_paused)
+
+    def test_other_commands_and_ctrl_c_during_streaming_never_split_the_reply(self):
+        self.ui.pm_target = ('pm-session', '/tmp/pm')
+        text = self._command_during_streaming('/pm')
+        self.assertIn('> /pm\n\nPM: claude-code session pm-session', text)
+        ui = self.ui
+        ui.pm_turn_active, ui.pm_interrupted = True, False
+        self.delta('第二段', index=1)
+        ui._pm_tick()
+        ui.request_quit()                                 # Ctrl-C: interrupt + "again exits"
+        self.delta('結尾', index=1)
+        while ui.pm_queue:
+            ui._pm_tick()
+        self.assertTrue(ui.conversation.text.endswith(
+            'PM:\n第二段結尾\n\nllmtool: 已中斷，等待 PM 結束本輪…\n\n'
+            'llmtool: Ctrl-C again exits (the PM connection is closed on exit)'))
+
     def test_escape_with_two_queued_pauses_at_once_and_the_reply_stays_whole(self):
         # W55 F2-a: Esc interrupts and pauses the queue; feedback shows before the turn ends.
         ui = self.ui
