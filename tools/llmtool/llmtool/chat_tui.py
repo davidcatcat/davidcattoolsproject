@@ -393,6 +393,9 @@ class ChatTUI:
         self.pm_turn_error = None    # RUNTIME_ERROR code of the current turn
         self.pm_turn_refused = False # a tool was refused (PERMISSION_DENIED) in this turn
         self.pm_interrupt_by = None  # "esc" or "ctrl-c"
+        # Token of the current turn: events and the end from an older turn's worker (one
+        # dropped by a disconnect, a fork or exit) are ignored.
+        self._pm_turn_seq = 0
         self._quit_warned = False    # first Ctrl-C with queued messages only warned
         # W52 F1: the working line at the end of the pane while a turn shows no text yet.
         self.pm_working_at = None    # offset where it starts (its leading blank line included)
@@ -1636,6 +1639,7 @@ class ChatTUI:
                 self.append("PM: not connected")
                 return
             self.pm_state = "closing"
+            self._pm_working_stop()   # never redrawn once disconnecting (see _pm_working_wanted)
             self._pm_worker(self._pm_disconnect, self.pm_runtime)
             return
         if parts == ["/pm", "history"]:
@@ -1661,7 +1665,11 @@ class ChatTUI:
             elif self.pm_runtime is None:
                 self.append("llmtool: PM 未連線；/pm connect 之後再 /pm queue send（佇列保留 %d 則）"
                             % len(self.pm_outbox))
-            elif self.pm_turn_active or self.pm_pending:
+            elif self.pm_pending or self.pm_state == "closing":
+                # finish_pm_connect/history/disconnect never send: resuming now would stall.
+                self.append("llmtool: a PM connect/disconnect/history request is in progress; "
+                            "/pm queue send again when it ends（佇列保留 %d 則）" % len(self.pm_outbox))
+            elif self.pm_turn_active:
                 self.pm_outbox_paused = None
                 self.append("llmtool: PM 佇列繼續：目前回合結束後送出下一則（共 %d 則）"
                             % len(self.pm_outbox))
@@ -1694,7 +1702,7 @@ class ChatTUI:
     def _pm_send_next(self):
         if not self.pm_outbox or self.pm_outbox_paused or self.pm_turn_active:
             return
-        if self.pm_runtime is None or self.pm_pending:
+        if self.pm_runtime is None or self.pm_pending or self.pm_state == "closing":
             self._pm_pause("PM 未連線")
             return
         text = self.pm_outbox.popleft()
@@ -1842,6 +1850,8 @@ class ChatTUI:
 
     def finish_pm_disconnect(self):
         self.pm_pending = False
+        if self.pm_turn_active:
+            self._pm_drop_turn()   # the worker's end may come later or never; it is stale now
         self.pm_runtime, self.pm_target, self.pm_mode, self.pm_state = None, None, False, None
         self.pm_binding, self.pm_warm = None, False
         self.append("PM disconnected; chat mode (Enter sends to chat provider "
@@ -1883,26 +1893,40 @@ class ChatTUI:
         self.pm_turn_refused = False
         self.pm_block_index = None
         self.pm_state = "working"
+        self._pm_turn_seq += 1
         self.append(header + chat_tui_pm.safe_text(text))   # also shows the working line
         # One idempotency key per submitted draft: pm_runtime never runs it twice.
         key = uuid.uuid4().hex
         self._loop = asyncio.get_running_loop()
-        threading.Thread(target=self._pm_turn, args=(self.pm_runtime, text, key, self._loop),
+        threading.Thread(target=self._pm_turn,
+                         args=(self.pm_runtime, text, key, self._loop, self._pm_turn_seq),
                          name="llmtool-chat-pm-turn", daemon=True).start()
 
-    def _pm_turn(self, runtime, text, key, loop):
+    def _pm_turn(self, runtime, text, key, loop, seq):
         """Worker thread: forward each pm_runtime event to the event loop as it arrives."""
         try:
             for event in runtime.send(text, idempotency_key=key):
                 if type(event) is dict:
-                    self._post(loop, self.pm_event, event)
+                    self._post(loop, self.pm_event, event, seq)
         except LLMToolError as exc:
             self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
-                                             "code": chat_tui_pm.error_code(exc)})
+                                             "code": chat_tui_pm.error_code(exc)}, seq)
         except BaseException:
             self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
-                                             "code": chat_tui_task.UNKNOWN})
-        self._post(loop, self.finish_pm_turn)
+                                             "code": chat_tui_task.UNKNOWN}, seq)
+        self._post(loop, self.finish_pm_turn, seq)
+
+    def _pm_stale(self, seq):
+        """True for a worker callback of a turn that is no longer the active one."""
+        return seq is not None and (seq != self._pm_turn_seq or not self.pm_turn_active)
+
+    def _pm_drop_turn(self):
+        """The connection is gone (disconnect, exit): end the turn here. Its worker's late
+        events and end are stale from now on, the working line and its timer are gone."""
+        self._pm_turn_seq += 1
+        self._pm_finalize()
+        self.pm_turn_active, self.pm_turn_started, self.pm_interrupted = False, None, False
+        self._pm_working_stop()
 
     def _pm_extend(self, text):
         """Queue text for the current PM block; the typewriter tick releases it. Every
@@ -1986,7 +2010,8 @@ class ChatTUI:
 
     def _pm_working_wanted(self):
         return (self.pm_turn_active and self.pm_block_raw is None and self.pm_turn_status is None
-                and self.pm_turn_error is None)
+                and self.pm_turn_error is None and self.pm_runtime is not None
+                and self.pm_state != "closing")
 
     def _pm_working_show(self):
         """Put (or redraw) the working line at the end of the pane; tick every second."""
@@ -2015,11 +2040,22 @@ class ChatTUI:
         if self.pm_working_at is not None and text[self.pm_working_at:] == self.pm_working_text:
             self.conversation.set_text(text[:self.pm_working_at])
         self.pm_working_at = None   # Anything else rewrote the tail: the line is gone already.
-        if not self.pm_turn_active and self._pm_working_handle is not None:
+        if not self.pm_turn_active:
+            self._pm_working_cancel()
+
+    def _pm_working_cancel(self):
+        if self._pm_working_handle is not None:
             self._pm_working_handle.cancel()
             self._pm_working_handle = None
 
-    def pm_event(self, event):
+    def _pm_working_stop(self):
+        """Remove the working line and cancel its timer, turn or no turn."""
+        self._pm_working_remove()
+        self._pm_working_cancel()
+
+    def pm_event(self, event, seq=None):
+        if self._pm_stale(seq):
+            return
         kind = event.get("type")
         if kind != "THINKING" and self.pm_state == "thinking":
             self.pm_state = "working"   # Thinking ended: text, a tool or the end follows.
@@ -2064,6 +2100,7 @@ class ChatTUI:
             if code == "PM_SESSION_FORKED":
                 # pm_runtime closed itself; the TUI no longer holds a usable connection.
                 self.pm_runtime, self.pm_mode = None, False
+                self._pm_working_stop()
         elif kind == "TURN_REPLAY":
             self.pm_turn_status = "REPLAY"
             self.append(chat_tui_pm.replay_text(event))
@@ -2072,24 +2109,26 @@ class ChatTUI:
             elapsed = max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic()))
             self.append(chat_tui_pm.turn_end_text(event, elapsed))   # append() flushes first
 
-    def finish_pm_turn(self):
+    def finish_pm_turn(self, seq=None):
+        if self._pm_stale(seq):
+            return
         self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
         self.pm_turn_active, self.pm_turn_started = False, None
-        self._pm_working_remove()
+        self._pm_working_stop()
         if self.pm_state in ("working", "thinking", "interrupting"):
             self.pm_state = "idle"
         status, error = self.pm_turn_status, self.pm_turn_error
         if self.pm_outbox and not self.pm_outbox_paused:
             if self.pm_runtime is None or self.pm_state == "closing":
                 self._pm_pause("PM 已斷線")
+            elif self.pm_interrupt_by == "ctrl-c":
+                self._pm_pause("Ctrl-C 中斷")   # whatever the end: a COMPLETED can race it
             elif error is not None:
                 self._pm_pause("上一回合失敗 " + error)
             elif self.pm_turn_refused:
                 self._pm_pause("權限被拒")   # even when the turn still ended COMPLETED
             elif status == "COMPLETED" or (status == "INTERRUPTED" and self.pm_interrupt_by == "esc"):
                 self._pm_send_next()
-            elif status == "INTERRUPTED":
-                self._pm_pause("Ctrl-C 中斷")
             else:
                 self._pm_pause("上一回合沒有完成（" + (status or "沒有 TURN_END") + "）")
         self.app.invalidate()
@@ -2114,10 +2153,15 @@ class ChatTUI:
             self._pm_exiting = True
             runtimes = [self.pm_runtime, self._pm_unadopted]
             self.pm_runtime, self._pm_unadopted = None, None
-        for handle in (self._pm_tick_handle, self._pm_working_handle, self._drag_copy_handle):
+        # Exit: the turn's late worker callbacks are stale; nothing is rendered any more.
+        self._pm_turn_seq += 1
+        self.pm_turn_active, self.pm_turn_started = False, None
+        for handle in (self._pm_tick_handle, self._pm_working_handle, self._drag_copy_handle,
+                       self._autoscroll_handle):
             if handle is not None:
                 handle.cancel()
         self._pm_tick_handle = self._pm_working_handle = self._drag_copy_handle = None
+        self._autoscroll_handle = None
         for runtime in runtimes:
             if runtime is not None:
                 self._close_runtime(runtime)

@@ -2801,6 +2801,104 @@ class PMConversationTests(BoundedPMTest):
                          ['go', 'next one'])
         self.assertIsNone(ui.pm_outbox_paused)
 
+    def _race(self, interrupt):
+        """A turn that ends COMPLETED although an interrupt was requested meanwhile."""
+        self.turns = [[_delta('一'), 'HOLD', _result('done')], [_delta('二'), _result('next')]]
+
+        async def queued(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1
+                             and 'PM:\n一' in ui.conversation.text, 'queued mid-turn')
+            ui.pm_runtime.interrupt = Mock()   # pm_runtime never hears it: the turn completes
+            interrupt(ui)
+            self.assertTrue(ui.pm_interrupted)
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', queued,
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active
+                                                  and (ui.pm_outbox_paused or not ui.pm_outbox),
+                                                  'turn end'),
+                            lambda ui: asyncio.sleep(0.1)])
+        self.assertIn('— PM turn COMPLETED', ui.conversation.text)
+        return ui
+
+    def test_ctrl_c_then_a_completed_turn_end_still_pauses_the_queue(self):
+        # #636 Codex review v2 finding 1: a COMPLETED that raced Ctrl-C sent the next one.
+        ui = self._race(lambda ui: ui.request_quit())
+        self.assertEqual(len(self.fakes[0].users()), 1)
+        self.assertEqual(list(ui.pm_outbox), ['next one'])
+        self.assertIn('暫停（Ctrl-C 中斷）', ui.conversation.text)
+
+    def test_escape_then_a_completed_turn_end_continues_the_queue(self):
+        ui = self._race(lambda ui: ui.interrupt_pm())
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['go', 'next one'])
+        self.assertIsNone(ui.pm_outbox_paused)
+
+    def test_disconnect_mid_turn_leaves_no_working_timer_and_ignores_the_old_worker(self):
+        # #636 Codex review v2 finding 2: after a disconnect mid-turn, append() redrew the
+        # working line and scheduled another tick.
+        self.turns = [_thinking() + ['HOLD', _result('late')]]
+        seen = {}
+
+        async def thinking(ui):
+            await self.until(ui, lambda ui: ui.conversation.text.endswith('PM 思考中… 0s'),
+                             'working line')
+            self.assertIsNotNone(ui._pm_working_handle)
+            seen['seq'] = ui._pm_turn_seq
+
+        async def disconnected(ui):
+            await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_pending,
+                             'disconnected')
+            self.assertFalse(ui.pm_turn_active)
+            self.assertIsNone(ui._pm_working_handle)
+            self.assertIsNone(ui.pm_working_at)
+            ui.append('later output')
+            self.assertIsNone(ui._pm_working_handle)
+            self.assertTrue(ui.conversation.text.endswith('later output'))
+            await asyncio.sleep(1.3)                  # a surviving tick would redraw by now
+            self.assertTrue(ui.conversation.text.endswith('later output'))
+            # The old turn's worker posting late is ignored.
+            before = ui.conversation.text
+            ui.pm_event({'type': 'TEXT_DELTA', 'text': 'stale', 'block_index': 0}, seen['seq'])
+            ui.finish_pm_turn(seen['seq'])
+            self.assertEqual(ui.conversation.text, before)
+
+        ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking,
+                            '/pm disconnect\r', disconnected])
+        self.assertNotIn('PM 思考中', ui.conversation.text)
+        self.assertNotIn('PM 處理中', ui.conversation.text)
+
+    def test_exit_mid_turn_cancels_every_timer(self):
+        self.turns = [_thinking() + ['HOLD', _result('late')]]
+
+        async def thinking(ui):
+            await self.until(ui, lambda ui: ui._pm_working_handle is not None, 'working line')
+
+        ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking])
+        # drive() exits the app and runs close_pm(), as run() does on exit.
+        self.assertFalse(ui.pm_turn_active)
+        self.assertIsNone(ui._pm_working_handle)
+        self.assertIsNone(ui._pm_tick_handle)
+        self.assertIsNone(ui._autoscroll_handle)
+        self.assertIsNone(ui._drag_copy_handle)
+
+    def test_queue_send_during_a_pm_request_worker_does_not_resume_into_a_stall(self):
+        self.turns = [[_delta('x'), 'HOLD', _result('boom', is_error=True, subtype='error')]]
+
+        async def paused(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1, 'queued')
+            self.fakes[0].gate.set()
+            await self.turn_done(ui)
+            await self.until(ui, lambda ui: ui.pm_outbox_paused, 'paused')
+            ui.pm_pending = True               # a /pm history worker is running
+            ui.run_queue_command('send')
+            self.assertTrue(ui.pm_outbox_paused)
+            self.assertIn('/pm queue send again when it ends', ui.conversation.text)
+            ui.pm_pending = False
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'wait\r', paused])
+        self.assertEqual(len(self.fakes[0].users()), 1)
+
     def test_escape_continues_the_queue_ctrl_c_pauses_it_and_clear_counts(self):
         self.turns = [[_delta('one'), 'HOLD', _result('stopped')],
                       [_delta('two'), 'HOLD', _result('stopped')]]
