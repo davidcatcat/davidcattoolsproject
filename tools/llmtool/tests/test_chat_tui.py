@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmtool import chat_tui, chat_tui_pm, chat_tui_view
+from llmtool import chat_tui, chat_tui_pm, chat_tui_status, chat_tui_view
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
 from llmtool.providers.base import ProviderCapabilities, Reply
@@ -125,6 +125,18 @@ class Base(unittest.TestCase):
         self.background_tick = patch.object(chat_tui.ChatTUI, '_background_tick',
                                             lambda ui: None)
         self.background_tick.start()
+
+
+class FinishRedrawTests(Base):
+    """_finish invalidates the app so the status row leaves working immediately."""
+
+    def test_finish_invalidates_app(self):
+        with create_pipe_input() as pipe:
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
+            ui.app.invalidate = Mock()
+            ui._finish(lambda: None)
+            ui.app.invalidate.assert_called_once()
+            self.assertFalse(ui.busy)
 
 
 class FallbackTests(Base):
@@ -2061,11 +2073,19 @@ class TaskEventsPaneTests(Base):
 
 
 
+
+BG_WATCH = 'PM（背景通知） Claude Code 自行開始一輪（背景工作的通知）'   # header, W56a layout
+BG_SUB = 'PM（背景通知） Claude Code 先處理一則背景通知；這則訊息等它結束後才開始'
+
 PM_SESSION = '0123abcd-89ab-cdef-0123-456789abcdef'
 
 
 class FakeClaude:
-    """A scripted `claude -p` stream-json process: replies per user line, holds on a gate."""
+    """A scripted `claude -p` stream-json process: replies per user line, holds on a gate.
+
+    Like Claude Code 2.1.312 it reports `command_lifecycle` frames (queued, started,
+    completed) for a message sent with a uuid, and runs one turn at a time: a message
+    with priority "later" starts only after a running (background) turn ends."""
 
     def __init__(self, turns):
         import json as _json
@@ -2079,14 +2099,20 @@ class FakeClaude:
         self.stdin = self
         self.terminated = self.closed_stdin = False
         self.returncode = None
+        self.turn_lock = threading.Lock()   # one Claude Code turn at a time
+        self.withhold = set()               # lifecycle states this fake never reports
+        self.rewrite = {}                   # lifecycle state -> the state reported instead
+        self.fail_writes = False            # a user line fails while being written
 
     # stdin side ------------------------------------------------------------
     def write(self, data):
         line = self._json.loads(data.decode('utf-8'))
         self.written.append(line)
+        if self.fail_writes and line.get('type') == 'user':
+            raise BrokenPipeError()
         if line.get('type') == 'user' and self.turns:
-            self.gate.clear()   # each turn holds until its own interrupt or release
-            thread = threading.Thread(target=self._play, args=(self.turns.pop(0),),
+            self._lifecycle(line, 'queued')
+            thread = threading.Thread(target=self._play_user, args=(line, self.turns.pop(0)),
                                       name='fake-claude-play', daemon=True)
             self.threads.append(thread)
             thread.start()
@@ -2107,6 +2133,18 @@ class FakeClaude:
             os.write(self._write, (self._json.dumps(obj) + '\n').encode('utf-8'))
         except (OSError, TypeError):   # closed (TypeError: _end() ran between check and write)
             pass
+
+    def _lifecycle(self, line, state):
+        if line.get('uuid') and state not in self.withhold:
+            self._emit({'type': 'command_lifecycle', 'command_uuid': line['uuid'],
+                        'state': self.rewrite.get(state, state), 'uuid': 'frame'})
+
+    def _play_user(self, line, script):
+        with self.turn_lock:
+            self.gate.clear()   # each turn holds until its own interrupt or release
+            self._lifecycle(line, 'started')
+            self._play(script)
+            self._lifecycle(line, 'completed')
 
     def _play(self, script):
         for item in script:
@@ -2143,6 +2181,16 @@ class FakeClaude:
 
     def users(self):
         return [line for line in self.written if line.get('type') == 'user']
+
+    def unsolicited(self, script, delay=0.0):
+        """Play a turn Claude Code starts by itself (a background task notification)."""
+        def play():
+            time.sleep(delay)
+            with self.turn_lock:
+                self._play(script)
+        thread = threading.Thread(target=play, name='fake-claude-play', daemon=True)
+        self.threads.append(thread)
+        thread.start()
 
 
 def _delta(text, index=0):
@@ -3113,23 +3161,27 @@ class PMConversationTests(BoundedPMTest):
             await self.until(ui, lambda ui: len(ui.pm_outbox) == 1, 'queued')
 
         async def disconnected(ui):
-            await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_turn_active,
-                             'disconnected')
-            self.assertEqual(list(ui.pm_outbox), ['wait'])
-            self.assertIn('暫停（PM 已斷線）', ui.conversation.text)
-            self.assertIn('  1. wait', ui.conversation.text)
+            # hd665: 'start' was mid-turn, so its fate is unconfirmed: held UNKNOWN at the
+            # head of the queue (never re-sent by itself), ahead of the waiting draft.
+            await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_turn_active
+                             and len(ui.pm_outbox) == 2, 'disconnected')
+            self.assertEqual(list(ui.pm_outbox), ['start', 'wait'])
+            self.assertIn('（UNKNOWN），未自動重送', ui.conversation.text)
+            self.assertIn('PM disconnected; chat mode', ui.conversation.text)
+            self.assertEqual(ui.pm_outbox_paused, 'UNKNOWN')   # stays paused: nothing sent
 
         def first_ctrl_c(ui):
             ui.request_quit()
             self.assertFalse(ui.app.is_done)
-            self.assertIn('PM 佇列還有 1 則未送出', ui.conversation.text)
+            self.assertIn('PM 佇列還有 2 則未送出', ui.conversation.text)
 
         ui, result = self.drive([self.connect(), self.connected, 'start\r', 'wait\r', queued,
                                  '/pm disconnect\r', disconnected, first_ctrl_c,
                                  lambda ui: ui.request_quit()])
         self.assertEqual(result, 0)
         self.assertEqual(len(self.fakes[0].users()), 1)
-        self.assertIn('  1. wait', ui.unsent_queue_text())
+        self.assertIn('  1. start', ui.unsent_queue_text())
+        self.assertIn('  2. wait', ui.unsent_queue_text())
 
     def test_mode_switch_never_starts_a_chat_or_task_request_during_a_pm_turn(self):
         # W52 B1 (Owner QA probe, ported): /task mode off, then Enter during a PM turn
@@ -3526,12 +3578,15 @@ class PMConversationTests(BoundedPMTest):
         self.assertIsNone(ui.pm_runtime)
 
     def test_process_exit_mid_turn_is_an_error_not_a_reply(self):
+        # hd665: the error is shown, and the draft is held UNKNOWN (paused), not lost.
         self.turns = [[_delta('partial'), 'EXIT']]
         ui, _ = self.drive([self.connect(), self.connected, 'go\r', self.turn_done])
         text = ui.conversation.text
         self.assertIn('PM runtime error PM_PROCESS_EXITED', text)
-        self.assertIn('\n錯誤 · ', text)
+        self.assertIn('\nUNKNOWN · ', text)   # the W56a turn-end line of an UNKNOWN turn
         self.assertEqual(ui.pm_state, 'error(PM_PROCESS_EXITED)')
+        self.assertEqual(list(ui.pm_outbox), ['go'])
+        self.assertEqual(ui.pm_outbox_paused, 'UNKNOWN')
 
     def test_history_disconnect_and_chat_is_never_the_pm(self):
         def history_shown(ui):
@@ -3551,6 +3606,373 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual([t['content'] for t in self.session.history], ['chat now', 'reply'])
         self.assertEqual(len(self.fakes[0].users()), 1)       # nothing more reached the PM
         self.assertTrue(self.fakes[0].closed_stdin)
+
+    def test_background_turn_between_owner_sends_is_shown_live_as_its_own_turn(self):
+        # P0-3 (Owner TUI run 2026-10-29): task-notification turns were not shown until the
+        # next Owner send, which then ended on the stale background result.
+        self.turns = [[_delta('已派工'), _result('已派工', usage={'output_tokens': 1})],
+                      [_delta('進度：'), 'HOLD', _delta('PR 已開'),
+                       _assistant({'type': 'text', 'text': '進度：PR 已開'}),
+                       _result('進度：PR 已開', usage={'output_tokens': 3})]]
+        background = [_delta('Codex 回報'), 'HOLD',
+                      _assistant({'type': 'text', 'text': 'Codex 回報'},
+                                 {'type': 'tool_use', 'id': 'b1', 'name': 'Bash', 'input': {}}),
+                      _tool_result('b1', 'SECRET_OUTPUT', False),
+                      _result('Codex 回報', usage={'output_tokens': 2})]
+
+        async def live(ui):
+            self.fakes[0].unsolicited(background, delay=0.2)
+            await self.until(ui, lambda ui: BG_WATCH + '\n  Codex 回報' in ui.conversation.text,
+                             'background text shown live')
+            self.assertTrue(ui.pm_turn_active)
+            self.assertIn(BG_WATCH, ui.conversation.text)
+            self.assertEqual(len(self.fakes[0].users()), 1)   # nothing was sent for it
+            self.fakes[0].gate.set()
+            await self.turn_done(ui)
+            text = ui.conversation.text
+            self.assertIn('  ▸ 使用工具 1 次（Bash ×1）', text)
+            self.assertIn('秒 · 2 tokens', text)
+            self.assertNotIn('SECRET', text)
+
+        async def owner_reply(ui):
+            await self.until(ui, lambda ui: 'PM\n  進度：' in ui.conversation.text, 'reply')
+            self.fakes[0].gate.set()
+            await self.turn_done(ui)
+
+        ui, _ = self.drive([self.connect(), self.connected, '派工\r', self.turn_done, live,
+                            '回報進度\r', owner_reply])
+        text = ui.conversation.text
+        self.assertEqual(len(re.findall(r'\n[0-9]+\.[0-9] 秒 · ', text)), 3)
+        owner = text.index('你\n  回報進度')
+        self.assertIn('進度：PR 已開', text[owner:])
+        self.assertIn('秒 · 3 tokens', text[owner:])
+        self.assertNotIn('Codex 回報', text[owner:])   # the background reply stays its own turn
+        turns = self.api.read_history(self.session_id)['turns']
+        shown = chat_tui_pm.history_text({'turns': turns})
+        self.assertIn('  PM（背景通知）\n(history) PM [COMPLETED] tools: Bash:\nCodex 回報', shown)
+        self.assertIn('  owner → PM:\n回報進度', shown)
+        self.assertEqual([(t['owner_text'], t.get('origin'), t['usage']) for t in turns],
+                         [('派工', None, {'output_tokens': 1}),
+                          ('', 'background', {'output_tokens': 2}),
+                          ('回報進度', None, {'output_tokens': 3})])
+
+    def test_owner_message_during_a_background_turn_waits_in_the_queue_and_is_answered(self):
+        # P0-3: the Owner message sent mid background turn was absorbed by Claude Code
+        # (queue-operation remove, absorbed_mid_turn) and never got a turn of its own.
+        self.turns = [[_delta('收到'), _result('收到')]]
+
+        async def background(ui):
+            self.fakes[0].unsolicited([_delta('背景'), 'HOLD', _result('背景')])
+            await self.until(ui, lambda ui: BG_WATCH + '\n  背景' in ui.conversation.text)
+
+        async def queued(ui):
+            await asyncio.sleep(0.2)
+            self.assertEqual(list(ui.pm_outbox), ['繼續推進，回報進度'])
+            self.assertIn('你（已排入佇列（第 1 則））\n  繼續推進，回報進度',
+                          ui.conversation.text)
+            self.assertEqual(self.fakes[0].users(), [])   # held while the background turn runs
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, background, '繼續推進，回報進度\r', queued,
+                            lambda ui: self.until(ui, lambda ui: 'PM\n  收到' in ui.conversation.text
+                                                  and not ui.pm_turn_active, 'answered')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['繼續推進，回報進度'])
+        self.assertIn('你（自佇列送出，剩 0 則）\n  繼續推進，回報進度', ui.conversation.text)
+        self.assertEqual(len(re.findall(r'\n[0-9]+\.[0-9] 秒 · ', ui.conversation.text)), 2)
+
+    def test_send_refused_by_a_background_turn_is_held_then_sent_when_it_ends(self):
+        # The race: pm_runtime claims a background turn just before the Owner's Enter is
+        # shown as one. The refused draft goes back to the queue, never to Claude Code.
+        self.turns = [[_delta('收到'), _result('收到')]]
+        claimed = {}
+
+        async def race(ui):
+            self.fakes[0].unsolicited([_delta('背景'), _result('背景')])
+            # Claim it the way the watcher does, before the TUI shows it.
+            claimed['events'] = ui.pm_runtime.background_turn(timeout=5)
+            self.assertIsNotNone(claimed['events'])
+
+        async def held(ui):
+            await self.until(ui, lambda ui: not ui.pm_turn_active, 'held turn ended')
+            self.assertEqual(list(ui.pm_outbox), ['回報進度'])
+            self.assertIn('這則訊息沒有送出，保留在佇列第 1 則', ui.conversation.text)
+            self.assertIsNone(ui.pm_outbox_paused)
+            self.assertEqual(self.fakes[0].users(), [])
+            turn = {'runtime': ui.pm_runtime, 'seq': None, 'events': [], 'ended': False}
+            ui.pm_background_start(turn)
+            for event in claimed['events']:
+                ui.pm_background_event(turn, event)
+            ui.pm_background_end(turn)
+
+        with patch.object(chat_tui.ChatTUI, '_pm_watch', lambda self, runtime, loop: None):
+            ui, _ = self.drive([self.connect(), self.connected, race, '回報進度\r', held,
+                                lambda ui: self.until(ui, lambda ui: 'PM\n  收到' in ui.conversation.text
+                                                      and not ui.pm_turn_active, 'answered')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['回報進度'])
+        self.assertIn(BG_WATCH + '\n  背景', ui.conversation.text)
+
+    def test_turn_started_before_claude_reads_the_message_is_shown_and_never_absorbs_it(self):
+        # Codex v1 P1: the background turn began in Claude Code before the Owner line was
+        # read and before the watcher saw any output. The message is sent with priority
+        # "later", the TUI shows that turn as background inside the Owner turn, and the
+        # Owner turn begins only at the message's own `started` frame.
+        self.turns = [[_delta('進度：PR 已開'), _result('進度：PR 已開', usage={'output_tokens': 3})]]
+
+        async def race(ui):
+            self.fakes[0].unsolicited([_delta('Codex 回報'), 'HOLD',
+                                       _result('Codex 回報', usage={'output_tokens': 2})])
+            await asyncio.sleep(0.2)   # its output is in flight; nobody has claimed it
+
+        async def shown(ui):
+            await self.until(ui, lambda ui: BG_SUB + '\n  Codex 回報' in ui.conversation.text,
+                             'background turn shown inside the Owner turn')
+            sent = self.fakes[0].users()
+            self.assertEqual([(u['priority'], len(u['uuid'])) for u in sent], [('later', 36)])
+            self.assertNotIn('進度：', ui.conversation.text)   # not started yet
+            self.fakes[0].gate.set()
+
+        with patch.object(chat_tui.ChatTUI, '_pm_watch', lambda self, runtime, loop: None):
+            ui, _ = self.drive([self.connect(), self.connected, race, '回報進度\r', shown,
+                                self.turn_done])
+        text = ui.conversation.text
+        background = text.index(BG_SUB)
+        accepted = text.index('Claude Code 開始處理你的訊息')
+        self.assertLess(text.index('你\n  回報進度'), background)
+        self.assertLess(background, text.index('秒 · 2 tokens'))
+        self.assertLess(text.index('秒 · 2 tokens'), accepted)
+        self.assertLess(accepted, text.index('PM\n  進度：PR 已開'))
+        self.assertLess(text.index('PM\n  進度：PR 已開'), text.index('秒 · 3 tokens'))
+        self.assertEqual(len(self.fakes[0].users()), 1)
+        self.assertEqual(ui.pm_turn_status, 'COMPLETED')
+        turns = self.api.read_history(self.session_id)['turns']
+        self.assertEqual(sorted((t['owner_text'], t.get('origin'), t['usage']) for t in turns),
+                         [('', 'background', {'output_tokens': 2}),
+                          ('回報進度', None, {'output_tokens': 3})])
+
+    def test_held_draft_is_sent_when_the_background_turn_ended_before_the_hold(self):
+        # Codex v1 P2: send() was refused (PM_TURN_ACTIVE), then the short background turn
+        # ended before _pm_hold ran and no background turn is left to drain the queue.
+        self.turns = [[_delta('收到'), _result('收到')]]
+        claimed = {}
+        original = chat_tui.ChatTUI._pm_hold
+
+        def late_hold(ui, text, seq, status):
+            list(claimed.pop('events', ()))   # that background turn ends first
+            return original(ui, text, seq, status)
+
+        async def claim(ui):
+            self.fakes[0].unsolicited([_delta('短'), _result('短')])
+            claimed['events'] = ui.pm_runtime.background_turn(timeout=5)
+            self.assertIsNotNone(claimed['events'])
+
+        with patch.object(chat_tui.ChatTUI, '_pm_watch', lambda self, runtime, loop: None), \
+                patch.object(chat_tui.ChatTUI, '_pm_hold', late_hold):
+            ui, _ = self.drive([self.connect(), self.connected, claim, '回報進度\r',
+                                lambda ui: self.until(ui, lambda ui: 'PM\n  收到' in ui.conversation.text
+                                                      and not ui.pm_turn_active, 'drained')])
+        self.assertIn('保留在佇列第 1 則', ui.conversation.text)
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['回報進度'])
+        self.assertEqual(list(ui.pm_outbox), [])
+
+    def test_unconfirmed_message_ends_unknown_and_is_resent_only_by_the_owner(self):
+        # Codex v2 P1: `queued` but no `started` within the bound: UNKNOWN, never re-sent
+        # automatically; the draft waits, paused, for /pm queue send.
+        self.turns = [[], [_delta('收到'), _result('收到')]]
+
+        def withhold(ui):
+            self.fakes[0].withhold = {'started', 'completed'}
+
+        async def unknown(ui):
+            await self.until(ui, lambda ui: 'UNKNOWN' in ui.conversation.text
+                             and not ui.pm_turn_active, 'UNKNOWN shown')
+            self.assertIn('無法確認 PM 是否收到這則訊息（UNKNOWN），未自動重送；可用 /pm queue send 重送',
+                          ui.conversation.text)
+            self.assertEqual(list(ui.pm_outbox), ['回報進度'])
+            self.assertEqual(ui.pm_outbox_paused, 'UNKNOWN')
+            await asyncio.sleep(0.3)
+            self.assertEqual(len(self.fakes[0].users()), 1)   # nothing re-sent by itself
+            self.fakes[0].withhold = set()
+
+        with patch.object(self.pm_runtime, 'PM_STARTED_GRACE', 0.3):
+            ui, _ = self.drive([self.connect(), self.connected, withhold, '回報進度\r', unknown,
+                                '/pm queue send\r',
+                                lambda ui: self.until(ui, lambda ui: 'PM\n  收到' in ui.conversation.text
+                                                      and not ui.pm_turn_active, 'resent')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['回報進度', '回報進度'])
+        self.assertEqual(list(ui.pm_outbox), [])
+
+    # -- hd665 (High Debug): every unconfirmed or refused attempt keeps its draft -----------
+    def _held(self, ui, paused):
+        return self.until(ui, lambda ui: not ui.pm_turn_active and list(ui.pm_outbox) == ['回報進度']
+                          and ui.pm_outbox_paused == paused, 'draft held, paused ' + paused)
+
+    def test_invalid_lifecycle_holds_draft_unknown_without_resend(self):
+        self.turns = [[_delta('x'), _result('x')]]
+
+        def rewrite(ui):
+            self.fakes[0].rewrite = {'started': 'future'}   # not a lifecycle state
+
+        async def held(ui):
+            await self._held(ui, 'UNKNOWN')
+            await asyncio.sleep(0.3)
+            self.assertEqual(len(self.fakes[0].users()), 1)
+
+        ui, _ = self.drive([self.connect(), self.connected, rewrite, '回報進度\r', held])
+        text = ui.conversation.text
+        self.assertIn('PM runtime error PM_STREAM_INVALID', text)
+        self.assertIn('無法確認 PM 是否收到這則訊息（UNKNOWN），未自動重送', text)
+        owner = [t for t in self.api.read_history(self.session_id)['turns'] if t['owner_text']]
+        self.assertEqual([(t['status'], t['delivery']) for t in owner], [('UNKNOWN', 'UNKNOWN')])
+
+    def test_lifecycle_refusal_retains_reason_and_pauses_queue(self):
+        self.turns = [[]]
+
+        def refuse(ui):
+            self.fakes[0].rewrite = {'started': 'refused'}
+            self.fakes[0].withhold = {'completed'}
+
+        async def held(ui):
+            await self._held(ui, 'Claude Code refused')
+            await asyncio.sleep(0.3)
+            self.assertEqual(len(self.fakes[0].users()), 1)   # never re-sent by itself
+
+        ui, _ = self.drive([self.connect(), self.connected, refuse, '回報進度\r', held])
+        self.assertIn('Claude Code 沒有處理這則訊息（refused），保留在佇列第 1 則並暫停',
+                      ui.conversation.text)
+        self.assertIn('\n未送出 · ', ui.conversation.text)
+
+    def test_child_exit_and_write_failure_retain_current_draft(self):
+        for case in ('exit', 'write'):
+            with self.subTest(case=case):
+                self.turns = [['EXIT']] if case == 'exit' else [[]]
+
+                def arm(ui, case=case):
+                    self.fakes[-1].fail_writes = case == 'write'
+
+                ui, _ = self.drive([self.connect(), self.connected, arm, '回報進度\r',
+                                    lambda ui: self._held(ui, 'UNKNOWN')])
+                self.assertIn('PM runtime error PM_PROCESS_EXITED', ui.conversation.text)
+                self.assertIn('（UNKNOWN），未自動重送', ui.conversation.text)
+                self.assertEqual(len(self.fakes[-1].users()), 1)
+
+    def test_esc_completion_race_never_drains_queue(self):
+        # Esc with the real pm_runtime.interrupt: the turn still completes (the race), and
+        # the queue stays paused.
+        self.turns = [[_delta('一'), 'HOLD', _result('done')], [_result('next')]]
+
+        async def race(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1
+                             and 'PM\n  一' in ui.conversation.text, 'queued mid-turn')
+            ui.interrupt_pm()   # the fake releases its turn on the control request
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', race,
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active, 'end'),
+                            lambda ui: asyncio.sleep(0.3)])
+        self.assertIn('\n已中斷 · ', ui.conversation.text)
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['go'])
+        self.assertEqual(list(ui.pm_outbox), ['next one'])
+        self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
+
+    def test_late_hold_is_applied_once_to_original_attempt(self):
+        self.turns = [[], [_delta('收到'), _result('收到')]]
+        seen = {}
+
+        def withhold(ui):
+            self.fakes[0].withhold = {'started', 'completed'}
+
+        async def held(ui):
+            await self._held(ui, 'UNKNOWN')
+            turns = self.api.read_history(self.session_id)['turns']
+            seen['turn_id'] = [t for t in turns if t['status'] == 'UNKNOWN'][0]['turn_id']
+            seen['seq'] = ui._pm_turn_seq
+            ui._pm_hold('回報進度', seen['seq'], 'UNKNOWN', None, seen['turn_id'])   # late, again
+            self.assertEqual(list(ui.pm_outbox), ['回報進度'])
+            self.fakes[0].withhold = set()
+
+        def late(ui):
+            self.assertEqual(ui.pm_turn_status, 'COMPLETED')   # the resent message's turn
+            ui._pm_hold('回報進度', seen['seq'], 'UNKNOWN', None, seen['turn_id'])
+            self.assertEqual(list(ui.pm_outbox), [])            # applied once only
+            ui._pm_hold('其他', seen['seq'], 'HELD')               # stale: draft kept, status not
+            self.assertEqual(ui.pm_turn_status, 'COMPLETED')
+            self.assertEqual(list(ui.pm_outbox), ['其他'])
+
+        with patch.object(self.pm_runtime, 'PM_STARTED_GRACE', 0.3):
+            ui, _ = self.drive([self.connect(), self.connected, withhold, '回報進度\r', held,
+                                '/pm queue send\r',
+                                lambda ui: self.until(ui, lambda ui: 'PM\n  收到' in ui.conversation.text
+                                                      and not ui.pm_turn_active, 'resent'),
+                                late])
+        self.assertEqual(len(self.fakes[0].users()), 2)
+
+    def test_unknown_stays_paused_across_late_background_events(self):
+        self.turns = [[]]
+
+        def withhold(ui):
+            self.fakes[0].withhold = {'started', 'completed'}
+
+        async def background(ui):
+            await self._held(ui, 'UNKNOWN')
+            self.fakes[0].unsolicited([_delta('背景'), _result('背景')])
+            await self.until(ui, lambda ui: BG_WATCH + '\n  背景' in ui.conversation.text
+                             and not ui.pm_turn_active, 'background turn ended')
+            await asyncio.sleep(0.3)
+
+        with patch.object(self.pm_runtime, 'PM_STARTED_GRACE', 0.3):
+            ui, _ = self.drive([self.connect(), self.connected, withhold, '回報進度\r', background])
+        self.assertEqual(len(self.fakes[0].users()), 1)
+        self.assertEqual(list(ui.pm_outbox), ['回報進度'])
+        self.assertEqual(ui.pm_outbox_paused, 'UNKNOWN')
+
+    def test_background_turns_feed_the_status_count_and_the_panel(self):
+        # W56d hook: pm_background_turns() reports the running background turn (on its own
+        # or inside an Owner turn), so 背景 N counts it and the ↓ panel lists it.
+        self.turns = [[_delta('收到'), _result('收到')]]
+
+        def panel(ui):
+            return ''.join(text for _style, text in ui.background_text())
+
+        async def watched(ui):
+            ui.finish_background(self.session_id, ([], None))   # TaskStore: no Tasks
+            self.assertIn('背景 0', ui.status_text())
+            self.fakes[0].unsolicited([_delta('背景'), 'HOLD', _result('背景')])
+            await self.until(ui, lambda ui: BG_WATCH + '\n  背景' in ui.conversation.text)
+            self.assertIn('背景 1 · ↓ 查看', ui.status_text())
+            self.assertEqual([(i['role'], i['state']) for i in ui.background_all()],
+                             [('PM', '背景回合')])
+            ui.show_background = True
+            self.assertTrue(ui.background_visible())
+            self.assertRegex(panel(ui), r'背景工作 1 項[^\n]*\n  PM +背景通知 +背景回合 +[0-9]+s')
+            self.fakes[0].gate.set()
+            await self.until(ui, lambda ui: not ui.pm_turn_active, 'background turn ended')
+            self.assertIn('背景 0', ui.status_text())
+            self.assertEqual(ui.pm_background_turns(), [])
+
+        async def inside(ui):
+            await self.until(ui, lambda ui: BG_SUB + '\n  Codex' in ui.conversation.text,
+                             'background turn inside the Owner turn')
+            self.assertEqual([i['state'] for i in ui.pm_background_turns()], ['背景回合'])
+            self.assertIn('背景 1', ui.status_text())
+            self.fakes[-1].gate.set()
+            await self.until(ui, lambda ui: 'PM\n  收到' in ui.conversation.text
+                             and not ui.pm_turn_active, 'answered')
+            self.assertEqual(ui.pm_background_turns(), [])
+
+        def race(ui):
+            ui.finish_background(self.session_id, ([], None))   # TaskStore: no Tasks
+            self.fakes[-1].unsolicited([_delta('Codex 回報'), 'HOLD', _result('Codex 回報')])
+
+        with patch.object(chat_tui_status, 'read_background', return_value=[]):
+            ui, _ = self.drive([self.connect(), self.connected, watched])
+        with patch.object(chat_tui_status, 'read_background', return_value=[]), \
+                patch.object(chat_tui.ChatTUI, '_pm_watch', lambda self, runtime, loop: None):
+            ui, _ = self.drive([self.connect(), self.connected, race,
+                                lambda ui: asyncio.sleep(0.2), '回報進度\r', inside])
 
     def test_run_closes_the_pm_runtime_even_when_the_app_fails(self):
         with create_pipe_input() as pipe:   # never the real stdin (CI has no terminal)
