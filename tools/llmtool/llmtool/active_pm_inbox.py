@@ -32,6 +32,7 @@ import time
 from pathlib import Path
 
 from .errors import LLMToolError
+from .task_index import TaskStatusIndex
 from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID
 
 DEFAULT_WAIT_SECONDS = 540
@@ -259,14 +260,34 @@ def _session_records(store, session_key):
 
     unreadable = 0
     records = []
-    for task_id in store.task_ids():
+    task_ids = store.task_ids()
+    index = TaskStatusIndex(store)
+    if not index.enabled:
+        for task_id in task_ids:
+            try:
+                record = store.get(task_id)
+            except LLMToolError:
+                unreadable += 1
+                continue
+            if record.get('pm_session_id') == session_key and _active_pm_runtime(record):
+                records.append(record)
+        return records, unreadable
+
+    # scan() refreshes uncached or changed files and retains unreadable records
+    # in its count. Once warm, only Tasks indexed to this PM need a validated
+    # read for the inbox's active-runtime check.
+    candidates, unreadable = index.scan(task_ids)
+    for task_id, _, indexed_session in candidates:
+        if indexed_session != session_key:
+            continue
         try:
-            record = store.get(task_id)
+            record, _ = index.reread(task_id)
         except LLMToolError:
             unreadable += 1
             continue
         if record.get('pm_session_id') == session_key and _active_pm_runtime(record):
             records.append(record)
+    index.flush()
     return records, unreadable
 
 
