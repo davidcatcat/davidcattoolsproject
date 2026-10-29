@@ -669,6 +669,111 @@ class TaskAdvanceTests(unittest.TestCase):
                 github_get=lambda _path: [])
         self.assertEqual(result['result'], {'repair_task_id': 'repair-1'})
 
+    def test_advance_acks_only_superseded_events_and_is_idempotent(self):
+        old_event = {'event_id': 'a' * 32, 'source': 'REVIEWER',
+                     'source_sha': 'b' * 40, 'state': 'PM_CONSUMED'}
+        record = base_record(pm_session_id='pm-session', completion_events=[old_event])
+        class Store:
+            def get(self, _task_id):
+                return record
+        store = Store()
+        calls = []
+        def ack(_store, event_id, _session_id):
+            calls.append(event_id)
+            old_event['state'] = 'ACKED'
+            return {'acknowledged_now': True}
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance.active_pm_inbox, 'ack', side_effect=ack):
+            first = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
+                github_get=lambda _url: [])
+            second = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
+                github_get=lambda _url: [])
+        self.assertEqual(first['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(first['acked'], ['a' * 32])
+        self.assertEqual(second['step'], first['step'])
+        self.assertEqual(second['acked'], [])
+        self.assertEqual(calls, ['a' * 32])
+
+    def test_advance_keeps_current_head_reviewer_event_for_decide(self):
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
+        current_event = {'event_id': 'a' * 32, 'source': 'REVIEWER',
+                         'source_sha': HEAD, 'version': 1, 'outcome': 'REVIEW_BLOCKED',
+                         'state': 'PM_CONSUMED'}
+        record = base_record(pm_session_id='pm-session', review_dispatch_claim=[claim],
+                             completion_events=[current_event])
+        class Store:
+            def get(self, _task_id):
+                return record
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance.active_pm_inbox, 'ack') as ack:
+            result = task_advance.advance(task_id=record['task_id'], store=Store(),
+                pr_number=17, github_get=lambda _url: [])
+        expected = task_advance.decide(record, d6(), PR, {'events': [current_event],
+                                                          'repair_claims': []})
+        self.assertEqual(result['step'], expected)
+        self.assertEqual(result['step'], 'REVIEWER_ATTENTION')
+        self.assertEqual(result['acked'], [])
+        ack.assert_not_called()
+
+    def test_advance_closed_acks_every_unacked_event(self):
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
+        events = [
+            {'event_id': 'a' * 32, 'source': 'REVIEWER', 'source_sha': HEAD,
+             'version': 1, 'outcome': 'REVIEW_PASS', 'state': 'PM_CONSUMED'},
+            {'event_id': 'b' * 32, 'source': 'HOST_WORKER', 'state': 'PENDING'},
+            {'event_id': 'c' * 32, 'source': 'HOST_WORKER', 'state': 'ACKED'},
+        ]
+        record = base_record(pm_session_id='pm-session', review_dispatch_claim=[claim],
+            completion={'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY',
+                'evidence': {'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}},
+            completion_events=events)
+        class Store:
+            def get(self, _task_id):
+                return record
+        calls = []
+        def ack(_store, event_id, _session_id):
+            calls.append(event_id)
+            return {'acknowledged_now': True}
+        merged_pr = dict(PR, merged=True, merge_commit_sha='d' * 40)
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=merged_pr), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}]), \
+             patch.object(task_advance.active_pm_inbox, 'ack', side_effect=ack):
+            result = task_advance.advance(task_id=record['task_id'], store=Store(),
+                pr_number=17, github_get=lambda _url: [],
+                record_github_event_call=lambda *_args, **_kwargs: None)
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(result['acked'], ['a' * 32, 'b' * 32])
+        self.assertEqual(calls, ['a' * 32, 'b' * 32])
+
+    def test_advance_ack_failure_adds_code_without_changing_step(self):
+        event = {'event_id': 'a' * 32, 'source': 'REVIEWER',
+                 'source_sha': 'b' * 40, 'state': 'PM_CONSUMED'}
+        record = base_record(pm_session_id='pm-session', completion_events=[event])
+        class Store:
+            def get(self, _task_id):
+                return record
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance.active_pm_inbox, 'ack', side_effect=RuntimeError('store')):
+            result = task_advance.advance(task_id=record['task_id'], store=Store(),
+                pr_number=17, dispatch_review_call=lambda **_kwargs: {'state': 'DISPATCHED'},
+                github_get=lambda _url: [])
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['result'], {'state': 'DISPATCHED'})
+        self.assertEqual(result['next'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['codes'], ['ACK_SKIPPED'])
+        self.assertEqual(result['acked'], [])
+
 
 if __name__ == '__main__':
     unittest.main()
