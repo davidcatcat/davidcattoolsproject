@@ -80,10 +80,12 @@ def _build_reference_patterns(repository=None):
     )
 
 
+_REPOSITORY_CONFIG_ERROR = None
 try:
     _OWNER_COMMENT_REF, _POLICY_EVIDENCE_REF = _build_reference_patterns()
-except LLMToolError:
+except LLMToolError as error:
     # Invalid trusted config must make every configured reference fail closed.
+    _REPOSITORY_CONFIG_ERROR = error
     _OWNER_COMMENT_REF = re.compile(r'(?!)')
     _POLICY_EVIDENCE_REF = re.compile(r'(?!)')
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
@@ -193,6 +195,9 @@ def _read_policy_file(path):
 
 def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
     """Read the one policy for the detected layout on every call; never cache decisions."""
+    if _REPOSITORY_CONFIG_ERROR is not None:
+        key = worker_key if type(worker_key) is str else 'unknown'
+        return PolicyDecision(key, False, 'WORKER_REPOSITORY_CONFIG_INVALID', None)
     if type(worker_key) is not str or re.fullmatch(r'[a-z][a-z0-9-]{0,63}', worker_key) is None:
         key = 'unknown'
         return PolicyDecision(key, False, 'WORKER_KEY_INVALID', None)
