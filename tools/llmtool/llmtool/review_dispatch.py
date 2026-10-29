@@ -280,6 +280,7 @@ def _review_return(claim, result):
         from .task_submission_cli import _screen_text
         output['review_text'] = _screen_text(result['review_text'], 65536)
     except LLMToolError:
+        output['verdict'] = 'BLOCKED'
         output['review_dispatch_code'] = 'REVIEW_TEXT_WITHHELD'
     return output
 
