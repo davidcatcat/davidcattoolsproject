@@ -264,7 +264,8 @@ WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
 TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
 _TASK_STORE_CONTENTION_ERRNOS = frozenset(
-    value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR)
+    value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR,
+                        errno.ENOLCK)
     if value is not None)
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
