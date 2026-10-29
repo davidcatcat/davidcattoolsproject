@@ -2836,14 +2836,20 @@ class OfficeViewTests(unittest.TestCase):
         run = mon.Process(40, 5718, 40, "01:00", "S", "Claude Code CLI", "claude", "Codex APP-SERVER 5718")
         seen = {}
 
-        def fake(now, root=None, canonical=None, live_calls=None, verdicts=None):
+        def fake(now, root=None, canonical=None, live_calls=None, verdicts=None, *,
+                 codex_running=False):
             seen["calls"] = live_calls
+            seen["codex_running"] = codex_running
             return []
         with patch.object(mon, "codex_rows", side_effect=fake):
             self.rows([run])
             self.assertEqual(seen["calls"], [-60.0])
+            self.assertFalse(seen["codex_running"])
             self.rows([])   # the table was read: nothing is running
             self.assertEqual(seen["calls"], [])
+            codex = mon.Process(41, 1, 41, "00:12", "S", "Codex CLI", "codex", "")
+            self.rows([codex])
+            self.assertTrue(seen["codex_running"])
 
     def test_monitor_version_from_git(self):
         def run(results):

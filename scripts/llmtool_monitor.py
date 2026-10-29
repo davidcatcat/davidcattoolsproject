@@ -3276,7 +3276,7 @@ def _ended_calls(subs, live_calls) -> set:
 
 def codex_rows(now: float, root: str | None = None,
                canonical: str | None = None,
-               live_calls: list[float] | None = None, verdicts: dict | None = None,
+               live_calls: list[float] | None = None, verdicts: dict | None = None, *,
                codex_running: bool = False) -> list[OfficeRow]:
     """live_calls: how many seconds ago each Codex-started one-shot claude
     process now running started (as negative offsets from now), or None when
@@ -5002,7 +5002,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
     calls = [-(_elapsed_seconds(p.elapsed) or 0.0) for p in running]
     codex_running = any(p.role.startswith("Codex CLI") for p in processes)
-    rows = (codex_rows(now, codex_root, canonical, calls, verdicts, codex_running)
+    rows = (codex_rows(now, codex_root, canonical, calls, verdicts,
+                       codex_running=codex_running)
             + claude_rows(now, claude_root, canonical, live))
     # Each running CLI is attached to one thread.
     clis = agent_clis(processes, sessions)
