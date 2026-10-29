@@ -25,9 +25,15 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
   `Verdict: FAIL`).
 - The binding line uses the Task ID, Run ID and contract digest that the PM gives the
   Reviewer (from `llmtool task show`) and the same HEAD.
-- The `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line appears **only** on a Claude PASS.
-- Only a Claude PASS in this exact form, unedited, satisfies the gate. A Codex PASS
-  in this form is advisory and ignored. Any other verdict comment that names the HEAD
+- The `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line appears on formal Claude or Codex
+  PASS comments.
+- A Claude PASS in this exact form, unedited, satisfies the gate. Under Owner
+  decision 035:A (#525, c6468216854), a Codex PASS satisfies it only for a
+  Claude-authored Task when the registered Reviewer is `codex-reviewer`, the
+  persisted Task classifies the comment as `REVIEW_PASS`, and exactly one matching
+  `COMPLETED` review dispatch claim records that PASS and the same non-empty review
+  text. Other Codex PASS comments are advisory and neither accept nor supersede.
+  Any other verdict comment that names the HEAD
   (FIX, FAIL, BLOCKED or malformed), an edited verdict comment, or a later PR review
   supersedes an earlier PASS. A PR review and a verdict comment with the same timestamp
   are not accepted.
