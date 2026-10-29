@@ -4251,11 +4251,15 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
         rows.append(OfficeRow(f"{kind + ' ' if kind else ''}ci runner {name}", state,
                               "；".join(notes), age, 90 + number, key=name, kind="worker",
                               evidence="GitHub", alert=alert))
-    _mac_waiting, linux_waiting, unassigned = _ci_queue_groups(view, local)
-    if linux_names and linux_waiting:
-        rows.append(ci_queue_row(linux_waiting, len(linux_names), "linux"))
-    if unassigned:
-        rows.append(ci_queue_row(unassigned, 0, "unassigned"))
+    # Queue details belong to the current GitHub snapshot. After a refresh
+    # failure, keep the last runner rows marked unconfirmed but don't present
+    # an old queue as if it were still waiting.
+    if old <= GITHUB_STALE and not view.error:
+        _mac_waiting, linux_waiting, unassigned = _ci_queue_groups(view, local)
+        if linux_names and linux_waiting:
+            rows.append(ci_queue_row(linux_waiting, len(linux_names), "linux"))
+        if unassigned:
+            rows.append(ci_queue_row(unassigned, 0, "unassigned"))
     return rows
 
 

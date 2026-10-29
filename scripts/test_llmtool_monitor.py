@@ -4129,14 +4129,14 @@ class GitHubRunnerTests(unittest.TestCase):
             ("linux ci runner ec2-llmtool-01", mon.WORKING),
             ("linux ci runner ec2-llmtool-02", mon.IDLE),
             ("linux ci runner ec2-llmtool-03", mon.STOPPED),
-            ("linux ci 兩台共用", "")])
+            ("linux ci 3 台共用", "")])
         busy, idle, offline = rows[:3]
         self.assertEqual(busy.detail, "執行中：llmtool CI（PR #350 @aaaaaaa）：Linux Python Test"
                                       "（已執行 3 分鐘）；Linux；標籤 ec2-llmtool")
         self.assertEqual((busy.age, busy.alert, busy.evidence), (180.0, "", "GitHub"))
         shared, = [row for row in rows if row.kind == "shared"]
         self.assertEqual((shared.name, shared.detail),
-                         ("linux ci 兩台共用", "排隊 1 個：llmtool CI（PR #351 @bbbbbbb）：Linux Python Test"))
+                         ("linux ci 3 台共用", "排隊 1 個：llmtool CI（PR #351 @bbbbbbb）：Linux Python Test"))
         self.assertTrue(idle.detail.startswith(
             "閒置，等工作；Linux；標籤 ec2-llmtool；上一個工作：llmtool CI（PR #349 @ccccccc）："
             "Linux Python Test 失敗（20 分鐘前）"), idle.detail)
@@ -4179,8 +4179,10 @@ class GitHubRunnerTests(unittest.TestCase):
 
     def test_queued_work_is_attributed_only_by_labels_and_unregistered_shows_nothing(self):
         source, _ = self.source(self.ci([self.MAC, self.linux("ec2-llmtool-01", label="other")]))
-        row, = mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"}, source.ci_runs)
-        self.assertNotIn("排隊", row.detail)   # it lacks the ec2-llmtool label the job asks for
+        rows = mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"}, source.ci_runs)
+        self.assertEqual([row.name for row in rows], [
+            "linux ci runner ec2-llmtool-01", "ci 未分配 排隊"])
+        self.assertNotIn("排隊", rows[0].detail)   # it lacks the ec2-llmtool label the job asks for
         source, _ = self.source(self.ci([self.MAC]))   # the EC2 runner is not registered yet
         self.assertEqual(mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"},
                                                 source.ci_runs), [])
@@ -4257,7 +4259,8 @@ class GitHubRunnerTests(unittest.TestCase):
             gate.set()
             source._thread.join(5)
         self.assertEqual([row.name for row in mon.github_runner_rows(source.ci_view, NOW)],
-                         ["linux ci runner ec2-llmtool-01"])
+                         ["linux ci runner ec2-llmtool-01",
+                          "linux ci 排隊", "ci 未分配 排隊"])
 
 
 if __name__ == "__main__":
