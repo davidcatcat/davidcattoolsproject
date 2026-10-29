@@ -21,6 +21,9 @@ from . import active_pm_inbox, config as llmtool_config
 from .errors import LLMToolError
 from .test_output_excerpts import _emitted_sensitive
 
+# The Claude Code permission mode of the dedicated PM process (shown in the TUI status).
+PM_PERMISSION_MODE = 'auto'
+
 MAX_MESSAGE_BYTES = 16384
 MAX_STREAM_LINE_BYTES = 1024 * 1024
 MAX_HISTORY_TURNS = 200
@@ -594,7 +597,8 @@ class PMRuntime:
                             transcript_present else '--session-id')
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
                     'stream-json', '--verbose', '--include-partial-messages', session_flag,
-                    self.pm_session_id, '--permission-prompts', 'none', '--permission-mode', 'auto',
+                    self.pm_session_id, '--permission-prompts', 'none',
+                    '--permission-mode', PM_PERMISSION_MODE,
                     '--strict-mcp-config', '--mcp-config', PM_MCP_CONFIG,
                     '--append-system-prompt', PM_SESSION_INSTRUCTION]
             runner = self.runner

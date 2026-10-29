@@ -225,8 +225,14 @@ def write_fake_tools(bin_dir):
 class Terminal:
     """One real ``llmtool chat --tui`` in a pseudo-terminal rendered by pyte."""
 
-    def __init__(self, pyte, root, replies, rows=24, columns=80, slow=1.0):
+    def __init__(self, pyte, root, replies, rows=24, columns=80, slow=1.0, environ=None,
+                 child_prefix=""):
         self.slow = slow   # timeout multiplier (the load scenario runs on a busy Mac)
+        # W56d: extra child environment (TERM_PROGRAM, COLORFGBG, ...) and code run before the
+        # TUI starts (a fake data source); every byte the TUI wrote is kept in ``raw``.
+        self.environ = dict(environ or {})
+        self.child_prefix = child_prefix
+        self.raw = bytearray()
         self.root = Path(os.path.realpath(root))   # no /var -> /private/var symlink (PM paths)
         self.screen = pyte.Screen(columns, rows)
         self.stream = pyte.ByteStream(self.screen)
@@ -273,8 +279,10 @@ class Terminal:
                 "FAKE_CLAUDE_LOG": str(self.claude_log),
                 "LLMTOOL_PTY_UNUSED": "placeholder",
             })
+            environment.update(self.environ)
             os.chdir(self.root)
-            os.execve(sys.executable, [sys.executable, "-c", CHILD_SOURCE], environment)
+            os.execve(sys.executable, [sys.executable, "-c", self.child_prefix + CHILD_SOURCE],
+                      environment)
         self.reader = threading.Thread(target=self._read_output, daemon=True)
         self.reader.start()
 
@@ -287,6 +295,7 @@ class Terminal:
             if not data:
                 return
             with self.lock:
+                self.raw += data
                 self.stream.feed(data)
 
     def stop(self):
@@ -329,6 +338,15 @@ class Terminal:
 
     def text(self):
         return "\n".join(self.rows())
+
+    def raw_text(self):
+        with self.lock:
+            return self.raw.decode("utf-8", "replace")
+
+    def cell(self, y, x):
+        """The pyte cell (data, fg, bg, bold, reverse, ...) at row y, column x."""
+        with self.lock:
+            return self.screen.buffer[y][x]
 
     def pane(self):
         """Conversation rows: everything above the status/input rule (a row of dashes)."""

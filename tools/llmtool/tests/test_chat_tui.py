@@ -118,6 +118,13 @@ class Base(unittest.TestCase):
         self.client.complete.return_value = Reply('reply', {})
         self.factory = patch('llmtool.chat.create_client', return_value=self.client).start()
         self.addCleanup(patch.stopall)
+        # W56d: the TUI settings file and the PM background read never reach the real HOME;
+        # tests that exercise the background read stop this patch.
+        patch('llmtool.chat_tui_theme.settings_path',
+              return_value=self.temp_root / 'tui-settings.json').start()
+        self.background_tick = patch.object(chat_tui.ChatTUI, '_background_tick',
+                                            lambda ui: None)
+        self.background_tick.start()
 
 
 class FallbackTests(Base):
@@ -503,7 +510,8 @@ class WidgetTests(Base):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
                                   '/exit', '/quit', '/pm connect', '/pm new', '/pm disconnect', '/pm history',
-                                  '/pm queue', '/task submit', '/task show', '/task mode', '/task list', '/task events'])
+                                  '/pm queue', '/task submit', '/task show', '/task mode', '/task list', '/task events',
+                                  '/theme', '/links'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
@@ -536,7 +544,7 @@ class WidgetTests(Base):
                 processor.feed(KeyPress(Keys.Escape, '\x1b'))
                 processor.process_keys()
                 # Esc may still start Esc Enter (newline), so the picker waits.
-                self.assertEqual([c[0] for c in ui.menu_items], ['/help'])
+                self.assertEqual([c[0] for c in ui.menu_items], ['/help', '/theme'])
                 processor.feed(timeout_flush)
                 processor.process_keys()
             self.assertEqual(ui.menu_items, [])
@@ -669,24 +677,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 18)
+            self.assertEqual(len(ui.menu_items), 20)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/help', rows[0])
-            self.assertIn('13 more (0 above, 13 below)', rows[-1])
+            self.assertIn('15 more (0 above, 15 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/help', ''.join(rows))
             self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('13 more (2 above, 11 below)', rows[-1])
+            self.assertIn('15 more (2 above, 13 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 17)
-            self.assertIn('/task events', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(13 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 19)
+            self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(15 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -2758,7 +2766,7 @@ class PMConversationTests(BoundedPMTest):
 
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
-            self.assertEqual(ui.status_text(), 'PM | ' + self.session_id[:8]
+            self.assertEqual(ui.status_text(), '▸▸ PM 模式 · auto | ' + self.session_id[:8]
                          + ' | 暖機中… | 最新 | F6 滑鼠:開 | F1')   # no chat fields
             self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
@@ -2874,7 +2882,7 @@ class PMConversationTests(BoundedPMTest):
             text = ui.conversation.text
             for number, draft in ((1, 'a'), (2, 'b'), (3, 'c')):
                 self.assertIn('你（已排入佇列（第 %d 則））\n  %s' % (number, draft), text)
-            self.assertIn('佇列3', ui.status_text())
+            self.assertIn('佇列 3', ui.status_text())
             self.assertEqual(len(self.fakes[0].users()), 1)
             self.fakes[0].gate.set()
 
@@ -2882,7 +2890,7 @@ class PMConversationTests(BoundedPMTest):
             await self.until(ui, lambda ui: len(self.fakes[0].users()) == 2, 'a sent')
             self.assertTrue(ui.pm_turn_active)
             self.assertEqual(list(ui.pm_outbox), ['b', 'c'])   # one turn at a time
-            self.assertIn('佇列2', ui.status_text())
+            self.assertIn('佇列 2', ui.status_text())
             self.fakes[0].gate.set()
 
         ui, _ = self.drive([self.connect(), self.connected, 'first\r', 'a\r', 'b\r', 'c\r',
@@ -2911,7 +2919,7 @@ class PMConversationTests(BoundedPMTest):
             self.assertIn('PM 佇列暫停，沒有送出：1 則，暫停（上一回合失敗 PM_PROCESS_EXITED）', text)
             self.assertIn('  1. next one', text)
             self.assertIn('/pm queue send 繼續送出', text)
-            self.assertIn('佇列1暫停', ui.status_text())
+            self.assertIn('佇列 1 暫停', ui.status_text())
 
         ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', queued, paused,
                             '/pm queue\r',
@@ -2947,7 +2955,7 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(list(ui.pm_outbox), ['next one'])
             self.assertIn('PM 佇列暫停，沒有送出：1 則，暫停（權限被拒）', text)
             self.assertIn('  1. next one', text)
-            self.assertIn('佇列1暫停', ui.status_text())
+            self.assertIn('佇列 1 暫停', ui.status_text())
 
         ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', queued, paused,
                             '/pm queue send\r',
@@ -3076,7 +3084,7 @@ class PMConversationTests(BoundedPMTest):
             await asyncio.sleep(0.2)
             self.assertEqual(len(self.fakes[0].users()), 1)   # nothing was auto-sent
             self.assertEqual(list(ui.pm_outbox), ['q1', 'q2'])
-            self.assertIn('佇列2暫停', ui.status_text())
+            self.assertIn('佇列 2 暫停', ui.status_text())
 
         async def after_enter(ui):
             await self.until(ui, lambda ui: len(self.fakes[0].users()) == 2, 'Enter sent one')
@@ -3283,7 +3291,7 @@ class PMConversationTests(BoundedPMTest):
             size[0] = Size(rows=24, columns=12)
             text = ui.status_text()
             self.assertLessEqual(get_cwidth(text), 12)
-            self.assertTrue(text.startswith('PM'))
+            self.assertTrue(text.startswith('▸▸ PM'))
 
         self.drive([self.connect(), self.connected, narrow], size=size)
 

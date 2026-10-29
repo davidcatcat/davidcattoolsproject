@@ -18,7 +18,8 @@ import threading
 import time
 import uuid
 
-from . import chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_view
+from . import (chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
+               chat_tui_view)
 from .chat import HELP, run_chat
 from .config import selected_provider
 from .errors import LLMToolError
@@ -114,10 +115,24 @@ only from llmtool Core and nothing is dispatched)
   /task show TASK_ID    Open a Task's detail
   /task list            Open the Task list (stage, update time, request) from TaskStore
   /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
+Display
+  /theme [dark|light|auto]
+                        Colour theme; auto follows the terminal background (COLORFGBG) and
+                        is dark when it is unknown. NO_COLOR or a colourless terminal always
+                        draws without colour. Saved in ~/.local/state/llmtool/tui-settings.json
+  /links [on|off]       Clickable path/file.py:123 (file://) and #123 (GitHub issue/PR of the
+                        git remote) links; only on terminals with OSC 8 links (iTerm2, WezTerm,
+                        Warp, kitty). Copy still gives the text as shown
+In PM mode the status bar starts with ▸▸ PM 模式 · the PM permission mode · 背景 N (Tasks of
+this PM session with a Developer or Reviewer at work, read from TaskStore every %d s) ·
+↓ 查看 · 佇列 N. With an empty input, Down opens the background list (role, Task/PR, state,
+age); Esc closes it.
+
 A Task receipt shows the PM provider, Task ID, Run ID and state recorded by Core;
 已建立／待派工 means no Developer has been dispatched. A chat reply is never a Task.
 Stage and next responsible are derived by the TUI from Core fields; values Core does
-not record are UNKNOWN or NOT_AVAILABLE.""" % chat_tui_status.REFRESH_SECONDS
+not record are UNKNOWN or NOT_AVAILABLE.""" % (chat_tui_status.REFRESH_SECONDS,
+                                                    chat_tui_status.REFRESH_SECONDS)
 
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
 # Picking one edits the input draft; it never runs the command.
@@ -141,12 +156,18 @@ SLASH_COMMANDS = (
     ("/task mode", "/task mode ", "Task mode for drafts: PROFILE, or off"),
     ("/task list", "/task list", "Task list with status from TaskStore"),
     ("/task events", "/task events", "Recent Task events from TaskStore"),
+    ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
+    ("/links", "/links ", "Clickable file and #PR links: on or off (saved)"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
+BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
                  "scroll", "mouse", "help")
 STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
+# PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
+# keys that act now (Esc 中斷, F7 工具).
+PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "keys")
 STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
 STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
@@ -387,11 +408,13 @@ class ChatTUI:
         from prompt_toolkit.layout import ConditionalContainer, HSplit, Layout, Window
         from prompt_toolkit.layout.controls import FormattedTextControl
         from prompt_toolkit.layout.dimension import Dimension
-        from prompt_toolkit.styles import Style
+        from prompt_toolkit.styles import DynamicStyle, Style
         from prompt_toolkit.utils import get_cwidth
         from prompt_toolkit.widgets import TextArea
 
         self._Document = Document
+        self._Style = Style
+        self._app_styles = {}
         self._get_cwidth = get_cwidth
         self.session = session
         self.busy = False
@@ -475,6 +498,22 @@ class ChatTUI:
         self.pm_tools_expanded = False
         self.pm_last_status = None   # TURN_END status of the last finished turn
         self.colour = chat_tui_view.colour_enabled()
+        # W56d: theme and OSC 8 links, from the saved settings (chat_tui_theme).
+        self.settings = chat_tui_theme.load_settings()
+        self.theme = chat_tui_theme.resolve_theme(self.settings["theme"])
+        self.links_supported = chat_tui_theme.osc8_supported()
+        self.linker = None
+        if self.links_supported:
+            top, slug = chat_tui_theme.repo_info()
+            self.linker = chat_tui_theme.Linker(top or os.getcwd(), slug)
+        # W56d status line: PM-dispatched work in flight (TaskStore, one read per
+        # REFRESH_SECONDS while a PM is connected) and the ↓ panel listing it.
+        self.background = []         # chat_tui_status.background_items of the bound PM
+        self.background_key = None   # PM session the items belong to
+        self.background_error = None
+        self.background_loaded = None    # monotonic time of the last finished read
+        self.background_reader = None
+        self.show_background = False
         # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
         # a COMPLETED turn. Esc (W55), a failed/refused turn, Ctrl-C or a disconnect pauses
         # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
@@ -500,7 +539,9 @@ class ChatTUI:
         # The conversation pane keeps its own rows, reading position, selection and
         # follow state (chat_tui_view); no scrollbar: the terminal's own is the only one.
         self.view = chat_tui_view.ConversationView(get_cwidth)
-        self.conversation = chat_tui_view.make_pane(self.view, colour=self.colour)
+        self.conversation = chat_tui_view.make_pane(
+            self.view, colour=self.colour, styler=self._style,
+            linker=lambda: self.linker if self.links_on() else None)
         history_text = ("History is stored locally." if session.history_saved
                         else "History stays in memory.")
         opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
@@ -547,13 +588,19 @@ class ChatTUI:
         # and Up/Down keep recalling input history when the menu is closed.
         self.input.buffer.on_text_insert += lambda _buffer: self._refresh_menu(True)
         self.input.buffer.on_text_changed += lambda _buffer: self._refresh_menu(False)
+        # Typing closes the ↓ background panel (it opens only on an empty input).
+        self.input.buffer.on_text_changed += lambda _buffer: self._close_background_on_text()
+        showing_background = Condition(lambda: self.background_visible())
+        self.background_window = Window(
+            FormattedTextControl(self.background_text), style="class:menu",
+            height=lambda: Dimension.exact(max(1, self.background_rows())), wrap_lines=False)
         self.menu_window = Window(
             FormattedTextControl(self.menu_text), style="class:menu",
             height=lambda: Dimension.exact(max(1, sum(self.picker_layout()))), wrap_lines=False)
         self.rule_window = Window(height=1, char=chat_tui_view.RULE_CHAR,
-                                  style=self._style("rule"))
+                                  style=lambda: self._style("rule"))
         self.status_window = Window(FormattedTextControl(self.status_fragments),
-                                    style=self._style("status.bar"),
+                                    style=lambda: self._style("status.bar"),
                                     height=Dimension.exact(1), wrap_lines=False)
         root = HSplit([ConditionalContainer(self.conversation,
                                             filter=~showing_help & ~showing_detail & ~showing_list
@@ -563,6 +610,7 @@ class ChatTUI:
                        ConditionalContainer(self.list_window, filter=showing_list),
                        ConditionalContainer(self.events, filter=showing_events),
                        self.rule_window,
+                       ConditionalContainer(self.background_window, filter=showing_background),
                        ConditionalContainer(self.menu_window, filter=picker_shown),
                        self.input, self.status_window],
                       height=Dimension(min=1, weight=1))
@@ -601,11 +649,27 @@ class ChatTUI:
         # there it touches nothing else, so a kept selection stays.
         reading_or_typing = input_focused | conversation_focused
 
-        @keys.add("escape", filter=reading_or_typing & pm_turn & ~picker_shown)
+        # W56d: Down on an empty PM input opens the background panel while it lists work;
+        # Esc closes it first (a second Esc then interrupts a running turn as before).
+        background_listed = Condition(lambda: self.pm_mode and not self.input.text
+                                      and bool(self.background_all()))
+
+        @keys.add("down", filter=input_focused & background_listed & ~picker_shown
+                  & ~showing_background, eager=True)
+        def _background_open(event):
+            self.show_background = True
+
+        @keys.add("escape", filter=showing_background & ~picker_shown)
+        def _background_close(event):
+            self.show_background = False
+
+        @keys.add("escape", filter=reading_or_typing & pm_turn & ~picker_shown
+                  & ~showing_background)
         def _pm_interrupt(event):
             self.interrupt_pm()
 
-        @keys.add("escape", filter=reading_or_typing & chat_request & ~picker_shown)
+        @keys.add("escape", filter=reading_or_typing & chat_request & ~picker_shown
+                  & ~showing_background)
         def _send_interrupt(event):
             self.interrupt_send()
 
@@ -743,11 +807,7 @@ class ChatTUI:
             layout=Layout(root, focused_element=self.input), key_bindings=keys, full_screen=True,
             mouse_support=Condition(lambda: self.mouse_enabled), refresh_interval=0.5,
             input=input, output=output,
-            style=Style.from_dict({"status": "reverse", "help": "italic", "rule": "fg:ansibrightblack",
-                                   "conversation.selected": "reverse",
-                                   "menu": "bg:ansibrightblack fg:ansiwhite",
-                                   "menu.current": "reverse",
-                                   "menu.header": "bg:ansibrightblack fg:ansiwhite bold"}))
+            style=DynamicStyle(self._app_style))
         # prompt_toolkit waits timeoutlen (1s) after a lone Esc in case Esc Enter follows;
         # that made dismissing the picker feel stuck. Shortened only while the picker is
         # visible on screen, so the Esc Enter window is unchanged otherwise.
@@ -756,8 +816,12 @@ class ChatTUI:
         self.app.before_render += lambda _app: self._sync_picker()
         # A shown list re-reads TaskStore when stale; redraws never read more often.
         self.app.before_render += lambda _app: self._list_tick()
+        # The connected PM's background work: at most one TaskStore read per interval.
+        self.app.before_render += lambda _app: self._background_tick()
         self._default_mouse_binding = load_mouse_bindings().bindings[0]
         _enable_mouse_drag_reporting(self.app.output)
+        if self.links_supported:
+            chat_tui_theme.install_osc8_guard(self.app.output)
         self.view.on_copied = self.app.invalidate   # thread-safe: shows 已複製 when pbcopy is done
 
     # -- rendering -----------------------------------------------------------------
@@ -805,9 +869,9 @@ class ChatTUI:
         if self.pm_mode:
             # Chat provider/model/usage are not the PM's; in PM mode only PM fields show.
             fields.update(self.pm_status_fields(compact))
-            shown = ["mode", "session", "state", "queue", "keys", "scroll", "mouse", "help"]
+            shown = ["mode", "session", "state", "keys", "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
-        for name in STATUS_DROP_ORDER:
+        for name in PM_STATUS_DROP_ORDER if self.pm_mode else STATUS_DROP_ORDER:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
             if name in shown:
@@ -841,7 +905,61 @@ class ChatTUI:
         return " · ".join(keys)
 
     def _style(self, token):
-        return chat_tui_view.token_style(token, self.colour)
+        return chat_tui_view.token_style(token, self.colour, self.theme)
+
+    def _app_style(self):
+        """The Application's class styles from the current theme table (cached per theme)."""
+        key = (self.theme, self.colour)
+        if key not in self._app_styles:
+            self._app_styles[key] = self._Style.from_dict({
+                "status": self._style("status.bar"), "help": self._style("ui.help"),
+                "rule": self._style("rule"), "conversation.selected": self._style("ui.selected"),
+                "menu": self._style("ui.menu"), "menu.current": self._style("ui.menu.current"),
+                "menu.header": self._style("ui.menu.header")})
+        return self._app_styles[key]
+
+    def links_on(self):
+        """OSC 8 links are drawn: a supporting terminal and not turned off with /links."""
+        return self.links_supported and self.settings["links"] == "on"
+
+    def _save_settings(self):
+        try:
+            chat_tui_theme.save_settings(self.settings)
+        except OSError as exc:
+            return " (not saved: " + (exc.strerror or "write failed") + ")"
+        return ""
+
+    def run_display_command(self, text):
+        """/theme [dark|light|auto] and /links [on|off]: change, save and report."""
+        parts = text.split()
+        if parts[0] == "/theme":
+            if len(parts) == 1:
+                self.append("Theme: %s (drawn %s%s). /theme dark|light|auto"
+                            % (self.settings["theme"], self.theme,
+                               "" if self.colour else ", no colour: NO_COLOR or terminal"))
+                return
+            if len(parts) != 2 or parts[1] not in chat_tui_theme.THEME_CHOICES:
+                self.append("usage: /theme dark|light|auto")
+                return
+            self.settings["theme"] = parts[1]
+            self.theme = chat_tui_theme.resolve_theme(parts[1])
+            self.append("Theme: %s (drawn %s)%s" % (parts[1], self.theme, self._save_settings()))
+            return
+        if len(parts) == 1:
+            self.append("Links: %s%s. /links on|off" % (
+                "on" if self.links_on() else "off",
+                "" if self.links_supported else " (this terminal has no OSC 8 links)"))
+            return
+        if len(parts) != 2 or parts[1] not in ("on", "off"):
+            self.append("usage: /links on|off")
+            return
+        self.settings["links"] = parts[1]
+        saved = self._save_settings()
+        if parts[1] == "on" and not self.links_supported:
+            self.append("Links: off — this terminal has no OSC 8 links (iTerm2, WezTerm, Warp "
+                        "and kitty have them); the setting is kept for those" + saved)
+            return
+        self.append("Links: " + parts[1] + saved)
 
     def picker_entries(self):
         if self.searching:
@@ -934,7 +1052,7 @@ class ChatTUI:
         # The detail and events panes are text areas with Esc-prefixed bindings, so a
         # lone Esc (close) would otherwise wait the full default timeout.
         shown = (sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
-                 or self.events_visible() or self.pm_turn_active
+                 or self.events_visible() or self.pm_turn_active or self.background_visible()
                  or (self.busy and self.worker_kind == "chat"))
         self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
@@ -1557,6 +1675,9 @@ class ChatTUI:
         if text.strip() == "/help":
             self.append(KEY_HELP + "\n\n" + HELP)
             return
+        if text.strip().split(maxsplit=1)[0] in ("/theme", "/links"):
+            self.run_display_command(text.strip())
+            return
         try:
             output = self.session.command(text)
         except LLMToolError as exc:
@@ -1853,11 +1974,106 @@ class ChatTUI:
             state = "錯誤 " + state[len("error("):-1]
         else:
             state = PM_STATE_LABELS.get(state, state)
-        queued = ""
+        # W56d lead: ▸▸ PM 模式 · permission mode · 背景 N · ↓ 查看 · 佇列 N
+        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_mode()]
+        count = self.background_count()
+        if count is not None:
+            lead.append("背景 %s" % count)
+            if count and not self.input.text:
+                lead.append("↓ 查看")
         if self.pm_outbox:
-            queued = "佇列%d" % len(self.pm_outbox) + ("暫停" if self.pm_outbox_paused else "")
-        return {"mode": PM_LABEL, "session": compact(session_id, 8),
-                "state": compact(state, 18), "queue": queued}
+            lead.append("佇列 %d" % len(self.pm_outbox) + (" 暫停" if self.pm_outbox_paused else ""))
+        return {"mode": " · ".join(lead), "session": compact(session_id, 8),
+                "state": compact(state, 18)}
+
+    # -- PM background work (W56d) ---------------------------------------------------
+    def pm_background_turns(self):
+        """Hook for #665's background-turn state: items shaped like background_items.
+
+        #665 is not on this base, so there are none yet; when pm_runtime reports background
+        turns, return them here and the status count and ↓ panel include them.
+        """
+        return []
+
+    def background_all(self):
+        """Listed background work of the connected PM: Task items, then #665 turns."""
+        if not self.pm_target or self.background_key != self.pm_target[0]:
+            return list(self.pm_background_turns())
+        return self.background + list(self.pm_background_turns())
+
+    def background_count(self):
+        """Items in flight; "?" after a failed read; None before the first read."""
+        if not self.pm_target or self.background_key != self.pm_target[0]:
+            return None
+        if self.background_error is not None:
+            return "?"
+        return len(self.background_all())
+
+    def _background_tick(self):
+        key = self.pm_target[0] if self.pm_target else None
+        if key is None or self.background_reader is not None:
+            return
+        if (key == self.background_key and self.background_loaded is not None and
+                time.monotonic() - self.background_loaded < chat_tui_status.REFRESH_SECONDS):
+            return
+        self._loop = asyncio.get_running_loop()
+        self.background_reader = threading.Thread(
+            target=self._read_background, args=(self._loop, key),
+            name="llmtool-chat-pm-background", daemon=True)
+        self.background_reader.start()
+
+    def _read_background(self, loop, key):
+        try:
+            outcome = (chat_tui_status.read_background(key), None)
+        except LLMToolError as exc:
+            outcome = ([], str(exc))
+        except Exception:
+            outcome = ([], "TaskStore read failed; details omitted")
+        try:
+            loop.call_soon_threadsafe(self.finish_background, key, outcome)
+        except RuntimeError:
+            pass
+
+    def finish_background(self, key, outcome):
+        self.background_reader = None
+        self.background, self.background_error = outcome
+        self.background_key = key
+        self.background_loaded = time.monotonic()
+        if not self.background_all():
+            self.show_background = False
+        self.app.invalidate()
+
+    def background_visible(self):
+        return self.show_background and self.pm_mode and self.background_rows() > 0
+
+    def _close_background_on_text(self):
+        if self.input.text:
+            self.show_background = False
+
+    def background_rows(self):
+        """Panel rows (header + items) that fit beside the minimum chat layout."""
+        input_rows = min(4, max(1, self.input.buffer.document.line_count))
+        free = self.app.output.get_size().rows - 3 - input_rows - sum(self.picker_layout())
+        return max(0, min(1 + min(len(self.background_all()), BACKGROUND_LIMIT), free))
+
+    def background_text(self):
+        width = max(1, self.app.output.get_size().columns)
+        cut = lambda text: fit_width(terminal_safe_text(text).replace("\n", " "), width,
+                                     self._get_cwidth)
+        items = self.background_all()
+        rows = self.background_rows()
+        header = " 背景工作 %d 項（TaskStore，每 %d 秒更新）— Esc 關閉" % (
+            len(items), chat_tui_status.REFRESH_SECONDS)
+        if self.background_error is not None:
+            header += " — 讀取失敗：" + self.background_error
+        result = [("class:menu.header", cut(header))]
+        for item in items[:max(0, rows - 1)]:
+            task = item.get("task") or chat_tui_task.UNKNOWN
+            line = "  %-9s %-8s %-8s %-26s %s" % (
+                item.get("role", ""), task[:8], item.get("pr", ""), item.get("state", ""),
+                chat_tui_status.age_text(item.get("updated_at")))
+            result += [("", "\n"), ("class:menu", cut(line))]
+        return result
 
     def run_pm_command(self, text):
         # Shell-style words, so a CWD with spaces can be quoted or escaped (W52 B3).

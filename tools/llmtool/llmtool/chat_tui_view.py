@@ -24,8 +24,9 @@ output were tied to the same caret. This module keeps the model in *screen rows*
   pane's selection. Warp also reports no release when the button goes up outside its
   grid, which is why a moving drag copies too (W52 F3).
 
-Styles (W56a): the pane text carries ``(start, end, token)`` spans; ``STYLE_TOKENS`` is the
-one table that maps a display token to a prompt_toolkit style, so a theme swaps that table.
+Styles (W56a): the pane text carries ``(start, end, token)`` spans; ``STYLE_TOKENS`` holds
+one table per theme (dark, light, mono) mapping a display token to a prompt_toolkit style,
+and a theme swaps the whole table (W56d).
 A ``rule`` line is drawn across the pane width and a ``meta.usage`` line right-aligned at
 draw time, so both stay right after a resize. ``render_markdown`` uses ``tui_markdown``
 when it is installed and otherwise shows the text unchanged.
@@ -70,44 +71,138 @@ try:
 except ImportError:
     _tui_markdown = None
 
-# Every display token -> (colour style, monochrome style). The monochrome column uses
-# only bold/dim/reverse, for NO_COLOR or a terminal without colour. Unknown tokens are
-# drawn as "text". W56d swaps this table for themes.
-STYLE_TOKENS = {
-    "text": ("", ""),
-    "md.bold": ("bold", "bold"),
-    "md.italic": ("italic", "dim"),
-    "md.code": ("fg:ansicyan", "bold"),
-    "md.heading": ("bold fg:ansiblue", "bold"),
-    "md.bullet": ("fg:ansicyan", "bold"),
-    "md.link": ("fg:ansiblue underline", "bold"),
-    "md.quote": ("fg:ansibrightblack italic", "dim"),
-    "md.table.border": ("fg:ansibrightblack", "dim"),
-    "md.table.header": ("bold", "bold"),
-    "md.table.cell": ("", ""),
-    "md.codeblock.border": ("fg:ansibrightblack", "dim"),
-    "md.codeblock.lang": ("fg:ansibrightblack italic", "dim"),
-    "md.codeblock": ("fg:ansiyellow", ""),
-    "diff.add": ("fg:ansigreen", "bold"),
-    "diff.del": ("fg:ansired", "dim"),
-    "diff.hunk": ("fg:ansicyan", "bold"),
-    "diff.meta": ("bold", "bold"),
-    "diff.lineno": ("fg:ansibrightblack", "dim"),
-    "syntax.keyword": ("fg:ansimagenta", "bold"),
-    "syntax.string": ("fg:ansigreen", ""),
-    "syntax.comment": ("fg:ansibrightblack italic", "dim"),
-    "syntax.number": ("fg:ansiyellow", ""),
-    "syntax.builtin": ("fg:ansicyan", ""),
-    "role.owner": ("bold fg:ansigreen", "bold reverse"),
-    "role.pm": ("bold fg:ansicyan", "bold"),
-    "role.system": ("fg:ansiyellow", "dim"),
-    "tool.summary": ("fg:ansibrightblack", "dim"),
-    "tool.error": ("fg:ansired", "bold"),
-    "meta.usage": ("fg:ansibrightblack", "dim"),
-    "rule": ("fg:ansibrightblack", "dim"),
-    "status.bar": ("reverse", "reverse"),
-    "status.key": ("reverse bold", "reverse bold"),
+# Every display token -> prompt_toolkit style, one table per theme (W56d). These three
+# tables are the only place a colour is named: the TUI's own chrome (menu, help, selection,
+# links) is themed through the "ui." tokens. "mono" is used for NO_COLOR or a terminal
+# without colour and uses only bold/dim/reverse. Unknown tokens are drawn as "text".
+THEME_DARK = {
+    "text": "",
+    "md.bold": "bold",
+    "md.italic": "italic",
+    "md.code": "fg:ansicyan",
+    "md.heading": "bold fg:ansiblue",
+    "md.bullet": "fg:ansicyan",
+    "md.link": "fg:ansiblue underline",
+    "md.quote": "fg:ansibrightblack italic",
+    "md.table.border": "fg:ansibrightblack",
+    "md.table.header": "bold",
+    "md.table.cell": "",
+    "md.codeblock.border": "fg:ansibrightblack",
+    "md.codeblock.lang": "fg:ansibrightblack italic",
+    "md.codeblock": "fg:ansiyellow",
+    "diff.add": "fg:ansigreen",
+    "diff.del": "fg:ansired",
+    "diff.hunk": "fg:ansicyan",
+    "diff.meta": "bold",
+    "diff.lineno": "fg:ansibrightblack",
+    "syntax.keyword": "fg:ansimagenta",
+    "syntax.string": "fg:ansigreen",
+    "syntax.comment": "fg:ansibrightblack italic",
+    "syntax.number": "fg:ansiyellow",
+    "syntax.builtin": "fg:ansicyan",
+    "role.owner": "bold fg:ansigreen",
+    "role.pm": "bold fg:ansicyan",
+    "role.system": "fg:ansiyellow",
+    "tool.summary": "fg:ansibrightblack",
+    "tool.error": "fg:ansired",
+    "meta.usage": "fg:ansibrightblack",
+    "rule": "fg:ansibrightblack",
+    "status.bar": "reverse",
+    "status.key": "reverse bold",
+    "ui.menu": "bg:ansibrightblack fg:ansiwhite",
+    "ui.menu.current": "reverse",
+    "ui.menu.header": "bg:ansibrightblack fg:ansiwhite bold",
+    "ui.help": "italic",
+    "ui.selected": "reverse",
+    "ui.link": "underline",
 }
+# Light terminals: the ANSI yellow and bright black most palettes ship are unreadable on a
+# white background, so this table names darker RGB values (prompt_toolkit maps them to the
+# terminal's colour depth).
+THEME_LIGHT = {
+    "text": "",
+    "md.bold": "bold",
+    "md.italic": "italic",
+    "md.code": "fg:#005f87",
+    "md.heading": "bold fg:#00539c",
+    "md.bullet": "fg:#005f87",
+    "md.link": "fg:#0645ad underline",
+    "md.quote": "fg:#5f5f5f italic",
+    "md.table.border": "fg:#8a8a8a",
+    "md.table.header": "bold",
+    "md.table.cell": "",
+    "md.codeblock.border": "fg:#9e9e9e",
+    "md.codeblock.lang": "fg:#6c6c6c italic",
+    "md.codeblock": "fg:#7a4a00",
+    "diff.add": "fg:#1a7f1a",
+    "diff.del": "fg:#b3001b",
+    "diff.hunk": "fg:#005f87",
+    "diff.meta": "bold",
+    "diff.lineno": "fg:#8a8a8a",
+    "syntax.keyword": "fg:#8700af",
+    "syntax.string": "fg:#1a7f1a",
+    "syntax.comment": "fg:#6c6c6c italic",
+    "syntax.number": "fg:#9a5b00",
+    "syntax.builtin": "fg:#005f87",
+    "role.owner": "bold fg:#1a7f1a",
+    "role.pm": "bold fg:#00539c",
+    "role.system": "fg:#8a5a00",
+    "tool.summary": "fg:#6c6c6c",
+    "tool.error": "fg:#b3001b",
+    "meta.usage": "fg:#7a7a7a",
+    "rule": "fg:#b2b2b2",
+    "status.bar": "bg:#dadada fg:#1c1c1c",
+    "status.key": "bg:#dadada fg:#000000 bold",
+    "ui.menu": "bg:#e8e8e8 fg:#1c1c1c",
+    "ui.menu.current": "bg:#00539c fg:#ffffff",
+    "ui.menu.header": "bg:#d0d0d0 fg:#000000 bold",
+    "ui.help": "italic",
+    "ui.selected": "reverse",
+    "ui.link": "underline",
+}
+THEME_MONO = {
+    "text": "",
+    "md.bold": "bold",
+    "md.italic": "dim",
+    "md.code": "bold",
+    "md.heading": "bold",
+    "md.bullet": "bold",
+    "md.link": "bold",
+    "md.quote": "dim",
+    "md.table.border": "dim",
+    "md.table.header": "bold",
+    "md.table.cell": "",
+    "md.codeblock.border": "dim",
+    "md.codeblock.lang": "dim",
+    "md.codeblock": "",
+    "diff.add": "bold",
+    "diff.del": "dim",
+    "diff.hunk": "bold",
+    "diff.meta": "bold",
+    "diff.lineno": "dim",
+    "syntax.keyword": "bold",
+    "syntax.string": "",
+    "syntax.comment": "dim",
+    "syntax.number": "",
+    "syntax.builtin": "",
+    "role.owner": "bold reverse",
+    "role.pm": "bold",
+    "role.system": "dim",
+    "tool.summary": "dim",
+    "tool.error": "bold",
+    "meta.usage": "dim",
+    "rule": "dim",
+    "status.bar": "reverse",
+    "status.key": "reverse bold",
+    "ui.menu": "reverse",
+    "ui.menu.current": "bold",
+    "ui.menu.header": "reverse bold",
+    "ui.help": "",
+    "ui.selected": "reverse",
+    "ui.link": "",
+}
+# Theme name -> its table; a theme swaps the whole table (W56a contract).
+STYLE_TOKENS = {"dark": THEME_DARK, "light": THEME_LIGHT, "mono": THEME_MONO}
 RULE_CHAR = "─"
 FILL_TOKENS = ("rule",)                 # drawn across the pane: "──── label" fills the row
 RIGHT_TOKENS = ("meta.usage",)          # drawn flush right
@@ -122,10 +217,14 @@ def colour_enabled(environ=None):
     return bool(term) and term != "dumb" and not term.startswith("vt") and not term.endswith("-mono")
 
 
-def token_style(token, colour=True):
-    """prompt_toolkit style string of a display token (unknown tokens: ``text``)."""
-    styles = STYLE_TOKENS.get(token) or STYLE_TOKENS["text"]
-    return styles[0 if colour else 1]
+def token_style(token, colour=True, theme="dark"):
+    """prompt_toolkit style string of a display token (unknown tokens: ``text``).
+
+    ``colour`` False (NO_COLOR, a colourless terminal) always uses the mono table.
+    """
+    table = STYLE_TOKENS.get(theme if colour else "mono") or THEME_DARK
+    style = table.get(token)
+    return table["text"] if style is None else style
 
 
 def render_markdown(text, width):
@@ -860,11 +959,15 @@ def parse_mouse(data):
     return kind, button, x - 1, y - 1
 
 
-def make_pane(view, style="class:conversation.selected", colour=None):
+def make_pane(view, style="class:conversation.selected", colour=None, styler=None,
+              linker=None):
     """A prompt_toolkit Window that shows ``view`` one row per line and never wraps.
 
-    Rows are drawn with their span styles (``token_style``); a whole-line ``rule`` span
-    fills the row and a whole-line ``meta.usage`` span is drawn flush right.
+    Rows are drawn with their span styles (``styler``, default ``token_style``); a
+    whole-line ``rule`` span fills the row and a whole-line ``meta.usage`` span is drawn
+    flush right. ``linker`` (a callable returning a ``chat_tui_theme.Linker`` or None) adds
+    OSC 8 links: each linked cell is preceded by its open sequence as a zero-width escape;
+    the text, and so selection and copy, is unchanged (W56d).
     """
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.layout import Window
@@ -873,6 +976,8 @@ def make_pane(view, style="class:conversation.selected", colour=None):
     from prompt_toolkit.utils import get_cwidth
 
     colour = colour_enabled() if colour is None else colour
+    styler = styler or (lambda token: token_style(token, colour))
+    linker = linker or (lambda: None)
 
     def aligned(text, start, end, token, width):
         """The row's drawn text for a whole-line fill/right token, else None."""
@@ -887,6 +992,10 @@ def make_pane(view, style="class:conversation.selected", colour=None):
             room = width - get_cwidth(label) - (1 if label else 0)
             return RULE_CHAR * max(0, room) + (" " + label if label else "")
         return " " * max(0, room) + shown
+
+    def links_open(url):
+        found = linker()
+        return found.open_sequence(url) if found is not None else ""
 
     class Control(UIControl):
         def is_focusable(self):
@@ -903,18 +1012,33 @@ def make_pane(view, style="class:conversation.selected", colour=None):
                 if len(parts) == 1:
                     drawn = aligned(text, start, end, parts[0][0], width)
                     if drawn is not None:
-                        klass = token_style(parts[0][0], colour)
+                        klass = styler(parts[0][0])
                         return [((klass + " " + style) if selected else klass, drawn)]
+                links = linker()
+                links = links.links(text, start, end) if links is not None else []
+                link_style = styler("ui.link") if links else ""
                 fragments = []
                 for token, low, high in parts:
-                    klass = token_style(token, colour)
-                    cuts = [low, high]
+                    klass = styler(token)
+                    cuts = {low, high}
                     if selected:
-                        cuts = sorted({low, high, min(max(span[0], low), high), min(max(span[1], low), high)})
+                        cuts |= {min(max(span[0], low), high), min(max(span[1], low), high)}
+                    for link_low, link_high, _url in links:
+                        cuts |= {min(max(link_low, low), high), min(max(link_high, low), high)}
+                    cuts = sorted(cuts)
                     for cut_low, cut_high in zip(cuts, cuts[1:]):
                         inside = selected and span[0] <= cut_low and cut_high <= span[1]
-                        fragments.append(((klass + " " + style).strip() if inside else klass,
-                                          text[cut_low:cut_high].replace("\t", " " * TAB_WIDTH)))
+                        piece_style = (klass + " " + style).strip() if inside else klass
+                        piece = text[cut_low:cut_high].replace("\t", " " * TAB_WIDTH)
+                        url = next((u for a, b, u in links if a <= cut_low and cut_high <= b), None)
+                        if url is None:
+                            fragments.append((piece_style, piece))
+                            continue
+                        opening = links_open(url)
+                        piece_style = (piece_style + " " + link_style).strip()
+                        for char in piece:
+                            fragments.append(("[ZeroWidthEscape]", opening))
+                            fragments.append((piece_style, char))
                 indent = view.row_indent(index)
                 if indent:
                     fragments.insert(0, ("", " " * indent))
