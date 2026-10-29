@@ -118,7 +118,7 @@ def final_line(lines):
                  re.fullmatch(r"OK(?: \((?:skipped=\d+|expected failures=\d+)(?:, (?:skipped=\d+|expected failures=\d+))*\))?", line) or
                  line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
 def passing_final(line):
-    return line == "OK" or re.fullmatch(r"OK \(skipped=[1-9][0-9]{0,5}\)", line) is not None
+    return line.endswith("OK") or re.fullmatch(r"OK \(skipped=[1-9][0-9]{0,5}\)", line) is not None
 try: lock_fd=open_lock(os.path.expanduser("~")+"/.llmtool-remote-test.lock")
 except BlockingIOError: sys.exit(75)
 cleanup_source="""import os,re,shutil,stat,sys,time
@@ -177,7 +177,7 @@ try:
                 if allowance<=1: raise subprocess.TimeoutExpired(mod,0)
                 test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance),capture_stderr=True)
                 test_output=test.stdout+(test.stderr or b""); log+=test_output
-                lines=[x.decode("utf8","replace") for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
+                lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
                 final=final_line(lines)
                 finals.append(final)
                 ran+=int(re.search(rb"Ran (\d+) tests?",test_output).group(1)) if re.search(rb"Ran (\d+) tests?",test_output) else 0
@@ -330,7 +330,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
             type(receipt['identity']['uid']) is not int or receipt['identity']['uid'] == 0 or
             receipt['fetch_head'] != sha or receipt['ran_total'] <= 0 or receipt['failures'] or
             receipt['tree'] is None or len(receipt['final']) < len(modules) or
-            any(not (line == 'OK' or
+            any(not (line.endswith('OK') or
                      re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
                 for line in receipt['final'])):
         return None
