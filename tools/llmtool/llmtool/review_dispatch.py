@@ -156,7 +156,7 @@ def _codex_argv(executable, reviewer_root):
             '-s', 'read-only', '--cd', str(reviewer_root), '-']
 
 
-def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=1):
+def _parse_codex_review_inner(raw, *, task_id, run_id, contract_digest, head, version=1):
     """Accept one exact, binding-complete Codex review object from JSONL."""
     if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
         _refuse('REVIEW_NOT_POSTED')
@@ -223,6 +223,61 @@ def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=
     if classified is None or classified[2] != expected_outcome:
         _refuse('REVIEW_NOT_POSTED')
     return {'thread_id': thread_id, 'review_text': verdict['review'], 'verdict': status}
+
+
+def _codex_final_message(raw):
+    """Return the last complete Codex agent message when its JSONL is readable."""
+    if type(raw) is not bytes or len(raw) > _CODEX_REVIEW_MAX_OUTPUT:
+        return None
+    final = None
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line, object_pairs_hook=_unique_json_object)
+            item = event.get('item') if type(event) is dict else None
+            if (type(event) is dict and event.get('type') == 'item.completed' and
+                    type(item) is dict and item.get('type') == 'agent_message' and
+                    type(item.get('text')) is str):
+                final = item['text']
+    except (UnicodeError, ValueError, RecursionError):
+        return final
+    return final
+
+
+def _parse_codex_review(raw, *, task_id, run_id, contract_digest, head, version=1):
+    """Parse a bound review and attach only a screened excerpt to refusals."""
+    try:
+        return _parse_codex_review_inner(
+            raw, task_id=task_id, run_id=run_id,
+            contract_digest=contract_digest, head=head, version=version)
+    except LLMToolError as exc:
+        if getattr(exc, 'review_dispatch_code', None) != 'REVIEW_NOT_POSTED':
+            raise
+        final = _codex_final_message(raw)
+        if final is not None and final.strip():
+            excerpt = final.encode('utf-8')[:2048].decode('utf-8', 'ignore')
+            try:
+                from .task_submission_cli import _screen_text
+                excerpt = _screen_text(excerpt, 2048)
+            except LLMToolError:
+                excerpt = ''
+            if excerpt:
+                _refuse('REVIEW_NOT_POSTED', 'Reviewer dispatch refused: ' + excerpt)
+        _refuse('REVIEW_NOT_POSTED')
+
+
+def _review_return(claim, result):
+    """Return a Codex verdict with review text screened at the CLI boundary."""
+    output = dict(claim)
+    output.pop('review_result', None)
+    output['verdict'] = result['verdict']
+    try:
+        from .task_submission_cli import _screen_text
+        output['review_text'] = _screen_text(result['review_text'], 65536)
+    except LLMToolError:
+        output['review_dispatch_code'] = 'REVIEW_TEXT_WITHHELD'
+    return output
 
 
 def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1):
@@ -312,8 +367,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             _refuse('REVIEW_DISPATCH_CLAIM_MISMATCH')
         if prior.get('state') == 'COMPLETED':
             result = prior.get('review_result')
-            return dict(prior, review_text=result['review_text'],
-                        verdict=result['verdict'])
+            return _review_return(prior, result)
         if prior['state'] == 'CLAIMED':
             unknown = dict(prior, state='UNKNOWN', updated_at=_now())
             updated_claims = [unknown if claim is prior else claim for claim in claims]
@@ -408,8 +462,7 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},
                                  review_dispatch_claim=updated_claims)
         if reviewer_key == 'codex-reviewer':
-            return dict(dispatched, review_text=codex_result['review_text'],
-                        verdict=codex_result['verdict'])
+            return _review_return(dispatched, codex_result)
         return dispatched
     except Exception as exc:
         unknown = dict(claim, state='UNKNOWN', updated_at=_now())
