@@ -754,6 +754,45 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(result['acked'], ['a' * 32, 'b' * 32])
         self.assertEqual(calls, ['a' * 32, 'b' * 32])
 
+    def test_advance_closed_acks_newly_recorded_merge_event(self):
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
+        record = base_record(pm_session_id='pm-session', review_dispatch_claim=[claim],
+            completion={'state': 'PM_EVIDENCE_READY', 'evidence': {
+                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}})
+        class Store:
+            def __init__(self):
+                self.record = record
+            def get(self, _task_id):
+                return self.record
+        store = Store()
+        def record_merge_event(_store, _record, session_id, event_id,
+                               issue_number, item_id, marker_type, status, sha):
+            store.record['completion_events'].append({
+                'event_id': event_id, 'source': 'GITHUB', 'source_sha': sha,
+                'session_id': session_id, 'issue_number': issue_number,
+                'item_id': item_id, 'marker_type': marker_type, 'status': status,
+                'state': 'PENDING'})
+        def ack(_store, event_id, _session_id):
+            event = next(item for item in store.record['completion_events']
+                         if item['event_id'] == event_id)
+            event['state'] = 'ACKED'
+            return {'acknowledged_now': True}
+        merged_pr = dict(PR, merged=True, merge_commit_sha='d' * 40)
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=merged_pr), \
+             patch.object(task_advance, '_review_outcomes', return_value=[{
+                 'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}]), \
+             patch.object(task_advance.active_pm_inbox, 'ack', side_effect=ack):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, github_get=lambda _url: [],
+                record_github_event_call=record_merge_event)
+        merge_event = next(event for event in store.record['completion_events']
+                           if event.get('source') == 'GITHUB')
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(result['acked'], [merge_event['event_id']])
+        self.assertEqual(merge_event['state'], 'ACKED')
+
     def test_advance_ack_failure_adds_code_without_changing_step(self):
         event = {'event_id': 'a' * 32, 'source': 'REVIEWER',
                  'source_sha': 'b' * 40, 'state': 'PM_CONSUMED'}

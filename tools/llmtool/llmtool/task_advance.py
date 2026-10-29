@@ -181,7 +181,13 @@ def _ack_consumed_events(result, record, store, result_head):
     acked = []
     skipped = False
     closed = result.get('step') == 'CLOSED'
-    events = record.get('completion_events', [])
+    try:
+        latest_record = store.get(record.get('task_id'))
+        if type(latest_record) is not dict:
+            latest_record = record
+    except Exception:
+        latest_record = record
+    events = latest_record.get('completion_events', [])
     if type(events) is list:
         for event in events:
             if type(event) is not dict or event.get('state') == 'ACKED':
@@ -193,7 +199,7 @@ def _ack_consumed_events(result, record, store, result_head):
                 type(result_head) is str and source_sha != result_head)
             if not eligible:
                 continue
-            session_id = record.get('pm_session_id')
+            session_id = latest_record.get('pm_session_id')
             if type(session_id) is not str:
                 skipped = True
                 continue
