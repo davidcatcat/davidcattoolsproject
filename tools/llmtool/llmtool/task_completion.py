@@ -1700,7 +1700,8 @@ def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha)
 
 
 def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
-                             workflow_name, check_name, runner_names):
+                             workflow_name, check_name, runner_names,
+                             pr_merged=False, pr_head_ref=None):
     workflow = _github_get('actions/workflows/' + workflow_path.rsplit('/', 1)[-1])
     if (type(workflow) is not dict or type(workflow.get('id')) is not int or
             workflow['id'] <= 0 or workflow.get('path') != workflow_path or
@@ -1719,12 +1720,19 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
         if type(run) is not dict:
             _stop('CI_WORKFLOW_RUNS_INVALID')
         pull_requests = run.get('pull_requests')
+        matching_pr = (type(pull_requests) is list and
+                       any(type(item) is dict and item.get('number') == pr_number and
+                           type(item.get('head')) is dict and
+                           item['head'].get('sha') == result_sha for item in pull_requests))
+        merged_empty_prs_match = (
+            pr_merged is True and type(pull_requests) is list and not pull_requests and
+            run.get('head_branch') == pr_head_ref and
+            type(run.get('head_repository')) is dict and
+            run['head_repository'].get('full_name') ==
+            'davidcatcat/davidcattoolsproject')
         if (run.get('workflow_id') != workflow_id or run.get('path') != workflow_path or
                 run.get('event') != 'pull_request' or run.get('head_sha') != result_sha or
-                type(pull_requests) is not list or
-                not any(type(item) is dict and item.get('number') == pr_number and
-                        type(item.get('head')) is dict and
-                        item['head'].get('sha') == result_sha for item in pull_requests)):
+                not (matching_pr or merged_empty_prs_match)):
             _stop('CI_WORKFLOW_RUN_MISMATCH')
         if (type(run.get('id')) is not int or run['id'] <= 0 or
                 type(run.get('run_number')) is not int or run['run_number'] <= 0 or
@@ -1791,7 +1799,8 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             'check_ids': check_ids}
 
 
-def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None):
+def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
+                         pr_merged=False, pr_head_ref=None):
     docs_only = _docs_only_ci(changed_paths)
     if docs_only:
         mac = {'workflow_id': None, 'run_id': None, 'run_attempt': None,
@@ -1801,12 +1810,14 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None):
         mac = _collect_one_ci_workflow(
             pr_number=pr_number, result_sha=result_sha, workflow_path=_CI_WORKFLOW_PATH,
             workflow_name=_CI_WORKFLOW_NAME, check_name=_MAC_CHECK,
-            runner_names=_CI_RUNNER_NAMES)
+            runner_names=_CI_RUNNER_NAMES, pr_merged=pr_merged,
+            pr_head_ref=pr_head_ref)
         linux_check = _LINUX_CHECK
     linux = _collect_one_ci_workflow(
         pr_number=pr_number, result_sha=result_sha, workflow_path=_LINUX_CI_WORKFLOW_PATH,
         workflow_name=_LINUX_CI_WORKFLOW_NAME, check_name=linux_check,
-        runner_names=_LINUX_CI_RUNNER_NAMES)
+        runner_names=_LINUX_CI_RUNNER_NAMES, pr_merged=pr_merged,
+        pr_head_ref=pr_head_ref)
     successful = set(mac['successful_checks']) | set(linux['successful_checks'])
     check_ids = dict(mac['check_ids'])
     check_ids.update(linux['check_ids'])
@@ -1833,7 +1844,14 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             type(contract_digest) is not str or _HEX64.fullmatch(contract_digest) is None):
         _stop('PR_NUMBER_INVALID')
     pr = _github_get(f'pulls/{pr_number}')
-    if (type(pr) is not dict or pr.get('state') != 'open' or pr.get('merged') is not False or
+    is_open_pr = (type(pr) is dict and pr.get('state') == 'open' and
+                  pr.get('merged') is False)
+    is_merged_pr = (
+        type(pr) is dict and pr.get('state') == 'closed' and pr.get('merged') is True and
+        type(pr.get('merge_commit_sha')) is str and
+        _HEX40.fullmatch(pr['merge_commit_sha']) is not None and
+        type(pr.get('base')) is dict and pr['base'].get('ref') == 'main')
+    if (type(pr) is not dict or not (is_open_pr or is_merged_pr) or
             type(pr.get('head')) is not dict or pr['head'].get('sha') != result_sha or
             type(pr.get('base')) is not dict or
             type(pr['base'].get('repo')) is not dict or
@@ -2055,12 +2073,15 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                       bool(formal_marker.search(review_body)) and review_binding_verified and
                       not reviewer_gates.intersection(missing))
     ci = _collect_ci_evidence(pr_number=pr_number, result_sha=result_sha,
-                              changed_paths=changed_paths)
+                              changed_paths=changed_paths, pr_merged=is_merged_pr,
+                              pr_head_ref=pr['head'].get('ref'))
     successful = set(ci['successful_checks'])
     required_checks = set(ci['required_checks'])
     if not required_checks.issubset(successful):
         missing.append('REQUIRED_CI_MISSING')
     return {'evidence': {'pr_number': pr_number, 'head_sha': result_sha,
+            'pr_state': 'MERGED' if is_merged_pr else 'OPEN',
+            'merge_commit_sha': pr.get('merge_commit_sha') if is_merged_pr else None,
             'formal_review_state': 'ACCEPTED' if reviewer_bound else 'UNVERIFIED',
             'review_actor': None if review is None else review['user']['login'].casefold(),
             'reviewer_github_login': None if reviewer.github_login is None else reviewer.github_login.casefold(),

@@ -1013,6 +1013,106 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['evidence']['review_session_identity'], 'UNKNOWN')
         self.assertIn('REVIEWER_NATIVE_SESSION_UNVERIFIED', result['missing_gates'])
 
+    def test_merged_pr_collects_empty_pull_request_ci_runs(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer-merged'
+        self._git('worktree', 'add', '-b', 'review/merged-branch',
+                  str(reviewer_root), result_sha)
+        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+            reviewer_root, 'review/merged-branch', result_sha, result_sha,
+            native_session_id='native-reviewer', github_login='reviewer-user',
+            state='REVIEW_PENDING')
+        pr = {'state': 'closed', 'merged': True, 'head': {
+                  'sha': result_sha, 'ref': 'feature/merged'},
+              'base': {'ref': 'main', 'repo': {
+                  'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'merge_commit_sha': 'b' * 40, 'user': {'login': 'author-user'}}
+        reviews = [{'state': 'APPROVED', 'commit_id': result_sha,
+                    'user': {'login': 'reviewer-user'},
+                    'submitted_at': '2026-10-28T10:00:00Z',
+                    'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                            self._review_binding(head=result_sha)}]
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        api = self._github_response_sequence(result_sha, pr, reviews, checks)
+        for run_index in (4, 8):
+            run = api[run_index]['workflow_runs'][0]
+            run['pull_requests'] = []
+            run['head_branch'] = 'feature/merged'
+            run['head_repository'] = {
+                'full_name': 'davidcatcat/davidcattoolsproject'}
+        with patch('llmtool.task_completion._github_get', side_effect=api):
+            evidence = task_completion.collect_github_evidence(
+                **self._github_kwargs(result_sha))
+        self.assertEqual(evidence['missing_gates'], [])
+        self.assertEqual(evidence['evidence']['pr_state'], 'MERGED')
+        self.assertEqual(evidence['evidence']['merge_commit_sha'], 'b' * 40)
+
+    def test_merged_pr_with_different_head_sha_stops_pr_head_mismatch(self):
+        result_sha = 'a' * 40
+        pr = {'state': 'closed', 'merged': True,
+              'head': {'sha': 'c' * 40, 'ref': 'feature/merged'},
+              'base': {'ref': 'main', 'repo': {
+                  'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'merge_commit_sha': 'b' * 40, 'user': {'login': 'author-user'}}
+        with patch('llmtool.task_completion._github_get', return_value=pr):
+            with self.assertRaises(LLMToolError) as raised:
+                task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
+        self.assertEqual(raised.exception.completion_code, 'PR_HEAD_MISMATCH')
+
+    def test_closed_unmerged_pr_stops_pr_head_mismatch(self):
+        result_sha = 'a' * 40
+        pr = {'state': 'closed', 'merged': False,
+              'head': {'sha': result_sha, 'ref': 'feature/closed'},
+              'base': {'ref': 'main', 'repo': {
+                  'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'merge_commit_sha': None, 'user': {'login': 'author-user'}}
+        with patch('llmtool.task_completion._github_get', return_value=pr):
+            with self.assertRaises(LLMToolError) as raised:
+                task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
+        self.assertEqual(raised.exception.completion_code, 'PR_HEAD_MISMATCH')
+
+    def test_merged_empty_pull_request_run_requires_matching_head_branch(self):
+        workflow_path = '.github/workflows/llmtool-mac-ci.yml'
+        workflow = {'id': 42, 'path': workflow_path,
+                    'name': 'llmtool Mac CI', 'state': 'active'}
+        run = {'workflow_id': 42, 'path': workflow_path,
+               'event': 'pull_request', 'head_sha': 'a' * 40,
+               'head_branch': 'different-branch',
+               'head_repository': {
+                   'full_name': 'davidcatcat/davidcattoolsproject'},
+               'pull_requests': []}
+        runs = {'total_count': 1, 'workflow_runs': [run]}
+        with patch('llmtool.task_completion._github_get', side_effect=[workflow, runs]):
+            with self.assertRaises(LLMToolError) as raised:
+                task_completion._collect_one_ci_workflow(
+                    pr_number=10, result_sha='a' * 40, workflow_path=workflow_path,
+                    workflow_name='llmtool Mac CI', check_name='check (macOS 3.13)',
+                    runner_names=task_completion._CI_RUNNER_NAMES,
+                    pr_merged=True, pr_head_ref='feature/merged')
+        self.assertEqual(raised.exception.completion_code, 'CI_WORKFLOW_RUN_MISMATCH')
+
+    def test_open_pr_empty_pull_request_run_still_fails_ci_workflow_run_mismatch(self):
+        workflow_path = '.github/workflows/llmtool-mac-ci.yml'
+        workflow = {'id': 42, 'path': workflow_path,
+                    'name': 'llmtool Mac CI', 'state': 'active'}
+        run = {'workflow_id': 42, 'path': workflow_path,
+               'event': 'pull_request', 'head_sha': 'a' * 40,
+               'head_branch': 'feature/open',
+               'head_repository': {
+                   'full_name': 'davidcatcat/davidcattoolsproject'},
+               'pull_requests': []}
+        runs = {'total_count': 1, 'workflow_runs': [run]}
+        with patch('llmtool.task_completion._github_get', side_effect=[workflow, runs]):
+            with self.assertRaises(LLMToolError) as raised:
+                task_completion._collect_one_ci_workflow(
+                    pr_number=10, result_sha='a' * 40, workflow_path=workflow_path,
+                    workflow_name='llmtool Mac CI', check_name='check (macOS 3.13)',
+                    runner_names=task_completion._CI_RUNNER_NAMES,
+                    pr_merged=False, pr_head_ref='feature/open')
+        self.assertEqual(raised.exception.completion_code, 'CI_WORKFLOW_RUN_MISMATCH')
+
     def test_pr_head_mismatch_fails_and_ci_head_mismatch_is_missing(self):
         result_sha, _ = self._make_result()
         pr = {'state': 'open', 'merged': False,
