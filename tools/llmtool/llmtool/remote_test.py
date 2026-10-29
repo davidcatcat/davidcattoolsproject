@@ -117,6 +117,8 @@ def final_line(lines):
                  if line.endswith("OK") or line.startswith("FAILED (") or
                  re.fullmatch(r"OK(?: \((?:skipped=\d+|expected failures=\d+)(?:, (?:skipped=\d+|expected failures=\d+))*\))?", line) or
                  line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
+def passing_final(line):
+    return line.endswith("OK") or re.fullmatch(r"OK \(skipped=[1-9][0-9]{0,5}\)", line) is not None
 try: lock_fd=open_lock(os.path.expanduser("~")+"/.llmtool-remote-test.lock")
 except BlockingIOError: sys.exit(75)
 cleanup_source="""import os,re,shutil,stat,sys,time
@@ -181,7 +183,7 @@ try:
                 ran+=int(re.search(rb"Ran (\d+) tests?",test_output).group(1)) if re.search(rb"Ran (\d+) tests?",test_output) else 0
                 if test.returncode==124:
                     result="TIMEOUT"; code=124; failures.append(mod); break
-                if test.returncode or not final.endswith("OK"):
+                if test.returncode or not passing_final(final):
                     result="FAIL"; code=test.returncode or 1
                     failures.append(mod); failed_outputs.extend((test.stdout,test.stderr or b""))
             if result!="TIMEOUT" and code==1 and len(failures)==0 and ran>0: result="PASS"; code=0
@@ -328,7 +330,9 @@ def _validate_remote_receipt(raw, *, sha, modules):
             type(receipt['identity']['uid']) is not int or receipt['identity']['uid'] == 0 or
             receipt['fetch_head'] != sha or receipt['ran_total'] <= 0 or receipt['failures'] or
             receipt['tree'] is None or len(receipt['final']) < len(modules) or
-            any(not line.endswith('OK') for line in receipt['final'])):
+            any(not (line.endswith('OK') or
+                     re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
+                for line in receipt['final'])):
         return None
     if receipt['result'] in ('FAIL', 'TIMEOUT', 'SHA_MISMATCH') and receipt['exit_code'] == 0:
         return None
