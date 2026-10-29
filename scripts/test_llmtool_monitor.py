@@ -2315,9 +2315,11 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "assistant", "timestamp": stamp(5),
              "message": {"content": "new turn"}}], age=5)
 
-        rows = {row.sid: row for row in self.rows() if row.name == "claude"}
-        self.assertEqual((rows["stale"].state, rows["stale"].age), (mon.IDLE, 77.0))
-        self.assertEqual((rows["fresh"].state, rows["fresh"].age), (mon.WORKING, 5.0))
+        rows = {row.key: row for row in self.rows() if row.name == "claude"}
+        stale = rows["claude:stale.jsonl"]
+        fresh = rows["claude:fresh.jsonl"]
+        self.assertEqual((stale.state, stale.age), (mon.IDLE, 77.0))
+        self.assertEqual((fresh.state, fresh.age), (mon.WORKING, 5.0))
 
     def test_claude_cli_registry_status_beats_the_session_file_guess(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")   # the D6 record names the role
