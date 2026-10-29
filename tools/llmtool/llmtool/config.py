@@ -154,7 +154,10 @@ def repository_config(home=None):
 
 
 def _apply_user(config, fragment):
-    _fields(fragment, {"providers", "generation", "active_provider", "diagnostics", "codex_direct", "repository"}, "user config")
+    _fields(fragment, {"providers", "generation", "active_provider", "diagnostics", "codex_direct",
+                       "repository", "pm_runtime"}, "user config")
+    if "pm_runtime" in fragment:
+        _validate_pm_runtime(fragment["pm_runtime"])
     if "repository" in fragment:
         _validate_repository(fragment["repository"])
     if "diagnostics" in fragment:
@@ -243,6 +246,20 @@ def validate_codex_direct_timeout(value):
     if type(value) is not int or not 1 <= value <= CODEX_DIRECT_MAX_TIMEOUT_SECONDS:
         raise LLMToolError("codex_direct.timeout_seconds must be an integer from 1 through 1800")
     return value
+
+
+def validate_pm_claude_config_dir(value):
+    """Validate the trusted Claude Code account directory for the PM process."""
+    if (type(value) is not str or not 1 <= len(value) <= 1024 or not os.path.isabs(value) or
+            any(ord(char) < 0x20 or ord(char) == 0x7f for char in value)):
+        raise LLMToolError("pm_runtime.claude_config_dir must be an absolute path")
+    return value
+
+
+def _validate_pm_runtime(fragment):
+    _fields(fragment, {"claude_config_dir"}, "user pm_runtime")
+    if "claude_config_dir" in fragment:
+        validate_pm_claude_config_dir(fragment["claude_config_dir"])
 
 
 def _validate_provider(provider, profile_name):
@@ -362,6 +379,19 @@ def codex_direct_timeout(cwd=None, home=None):
     _fields(direct_config, {"timeout_seconds"}, "user codex_direct")
     return validate_codex_direct_timeout(
         direct_config.get("timeout_seconds", CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS))
+
+
+def pm_claude_config_dir(home=None):
+    """Return the user-configured PM Claude account directory, or None when unset.
+
+    Read from trusted user config only; project config cannot set it.
+    """
+    path = user_config_path(home)
+    user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
+    fragment = user.get("pm_runtime", {})
+    _validate_pm_runtime(fragment)
+    value = fragment.get("claude_config_dir")
+    return None if value is None else validate_pm_claude_config_dir(value)
 
 
 def inspect_config(*, environ=None, cwd=None, home=None):

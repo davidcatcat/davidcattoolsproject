@@ -51,6 +51,8 @@ _RECOVERY = {
                           "unaffected",
     "PM_HISTORY_WRITE_FAILED": "pm_runtime could not save the turn history; check the llmtool state "
                                "directory",
+    "PM_CONFIG_INVALID": "pm_runtime.claude_config_dir in ~/.config/llmtool/config.yaml must be "
+                         "an absolute path; fix it, then connect again",
     "PM_STATE_INVALID": "the llmtool PM runtime state directory must be a plain user directory",
 }
 
@@ -100,6 +102,11 @@ def binding_text(binding):
         return "NOT dedicated (no pm_runtime binding)"
     return ("dedicated (pm_runtime binding created " + safe_text(binding.get("created_at"))
             + ")" if binding.get("dedicated") is True else "NOT dedicated")
+
+
+def account_text(runtime):
+    """The Claude account directory the connected PM runs under."""
+    return "Claude account " + safe_text(getattr(runtime, "claude_config_dir", None))
 
 
 def event_ids(event):
