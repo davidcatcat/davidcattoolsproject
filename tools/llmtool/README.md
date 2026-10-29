@@ -708,6 +708,16 @@ Provider uses one ephemeral CLI call and has no native resumable Session ID;
 `task show` retrieves the recorded Task and response but does not resume a model
 conversation, dispatch a Developer, run tests, or continue work in the background.
 
+The dedicated PM (`/pm new`, `/pm connect`) runs `claude` with the inherited environment
+unless the trusted user config `~/.config/llmtool/config.yaml` sets
+`pm_runtime: {claude_config_dir: /Users/me/.claude-account2}` (an absolute path; project
+`.llmtool.yaml` cannot set it). pm_runtime then starts the PM with that directory as
+`CLAUDE_CONFIG_DIR` and looks up the session transcript there; an invalid value refuses to
+connect with `PM_CONFIG_INVALID`. `/pm connect` and `/pm` show the Claude account
+directory in use. The TUI PM runs in Claude Code auto permission mode
+(`--permission-mode auto`, Owner #304 c6494914495); the stop-loss is to revert to
+chat-only after any action outside the Owner's authorization.
+
 `task record-pm --stdin-json` records a decision from the active PM runtime without invoking a
 provider. Its strict JSON input contains `request` and a structured `response`; it accepts only
 LOW-risk `opencode` or `codex` Developer assignments. The record identifies its runtime as

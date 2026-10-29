@@ -1628,6 +1628,7 @@ class ChatTUI:
                 self.append("PM: claude-code session " + self.pm_target[0] + " (cwd "
                             + chat_tui_pm.safe_text(str(self.pm_target[1])) + "), "
                             + chat_tui_pm.binding_text(self.pm_binding)
+                            + ", " + chat_tui_pm.account_text(self.pm_runtime)
                             + ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
                             + ("; PM mode" if self.pm_mode else "; not in PM mode"))
             return
@@ -1878,6 +1879,7 @@ class ChatTUI:
                     + self.pm_target[0] + " (claude-code, cwd "
                     + chat_tui_pm.safe_text(str(self.pm_target[1]))
                     + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_binding)
+                    + "; " + chat_tui_pm.account_text(self.pm_runtime)
                     + ". pm_runtime checked at connect time that the session did not look "
                     "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
                     "connection. Chat replies are never the PM.")

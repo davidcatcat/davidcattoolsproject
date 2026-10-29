@@ -161,7 +161,7 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(argv, ['claude', '-p', '--input-format', 'stream-json',
                                 '--output-format', 'stream-json', '--verbose',
                                 '--include-partial-messages', '--session-id', SESSION,
-                                '--permission-prompts', 'none',
+                                '--permission-prompts', 'none', '--permission-mode', 'auto',
                                 '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
                                 '--append-system-prompt', pm_runtime.PM_SESSION_INSTRUCTION])
         self.assertEqual(cwd, self.cwd)
@@ -179,7 +179,7 @@ class PMRuntimeTests(unittest.TestCase):
         # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated
         # the prompt cache, so the PM process runs with a fixed, empty MCP set (claude CLI
         # 2.1.312 --strict-mcp-config + --mcp-config); #304: the PM answers without a
-        # preamble when it uses no tool (--append-system-prompt). Permission policy unchanged.
+        # preamble when it uses no tool (--append-system-prompt). Permission prompts stay off.
         runtime = self.runtime(FakeProcess())
         runtime.open()
         runtime.close()
@@ -193,10 +193,54 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertIn('without calling any tool', instruction)
         self.assertEqual(argv[argv.index('--permission-prompts') + 1], 'none')
         self.assertNotIn('--dangerously-skip-permissions', argv)
-        self.assertNotIn('--permission-mode', argv)
+        # Owner #304 c6494914495 (A): the TUI PM runs in Claude Code auto permission mode.
+        self.assertEqual(argv.count('--permission-mode'), 1)
+        self.assertEqual(argv[argv.index('--permission-mode') + 1], 'auto')
+        self.assertEqual(argv.index('--permission-mode'), argv.index('--permission-prompts') + 2)
         self.assertEqual(argv.count('--strict-mcp-config'), 1)
         self.assertEqual(argv.count('--append-system-prompt'), 1)
         self.assertEqual(argv.index('--permission-prompts'), argv.index(SESSION) + 1)
+
+    def write_user_config(self, text):
+        path = Path(self.temp.name) / '.config/llmtool/config.yaml'
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding='utf-8')
+
+    def test_configured_claude_account_is_used_for_child_and_transcript(self):
+        # Owner 10-27 "claude2 only": the PM runs on the configured account, even
+        # when the inherited environment names another one.
+        account = os.path.join(self.temp.name, 'claude-account2')
+        self.write_user_config('pm_runtime:\n  claude_config_dir: ' + account + '\n')
+        runtime = self.runtime()
+        runtime.environ['CLAUDE_CONFIG_DIR'] = os.path.join(self.temp.name, 'default-claude')
+        with patch.object(pm_runtime.active_pm_inbox, 'claude_session_present',
+                          return_value=False) as present:
+            runtime.open()
+        self.assertEqual(present.call_args.args[2]['CLAUDE_CONFIG_DIR'], account)
+        argv, _, env = self.calls[0]
+        self.assertEqual(env['CLAUDE_CONFIG_DIR'], account)
+        self.assertEqual(env['HOME'], self.temp.name)
+        self.assertEqual(runtime.claude_config_dir, account)
+        self.assertEqual(argv[argv.index('--permission-prompts') + 1], 'none')
+
+    def test_unset_claude_account_keeps_inherited_environment(self):
+        runtime = self.runtime()
+        runtime.open()
+        _, _, env = self.calls[0]
+        self.assertEqual(env, {'HOME': self.temp.name})
+        self.assertEqual(runtime.claude_config_dir, os.path.join(self.temp.name, '.claude'))
+
+    def test_invalid_claude_account_config_starts_nothing(self):
+        for text in ('pm_runtime:\n  claude_config_dir: relative/claude\n',
+                     'pm_runtime:\n  claude_config_dir: 5\n',
+                     'pm_runtime:\n  other: x\n'):
+            with self.subTest(text=text):
+                self.write_user_config(text)
+                runtime = self.runtime()
+                with self.assertRaises(LLMToolError) as raised:
+                    runtime.open()
+                self.assertEqual(raised.exception.pm_runtime_code, 'PM_CONFIG_INVALID')
+                self.assertEqual(self.calls, [])
 
     def test_busy_lock_does_not_start_second_process(self):
         first, second = self.runtime(), self.runtime()
