@@ -34,7 +34,6 @@ Pure Python apart from ``make_pane`` (the prompt_toolkit control), so it is unit
 without a terminal.
 """
 
-import array
 import bisect
 import collections
 import os
@@ -177,68 +176,40 @@ def render_cache_chars():
     return _rendered_chars[0]
 
 
-# Copy maps displayed reply text back to its source (Codex v2 P2): characters drawn by
-# the layout (borders, glyphs, indents) are never matched; whitespace matches only at
-# the source cursor or after markup; anything else is looked for a short way ahead.
-DECORATION = frozenset("─│┌┐└┘├┤┬┴┼•◦▪▍↪")
-MARKUP = frozenset("*_`~#>|-+[]()!:=")
-EMPHASIS = frozenset("*_`~")
-MATCH_WINDOW = 256
-
-
-def source_map(shown, source):
-    """(lo, hi): for each displayed character, the source offsets it starts and ends at
-    (lo == hi for a character the layout added)."""
-    lo, hi = array.array("q"), array.array("q")
-    position, size = 0, len(source)
-    for char in shown:
-        found = -1
-        if char.isspace():
-            probe = position
-            while probe < size and probe - position < 8 and source[probe] in MARKUP:
-                probe += 1
-            if probe < size and source[probe] == char:
-                found = probe
-        elif char not in DECORATION:
-            found = source.find(char, position, position + MATCH_WINDOW)
-        if found < 0:
-            lo.append(position)
-            hi.append(position)
-        else:
-            lo.append(found)
-            position = found + 1
-            hi.append(position)
-    return lo, hi
-
-
 class SourceRegion:
-    """Pane text ``[start, end)`` that shows ``source`` rendered; copies go back to it."""
+    """Pane text ``[start, end)`` that shows ``source`` rendered at ``width`` with each row
+    prefixed by ``indent``; copies go back to the source (Codex v2/v3 P2)."""
 
-    __slots__ = ("start", "end", "source", "_map")
+    __slots__ = ("start", "end", "source", "width", "indent", "_map")
 
-    def __init__(self, start, end, source):
-        self.start, self.end, self.source, self._map = start, end, source, None
+    def __init__(self, start, end, source, width=0, indent=""):
+        self.start, self.end, self.source = start, end, source
+        self.width, self.indent, self._map = width, indent, None
 
     def moved(self, delta):
-        region = SourceRegion(self.start + delta, self.end + delta, self.source)
+        region = SourceRegion(self.start + delta, self.end + delta, self.source, self.width,
+                              self.indent)
         region._map = self._map
         return region
 
     def copy(self, shown, low, high):
-        """Source text for displayed ``[low, high)`` (offsets in the pane)."""
+        """Source text for displayed ``[low, high)`` (offsets in the pane): the whole
+        source for a whole selection, else the source span from the first to the last
+        selected character that came from the source (see chat_tui_copymap)."""
         if low <= self.start and high >= self.end:
             return self.source
-        if self._map is None:
-            self._map = source_map(shown, self.source)
-        lo, hi = self._map
         first, last = max(low, self.start) - self.start, min(high, self.end) - self.start
-        begin, finish = lo[first], hi[last - 1]
-        source = self.source
-        while begin > 0 and source[begin - 1] in EMPHASIS:      # keep emphasis markers
-            begin -= 1
-        while finish < len(source) and source[finish] in EMPHASIS:
-            finish += 1
-        return source[begin:max(begin, finish)]
+        if self._map is None:
+            from . import chat_tui_copymap
+            display, offsets = chat_tui_copymap.display_map(
+                self.source, self.width, FLOW_WIDTH, _markdown_blocks, _tui_markdown, self.indent)
+            self._map = offsets if display == shown else False
+        if self._map is False:   # never expected: the pane shows other text than the map
+            return shown[first:last]
+        mapped = [offset for offset in self._map[first:last] if offset >= 0]
+        if not mapped:
+            return ""
+        return self.source[min(mapped):max(mapped) + 1]
 
 
 def _markdown_blocks(text):
@@ -508,12 +479,13 @@ class ConversationView:
 
     def set_tail(self, start, segments, sources=()):
         """Replace the text from ``start`` on with [(text, token)] segments; ``sources``
-        are (begin, end, source) regions relative to ``start`` that copy as ``source``."""
+        are (begin, end, source, width, indent) regions relative to ``start`` that copy
+        as ``source`` (``width``/``indent``: how the source was rendered)."""
         self.set_text(self.text[:start] + "".join(part for part, _token in segments))
         self._clip_spans(start)
         self._add_segments(start, segments)
-        self.sources.extend(SourceRegion(start + low, start + high, source)
-                            for low, high, source in sources if high > low)
+        self.sources.extend(SourceRegion(start + low, start + high, *region)
+                            for low, high, *region in sources if high > low)
 
     def replace(self, start, end, segments):
         """Replace ``text[start:end]`` with styled segments; later spans, the reading

@@ -1015,8 +1015,8 @@ class ChatTUI:
             segments = [(terminal_safe_text(part), token) for part, token in segments]
         separator = "\n\n" if old else ""
         self.view.set_tail(len(old), [(separator, "text")] + segments,
-                           [(low + len(separator), high + len(separator), source)
-                            for low, high, source in sources])
+                           [(low + len(separator), high + len(separator), *rest)
+                            for low, high, *rest in sources])
         if block is not None:
             self._stream_attach(block)
         if show_working:
@@ -1071,7 +1071,8 @@ class ChatTUI:
     def _body(self, text, indent):
         """(segments, sources) of a reply body: copies of it give back ``text``."""
         segments = self._body_segments(text, indent)
-        return segments, [(0, sum(len(part) for part, _token in segments), text)]
+        return segments, [(0, sum(len(part) for part, _token in segments), text,
+                           self._render_width() - len(indent), indent)]
 
     def _pm_open_block(self):
         """Open the PM text block: under the 「PM」 label the first time in a turn."""
@@ -1795,8 +1796,8 @@ class ChatTUI:
             if not streamed:
                 body, sources = self._body(terminal_safe_text(text or ""), "")
                 self.append("assistant:\n", segments=[("assistant:", "role.pm"), ("\n", "text")] + body,
-                            sources=[(low + len("assistant:\n"), high + len("assistant:\n"), source)
-                                     for low, high, source in sources])
+                            sources=[(low + len("assistant:\n"), high + len("assistant:\n"), *rest)
+                                     for low, high, *rest in sources])
             if self.session.last_interrupted:
                 self.append("llmtool: reply interrupted"
                             + (" after the text above; it stays in history as shown"
@@ -2272,7 +2273,7 @@ class ChatTUI:
         follows only while it is at the bottom.
         """
         self.view.set_tail(start - 1, [("\n", "text")] + segments,
-                           [(low + 1, high + 1, source) for low, high, source in sources])
+                           [(low + 1, high + 1, *rest) for low, high, *rest in sources])
         self.app.invalidate()
 
     def _pm_finalize(self):

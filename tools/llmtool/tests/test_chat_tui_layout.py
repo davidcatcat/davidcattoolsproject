@@ -372,8 +372,8 @@ class CopySourceTests(Base):
 
     def test_bold_whole_and_partial(self):
         self.assertEqual(self.select("先看", "吧"), "先看 **檔案** 吧")
-        self.assertEqual(self.select("檔案"), "**檔案**")
-        self.assertEqual(self.select("看 檔"), "看 **檔")
+        self.assertEqual(self.select("檔案"), "檔案")            # the characters selected
+        self.assertEqual(self.select("看 檔"), "看 **檔")        # their source span
 
     def test_table_whole_and_partial(self):
         table = "| 名稱 | 數量 |\n|---|---|\n| 蘋果 | 12 |\n| 香蕉 | 345 |"
@@ -390,7 +390,103 @@ class CopySourceTests(Base):
         text = self.ui.view.text
         start = text.rindex("┌─ python")
         end = text.index("\n", text.index("└", start))   # through the bottom border
-        self.assertEqual(self.ui.view.copy_text(start, end), "```python\nx = 1\ny = compute(x)\n```")
+        # borders are UNMAPPED; the language label and the code lines come from the source
+        self.assertEqual(self.ui.view.copy_text(start, end), "python\nx = 1\ny = compute(x)\n")
+
+    def body(self, source, width=40):
+        """Render ``source`` as a PM body at ``width`` columns; (view, region start)."""
+        ui = self.ui
+        ui.view.width = width + len(chat_tui.BODY_INDENT)
+        body, sources = ui._body(source, chat_tui.BODY_INDENT)
+        ui.append("x", segments=body, sources=sources)
+        return ui.view, len(ui.view.text) - sum(len(part) for part, _token in body)
+
+    def copy_at(self, view, start, needle, nth=0):
+        index = start - 1
+        for _ in range(nth + 1):
+            index = view.text.index(needle, index + 1)
+        return view.copy_text(index, index + len(needle))
+
+    def test_leading_source_spaces_are_not_the_added_indent(self):
+        view, start = self.body("  兩個前導空白")
+        self.assertEqual(view.text[start:], "    兩個前導空白")       # 2 added + 2 source
+        self.assertEqual(view.copy_text(start, start + 2), "")          # the added indent only
+        self.assertEqual(view.copy_text(start + 2, start + 4), "  ")    # the source spaces
+        self.assertEqual(view.copy_text(start, start + 5), "  兩")
+        self.assertEqual(view.copy_text(start, len(view.text)), "  兩個前導空白")
+
+    def test_literal_bullets_in_the_source_keep_their_offsets(self):
+        view, start = self.body("• literal •\n- item")
+        self.assertEqual(self.copy_at(view, start, "•"), "•")
+        self.assertEqual(self.copy_at(view, start, "•", 1), "•")
+        self.assertEqual(self.copy_at(view, start, "literal •"), "literal •")
+        self.assertEqual(self.copy_at(view, start, "•", 2), "")         # the glyph for "-"
+        self.assertEqual(self.copy_at(view, start, "• item"), "item")
+
+    def test_literal_box_characters_inside_a_code_block(self):
+        view, start = self.body("```\na │ b ─ c\n```")
+        line = view.text.index("a │ b ─ c", start)
+        self.assertEqual(view.copy_text(line, line + 9), "a │ b ─ c")
+        self.assertEqual(self.copy_at(view, start, "│ b ─"), "│ b ─")
+        gutter = view.text.rindex("│ ", start, line)
+        self.assertEqual(view.copy_text(gutter, gutter + 3), "a")      # the added gutter is not
+        self.assertEqual(self.copy_at(view, start, "┌──"), "")
+
+    def test_mixed_cjk_lines_that_wrap(self):
+        cell = "很長的中文欄位內容 mixed 英文 words"
+        view, start = self.body("| %s | b |\n|---|---|\n| 1 | 2 |" % cell, width=24)
+        rows = [row for row in view.text[start:].split("\n") if "│" in row and "很" in row]
+        self.assertGreater(len(rows), 0)
+        table_start = view.text.index("┌", start)
+        table_end = view.text.index("┘", table_start)
+        copied = view.copy_text(table_start, table_end + 1)
+        self.assertTrue(copied.startswith(cell[:3]) and "2" in copied and "─" not in copied)
+        for piece in ("很長的", "mixed", "英文"):
+            self.assertEqual(self.copy_at(view, table_start, piece), piece)
+        code = "x = '中文很長很長很長很長很長很長很長很長很長很長' + y"
+        view, start = self.body("```py\n%s\n```" % code, width=20)
+        first = view.text.index("x = ", start)
+        last = view.text.rindex("y", first, view.text.index("└", first)) + 1
+        self.assertGreater(view.text[first:last].count("\n"), 0)       # hard-wrapped rows
+        self.assertEqual(view.copy_text(first, last), code)            # no "│↪" or breaks
+        prose = "中文混合 English 的一行，" * 12
+        view, start = self.body(prose, width=30)
+        view.layout(32, 20)                                            # soft-wrapped by the pane
+        self.assertGreater(len([r for r in view.rows if r[1] >= start]), 2)
+        self.assertEqual(view.copy_text(start + 2 + 5, start + 2 + 40), prose[5:40])
+
+    def test_every_mapped_character_is_its_source_character(self):
+        from llmtool import chat_tui_copymap as copymap
+        sources = [self.SOURCE, "  兩個前導空白", "• literal •", "```\na │ b ─ c\n```",
+                   "- a [link](http://x.y) and `code` \\* esc\n1. one\n> quote **b**\n# Head ##"
+                   "\n---\ntab\there\n  - nested *it* https://e.com/x.",
+                   "| 很長的中文欄位內容需要換行 | b |\n|:-:|--:|\n| x \\| y | 中文中文中文中文中文 |",
+                   "| a | b | c |\n|---|---|---|\n| 1 | 2 | 3 | 4 |",
+                   "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n ctx",
+                   "```diff\n@@ -1 +1 @@\n-a\n+b\n```", "```\nunclosed\n"]
+        failed = []
+        original = copymap._Mapper.block
+
+        def block(mapper, first, count):
+            try:
+                return original(mapper, first, count)
+            except Exception as error:
+                failed.append(error)
+                raise
+        with patch.object(copymap._Mapper, "block", block):
+            for width in (8, 20, 40, 80):
+                for source in sources:
+                    with self.subTest(width=width, source=source[:20]):
+                        shown = "\n".join("  " + "".join(t for t, _ in line)
+                                          for line in chat_tui_view.render_markdown(source, width))
+                        display, offsets = copymap.display_map(
+                            source, width, chat_tui_view.FLOW_WIDTH, chat_tui_view._markdown_blocks,
+                            chat_tui_view._tui_markdown, "  ")
+                        self.assertEqual(display, shown)
+                        for index, offset in enumerate(offsets):
+                            if offset >= 0 and source[offset] != "\t":
+                                self.assertEqual(display[index], source[offset])
+        self.assertEqual(failed, [])                                   # no block fell back
 
     def test_soft_wrapped_hanging_indent_is_never_copied(self):
         ui = self.ui
