@@ -37,10 +37,10 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6506233668"
     },
     "agy": {
-      "dispatch": "OWNER_ASSIGNMENT_ONLY",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
       "decided_at": "2026-10-30",
-      "reason": "Owner option B (PM-selected AGY with claude-sonnet-5-5-medium, Codex review) is pending a code change: the AGY execution gate accepts only OWNER_ASSIGNMENT_MATCHED and AGENTS.md requires an exact Owner assignment; until that lands AGY stays per-Task Owner assignment only",
+      "reason": "Owner option B: PM-selected AGY Developer dispatch with claude-sonnet-5-5-medium, formally reviewed by Codex; validate auth, quota, session, D6 and scoped safety; no automatic retry or fallback",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6506062108",
       "owner_assignments": [
         {
