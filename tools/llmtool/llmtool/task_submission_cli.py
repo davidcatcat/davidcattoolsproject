@@ -784,10 +784,10 @@ def run_task_advance(args, *, store=None, **adapters):
 def run_task_claude_result(args, *, store=None, stdout=None):
     """Persist the one Claude Developer result against its original PM session."""
     store = TaskStore() if store is None else store
-    task = store.get(args.task_id)
     pm_session_id = getattr(args, 'pm_session', None)
     if type(pm_session_id) is not str or not pm_session_id:
         raise LLMToolError('original PM session is required')
+    pm_session_id = active_pm_inbox.pm_session_key(pm_session_id)
     result = store.record_claude_result(
         args.task_id, pm_session_id=pm_session_id,
         executor_task_id=args.executor_task, head_sha=args.head)

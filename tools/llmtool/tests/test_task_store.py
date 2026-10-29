@@ -277,9 +277,12 @@ class TaskStoreTests(unittest.TestCase):
         args.pm_session = 'pm-not-the-original'
         with self.assertRaises(LLMToolError):
             task_submission_cli_module.run_task_claude_result(args, store=self.store)
+        args.pm_session = 'not a session'
+        with self.assertRaises(LLMToolError):
+            task_submission_cli_module.run_task_claude_result(args, store=self.store)
         self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
                          'DEVELOPER_PENDING')
-        args.pm_session = task['pm_session_id']
+        args.pm_session = task['pm_session_id'][len('pm-'):]
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             self.assertEqual(task_submission_cli_module.run_task_claude_result(
                 args, store=self.store, stdout=io.StringIO()), 0)
