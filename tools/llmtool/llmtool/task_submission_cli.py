@@ -2728,13 +2728,19 @@ def run_task_codex_delegate(args, *, store):
         rejection, artifact = _codex_cumulative_diff_rejection(
             registration.root, task_source_sha, write_paths,
             validate_envelope=result.status == 'DONE')
+        # The cumulative-diff helper also returns an empty artifact for size
+        # and decoding failures; only its envelope rejection identifies a
+        # truly empty diff for final-message capture.
+        empty_diff = (result.status == 'DONE' and not artifact and
+                      rejection == 'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
         rejection = (ignored_rejection if ignored_rejection is not None else
                      rejection)
         if rejection is not None:
             output_rejection = rejection
             developer.update(execution=execution)
             saved = _persist_developer_output_rejection(
-                store, task['task_id'], developer, rejection, result.usage, artifact)
+                store, task['task_id'], developer, rejection, result.usage,
+                result.final_message if empty_diff else artifact)
             rejection_persisted = True
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',

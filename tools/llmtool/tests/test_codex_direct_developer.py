@@ -122,6 +122,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(result.usage, {'prompt_tokens': 13, 'completion_tokens': 8,
                                         'total_tokens': 21,
                                         'cached_prompt_tokens': 2})
+        self.assertEqual(result.final_message, json.dumps(self.final))
         self.assertTrue(self.invoked.exists())
         argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
                             pycache_prefix='/tmp/codex-direct-cache')
@@ -229,8 +230,13 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         raw = json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) + '\n'
         raw += json.dumps({'type': 'item.completed', 'item': {
             'type': 'agent_message', 'text': '```json\n' + json.dumps(final) + '\n```'}})
-        _, result, _ = direct._result_from_events(raw.encode('utf-8'))
+        parsed = direct._result_from_events(raw.encode('utf-8'))
+        _, result, _ = parsed
         self.assertEqual(result['tests'], ['test_one.py: passed; test_two.py: not run'])
+        self.assertEqual(set(result), set(final))
+        self.assertIs(type(result), dict)
+        self.assertEqual(parsed.final_message,
+                         '```json\n' + json.dumps(final) + '\n```')
 
     def test_signal_ended_run_without_final_message_is_interrupted(self):
         # Emit malformed partial output before the signal. The interruption
@@ -426,7 +432,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                           side_effect=[registration, bound_registration]), \
              patch.object(task_submission_cli.task_completion, '_git', return_value=b''), \
              patch.object(task_submission_cli, '_ignored_output_rejection', return_value=None), \
-             patch.object(task_submission_cli, '_developer_output_rejection', return_value=None), \
+             patch.object(task_submission_cli, '_codex_cumulative_diff_rejection',
+                          return_value=(None, 'diff --git a/src.py b/src.py\n')), \
              patch.object(task_submission_cli, 'run_task_direct_result_event', return_value=0):
             result = task_submission_cli.run_task_codex_delegate(args, store=store)
         self.assertEqual(result, 0)
