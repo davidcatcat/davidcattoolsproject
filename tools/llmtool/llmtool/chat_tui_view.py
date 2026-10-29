@@ -24,11 +24,18 @@ output were tied to the same caret. This module keeps the model in *screen rows*
   pane's selection. Warp also reports no release when the button goes up outside its
   grid, which is why a moving drag copies too (W52 F3).
 
+Styles (W56a): the pane text carries ``(start, end, token)`` spans; ``STYLE_TOKENS`` is the
+one table that maps a display token to a prompt_toolkit style, so a theme swaps that table.
+A ``rule`` line is drawn across the pane width and a ``meta.usage`` line right-aligned at
+draw time, so both stay right after a resize. ``render_markdown`` uses ``tui_markdown``
+when it is installed and otherwise shows the text unchanged.
+
 Pure Python apart from ``make_pane`` (the prompt_toolkit control), so it is unit-testable
 without a terminal.
 """
 
 import bisect
+import os
 import shutil
 import subprocess
 import sys
@@ -52,6 +59,78 @@ COPY_LIMIT_BYTES = 1024 * 1024   # Largest selection handed to the clipboard too
 COPY_SCAN_CHUNK = 65536          # Characters measured at a time while checking that limit.
 WORD_SCAN_LIMIT = COPY_LIMIT_BYTES  # Characters a double-click word may extend in either direction.
 _ZWJ = "\u200d"
+
+try:
+    from . import tui_markdown as _tui_markdown   # W56b+c renderer; optional until it lands
+except ImportError:
+    _tui_markdown = None
+
+# Every display token -> (colour style, monochrome style). The monochrome column uses
+# only bold/dim/reverse, for NO_COLOR or a terminal without colour. Unknown tokens are
+# drawn as "text". W56d swaps this table for themes.
+STYLE_TOKENS = {
+    "text": ("", ""),
+    "md.bold": ("bold", "bold"),
+    "md.italic": ("italic", "dim"),
+    "md.code": ("fg:ansicyan", "bold"),
+    "md.heading": ("bold fg:ansiblue", "bold"),
+    "md.bullet": ("fg:ansicyan", "bold"),
+    "md.link": ("fg:ansiblue underline", "bold"),
+    "md.quote": ("fg:ansibrightblack italic", "dim"),
+    "md.table.border": ("fg:ansibrightblack", "dim"),
+    "md.table.header": ("bold", "bold"),
+    "md.table.cell": ("", ""),
+    "md.codeblock.border": ("fg:ansibrightblack", "dim"),
+    "md.codeblock.lang": ("fg:ansibrightblack italic", "dim"),
+    "md.codeblock": ("fg:ansiyellow", ""),
+    "diff.add": ("fg:ansigreen", "bold"),
+    "diff.del": ("fg:ansired", "dim"),
+    "diff.hunk": ("fg:ansicyan", "bold"),
+    "diff.meta": ("bold", "bold"),
+    "diff.lineno": ("fg:ansibrightblack", "dim"),
+    "syntax.keyword": ("fg:ansimagenta", "bold"),
+    "syntax.string": ("fg:ansigreen", ""),
+    "syntax.comment": ("fg:ansibrightblack italic", "dim"),
+    "syntax.number": ("fg:ansiyellow", ""),
+    "syntax.builtin": ("fg:ansicyan", ""),
+    "role.owner": ("bold fg:ansigreen", "bold reverse"),
+    "role.pm": ("bold fg:ansicyan", "bold"),
+    "role.system": ("fg:ansiyellow", "dim"),
+    "tool.summary": ("fg:ansibrightblack", "dim"),
+    "tool.error": ("fg:ansired", "bold"),
+    "meta.usage": ("fg:ansibrightblack", "dim"),
+    "rule": ("fg:ansibrightblack", "dim"),
+    "status.bar": ("reverse", "reverse"),
+    "status.key": ("reverse bold", "reverse bold"),
+}
+RULE_CHAR = "─"
+FILL_TOKENS = ("rule",)                 # drawn across the pane: "──── label" fills the row
+RIGHT_TOKENS = ("meta.usage",)          # drawn flush right
+
+
+def colour_enabled(environ=None):
+    """False for NO_COLOR or a terminal without colour (dumb, vt*, *-mono)."""
+    environ = os.environ if environ is None else environ
+    if environ.get("NO_COLOR"):
+        return False
+    term = environ.get("TERM", "")
+    return bool(term) and term != "dumb" and not term.startswith("vt") and not term.endswith("-mono")
+
+
+def token_style(token, colour=True):
+    """prompt_toolkit style string of a display token (unknown tokens: ``text``)."""
+    styles = STYLE_TOKENS.get(token) or STYLE_TOKENS["text"]
+    return styles[0 if colour else 1]
+
+
+def render_markdown(text, width):
+    """Lines of (text, token) segments: ``tui_markdown.render`` when present, else plain lines."""
+    if _tui_markdown is not None:
+        try:
+            return _tui_markdown.render(text, max(1, width))
+        except Exception:
+            pass   # a renderer bug never hides the reply: show it unformatted
+    return [[(line, "text")] for line in text.split("\n")]
 
 
 def utf8_size(text, start, end, limit, measure=None):
@@ -202,6 +281,8 @@ class ConversationView:
         self.rows = [(0, 0, 0)]
         self._starts = [0]
         self._line_rows = [1]    # rows each logical line occupies (incremental re-wrap)
+        self.spans = []          # sorted, disjoint (start, end, token); gaps are "text"
+        self._span_starts = []
         self.width = 0
         self.height = 1
         self._dirty = True
@@ -230,9 +311,11 @@ class ConversationView:
 
     # -- text and layout -------------------------------------------------------------
     def set_text(self, text):
+        """Replace the text; spans after the first changed character are dropped."""
         if text == self.text:
             return
         changed = common_prefix_length(self.text, text)
+        self._clip_spans(changed)
         self._changed_from = changed if not self._dirty else min(self._changed_from, changed)
         self.text = text
         self._dirty = True
@@ -243,6 +326,72 @@ class ConversationView:
                 self.clear_selection()
         if not self.following:
             self.unseen = True
+
+    def _clip_spans(self, offset):
+        index = bisect.bisect_left(self._span_starts, offset)
+        del self.spans[index:], self._span_starts[index:]
+        if self.spans and self.spans[-1][1] > offset:
+            self.spans[-1] = (self.spans[-1][0], offset, self.spans[-1][2])
+
+    def _add_segments(self, offset, segments):
+        """Spans for styled segments placed at ``offset`` (after every existing span)."""
+        for part, token in segments:
+            if part and token != "text":
+                self.spans.append((offset, offset + len(part), token))
+                self._span_starts.append(offset)
+            offset += len(part)
+
+    def set_tail(self, start, segments):
+        """Replace the text from ``start`` on with [(text, token)] segments."""
+        self.set_text(self.text[:start] + "".join(part for part, _token in segments))
+        self._clip_spans(start)
+        self._add_segments(start, segments)
+
+    def replace(self, start, end, segments):
+        """Replace ``text[start:end]`` with styled segments; later spans, the reading
+        anchor and the selection move with the text after it."""
+        new = "".join(part for part, _token in segments)
+        delta = len(new) - (end - start)
+        after = [(s + delta, e + delta, t) for s, e, t in self.spans if s >= end]
+        before = [(s, min(e, start), t) for s, e, t in self.spans if s < start]
+        anchor, head = self.anchor, self.head
+        self.set_text(self.text[:start] + new + self.text[end:])
+        self.spans = before
+        self._span_starts = [s for s, _e, _t in before]
+        self._add_segments(start, segments)
+        self.spans.extend(after)
+        self._span_starts.extend(s for s, _e, _t in after)
+        if anchor is not None and head is not None:
+            self.anchor, self.head = (value + delta if value >= end else min(value, start)
+                                      for value in (anchor, head))
+        if self.top_offset >= end:
+            self.top_offset += delta
+
+    def token_at(self, offset):
+        index = bisect.bisect_right(self._span_starts, offset) - 1
+        if index >= 0 and self.spans[index][1] > offset:
+            return self.spans[index][2]
+        return "text"
+
+    def styled(self, start, end):
+        """[(token, start, end)] covering ``text[start:end]``; gaps are "text"."""
+        parts = []
+        index = max(0, bisect.bisect_right(self._span_starts, start) - 1)
+        position = start
+        while position < end and index < len(self.spans):
+            low, high, token = self.spans[index]
+            index += 1
+            if high <= position:
+                continue
+            if low >= end:
+                break
+            if low > position:
+                parts.append(("text", position, low))
+            parts.append((token, max(low, position), min(high, end)))
+            position = min(high, end)
+        if position < end:
+            parts.append(("text", position, end))
+        return parts
 
     def layout(self, width, height):
         """Rows for this width and the first visible row for this height (each render)."""
@@ -539,12 +688,33 @@ def parse_mouse(data):
     return kind, button, x - 1, y - 1
 
 
-def make_pane(view, style="class:conversation.selected"):
-    """A prompt_toolkit Window that shows ``view`` one row per line and never wraps."""
+def make_pane(view, style="class:conversation.selected", colour=None):
+    """A prompt_toolkit Window that shows ``view`` one row per line and never wraps.
+
+    Rows are drawn with their span styles (``token_style``); a whole-line ``rule`` span
+    fills the row and a whole-line ``meta.usage`` span is drawn flush right.
+    """
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.layout import Window
     from prompt_toolkit.layout.controls import UIContent, UIControl
     from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.utils import get_cwidth
+
+    colour = colour_enabled() if colour is None else colour
+
+    def aligned(text, start, end, token, width):
+        """The row's drawn text for a whole-line fill/right token, else None."""
+        if token not in FILL_TOKENS + RIGHT_TOKENS:
+            return None
+        if (start and text[start - 1] != "\n") or (end < len(text) and text[end] != "\n"):
+            return None   # only a line that fits one row is aligned
+        shown = text[start:end]
+        room = width - get_cwidth(shown)
+        if token in FILL_TOKENS:
+            label = shown.lstrip(RULE_CHAR).strip()
+            room = width - get_cwidth(label) - (1 if label else 0)
+            return RULE_CHAR * max(0, room) + (" " + label if label else "")
+        return " " * max(0, room) + shown
 
     class Control(UIControl):
         def is_focusable(self):
@@ -556,11 +726,24 @@ def make_pane(view, style="class:conversation.selected"):
 
             def get_line(index):
                 _line, start, end = rows[index]
-                if span is None or span[1] <= start or span[0] >= end:
-                    return [("", text[start:end].replace("\t", " " * TAB_WIDTH))]
-                low, high = max(start, span[0]), min(end, span[1])
-                fragments = [("", text[start:low]), (style, text[low:high]), ("", text[high:end])]
-                return [(klass, part.replace("\t", " " * TAB_WIDTH)) for klass, part in fragments if part]
+                parts = view.styled(start, end)
+                selected = span is not None and span[0] < end and span[1] > start
+                if len(parts) == 1:
+                    drawn = aligned(text, start, end, parts[0][0], width)
+                    if drawn is not None:
+                        klass = token_style(parts[0][0], colour)
+                        return [((klass + " " + style) if selected else klass, drawn)]
+                fragments = []
+                for token, low, high in parts:
+                    klass = token_style(token, colour)
+                    cuts = [low, high]
+                    if selected:
+                        cuts = sorted({low, high, min(max(span[0], low), high), min(max(span[1], low), high)})
+                    for cut_low, cut_high in zip(cuts, cuts[1:]):
+                        inside = selected and span[0] <= cut_low and cut_high <= span[1]
+                        fragments.append(((klass + " " + style).strip() if inside else klass,
+                                          text[cut_low:cut_high].replace("\t", " " * TAB_WIDTH)))
+                return [fragment for fragment in fragments if fragment[1]]
 
             # The cursor is hidden; its row is the view's top, so the Window keeps that row.
             return UIContent(get_line=get_line, line_count=len(rows),

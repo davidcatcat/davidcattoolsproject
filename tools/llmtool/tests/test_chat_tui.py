@@ -3,6 +3,7 @@ import asyncio
 import copy
 import io
 import os
+import re
 import signal
 import sys
 import tempfile
@@ -1214,10 +1215,10 @@ class WidgetTests(Base):
         def install(ui):
             original = ui.append
 
-            def broken_append(text):
+            def broken_append(text, *args, **kwargs):
                 if text.startswith('assistant:'):
                     raise RuntimeError('PRIVATE render detail')
-                return original(text)
+                return original(text, *args, **kwargs)
             ui.append = broken_append
         ui, result = self.drive([install, 'q\r', self.idle])
         self.assertEqual(result, 1)
@@ -2398,10 +2399,12 @@ class PMTypewriterTests(Base):
         text = self.ui.conversation.text
         if self.ui.pm_working_at is not None:   # the working line below the block (W52 F1)
             text = text[:self.ui.pm_working_at]
-        if '\nPM:' not in text:
+        if text.endswith('\nPM'):
+            return ''                                # the label opened; no text yet
+        if '\nPM\n' not in text:
             return None
-        rest = text[text.rindex('\nPM:') + 4:]
-        return rest[1:] if rest.startswith('\n') else rest
+        rest = text[text.rindex('\nPM\n') + 4:]
+        return rest[2:] if rest.startswith('  ') else rest   # the body indent (W56a)
 
     def test_text_is_released_in_order_a_few_characters_per_tick(self):
         # CJK text: an ASCII word is shown only once complete (screen_stream), as before.
@@ -2450,7 +2453,7 @@ class PMTypewriterTests(Base):
         self.assertEqual(ui.pm_queue, '')
         self.assertIsNone(ui.pm_block_raw)
         text = ui.conversation.text
-        self.assertIn('PM:\nhello world\n\n  — PM turn COMPLETED', text)
+        self.assertIn('PM\n  hello world\n\n0.0 秒', text)   # W56a: the short usage line
 
     def test_interrupt_and_turn_finish_flush_the_queue(self):
         ui = self.ui
@@ -2458,13 +2461,13 @@ class PMTypewriterTests(Base):
         self.delta('partial answer')
         ui.interrupt_pm()
         ui.pm_runtime.interrupt.assert_called_once_with()
-        self.assertIn('PM:\npartial answer\n\nllmtool: interrupt sent to the PM',
+        self.assertIn('PM\n  partial answer\n\nllmtool: interrupt sent to the PM',
                       ui.conversation.text)
         self.assertEqual(ui.pm_queue, '')
         ui.pm_turn_active, ui.pm_interrupted = True, False
         self.delta('tail', index=1)
         ui.finish_pm_turn()                           # a turn that ends without TURN_END
-        self.assertIn('PM:\ntail', ui.conversation.text)
+        self.assertIn('\n  tail', ui.conversation.text)   # same turn: no second label
         self.assertEqual(ui.pm_queue, '')
         self.assertIsNone(ui.pm_block_raw)
         self.assertEqual(ui.pm_state, 'idle')
@@ -2473,10 +2476,11 @@ class PMTypewriterTests(Base):
         ui = self.ui
         self.delta('first block', index=0)
         self.delta('second', index=1)                  # a new content block
-        self.assertIn('PM:\nfirst block\n\nPM:', ui.conversation.text)
+        self.assertIn('PM\n  first block\n\n', ui.conversation.text)
+        self.assertEqual(ui.conversation.text.count('\nPM\n'), 1)   # one label per turn
         self.assertEqual(ui.pm_queue, 'second')
         ui.pm_event({'type': 'TOOL_USE', 'tool_use_id': 't', 'name': 'Read'})
-        self.assertIn('PM:\nsecond\n\n  · tool Read', ui.conversation.text)
+        self.assertIn('\n  second\n\n  ▸ 使用工具 1 次（Read ×1；執行中）', ui.conversation.text)
         self.assertEqual(ui.pm_queue, '')
 
     def test_split_secret_is_screened_at_every_tick(self):
@@ -2604,8 +2608,8 @@ class PMConversationTests(BoundedPMTest):
 
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
-            self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8]
-                         + ' 暖機中… | 最新 | F6 滑鼠:開 | F1')   # no chat fields
+            self.assertEqual(ui.status_text(), 'PM | ' + self.session_id[:8]
+                         + ' | 暖機中… | 最新 | F6 滑鼠:開 | F1')   # no chat fields
             self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
@@ -2617,9 +2621,10 @@ class PMConversationTests(BoundedPMTest):
         async def partial(ui):
             # The fake holds after 'Hello ': the text reached the pane through typewriter
             # ticks on the loop, not through an end-of-block flush.
-            await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text, 'first delta')
+            await self.until(ui, lambda ui: 'PM\n  Hello' in ui.conversation.text, 'first delta')
             self.assertTrue(ui.pm_turn_active)
-            self.assertIn('working', ui.status_text())
+            self.assertIn('回答中', ui.status_text())
+            self.assertIn('Esc 中斷', ui.status_text())   # the keys valid now
             self.assertNotIn('暖機中', ui.status_text())   # first output ended the warm-up view
             self.assertNotIn('Hello 老闆', ui.conversation.text)   # streamed, not yet complete
             self.fakes[0].gate.set()
@@ -2627,14 +2632,15 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive([self.connect(), self.connected, connected_view,
                             '請問進度？\r', partial, self.turn_done])
         text = ui.conversation.text
-        self.assertIn('owner → PM:\n請問進度？', text)
+        self.assertRegex(text, '── [0-9]{2}:[0-9]{2}\n你\n  請問進度？')   # rule, label, body
         self.assertEqual(text.count('Hello 老闆'), 1)                # assistant text not doubled
-        self.assertIn('  · tool Read', text)
-        self.assertIn('  · tool Read: error (pm_runtime reason TOOL_ERROR)', text)
-        self.assertNotIn('auto-denied', text)
-        self.assertIn('PM:\nafter tool', text)                      # new block after the tool
-        self.assertIn('— PM turn COMPLETED in', text)
-        self.assertIn('usage: input 5, output 7 (provider-reported)', text)
+        self.assertIn('  ▸ 使用工具 1 次（Read ×1；1 次失敗）', text)   # one line for the tools
+        self.assertNotIn('· tool', text)
+        self.assertNotIn('自動拒絕', text)
+        self.assertIn('\n  after tool', text)                       # new block after the tool
+        self.assertEqual(text.count('\nPM\n'), 1)                  # one PM label per turn
+        self.assertRegex(text, '\n[0-9]+\\.[0-9] 秒 · 12 tokens')   # short usage line
+        self.assertNotIn('provider-reported', text)
         self.assertNotIn('SECRET', text)
         self.assertEqual(ui.pm_state, 'idle')
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
@@ -2653,7 +2659,7 @@ class PMConversationTests(BoundedPMTest):
         def warm_idle(ui):
             self.assertTrue(ui.pm_warm)
             self.assertIn('暖機中…', ui.status_text())
-            self.assertNotIn('idle', ui.status_text())
+            self.assertNotIn('待命', ui.status_text())
             self.assertNotIn('暖機', ui.conversation.text)   # status only; nothing was sent
             self.assertEqual(len(self.fakes[0].users()), 0)
 
@@ -2661,18 +2667,18 @@ class PMConversationTests(BoundedPMTest):
             await self.until(ui, lambda ui: len(self.fakes[0].users()) == 1, 'turn sent')
             self.assertTrue(ui.pm_turn_active)
             self.assertRegex(ui.status_text(), '暖機中… [0-9]+\\.[0-9]s')
-            self.assertNotIn('working', ui.status_text())
+            self.assertNotIn('回答中', ui.status_text())
             self.fakes[0].gate.set()
 
         def answered(ui):
             self.assertFalse(ui.pm_warm)
-            self.assertIn('PM:\n早安', ui.conversation.text)
-            self.assertIn(' idle ', ui.status_text())
+            self.assertIn('PM\n  早安', ui.conversation.text)
+            self.assertIn(' 待命 ', ui.status_text())
             self.assertNotIn('暖機', ui.status_text())
 
         async def second(ui):
-            await self.until(ui, lambda ui: 'PM:\n再次' in ui.conversation.text, 'second delta')
-            self.assertIn('working', ui.status_text())
+            await self.until(ui, lambda ui: 'PM\n  再次' in ui.conversation.text, 'second delta')
+            self.assertIn('回答中', ui.status_text())
             self.assertNotIn('暖機', ui.status_text())
             self.fakes[0].gate.set()
 
@@ -2693,8 +2699,8 @@ class PMConversationTests(BoundedPMTest):
             ui.app.renderer.render(ui.app, ui.app.layout)
 
         async def busy(ui):
-            await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text)
-            self.assertIn('owner → PM（已排入佇列（第 1 則））:\nsecond', ui.conversation.text)
+            await self.until(ui, lambda ui: 'PM\n  Hello' in ui.conversation.text)
+            self.assertIn('你（已排入佇列（第 1 則））\n  second', ui.conversation.text)
             self.assertEqual(ui.input.text, '')            # the draft left the editor
             self.assertEqual(list(ui.pm_outbox), ['second'])
             self.assertEqual(len(self.fakes[0].users()), 1)   # empty Enters sent nothing
@@ -2704,7 +2710,7 @@ class PMConversationTests(BoundedPMTest):
                             'second\r', busy, self.turn_done], size=size)
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['one', 'second'])
-        self.assertIn('owner → PM（自佇列送出，剩 0 則）:\nsecond', ui.conversation.text)
+        self.assertIn('你（自佇列送出，剩 0 則）\n  second', ui.conversation.text)
 
     def test_three_drafts_typed_during_a_turn_are_sent_in_order_one_turn_at_a_time(self):
         # W52 F2: Enter during a turn queues (FIFO); each COMPLETED turn sends the next.
@@ -2717,7 +2723,7 @@ class PMConversationTests(BoundedPMTest):
             await self.until(ui, lambda ui: len(ui.pm_outbox) == 3, 'three queued')
             text = ui.conversation.text
             for number, draft in ((1, 'a'), (2, 'b'), (3, 'c')):
-                self.assertIn('owner → PM（已排入佇列（第 %d 則））:\n%s' % (number, draft), text)
+                self.assertIn('你（已排入佇列（第 %d 則））\n  %s' % (number, draft), text)
             self.assertIn('佇列3', ui.status_text())
             self.assertEqual(len(self.fakes[0].users()), 1)
             self.fakes[0].gate.set()
@@ -2735,7 +2741,7 @@ class PMConversationTests(BoundedPMTest):
                                                   and not ui.pm_outbox, 'queue drained')])
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['first', 'a', 'b', 'c'])
-        self.assertEqual(ui.conversation.text.count('— PM turn COMPLETED'), 4)
+        self.assertEqual(len(re.findall('\n[0-9]+\\.[0-9] 秒 · 12 tokens', ui.conversation.text)), 4)
         self.assertNotIn('佇列', ui.status_text())
 
     def test_failed_turn_pauses_the_queue_until_queue_send(self):
@@ -2785,8 +2791,8 @@ class PMConversationTests(BoundedPMTest):
             await self.turn_done(ui)
             await asyncio.sleep(0.1)
             text = ui.conversation.text
-            self.assertIn('auto-denied (pm_runtime reason PERMISSION_DENIED', text)
-            self.assertIn('— PM turn COMPLETED', text)
+            self.assertIn('▸ 使用工具 1 次（Bash ×1；1 次失敗）', text)
+            self.assertRegex(text, '\n[0-9]+\\.[0-9] 秒')
             self.assertEqual(len(self.fakes[0].users()), 1)     # nothing more was sent
             self.assertEqual(list(ui.pm_outbox), ['next one'])
             self.assertIn('PM 佇列暫停，沒有送出：1 則，暫停（權限被拒）', text)
@@ -2807,7 +2813,7 @@ class PMConversationTests(BoundedPMTest):
 
         async def queued(ui):
             await self.until(ui, lambda ui: len(ui.pm_outbox) == 1
-                             and 'PM:\n一' in ui.conversation.text, 'queued mid-turn')
+                             and 'PM\n  一' in ui.conversation.text, 'queued mid-turn')
             ui.pm_runtime.interrupt = Mock()   # pm_runtime never hears it: the turn completes
             interrupt(ui)
             self.assertTrue(ui.pm_interrupted)
@@ -2818,7 +2824,7 @@ class PMConversationTests(BoundedPMTest):
                                                   and (ui.pm_outbox_paused or not ui.pm_outbox),
                                                   'turn end'),
                             lambda ui: asyncio.sleep(0.1)])
-        self.assertIn('— PM turn COMPLETED', ui.conversation.text)
+        self.assertRegex(ui.conversation.text, '\n[0-9]+\\.[0-9] 秒')
         return ui
 
     def test_ctrl_c_then_a_completed_turn_end_still_pauses_the_queue(self):
@@ -3007,7 +3013,7 @@ class PMConversationTests(BoundedPMTest):
                             '\t', reading, lone_escape, interrupted,
                             lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active
                                                   and not ui.pm_outbox, 'queue continued')])
-        self.assertIn('— PM turn INTERRUPTED', ui.conversation.text)
+        self.assertIn('\n已中斷 · ', ui.conversation.text)
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['PM request', 'queued'])                # Esc continued the queue
 
@@ -3030,7 +3036,7 @@ class PMConversationTests(BoundedPMTest):
             self.fakes[0].gate.set()
 
         async def text_arrived(ui):
-            await self.until(ui, lambda ui: 'PM:\n答案' in ui.conversation.text, 'text')
+            await self.until(ui, lambda ui: 'PM\n  答案' in ui.conversation.text, 'text')
             seen['text'] = ui.conversation.text
             self.fakes[0].gate.set()
 
@@ -3061,7 +3067,7 @@ class PMConversationTests(BoundedPMTest):
         def interrupted(ui):
             self.assertEqual(ui.pm_state, 'idle')
             self.assertIn('interrupt sent to the PM', ui.conversation.text)
-            self.assertIn('— PM turn INTERRUPTED', ui.conversation.text)
+            self.assertIn('\n已中斷 · ', ui.conversation.text)
             controls = [l for l in self.fakes[0].written if l.get('type') == 'control_request']
             self.assertEqual([c['request']['subtype'] for c in controls], ['interrupt'])
 
@@ -3088,15 +3094,15 @@ class PMConversationTests(BoundedPMTest):
 
         async def thinking(ui):
             await self.until(ui, lambda ui: ui.pm_state == 'thinking', 'thinking status')
-            self.assertIn('思考中…', ui.status_text())
-            self.assertNotIn('\nPM:\n', ui.conversation.text)   # nothing reached the pane
+            self.assertIn('思考中', ui.status_text())
+            self.assertNotIn('\nPM\n', ui.conversation.text)   # nothing reached the pane
             self.assertNotIn('PRIVATE_REASONING', ui.conversation.text)
             self.fakes[0].gate.set()
 
         ui, _ = self.drive([self.connect(), self.connected, '說出台北觀光地點\r', thinking,
                             self.turn_done])
         text = ui.conversation.text
-        self.assertIn('PM:\n台北101', text)
+        self.assertIn('PM\n  台北101', text)
         self.assertNotIn('PRIVATE_REASONING', text)
         self.assertNotIn('思考中', text)
         self.assertEqual(ui.pm_state, 'idle')
@@ -3109,7 +3115,7 @@ class PMConversationTests(BoundedPMTest):
             size[0] = Size(rows=24, columns=12)
             text = ui.status_text()
             self.assertLessEqual(get_cwidth(text), 12)
-            self.assertTrue(text.startswith('PM:'))
+            self.assertTrue(text.startswith('PM'))
 
         self.drive([self.connect(), self.connected, narrow], size=size)
 
@@ -3280,8 +3286,11 @@ class PMConversationTests(BoundedPMTest):
                        _result('done')]]
         ui, _ = self.drive([self.connect(), self.connected, 'run it\r', self.turn_done])
         text = ui.conversation.text
-        self.assertIn('  · tool Bash: auto-denied (pm_runtime reason PERMISSION_DENIED', text)
-        self.assertIn('  · tool Read: done', text)
+        self.assertIn('  ▸ 使用工具 2 次（Bash ×1、Read ×1；1 次失敗）', text)
+        ui.toggle_tools()                                  # F7: one line per tool
+        text = ui.conversation.text
+        self.assertIn('  ▾ 使用工具 2 次（Bash ×1、Read ×1；1 次失敗）\n'
+                      '      Bash  ✗ 自動拒絕 (PERMISSION_DENIED)\n      Read  ✓', text)
         self.assertNotIn('file content', text)
 
     def test_fresh_binding_connects_without_transcript(self):
@@ -3306,11 +3315,10 @@ class PMConversationTests(BoundedPMTest):
                        _result('You have hit your limit', is_error=True, subtype='error')]]
         ui, _ = self.drive([self.connect(), self.connected, 'go\r', self.turn_done])
         text = ui.conversation.text
-        self.assertIn('PM:\npart A', text)
-        self.assertIn('PM:\npart B end', text)          # a new content block opens a new PM block
+        self.assertIn('PM\n  part A', text)
+        self.assertIn('\n\n  part B end', text)          # a new content block opens a new PM block
         self.assertIn('PM runtime error PM_QUOTA_EXHAUSTED; retry when (TUI guidance): the PM', text)
-        self.assertIn('— PM turn ERROR', text)
-        self.assertRegex(text, r'turn [0-9a-f]{8} event #\d+')
+        self.assertIn('\n錯誤 · ', text)
 
     def test_esc_enter_is_still_a_newline_when_no_turn_runs(self):
         ui, _ = self.drive([self.connect(), self.connected, 'a', '\x1b\r', 'b',
@@ -3346,7 +3354,7 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive([self.connect(), self.connected, 'go\r', self.turn_done])
         text = ui.conversation.text
         self.assertIn('PM runtime error PM_PROCESS_EXITED', text)
-        self.assertIn('— PM turn ERROR', text)
+        self.assertIn('\n錯誤 · ', text)
         self.assertEqual(ui.pm_state, 'error(PM_PROCESS_EXITED)')
 
     def test_history_disconnect_and_chat_is_never_the_pm(self):
@@ -3360,7 +3368,7 @@ class PMConversationTests(BoundedPMTest):
                             'chat now\r', self.idle])
         text = ui.conversation.text
         self.assertIn('(history) ', text)
-        self.assertIn('owner → PM:\nfirst', text)
+        self.assertIn('你\n  first', text)
         self.assertIn('[COMPLETED] tools: Read', text)
         self.assertIn('PM disconnected; chat mode', text)
         self.assertIn('assistant:\nreply', text)            # chat goes to the chat provider
@@ -3387,7 +3395,7 @@ def pane_rows(ui):
     for y in range(ui.app.output.get_size().rows):
         cells = screen.data_buffer[y]
         text = ''.join(cells[x].char for x in range(ui.app.output.get_size().columns)).rstrip()
-        if text.startswith('-----'):
+        if text and set(text) == {'─'}:   # the rule row above the input (W56a)
             break
         rows.append(text)
     return rows
@@ -3957,7 +3965,7 @@ class ScrollSelectTests(Base):
             ui.stream_raw = ''
             ui.busy, ui.worker_kind = True, 'chat'
             ui._stream_attach('stream slice 中文')
-            ui._block_render(ui.stream_start, 'stream slice 中文 more')
+            ui._block_render(ui.stream_start, [('stream slice 中文 more', 'text')])
             ui.busy = False
             await self.settle(ui)
             self.assertEqual(ui.view.selected_text(), state['text'])

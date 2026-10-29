@@ -1,0 +1,279 @@
+"""W56a layout: style tokens, styled spans, turn rules, tool summary, usage and status bar."""
+
+import sys
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from llmtool import chat_tui, chat_tui_pm, chat_tui_view
+from tests.test_chat_tui import HAVE_TOOLKIT, Base
+
+if HAVE_TOOLKIT:
+    from prompt_toolkit.data_structures import Size
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+    from prompt_toolkit.utils import get_cwidth
+
+CONTRACT_TOKENS = (
+    "text", "md.bold", "md.italic", "md.code", "md.heading", "md.bullet", "md.link", "md.quote",
+    "md.table.border", "md.table.header", "md.table.cell",
+    "md.codeblock.border", "md.codeblock.lang", "md.codeblock",
+    "diff.add", "diff.del", "diff.hunk", "diff.meta", "diff.lineno",
+    "syntax.keyword", "syntax.string", "syntax.comment", "syntax.number", "syntax.builtin",
+    "role.owner", "role.pm", "role.system", "tool.summary", "tool.error", "meta.usage",
+    "rule", "status.bar", "status.key",
+)
+
+
+class StyleTokenTests(unittest.TestCase):
+    def test_one_table_maps_every_contract_token(self):
+        self.assertEqual(set(chat_tui_view.STYLE_TOKENS), set(CONTRACT_TOKENS))
+        for token, (colour, mono) in chat_tui_view.STYLE_TOKENS.items():
+            with self.subTest(token=token):
+                self.assertNotIn("fg:", mono)
+                self.assertNotIn("bg:", mono)
+                self.assertTrue(set(mono.split()) <= {"bold", "dim", "reverse"}, mono)
+
+    def test_unknown_tokens_fall_back_to_text(self):
+        self.assertEqual(chat_tui_view.token_style("md.nonsense"), chat_tui_view.token_style("text"))
+        self.assertEqual(chat_tui_view.token_style("role.pm", colour=False), "bold")
+
+    def test_colour_off_for_no_color_and_colourless_terminals(self):
+        self.assertTrue(chat_tui_view.colour_enabled({"TERM": "xterm-256color"}))
+        self.assertFalse(chat_tui_view.colour_enabled({"TERM": "xterm-256color", "NO_COLOR": "1"}))
+        for term in ("", "dumb", "vt100", "xterm-mono"):
+            with self.subTest(term=term):
+                self.assertFalse(chat_tui_view.colour_enabled({"TERM": term}))
+
+    def test_markdown_fallback_and_renderer(self):
+        with patch.object(chat_tui_view, "_tui_markdown", None):
+            self.assertEqual(chat_tui_view.render_markdown("**a**\nb", 40),
+                             [[("**a**", "text")], [("b", "text")]])
+
+        class Renderer:
+            @staticmethod
+            def render(text, width):
+                return [[("a", "md.bold")], [("w=%d" % width, "text")]]
+        with patch.object(chat_tui_view, "_tui_markdown", Renderer):
+            self.assertEqual(chat_tui_view.render_markdown("**a**", 40),
+                             [[("a", "md.bold")], [("w=40", "text")]])
+
+        class Broken:
+            @staticmethod
+            def render(text, width):
+                raise ValueError("bug")
+        with patch.object(chat_tui_view, "_tui_markdown", Broken):
+            self.assertEqual(chat_tui_view.render_markdown("x", 40), [[("x", "text")]])
+
+
+class SpanTests(unittest.TestCase):
+    def view(self):
+        return chat_tui_view.ConversationView(lambda char: 2 if ord(char) > 0x2e80 else 1)
+
+    def test_set_tail_styles_segments_and_clips_on_rewrite(self):
+        view = self.view()
+        view.set_tail(0, [("你", "role.owner"), ("\n  hi", "text"), ("\nPM", "role.pm")])
+        self.assertEqual(view.text, "你\n  hi\nPM")
+        self.assertEqual(view.spans, [(0, 1, "role.owner"), (6, 9, "role.pm")])
+        self.assertEqual(view.styled(0, 9), [("role.owner", 0, 1), ("text", 1, 6),
+                                             ("role.pm", 6, 9)])
+        view.set_text("你\n  hi\nP")
+        self.assertEqual(view.spans, [(0, 1, "role.owner"), (6, 8, "role.pm")])
+        view.set_text("")
+        self.assertEqual(view.spans, [])
+
+    def test_replace_moves_later_spans_selection_and_reading_anchor(self):
+        view = self.view()
+        view.set_tail(0, [("aa", "text"), ("SUM", "tool.summary"), ("bb", "text"), ("U", "meta.usage")])
+        view.anchor, view.head = 5, 7
+        view.top_offset = 5
+        view.replace(2, 5, [("SUMMARY", "tool.error")])
+        self.assertEqual(view.text, "aaSUMMARYbbU")
+        self.assertEqual(view.spans, [(2, 9, "tool.error"), (11, 12, "meta.usage")])
+        self.assertEqual((view.anchor, view.head), (9, 11))
+        self.assertEqual(view.top_offset, 9)
+        self.assertEqual(view.token_at(11), "meta.usage")
+        self.assertEqual(view.token_at(10), "text")
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, "prompt_toolkit not installed")
+class PaneDrawTests(unittest.TestCase):
+    def lines(self, segments, width=30, colour=True):
+        view = chat_tui_view.ConversationView(get_cwidth)
+        view.set_tail(0, segments)
+        pane = chat_tui_view.make_pane(view, colour=colour)
+        content = pane.control.create_content(width, 10)
+        return [content.get_line(index) for index in range(content.line_count)]
+
+    def test_rule_fills_the_row_with_the_time_at_the_right(self):
+        lines = self.lines([("── 14:03", "rule"), ("\n你", "role.owner")], width=20)
+        self.assertEqual(lines[0], [("fg:ansibrightblack", "─" * 14 + " 14:03")])
+        self.assertEqual(lines[1], [("bold fg:ansigreen", "你")])
+
+    def test_usage_is_flush_right_and_mono_uses_attributes_only(self):
+        lines = self.lines([("x\n", "text"), ("1.0 秒 · 2.4k tokens", "meta.usage")], width=30,
+                           colour=False)
+        style, text = lines[1][0]
+        self.assertEqual(style, "dim")
+        self.assertEqual(get_cwidth(text), 30)
+        self.assertTrue(text.endswith("1.0 秒 · 2.4k tokens"))
+
+    def test_selection_keeps_the_token_style(self):
+        view = chat_tui_view.ConversationView(get_cwidth)
+        view.set_tail(0, [("ab", "md.bold"), ("cd", "text")])
+        view.anchor, view.head = 1, 3
+        pane = chat_tui_view.make_pane(view, colour=True)
+        line = pane.control.create_content(20, 5).get_line(0)
+        self.assertEqual(line, [("bold", "a"), ("bold class:conversation.selected", "b"),
+                                ("class:conversation.selected", "c"), ("", "d")])
+
+
+class TurnTextTests(unittest.TestCase):
+    def test_usage_line_is_short(self):
+        event = {"status": "COMPLETED", "usage": {"input_tokens": 2000, "output_tokens": 400,
+                                                  "cache_read_input_tokens": 90000}}
+        self.assertEqual(chat_tui.usage_line(event, 39.84), "39.8 秒 · 2.4k tokens")
+        self.assertEqual(chat_tui.usage_line({"status": "INTERRUPTED", "usage": {}}, 1.0),
+                         "已中斷 · 1.0 秒")
+        self.assertEqual(chat_tui.usage_line({"status": "odd status"}, 0.5), "UNKNOWN · 0.5 秒")
+
+    def test_tool_summary_counts_names_and_failures(self):
+        calls = [["Bash", "ok"], ["Read", "error"], ["Bash", "ok"], ["Bash", "denied"],
+                 ["Read", "ok"], ["Bash", "ok"]]
+        segments = chat_tui.tool_summary_lines(calls, expanded=False)
+        self.assertEqual(segments, [("  ▸ 使用工具 6 次（Bash ×4、Read ×2；2 次失敗）", "tool.error")])
+        ok = chat_tui.tool_summary_lines([["Read", "ok"], ["Grep", None]], expanded=True)
+        self.assertEqual(ok, [("  ▾ 使用工具 2 次（Read ×1、Grep ×1；執行中）", "tool.summary"),
+                              ("\n      Read  ✓", "tool.summary"),
+                              ("\n      Grep  … 執行中", "tool.summary")])
+
+    def test_history_keeps_the_full_usage(self):
+        text = chat_tui_pm.history_text({"turns": [{
+            "started_at": "t", "owner_text": "hi", "status": "COMPLETED", "result_text": "ok",
+            "usage": {"input_tokens": 5, "output_tokens": 7, "cache_read_input_tokens": 9}}]})
+        self.assertIn("(history) usage: input 5, output 7, cache read input 9 (provider-reported)",
+                      text)
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, "prompt_toolkit not installed")
+class PMLayoutTests(Base):
+    """A PM turn driven by events, without a running loop (as PMTypewriterTests)."""
+
+    def setUp(self):
+        super().setUp()
+        self.pipe = create_pipe_input()
+        self.pipe.__enter__()
+        self.addCleanup(self.pipe.__exit__, None, None, None)
+        self.ui = chat_tui.ChatTUI(self.session, input=self.pipe, output=DummyOutput())
+        ui = self.ui
+        ui.pm_mode, ui.pm_state, ui.pm_target = True, "idle", ("abcdef0123456789", "/tmp")
+
+    def start(self, text="請問"):
+        ui = self.ui
+        ui._pm_turn_seq += 1
+        ui.pm_turn_active, ui.pm_turn_started, ui.pm_state = True, time.monotonic(), "working"
+        ui.pm_labelled, ui.pm_tool_calls, ui.pm_tool_ids = False, [], {}
+        ui.append("owner → PM:\n" + text, segments=ui._owner_segments("owner → PM:\n" + text, rule=True))
+
+    def event(self, kind, **fields):
+        self.ui.pm_event(dict(type=kind, **fields))
+
+    def tokens(self, needle):
+        view = self.ui.view
+        start = view.text.rindex(needle)
+        return {token for token, _low, _high in view.styled(start, start + len(needle))}
+
+    def test_one_turn_layout(self):
+        ui = self.ui
+        self.start()
+        self.event("TEXT_DELTA", text="先看 **檔案**", block_index=0)
+        self.event("TOOL_USE", tool_use_id="a", name="Read")
+        self.event("TOOL_USE", tool_use_id="b", name="Bash")
+        self.event("TOOL_RESULT", tool_use_id="a", reason="OK")
+        self.event("TOOL_RESULT", tool_use_id="b", reason="TOOL_ERROR")
+        self.event("TEXT_DELTA", text="結論", block_index=2)
+        self.event("TURN_END", status="COMPLETED", usage={"input_tokens": 1200, "output_tokens": 34})
+        ui.finish_pm_turn()
+        text = ui.conversation.text
+        body = text[text.rindex("── "):]
+        self.assertRegex(body, "^── [0-9]{2}:[0-9]{2}\n你\n  請問\n\nPM\n  先看 \\*\\*檔案\\*\\*\n\n"
+                               "  ▸ 使用工具 2 次（Read ×1、Bash ×1；1 次失敗）\n\n  結論\n\n"
+                               "[0-9]+\\.[0-9] 秒 · 1.2k tokens$")
+        self.assertEqual(self.tokens("你"), {"role.owner"})
+        self.assertEqual(ui.view.token_at(text.rindex("\nPM\n") + 1), "role.pm")
+        self.assertEqual(self.tokens("▸ 使用工具"), {"tool.error"})
+        self.assertEqual(self.tokens(" 秒 · 1.2k tokens"), {"meta.usage"})
+        self.assertEqual(ui.view.token_at(text.rindex("── ")), "rule")
+
+    def test_summary_updates_in_place_while_text_follows_and_f7_expands_it(self):
+        ui = self.ui
+        self.start()
+        self.event("TOOL_USE", tool_use_id="a", name="Read")
+        self.event("TEXT_DELTA", text="中間", block_index=1)
+        ui._pm_flush()
+        ui._pm_render(final=False)
+        self.event("TOOL_USE", tool_use_id="b", name="Read")
+        text = ui.conversation.text
+        self.assertEqual(text.count("使用工具"), 1)               # one line, updated in place
+        self.assertIn("PM\n  ▸ 使用工具 2 次（Read ×2；執行中）\n\n  中間", text)
+        self.assertIn("F7 工具", ui.status_text())
+        ui.toggle_tools()
+        self.assertIn("  ▾ 使用工具 2 次（Read ×2；執行中）\n      Read  … 執行中\n"
+                      "      Read  … 執行中\n\n  中間", ui.conversation.text)
+        self.event("TOOL_RESULT", tool_use_id="a", reason="PERMISSION_DENIED")
+        self.assertIn("      Read  ✗ 自動拒絕 (PERMISSION_DENIED)", ui.conversation.text)
+        self.assertEqual(self.tokens("▾ 使用工具"), {"tool.error"})
+        ui.toggle_tools()
+        self.assertIn("  ▸ 使用工具 2 次（Read ×2；1 次失敗；執行中）\n\n  中間", ui.conversation.text)
+        self.assertNotIn("      Read", ui.conversation.text)
+        self.assertTrue(ui.conversation.text.endswith(ui.pm_working_text))   # working line kept last
+
+    def test_queued_owner_note_and_system_notice_styles(self):
+        ui = self.ui
+        ui.append("owner → PM（已排入佇列（第 1 則））:\n下一則")
+        ui.append("llmtool: PM 佇列暫停")
+        self.assertIn("你（已排入佇列（第 1 則））\n  下一則", ui.conversation.text)
+        self.assertEqual(self.tokens("（已排入佇列（第 1 則））"), {"role.system"})
+        self.assertEqual(self.tokens("llmtool: PM 佇列暫停"), {"role.system"})
+
+    def test_status_bar_states_queue_and_keys(self):
+        ui = self.ui
+        self.assertEqual(ui.status_text(), "PM | abcdef01 | 待命 | 最新 | F6 滑鼠:開 | F1")
+        self.start()
+        ui.pm_outbox.append("next")
+        status = ui.status_text()
+        self.assertRegex(status, "^PM \\| abcdef01 \\| 回答中 [0-9.]+s \\| 佇列1 \\| Esc 中斷 \\| ")
+        ui.pm_state = "thinking"
+        self.assertIn("思考中", ui.status_text())
+        ui.pm_outbox.clear()
+        self.event("TURN_END", status="INTERRUPTED", usage={})
+        ui.finish_pm_turn()
+        self.assertIn("| 已中斷 |", ui.status_text())
+        keys = [style for style, text in ui.status_fragments() if text in ("F1", "F6 滑鼠:開")]
+        self.assertEqual(keys, [chat_tui_view.token_style("status.key", ui.colour)] * 2)
+        for width in (80, 40, 20, 12, 6):
+            ui.app.output.get_size = lambda width=width: Size(rows=24, columns=width)
+            with self.subTest(width=width):
+                self.assertLessEqual(get_cwidth(ui.status_text()), width)
+                self.assertNotIn("\n", ui.status_text())
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, "prompt_toolkit not installed")
+class ChatLayoutTests(Base):
+    def test_chat_labels_stay_with_a_rule_and_styles(self):
+        with create_pipe_input() as pipe:
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
+            ui.append("you:\nq", segments=ui._rule_segments() + [("you:", "role.owner"), ("\nq", "text")])
+            ui.append("assistant:\n", segments=[("assistant:", "role.pm"), ("\n", "text")]
+                      + ui._body_segments("**粗體**", ""))
+            text = ui.conversation.text
+            self.assertRegex(text, "── [0-9]{2}:[0-9]{2}\nyou:\nq\n\nassistant:\n\\*\\*粗體\\*\\*$")
+            start = text.index("assistant:")
+            self.assertEqual(ui.view.token_at(start), "role.pm")
+            self.assertEqual(ui.view.token_at(text.index("you:")), "role.owner")
+
+
+if __name__ == "__main__":
+    unittest.main()
