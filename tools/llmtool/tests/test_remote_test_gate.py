@@ -130,7 +130,8 @@ class RemoteTestGateTests(unittest.TestCase):
             {'modules': ['test_other']}, {'ran_total': 0},
             {'failures': [MODULE]}, {'result': 'FAIL'},
             {'result': 'TIMEOUT'}, {'result': 'SHA_MISMATCH'},
-            {'source_sha': 'c' * 40}, {'final': ['OK (skipped=1)']},
+            {'source_sha': 'c' * 40}, {'final': ['OK (skipping 1)']},
+            {'final': ['OK (skipped=0)']},
         ]
         for change in mismatches:
             with self.subTest(change=change):
@@ -140,8 +141,27 @@ class RemoteTestGateTests(unittest.TestCase):
                     task, executor_task='d6-task', source_sha=SHA, paths=[PATH])
                 self.assertIsNone(found)
                 self.assertEqual(missing, 'MAC_EVIDENCE_REQUIRED'
-                                 if 'skipped' in str(change).lower()
+                                 if 'skipp' in str(change).lower()
                                  else 'REMOTE_TEST_RECEIPT_MISSING')
+
+    def test_gate_accepts_exact_skip_summary_and_rejects_other_skip_text(self):
+        task = task_with_tests()
+        task.update(task_id='1' * 32, run_id='2' * 32,
+                    remote_test_receipts=[sealed_receipt(final=['OK (skipped=1)'])])
+
+        receipt, code = task_submission_cli._matching_remote_test_receipt(
+            task, executor_task='d6-task', source_sha=SHA, paths=[PATH])
+        self.assertIsNotNone(receipt)
+        self.assertIsNone(code)
+
+        task['remote_test_receipts'] = [
+            sealed_receipt(final=['OK (skipping 1)']),
+            sealed_receipt(final=['OK (expected failures=1)']),
+        ]
+        receipt, code = task_submission_cli._matching_remote_test_receipt(
+            task, executor_task='d6-task', source_sha=SHA, paths=[PATH])
+        self.assertIsNone(receipt)
+        self.assertEqual(code, 'MAC_EVIDENCE_REQUIRED')
 
     def test_consumer_rejects_receipt_for_sha_other_than_reviewed_head(self):
         task = task_with_tests()
