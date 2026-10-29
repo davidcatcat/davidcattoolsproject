@@ -161,7 +161,7 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(argv, ['claude', '-p', '--input-format', 'stream-json',
                                 '--output-format', 'stream-json', '--verbose',
                                 '--include-partial-messages', '--session-id', SESSION,
-                                '--permission-prompts', 'none',
+                                '--permission-prompts', 'none', '--permission-mode', 'auto',
                                 '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
                                 '--append-system-prompt', pm_runtime.PM_SESSION_INSTRUCTION])
         self.assertEqual(cwd, self.cwd)
@@ -179,7 +179,7 @@ class PMRuntimeTests(unittest.TestCase):
         # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated
         # the prompt cache, so the PM process runs with a fixed, empty MCP set (claude CLI
         # 2.1.312 --strict-mcp-config + --mcp-config); #304: the PM answers without a
-        # preamble when it uses no tool (--append-system-prompt). Permission policy unchanged.
+        # preamble when it uses no tool (--append-system-prompt). Permission prompts stay off.
         runtime = self.runtime(FakeProcess())
         runtime.open()
         runtime.close()
@@ -193,7 +193,10 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertIn('without calling any tool', instruction)
         self.assertEqual(argv[argv.index('--permission-prompts') + 1], 'none')
         self.assertNotIn('--dangerously-skip-permissions', argv)
-        self.assertNotIn('--permission-mode', argv)
+        # Owner #304 c6494914495 (A): the TUI PM runs in Claude Code auto permission mode.
+        self.assertEqual(argv.count('--permission-mode'), 1)
+        self.assertEqual(argv[argv.index('--permission-mode') + 1], 'auto')
+        self.assertEqual(argv.index('--permission-mode'), argv.index('--permission-prompts') + 2)
         self.assertEqual(argv.count('--strict-mcp-config'), 1)
         self.assertEqual(argv.count('--append-system-prompt'), 1)
         self.assertEqual(argv.index('--permission-prompts'), argv.index(SESSION) + 1)

@@ -714,7 +714,9 @@ unless the trusted user config `~/.config/llmtool/config.yaml` sets
 `.llmtool.yaml` cannot set it). pm_runtime then starts the PM with that directory as
 `CLAUDE_CONFIG_DIR` and looks up the session transcript there; an invalid value refuses to
 connect with `PM_CONFIG_INVALID`. `/pm connect` and `/pm` show the Claude account
-directory in use.
+directory in use. The TUI PM runs in Claude Code auto permission mode
+(`--permission-mode auto`, Owner #304 c6494914495); the stop-loss is to revert to
+chat-only after any action outside the Owner's authorization.
 
 `task record-pm --stdin-json` records a decision from the active PM runtime without invoking a
 provider. Its strict JSON input contains `request` and a structured `response`; it accepts only
