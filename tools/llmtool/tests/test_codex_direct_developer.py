@@ -427,7 +427,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                           side_effect=[registration, bound_registration]), \
              patch.object(task_submission_cli.task_completion, '_git', return_value=b''), \
              patch.object(task_submission_cli, '_ignored_output_rejection', return_value=None), \
-             patch.object(task_submission_cli, '_developer_output_rejection', return_value=None), \
+             patch.object(task_submission_cli, '_codex_cumulative_diff_rejection',
+                          return_value=(None, 'diff --git a/src.py b/src.py\n')), \
              patch.object(task_submission_cli, 'run_task_direct_result_event', return_value=0):
             result = task_submission_cli.run_task_codex_delegate(args, store=store)
         self.assertEqual(result, 0)

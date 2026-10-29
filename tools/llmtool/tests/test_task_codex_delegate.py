@@ -286,7 +286,7 @@ class CodexDelegateTests(unittest.TestCase):
                 task, codex_result=result, empty_diff=True)
         developer = saved['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_OUTPUT_REJECTED')
-        self.assertEqual(developer['error_code'], 'DEVELOPER_OUTPUT_EMPTY_DIFF')
+        self.assertEqual(developer['error_code'], 'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
         capture = developer['rejected_output_capture']
         captured = (self.store.root / capture['ref']).read_text(encoding='utf-8')
         self.assertIn('No files changed.', captured)

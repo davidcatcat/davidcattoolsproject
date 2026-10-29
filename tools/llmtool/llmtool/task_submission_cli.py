@@ -2728,8 +2728,12 @@ def run_task_codex_delegate(args, *, store):
         rejection, artifact = _codex_cumulative_diff_rejection(
             registration.root, task_source_sha, write_paths,
             validate_envelope=result.status == 'DONE')
-        if rejection is None and result.status == 'DONE' and not artifact:
-            rejection = 'DEVELOPER_OUTPUT_EMPTY_DIFF'
+        empty_diff = rejection is None and result.status == 'DONE' and not artifact
+        if empty_diff:
+            # task_store's rejection-code contract has no empty-diff code.
+            # Keep its existing envelope rejection while capturing the final
+            # message as the bounded, screened diagnostic.
+            rejection = 'DEVELOPER_OUTPUT_INVALID_ENVELOPE'
         rejection = (ignored_rejection if ignored_rejection is not None else
                      rejection)
         if rejection is not None:
@@ -2737,8 +2741,7 @@ def run_task_codex_delegate(args, *, store):
             developer.update(execution=execution)
             saved = _persist_developer_output_rejection(
                 store, task['task_id'], developer, rejection, result.usage,
-                result.final_message if rejection == 'DEVELOPER_OUTPUT_EMPTY_DIFF'
-                else artifact)
+                result.final_message if empty_diff else artifact)
             rejection_persisted = True
         elif result.status != 'DONE':
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN', error_code='CODEX_BLOCKED',
