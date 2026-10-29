@@ -9,6 +9,7 @@ and malformed Markdown degrades to plain ``text`` instead of raising.
 """
 from __future__ import annotations
 
+import bisect
 import builtins
 import functools
 import io
@@ -114,17 +115,19 @@ def display_width(text: str) -> int:
 
 def _clusters(text):
     """``(cluster, width)`` units: zero-width marks join the previous character."""
-    units = []
+    if text.isascii() and text.isprintable():
+        return [(char, 1) for char in text]
+    clusters, widths = [], []
     joined = False
     for char in text:
         width = char_width(char)
-        if units and (width == 0 or joined):
-            cluster, cells = units[-1]
-            units[-1] = (cluster + char, cells)
+        if clusters and (width == 0 or joined):
+            clusters[-1].append(char)
         else:
-            units.append((char, width))
-        joined = char == "‍"
-    return units
+            clusters.append([char])
+            widths.append(width)
+        joined = char == "\u200d"
+    return [("".join(cluster), width) for cluster, width in zip(clusters, widths)]
 
 
 def _source_lines(text):
@@ -137,21 +140,22 @@ _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
 
 def _sanitize(line):
     """Terminal control characters (ESC and friends) become a visible U+FFFD."""
-    return _CONTROL.sub("�", line)
+    return _CONTROL.sub("\ufffd", line)
 
 
 # --- wrapping --------------------------------------------------------------
 
 def _merge(segments):
-    merged = []
+    parts, tokens = [], []
     for text, token in segments:
         if not text:
             continue
-        if merged and merged[-1][1] == token:
-            merged[-1] = (merged[-1][0] + text, token)
+        if tokens and tokens[-1] == token:
+            parts[-1].append(text)
         else:
-            merged.append((text, token))
-    return merged
+            parts.append([text])
+            tokens.append(token)
+    return [("".join(part), token) for part, token in zip(parts, tokens)]
 
 
 def _wrap(segments, width, first_prefix=(), next_prefix=(), hard=False):
@@ -233,9 +237,10 @@ def _break_between(before, after):
 
 
 def _trim(row):
-    while row and row[-1][0] == " ":
-        row = row[:-1]
-    return row
+    end = len(row)
+    while end and row[end - 1][0] == " ":
+        end -= 1
+    return row[:end]
 
 
 def _pad(segments, room, token, align="left"):
@@ -254,9 +259,14 @@ def _pad(segments, room, token, align="left"):
 # --- inline Markdown -------------------------------------------------------
 
 _INLINE_SPECIAL = re.compile(r"[\\`*_\[]|https?://")
-_LINK = re.compile(r"\[([^\]\n]*)\]\(\s*([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)\s*\)")
+_LINK = re.compile(r"\[([^\[\]\n]*)\]\(\s*([^()\s]*(?:\([^()\s]*\)[^()\s]*)*)\s*\)")
 _BARE_URL = re.compile(r"https?://[^\s<>()\[\]]+")
 _ESCAPABLE = frozenset("\\`*_{}[]()#+-.!|>~")
+_TICKS = re.compile(r"`+")
+
+# Linear-time contract: every scan below moves forward.  A failed ``[`` match stops
+# at the next bracket, backtick runs are looked up in a per-line index, and a failed
+# emphasis closer search is remembered so later openers of that kind stop at once.
 
 
 def inline(text, base=TEXT, depth=0):
@@ -266,6 +276,8 @@ def inline(text, base=TEXT, depth=0):
     out = []
     plain = []
     position, length = 0, len(text)
+    ticks = _tick_runs(text) if "`" in text else {}
+    failed = {}
 
     def flush():
         if plain:
@@ -290,7 +302,7 @@ def inline(text, base=TEXT, depth=0):
             continue
         if char == "`":
             run = _run_length(text, start, "`")
-            close = _find_run(text, start + run, "`", run)
+            close = _next_tick_run(ticks, start + run, run)
             if close < 0:
                 plain.append("`" * run)
                 position = start + run
@@ -337,7 +349,7 @@ def inline(text, base=TEXT, depth=0):
             plain.append(char * run)
             position = start + run
             continue
-        span = _emphasis(text, start, char, run)
+        span = _emphasis(text, start, char, run, ticks, failed)
         if span is None:
             plain.append(char * run)
             position = start + run
@@ -358,30 +370,44 @@ def _run_length(text, start, char):
     return end - start
 
 
-def _find_run(text, start, char, run):
-    """Index of the next run of exactly ``run`` ``char``s at or after ``start``."""
-    position = text.find(char * run, start)
-    while position >= 0:
-        actual = _run_length(text, position, char)
-        if actual == run:
-            return position
-        position = text.find(char * run, position + actual)
-    return -1
+def _tick_runs(text):
+    """Start positions of the backtick runs in ``text``, keyed by run length."""
+    runs = {}
+    for match in _TICKS.finditer(text):
+        runs.setdefault(match.end() - match.start(), []).append(match.start())
+    return runs
 
 
-def _emphasis(text, start, char, run):
-    """``(marker_length, close_index)`` for an emphasis span opening at ``start``."""
+def _next_tick_run(ticks, start, run):
+    """Start of the next backtick run of exactly ``run`` at or after ``start``, or -1."""
+    starts = ticks.get(run)
+    if not starts:
+        return -1
+    index = bisect.bisect_left(starts, start)
+    return starts[index] if index < len(starts) else -1
+
+
+def _emphasis(text, start, char, run, ticks, failed):
+    """``(marker_length, close_index)`` for an emphasis span opening at ``start``.
+
+    ``failed`` maps ``(char, marker)`` to the earliest position a closer search
+    failed from; a closer is judged by its own surroundings, so a later search of
+    the same kind would fail as well and is skipped.
+    """
     for marker in ((3, 2, 1) if run == 3 else (run,) if run < 3 else ()):
         content_start = start + marker
         if content_start >= len(text) or text[content_start].isspace():
             continue
-        close = _find_closer(text, content_start, char, marker)
+        if failed.get((char, marker), len(text) + 1) <= content_start:
+            continue
+        close = _find_closer(text, content_start, char, marker, ticks)
         if close >= 0:
             return marker, close
+        failed[(char, marker)] = content_start
     return None
 
 
-def _find_closer(text, position, char, marker):
+def _find_closer(text, position, char, marker, ticks):
     """Closing delimiter of ``marker`` chars, skipping code spans and other runs."""
     length = len(text)
     opening = position
@@ -392,7 +418,7 @@ def _find_closer(text, position, char, marker):
             continue
         if current == "`":
             run = _run_length(text, position, "`")
-            close = _find_run(text, position + run, "`", run)
+            close = _next_tick_run(ticks, position + run, run)
             position = (close + run) if close >= 0 else position + run
             continue
         if current != char:
@@ -415,12 +441,12 @@ def _find_closer(text, position, char, marker):
 
 # --- block structure -------------------------------------------------------
 
-_FENCE = re.compile(r"^(\s*)(`{3,}|~{3,})\s*([^\s`]*)[^`]*$")
-_HEADING = re.compile(r"^\s{0,3}(#{1,6})(?:\s+(.*?))?\s*#*\s*$")
+_FENCE = re.compile(r"^(\s*)(`{3,}|~{3,})[ \t]*([^\s`]*)(.*)$")
+_HEADING = re.compile(r"^\s{0,3}(#{1,6})(?=\s|$)")
 _BULLET = re.compile(r"^(\s*)([-*+]|\d{1,9}[.)])\s+(.*)$")
 _QUOTE = re.compile(r"^\s{0,3}>")
 _RULE = re.compile(r"^\s{0,3}([-*_])(?:\s*\1){2,}\s*$")
-_TABLE_SEPARATOR = re.compile(r"^\s*\|?\s*:?-+:?\s*(\|\s*:?-+:?\s*)*\|?\s*$")
+_SEPARATOR_CELL = re.compile(r":?-+:?")
 _HUNK = re.compile(r"^@@+ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@+")
 _DIFF_META_PREFIXES = (
     "diff --git ", "index ", "--- ", "+++ ", "new file mode", "deleted file mode",
@@ -466,7 +492,7 @@ class _Renderer:
             self.lines.append([])
             return index + 1
         fence = _FENCE.match(line)
-        if fence:
+        if fence and not (fence.group(2)[0] == "`" and "`" in fence.group(4)):
             return self.fenced(lines, index, fence)
         if _is_diff_start(lines, index):
             end = index + 1
@@ -475,7 +501,7 @@ class _Renderer:
             self.lines.extend(self.diff(lines[index:end], width))
             return end
         if "|" in line and index + 1 < len(lines) and "|" in lines[index + 1] \
-                and _TABLE_SEPARATOR.match(lines[index + 1]):
+                and _is_table_separator(lines[index + 1]):
             end = index + 2
             while end < len(lines) and "|" in lines[end] and lines[end].strip():
                 end += 1
@@ -484,7 +510,7 @@ class _Renderer:
         heading = _HEADING.match(line)
         if heading:
             glyph = [(HEADING_GLYPH + " ", HEADING)]
-            body = inline(heading.group(2) or "", HEADING)
+            body = inline(_heading_text(line[heading.end():]), HEADING)
             self.lines.extend(_wrap(body, width, glyph, [("  ", HEADING)]))
             return index + 1
         if _RULE.match(line):
@@ -502,6 +528,7 @@ class _Renderer:
             return index + 1
         if _QUOTE.match(line):
             depth, rest = _quote_depth(line)
+            depth = min(depth, max(1, (width - 2) // (2 * len(QUOTE_BAR))))
             bar = [(QUOTE_BAR * depth, QUOTE)]
             self.lines.extend(_wrap(inline(rest, QUOTE), width, bar, bar))
             return index + 1
@@ -566,9 +593,11 @@ class _Renderer:
         rows = [_fit_cells(header, columns)] + [_fit_cells(_split_row(b), columns) for b in body_lines]
         cells = [[inline(cell.strip(), TABLE_HEADER if r == 0 else TABLE_CELL) for cell in row]
                  for r, row in enumerate(rows)]
+        room = self.width - (3 * columns + 1)
+        if room < columns:
+            return self.table_as_list(cells)
         natural = [max(1, max(_segments_width(row[c]) for row in cells)) for c in range(columns)]
         minimum = [max(1, max(_widest_unit(row[c]) for row in cells)) for c in range(columns)]
-        room = self.width - (3 * columns + 1)
         if room < sum(minimum):
             return self.table_as_list(cells)
         widths = _fit_columns(natural, minimum, room)
@@ -598,9 +627,11 @@ class _Renderer:
     def table_as_list(self, cells):
         """Too narrow for borders: each row as ``header: value`` lines."""
         header, out = cells[0], []
-        for row in cells[1:] or [header]:
+        for row in cells[1:] or [[[] for _ in header]]:
             out.append([("─" * self.width, TABLE_BORDER)])
             for name, value in zip(header, row):
+                if not name and not value:
+                    continue
                 label = list(name) + [(": ", TABLE_HEADER)]
                 out.extend(_wrap(label + list(value), self.width, (), [("  ", TABLE_CELL)]))
         return out
@@ -692,17 +723,41 @@ def _number_diff(lines):
 
 
 def _quote_depth(line):
-    depth = 0
-    rest = line.lstrip()
-    while rest.startswith(">"):
+    """Nesting depth of a ``>`` quote line and the text after its markers."""
+    depth, position, length = 0, len(line) - len(line.lstrip()), len(line)
+    while position < length and line[position] == ">":
         depth += 1
-        rest = rest[1:]
-        if rest.startswith(" "):
-            rest = rest[1:]
-        rest_stripped = rest.lstrip()
-        if rest_stripped.startswith(">"):
-            rest = rest_stripped
-    return depth, rest
+        position += 1
+        if position < length and line[position] == " ":
+            position += 1
+        following = position
+        while following < length and line[following] in " \t":
+            following += 1
+        if following < length and line[following] == ">":
+            position = following
+    return depth, line[position:]
+
+
+def _heading_text(rest):
+    """Heading text without its optional closing ``#`` sequence."""
+    text = rest.strip()
+    closed = text.rstrip("#")
+    if not closed or closed[-1] in " \t":
+        text = closed.rstrip()
+    return text
+
+
+def _is_table_separator(line):
+    """True for a pipe-table delimiter row such as ``|:--|--:|``."""
+    row = line.strip()
+    if "|" not in row:
+        return False
+    if row.startswith("|"):
+        row = row[1:]
+    if row.endswith("|"):
+        row = row[:-1]
+    cells = row.split("|")
+    return all(_SEPARATOR_CELL.fullmatch(cell.strip()) for cell in cells)
 
 
 def _split_row(line):

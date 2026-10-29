@@ -1,4 +1,5 @@
 """W56b+c pure Markdown/table/code/diff renderer: tokens, wrapping and degrade."""
+import gc
 import sys
 import time
 import unittest
@@ -318,6 +319,75 @@ class PerformanceTests(unittest.TestCase):
         elapsed = time.perf_counter() - start
         self.assertGreater(len(rendered), 2000)
         self.assertLess(elapsed, 0.5, f"2,000-line render took {elapsed:.3f}s")
+
+
+ADVERSARIAL = {
+    "10,000 [": "[" * 10000,
+    "10,000 *": "*" * 10000,
+    "10,000 backticks": "`" * 10000,
+    "10,000 inline backticks": "x " + "` ``" * 2500,
+    "5,000 | in one row": "| a | b |\n|---|---|\n" + "|" * 5000,
+    "5,000 | header": "|" * 5000 + "\n|---|---|\n| a | b |",
+    "1,000 nested >": "> " * 1000 + "x",
+    "1,000 bare >": ">" * 1000,
+    "*a repeated": "*a " * 3000,
+    "[x]( repeated": "[x](" * 2500,
+    "# then spaces": "# " + " " * 10000 + "x",
+    "# then hashes": "# " + "#" * 10000 + "x",
+    "fence with tick": "```" + "a" * 10000 + "`",
+}
+
+
+def best_time(source, repeat=3):
+    best = float("inf")
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        for _ in range(repeat):
+            start = time.perf_counter()
+            render(source, 80)
+            best = min(best, time.perf_counter() - start)
+    finally:
+        if enabled:
+            gc.enable()
+    return best
+
+
+class AdversarialInputTests(unittest.TestCase):
+    def test_each_adversarial_input_under_fifth_of_a_second(self):
+        for name, source in ADVERSARIAL.items():
+            with self.subTest(name):
+                elapsed = best_time(source)
+                self.assertLess(elapsed, 0.2, f"{name}: {elapsed:.3f}s")
+
+    def test_time_grows_linearly(self):
+        def workload(n):
+            return "\n".join([
+                "[" * n, "*a " * (n // 3), "x " + "` ``" * (n // 4), "_a " * (n // 3),
+                "| a | b |", "|---|---|", "|" * n, "", "> " * (n // 20) + "x", "# " + "#" * n,
+            ])
+        best_time(workload(1000))   # warm caches
+        small, large = best_time(workload(8000), 5), best_time(workload(16000), 5)
+        self.assertLessEqual(large, 3 * small + 0.005, f"n: {small:.4f}s, 2n: {large:.4f}s")
+
+    def test_degraded_output_keeps_every_character(self):
+        self.assertEqual("".join(plain(line) for line in render("[" * 300, 80)), "[" * 300)
+        self.assertEqual("".join(plain(line) for line in render("*a " * 50, 400)).split(),
+                         ("*a " * 50).split())
+        nested = render("> > > deep", 40)[0]
+        self.assertEqual(nested, [("│ │ │ deep", "md.quote")])
+        self.assertTrue(plain(render("> " * 1000 + "x", 20)[0]).endswith("x"))
+
+    def test_block_rules_after_regex_rewrite(self):
+        self.assertEqual(render("## Title ##", 40)[0], [("▍ Title", "md.heading")])
+        self.assertEqual(render("# C# #", 40)[0], [("▍ C#", "md.heading")])
+        self.assertEqual(render("#", 40)[0], [("▍ ", "md.heading")])
+        self.assertEqual(plain(render("#hashtag", 40)[0]), "#hashtag")
+        self.assertEqual(plain(render("```a`b", 40)[0]), "```a`b")
+        self.assertEqual(render("~~~ sh x\nfi\n~~~", 40)[0][1], ("sh", "md.codeblock.lang"))
+        self.assertTrue(plain(render("| a |\n|:-:|\n| 1 |", 40)[0]).startswith("┌"))
+        self.assertEqual(plain(render("| a |\n| x |", 40)[0]), "| a |")
+        self.assertEqual(render("[a [b](u)", 40)[0], [("[a ", "text"), ("b (u)", "md.link")])
 
 
 if __name__ == "__main__":
