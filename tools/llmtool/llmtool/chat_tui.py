@@ -1052,7 +1052,7 @@ class ChatTUI:
 
     def status_report(self):
         """/status (W57): what the current mode is talking to, in the status bar's words."""
-        theme = "主題：%s（目前 %s%s）" % (self.settings["theme"], self.theme,
+        theme = "主題（本機設定）：%s（目前 %s%s）" % (self.settings["theme"], self.theme,
                                      "" if self.colour else "，無色彩")
         if self.pm_mode and self.pm_target:
             count = self.background_count()
@@ -1066,12 +1066,14 @@ class ChatTUI:
                      + chat_tui_pm.safe_text(str(self.pm_target[1])) + "）",
                      "Claude 帳號目錄：" + chat_tui_pm.safe_text(
                          getattr(self.pm_runtime, "claude_config_dir", None)),
-                     "權限模式：" + chat_tui_pm.permission_mode()
+                     "權限模式（本機設定）：" + chat_tui_pm.permission_mode()
                      + "（自動，不跳出確認）",
                      "PM 狀態：" + self.pm_status_fields(lambda value, _width: value)["state"],
-                     "背景：" + ("讀取中" if count is None else "讀取失敗" if count == "?"
-                               else "%d 件進行中" % count),
-                     "佇列：" + queue, theme]
+                     "背景：" + ("讀取中" if count is None else
+                               "UNKNOWN（TaskStore：" + chat_tui_pm.safe_text(
+                                   str(self.background_error or "read failed")).replace("\n", " ")
+                               + ")" if count == "?" else "%d 件進行中" % count),
+                     "佇列（本機設定）：" + queue, theme]
             return "\n  ".join(lines)
         session = self.session
         model = selected_provider(session.config).get("model")
@@ -1083,9 +1085,9 @@ class ChatTUI:
         if session.state == "error":
             state = "錯誤（" + (session.last_error_code or "未分類") + "）"
         lines = ["狀態（聊天模式，不是 PM）",
-                 "供應商：" + session.provider + "（" + selected_provider(session.config)["type"]
+                 "供應商（本機設定）：" + session.provider + "（" + selected_provider(session.config)["type"]
                  + "）",
-                 "設定的模型：" + (model or "供應商預設"),
+                 "設定的模型（本機設定）：" + (model or "供應商預設"),
                  "實際模型：" + served,
                  "技能：" + (session.skill.name if session.skill else "無"),
                  "對話：%d 輪" % (len(session.history) // 2),

@@ -288,13 +288,26 @@ class PMRuntimeTests(unittest.TestCase):
                          'List files')
         self.assertIsNone(describe('Bash', {'command': 'cat ~/.netrc'}))   # no description
         self.assertEqual(describe('Grep', {'pattern': 'def main', 'path': 'src'}), 'Grep def main')
-        self.assertEqual(describe('Edit', {'file_path': '/r/a.py', 'old_string': 'x'}), 'Edit /r/a.py')
+        self.assertEqual(describe('Edit', {'file_path': '/r/a.py', 'old_string': 'x'}), 'Edit a.py')
         self.assertIsNone(describe('Read', 'not a dict'))
         self.assertIsNone(describe('Read', {'file_path': '  '}))
         self.assertEqual(len(describe('Bash', {'description': 'x' * 999})),
                          pm_runtime.TOOL_DESCRIPTION_CHARS)
         key = 'gh' + 'p_' + 'A1b2C3d4E5f6G7h8J9k0' * 2
         self.assertNotIn(key, describe('Bash', {'description': 'push with ' + key}) or '')
+
+    def test_tool_descriptions_redact_absolute_paths_by_location(self):
+        describe = pm_runtime._tool_description
+        home = str(Path.home())
+        self.assertEqual(describe('Read', {'file_path': self.cwd + '/src/app.py'}, self.cwd),
+                         'Read src/app.py')
+        self.assertEqual(describe('Read', {'file_path': home + '/private/keys/client.pem'},
+                                  self.cwd), 'Read ~/private/keys/client.pem')
+        self.assertEqual(describe('Read', {'file_path': '/var/private/client.pem'}, self.cwd),
+                         'Read client.pem')
+        self.assertEqual(describe('Bash', {'description':
+                                          'Read /var/private/client.pem'}, self.cwd),
+                         'Read client.pem')
 
     def test_argv_fixes_tool_set_and_adds_pm_instruction_on_every_launch(self):
         # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated

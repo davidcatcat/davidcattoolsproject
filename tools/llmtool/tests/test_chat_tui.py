@@ -1604,8 +1604,8 @@ class W57ChatTests(Base):
         ui, _ = self.drive(['/status\r'])
         status = self.status(ui)
         self.assertIn('狀態（聊天模式，不是 PM）', status)
-        self.assertIn('供應商：first（openai-compatible）', status)
-        self.assertIn('設定的模型：test', status)
+        self.assertIn('供應商（本機設定）：first（openai-compatible）', status)
+        self.assertIn('設定的模型（本機設定）：test', status)
         self.assertIn('實際模型：尚未呼叫', status)
         self.assertIn('連線：未檢查', status)
         self.assertIn('狀態：待命', status)
@@ -3740,13 +3740,25 @@ class PMConversationTests(BoundedPMTest):
         status = ui.conversation.text.split('> /status', 1)[1]
         self.assertIn('PM session：' + self.session_id + '（claude-code，cwd ', status)
         self.assertIn('Claude 帳號目錄：' + str(self.temp_root), status)
-        self.assertIn('權限模式：auto（自動，不跳出確認）', status)
+        self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
         self.assertIn('PM 狀態：暖機中…', status)
-        self.assertIn('佇列：沒有', status)
-        self.assertRegex(status, '背景：(讀取中|讀取失敗|[0-9]+ 件進行中)')
-        self.assertIn('主題：', status)
+        self.assertIn('佇列（本機設定）：沒有', status)
+        self.assertRegex(status, '背景：(讀取中|UNKNOWN（TaskStore：.*）|[0-9]+ 件進行中)')
+        self.assertIn('主題（本機設定）：', status)
         self.assertNotIn('供應商', status)
         self.assertNotIn('provider:', status)
+
+    def test_status_background_read_failure_shows_unknown_source_and_reason(self):
+        reason = 'TaskStore read denied'
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: (setattr(ui, 'background_key', self.session_id),
+                                        setattr(ui, 'background_error', reason)),
+                            '/status\r',
+                            lambda ui: self.until(ui, lambda: '狀態（PM 模式）' in
+                                                  ui.conversation.text)])
+        status = ui.conversation.text.split('> /status', 1)[1]
+        self.assertIn('背景：UNKNOWN（TaskStore：' + reason + ')', status)
+        self.assertNotIn('背景：讀取失敗', status)
 
     def test_history_turns_use_the_live_layout(self):
         import json

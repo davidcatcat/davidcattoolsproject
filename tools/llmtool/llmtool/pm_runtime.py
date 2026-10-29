@@ -215,7 +215,38 @@ _TOOL_TARGET_KEYS = ('pattern', 'file_path', 'notebook_path', 'path', 'url')
 TOOL_DESCRIPTION_CHARS = 240
 
 
-def _tool_description(name, tool_input):
+def _display_local_path(value, cwd=None):
+    """Hide absolute local paths while keeping useful context in the PM tool summary."""
+    if not isinstance(value, str) or not value.startswith('/'):
+        return value
+    path = os.path.normpath(value)
+    roots = []
+    if isinstance(cwd, str) and cwd:
+        roots.append((os.path.normpath(os.path.abspath(cwd)), 'repo'))
+    home = os.path.normpath(str(Path.home()))
+    roots.append((home, 'home'))
+    for root, kind in roots:
+        try:
+            if os.path.commonpath((root, path)) == root:
+                relative = os.path.relpath(path, root)
+                if kind == 'repo':
+                    return '.' if relative == '.' else relative
+                return '~' if relative == '.' else '~/' + relative
+        except ValueError:
+            continue
+    return os.path.basename(path) or '/'
+
+
+_ABSOLUTE_PATH = re.compile(r'(?<![A-Za-z0-9_:])/(?:[^\s]+)')
+
+
+def _redact_path_match(match, cwd):
+    token = match.group(0)
+    path = token.rstrip('.,;:)])}')
+    return _display_local_path(path, cwd) + token[len(path):]
+
+
+def _tool_description(name, tool_input, cwd=None):
     if not isinstance(tool_input, dict):
         return None
     text = tool_input.get('description')
@@ -224,7 +255,16 @@ def _tool_description(name, tool_input):
                        if isinstance(tool_input.get(key), str) and tool_input[key].strip()), None)
         if target is None:
             return None
-        text = name + ' ' + target
+        text = name + ' ' + _display_local_path(target, cwd)
+    else:
+        # Descriptions are model supplied and may contain the same local paths as
+        # the structured target fields. Replace path tokens before they reach the UI.
+        target = next((tool_input[key] for key in _TOOL_TARGET_KEYS
+                       if isinstance(tool_input.get(key), str) and tool_input[key].startswith('/')),
+                      None)
+        if target is not None:
+            text = text.replace(target, _display_local_path(target, cwd))
+        text = _ABSOLUTE_PATH.sub(lambda match: _redact_path_match(match, cwd), text)
     text = ' '.join(text.split())[:TOOL_DESCRIPTION_CHARS]
     screened = _screen_stream_text(text)
     return None if screened == '[withheld]' else screened
@@ -617,7 +657,8 @@ class _TurnParser:
                         if name not in record['tool_names']:
                             record['tool_names'].append(name)
                         out.append(self.emit('TOOL_USE', tool_use_id=tool_id, name=name,
-                                             description=_tool_description(name, item.get('input'))))
+                                             description=_tool_description(
+                                                 name, item.get('input'), self.runtime.cwd)))
         elif kind == 'user':
             for item in _iter_content((line.get('message') or {}).get('content')):
                 if isinstance(item, dict) and item.get('type') == 'tool_result':
