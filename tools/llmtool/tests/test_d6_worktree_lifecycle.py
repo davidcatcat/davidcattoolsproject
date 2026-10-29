@@ -188,32 +188,37 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         )
         for suffix, expected in cases:
             with self.subTest(mismatch=suffix):
-                task_id = "rebind-" + suffix
-                _root, record_path = self._registered_result_fixture(task_id)
-                record = lifecycle._read_registry_record(record_path)
-                record["physical_identity"]["device"] += 1
-                identity = record["physical_identity"]
-                if suffix == "inode":
-                    identity["inode"] += 1
-                elif suffix == "uid":
-                    identity["uid"] += 1
-                elif suffix == "mode":
-                    identity["mode"] = "0o755"
-                elif suffix == "branch":
-                    record["branch"] = "task/wrong-branch"
-                elif suffix == "head":
-                    record["head_sha"] = "0" * 40
-                elif suffix == "path":
-                    record["root_realpath"] = str(self.tasks / (task_id + "-other"))
-                elif suffix == "retired":
-                    record["state"] = "REMOVED"
-                lifecycle._replace_record(record_path, record)
-                before = lifecycle._read_registry_record(record_path)
-                result, line = self._rebind(task_id, execute=True)
-                self.assertEqual(result, 1)
-                self.assertEqual(line["result"], "BLOCKED")
-                self.assertEqual(line["reasons"], [expected])
-                self.assertEqual(lifecycle._read_registry_record(record_path), before)
+                _root = None
+                try:
+                    task_id = "rebind-" + suffix
+                    _root, record_path = self._registered_result_fixture(task_id)
+                    record = lifecycle._read_registry_record(record_path)
+                    record["physical_identity"]["device"] += 1
+                    identity = record["physical_identity"]
+                    if suffix == "inode":
+                        identity["inode"] += 1
+                    elif suffix == "uid":
+                        identity["uid"] += 1
+                    elif suffix == "mode":
+                        os.chmod(_root, 0o755)
+                    elif suffix == "branch":
+                        record["branch"] = "task/wrong-branch"
+                    elif suffix == "head":
+                        record["head_sha"] = "0" * 40
+                    elif suffix == "path":
+                        record["root_realpath"] = str(self.tasks / (task_id + "-other"))
+                    elif suffix == "retired":
+                        record["state"] = "REMOVED"
+                    lifecycle._replace_record(record_path, record)
+                    before = lifecycle._read_registry_record(record_path)
+                    result, line = self._rebind(task_id, execute=True)
+                    self.assertEqual(result, 1)
+                    self.assertEqual(line["result"], "BLOCKED")
+                    self.assertEqual(line["reasons"], [expected])
+                    self.assertEqual(lifecycle._read_registry_record(record_path), before)
+                finally:
+                    if suffix == "mode" and _root is not None:
+                        os.chmod(_root, 0o700)
 
     def test_train_squash_publication_requires_all_evidence(self):
         root, _ = self._registered_result_fixture("train-evidence")
