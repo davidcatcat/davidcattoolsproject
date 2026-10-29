@@ -557,7 +557,9 @@ def _validate_remote_test_receipts(record):
                  type(receipt['identity'].get('uid')) is not int or receipt['identity']['uid'] == 0 or
                  receipt['ran_total'] <= 0 or receipt['failures'] or
                  receipt['tree'] is None or len(receipt['final']) < len(receipt['modules']) or
-                 any(not line.endswith('OK') for line in receipt['final'])) or
+                 any(not (line == 'OK' or
+                          re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
+                     for line in receipt['final'])) or
                 (receipt['result'] == 'SHA_MISMATCH' and
                  receipt['fetch_head'] == receipt['source_sha'])):
             _fail('REMOTE_TEST_RECEIPT_INVALID')
