@@ -1451,11 +1451,12 @@ def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
                 _task_git(resolved, "branch", "--show-current").stdout.strip() != branch):
             return "D6_REBIND_BRANCH_MISMATCH", None
         head = _task_git(resolved, "rev-parse", "--verify", "HEAD").stdout.strip()
-        if head != record["head_sha"]:
+        if (_task_git(resolved, "merge-base", "--is-ancestor", record["head_sha"],
+                      head, check=False).returncode != 0):
             return "D6_REBIND_HEAD_MISMATCH", None
         if require_device_mismatch and info.st_dev == identity["device"]:
             return "D6_REBIND_DEVICE_UNCHANGED", None
-        return None, (resolved, info)
+        return None, (resolved, info, head)
 
     all_ok = True
     try:
@@ -1481,8 +1482,12 @@ def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
                     identity = dict(record["physical_identity"])
                     identity["device"] = new_device
                     updated["physical_identity"] = identity
+                    evidence = "device rebind %s->%s at %s" % (
+                        old_device, new_device, _now())
+                    if current[2] != record["head_sha"]:
+                        evidence += " (worktree HEAD %s ahead of record)" % current[2]
                     updated["evidence_refs"] = list(record["evidence_refs"]) + [
-                        "device rebind %s->%s at %s" % (old_device, new_device, _now())]
+                        evidence]
                     _replace_record(record_path, updated)
                     confirmed = _read_registry_record(record_path)
                     verify_reason, _ = assess(task_id, confirmed,

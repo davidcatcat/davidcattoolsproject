@@ -154,7 +154,11 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
 
     def test_device_rebind_dry_run_and_execute(self):
         root, record_path = self._registered_result_fixture("device-rebind")
+        worktree_head = self._commit_file(
+            root, "descendant commit\n", "commit after registration")
         record = lifecycle._read_registry_record(record_path)
+        recorded_head = record["head_sha"]
+        self.assertNotEqual(worktree_head, recorded_head)
         original_device = record["physical_identity"]["device"]
         record["physical_identity"]["device"] = original_device + 1
         lifecycle._replace_record(record_path, record)
@@ -171,10 +175,34 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(line["result"], "REBOUND")
         rebound = lifecycle._read_registry_record(record_path)
         self.assertEqual(rebound["physical_identity"]["device"], root.lstat().st_dev)
-        self.assertTrue(rebound["evidence_refs"][-1].startswith(
-            "device rebind %s->%s at " % (original_device + 1, root.lstat().st_dev)))
+        self.assertEqual(rebound["head_sha"], recorded_head)
+        self.assertRegex(
+            rebound["evidence_refs"][-1],
+            r"^device rebind %s->%s at .* \(worktree HEAD %s ahead of record\)$" %
+            (original_device + 1, root.lstat().st_dev, worktree_head))
         self.assertEqual(lifecycle._identity_reasons(
             root, rebound, self.source, self.source / ".git", self.tasks), [])
+        def complete_bootstrap(bootstrap_root, bootstrap_task_id):
+            self.assertEqual(bootstrap_root, root)
+            self.assertEqual(bootstrap_task_id, "device-rebind")
+            current = lifecycle._read_registry_record(record_path)
+            self.assertEqual(current["head_sha"], worktree_head)
+            current["env2_pass_marker"] = {
+                **before["env2_pass_marker"],
+                "submitted_head_sha": worktree_head,
+                "current_head_sha": worktree_head,
+            }
+            lifecycle._replace_record(record_path, current)
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap",
+                             side_effect=complete_bootstrap) as bootstrap:
+            recorded = lifecycle.record_result(
+                task_id="device-rebind", canonical_root=self.source, root=root,
+                workspace_root=self.tasks)
+        bootstrap.assert_called_once_with(root, "device-rebind")
+        self.assertEqual(recorded, worktree_head)
+        self.assertEqual(lifecycle._read_registry_record(record_path)["head_sha"],
+                         worktree_head)
 
     def test_device_rebind_refuses_every_non_device_mismatch(self):
         cases = (
