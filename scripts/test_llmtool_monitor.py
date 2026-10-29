@@ -4803,3 +4803,67 @@ class TaskScanCacheTests(unittest.TestCase):
             self.assertIsNone(mon._place(cwd, canonical))   # same registry read: kept
             current[0] = next(answers)
             self.assertEqual(mon._place(cwd, canonical), ("task", "wp-1"))
+
+
+class SysctlBoundsTests(unittest.TestCase):
+    """Codex review #637: every sysctl length is checked against a cap before a
+    buffer is allocated and against the buffer before it is parsed; any bad
+    length means the monitor uses ps, without a large allocation or a crash."""
+
+    def _kernel(self, answers):
+        import ctypes
+        kernel = mon._Sysctl.__new__(mon._Sysctl)
+        kernel.ctypes, self.allocated, calls = ctypes, [], iter(answers)
+        real = ctypes.create_string_buffer
+
+        def buffer(size):
+            self.allocated.append(size)
+            return real(min(size, 1 << 16))   # never really allocate what a test claims
+        kernel.ctypes = __import__("types").SimpleNamespace(create_string_buffer=buffer)
+        kernel.args_buf = real(mon.PROCARGS_MAX)
+        kernel._call = lambda mib, buf, size: next(calls)(buf, size)
+        return kernel
+
+    def _falls_back_to_ps(self, kernel):
+        ran = []
+        table = mon.ProcessTable(ps=lambda: ran.append(1) or "4000 1 4000 00:01 S claude\n",
+                                 kernel=kernel, clock=lambda: 100.0 + len(ran), watched=frozenset())
+        self.assertEqual(table.rows()[0][0], 4000)
+        table.rows()
+        self.assertEqual(len(ran), 2)   # ps both times: the kernel list was refused
+
+    def test_oversized_size_query_allocates_nothing(self):
+        kernel = self._kernel([lambda buf, size: 1 << 40])
+        self.assertIsNone(kernel.processes())
+        self.assertEqual(self.allocated, [])
+        self._falls_back_to_ps(self._kernel([lambda buf, size: 1 << 40] * 2))
+
+    def test_second_length_larger_than_the_buffer_is_refused(self):
+        answers = [lambda buf, size: 10 * mon.KINFO_SIZE, lambda buf, size: size + mon.KINFO_SIZE]
+        kernel = self._kernel(answers)
+        self.assertIsNone(kernel.processes())
+        self.assertTrue(all(n <= mon.KINFO_MAX_BYTES for n in self.allocated))
+        self._falls_back_to_ps(self._kernel(answers * 2))
+
+    def test_misaligned_length_is_refused(self):
+        answers = [lambda buf, size: 10 * mon.KINFO_SIZE, lambda buf, size: 10 * mon.KINFO_SIZE - 1]
+        self.assertIsNone(self._kernel(answers).processes())
+        self._falls_back_to_ps(self._kernel(answers * 2))
+
+    def test_size_near_the_cap_allocates_at_most_the_cap(self):
+        kernel = self._kernel([lambda buf, size: mon.KINFO_MAX_BYTES, lambda buf, size: 0])
+        self.assertIsNone(kernel.processes())
+        self.assertEqual(self.allocated, [mon.KINFO_MAX_BYTES])
+
+    def test_procargs_lengths_are_bounded(self):
+        cap = mon.PROCARGS_MAX
+        argv = (1).to_bytes(4, sys.byteorder) + b"/bin/zsh\0\0zsh\0"
+        for answers in ([lambda b, s: cap + 1],                        # size query over the cap
+                        [lambda b, s: 64, lambda b, s: cap + 1],       # answer longer than the buffer
+                        [lambda b, s: 2]):                             # shorter than argc
+            self.assertIsNone(self._kernel(answers).command(4000))
+
+        def fill(buf, size):
+            buf[:len(argv)] = argv
+            return len(argv)
+        self.assertEqual(self._kernel([lambda b, s: len(argv), fill]).command(4000), "zsh")

@@ -396,6 +396,11 @@ def run_ps_users(uids) -> str:
 PS_FULL_EVERY = 15.0   # seconds: `ps -A` at least this often (STAT, root processes' commands)
 PS_MIN_GAP = 4.0       # seconds: `ps -U` no more often than this for another account's newcomer
 KINFO_SIZE = 648       # sizeof(struct kinfo_proc) on 64-bit macOS
+# Upper bounds checked before any buffer is allocated: a size the kernel (or
+# a broken sysctl) reports beyond them means "use ps", never a huge buffer.
+KINFO_MAX_PROCS = 32768                          # kern.maxproc is a few thousand on a Mac
+KINFO_MAX_BYTES = KINFO_SIZE * KINFO_MAX_PROCS   # ~21 MB
+PROCARGS_MAX = 1 << 18                           # bytes of one process's KERN_PROCARGS2
 SZOMB, SSTOP = 5, 4    # extern_proc.p_stat values
 P_CONTROLT, EPROC_SLEADER = 0x2, 0x2
 
@@ -429,7 +434,7 @@ class _Sysctl:
         self.libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
         self.libc.sysctl.argtypes = (ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
                                      ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
-        self.args_buf = ctypes.create_string_buffer(1 << 18)
+        self.args_buf = ctypes.create_string_buffer(PROCARGS_MAX)
 
     def _call(self, mib: tuple, buf, size: int):
         ctypes = self.ctypes
@@ -440,11 +445,12 @@ class _Sysctl:
 
     def processes(self) -> list[KProc] | None:
         size = self._call((1, 14, 0), None, 0)   # CTL_KERN, KERN_PROC, KERN_PROC_ALL
-        if not size:
+        # Room for processes started between the two calls, within the cap.
+        if not size or size > KINFO_MAX_BYTES:
             return None
-        buf = self.ctypes.create_string_buffer(size + 64 * KINFO_SIZE)
+        buf = self.ctypes.create_string_buffer(min(size + 64 * KINFO_SIZE, KINFO_MAX_BYTES))
         size = self._call((1, 14, 0), buf, len(buf))
-        if not size or size % KINFO_SIZE:
+        if not size or size > len(buf) or size % KINFO_SIZE:
             return None
         return [KProc(pid, ppid, pgid, start, start_us, pstat, comm, uid, flag, eflag, tpgid, nice)
                 for start, start_us, flag, pstat, pid, nice, comm, uid, ppid, pgid, tpgid, eflag
@@ -453,8 +459,11 @@ class _Sysctl:
     def command(self, pid: int) -> str | None:
         """argv joined by spaces, as ps prints it; None when the kernel refuses
         (another account's process: ps reads those as root)."""
-        size = self._call((1, 49, pid), self.args_buf, len(self.args_buf))   # KERN_PROCARGS2
-        if not size or size < 4:
+        size = self._call((1, 49, pid), None, 0)   # KERN_PROCARGS2: how much there is
+        if not size or size < 4 or size > len(self.args_buf):
+            return None   # unreadable, or longer than the cap: ps prints it
+        size = self._call((1, 49, pid), self.args_buf, len(self.args_buf))
+        if not size or size < 4 or size > len(self.args_buf):
             return None
         raw = self.args_buf.raw[:size]
         argc = int.from_bytes(raw[:4], sys.byteorder)
