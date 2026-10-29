@@ -1037,6 +1037,57 @@ def _added_diff_content(value):
     return '\n'.join(added)
 
 
+def _recount_developer_hunks(value):
+    """Recompute unified-diff hunk counts from their body lines."""
+    lines = value.splitlines(keepends=True)
+    result = []
+    index = 0
+    while index < len(lines):
+        raw_header = lines[index]
+        header = raw_header.rstrip('\r\n')
+        match = _HUNK_HEADER.fullmatch(header)
+        if match is None:
+            result.append(raw_header)
+            index += 1
+            continue
+
+        body = []
+        old_count = new_count = 0
+        cursor = index + 1
+        while cursor < len(lines):
+            raw_line = lines[cursor]
+            line = raw_line.rstrip('\r\n')
+            if line.startswith((' ', '-', '+')):
+                body.append(raw_line)
+                if line.startswith(' '):
+                    old_count += 1
+                    new_count += 1
+                elif line.startswith('-'):
+                    old_count += 1
+                else:
+                    new_count += 1
+                cursor += 1
+                continue
+            if line.startswith('\\ No newline at end of file'):
+                body.append(raw_line)
+                cursor += 1
+                continue
+            break
+
+        if (int(match.group(2) or '1') != old_count or
+                int(match.group(4) or '1') != new_count):
+            suffix_start = header.rfind('@@') + 2
+            recounted = (f'@@ -{match.group(1)},{old_count} '
+                         f'+{match.group(3)},{new_count} @@{header[suffix_start:]}')
+        else:
+            recounted = header
+        newline = raw_header[len(header):]
+        result.append(recounted + newline)
+        result.extend(body)
+        index = cursor
+    return ''.join(result)
+
+
 def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=True):
     """Apply the unchanged envelope, strict diff, and write-scope checks."""
     if type(value) is not str or not value.strip():
@@ -1071,6 +1122,7 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Tr
 
 def _developer_normalized_output(value, write_paths, *, source_files=None):
     """Normalize salvageable text, then preserve strict rejection categories."""
+    value = _recount_developer_hunks(value) if type(value) is str else value
     original_rejection = _strict_developer_output_rejection(value, write_paths)
     if (original_rejection is not None and original_rejection not in
             ('DEVELOPER_OUTPUT_INVALID_ENVELOPE', 'DEVELOPER_OUTPUT_INVALID_DIFF')):
@@ -1347,8 +1399,9 @@ def _developer_prompt(task, *, source_sha, read_paths, write_paths, acceptance, 
         'Every hunk header must count its lines exactly: -start,old_count +start,new_count. '
         'Context lines (one leading space, including blank ones) count on both sides, '
         '- lines toward old_count only and + lines toward new_count only. Copy context '
-        'lines verbatim from the file at source_sha. '
-        'Only edit existing files; creating, deleting or renaming files is not supported. '
+        'lines verbatim from the file at source_sha. Never abbreviate or write "..."; '
+        'keep hunks small and use one hunk per change region. New files use --- /dev/null '
+        'and +++ b/path; deletions use --- a/path and +++ /dev/null. Renames are not supported. '
         'Use actual paths from write_paths and real changed lines. Do not claim to run '
         'tests, execute tools, commit, dispatch another agent, approve work, or modify '
         'files. Do not include credentials, secrets, private data, or prose outside the diff.'
