@@ -2728,7 +2728,7 @@ def run_task_codex_delegate(args, *, store):
         rejection, artifact = _codex_cumulative_diff_rejection(
             registration.root, task_source_sha, write_paths,
             validate_envelope=result.status == 'DONE')
-        empty_diff = rejection is None and result.status == 'DONE' and not artifact
+        empty_diff = result.status == 'DONE' and not artifact
         if empty_diff:
             # task_store's rejection-code contract has no empty-diff code.
             # Keep its existing envelope rejection while capturing the final
