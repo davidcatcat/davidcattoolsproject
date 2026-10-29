@@ -242,10 +242,11 @@ def tool_label(event):
     text = event.get("description")
     if type(text) is not str:
         return name
-    text = "".join(char for char in " ".join(text.split()) if char.isprintable())
+    text = " ".join("".join(char for char in text
+                            if char.isprintable() or char.isspace()).split())
+    text = text[:pm_runtime.TOOL_DESCRIPTION_CHARS]
     shown = safe_text(text) if text else WITHHELD
-    if (shown == WITHHELD or not shown.strip()
-            or not pm_runtime._label_is_safe(shown, name)):
+    if shown == WITHHELD or not shown.strip():
         return name
     if display_width(shown) <= TOOL_LABEL_CELLS:
         return shown

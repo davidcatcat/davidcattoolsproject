@@ -216,7 +216,7 @@ TOOL_DESCRIPTION_CHARS = 240
 
 
 def _display_local_path(value, cwd=None):
-    """Hide absolute local paths while keeping useful context in the PM tool summary."""
+    """Shorten paths inside the repository or home; keep other paths intact."""
     if not isinstance(value, str) or not value.startswith('/'):
         return value
     path = os.path.normpath(value)
@@ -234,7 +234,7 @@ def _display_local_path(value, cwd=None):
                 return '~' if relative == '.' else '~/' + relative
         except ValueError:
             continue
-    return os.path.basename(path) or '[root]'
+    return path
 
 
 def _is_display_path(value):
@@ -242,12 +242,12 @@ def _is_display_path(value):
         return False
     if value in ('.', '~', '[root]'):
         return True
-    tail = value[2:] if value.startswith('~/') else value
+    tail = value[2:] if value.startswith('~/') else value[1:] if value.startswith('/') else value
     return all(
         part
         and part not in ('.', '..')
         and part == part.strip()
-        and all(char.isalnum() or char in ' ._-' for char in part)
+        and all(char.isprintable() for char in part)
         for part in tail.split('/')
     )
 
@@ -265,16 +265,6 @@ def display_path(value, cwd=None):
     return shown if _is_display_path(shown) else None
 
 
-def _label_is_safe(label, name):
-    if not isinstance(label, str) or not all(char.isprintable() for char in label):
-        return False
-    if '/' not in label:
-        return True
-    prefix = name + ' '
-    return ('/' not in name and label.startswith(prefix)
-            and _is_display_path(label[len(prefix):]))
-
-
 def _tool_description(name, tool_input, cwd=None):
     if (not isinstance(tool_input, dict)
             or not isinstance(name, str)
@@ -283,10 +273,9 @@ def _tool_description(name, tool_input, cwd=None):
         return None
     raw = tool_input.get('description')
     text = None
-    if (isinstance(raw, str)
-            and '/' not in raw
-            and all(char.isprintable() or char.isspace() for char in raw)):
-        text = ' '.join(raw.split())
+    if isinstance(raw, str):
+        text = ' '.join(''.join(char for char in raw
+                                if char.isprintable() or char.isspace()).split())
 
     if not text:
         for key in _TOOL_TARGET_KEYS:
@@ -298,8 +287,7 @@ def _tool_description(name, tool_input, cwd=None):
     if not text:
         return None
     screened = _screen_stream_text(text[:TOOL_DESCRIPTION_CHARS])
-    return (screened if screened != '[withheld]'
-            and _label_is_safe(screened, name) else None)
+    return screened if screened != '[withheld]' else None
 
 
 _STREAM_SECRET_START = re.compile(

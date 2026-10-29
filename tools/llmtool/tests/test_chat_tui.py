@@ -3733,13 +3733,13 @@ class PMConversationTests(BoundedPMTest):
         self.assertNotIn('SECRET_COMMAND', ui.conversation.text)
         self.assertNotIn('SECRET_OUTPUT', ui.conversation.text)
 
-    def test_pm_tool_label_hides_ambiguous_path_descriptions(self):
-        for description in ('Read file:/Users/alice/private.pem',
-                            'Read /Users/alice/private.pem',
-                            'Read https://x.com/a,/Users/alice/b'):
+    def test_pm_tool_label_preserves_descriptions_with_paths(self):
+        for description in ('scp host:/Users/x/k.pem .',
+                            'fetch https://example.com/a/b',
+                            'export PATH=/a:/b', 'cat ~/notes/x.md'):
             with self.subTest(description=description):
                 self.assertEqual(chat_tui_pm.tool_label({
-                    'name': 'Read', 'description': description}), 'Read')
+                    'name': 'Bash', 'description': description}), description)
         self.assertEqual(chat_tui_pm.tool_label({
             'name': 'Read', 'description': 'Read docs/a.md'}), 'Read docs/a.md')
 
@@ -3749,8 +3749,8 @@ class PMConversationTests(BoundedPMTest):
                                                   ui.conversation.text)])
         status = ui.conversation.text.split('> /status', 1)[1]
         self.assertIn('PM session：' + self.session_id + '（claude-code，cwd .）', status)
-        self.assertIn('Claude 帳號目錄：.claude', status)
-        self.assertNotIn(str(self.temp_root), status)
+        # Owner #683: TUI shows paths like Claude Code (repo-relative, ~/, else full path).
+        self.assertRegex(status, r'Claude 帳號目錄：/\S*\.claude\n')
         self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
         self.assertIn('PM 狀態：暖機中…', status)
         self.assertIn('佇列（本機設定）：沒有', status)
