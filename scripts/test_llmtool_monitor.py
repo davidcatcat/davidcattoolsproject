@@ -2651,6 +2651,32 @@ class OfficeViewTests(unittest.TestCase):
         self.assertLess(lines.index(f"── {mon.STATUS_SECTION} ──"),
                         next(i for i, line in enumerate(lines) if line.startswith("agy")))
 
+    def test_pm_runtime_binding_labels_only_the_bound_claude_session(self):
+        bound = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+        other = "bbbbbbbb-cccc-4ddd-8eee-ffffffffffff"
+        for sid, title in ((bound, "Bound PM title"), (other, "Ordinary call title")):
+            self._write(self.claude / "proj" / f"{sid}.jsonl", [
+                {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"},
+                {"type": "ai-title", "aiTitle": title}], age=mon.OFFICE_BUSY + 60)
+        runtime = Path(self.tmp.name) / "pm-runtime"
+        runtime.mkdir(mode=0o700)
+        binding = runtime / f"{bound}.binding.json"
+        binding.write_text(json.dumps({"runtime": "claude-code", "native_session_id": bound,
+                                       "cwd": self.canonical, "dedicated": True,
+                                       "created_at": "2026-10-29T00:00:00Z",
+                                       "session_started": False}), encoding="utf-8")
+        os.chmod(binding, 0o600)
+        with patch.object(mon, "PM_RUNTIME_DIR", str(runtime)):
+            rows = [row for row in self.rows() if row.detail in
+                    ("Bound PM title", "Ordinary call title")]
+            self.assertEqual({row.detail: (row.name, row.state) for row in rows}, {
+                "Bound PM title": ("PM（TUI）", mon.DONE),
+                "Ordinary call title": ("claude 單次呼叫", mon.DONE),
+            })
+        with patch.object(mon, "PM_RUNTIME_DIR", str(runtime / "missing")):
+            row = next(row for row in self.rows() if row.detail == "Bound PM title")
+            self.assertEqual(row.name, "claude 單次呼叫")
+
     def test_unpersisted_claude_run_started_by_codex_is_shown_from_its_process(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user"},
                     ["task_started"], age=5)
