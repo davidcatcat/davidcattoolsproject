@@ -138,6 +138,82 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         return subprocess.check_output(["/usr/bin/git", *args], cwd=cwd,
                                        text=True).strip()
 
+    def _rebind(self, task_id, *, execute=False):
+        output = io.StringIO()
+        argv = ["--rebind-device-task-id", task_id, "--repo-root", str(self.source)]
+        if execute:
+            argv.append("--execute-approved-rebind")
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "TASKS_ROOT", self.tasks), \
+                contextlib.redirect_stdout(output):
+            result = lifecycle._main(argv)
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual(len(lines), 1)
+        return result, lines[0]
+
+    def test_device_rebind_dry_run_and_execute(self):
+        root, record_path = self._registered_result_fixture("device-rebind")
+        record = lifecycle._read_registry_record(record_path)
+        original_device = record["physical_identity"]["device"]
+        record["physical_identity"]["device"] = original_device + 1
+        lifecycle._replace_record(record_path, record)
+        before = lifecycle._read_registry_record(record_path)
+
+        result, line = self._rebind("device-rebind")
+        self.assertEqual(result, 0)
+        self.assertEqual((line["result"], line["old_device"], line["new_device"]),
+                         ("READY", original_device + 1, root.lstat().st_dev))
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+        result, line = self._rebind("device-rebind", execute=True)
+        self.assertEqual(result, 0)
+        self.assertEqual(line["result"], "REBOUND")
+        rebound = lifecycle._read_registry_record(record_path)
+        self.assertEqual(rebound["physical_identity"]["device"], root.lstat().st_dev)
+        self.assertTrue(rebound["evidence_refs"][-1].startswith(
+            "device rebind %s->%s at " % (original_device + 1, root.lstat().st_dev)))
+        self.assertEqual(lifecycle._identity_reasons(
+            root, rebound, self.source, self.source / ".git", self.tasks), [])
+
+    def test_device_rebind_refuses_every_non_device_mismatch(self):
+        cases = (
+            ("inode", "D6_REBIND_INODE_MISMATCH"),
+            ("uid", "D6_REBIND_UID_MISMATCH"),
+            ("mode", "D6_REBIND_MODE_MISMATCH"),
+            ("branch", "D6_REBIND_BRANCH_MISMATCH"),
+            ("head", "D6_REBIND_HEAD_MISMATCH"),
+            ("path", "D6_REBIND_PATH_MISMATCH"),
+            ("retired", "D6_REBIND_STATE_REFUSED"),
+        )
+        for suffix, expected in cases:
+            with self.subTest(mismatch=suffix):
+                task_id = "rebind-" + suffix
+                _root, record_path = self._registered_result_fixture(task_id)
+                record = lifecycle._read_registry_record(record_path)
+                record["physical_identity"]["device"] += 1
+                identity = record["physical_identity"]
+                if suffix == "inode":
+                    identity["inode"] += 1
+                elif suffix == "uid":
+                    identity["uid"] += 1
+                elif suffix == "mode":
+                    identity["mode"] = "0o755"
+                elif suffix == "branch":
+                    record["branch"] = "task/wrong-branch"
+                elif suffix == "head":
+                    record["head_sha"] = "0" * 40
+                elif suffix == "path":
+                    record["root_realpath"] = str(self.tasks / (task_id + "-other"))
+                elif suffix == "retired":
+                    record["state"] = "REMOVED"
+                lifecycle._replace_record(record_path, record)
+                before = lifecycle._read_registry_record(record_path)
+                result, line = self._rebind(task_id, execute=True)
+                self.assertEqual(result, 1)
+                self.assertEqual(line["result"], "BLOCKED")
+                self.assertEqual(line["reasons"], [expected])
+                self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
     def test_train_squash_publication_requires_all_evidence(self):
         root, _ = self._registered_result_fixture("train-evidence")
         head = self._commit_file(root, "pr head\n", "PR head")
