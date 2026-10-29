@@ -9,11 +9,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
     },
     "claude-developer": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-28",
-      "reason": "Owner: dispatch the Claude UI Agent like the other Developer Workers to push TUI progress",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6449248781",
+      "decided_at": "2026-10-30",
+      "reason": "Owner paused Claude Developer (including the Claude UI Agent) because the Claude token budget is short; Developer work goes to Codex gpt-6-luna high until the Owner re-enables",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6505985427",
       "owner_assignments": [
         {
           "task_id": "5fd1be3ee96e42678fe1dac75a9b697a",
