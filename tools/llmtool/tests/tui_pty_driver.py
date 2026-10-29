@@ -59,7 +59,8 @@ sys.exit(entrypoint.main(["chat", "--tui"]))
 # A Claude Code stand-in speaking the stream-json protocol pm_runtime drives. Each user
 # message is logged (FAKE_CLAUDE_LOG, one JSON line) before it is answered. The text picks
 # the behaviour: "think:N ..." streams a thinking block, then waits N s before the answer;
-# "slow:N ..." waits N s before the answer. An interrupt control request ends the turn.
+# "slow:N ..." waits N s before the answer; "tools:N ..." runs described tools (W57).
+# An interrupt control request ends the turn.
 # Like Claude Code 2.1.312 it reports command_lifecycle frames for a message sent with a
 # uuid: queued when read (also during a turn), started when its turn begins, completed
 # after its result; cancel_async_message withdraws a message that has not started.
@@ -133,9 +134,12 @@ while True:
         log.write(json.dumps({"text": text, "at": time.time()}, ensure_ascii=False) + "\n")
     with open(transcript, "a", encoding="utf-8") as stream:
         stream.write(json.dumps({"type": "user", "text": text}, ensure_ascii=False) + "\n")
-    hold, thinking, body = 0.0, False, text
+    hold, thinking, body, tools = 0.0, False, text, 0.0
     head = text.split(" ", 1)[0]
-    if head.startswith(("think:", "slow:")):
+    if head.startswith("tools:"):
+        tools = float(head.split(":", 1)[1])
+        body = text[len(head):].strip()
+    elif head.startswith(("think:", "slow:")):
         thinking = head.startswith("think:")
         hold = float(head.split(":", 1)[1])
         body = text[len(head):].strip()
@@ -146,6 +150,16 @@ while True:
         event({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": ""}})
         event({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "PRIVATE_REASONING"}})
     interrupted = wait(hold)
+    if tools:
+        out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Bash",
+             "input": {"command": "SECRET_COMMAND --run", "description": "跑 focused 測試"}}]}})
+        interrupted = wait(tools)
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+             "content": "SECRET_OUTPUT"}]}})
+        out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2", "name": "Read",
+             "input": {"file_path": "docs/plan.md"}}]}})
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2",
+             "content": "no such file", "is_error": True}]}})
     if thinking:
         event({"type": "content_block_stop", "index": 0})
     answer = "PM 回覆：" + body
@@ -481,7 +495,7 @@ class Terminal:
         self.wait_text("/pm connect connects to it", "/pm new binding")
         self.submit("/pm connect")
         self.wait_text("PM mode", "/pm connect")
-        self.wait_text("PM history", "/pm connect history")
+        self.wait_text("PM 歷史", "/pm connect history")
 
 
 class CPUBurner:

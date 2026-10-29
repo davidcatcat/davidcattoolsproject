@@ -12,11 +12,13 @@ What S2 still does not provide is shown as UNKNOWN.
 """
 
 import re
+from datetime import datetime
 
 from .chat_tui_task import UNKNOWN
 from .test_output_excerpts import _emitted_sensitive
 
 HISTORY_SHOWN = 20  # Most recent stored turns rendered on connect.
+TOOL_LABEL_CELLS = 120  # W57: most display cells of a tool line's description.
 WITHHELD = "[PM text withheld: it contains credential-like text]"
 # While a PM reply streams, the ASCII token still growing at the end (any run of
 # non-space ASCII) is not shown until it ends, so a credential split across deltas is
@@ -228,26 +230,62 @@ def turn_end_text(event, elapsed):
             + " event #" + (str(seq) if seq is not None else UNKNOWN))
 
 
-def history_text(result):
-    """Stored turns from pm_runtime.read_history, newest HISTORY_SHOWN, oldest first."""
+def tool_label(event):
+    """A screened tool description, or its name; never display a command or tool output."""
+    from .tui_markdown import display_width
+    name = safe_name(event.get("name"))
+    text = event.get("description")
+    if type(text) is not str:
+        return name
+    text = "".join(char for char in " ".join(text.split()) if char.isprintable())
+    shown = safe_text(text) if text else WITHHELD
+    if shown == WITHHELD or not shown.strip():
+        return name
+    if display_width(shown) <= TOOL_LABEL_CELLS:
+        return shown
+    cut, used = [], 0
+    for char in shown:
+        width = display_width(char)
+        if used + width > TOOL_LABEL_CELLS - 1:
+            break
+        cut.append(char)
+        used += width
+    return "".join(cut) + "…"
+
+
+def _local_time(value, now=None):
+    """A stored UTC ISO time as local HH:MM, with the date when it is not today."""
+    try:
+        when = datetime.fromisoformat(value).astimezone()
+    except (TypeError, ValueError):
+        return "時間不明"
+    now = now or datetime.now().astimezone()
+    return when.strftime("%H:%M" if when.date() == now.date() else "%m-%d %H:%M")
+
+
+def _elapsed(turn):
+    try:
+        seconds = (datetime.fromisoformat(turn["ended_at"])
+                   - datetime.fromisoformat(turn["started_at"])).total_seconds()
+    except (KeyError, TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
+
+
+def history_turns(result, now=None):
+    """Return screened fields for the newest HISTORY_SHOWN stored turns."""
     turns = result.get("turns") if type(result) is dict else None
-    if type(turns) is not list or not turns:
-        return "PM history: no stored turns"
-    shown = [t for t in turns if type(t) is dict][-HISTORY_SHOWN:]
-    lines = ["PM history (stored by pm_runtime; last %d of %d turns)" % (len(shown), len(turns))]
-    for turn in shown:
-        # Stored history is not validated by pm_runtime: every shown field is screened.
+    turns = [turn for turn in turns if type(turn) is dict] if type(turns) is list else []
+    shown = []
+    for turn in turns[-HISTORY_SHOWN:]:
         tools = turn.get("tool_names") if type(turn.get("tool_names")) is list else []
-        if turn.get("origin") == "background":   # a turn Claude Code started by itself
-            lines.append("(history) %s  PM（背景通知）" % safe_text(turn.get("started_at")))
-        else:
-            lines.append("(history) %s  owner → PM:\n%s" % (
-                safe_text(turn.get("started_at")), safe_text(turn.get("owner_text"))))
-        lines.append("(history) PM [%s]%s:\n%s" % (
-            safe_code(turn.get("status")),
-            (" tools: " + ", ".join(safe_name(t) for t in tools)) if tools else "",
-            safe_text(turn.get("result_text"), "") or "(no stored reply text)"))
-        if type(turn.get("usage")) is dict and turn["usage"]:
-            # The pane shows a short usage line per turn; the full numbers are here (W56a).
-            lines.append("(history) usage: " + usage_text(turn.get("usage")))
-    return "\n".join(lines)
+        shown.append({
+            "time": _local_time(turn.get("started_at"), now),
+            "background": turn.get("origin") == "background",
+            "owner": safe_text(turn.get("owner_text")),
+            "status": safe_code(turn.get("status")),
+            "reply": safe_text(turn.get("result_text"), ""),
+            "tools": [safe_name(name) for name in tools],
+            "usage": turn.get("usage") if type(turn.get("usage")) is dict else {},
+            "elapsed": _elapsed(turn)})
+    return shown, len(turns)
