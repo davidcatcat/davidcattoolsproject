@@ -17,6 +17,7 @@ import sys
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 
 from . import (chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
                chat_tui_view)
@@ -184,6 +185,10 @@ PM_USAGE = ("usage: /pm new [CWD]\n       /pm connect [SESSION [CWD]]\n"
             "       /pm\n(a CWD with spaces: quote it or escape the spaces)")
 # The pane's PM working line (W52 F1): redrawn this often while a turn has no text showing.
 PM_WORKING_SECONDS = 1.0
+# P0-3: how long the background watcher waits per pm_runtime.background_turn call; it
+# re-checks that the runtime is still alive between waits.
+PM_WATCH_SECONDS = 0.5
+PM_BACKGROUND_LABEL = "PM（背景通知）"
 QUEUE_PREVIEW_COLUMNS = 60   # Columns of each queued message shown by /pm queue and a pause.
 # Layout (W56a): role labels, the indent of a PM reply body, and the owner header prefix
 # the PM paths write (shown as the 「你」 label).
@@ -194,7 +199,8 @@ BODY_INDENT = "  "
 TOOL_DETAIL_INDENT = "      "
 PM_STATE_LABELS = {"thinking": "思考中", "working": "回答中", "interrupting": "中斷中…",
                    "idle": "待命", "connecting": "連線中…", "closing": "斷線中…"}
-TURN_STATUS_LABELS = {"INTERRUPTED": "已中斷", "ERROR": "錯誤", "REPLAY": "未重送"}
+TURN_STATUS_LABELS = {"INTERRUPTED": "已中斷", "ERROR": "錯誤", "REPLAY": "未重送",
+                      "NOT_SENT": "未送出", "ABSORBED": "併入背景回合"}
 
 
 def _enable_mouse_drag_reporting(output):
@@ -526,6 +532,16 @@ class ChatTUI:
         # Token of the current turn: events and the end from an older turn's worker (one
         # dropped by a disconnect, a fork or exit) are ignored.
         self._pm_turn_seq = 0
+        # P0-3: turns Claude Code starts by itself (background task notifications) are shown
+        # as turns labelled PM_BACKGROUND_LABEL. One that arrives while an Owner turn is still
+        # shown waits here (its events buffered) until that turn ends.
+        self.pm_label = PM_LABEL
+        self._pm_background_live = {}   # key -> pm_background_turns() item of a running one
+        self.pm_header_open = False     # the next PM block goes right under a header line
+        self.pm_turn_kind = None         # "owner" or "background" while a turn is active
+        self.pm_background_started = None   # start of a background turn inside an Owner turn
+        self._pm_background_waiting = collections.deque()
+        self._pm_held_attempts = set()   # turn ids whose draft went back to the queue
         self._quit_warned = False    # first Ctrl-C with queued messages only warned
         # W52 F1: the working line at the end of the pane while a turn shows no text yet.
         self.pm_working_at = None    # offset where it starts (its leading blank line included)
@@ -1206,11 +1222,15 @@ class ChatTUI:
 
     def _pm_open_block(self):
         """Open the PM text block: under the 「PM」 label the first time in a turn."""
-        if self.pm_labelled:
+        if self.pm_header_open:   # right under a background turn's header line
+            self.pm_header_open = False
+            self._pm_working_remove()   # the reply replaces the working line
+            self.pm_block_start = len(self.conversation.text) + 1   # after "\n"
+        elif self.pm_labelled:
             self.append("", show_working=False)   # a blank line, then the block
             self.pm_block_start = len(self.conversation.text)
         else:
-            self.append(PM_LABEL, show_working=False, segments=[(PM_LABEL, "role.pm")])
+            self.append(self.pm_label, show_working=False, segments=[(self.pm_label, "role.pm")])
             self.pm_block_start = len(self.conversation.text) + 1   # after "\n"
             self.pm_labelled = True
         self.pm_block_raw = ""
@@ -1227,7 +1247,7 @@ class ChatTUI:
                 and self._tool_block_valid():
             self._replace_block(segments, shown)
             return
-        label = [] if self.pm_labelled else [(PM_LABEL, "role.pm"), ("\n", "text")]
+        label = [] if self.pm_labelled else [(self.pm_label, "role.pm"), ("\n", "text")]
         self.pm_labelled = True
         self.append(shown, segments=label + segments)
         end = len(self.conversation.text)
@@ -1987,14 +2007,6 @@ class ChatTUI:
                 "state": compact(state, 18)}
 
     # -- PM background work (W56d) ---------------------------------------------------
-    def pm_background_turns(self):
-        """Hook for #665's background-turn state: items shaped like background_items.
-
-        #665 is not on this base, so there are none yet; when pm_runtime reports background
-        turns, return them here and the status count and ↓ panel include them.
-        """
-        return []
-
     def background_all(self):
         """Listed background work of the connected PM: Task items, then #665 turns."""
         if not self.pm_target or self.background_key != self.pm_target[0]:
@@ -2174,7 +2186,7 @@ class ChatTUI:
                             % len(self.pm_outbox))
         elif everything:
             self.pm_outbox_paused = None
-            self._pm_send_next()
+            self._pm_send_next(explicit=True)
         else:
             text = self.pm_outbox.popleft()   # still paused: the rest waits for the next Enter
             self._pm_start_turn(text, "owner → PM（自佇列送出，佇列暫停，剩 %d 則）:\n"
@@ -2214,11 +2226,18 @@ class ChatTUI:
         self.pm_tail.append(terminal_safe_text(text))
         self._pm_render(final=False)
 
-    def _pm_send_next(self):
-        if not self.pm_outbox or self.pm_outbox_paused or self.pm_turn_active:
-            return
+    def _pm_send_next(self, explicit=False):
+        if (not self.pm_outbox or self.pm_outbox_paused or self.pm_turn_active
+                or self._pm_background_waiting):
+            return   # a waiting background turn goes first; its end sends the next draft
         if self.pm_runtime is None or self.pm_pending or self.pm_state == "closing":
             self._pm_pause("PM 未連線")
+            return
+        blocked = getattr(self.pm_runtime, "automatic_sends_blocked", None)
+        if not explicit and callable(blocked) and blocked():
+            # A lifecycle frame contradicted a receipt pm_runtime had already latched.
+            self._pm_pause("PM 協定異常", "llmtool: PM 回報的訊息狀態前後矛盾，自動送出已停止；"
+                           "/pm queue send 由你決定是否送出")
             return
         text = self.pm_outbox.popleft()
         self._pm_start_turn(text, "owner → PM（自佇列送出，剩 %d 則）:\n" % len(self.pm_outbox))
@@ -2335,6 +2354,9 @@ class ChatTUI:
             return
         self.pm_runtime = outcome["runtime"]
         self.pm_binding = outcome.get("binding")
+        if callable(getattr(self.pm_runtime, "background_turn", None)):
+            threading.Thread(target=self._pm_watch, args=(self.pm_runtime, self._loop),
+                             name="llmtool-chat-pm-watch", daemon=True).start()
         self.pm_target = (outcome["session"], getattr(self.pm_runtime, "cwd", outcome["cwd"]))
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
         # Status shows 暖機中… until the first turn's first output; W41 A: no warm-up message.
@@ -2368,6 +2390,8 @@ class ChatTUI:
         self.pm_pending = False
         if self.pm_turn_active:
             self._pm_drop_turn()   # the worker's end may come later or never; it is stale now
+        self._pm_background_waiting.clear()
+        self._pm_background_live.clear()
         self.pm_runtime, self.pm_target, self.pm_mode, self.pm_state = None, None, False, None
         self.pm_binding, self.pm_warm = None, False
         self.append("PM disconnected; chat mode (Enter sends to chat provider "
@@ -2403,14 +2427,7 @@ class ChatTUI:
         self._pm_start_turn(text, "owner → PM:\n")
 
     def _pm_start_turn(self, text, header):
-        self.pm_turn_active, self.pm_turn_started = True, time.monotonic()
-        self.pm_interrupted, self.pm_deltas, self.pm_tools = False, False, {}
-        self.pm_turn_status = self.pm_turn_error = self.pm_interrupt_by = None
-        self.pm_turn_refused = False
-        self.pm_block_index = None
-        self.pm_state = "working"
-        self._pm_turn_seq += 1
-        self.pm_labelled, self.pm_tool_calls, self.pm_tool_ids = False, [], {}
+        self._pm_begin(PM_LABEL, "owner")
         self.append(header, segments=self._owner_segments(header + chat_tui_pm.safe_text(text),
                                                         rule=True))   # also shows the working line
         # One idempotency key per submitted draft: pm_runtime never runs it twice.
@@ -2420,19 +2437,174 @@ class ChatTUI:
                          args=(self.pm_runtime, text, key, self._loop, self._pm_turn_seq),
                          name="llmtool-chat-pm-turn", daemon=True).start()
 
+    def _pm_begin(self, label, kind):
+        """Mark a new turn active (Owner or background) and return its token."""
+        self.pm_turn_active, self.pm_turn_started = True, time.monotonic()
+        self.pm_interrupted, self.pm_deltas, self.pm_tools = False, False, {}
+        self.pm_turn_status = self.pm_turn_error = self.pm_interrupt_by = None
+        self.pm_turn_refused = False
+        self.pm_block_index = None
+        self.pm_state = "working"
+        self.pm_label, self.pm_turn_kind = label, kind
+        self._pm_turn_seq += 1
+        self._pm_reset_blocks()
+        return self._pm_turn_seq
+
+    def _pm_reset_blocks(self):
+        """A new turn (or a background turn inside one): its own label and tool summary."""
+        self.pm_labelled, self.pm_tool_calls, self.pm_tool_ids = False, [], {}
+        self.pm_tool_block = None
+        self.pm_header_open = False
+
     def _pm_turn(self, runtime, text, key, loop, seq):
         """Worker thread: forward each pm_runtime event to the event loop as it arrives."""
+        # written: send() returned, so the message may have gone out; receipt: pm_runtime
+        # reported the attempt's outcome (its Owner TURN_END, or a replay of an earlier one).
+        written = receipt = False
         try:
-            for event in runtime.send(text, idempotency_key=key):
+            events = runtime.send(text, idempotency_key=key)
+            written = True
+            for event in events:
                 if type(event) is dict:
                     self._post(loop, self.pm_event, event, seq)
+                    owner_end = event.get("type") == "TURN_END" and event.get("origin") is None
+                    if event.get("type") == "TURN_REPLAY" or (owner_end and receipt):
+                        receipt = True
+                        continue
+                    if not owner_end:
+                        continue
+                    receipt = True
+                    if event.get("status") in ("NOT_SENT", "UNKNOWN"):
+                        # NOT_SENT: Claude Code withdrew it unprocessed (or it was never
+                        # written). UNKNOWN: its fate is unconfirmed. Either way it goes back
+                        # to the queue once, never lost; an UNKNOWN one is never sent again
+                        # without the Owner.
+                        self._post(loop, self._pm_hold, text, seq, event["status"],
+                                   event.get("reason"), event.get("turn_id"))
         except LLMToolError as exc:
+            if chat_tui_pm.error_code(exc) == "PM_TURN_ACTIVE" and not written:
+                # P0-3: a background turn started first; nothing was sent. The draft goes
+                # back to the front of the queue and is sent when that turn ends.
+                self._post(loop, self._pm_hold, text, seq, "HELD")
+                self._post(loop, self.finish_pm_turn, seq)
+                return
             self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
                                              "code": chat_tui_pm.error_code(exc)}, seq)
         except BaseException:
             self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
                                              "code": chat_tui_task.UNKNOWN}, seq)
+        if written and not receipt:
+            # The turn ended without a receipt (a forked session, a broken iterator): the
+            # message may have been delivered, so it is held as UNKNOWN.
+            self._post(loop, self._pm_hold, text, seq, "UNKNOWN")
         self._post(loop, self.finish_pm_turn, seq)
+
+    def _pm_hold(self, text, seq, status, reason=None, turn_id=None):
+        """Put a draft back at the queue head, once per attempt; a late hold never changes
+        the status of a newer turn."""
+        if turn_id is not None:
+            if turn_id in self._pm_held_attempts:
+                return
+            self._pm_held_attempts.add(turn_id)
+        self.pm_outbox.appendleft(text)
+        if not self._pm_stale(seq):
+            self.pm_turn_status = status
+        if status == "HELD":
+            self._pm_notice("llmtool: PM 正在處理背景通知；這則訊息沒有送出，保留在佇列第 1 則，"
+                            "背景回合結束後送出")
+        elif status == "UNKNOWN":
+            self.pm_outbox_paused = "UNKNOWN"   # only the Owner resends it
+            self._pm_notice("llmtool: 無法確認 PM 是否收到這則訊息（UNKNOWN），未自動重送；"
+                            "可用 /pm queue send 重送")
+        elif reason in ("refused", "discarded"):
+            # Claude Code turned it down: sending it again by itself would just repeat that.
+            self.pm_outbox_paused = "Claude Code " + reason
+            self._pm_notice("llmtool: Claude Code 沒有處理這則訊息（" + reason + "），保留在佇列"
+                            "第 1 則並暫停；/pm queue send 重送")
+        else:
+            self._pm_notice("llmtool: Claude Code 沒有處理這則訊息（已撤回），保留在佇列第 1 則")
+
+    def _pm_watch(self, runtime, loop):
+        """Watcher thread (P0-3): while connected, take each turn Claude Code starts by
+        itself between Owner turns and forward it like an Owner turn's events."""
+        while runtime.is_alive():
+            try:
+                events = runtime.background_turn(timeout=PM_WATCH_SECONDS)
+            except Exception:
+                return   # pm_runtime could not record it; the next Owner send reports why
+            if events is None:
+                continue
+            turn = {"runtime": runtime, "seq": None, "events": [], "ended": False}
+            if not self._post(loop, self.pm_background_start, turn):
+                return
+            try:
+                for event in events:
+                    if type(event) is dict:
+                        self._post(loop, self.pm_background_event, turn, event)
+            except LLMToolError as exc:
+                self._post(loop, self.pm_background_event, turn,
+                           {"type": "RUNTIME_ERROR", "code": chat_tui_pm.error_code(exc)})
+            except BaseException:
+                self._post(loop, self.pm_background_event, turn,
+                           {"type": "RUNTIME_ERROR", "code": chat_tui_task.UNKNOWN})
+            self._post(loop, self.pm_background_end, turn)
+
+    def pm_background_start(self, turn):
+        if turn["runtime"] is not self.pm_runtime or self.pm_state == "closing":
+            turn["seq"] = -1   # an old connection's turn: ignored
+        elif self.pm_turn_active:
+            turn["queued_at"] = datetime.now(timezone.utc).isoformat()
+            self._pm_background_waiting.append(turn)   # shown when the Owner turn ends
+        else:
+            self._pm_background_show(turn)
+
+    def _pm_background_header(self, note):
+        """W56a layout: a turn rule, then the 「PM（背景通知）」 role label with its note; the
+        turn's text follows under that label."""
+        self.pm_label = PM_BACKGROUND_LABEL
+        self._pm_reset_blocks()
+        text = PM_BACKGROUND_LABEL + " " + note
+        self.append(text, segments=self._rule_segments() + [
+            (PM_BACKGROUND_LABEL, "role.pm"), (" " + note, "role.system")])
+        self.pm_labelled = self.pm_header_open = True
+
+    def _pm_background_track(self, key, turn_id=None):
+        self._pm_background_live[key] = {
+            "role": PM_LABEL, "task": turn_id or "背景通知", "pr": "", "state": "背景回合",
+            "updated_at": datetime.now(timezone.utc).isoformat()}
+
+    def pm_background_turns(self):
+        """W56d hook: background turns of the connected PM (running, then waiting to be
+        shown), shaped like chat_tui_status.background_items; they count in 背景 N and
+        are listed in the ↓ panel."""
+        if self.pm_runtime is None:
+            return []
+        waiting = [{"role": PM_LABEL, "task": "背景通知", "pr": "", "state": "等待顯示",
+                    "updated_at": item.get("queued_at")}
+                   for item in self._pm_background_waiting]
+        return list(self._pm_background_live.values()) + waiting
+
+    def _pm_background_show(self, turn):
+        turn["seq"] = self._pm_begin(PM_BACKGROUND_LABEL, "background")
+        self._pm_background_track(("turn", turn["seq"]))
+        self._pm_background_header("Claude Code 自行開始一輪（背景工作的通知）")
+        for event in turn["events"]:
+            self.pm_event(event, turn["seq"])
+        turn["events"] = []
+        if turn["ended"]:
+            self.finish_pm_turn(turn["seq"])
+
+    def pm_background_event(self, turn, event):
+        if turn["seq"] is None:
+            turn["events"].append(event)
+        else:
+            self.pm_event(event, turn["seq"])
+
+    def pm_background_end(self, turn):
+        if turn["seq"] is None:
+            turn["ended"] = True
+        else:
+            self.finish_pm_turn(turn["seq"])
 
     def _pm_stale(self, seq):
         """True for a worker callback of a turn that is no longer the active one."""
@@ -2582,6 +2754,31 @@ class ChatTUI:
             self.pm_state = "working"   # Thinking ended: text, a tool or the end follows.
         if kind in ("TEXT_DELTA", "ASSISTANT_TEXT", "TOOL_USE", "TURN_END", "RUNTIME_ERROR"):
             self.pm_warm = False        # The process answered: the cold start is over.
+        if kind == "BACKGROUND_TURN_START":
+            # Claude Code runs a turn of its own before it takes the Owner message.
+            self._pm_finalize()
+            self.pm_background_started = time.monotonic()
+            self.pm_block_index, self.pm_deltas = None, False
+            self._pm_background_track(("sub", self._pm_turn_seq), event.get("turn_id"))
+            self._pm_background_header("Claude Code 先處理一則背景通知；這則訊息等它結束後才開始")
+            return
+        if kind == "TURN_ACCEPTED":
+            if self.pm_label != PM_LABEL:
+                self._pm_finalize()
+                self.pm_label, self.pm_block_index, self.pm_deltas = PM_LABEL, None, False
+                self._pm_reset_blocks()   # the Owner reply opens under its own 「PM」 label
+                self.pm_turn_started = time.monotonic()   # the Owner turn's own timing
+                notice = "Claude Code 開始處理你的訊息"
+                self.append(notice, segments=[(notice, "role.system")])
+            return
+        if (kind == "TURN_END" and event.get("origin") == "background"
+                and self.pm_turn_kind == "owner"):
+            elapsed = max(0.0, time.monotonic() - (self.pm_background_started or time.monotonic()))
+            line = usage_line(event, elapsed)
+            self.append(line, segments=[(line, "meta.usage")])
+            self._pm_background_live.pop(("sub", self._pm_turn_seq), None)
+            self.pm_block_index, self.pm_deltas = None, False
+            return
         if kind == "THINKING":
             # Status only: thinking content never reaches the pane (pm_runtime sends none).
             if self.pm_state == "working":
@@ -2647,6 +2844,8 @@ class ChatTUI:
     def finish_pm_turn(self, seq=None):
         if self._pm_stale(seq):
             return
+        for kind in ("turn", "sub"):   # the background turn of this turn (if any) is over
+            self._pm_background_live.pop((kind, self._pm_turn_seq), None)
         self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
         self.pm_turn_active, self.pm_turn_started = False, None
         self._pm_working_stop()
@@ -2664,10 +2863,23 @@ class ChatTUI:
                 self._pm_pause("上一回合失敗 " + error)
             elif self.pm_turn_refused:
                 self._pm_pause("權限被拒")   # even when the turn still ended COMPLETED
-            elif status == "COMPLETED":
+            elif status in ("COMPLETED", "ABSORBED"):
                 self._pm_send_next()
+            elif status in ("HELD", "NOT_SENT"):
+                # The background turn that held the draft sends it when it ends. If that
+                # turn is already over (it ended before the hold was handled), drain now.
+                runtime = self.pm_runtime
+                busy = getattr(runtime, "turn_active", None)
+                if not self._pm_background_waiting and not (callable(busy) and busy()):
+                    self._pm_send_next()
             else:
                 self._pm_pause("上一回合沒有完成（" + (status or "沒有 TURN_END") + "）")
+        while self._pm_background_waiting and not self.pm_turn_active:
+            turn = self._pm_background_waiting.popleft()
+            if turn["runtime"] is self.pm_runtime and self.pm_state != "closing":
+                self._pm_background_show(turn)
+            else:
+                turn["seq"] = -1
         self.app.invalidate()
 
     def interrupt_pm(self, by="esc"):
@@ -2696,6 +2908,8 @@ class ChatTUI:
         # Exit: the turn's late worker callbacks are stale; nothing is rendered any more.
         self._pm_turn_seq += 1
         self.pm_turn_active, self.pm_turn_started = False, None
+        self._pm_background_waiting.clear()
+        self._pm_background_live.clear()
         for handle in (self._pm_tick_handle, self._pm_working_handle, self._drag_copy_handle,
                        self._autoscroll_handle):
             if handle is not None:

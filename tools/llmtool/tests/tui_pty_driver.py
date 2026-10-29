@@ -60,6 +60,9 @@ sys.exit(entrypoint.main(["chat", "--tui"]))
 # message is logged (FAKE_CLAUDE_LOG, one JSON line) before it is answered. The text picks
 # the behaviour: "think:N ..." streams a thinking block, then waits N s before the answer;
 # "slow:N ..." waits N s before the answer. An interrupt control request ends the turn.
+# Like Claude Code 2.1.312 it reports command_lifecycle frames for a message sent with a
+# uuid: queued when read (also during a turn), started when its turn begins, completed
+# after its result; cancel_async_message withdraws a message that has not started.
 FAKE_CLAUDE = r'''#!PYTHON
 import json, os, queue, sys, threading, time
 args = sys.argv[1:]
@@ -76,15 +79,24 @@ elif not os.path.exists(transcript):
 with open(os.environ["FAKE_CLAUDE_LOG"] + ".starts", "a", encoding="utf-8") as starts:
     starts.write(json.dumps({"argv": args, "at": time.time()}) + "\n")
 inbox = queue.Queue()
-def read():
-    for raw in sys.stdin:
-        inbox.put(json.loads(raw))
-    inbox.put(None)
-threading.Thread(target=read, daemon=True).start()
+lock = threading.Lock()
 def out(value):
     value.setdefault("session_id", session)
-    sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
-    sys.stdout.flush()
+    with lock:
+        sys.stdout.write(json.dumps(value, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+def lifecycle(item, state):
+    if item.get("uuid"):
+        out({"type": "command_lifecycle", "command_uuid": item["uuid"], "state": state,
+             "uuid": "frame-" + state})
+def read():
+    for raw in sys.stdin:
+        item = json.loads(raw)
+        if item.get("type") == "user":
+            lifecycle(item, "queued")
+        inbox.put(item)
+    inbox.put(None)
+threading.Thread(target=read, daemon=True).start()
 def event(value):
     out({"type": "stream_event", "event": value})
 pending = []
@@ -99,6 +111,13 @@ def wait(seconds):
         if item is None:
             sys.exit(0)
         if item.get("type") == "control_request":
+            request = item.get("request") or {}
+            if request.get("subtype") == "cancel_async_message":
+                for waiting in list(pending):
+                    if waiting.get("uuid") == request.get("message_uuid"):
+                        pending.remove(waiting)
+                        lifecycle(waiting, "cancelled")
+                continue
             return True
         pending.append(item)
     return False
@@ -108,6 +127,7 @@ while True:
         break
     if item.get("type") != "user":
         continue
+    lifecycle(item, "started")
     text = "".join(part.get("text", "") for part in item["message"]["content"])
     with open(os.environ["FAKE_CLAUDE_LOG"], "a", encoding="utf-8") as log:
         log.write(json.dumps({"text": text, "at": time.time()}, ensure_ascii=False) + "\n")
@@ -145,6 +165,7 @@ while True:
     out({"type": "result", "subtype": "error_during_execution" if interrupted else "success",
          "result": shown if interrupted else answer, "is_error": False,
          "usage": {"input_tokens": 11, "output_tokens": 7}})
+    lifecycle(item, "completed")
 '''
 
 FAKE_PBCOPY = r'''#!/bin/sh
