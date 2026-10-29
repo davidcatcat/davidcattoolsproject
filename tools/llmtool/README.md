@@ -1568,8 +1568,8 @@ collection, or A6 validation.
 
 ## A3.5 — Interactive Chat Shell
 
-`llmtool chat` starts a persistent interactive process with memory-only conversation
-history. Provider != Role != Agent != Skill. A3.5 is DONE and merged to main
+`llmtool chat` starts an interactive process with local conversation history by
+default. Provider != Role != Agent != Skill. A3.5 is DONE and merged to main
 in `021456b`; canonical validation and external ChatGPT review PASS.
 
 ```sh
@@ -1594,9 +1594,21 @@ are resolved only when sending a user turn, not during slash commands or startup
 | `/skill` | Show selected skill and available runtime names |
 | `/skill <name>` | Select a runtime skill for subsequent requests |
 | `/skill none` | Clear the skill; preserve conversation |
-| `/clear` | Clear conversation only; keep provider and skill |
+| `/clear` | Clear in-memory and saved conversation; keep provider and skill |
 | `/history` | Display user and assistant messages, excluding system context/metadata |
 | `/exit`, `/quit` | Exit with status 0 |
+
+By default, chat loads saved turns at startup and saves successful turns locally
+in `~/.local/state/llmtool/chat/history.json`. The state directory is owned by
+the current user with mode `0700`; the history file is owned by the current user
+with mode `0600`. Saving keeps at most the newest 200 exchanges and trims older
+exchanges as needed to keep the JSON file at or below 256 KiB. On save and load,
+sensitive-looking content is screened; detected content is represented as
+`[withheld]`. If the history file is unavailable or invalid, chat
+continues without saved history and reports that history could not be loaded or
+saved. `llmtool chat --no-history` disables disk loading and saving for that
+session while conversation remains in memory. This option also applies with
+`--tui`.
 
 **Switching providers sends retained conversation history to the newly selected
 provider on the next user turn.** The switch prints this notice. Use `/clear`
@@ -1622,9 +1634,10 @@ traceback. Ctrl-C does not resume the shell. A failed request prints a generic
 sanitized error, discards that attempted turn, preserves prior successful history,
 and permits retry or provider switching. Provider stderr and metadata are hidden.
 
-History has no disk persistence, transcript, restore, database, or cloud sync.
-`/history` displays the explicit conversation itself; it does not redact secrets
-users included in their own messages. `/clear` removes in-memory turns only.
+`/history` displays the explicit conversation in memory; it does not redact
+secrets users included in their own messages. `/clear` empties in-memory history
+and, when saving is available, replaces saved turns with an empty history file.
+There is no database or cloud sync.
 Replies are display text: no shell/Git execution, code execution, file mutation,
 tools, hooks, auto-approval, or routing is added. Existing provider transports
 retain their established boundaries. Technical capabilities grant no permission.
@@ -1633,14 +1646,15 @@ automatic A4 packet extraction, A5 Git injection, or A6 validation. A9 is availa
 
 Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains its
 subcommand-required behavior; automatic interactive entry is a future UX option.
-History grows in memory without token budgeting or automatic truncation; provider
-context limits may eventually cause a recoverable failure. Live smoke is NOT-TESTED.
+In-memory history has no token budgeting or automatic truncation; provider
+context limits may eventually cause a recoverable failure. The on-disk cap does
+not bound the live session's in-memory history. Live smoke is NOT-TESTED.
 
 ### TUI UI/UX decision and planned polish (Owner accepted 2026-10-22)
 
 See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20).
 
-**TUI is presentation and interaction only.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. Its conversation history remains memory-only; closing the chat does **not** establish persistent Task resume or detached background work.
+**TUI is presentation and interaction only.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. It uses the same local saved chat history as line mode by default; `--no-history` keeps turns in memory only. Closing the chat does **not** establish persistent Task resume or detached background work.
 
 Agreed UI backlog, not yet fully implemented: **P0** command picker/completion for already-supported commands, input history search, composer polish and compact selectable status; **P1** Markdown/code/diff and expandable evidence display plus optional read-only Task/Agent/GitHub/Usage/Approval screens **only if Core exposes trustworthy data**; **P2** themes, syntax highlighting and optional layouts. Key mappings such as Shift+Enter, Ctrl+R, Ctrl+G and Ctrl+O are proposals subject to terminal testing and backwards compatibility. Unknown or unsupported functions are hidden/disabled or marked UNKNOWN; TUI changes must not add provider, PM, execution, Git, approval, token accounting, database or background-worker behavior.
 
@@ -1652,8 +1666,8 @@ llmtool chat --tui
 ```
 
 `--tui` is opt-in; plain `llmtool chat` is unchanged and never imports the UI.
-It uses the same `ChatSession` (same commands, provider/skill rules, memory-only
-history, error rollback); it adds no second chat core, disk history, tools,
+It uses the same `ChatSession` (same commands, provider/skill rules, local saved
+history by default, error rollback); it adds no second chat core, tools,
 shell, Git or file-write permission. Layout: a scrollable conversation pane, a
 persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
 Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
