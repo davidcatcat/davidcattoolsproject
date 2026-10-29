@@ -16,6 +16,7 @@ from unittest.mock import patch
 from llmtool.cli import main, parser_for_cli
 from llmtool.errors import LLMToolError, coded_error
 from llmtool import worker_dispatch
+from llmtool import opencode_direct_developer
 from llmtool.providers import get_provider_capabilities
 from llmtool.providers.base import Reply
 from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
@@ -792,7 +793,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         developer = result['developer']
         self.assertEqual(developer['provider_profile'], 'opencode')
         self.assertEqual(developer['provider_type'], 'opencode-cli')
-        self.assertEqual(developer['model'], 'opencode/deepseek-v4.1-flash-free')
+        self.assertEqual(developer['model'], opencode_direct_developer.MODEL)
         self.assertEqual(developer['execution']['native_session_id'], 'ses_Abc123')
         self.assertEqual(developer['execution']['process_exit_code'], 0)
         self.assertEqual(developer['execution']['usage_source'], 'CLI_REPORTED')
