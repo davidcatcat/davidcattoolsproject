@@ -1654,6 +1654,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n')
         client = FakeClient(Reply(patch_text, {
             'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
+            'served_model': 'qwen3.8-27b',
         }))
         args = self._delegate_args(task, read_path=[target], write_path=[target],
                                    context='VALUE = 1\n')
