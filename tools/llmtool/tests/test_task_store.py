@@ -239,6 +239,51 @@ class TaskStoreTests(unittest.TestCase):
             'error_code': None, 'created_at': '2026-10-23T00:00:00Z',
         }
 
+    def _claude_result_task(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = self._developer_assignment(provider='claude')
+        developer['owner_assignment_ref'] = (
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+            '#issuecomment-1')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
+        return task
+
+    def test_claude_result_is_pm_bound_single_pending_transition(self):
+        task = self._claude_result_task()
+        pm_session = task['pm_session_id']
+        with self.assertRaises(LLMToolError):
+            self.store.record_claude_result(
+                task['task_id'], pm_session_id='pm-' + new_id(),
+                executor_task_id='executor-1', head_sha='a' * 40)
+        with self.assertRaises(LLMToolError):
+            self.store.record_claude_result(
+                task['task_id'], pm_session_id=pm_session,
+                executor_task_id='executor-1', head_sha='bad')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            saved = self.store.record_claude_result(
+                task['task_id'], pm_session_id=pm_session,
+                executor_task_id='executor-1', head_sha='a' * 40)
+        result = saved['developer']['claude_result']
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(result['executor_task_id'], 'executor-1')
+        self.assertEqual(result['head_sha'], 'a' * 40)
+        self.assertRegex(result['recorded_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+        with self.assertRaises(LLMToolError):
+            self.store.record_claude_result(
+                task['task_id'], pm_session_id=pm_session,
+                executor_task_id='executor-1', head_sha='a' * 40)
+
+    def test_claude_result_rejects_wrong_state(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        with self.assertRaises(LLMToolError):
+            self.store.record_claude_result(
+                task['task_id'], pm_session_id=task['pm_session_id'],
+                executor_task_id='executor-1', head_sha='a' * 40)
+
     def _allow_codex_dispatch(self):
         policy_path = Path(worker_dispatch._POLICY_PATH)
         policy = json.loads(policy_path.read_text(encoding='utf-8'))

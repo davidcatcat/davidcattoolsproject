@@ -182,6 +182,7 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
 ))
 _DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
 _DEVELOPER_EXECUTOR_TASK_FIELDS = frozenset(('executor_task_id',))
+_CLAUDE_RESULT_FIELDS = frozenset(('claude_result',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DEVELOPER_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
@@ -207,6 +208,11 @@ _DEVELOPER_PROGRESS_SHAPES = tuple(
     shape | frozenset(('progress',))
     for shape in (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
                   *_DEVELOPER_BLOCKED_REASON_SHAPES)
+)
+_DEVELOPER_CLAUDE_RESULT_SHAPES = tuple(
+    shape | _CLAUDE_RESULT_FIELDS for shape in
+    (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+     *_DEVELOPER_BLOCKED_REASON_SHAPES, *_DEVELOPER_PROGRESS_SHAPES)
 )
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
@@ -1026,7 +1032,8 @@ def _validate(record):
             assignment_shapes = (*_DEVELOPER_BASE_SHAPES,
                                  *_DEVELOPER_EXTENSION_SHAPES,
                                  *_DEVELOPER_BLOCKED_REASON_SHAPES,
-                                 *_DEVELOPER_PROGRESS_SHAPES)
+                                 *_DEVELOPER_PROGRESS_SHAPES,
+                                 *_DEVELOPER_CLAUDE_RESULT_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if ('executor_task_id' in developer and
@@ -1112,9 +1119,27 @@ def _validate(record):
             if (developer['provider_profile'] == 'claude' and
                     (developer['provider_type'] is not None or
                      developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
-                     developer['state'] != 'DEVELOPER_PENDING' or
-                     'owner_assignment_ref' not in developer)):
+                     developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_RESPONDED') or
+                     'owner_assignment_ref' not in developer or
+                     (developer['state'] == 'DEVELOPER_PENDING' and
+                      'claude_result' in developer) or
+                     (developer['state'] == 'DEVELOPER_RESPONDED' and
+                      ('claude_result' not in developer or developer['artifact'] is not None or
+                       developer['usage'] is not None or developer['error_code'] is not None or
+                       developer['model'] is not None)))):
                 _fail()
+            if 'claude_result' in developer:
+                result = developer['claude_result']
+                if (developer['provider_profile'] != 'claude' or
+                        type(result) is not dict or
+                        set(result) != {'executor_task_id', 'head_sha', 'recorded_at'} or
+                        not _safe_identifier(result['executor_task_id'], D6_TASK_ID) or
+                        type(result['head_sha']) is not str or
+                        re.fullmatch(r'[0-9a-f]{40}', result['head_sha']) is None or
+                        type(result['recorded_at']) is not str or
+                        re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',
+                                     result['recorded_at']) is None):
+                    _fail()
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
@@ -1313,10 +1338,11 @@ def _validate(record):
                       type(developer.get('execution')) is not dict or
                       developer['execution'].get('usage_source') != 'CLI_REPORTED'))):
                 _fail()
-            if dev_state == 'DEVELOPER_RESPONDED' and (
+            if (dev_state == 'DEVELOPER_RESPONDED' and
+                    developer['provider_profile'] != 'claude' and (
                     developer['provider_type'] is None or artifact is None or
                     developer['error_code'] is not None or
-                    (token_cap_required and developer['max_tokens'] is None)):
+                    (token_cap_required and developer['max_tokens'] is None))):
                 _fail()
             if dev_state == 'BLOCKED' and (
                     developer['provider_profile'] != 'agy' or
@@ -2117,6 +2143,34 @@ class TaskStore:
                 self._update(task_id, expected={'record_sha256': current['record_sha256']},
                              changes={'remote_test_receipts': receipts + [receipt]})
                 return receipt
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def record_claude_result(self, task_id, *, pm_session_id, executor_task_id, head_sha):
+        """Record the one PM-bound result transition for a Claude Developer Task."""
+        if (not _safe_identifier(pm_session_id, SESSION_ID) or
+                not _safe_identifier(executor_task_id, D6_TASK_ID) or
+                type(head_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', head_sha) is None):
+            _fail('CLAUDE_RESULT_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            developer = current.get('developer')
+            if current.get('pm_session_id') != pm_session_id:
+                _fail('CLAUDE_RESULT_BINDING_MISMATCH')
+            if (type(developer) is not dict or
+                    developer.get('provider_profile') != 'claude' or
+                    developer.get('state') != 'DEVELOPER_PENDING'):
+                _fail('CLAUDE_RESULT_STATE_INVALID')
+            responded = dict(developer)
+            responded.update(state='DEVELOPER_RESPONDED', claude_result={
+                'executor_task_id': executor_task_id, 'head_sha': head_sha,
+                'recorded_at': self._completion_now(),
+            })
+            try:
+                return self._update(task_id,
+                    expected={'record_sha256': current['record_sha256']},
+                    changes={'developer': responded})
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')
