@@ -330,6 +330,7 @@ def configuration(*, read_paths, write_paths, model=MODEL,
     rules.extend({'action': 'edit', 'resource': path, 'effect': 'allow'}
                  for path in write_paths)
     provider, model = selected.split('/', 1)
+    model = model.split('#', 1)[0]
     return {
         'model': selected,
         'default_agent': AGENT,

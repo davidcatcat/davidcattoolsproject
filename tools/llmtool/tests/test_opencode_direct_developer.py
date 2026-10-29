@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
-    AGENT, MODEL, DirectOpenCodeError, configuration, parse_json_events, run,
+    AGENT, MAX_OUTPUT_TOKENS, MODEL, DirectOpenCodeError, configuration,
+    parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool import worker_dispatch
@@ -472,6 +473,15 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             with self.subTest(model=model):
                 self.assertEqual(configuration(read_paths=['source.py'],
                     write_paths=['source.py'], model=model)['model'], model)
+
+    def test_variant_is_stripped_from_provider_model_key(self):
+        value = configuration(read_paths=['source.py'], write_paths=['source.py'],
+                              model='opencode/x-free#high')
+        self.assertEqual(value['providers'], {
+            'opencode': {'models': {'x-free': {
+                'limit': {'output': MAX_OUTPUT_TOKENS},
+            }}}
+        })
 
     def test_non_free_or_malformed_model_is_rejected_before_any_cli_launch(self):
         marker = self.root / 'invoked'

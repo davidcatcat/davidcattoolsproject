@@ -19,6 +19,7 @@ from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record, run_task_complete
 from llmtool import task_completion
 from llmtool import worker_dispatch
+from llmtool import opencode_direct_developer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import d6_worktree_lifecycle  # noqa: E402
@@ -1831,7 +1832,7 @@ class TaskCompletionTests(unittest.TestCase):
         developer = task['developer']
         artifact = 'diff --git a/test_fixture.py b/test_fixture.py\n'
         developer.update(provider_profile='opencode', provider_type='opencode-cli',
-            model='opencode/deepseek-v4.1-flash-free',
+            model=opencode_direct_developer.MODEL,
             backend_session_semantics='CLI_REPORTED_SESSION_ID',
             state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
