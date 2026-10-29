@@ -2315,7 +2315,7 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "assistant", "timestamp": stamp(5),
              "message": {"content": "new turn"}}], age=5)
 
-        rows = {row.key: row for row in self.rows() if row.name == "claude"}
+        rows = {row.key: row for row in self.rows()}
         stale = rows["claude:stale.jsonl"]
         fresh = rows["claude:fresh.jsonl"]
         self.assertEqual((stale.state, stale.age), (mon.IDLE, 77.0))
