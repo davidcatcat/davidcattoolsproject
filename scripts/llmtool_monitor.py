@@ -3391,7 +3391,12 @@ def _claude_row(entry: dict, state: str, detail: str, age, place, task: str, key
     # none. Nothing else claims a role (Owner 2026-10-23, #565).
     named = SESSION_ROLE.fullmatch(name)
     launcher = (named.group(1) or named.group(2)) if named else ""
-    role = (_d6_role(canonical, place[1]) or launcher) if place[0] == "task" else launcher
+    bound_role = _d6_role(canonical, place[1]) if place[0] == "task" else ""
+    role = bound_role or launcher
+    # A D6 Developer binding can cover the UI Agent session as well. Keep
+    # that distinction only when the validated launcher name explicitly says UI.
+    if bound_role == "developer" and named and named.group(1):
+        role = "ui"
     # Only a running CLI says whether it has a terminal; a session moved to
     # the background keeps running without one.
     mode = ("背景" if entry.get("kind") == "bg" else "互動") if running else ""

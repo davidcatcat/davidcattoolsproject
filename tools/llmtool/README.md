@@ -708,6 +708,16 @@ Provider uses one ephemeral CLI call and has no native resumable Session ID;
 `task show` retrieves the recorded Task and response but does not resume a model
 conversation, dispatch a Developer, run tests, or continue work in the background.
 
+The dedicated PM (`/pm new`, `/pm connect`) runs `claude` with the inherited environment
+unless the trusted user config `~/.config/llmtool/config.yaml` sets
+`pm_runtime: {claude_config_dir: /Users/me/.claude-account2}` (an absolute path; project
+`.llmtool.yaml` cannot set it). pm_runtime then starts the PM with that directory as
+`CLAUDE_CONFIG_DIR` and looks up the session transcript there; an invalid value refuses to
+connect with `PM_CONFIG_INVALID`. `/pm connect` and `/pm` show the Claude account
+directory in use. The TUI PM runs in Claude Code auto permission mode
+(`--permission-mode auto`, Owner #304 c6494914495); the stop-loss is to revert to
+chat-only after any action outside the Owner's authorization.
+
 `task record-pm --stdin-json` records a decision from the active PM runtime without invoking a
 provider. Its strict JSON input contains `request` and a structured `response`; it accepts only
 LOW-risk `opencode` or `codex` Developer assignments. The record identifies its runtime as
@@ -1430,14 +1440,12 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 
 ## Safety boundary
 
-模型命令唯讀本機資料並向設定的 API provider 發出 HTTPS/HTTP request；`claude-cli` 會以
-固定 argv、無 shell 的方式啟動使用者已安裝的 CLI，並停用 CLI tools、session persistence
-及自訂 hooks/plugins/MCP。llmtool 不執行模型回傳的 shell/Git 指令，也不協調檔案修改。
+`ask`、`analyze-log`、`review-diff`、A9/A10 與一般 chat 的文字 provider 不執行模型回傳的 shell/Git 指令；`claude-cli` 文字 transport 使用固定 argv、無 shell，並要求停用 CLI tools、session persistence 及自訂 hooks/plugins/MCP。PM runtime 與經授權的 direct Developer 是另外的執行路徑；它們有獨立的本機記錄與執行邊界，direct Developer 可在核准的 D6 寫入範圍內修改檔案。
 明確的 config 操作及 A7 feedback capture/review 可寫入指定檔案；A9 orchestration 與 A10 retrieval 不寫檔。
 不自動讀取 SSH、keychain 或任意 secret file；模型命令明確提供的文字、pipe、`--file`
 內容會完整傳給 gateway，請自行移除不應傳送的秘密。離線 `test-excerpts` 只處理
 明確指定的本機 capture，不傳給任何 provider。
-工具不自動寫 prompt／response log、cache 或 benchmark report；使用者明確 capture 的 feedback 是獨立資料。
+一般 chat 預設將 user/assistant turns 保存至 `~/.local/state/llmtool/chat/history.json`；其目錄為 `0700`、檔案為 `0600`，內容經敏感資訊樣式篩查，最多保存 200 組 exchanges，序列化檔案上限為 256 KiB。`llmtool chat --no-history` 只停用一般 `ChatSession` 對這份 history 檔的載入與保存；它不會停用 PM runtime、Task store、task-status cache、測試記錄或外部 CLI 的獨立儲存。本機儲存依子系統分開管理。PM runtime 會在 `~/.local/state/llmtool/pm-runtime/` 保存 `<key>.history.json`、binding 與 runtime metadata；history 保留最近 200 筆 PM turn records，沒有一般 chat 的 256 KiB 檔案上限，也沒有對應的停用旗標。Task 操作會在 `~/.local/state/llmtool/tasks/` 保存 request、response、proposal、evidence、events、receipts 與相關狀態，並可能保存經遮罩的 rejected-output capture；`task status` 可更新相鄰的 `task-status-index.json` cache。Ask diagnostics 另受 `--save-diagnostics`、`--no-save-diagnostics` 與 trusted user 的 `diagnostics.persist_metadata` 控制，預設關閉，只保存其限定的 metadata。測試、High Debug、AGY、review artifact 與 D6 helper 路徑也會建立各自的記錄或暫存檔；部分 raw test/native log 在寫入前不做內容篩查。Config 與 feedback 由明確操作保存；benchmark adapter 本身只輸出結果，不自動保存 benchmark report。外部 CLI 的 session、cache 與 runtime state 依該路徑及 CLI 實作另行管理；llmtool 沒有全域「完全不落盤」開關。
 
 ## 開發與驗證
 
@@ -1460,7 +1468,8 @@ argv、stdin、timeout、output limit 與 sanitized errors。Live runtime valida
 
 ```text
 llmtool/cli.py                         CLI 與輸出
-llmtool/chat.py                        memory-only chat session and REPL
+llmtool/chat.py                        conversation state and REPL; optional private local history
+llmtool/chat_history.py                private, bounded local chat history (0700/0600, screened)
 llmtool/chat_tui.py                    opt-in full-screen chat UI (`chat --tui`)
 llmtool/context.py                     immutable packets, bounded parsing and rendering
 llmtool/config.py                      YAML 合併、驗證、遮罩、init
@@ -1577,8 +1586,8 @@ collection, or A6 validation.
 
 ## A3.5 — Interactive Chat Shell
 
-`llmtool chat` starts a persistent interactive process with memory-only conversation
-history. Provider != Role != Agent != Skill. A3.5 is DONE and merged to main
+`llmtool chat` starts an interactive process with local conversation history by
+default. Provider != Role != Agent != Skill. A3.5 is DONE and merged to main
 in `021456b`; canonical validation and external ChatGPT review PASS.
 
 ```sh
@@ -1603,9 +1612,20 @@ are resolved only when sending a user turn, not during slash commands or startup
 | `/skill` | Show selected skill and available runtime names |
 | `/skill <name>` | Select a runtime skill for subsequent requests |
 | `/skill none` | Clear the skill; preserve conversation |
-| `/clear` | Clear conversation only; keep provider and skill |
+| `/clear` | Clear in-memory and saved conversation; keep provider and skill |
 | `/history` | Display user and assistant messages, excluding system context/metadata |
 | `/exit`, `/quit` | Exit with status 0 |
+
+By default, chat loads saved turns at startup and saves successful turns locally
+in `~/.local/state/llmtool/chat/history.json`. The state directory is owned by
+the current user with mode `0700`; the history file is owned by the current user
+with mode `0600`. Saving keeps at most the newest 200 exchanges and trims older
+exchanges as needed to keep the JSON file at or below 256 KiB. On save and load,
+sensitive-looking content is screened; detected content is represented as
+`[withheld]`. If the history file is unavailable or invalid, chat
+continues without saved history and reports that history could not be loaded or
+saved. `llmtool chat --no-history` disables loading and saving of the normal `ChatSession` history file while retaining that conversation in memory; it does not disable independent PM, Task, cache, test-log or native CLI storage. This option also applies with
+`--tui`.
 
 **Switching providers sends retained conversation history to the newly selected
 provider on the next user turn.** The switch prints this notice. Use `/clear`
@@ -1631,9 +1651,10 @@ traceback. Ctrl-C does not resume the shell. A failed request prints a generic
 sanitized error, discards that attempted turn, preserves prior successful history,
 and permits retry or provider switching. Provider stderr and metadata are hidden.
 
-History has no disk persistence, transcript, restore, database, or cloud sync.
-`/history` displays the explicit conversation itself; it does not redact secrets
-users included in their own messages. `/clear` removes in-memory turns only.
+`/history` displays the explicit conversation in memory; it does not redact
+secrets users included in their own messages. `/clear` empties in-memory history
+and, when saving is available, replaces saved turns with an empty history file.
+There is no database or cloud sync.
 Replies are display text: no shell/Git execution, code execution, file mutation,
 tools, hooks, auto-approval, or routing is added. Existing provider transports
 retain their established boundaries. Technical capabilities grant no permission.
@@ -1642,14 +1663,15 @@ automatic A4 packet extraction, A5 Git injection, or A6 validation. A9 is availa
 
 Existing `ask` remains the one-shot/pipeline interface. Bare `llmtool` retains its
 subcommand-required behavior; automatic interactive entry is a future UX option.
-History grows in memory without token budgeting or automatic truncation; provider
-context limits may eventually cause a recoverable failure. Live smoke is NOT-TESTED.
+In-memory history has no token budgeting or automatic truncation; provider
+context limits may eventually cause a recoverable failure. The on-disk cap does
+not bound the live session's in-memory history. Live smoke is NOT-TESTED.
 
 ### TUI UI/UX decision and planned polish (Owner accepted 2026-10-22)
 
 See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20).
 
-**TUI is presentation and interaction only.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. Its conversation history remains memory-only; closing the chat does **not** establish persistent Task resume or detached background work.
+**The TUI presents normal chat and also exposes separate PM and Task interfaces.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. Normal chat uses the same saved `ChatSession` history as line mode by default; `--no-history` disables only that history file, while PM and Task interfaces retain their independent persistence behavior. Closing the chat does **not** establish persistent Task resume or detached background work.
 
 Agreed UI backlog, not yet fully implemented: **P0** command picker/completion for already-supported commands, input history search, composer polish and compact selectable status; **P1** Markdown/code/diff and expandable evidence display plus optional read-only Task/Agent/GitHub/Usage/Approval screens **only if Core exposes trustworthy data**; **P2** themes, syntax highlighting and optional layouts. Key mappings such as Shift+Enter, Ctrl+R, Ctrl+G and Ctrl+O are proposals subject to terminal testing and backwards compatibility. Unknown or unsupported functions are hidden/disabled or marked UNKNOWN; TUI changes must not add provider, PM, execution, Git, approval, token accounting, database or background-worker behavior.
 
@@ -1661,9 +1683,7 @@ llmtool chat --tui
 ```
 
 `--tui` is opt-in; plain `llmtool chat` is unchanged and never imports the UI.
-It uses the same `ChatSession` (same commands, provider/skill rules, memory-only
-history, error rollback); it adds no second chat core, disk history, tools,
-shell, Git or file-write permission. Layout: a scrollable conversation pane, a
+Normal chat mode uses the same `ChatSession`, provider/skill rules, saved-history default and error rollback as line mode. The TUI also calls separate PM runtime and Task APIs; their records and execution permissions follow those Core interfaces and are not controlled by `--no-history`. Layout: a scrollable conversation pane, a
 persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
 Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
 on the first/last input line recall earlier inputs from this process only; Tab

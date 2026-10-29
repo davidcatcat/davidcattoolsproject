@@ -268,6 +268,15 @@ class PMLayoutTests(Base):
         self.assertNotIn("      Read", ui.conversation.text)
         self.assertTrue(ui.conversation.text.endswith(ui.pm_working_text))   # working line kept last
 
+    def test_account_text_is_a_system_notice(self):
+        ui = self.ui
+        ui.pm_runtime = type("Runtime", (), {"claude_config_dir": "/Users/x/.claude-account2"})()
+        ui._append_account("PM mode: …; ", ". Esc interrupts a turn.")
+        self.assertTrue(ui.conversation.text.endswith(
+            "PM mode: …; Claude account /Users/x/.claude-account2. Esc interrupts a turn."))
+        self.assertEqual(self.tokens("Claude account /Users/x/.claude-account2"), {"role.system"})
+        self.assertEqual(self.tokens("PM mode: …; "), {"text"})
+
     def test_queued_owner_note_and_system_notice_styles(self):
         ui = self.ui
         ui.append("owner → PM（已排入佇列（第 1 則））:\n下一則")

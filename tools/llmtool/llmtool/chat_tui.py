@@ -1,8 +1,8 @@
 """Opt-in full-screen chat UI over the existing ChatSession (A3.5 UX-1/UX-2).
 
 Display layer only: ChatSession still owns config, provider/skill selection,
-memory-only history, requests and errors. No disk history, tools, shell, Git or
-file writes. Model output is untrusted and rendered via terminal_safe_text.
+history (memory-only or saved locally), requests and errors. No tools, shell,
+Git or file writes. Model output is untrusted and rendered via terminal_safe_text.
 prompt-toolkit is an optional dependency (``llmtool[tui]``); when it is absent
 or stdin/stdout is not a terminal, the existing line chat runs instead, before
 any UI starts. A UI failure never drops into, or replays input through, the REPL.
@@ -501,9 +501,15 @@ class ChatTUI:
         # follow state (chat_tui_view); no scrollbar: the terminal's own is the only one.
         self.view = chat_tui_view.ConversationView(get_cwidth)
         self.conversation = chat_tui_view.make_pane(self.view, colour=self.colour)
+        history_text = ("History is stored locally." if session.history_saved
+                        else "History stays in memory.")
+        opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
+                   + "\n" + history_text + " F1 or /help for help; Ctrl-C exits.")
+        if session.history_notice:
+            opening += "\nllmtool: " + session.history_notice
+            session.history_notice = None
         self.conversation.set_text(
-            terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
-                               + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."
+            terminal_safe_text(opening
                                + "\nChat mode talks to the chat provider directly; it is not a PM."
                                + " /pm connect (or /pm new) talks to the dedicated PM."
                                + " /task submit is for development testing only: it records"
@@ -1030,6 +1036,12 @@ class ChatTUI:
         if text.startswith("llmtool:"):
             return [(text, "role.system")]
         return [(text, "text")]
+
+    def _append_account(self, before, after):
+        """A PM notice with the #657 account text (``Claude account <dir>``) as role.system."""
+        account = chat_tui_pm.account_text(self.pm_runtime)
+        self.append(before + account + after,
+                    segments=[(before, "text"), (account, "role.system"), (after, "text")])
 
     @staticmethod
     def _rule_segments():
@@ -1861,11 +1873,12 @@ class ChatTUI:
                 self.append("PM: not connected. /pm connect uses the saved dedicated PM binding; "
                             "/pm new [CWD] creates one.")
             else:
-                self.append("PM: claude-code session " + self.pm_target[0] + " (cwd "
-                            + chat_tui_pm.safe_text(str(self.pm_target[1])) + "), "
-                            + chat_tui_pm.binding_text(self.pm_binding)
-                            + ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
-                            + ("; PM mode" if self.pm_mode else "; not in PM mode"))
+                self._append_account(
+                    "PM: claude-code session " + self.pm_target[0] + " (cwd "
+                    + chat_tui_pm.safe_text(str(self.pm_target[1])) + "), "
+                    + chat_tui_pm.binding_text(self.pm_binding) + ", ",
+                    ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
+                    + ("; PM mode" if self.pm_mode else "; not in PM mode"))
             return
         if parts[1:2] == ["queue"] and len(parts) <= 3:
             self.run_queue_command(parts[2] if len(parts) == 3 else None)
@@ -2110,13 +2123,14 @@ class ChatTUI:
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
         # Status shows 暖機中… until the first turn's first output; W41 A: no warm-up message.
         self.pm_warm = True
-        self.append("PM mode: Enter sends each draft in real time to the PM session "
-                    + self.pm_target[0] + " (claude-code, cwd "
-                    + chat_tui_pm.safe_text(str(self.pm_target[1]))
-                    + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_binding)
-                    + ". pm_runtime checked at connect time that the session did not look "
-                    "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
-                    "connection. Chat replies are never the PM.")
+        self._append_account(
+            "PM mode: Enter sends each draft in real time to the PM session "
+            + self.pm_target[0] + " (claude-code, cwd "
+            + chat_tui_pm.safe_text(str(self.pm_target[1]))
+            + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_binding) + "; ",
+            ". pm_runtime checked at connect time that the session did not look "
+            "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
+            "connection. Chat replies are never the PM.")
         if outcome["history_error"]:
             self.append("llmtool: PM history unavailable. "
                         + chat_tui_pm.error_text(outcome["history_error"]))

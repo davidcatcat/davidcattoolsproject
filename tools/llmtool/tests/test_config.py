@@ -9,8 +9,8 @@ from io import StringIO
 import yaml
 
 from llmtool.config import (
-    DEFAULTS, api_key, codex_direct_timeout, init_config, repository_config, resolve_config,
-    show_config, user_config_path,
+    DEFAULTS, api_key, codex_direct_timeout, init_config, pm_claude_config_dir, repository_config,
+    resolve_config, show_config, user_config_path,
 )
 from llmtool.errors import LLMToolError
 from llmtool.cli import main
@@ -118,6 +118,25 @@ class ConfigTests(unittest.TestCase):
                 self.user.write_text(yaml.safe_dump({"codex_direct": {"timeout_seconds": value}}))
                 with self.assertRaises(LLMToolError):
                     codex_direct_timeout(self.cwd, self.home)
+
+    def test_pm_claude_config_dir_is_trusted_user_config_only(self):
+        self.assertIsNone(pm_claude_config_dir(self.home))
+        self.user.write_text("pm_runtime:\n  claude_config_dir: /Users/x/.claude-account2\n",
+                             encoding="utf-8")
+        self.assertEqual(self.resolve(), DEFAULTS)
+        self.assertEqual(pm_claude_config_dir(self.home), "/Users/x/.claude-account2")
+        for value in ("relative/dir", "", 5, None, "/a\nb", "/" + "a" * 1024):
+            with self.subTest(value=value):
+                self.user.write_text(yaml.safe_dump({"pm_runtime": {"claude_config_dir": value}}))
+                with self.assertRaises(LLMToolError):
+                    pm_claude_config_dir(self.home)
+                with self.assertRaises(LLMToolError):
+                    self.resolve()
+        self.user.unlink()
+        self.project.write_text("pm_runtime:\n  claude_config_dir: /tmp/attacker\n", encoding="utf-8")
+        with self.assertRaisesRegex(LLMToolError, "^project config: forbidden or unsupported field$"):
+            self.resolve()
+        self.assertIsNone(pm_claude_config_dir(self.home))
 
     def test_codex_direct_timeout_ignores_project_and_provider_selection(self):
         self.user.write_text("codex_direct:\n  timeout_seconds: 900\n", encoding="utf-8")
