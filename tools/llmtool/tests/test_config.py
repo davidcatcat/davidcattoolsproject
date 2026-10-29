@@ -9,7 +9,7 @@ from io import StringIO
 import yaml
 
 from llmtool.config import (
-    DEFAULTS, api_key, codex_direct_timeout, init_config, resolve_config,
+    DEFAULTS, api_key, codex_direct_timeout, init_config, repository_config, resolve_config,
     show_config, user_config_path,
 )
 from llmtool.errors import LLMToolError
@@ -58,6 +58,56 @@ class ConfigTests(unittest.TestCase):
     def test_user_config(self):
         self.user.write_text("generation:\n  max_tokens: 321\n", encoding="utf-8")
         self.assertEqual(self.resolve()["generation"]["max_tokens"], 321)
+
+    def test_repository_identity_uses_trusted_user_config_and_defaults(self):
+        self.assertEqual(repository_config(self.home), {
+            "slug": "davidcatcat/davidcattoolsproject",
+            "dispatch_issue": 289,
+            "dispatch_evidence_pr": 283,
+        })
+        self.user.write_text("repository:\n  slug: example-org/repo.name\n"
+                             "  dispatch_issue: 12\n  dispatch_evidence_pr: 34\n",
+                             encoding="utf-8")
+        self.assertEqual(repository_config(self.home), {
+            "slug": "example-org/repo.name",
+            "dispatch_issue": 12,
+            "dispatch_evidence_pr": 34,
+        })
+        self.project.write_text("repository: {slug: project.example/repo, dispatch_issue: 99}\n",
+                                encoding="utf-8")
+        with self.assertRaisesRegex(LLMToolError, "project config: forbidden or unsupported field"):
+            self.resolve()
+
+    def test_repository_identity_without_user_config_does_not_load_yaml(self):
+        with patch("llmtool.config.yaml_module", side_effect=LLMToolError("yaml unavailable")):
+            self.assertEqual(repository_config(self.home), {
+                "slug": "davidcatcat/davidcattoolsproject",
+                "dispatch_issue": 289,
+                "dispatch_evidence_pr": 283,
+            })
+
+        self.user.write_text("repository: {}\n", encoding="utf-8")
+        with patch("llmtool.config.yaml_module", side_effect=LLMToolError("yaml unavailable")):
+            with self.assertRaisesRegex(LLMToolError, "yaml unavailable"):
+                repository_config(self.home)
+
+    def test_invalid_repository_identity_is_rejected_with_fixed_message(self):
+        for repository in (
+            {"slug": "../bad"}, {"slug": "owner.name/repo"},
+            {"slug": "owner/repo?x"}, {"slug": "owner/.."},
+            {"slug": "owner/repo", "dispatch_issue": True},
+            {"slug": "owner/repo", "dispatch_issue": 0},
+            {"slug": "owner/repo", "dispatch_issue": 10**9 + 1},
+            {"slug": "owner/repo", "dispatch_evidence_pr": False},
+            {"slug": "owner/repo", "dispatch_evidence_pr": 0},
+            {"unknown": "ignored"},
+        ):
+            with self.subTest(repository=repository):
+                self.user.write_text(yaml.safe_dump({"repository": repository}), encoding="utf-8")
+                with self.assertRaisesRegex(LLMToolError, "^user repository: invalid configuration$"):
+                    repository_config(self.home)
+                with self.assertRaisesRegex(LLMToolError, "^user repository: invalid configuration$"):
+                    self.resolve()
 
     def test_codex_direct_timeout_configuration(self):
         self.user.write_text("codex_direct:\n  timeout_seconds: 900\n", encoding="utf-8")
