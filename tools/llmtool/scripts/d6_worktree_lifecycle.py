@@ -1356,11 +1356,13 @@ REBIND_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
 
 
 def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
-                        workspace_root=TASKS_ROOT):
+                        workspace_root=None):
     """Audit and optionally repair only a D6 record's changed device number."""
     if (not task_ids or len(task_ids) != len(set(task_ids)) or
             any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids)):
         _stop("D6_TASK_INPUT_INVALID")
+    if workspace_root is None:
+        workspace_root = TASKS_ROOT
     if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     workspace_root = Path(os.path.realpath(workspace_root))
