@@ -9,6 +9,7 @@ any UI starts. A UI failure never drops into, or replays input through, the REPL
 """
 
 import asyncio
+import collections
 import os
 import signal
 import sys
@@ -41,13 +42,20 @@ KEY_HELP = """Keys
                         the view stays where you read it while output arrives, and scrolling
                         back to the bottom follows new output again (status shows 最新)
   Drag                  Select conversation text; dragging past the top/bottom edge keeps
-                        scrolling and extends the selection. Releasing copies exactly the
-                        selected text to the system clipboard (pbcopy; status shows 已複製),
-                        so Cmd+V pastes it; double-click selects a word. Ctrl-C with a
-                        selection copies it again and clears it instead of exiting
+                        scrolling and extends the selection. The selection is copied to the
+                        system clipboard while you drag and again on release (pbcopy; status
+                        shows 已複製), so Cmd+V pastes exactly it; no Cmd+C is needed.
+                        Double-click selects a word. Ctrl-C with a selection copies it again
+                        and clears it instead of exiting
+                        Warp and Terminal.app: drag, then Cmd+V where you want the text.
+                        Cmd+C goes to the terminal, never to llmtool: it copies only the
+                        terminal's own selection and, with none, leaves the clipboard (which
+                        already holds the drag) unchanged
+  Shift-drag (Warp), Fn-drag (Terminal.app)
+                        The terminal's own selection while mouse reporting is on; Cmd+C
+                        then copies it as in any terminal
   F6                    Toggle mouse reporting off/on: off hands the mouse to the terminal
-                        (its own select/copy; the wheel then no longer scrolls). Terminal.app
-                        also selects natively with Fn-drag and Warp with Shift-drag while on
+                        (its own select/copy; the wheel then no longer scrolls)
   F1                    Toggle this help (shown in place of the conversation)
   F2                    Toggle the last Task detail (Esc also closes it)
   F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
@@ -70,10 +78,18 @@ Talk to the PM: the dedicated Claude Code PM (/pm …) is the product entry
   /pm disconnect        End the connection and return to chat mode
   /pm history           Show the turns pm_runtime stored for this PM session
   /pm                   Show the connected PM and its state
-  Esc (during a turn)   Interrupt the PM turn; Ctrl-C interrupts first, a second Ctrl-C exits
+  Enter (during a turn) Queue the draft (已排入佇列（第 N 則）): queued messages are sent one turn
+                        at a time, in order, each after the previous turn COMPLETED
+  /pm queue             List the queued messages; /pm queue clear drops them,
+                        /pm queue send resumes a paused queue
+  Esc (during a turn)   Interrupt the PM turn; the queue then continues. Ctrl-C interrupts
+                        and pauses the queue; a second Ctrl-C exits
+A failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing more is sent
+until /pm queue send, and the pane lists what is waiting.
 PM replies stream in as pm_runtime reports them; tool use is one line per tool and never
-shows tool input or output. PM thinking is never shown as the answer: the PM field says
-思考中… meanwhile. Chat replies are never sent to or shown as the PM.
+shows tool input or output. PM thinking is never shown as the answer: while the PM thinks
+or works the pane shows a working line (PM 思考中… 12s), updated every second and
+replaced by the reply. Chat replies are never sent to or shown as the PM.
 
 Formal task commands (developer/test path, separate from ordinary chat; results come
 only from llmtool Core and nothing is dispatched)
@@ -106,6 +122,7 @@ SLASH_COMMANDS = (
     ("/pm new", "/pm new", "Create a dedicated PM session (pm_runtime binding)"),
     ("/pm disconnect", "/pm disconnect", "End the PM connection"),
     ("/pm history", "/pm history", "Turns pm_runtime stored for this PM"),
+    ("/pm queue", "/pm queue", "Queued PM messages: list, clear, or send (resume)"),
     ("/task submit", "/task submit --provider ",
      "開發測試用：只登記，不會派工 (--provider PROFILE REQUEST)"),
     ("/task show", "/task show ", "Show a task by TASK_ID"),
@@ -126,6 +143,9 @@ ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Es
 PM_TICK_SECONDS = 0.03
 PM_CHARS_PER_TICK = 2
 PM_MAX_LAG_TICKS = 33
+# The pane's PM working line (W52 F1): redrawn this often while a turn has no text showing.
+PM_WORKING_SECONDS = 1.0
+QUEUE_PREVIEW_COLUMNS = 60   # Columns of each queued message shown by /pm queue and a pause.
 
 
 def _enable_mouse_drag_reporting(output):
@@ -242,10 +262,15 @@ def run_chat_tui(session, stdin=None, stdout=None, stderr=None):
         print("llmtool: --tui unavailable: " + reason + "; using line chat", file=stderr)
         return run_chat(session, stdout=stdout, stderr=stderr)
     try:
+        ui = None
         try:
-            status = ChatTUI(session).run()
+            ui = ChatTUI(session)
+            status = ui.run()
         except Exception:
             status = 1
+        unsent = ui.unsent_queue_text() if ui is not None else None
+        if unsent:
+            print(terminal_safe_text(unsent), file=stderr)   # never dropped silently (W52 F2)
         if status != 0:
             print(FAILED, file=stderr)
         return status
@@ -350,6 +375,22 @@ class ChatTUI:
         self._pm_unadopted = None
         self.pm_deltas = False       # text deltas seen since the last assistant/tool boundary
         self.pm_tools = {}
+        # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
+        # a COMPLETED turn (or an Esc interrupt). A failed/refused turn, Ctrl-C or a
+        # disconnect pauses it (the reason text) until /pm queue send.
+        self.pm_outbox = collections.deque()
+        self.pm_outbox_paused = None
+        self.pm_turn_status = None   # TURN_END status of the current turn
+        self.pm_turn_error = None    # RUNTIME_ERROR code of the current turn
+        self.pm_interrupt_by = None  # "esc" or "ctrl-c"
+        self._quit_warned = False    # first Ctrl-C with queued messages only warned
+        # W52 F1: the working line at the end of the pane while a turn shows no text yet.
+        self.pm_working_at = None    # offset where it starts (its leading blank line included)
+        self.pm_working_text = ""
+        self._pm_working_handle = None
+        # W52 F3: a moving drag copies its selection shortly after it changes, so the
+        # clipboard is right even when the terminal never reports the release (Warp).
+        self._drag_copy_handle = None
         self._loop = None
         self._received_signal = None
         # The conversation pane keeps its own rows, reading position, selection and
@@ -566,8 +607,9 @@ class ChatTUI:
 
         @keys.add("c-c")
         def _interrupt(event):
-            # Warp may send Ctrl-C for Cmd+C: with a selection, copy it again and clear it
-            # instead of interrupting or exiting (a second Ctrl-C then acts as usual).
+            # With a selection, Ctrl-C copies it again and clears it instead of interrupting
+            # or exiting (a second Ctrl-C then acts as usual). Cmd+C never arrives here:
+            # Warp and Terminal.app keep it for their own copy (W52 F3, Warp log).
             if self.view.selected_range() and self.conversation_visible():
                 self.view.copy_selection()
                 self.view.clear_selection()
@@ -802,11 +844,13 @@ class ChatTUI:
         self.input.buffer.set_document(self._Document(fill, len(fill)))
         return True
 
-    def append(self, text):
+    def append(self, text, show_working=True):
         """Add untrusted text; follow new output only if the caret was at the end.
 
-        New output closes the Task detail so it is never hidden behind that pane.
+        New output closes the Task detail so it is never hidden behind that pane. During a
+        PM turn the working line moves below it (not when it opens a PM text block).
         """
+        self._pm_working_remove()   # The working line always stays the last thing shown.
         self._pm_finalize()  # Any other output ends the streaming PM block (shown in full).
         block = self._stream_detach()  # A streaming chat reply stays one block, below.
         if self.show_detail:
@@ -819,6 +863,8 @@ class ChatTUI:
         self.conversation.set_text(old + ("\n\n" if old else "") + terminal_safe_text(text))
         if block is not None:
             self._stream_attach(block)
+        if show_working:
+            self._pm_working_show()
         self.app.invalidate()
 
     def conversation_visible(self):
@@ -873,6 +919,7 @@ class ChatTUI:
                     self._drag_to(x, y)
             else:
                 self._autoscroll_stop()
+                self._drag_copy_stop()   # the release copies right away
                 if self._drag_moved:
                     self._extend_to(x, y)
                 view.end_drag(view.head)
@@ -881,6 +928,7 @@ class ChatTUI:
             return False
         if kind == MouseEventType.MOUSE_DOWN and button == MouseButton.LEFT:
             self._autoscroll_stop()
+            self._drag_copy_stop()   # a drag whose release never came is replaced
             view.begin_drag(view.offset_at(view.top + y - top, x - left))
             self._drag_pointer = self._drag_origin = (x, y)
             self._drag_moved = False
@@ -928,7 +976,28 @@ class ChatTUI:
                 chat_tui_view.AUTOSCROLL_SECONDS, self._autoscroll_tick)
         elif not at_edge:
             self._autoscroll_stop()
+        if self._drag_copy_handle is None:
+            self._drag_copy_handle = asyncio.get_running_loop().call_later(
+                chat_tui_view.DRAG_COPY_SECONDS, self._drag_copy_tick)
         self.app.invalidate()
+
+    def _drag_copy_tick(self):
+        """Copy the selection of a drag still in progress (W52 F3).
+
+        Warp reports no release when the button goes up outside its grid (its log shows
+        the drag events and then no Released), and it keeps Cmd+C for itself, so a copy
+        made only on release left the old clipboard. The worker keeps only the newest
+        request, so the clipboard ends with the selection as it was last drawn.
+        """
+        self._drag_copy_handle = None
+        if self.view.dragging and self._drag_moved and self.conversation_visible():
+            self.view.copy_selection()
+            self.app.invalidate()
+
+    def _drag_copy_stop(self):
+        if self._drag_copy_handle is not None:
+            self._drag_copy_handle.cancel()
+            self._drag_copy_handle = None
 
     def _autoscroll_tick(self):
         self._autoscroll_handle = None
@@ -965,6 +1034,7 @@ class ChatTUI:
         """Any pane switch ends a drag, its auto-scroll timer and the selection, so nothing
         hidden keeps scrolling, extending or capturing Ctrl-C."""
         self._autoscroll_stop()
+        self._drag_copy_stop()
         self._drag_pointer = None
         self.view.clear_selection()
 
@@ -1484,7 +1554,12 @@ class ChatTUI:
             state = "暖機中…"
         elif state == "thinking":
             state = "思考中…"
-        return "PM:" + compact(session_id, 8) + " " + compact(state, 18)
+            if self.pm_turn_started is not None:
+                state += " %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+        queued = ""
+        if self.pm_outbox:
+            queued = " 佇列%d" % len(self.pm_outbox) + ("暫停" if self.pm_outbox_paused else "")
+        return "PM:" + compact(session_id, 8) + " " + compact(state, 18) + queued
 
     def run_pm_command(self, text):
         parts = text.split()
@@ -1498,6 +1573,9 @@ class ChatTUI:
                             + chat_tui_pm.binding_text(self.pm_binding)
                             + ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
                             + ("; PM mode" if self.pm_mode else "; not in PM mode"))
+            return
+        if parts[1:2] == ["queue"] and len(parts) <= 3:
+            self.run_queue_command(parts[2] if len(parts) == 3 else None)
             return
         if self.pm_pending:
             self.append("llmtool: a PM connect/disconnect/history request is in progress")
@@ -1536,7 +1614,68 @@ class ChatTUI:
             self._pm_worker(self._pm_history, self.pm_target[0], self.pm_runtime)
             return
         self.append("usage: /pm new [CWD]\n       /pm connect [SESSION [CWD]]\n"
-                    "       /pm disconnect\n       /pm history\n       /pm")
+                    "       /pm disconnect\n       /pm history\n       /pm queue [clear|send]\n"
+                    "       /pm")
+
+    # -- PM queue (W52 F2) ---------------------------------------------------------------
+    def run_queue_command(self, action):
+        if action is None:
+            self.append(self._queue_text("PM 佇列"))
+        elif action == "clear":
+            count = len(self.pm_outbox)
+            self.pm_outbox.clear()
+            self.pm_outbox_paused = None
+            self.append("llmtool: PM 佇列已清除 %d 則（未送出）" % count)
+        elif action == "send":
+            if not self.pm_outbox:
+                self.append("llmtool: PM 佇列是空的")
+            elif self.pm_runtime is None:
+                self.append("llmtool: PM 未連線；/pm connect 之後再 /pm queue send（佇列保留 %d 則）"
+                            % len(self.pm_outbox))
+            elif self.pm_turn_active or self.pm_pending:
+                self.pm_outbox_paused = None
+                self.append("llmtool: PM 佇列繼續：目前回合結束後送出下一則（共 %d 則）"
+                            % len(self.pm_outbox))
+            else:
+                self.pm_outbox_paused = None
+                self._pm_send_next()
+        else:
+            self.append("usage: /pm queue [clear|send]")
+
+    def _queue_text(self, title):
+        if not self.pm_outbox:
+            return title + "：空"
+        lines = [title + "：%d 則%s" % (len(self.pm_outbox), "，暫停（" + self.pm_outbox_paused
+                                       + "）" if self.pm_outbox_paused else "")]
+        for number, text in enumerate(self.pm_outbox, 1):
+            shown = chat_tui_pm.safe_text(text).strip().replace("\t", " ")
+            first = shown.split("\n")[0] + (" …" if "\n" in shown else "")
+            lines.append("  %d. " % number + fit_width(first, QUEUE_PREVIEW_COLUMNS,
+                                                       self._get_cwidth))
+        return "\n".join(lines)
+
+    def _pm_pause(self, reason):
+        """Stop sending queued messages; they stay listed and /pm queue send resumes."""
+        if not self.pm_outbox or self.pm_outbox_paused:
+            return
+        self.pm_outbox_paused = reason
+        self.append(self._queue_text("llmtool: PM 佇列暫停，沒有送出")
+                    + "\n/pm queue send 繼續送出；/pm queue clear 清除")
+
+    def _pm_send_next(self):
+        if not self.pm_outbox or self.pm_outbox_paused or self.pm_turn_active:
+            return
+        if self.pm_runtime is None or self.pm_pending:
+            self._pm_pause("PM 未連線")
+            return
+        text = self.pm_outbox.popleft()
+        self._pm_start_turn(text, "owner → PM（自佇列送出，剩 %d 則）:\n" % len(self.pm_outbox))
+
+    def unsent_queue_text(self):
+        """What run_chat_tui prints after exit when queued messages were never sent."""
+        if not self.pm_outbox:
+            return None
+        return self._queue_text("llmtool: 離開時 PM 佇列仍有未送出的訊息（沒有送出）")
 
     def _pm_new(self, cwd, loop):
         try:
@@ -1678,6 +1817,7 @@ class ChatTUI:
         self.pm_binding, self.pm_warm = None, False
         self.append("PM disconnected; chat mode (Enter sends to chat provider "
                     + self.session.provider + ", not a PM)")
+        self._pm_pause("PM 已斷線")
 
     def _pm_history(self, session_id, runtime, loop):
         history, code = self._pm_read_history(session_id, runtime)
@@ -1691,18 +1831,29 @@ class ChatTUI:
     def submit_pm(self, text):
         """Enter in PM mode: one pm_runtime turn at a time; the draft leaves the editor and
         the turn is marked active in the same key handler, so nothing is sent twice."""
-        if self.pm_turn_active:
-            self.append("llmtool: a PM turn is in progress; input kept. Esc interrupts it.")
-            return
         if self.pm_runtime is None or self.pm_pending:
             self.append("llmtool: the PM is not connected; /pm connect")
             return
         self.input.buffer.reset(append_to_history=True)
+        if self.pm_turn_active or self.pm_outbox:
+            # W52 F2: a turn is running (or a paused queue waits): queue it, in order.
+            self.pm_outbox.append(text)
+            self.append("owner → PM（已排入佇列（第 %d 則））:\n" % len(self.pm_outbox)
+                        + chat_tui_pm.safe_text(text)
+                        + ("\n  — 佇列暫停（" + self.pm_outbox_paused + "）；/pm queue send 繼續"
+                           if self.pm_outbox_paused else ""))
+            if not self.pm_turn_active:
+                self._pm_send_next()
+            return
+        self._pm_start_turn(text, "owner → PM:\n")
+
+    def _pm_start_turn(self, text, header):
         self.pm_turn_active, self.pm_turn_started = True, time.monotonic()
         self.pm_interrupted, self.pm_deltas, self.pm_tools = False, False, {}
+        self.pm_turn_status = self.pm_turn_error = self.pm_interrupt_by = None
         self.pm_block_index = None
         self.pm_state = "working"
-        self.append("owner → PM:\n" + chat_tui_pm.safe_text(text))
+        self.append(header + chat_tui_pm.safe_text(text))   # also shows the working line
         # One idempotency key per submitted draft: pm_runtime never runs it twice.
         key = uuid.uuid4().hex
         self._loop = asyncio.get_running_loop()
@@ -1730,7 +1881,7 @@ class ChatTUI:
         if not text:
             return
         if self.pm_block_raw is None:
-            self.append("PM:")
+            self.append("PM:", show_working=False)   # the reply replaces the working line
             self.pm_block_raw = ""
             self.pm_block_start = len(self.conversation.text) + 1   # after "\n"
         self.pm_queue += text
@@ -1789,6 +1940,55 @@ class ChatTUI:
         self._pm_render(final=True)
         self.pm_block_raw = None
 
+    # -- working line (W52 F1) -----------------------------------------------------------
+    def _pm_working_line(self):
+        elapsed = int(max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic())))
+        if self.pm_state == "thinking":
+            verb = "思考中…"
+        elif self.pm_warm:
+            verb = "暖機中…"
+        elif self.pm_state == "interrupting":
+            verb = "中斷中…"
+        else:
+            verb = "處理中…"
+        return ("PM " + verb + " %ds" % elapsed
+                + ("（佇列 %d 則）" % len(self.pm_outbox) if self.pm_outbox else ""))
+
+    def _pm_working_wanted(self):
+        return (self.pm_turn_active and self.pm_block_raw is None and self.pm_turn_status is None
+                and self.pm_turn_error is None)
+
+    def _pm_working_show(self):
+        """Put (or redraw) the working line at the end of the pane; tick every second."""
+        if not self._pm_working_wanted():
+            self._pm_working_remove()
+            return
+        self._pm_working_remove()
+        self.pm_working_text = "\n\n" + self._pm_working_line()
+        self.pm_working_at = len(self.conversation.text)
+        self.conversation.set_text(self.conversation.text + self.pm_working_text)
+        if self._pm_working_handle is None:
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return   # No loop (unit tests): the line is drawn, not ticked.
+            self._pm_working_handle = loop.call_later(PM_WORKING_SECONDS, self._pm_working_tick)
+
+    def _pm_working_tick(self):
+        self._pm_working_handle = None
+        if self.pm_turn_active:
+            self._pm_working_show()   # Shows it again after a block or tool, or redraws it.
+            self.app.invalidate()
+
+    def _pm_working_remove(self):
+        text = self.conversation.text
+        if self.pm_working_at is not None and text[self.pm_working_at:] == self.pm_working_text:
+            self.conversation.set_text(text[:self.pm_working_at])
+        self.pm_working_at = None   # Anything else rewrote the tail: the line is gone already.
+        if not self.pm_turn_active and self._pm_working_handle is not None:
+            self._pm_working_handle.cancel()
+            self._pm_working_handle = None
+
     def pm_event(self, event):
         kind = event.get("type")
         if kind != "THINKING" and self.pm_state == "thinking":
@@ -1799,6 +1999,7 @@ class ChatTUI:
             # Status only: thinking content never reaches the pane (pm_runtime sends none).
             if self.pm_state == "working":
                 self.pm_state = "thinking"
+            self._pm_working_show()
             self.app.invalidate()
         elif kind == "TEXT_DELTA" and type(event.get("text")) is str:
             index = event.get("block_index")
@@ -1813,6 +2014,7 @@ class ChatTUI:
                 self._pm_extend(event["text"])
             self._pm_finalize()
             self.pm_deltas = False
+            self._pm_working_show()   # until the next text, tool or the turn end
         elif kind == "TOOL_USE":
             name = event.get("name") if type(event.get("name")) is str else None
             self.pm_tools[event.get("tool_use_id")] = name
@@ -1823,6 +2025,7 @@ class ChatTUI:
         elif kind == "RUNTIME_ERROR":
             code = chat_tui_pm.safe_code(event.get("code"))
             self.pm_state = "error(" + code + ")"
+            self.pm_turn_error = code
             stderr = chat_tui_pm.stderr_text(event)
             self.append("llmtool: " + chat_tui_pm.error_text(code)
                         + ("\n  stderr (screened): " + stderr if stderr else ""))
@@ -1830,22 +2033,38 @@ class ChatTUI:
                 # pm_runtime closed itself; the TUI no longer holds a usable connection.
                 self.pm_runtime, self.pm_mode = None, False
         elif kind == "TURN_REPLAY":
+            self.pm_turn_status = "REPLAY"
             self.append(chat_tui_pm.replay_text(event))
         elif kind == "TURN_END":
+            self.pm_turn_status = chat_tui_pm.safe_code(event.get("status"))
             elapsed = max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic()))
             self.append(chat_tui_pm.turn_end_text(event, elapsed))   # append() flushes first
 
     def finish_pm_turn(self):
         self._pm_finalize()   # Nothing queued survives the turn (interrupt without TURN_END).
         self.pm_turn_active, self.pm_turn_started = False, None
+        self._pm_working_remove()
         if self.pm_state in ("working", "thinking", "interrupting"):
             self.pm_state = "idle"
+        status, error = self.pm_turn_status, self.pm_turn_error
+        if self.pm_outbox and not self.pm_outbox_paused:
+            if self.pm_runtime is None or self.pm_state == "closing":
+                self._pm_pause("PM 已斷線")
+            elif error is not None:
+                self._pm_pause("上一回合失敗 " + error)
+            elif status == "COMPLETED" or (status == "INTERRUPTED" and self.pm_interrupt_by == "esc"):
+                self._pm_send_next()
+            elif status == "INTERRUPTED":
+                self._pm_pause("Ctrl-C 中斷")
+            else:
+                self._pm_pause("上一回合沒有完成（" + (status or "沒有 TURN_END") + "）")
         self.app.invalidate()
 
-    def interrupt_pm(self):
+    def interrupt_pm(self, by="esc"):
         if not self.pm_turn_active or self.pm_interrupted or self.pm_runtime is None:
             return
         self.pm_interrupted, self.pm_state = True, "interrupting"
+        self.pm_interrupt_by = by
         self.append("llmtool: interrupt sent to the PM; waiting for the turn to end")   # flushes
         try:
             self.pm_runtime.interrupt()
@@ -1861,9 +2080,10 @@ class ChatTUI:
             self._pm_exiting = True
             runtimes = [self.pm_runtime, self._pm_unadopted]
             self.pm_runtime, self._pm_unadopted = None, None
-        if self._pm_tick_handle is not None:
-            self._pm_tick_handle.cancel()
-            self._pm_tick_handle = None
+        for handle in (self._pm_tick_handle, self._pm_working_handle, self._drag_copy_handle):
+            if handle is not None:
+                handle.cancel()
+        self._pm_tick_handle = self._pm_working_handle = self._drag_copy_handle = None
         for runtime in runtimes:
             if runtime is not None:
                 self._close_runtime(runtime)
@@ -1891,8 +2111,13 @@ class ChatTUI:
     def request_quit(self):
         self.close_menu()  # Ctrl-C/Ctrl-D: also restores the default Esc timeout.
         if self.pm_turn_active and not self.pm_interrupted:
-            self.interrupt_pm()
+            self.interrupt_pm("ctrl-c")   # also pauses the queue (finish_pm_turn)
             self.append("llmtool: Ctrl-C again exits (the PM connection is closed on exit)")
+            return
+        if self.pm_outbox and not self._quit_warned and not self.pm_turn_active:
+            self._quit_warned = True
+            self.append("llmtool: PM 佇列還有 %d 則未送出；再按一次 Ctrl-C 離開（不會送出）"
+                        % len(self.pm_outbox))
             return
         if self.busy and self.worker_kind == "chat" and not self.send_interrupted:
             self.interrupt_send()
