@@ -1352,6 +1352,161 @@ def _mark_retain_blocked(record_path, record, reasons):
     _replace_record(record_path, updated)
 
 
+REBIND_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
+
+
+def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
+                        workspace_root=None):
+    """Audit and optionally repair only a D6 record's changed device number."""
+    if (not task_ids or len(task_ids) != len(set(task_ids)) or
+            any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids)):
+        _stop("D6_TASK_INPUT_INVALID")
+    if workspace_root is None:
+        workspace_root = TASKS_ROOT
+    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+        _stop("D6_WORKSPACE_ROOT_INVALID")
+    workspace_root = Path(os.path.realpath(workspace_root))
+    canonical_root = Path(canonical_root).resolve(strict=True)
+    if _task_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
+        _stop("D6_REPOSITORY_INVALID")
+    common_dir = Path(_task_git(canonical_root, "rev-parse", "--path-format=absolute",
+                                "--git-common-dir").stdout.strip())
+    if (not common_dir.is_absolute() or common_dir.name != ".git" or
+            Path(os.path.realpath(common_dir)) != common_dir):
+        _stop("D6_COMMON_DIR_INVALID")
+    if _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS:
+        _stop("D6_ORIGIN_INVALID")
+    registry = common_dir / "llmtool-worktrees"
+    _safe_dir(registry, mode=0o700, uid=os.getuid())
+    lock_fd = None
+    if execute:
+        try:
+            lock_fd = os.open(registry / ".lifecycle.lock",
+                              os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            lock_info = os.fstat(lock_fd)
+            if (not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid != os.getuid() or
+                    stat.S_IMODE(lock_info.st_mode) != 0o600 or lock_info.st_nlink != 1):
+                os.close(lock_fd)
+                lock_fd = None
+                _stop("D6_REGISTRY_LOCK_INVALID")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except LifecycleError:
+            raise
+        except OSError:
+            _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
+
+    def assess(task_id, record, *, require_device_mismatch=True):
+        if (type(record) is not dict or type(record.get("schema_version")) is not int or
+                record.get("schema_version") != 1 or record.get("task_id") != task_id or
+                type(record.get("root_realpath")) is not str or
+                type(record.get("physical_identity")) is not dict or
+                set(record["physical_identity"]) != {"device", "inode", "uid", "mode"} or
+                any(type(record["physical_identity"].get(key)) is not int or
+                    record["physical_identity"][key] < 0
+                    for key in ("device", "inode", "uid")) or
+                record["physical_identity"].get("mode") != "0o700" or
+                type(record.get("evidence_refs")) is not list or
+                any(type(item) is not str for item in record.get("evidence_refs", [])) or
+                type(record.get("state")) is not str or
+                type(record.get("branch")) is not str or
+                type(record.get("base_sha")) is not str or
+                not SHA40_RE.fullmatch(record["base_sha"]) or
+                type(record.get("head_sha")) is not str or
+                not SHA40_RE.fullmatch(record["head_sha"])):
+            return "D6_REBIND_RECORD_SCHEMA_INVALID", None
+        if record.get("state") not in REBIND_STATES:
+            return "D6_REBIND_STATE_REFUSED", None
+        if record.get("lock_state") != "LOCKED":
+            return "D6_REBIND_LOCK_STATE_MISMATCH", None
+        root_text = record["root_realpath"]
+        try:
+            root = Path(root_text)
+            resolved = root.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return "D6_REBIND_PATH_MISMATCH", None
+        if (str(resolved) != root_text or str(resolved) == str(canonical_root) or
+                resolved.parent != workspace_root):
+            return "D6_REBIND_PATH_MISMATCH", None
+        try:
+            info = resolved.lstat()
+        except OSError:
+            return "D6_REBIND_PATH_MISMATCH", None
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return "D6_REBIND_PATH_MISMATCH", None
+        identity = record["physical_identity"]
+        if info.st_ino != identity["inode"]:
+            return "D6_REBIND_INODE_MISMATCH", None
+        if info.st_uid != identity["uid"] or info.st_uid != os.getuid():
+            return "D6_REBIND_UID_MISMATCH", None
+        if stat.S_IMODE(info.st_mode) != 0o700 or identity["mode"] != "0o700":
+            return "D6_REBIND_MODE_MISMATCH", None
+        if record.get("git_common_dir") != str(common_dir):
+            return "D6_REBIND_COMMON_DIR_MISMATCH", None
+        if (_task_git(resolved, "rev-parse", "--show-toplevel").stdout.strip() != str(resolved) or
+                _task_git(resolved, "rev-parse", "--path-format=absolute",
+                          "--git-common-dir").stdout.strip() != str(common_dir)):
+            return "D6_REBIND_COMMON_DIR_MISMATCH", None
+        branch = record["branch"]
+        if (not _valid_branch(canonical_root, branch) or
+                _task_git(resolved, "branch", "--show-current").stdout.strip() != branch):
+            return "D6_REBIND_BRANCH_MISMATCH", None
+        head = _task_git(resolved, "rev-parse", "--verify", "HEAD").stdout.strip()
+        if head != record["head_sha"]:
+            return "D6_REBIND_HEAD_MISMATCH", None
+        if require_device_mismatch and info.st_dev == identity["device"]:
+            return "D6_REBIND_DEVICE_UNCHANGED", None
+        return None, (resolved, info)
+
+    all_ok = True
+    try:
+        for task_id in task_ids:
+            result = {"task_id": task_id, "mode": "execute" if execute else "dry-run"}
+            record_path = registry / (task_id + ".json")
+            try:
+                try:
+                    record = _read_registry_record(record_path)
+                except LifecycleError as exc:
+                    if exc.code == "D6_REGISTRY_INVALID":
+                        _stop("D6_REBIND_RECORD_SCHEMA_INVALID")
+                    raise
+                reason, current = assess(task_id, record)
+                if reason:
+                    raise LifecycleError(reason)
+                old_device = record["physical_identity"]["device"]
+                new_device = current[1].st_dev
+                result.update(root=str(current[0]), old_device=old_device,
+                              new_device=new_device)
+                if execute:
+                    updated = dict(record)
+                    identity = dict(record["physical_identity"])
+                    identity["device"] = new_device
+                    updated["physical_identity"] = identity
+                    updated["evidence_refs"] = list(record["evidence_refs"]) + [
+                        "device rebind %s->%s at %s" % (old_device, new_device, _now())]
+                    _replace_record(record_path, updated)
+                    confirmed = _read_registry_record(record_path)
+                    verify_reason, _ = assess(task_id, confirmed,
+                                              require_device_mismatch=False)
+                    if (verify_reason or
+                            confirmed.get("physical_identity", {}).get("device") != new_device or
+                            confirmed.get("evidence_refs", [])[-1:] !=
+                            updated["evidence_refs"][-1:]):
+                        _stop("D6_REBIND_CONFIRMATION_FAILED")
+                    result["result"] = "REBOUND"
+                else:
+                    result["result"] = "READY"
+            except LifecycleError as exc:
+                all_ok = False
+                result["result"] = "BLOCKED"
+                result["reasons"] = [exc.code]
+            print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+    return all_ok
+
+
 def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence=None,
                      train_evidence=None,
                      discard_uncommitted=(), unknown_evidence=None,
@@ -1708,6 +1863,10 @@ def _main(argv=None):
     parser.add_argument("--execute-approved-lifecycle", action="store_true")
     parser.add_argument("--retire-task-id", action="append",
                         help="plan retirement of this task (repeatable); dry run by default")
+    parser.add_argument("--rebind-device-task-id", action="append",
+                        help="audit this task's device-only identity change (repeatable); dry run by default")
+    parser.add_argument("--execute-approved-rebind", action="store_true",
+                        help="write audited device-only D6 record rebinds")
     parser.add_argument("--squash-evidence", action="append",
                         metavar="TASK_ID=PR_HEAD_SHA:SQUASH_SHA",
                         help="merged squash PR: final PR head and its commit on origin/main")
@@ -1737,6 +1896,23 @@ def _main(argv=None):
         create_values = (args.task_id, args.agent_id, args.session_ref,
                          args.lease_ref, args.branch, args.base_sha)
         create_options = (args.github_login, args.native_session_id)
+        if args.rebind_device_task_id is not None:
+            if (any(value is not None for value in create_values + create_options) or
+                    args.resume_task_id is not None or args.resume_root is not None or
+                    args.record_result_task_id is not None or
+                    args.bind_native_session_task_id is not None or
+                    args.retire_task_id is not None or args.execute_approved_retire or
+                    args.execute_approved_lifecycle or args.squash_evidence or
+                    args.train_evidence or args.discard_uncommitted or
+                    args.retain_blocked_evidence or args.reconcile_registry or
+                    args.execute_approved_reconcile or args.release_retain):
+                _stop("D6_TASK_INPUT_INVALID")
+            return 0 if rebind_device_tasks(
+                canonical_root=args.repo_root,
+                task_ids=args.rebind_device_task_id,
+                execute=args.execute_approved_rebind) else 1
+        if args.execute_approved_rebind:
+            _stop("D6_TASK_INPUT_INVALID")
         if args.bind_native_session_task_id is not None:
             if (any(value is not None for value in create_values) or
                     args.github_login is not None or
