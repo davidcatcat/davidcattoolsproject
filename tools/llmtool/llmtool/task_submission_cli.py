@@ -2934,13 +2934,14 @@ def run_task_codex_delegate(args, *, store):
 
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
-    _validate_acceptance_scope(args.acceptance)
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
         if getattr(args, 'owner_ref', None) is None:
             raise LLMToolError('--provider agy requires --owner-ref')
+        _validate_acceptance_scope(getattr(args, 'acceptance', None))
         return run_task_agy_delegate(args, store=store)
+    _validate_acceptance_scope(args.acceptance)
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
