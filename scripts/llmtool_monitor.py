@@ -4045,7 +4045,8 @@ _runner_log_cache: dict = {}   # log path -> (file key, parsed lines)
 
 def runner_rows(processes: list[Process], now: float, root=None,
                 cwd_of=process_cwd, isolation=process_isolation,
-                ci: list | None = None, user_of=process_user) -> list[OfficeRow]:
+                ci: list | None = None, user_of=process_user,
+                waiting_jobs: list[str] | None = None) -> list[OfficeRow]:
     """One row per self-hosted GitHub Actions runner (Issue #99): running or
     not, kept apart from this account or not, its current or last job,
     restarts and where its logs are. The runners share one GitHub queue, so
@@ -4070,21 +4071,24 @@ def runner_rows(processes: list[Process], now: float, root=None,
     for number, (place, listener) in enumerate(found, 1):
         rows.append(_runner_row(place, listener, processes, now, isolation, ci or [],
                                 number, len(found)))
-    waiting = [run[1] for run in ci or [] if run[0] != "in_progress"]
+    waiting = (waiting_jobs if waiting_jobs is not None else
+               [run[1] for run in ci or [] if run[0] != "in_progress"])
     if rows and waiting:
         rows.append(ci_queue_row(waiting, len(rows)))
     return rows
 
 
-def ci_queue_row(waiting: list[str], runners: int) -> OfficeRow:
-    """The jobs GitHub has not given to any Mac runner yet, said once for all
-    of them: 「mac ci 兩台共用  排隊 N 個：A、B、C…」. Its colour follows the
-    runner rows and the fold never hides it (office_view, _tree)."""
-    name = ("mac ci 兩台共用" if runners == 2 else f"mac ci {runners} 台共用" if runners > 2
-            else "mac ci 排隊")
+def ci_queue_row(waiting: list[str], runners: int, platform: str = "mac") -> OfficeRow:
+    """Render one shared platform queue, or an unassigned queue, without folding it."""
+    prefix = "linux" if platform == "linux" else "mac"
+    name = (f"ci 未分配 排隊" if platform == "unassigned" else
+            f"{prefix} ci 兩台共用" if runners == 2 else
+            f"{prefix} ci {runners} 台共用" if runners > 2 else f"{prefix} ci 排隊")
     detail = (f"排隊 {len(waiting)} 個：" + "、".join(waiting[:3])
               + ("…" if len(waiting) > 3 else ""))
-    return OfficeRow(name, "", detail, None, 80 + runners + 1, group=RUNNER_ROW, kind="shared",
+    group = ("linux ci runner" if platform == "linux" else
+             "" if platform == "unassigned" else RUNNER_ROW)
+    return OfficeRow(name, "", detail, None, 80 + runners + 1, group=group, kind="shared",
                      evidence="GitHub")
 
 
@@ -4164,6 +4168,34 @@ def _runner_row(root, listener, processes, now, isolation, ci, number, total):
 RUNNER_DEFAULT_LABELS = frozenset({"self-hosted", "linux", "macos", "windows", "x64", "arm64", "arm"})
 
 
+def _ci_queue_groups(view: CiView | None, local=()) -> tuple[list[str], list[str], list[str]]:
+    """Assign each already-read queued job once to Mac, Linux, or unassigned."""
+    if view is None or not view.queued:
+        return [], [], []
+    labels_by_name = {name: {label.lower() for label in labels}
+                      for name, _system, _status, _busy, labels in view.runners or []}
+    mac_names = set(local)
+    mac_labels = set().union(*(labels_by_name.get(name, set()) for name in mac_names))
+    linux_labels = set().union(*(labels_by_name.get(name, set()) for name, *_ in view.runners or []
+                                 if name not in mac_names and name.startswith("ec2-")))
+    mac, linux, unassigned = [], [], []
+    seen = set()
+    for wanted, text in view.queued:
+        key = (frozenset(wanted), text)
+        if key in seen:
+            continue
+        seen.add(key)
+        fits_mac = bool(wanted and mac_labels and wanted <= mac_labels)
+        fits_linux = bool(wanted and linux_labels and wanted <= linux_labels)
+        if fits_mac and (not fits_linux or "macos" in wanted and "linux" not in wanted):
+            mac.append(text)
+        elif fits_linux:
+            linux.append(text)
+        else:
+            unassigned.append(text)
+    return mac, linux, unassigned
+
+
 def _runner_system(name: str, system: str) -> str:
     """The runner's platform word for its row: GitHub's os, except that an
     `ec2-` runner is a Linux one even while its os or labels are incomplete
@@ -4185,10 +4217,11 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
                           None, 90, kind="worker", evidence="GitHub",
                           alert=f"GitHub runner 清單讀不到（{view.error}）")]
     rows, old = [], now - view.seen_at
+    linux_names = [name for name, system, _status, _busy, _labels in view.runners or []
+                   if name not in local and _runner_system(name, system) == "linux"]
     for number, (name, system, status, busy, labels) in enumerate(view.runners, 1):
         if name in local:
             continue
-        mine = {label.lower() for label in labels}
         running = [run for run in ci or [] if run[0] == "in_progress" and run[3] == name]
         alert = ""
         if old > GITHUB_STALE or view.error:
@@ -4214,14 +4247,15 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
         last = (view.finished or {}).get(name)
         if last and state != WORKING:
             notes.append(f"上一個工作：{last[0]} {last[1]}（{_ago(now - last[2])}）")
-        fits = [text for wanted, text in view.queued if wanted and wanted <= mine]
-        if fits:   # GitHub has not given them to a runner; this one has every label they ask for
-            notes.append(f"排隊中、它可以接 {len(fits)} 個：" + "、".join(fits[:3])
-                         + ("…" if len(fits) > 3 else ""))
         kind = _runner_system(name, system)
         rows.append(OfficeRow(f"{kind + ' ' if kind else ''}ci runner {name}", state,
                               "；".join(notes), age, 90 + number, key=name, kind="worker",
                               evidence="GitHub", alert=alert))
+    _mac_waiting, linux_waiting, unassigned = _ci_queue_groups(view, local)
+    if linux_names and linux_waiting:
+        rows.append(ci_queue_row(linux_waiting, len(linux_names), "linux"))
+    if unassigned:
+        rows.append(ci_queue_row(unassigned, 0, "unassigned"))
     return rows
 
 
@@ -5022,8 +5056,13 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                               f"由 Codex 啟動，已結束（跑了約 {max(1, int(duration))} 秒，"
                               "看不出在做什麼）", since_end, 30, kind="subagent", evidence="程序"))
     agy = agy_rows(processes, canonical, cwd_of, cpu_of)
-    mac = runner_rows(processes, now, runner_root, cwd_of, ci=ci)
-    rows += agy + mac + github_runner_rows(ci_view, now, {row.key for row in mac}, ci)
+    mac = runner_rows(processes, now, runner_root, cwd_of, ci=ci, waiting_jobs=[])
+    local_names = {row.key for row in mac if row.kind == "worker" and row.key}
+    mac_waiting, _linux_waiting, _unassigned = _ci_queue_groups(ci_view, local_names)
+    runner_count = sum(row.kind == "worker" for row in mac)
+    if mac_waiting:
+        mac.append(ci_queue_row(mac_waiting, runner_count))
+    rows += agy + mac + github_runner_rows(ci_view, now, local_names, ci)
     rows.append(remote_test_row(processes, now, llmtool_tasks))
     raw, source = load_dispatch(canonical, dispatch)
     switches, problem = worker_dispatch(raw)
