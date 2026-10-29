@@ -119,6 +119,7 @@
 - GitHub branch protection/required checks are unavailable on this plan, so the Integrator checks this gate before every merge.
 - A model's self-review is not independent acceptance. Mac behavior requires evidence from the actual Mac and tested revision. A GitHub comment does not prove Worker execution, Session wake or Owner notification.
 - Distinguish proposal, review, product acceptance, delegated authority and Git execution in reports.
+- D1–D7 role order is historical only where D8 changes roles/per-call approval or D6 changes fixed-worktree limits. Unchanged egress, containment, review, live-evidence and runtime safeguards remain current. See [policy history](docs/history/llmtool-agent-policy-legacy-20261020.md) for provenance and [ai-team-delivery](skills/ai-team-delivery/SKILL.md) for normative gates.
 
 ### Process tiers (Owner decision 023:A: [decision sheet](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6467792563), [Owner answer](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854))
 
@@ -127,5 +128,3 @@
 - Small text fixes are combined into one PR per day.
 - A re-review covers only changes since the previous review.
 - Anything that touches code is never a small fix.
-
-- D1–D7 role order is historical only where D8 changes roles/per-call approval or D6 changes fixed-worktree limits. Unchanged egress, containment, review, live-evidence and runtime safeguards remain current. See [policy history](docs/history/llmtool-agent-policy-legacy-20261020.md) for provenance and [ai-team-delivery](skills/ai-team-delivery/SKILL.md) for normative gates.
