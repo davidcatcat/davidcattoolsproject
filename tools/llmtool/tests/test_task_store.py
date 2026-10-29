@@ -1558,6 +1558,18 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(invalid.exception.task_store_error_code,
                          'TASK_ABANDONMENT_INVALID')
 
+    def test_abandonment_supports_v1_record_shape(self):
+        value = record()
+        self.assertEqual(value['schema_version'], 1)
+        self.store.create(value)
+
+        saved = self.store.abandon(value['task_id'],
+                                   pm_session_id=value['pm_session_id'],
+                                   reason='PM stopped this Task')
+
+        self.assertEqual(saved['abandonment']['reason'], 'PM stopped this Task')
+        self.assertEqual(saved['schema_version'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()

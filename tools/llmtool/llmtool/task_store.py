@@ -115,10 +115,6 @@ _V2_REPAIR_SHAPES = tuple(shape | frozenset(('review_repair_claims',))
                           for shape in _V2_REPAIR_OPTIONAL_BASES)
 _HIGH_DEBUG_VALID_SHAPES = tuple(shape | frozenset(('high_debug',)) for shape in (
     *_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES))
-_ABANDONMENT_VALID_SHAPES = tuple(
-    shape | frozenset(('abandonment',)) for shape in (
-        *_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES,
-        *_HIGH_DEBUG_VALID_SHAPES))
 _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 'examined_sha',
     'd6', 'model_requested', 'model_observed', 'effort_observed', 'status',
     'report_sha256', 'report', 'usage', 'recorded_at'))
@@ -593,9 +589,10 @@ def _validate_remote_test_outcomes(record):
 
 
 def _validate(record):
+    keys = set(record) - {'abandonment'} if type(record) is dict else set()
     if (type(record) is not dict or
-            (record.get('schema_version') == 1 and set(record) != _FIELDS_V1) or
-            (record.get('schema_version') == 2 and set(record) not in
+            (record.get('schema_version') == 1 and keys != _FIELDS_V1) or
+            (record.get('schema_version') == 2 and keys not in
              (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
               *_V2_REMOTE_OUTCOME_SHAPES, *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES,
               *(shape | frozenset(('completion_events',))
@@ -619,8 +616,7 @@ def _validate(record):
                 for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                               *_V2_REMOTE_OUTCOME_SHAPES,
                               *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES,
-             *_ABANDONMENT_VALID_SHAPES)) or
+             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
