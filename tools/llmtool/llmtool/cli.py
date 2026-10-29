@@ -129,9 +129,9 @@ def parser_for_cli():
         if command == "context-pack":
             child.add_argument("--json", action="store_true", help="output a validated Context Packet as JSON")
         add_options(child)
-    chat = sub.add_parser("chat", help="Start an interactive chat with local history")
+    chat = sub.add_parser("chat", help="Start an interactive chat with private local history")
     chat.add_argument("--skill", help="explicit runtime skill name")
-    chat.add_argument("--no-history", action="store_true", help="keep chat history in memory only")
+    chat.add_argument("--no-history", action="store_true", help="disable saved history; keep it in memory only")
     chat.add_argument("--tui", action="store_true",
                       help="opt-in full-screen terminal UI (needs llmtool[tui]); falls back to line chat")
     add_options(chat)

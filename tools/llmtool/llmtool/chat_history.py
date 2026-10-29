@@ -23,28 +23,17 @@ class ChatHistory:
 
     def _directory(self, create=False):
         path = self.path.parent
-        parts = list(reversed(path.parents)) + [path]
-        current = Path(path.anchor)
-        for part in parts:
-            if str(part) == path.anchor:
-                continue
-            current = current / part.name
-            try:
-                info = current.lstat()
-            except FileNotFoundError:
-                if not create:
-                    return False
-                current.mkdir(mode=0o700)
-                info = current.lstat()
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
-                return False
+        if create:
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
         info = path.lstat()
+        if not stat.S_ISDIR(info.st_mode):
+            return False
         if info.st_uid != os.getuid():
             return False
         if create and stat.S_IMODE(info.st_mode) != 0o700:
             os.chmod(path, 0o700, follow_symlinks=False)
             info = path.lstat()
-        return stat.S_IMODE(info.st_mode) == 0o700
+        return stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
 
     def load(self):
         if not self.enabled:

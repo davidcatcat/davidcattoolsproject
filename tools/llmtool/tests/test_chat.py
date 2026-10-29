@@ -17,7 +17,7 @@ from llmtool.config import resolve_config
 from llmtool.errors import LLMToolError
 from llmtool.prompts import COMMON, chat_messages, messages_for
 from llmtool.providers import create_client
-from llmtool.providers.base import Reply
+from llmtool.providers.base import ProviderCapabilities, Reply
 from llmtool.skills import load_skill
 
 
@@ -251,18 +251,29 @@ providers:
     def test_failed_turn_not_saved(self):
         history_path = self.home / '.local/state/llmtool/chat/history.json'
         session = ChatSession(self.config, history_path=history_path)
+        session.send('prior question')
+        original_history = copy.deepcopy(session.history)
+        original_file = history_path.read_bytes()
         self.client.complete.side_effect = RuntimeError('private failure')
         with self.assertRaises(LLMToolError):
             session.send('question')
-        self.assertFalse(history_path.exists())
-        self.assertEqual(session.history, [])
+        self.assertEqual(history_path.read_bytes(), original_file)
+        self.assertEqual(session.history, original_history)
 
-    def test_interrupted_turn_not_saved(self):
+    def test_interrupted_partial_reply_saved(self):
         history_path = self.home / '.local/state/llmtool/chat/history.json'
         session = ChatSession(self.config, history_path=history_path)
-        session.send('question', cancel=Mock(is_set=Mock(return_value=True)))
-        self.assertFalse(history_path.exists())
+        self.client.CAPABILITIES = ProviderCapabilities(
+            chat=True, large_context=False, reasoning_control=False, streaming=True,
+            code_edit=False, shell=False, git=False)
+        self.client.stream.return_value = iter(('partial reply', 'unkept remainder'))
+        from threading import Event
+        cancel = Event()
+        session.send('question', on_text=lambda chunk: cancel.set(), cancel=cancel)
+        self.assertTrue(history_path.exists())
+        self.assertEqual(json.loads(history_path.read_text()), session.history)
         self.assertEqual(len(session.history), 2)
+        self.assertEqual(session.history[-1]['content'], 'partial reply')
 
     def test_unsafe_or_malformed_history_is_ignored(self):
         history_path = self.home / '.local/state/llmtool/chat/history.json'
@@ -283,11 +294,12 @@ providers:
     def test_sensitive_history_is_withheld(self):
         history_path = self.home / '.local/state/llmtool/chat/history.json'
         session = ChatSession(self.config, history_path=history_path)
-        self.client.complete.return_value = Reply('api_key=PRIVATE_VALUE', {})
-        session.send('question')
+        self.client.complete.return_value = Reply('ordinary reply text', {})
+        with patch('llmtool.test_output_excerpts._emitted_sensitive', return_value=True):
+            session.send('ordinary question')
         stored = history_path.read_text()
         self.assertIn('[withheld]', stored)
-        self.assertNotIn('PRIVATE_VALUE', stored)
+        self.assertNotIn('ordinary reply text', stored)
 
     def test_history_caps_turns_and_bytes(self):
         history_path = self.home / '.local/state/llmtool/chat/history.json'

@@ -115,7 +115,7 @@ def _error_code(exc):
 
 
 class ChatSession:
-    """A config snapshot plus successful turns, optionally backed by private history."""
+    """A config snapshot plus successful turns, optionally backed by private local history."""
 
     def __init__(self, config, skill=None, history_path=None):
         self.config = copy.deepcopy(config)
@@ -241,7 +241,7 @@ class ChatSession:
         usage = reply_usage(reply.metadata)
         reported = _reported_model(provider_type, reply.metadata)
         self.history.extend((user, {"role": "assistant", "content": reply.content}))
-        if self._history_store is not None and not interrupted:
+        if self._history_store is not None:
             self._history_store.save(self.history)
             self.history_notice = self._history_store.notice
         self.last_elapsed = max(0.0, time.monotonic() - started)
