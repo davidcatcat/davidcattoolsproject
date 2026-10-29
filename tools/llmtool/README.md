@@ -1451,7 +1451,8 @@ argv、stdin、timeout、output limit 與 sanitized errors。Live runtime valida
 
 ```text
 llmtool/cli.py                         CLI 與輸出
-llmtool/chat.py                        memory-only chat session and REPL
+llmtool/chat.py                        conversation state and REPL; optional private local history
+llmtool/chat_history.py                private, bounded local chat history (0700/0600, screened)
 llmtool/chat_tui.py                    opt-in full-screen chat UI (`chat --tui`)
 llmtool/context.py                     immutable packets, bounded parsing and rendering
 llmtool/config.py                      YAML 合併、驗證、遮罩、init
