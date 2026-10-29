@@ -33,7 +33,6 @@ class FakeClient:
 
 chat.create_client = lambda config, value: FakeClient()
 chat._streams = lambda client: True
-chat.api_key = lambda config: "unused"
 
 def fake_copy(text):
     with open(os.environ["FAKE_COPY_FILE"], "w", encoding="utf-8") as output:
@@ -141,6 +140,7 @@ class ChatTUIPTYTests(unittest.TestCase):
                 "FAKE_REPLY": _reply_text(),
                 "FAKE_DELAY": str(delay),
                 "FAKE_COPY_FILE": str(self.copy_path),
+                "LLMTOOL_PTY_UNUSED": "placeholder",
             })
             os.execve(sys.executable, [sys.executable, "-c", SOURCE], environment)
         self.reader = threading.Thread(target=self._read_output, daemon=True)
