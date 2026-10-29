@@ -224,8 +224,24 @@ class WidgetTests(Base):
         ui, result = self.drive([])
         self.assertEqual(result, 0)
         self.assertIn('LLMTool interactive chat (full-screen)', ui.conversation.text)
+        self.assertIn('History stays in memory.', ui.conversation.text)
         self.assertIn('provider: first', ui.conversation.text)
         self.factory.assert_not_called()
+
+    def test_saved_history_is_identified_in_opening_text(self):
+        history_path = self.temp_root / '.local/state/llmtool/chat/history.json'
+        self.session = ChatSession(self.session.config, history_path=history_path)
+        ui, result = self.drive([])
+        self.assertEqual(result, 0)
+        self.assertIn('History is stored locally.', ui.conversation.text)
+        self.assertNotIn('History stays in memory.', ui.conversation.text)
+
+    def test_history_notice_is_shown_once_as_llmtool_line(self):
+        self.session.history_notice = 'chat history was unavailable; continuing without saved history'
+        ui, result = self.drive([])
+        self.assertEqual(result, 0)
+        self.assertEqual(ui.conversation.text.count('llmtool: chat history was unavailable; continuing without saved history'), 1)
+        self.assertIsNone(self.session.history_notice)
 
     def test_fixed_bottom_layout_fills_80x24_and_99x36(self):
         for rows, columns in ((24, 80), (36, 99)):

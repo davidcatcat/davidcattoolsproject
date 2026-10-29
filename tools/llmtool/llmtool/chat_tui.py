@@ -1,8 +1,8 @@
 """Opt-in full-screen chat UI over the existing ChatSession (A3.5 UX-1/UX-2).
 
 Display layer only: ChatSession still owns config, provider/skill selection,
-memory-only history, requests and errors. No disk history, tools, shell, Git or
-file writes. Model output is untrusted and rendered via terminal_safe_text.
+history (memory-only or saved locally), requests and errors. No tools, shell,
+Git or file writes. Model output is untrusted and rendered via terminal_safe_text.
 prompt-toolkit is an optional dependency (``llmtool[tui]``); when it is absent
 or stdin/stdout is not a terminal, the existing line chat runs instead, before
 any UI starts. A UI failure never drops into, or replays input through, the REPL.
@@ -356,9 +356,15 @@ class ChatTUI:
         # follow state (chat_tui_view); no scrollbar: the terminal's own is the only one.
         self.view = chat_tui_view.ConversationView(get_cwidth)
         self.conversation = chat_tui_view.make_pane(self.view)
+        history_text = ("History is stored locally." if session.history_saved
+                        else "History stays in memory.")
+        opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
+                   + "\n" + history_text + " F1 or /help for help; Ctrl-C exits.")
+        if session.history_notice:
+            opening += "\nllmtool: " + session.history_notice
+            session.history_notice = None
         self.conversation.set_text(
-            terminal_safe_text("LLMTool interactive chat (full-screen)\n" + session.status()
-                               + "\nHistory stays in memory. F1 or /help for help; Ctrl-C exits."
+            terminal_safe_text(opening
                                + "\nChat mode talks to the chat provider directly; it is not a PM."
                                + " /pm connect (or /pm new) talks to the dedicated PM."
                                + " /task submit is for development testing only: it records"
