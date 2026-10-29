@@ -157,6 +157,31 @@ def _clock(deadline):
         reject('OPENCODE_TIMEOUT')
 
 
+def _reap_pending_processes(holders, timeout=.5, interval=.01):
+    """Give already-stopped owned children a short bounded chance to reap.
+
+    Lifecycle teardown can exhaust the shared job deadline before the OS has
+    scheduled a SIGKILLed leader. Polling here only reaps direct children; it
+    never signals a process group or upgrades an unconfirmed group cleanup.
+    """
+    end=time.monotonic()+max(0,timeout)
+    pending=[lifecycle.process for lifecycle in holders
+             if lifecycle.process is not None and lifecycle.process.returncode is None]
+    while pending:
+        still_pending=[]
+        for process in pending:
+            try:
+                if process.poll() is None:
+                    still_pending.append(process)
+            except (OSError, ChildProcessError):
+                still_pending.append(process)
+        pending=still_pending
+        remaining=end-time.monotonic()
+        if not pending or remaining<=0:
+            break
+        time.sleep(min(interval,remaining))
+
+
 def _libc_waitid_binding():
     """libc binding for waitid(2) where CPython lacks an os.waitid exposure.
 
@@ -833,6 +858,11 @@ def run_worker(job, host):
         if stage=='READINESS' and host_stage=='CREDENTIAL': mark_stage('CREDENTIAL')
     finally:
         if pipes is not None: pipes.selector.close()
+        # A deadline-expired wait in lifecycle teardown may leave a killed
+        # direct child unreaped. Reap it if it exits promptly, while retaining
+        # CLEANUP_UNKNOWN whenever the owned process group was not confirmed gone.
+        if any(x.process is not None and x.process.returncode is None for x in holders):
+            _reap_pending_processes(holders)
         for lifecycle in holders:
             process=lifecycle.process
             if process is not None:
