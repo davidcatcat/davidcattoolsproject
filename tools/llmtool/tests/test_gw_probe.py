@@ -5,6 +5,7 @@ import http.server
 import importlib.util
 import io
 import json
+import os
 import sys
 import tempfile
 import threading
@@ -190,9 +191,10 @@ class FakeServer(unittest.TestCase):
     def test_main_reports_model_change_and_ok_for_same_model(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            state_path = root / "state" / "gw_probe_model.json"
-            with mock.patch.object(probe, "_model_state_path", return_value=state_path):
-                for expected, code in (("OK", 0), ("GW_MODEL_CHANGED", 1), ("OK", 0)):
+            state_path = root / "state" / "llmtool" / "gw_probe_model.json"
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(root / "state")}):
+                self.assertEqual(probe._model_state_path(), state_path)
+                for expected, code in (("OK", 0), ("GW_MODEL_CHANGED", 2), ("OK", 0)):
                     if expected == "GW_MODEL_CHANGED":
                         FakeHandler.served_model = "qwen3.8-27b"
                     stdout = io.StringIO()
@@ -205,6 +207,21 @@ class FakeServer(unittest.TestCase):
                     self.assertEqual(json.loads(stdout.getvalue())["status"], expected)
                 saved = json.loads((root / "out" / "gw_probe.json").read_text())
                 self.assertEqual(saved["served_model"], "qwen3.8-27b")
+
+    def test_main_same_model_succeeds_when_state_directory_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            state_home = root / "state"
+            state_home.write_text("not a directory", encoding="utf-8")
+            stdout = io.StringIO()
+            with mock.patch.dict(os.environ, {"XDG_STATE_HOME": str(state_home)}):
+                with contextlib.redirect_stdout(stdout):
+                    code = probe.main([
+                        "--only", "thinking", "--base-url", self.base_url,
+                        "--model", "fake-model", "--out-dir", str(root / "out"),
+                    ])
+            self.assertEqual(code, 0)
+            self.assertEqual(json.loads(stdout.getvalue())["status"], "OK")
 
     def test_probe_ignores_missing_or_oversized_served_model(self):
         self.assertEqual(probe._record_served_model(None, Path("unused")), "UNKNOWN")

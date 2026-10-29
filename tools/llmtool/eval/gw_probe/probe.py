@@ -165,14 +165,20 @@ def _record_served_model(served_model, path=None):
                     or not SERVED_MODEL_PATTERN.fullmatch(state["served_model"])):
                 return "MODEL_STATE_ERROR"
             previous = state["served_model"]
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        return "MODEL_STATE_ERROR"
+    changed = previous is not None and previous != served_model
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_name(path.name + ".tmp")
         temporary.write_text(json.dumps({"served_model": served_model}) + "\n", encoding="utf-8")
         os.chmod(temporary, 0o600)
         os.replace(temporary, path)
     except (OSError, ValueError, UnicodeError, RecursionError):
-        return "MODEL_STATE_ERROR"
-    return "GW_MODEL_CHANGED" if previous is not None and previous != served_model else "OK"
+        # State persistence is best effort. With no readable prior value, or with
+        # the same model already recorded, a write failure cannot imply a change.
+        return "GW_MODEL_CHANGED" if changed else "OK"
+    return "GW_MODEL_CHANGED" if changed else "OK"
 
 
 def _chat(client, messages, *, effort=None, thinking="unset", max_tokens=128, temperature=0, tools=None,
@@ -468,7 +474,7 @@ def main(argv=None):
     print(json.dumps({"status": model_status, "served_model": served_model,
                       "json": os.fspath(json_path), "markdown": os.fspath(markdown_path)},
                      ensure_ascii=False))
-    return 1 if model_status == "GW_MODEL_CHANGED" else 2 if model_status == "MODEL_STATE_ERROR" else 0
+    return 2 if model_status == "GW_MODEL_CHANGED" else 0
 
 
 if __name__ == "__main__":
