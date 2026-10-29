@@ -16,6 +16,10 @@ TASK = 'a' * 32
 HEAD = 'b' * 40
 
 
+def _runtime_parts(*pieces):
+    return ''.join(pieces)
+
+
 class DurableFakeStore:
     """Small file-backed TaskStore seam for restart/idempotence tests."""
     def __init__(self, path):
@@ -289,6 +293,44 @@ class ReviewDispatchTests(unittest.TestCase):
                         run_id='c' * 32, contract_digest='d' * 64, head=HEAD)
                 self.assertEqual(raised.exception.review_dispatch_code,
                                  'REVIEW_NOT_POSTED')
+
+    def test_refused_codex_review_includes_only_a_screened_bounded_excerpt(self):
+        final = 'not a review object: ' + ('界' * 3000)
+        raw = ('\n'.join((
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
+            json.dumps({'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': final}}))).encode('utf-8'))
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                raw, task_id=TASK, run_id='c' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(raised.exception.review_dispatch_code, 'REVIEW_NOT_POSTED')
+        message = str(raised.exception)
+        excerpt = message.split('Reviewer dispatch refused: ', 1)[1]
+        self.assertLessEqual(len(excerpt.encode('utf-8')), 2048)
+        self.assertTrue(final.startswith(excerpt))
+
+        hidden = _runtime_parts(
+            'not a review object: ', 'api', '_key', ' = ', 'abcdefghijkl', 'mnop')
+        raw_hidden = ('\n'.join((
+            json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
+            json.dumps({'type': 'item.completed', 'item': {
+                'type': 'agent_message', 'text': hidden}}))).encode('utf-8'))
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                raw_hidden, task_id=TASK, run_id='c' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(str(raised.exception),
+                         'Reviewer dispatch refused; details omitted')
+
+        without_final = json.dumps({
+            'type': 'thread.started', 'thread_id': '0123456789abcdef'}).encode('utf-8')
+        with self.assertRaises(LLMToolError) as raised:
+            review_dispatch._parse_codex_review(
+                without_final, task_id=TASK, run_id='c' * 32,
+                contract_digest='d' * 64, head=HEAD)
+        self.assertEqual(str(raised.exception),
+                         'Reviewer dispatch refused; details omitted')
 
     def test_malformed_or_misbinding_codex_verdict_is_refused(self):
         raw = (b'{"type":"item.completed","item":{"type":"agent_message",'
@@ -574,6 +616,47 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         self.assertEqual(first['state'], 'COMPLETED')
         self.assertEqual(second['review_text'], review_text)
         self.assertEqual(second['verdict'], 'PASS')
+        self.assertNotIn('review_result', first)
+        self.assertNotIn('review_result', second)
+        self.assertEqual(calls, ['called'])
+
+    def test_sensitive_codex_review_text_is_withheld_on_fresh_and_replay(self):
+        executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
+        preflight = (self.task_id, executor, HEAD, 'e' * 40, 'codex-reviewer')
+        reviewer = SimpleNamespace(root='/repo/reviewer')
+        review_text = _codex_review_text() + _runtime_parts(
+            '\nFinding: ', 'api', '_key', ' = ', 'abcdefghijkl', 'mnop')
+        calls = []
+
+        def invoke(store, preflights):
+            with patch.object(review_dispatch, '_preflight', side_effect=preflights), \
+                    patch.object(review_dispatch.worker_dispatch, 'evaluate',
+                                 return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                    patch.object(review_dispatch, '_resolve_github_login',
+                                 return_value='reviewer-user'), \
+                    patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                                 return_value=reviewer):
+                return review_dispatch.dispatch_review(
+                    store=store, task_id=self.task_id, executor_task='executor-d6',
+                    pr_number=42, create_d6=lambda **_: None,
+                    bind_session=lambda **_: None, prompt_renderer=lambda *_: 'prompt',
+                    codex_runner=lambda **_: (calls.append('called') or {
+                        'thread_id': '0123456789abcdef', 'review_text': review_text,
+                        'verdict': 'PASS'}))
+
+        first = invoke(self.store, [preflight, preflight])
+        reopened = task_store.TaskStore(Path(self.temp.name).resolve())
+        second = invoke(reopened, [preflight])
+        for result in (first, second):
+            self.assertEqual(result['verdict'], 'BLOCKED')
+            self.assertEqual(result['review_dispatch_code'], 'REVIEW_TEXT_WITHHELD')
+            self.assertNotIn('review_text', result)
+            self.assertNotIn('review_result', result)
+        stored_result = reopened.get(self.task_id)['review_dispatch_claim'][0]['review_result']
+        self.assertEqual(stored_result['verdict'], 'BLOCKED')
+        self.assertEqual(stored_result['review_text'], '')
+        self.assertNotIn(review_text, json.dumps(reopened.get(self.task_id)))
+        self.assertNotEqual(stored_result['verdict'], 'PASS')
         self.assertEqual(calls, ['called'])
 
 
