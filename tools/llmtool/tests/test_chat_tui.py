@@ -3797,7 +3797,7 @@ class PMConversationTests(BoundedPMTest):
             self.fakes[0].gate.set()
             await self.turn_done(ui)
             text = ui.conversation.text
-            self.assertRegex(text, '  ▸ Bash（[0-9]+s）')
+            self.assertRegex(text, '  ▸ ✓ Bash（[0-9]+s）')
             self.assertIn('秒 · 2 tokens', text)
             self.assertNotIn('SECRET', text)
 
