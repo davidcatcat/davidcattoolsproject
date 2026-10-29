@@ -1076,6 +1076,28 @@ class TaskStoreTests(unittest.TestCase):
         holder.stdin.flush()
         self.assertEqual(holder.wait(timeout=5), 0)
 
+    def test_transient_flock_enolck_retries_update(self):
+        value = record()
+        self.store.create(value)
+        original_flock = fcntl.flock
+        attempts = []
+
+        def contend_once(fd, operation):
+            if operation == fcntl.LOCK_EX | fcntl.LOCK_NB:
+                attempts.append(operation)
+                if len(attempts) == 1:
+                    raise OSError(errno.ENOLCK, 'transient lock table contention')
+            return original_flock(fd, operation)
+
+        with patch.object(task_store_module.fcntl, 'flock', side_effect=contend_once):
+            updated = self.store.update(value['task_id'], state='PM_UNAVAILABLE',
+                                        error_code='PROVIDER_TIMEOUT')
+
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(updated['state'], 'PM_UNAVAILABLE')
+        self.assertEqual(updated['error_code'], 'PROVIDER_TIMEOUT')
+        self.assertEqual(self.store.get(value['task_id']), updated)
+
     def test_concurrent_lock_create_enoent_is_retried(self):
         # macOS openat(O_CREAT) may report ENOENT while another process
         # creates the same lock name; the next attempt opens that file.
