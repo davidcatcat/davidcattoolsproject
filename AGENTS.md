@@ -108,16 +108,10 @@
 - Independent review and exact-head CI are separate merge gates.
 - Apply [Owner outcome reporting v1.1](docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for milestone outcomes and G1–G4 checkpoints.
 
-### Process tiers (Owner decision 023)
+### Merge gates (Owner decision #425, issuecomment-6434005860)
 
-- Small documentation fixes go into the open daily docs-batch PR.
-- PRs touching only documentation skip the Mac job.
-- Mac-only tests run on the PR Mac job.
-- The full Mac suite runs after a train merge.
-- Code changes follow Developer → EC2 → formal Reviewer → exact-head CI → train.
-
-- **Merge gates (Owner decision #425, issuecomment-6434005860):** For llmtool PRs, require successful `check (macOS 3.13)` in `llmtool Mac CI` on an Owner self-hosted runner (`davidproject-self-action` or `davidproject-self-action-2`) for the exact PR head (Mac-relevant plus affected modules), and `check (Linux 3.14)` (full suite, sharded on EC2 runners `ec2-self-runner`, `ec2-self-runner-2` and `ec2-self-runner-3`).
-- The full Mac suite runs on a 6-hour schedule when main has new merges and on manual dispatch as a post-merge safety net (Owner decision #425); triage failures immediately. Disabled GitHub-hosted workflows are not waited for and are never re-enabled.
+- For llmtool PRs, require successful `check (macOS 3.13)` in `llmtool Mac CI` on an Owner self-hosted runner (`davidproject-self-action` or `davidproject-self-action-2`) for the exact PR head; the PR Mac job runs only Mac-relevant modules selected by `ci_mac_modules.py` (Owner decision 004:A: [decision sheet](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6467792563), [Owner answer](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854)). Also require `check (Linux 3.14)` (full suite, sharded on EC2 runners `ec2-self-runner`, `ec2-self-runner-2` and `ec2-self-runner-3`).
+- The PM manually dispatches the full Mac suite after each merge train; the workflow has no schedule (Owner decision 004:A: [decision sheet](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6467792563), [Owner answer](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854); Owner decision #425). Triage failures immediately. Disabled GitHub-hosted workflows are not waited for and are never re-enabled.
 - `llmtool Linux CI` on Owner EC2 runners adds `check (Linux 3.14)` on every PR and main push. Python 3.9 runs only as a pre-release check started manually on main (Owner 2026-10-25), so a PR reports Linux 3.9 NOT_RUN. Windows is reported NOT_RUN, never PASS. A skipped job is NOT_RUN.
 - A documentation-only PR, where workflow classification marks every changed path as documentation, needs `check (docs)` instead of Mac and Linux code jobs; those code jobs report NOT_RUN.
 - A PR changing code, or Markdown under a `tools/llmtool/` subdirectory (files llmtool reads at runtime), keeps code jobs and also needs `check (docs)` when it changes documentation.
@@ -125,4 +119,13 @@
 - GitHub branch protection/required checks are unavailable on this plan, so the Integrator checks this gate before every merge.
 - A model's self-review is not independent acceptance. Mac behavior requires evidence from the actual Mac and tested revision. A GitHub comment does not prove Worker execution, Session wake or Owner notification.
 - Distinguish proposal, review, product acceptance, delegated authority and Git execution in reports.
+
+### Process tiers (Owner decision 023:A: [decision sheet](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6467792563), [Owner answer](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854))
+
+- Formal review by the other AI family applies to every PR.
+- Pure documentation and pure test PRs skip the Mac job.
+- Small text fixes are combined into one PR per day.
+- A re-review covers only changes since the previous review.
+- Anything that touches code is never a small fix.
+
 - D1–D7 role order is historical only where D8 changes roles/per-call approval or D6 changes fixed-worktree limits. Unchanged egress, containment, review, live-evidence and runtime safeguards remain current. See [policy history](docs/history/llmtool-agent-policy-legacy-20261020.md) for provenance and [ai-team-delivery](skills/ai-team-delivery/SKILL.md) for normative gates.
