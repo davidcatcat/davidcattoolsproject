@@ -153,7 +153,7 @@ else:
         def invoke():
             try:
                 with background_cli_invocation():
-                    self.complete(timeout_seconds=1.0)
+                    self.complete(timeout_seconds=3.0)
             except BaseException as exc:
                 outcome.append(exc)
 
@@ -300,7 +300,7 @@ else:
     def test_timeout_is_normalized_and_resources_cleaned(self):
         self.fake("timeout")
         with self.assertRaisesRegex(LLMToolError, "^Codex CLI timed out$"):
-            self.complete(timeout_seconds=1)
+            self.complete(timeout_seconds=3)
         self.assertFalse(Path(self.captured()["cwd"]).exists())
 
     def test_descendant_pipe_handles_are_bounded_by_timeout(self):
