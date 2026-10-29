@@ -115,6 +115,10 @@ _V2_REPAIR_SHAPES = tuple(shape | frozenset(('review_repair_claims',))
                           for shape in _V2_REPAIR_OPTIONAL_BASES)
 _HIGH_DEBUG_VALID_SHAPES = tuple(shape | frozenset(('high_debug',)) for shape in (
     *_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES))
+_ABANDONMENT_VALID_SHAPES = tuple(
+    shape | frozenset(('abandonment',)) for shape in (
+        *_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES,
+        *_HIGH_DEBUG_VALID_SHAPES))
 _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 'examined_sha',
     'd6', 'model_requested', 'model_observed', 'effort_observed', 'status',
     'report_sha256', 'report', 'usage', 'recorded_at'))
@@ -615,7 +619,8 @@ def _validate(record):
                 for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                               *_V2_REMOTE_OUTCOME_SHAPES,
                               *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES)) or
+             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES,
+             *_ABANDONMENT_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
@@ -625,6 +630,25 @@ def _validate(record):
             type(record['state']) is not str or record['state'] not in STATES or
             type(record['created_at']) is not str or type(record['updated_at']) is not str):
         _fail()
+    if 'abandonment' in record:
+        item = record['abandonment']
+        if (type(item) is not dict or set(item) !=
+                frozenset(('reason', 'abandoned_at', 'pm_session_id'))):
+            _fail('TASK_ABANDONMENT_INVALID')
+        reason = item['reason']
+        abandoned_at = item['abandoned_at']
+        try:
+            parsed_time = (datetime.strptime(abandoned_at, '%Y-%m-%dT%H:%M:%SZ')
+                           if type(abandoned_at) is str and re.fullmatch(
+                               r'[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z',
+                               abandoned_at) else None)
+        except (TypeError, ValueError):
+            parsed_time = None
+        if (type(reason) is not str or not 1 <= len(reason) <= 500 or
+                not reason.strip() or not all(char.isprintable() for char in reason) or
+                _emitted_sensitive(reason) or parsed_time is None or
+                not _safe_identifier(item['pm_session_id'], SESSION_ID)):
+            _fail('TASK_ABANDONMENT_INVALID')
     if 'completion_events' in record:
         _validate_completion_events(record)
         _validate_completion_tombstones(record)
@@ -1916,6 +1940,31 @@ class TaskStore:
         if type(expected) is not dict or not expected:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
+
+    def abandon(self, task_id, *, pm_session_id, reason):
+        """Record a PM-only terminal abandonment, idempotent for the same reason."""
+        if (not _safe_identifier(pm_session_id, SESSION_ID) or type(reason) is not str or
+                not 1 <= len(reason) <= 500 or not reason.strip() or
+                not all(char.isprintable() for char in reason) or _emitted_sensitive(reason)):
+            _fail('TASK_ABANDONMENT_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            if current.get('pm_session_id') != pm_session_id:
+                _fail('TASK_PM_SESSION_DENIED')
+            saved = current.get('abandonment')
+            if saved is not None:
+                if saved['reason'] == reason:
+                    return current
+                _fail('TASK_ABANDONMENT_CONFLICT')
+            stamped = dict(reason=reason, abandoned_at=self._completion_now(),
+                           pm_session_id=pm_session_id)
+            try:
+                return self.compare_and_update(
+                    task_id, expected={'record_sha256': current['record_sha256']},
+                    abandonment=stamped)
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
 
     def append_high_debug(self, task_id, entry):
         for _ in range(5):

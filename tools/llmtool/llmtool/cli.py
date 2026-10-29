@@ -38,6 +38,7 @@ from .dispatch_check import add_dispatch_check_parser, run_dispatch_check
 
 TASK_ACTIONS = {
     'ack': ('run_task_ack', False),
+    'abandon': ('run_task_abandon', False),
     'advance': ('run_task_advance', False),
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate', True),
