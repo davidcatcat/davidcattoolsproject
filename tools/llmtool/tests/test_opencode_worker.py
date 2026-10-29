@@ -727,6 +727,25 @@ class OpenCodeWorkerTests(unittest.TestCase):
         host=Host();host.fail_final=True
         self.assertEqual(w.run_worker(self.job(),host).code,'OPENCODE_FINALIZE_UNKNOWN')
 
+    def test_pending_child_poll_allows_slow_exit_without_confirming_group_cleanup(self):
+        class SlowExitProcess:
+            def __init__(self):
+                self.returncode=None
+                self.polls=0
+            def poll(self):
+                self.polls+=1
+                if self.polls==1:
+                    return None
+                self.returncode=-9
+                return self.returncode
+
+        process=SlowExitProcess()
+        lifecycle=type('Lifecycle',(),{'process':process,'cleanup_confirmed':False})()
+        w._reap_pending_processes([lifecycle],timeout=.1,interval=0)
+        self.assertEqual(process.returncode,-9)
+        self.assertGreaterEqual(process.polls,2)
+        self.assertFalse(lifecycle.cleanup_confirmed)
+
     def test_server_leader_stays_unreaped_until_owned_lifecycle_stop(self):
         observed=[]
         real_exit=w.CLIProcessLifecycle.__exit__
