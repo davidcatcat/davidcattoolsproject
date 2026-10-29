@@ -436,7 +436,7 @@ class TUIUserScenarioTests(TUIScenarioCase):
         dump("/pm history")
         terminal.submit("/status")
         terminal.wait_text("狀態（PM 模式）", "PM /status")
-        self.assertIn("權限模式：auto", terminal.text())
+        self.assertIn("權限模式（本機設定）：auto", terminal.text())
         dump("/status in PM mode")
         out = os.environ.get("LLMTOOL_PTY_DUMP")
         if out:

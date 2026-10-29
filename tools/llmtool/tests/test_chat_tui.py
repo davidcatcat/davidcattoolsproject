@@ -3754,7 +3754,7 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: (setattr(ui, 'background_key', self.session_id),
                                         setattr(ui, 'background_error', reason)),
                             '/status\r',
-                            lambda ui: self.until(ui, lambda: '狀態（PM 模式）' in
+                            lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
                                                   ui.conversation.text)])
         status = ui.conversation.text.split('> /status', 1)[1]
         self.assertIn('背景：UNKNOWN（TaskStore：' + reason + ')', status)
