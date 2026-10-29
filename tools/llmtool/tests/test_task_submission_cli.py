@@ -672,9 +672,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 })
                 envelope = json.dumps({'request': 'Build feature', 'response': response})
                 store = TaskStore(Path(self.temp.name).resolve() / 'over-limit')
-                with self.assertRaisesRegex(LLMToolError, expected):
+                with self.assertRaises(LLMToolError) as raised:
                     run_task_record_pm(Namespace(stdin_json=True), store=store,
                                        input_stream=io.StringIO(envelope))
+                self.assertEqual(str(raised.exception), expected)
                 self.assertFalse(store.root.exists())
 
     def test_task_delegate_reports_acceptance_item_size_without_echoing_text(self):
