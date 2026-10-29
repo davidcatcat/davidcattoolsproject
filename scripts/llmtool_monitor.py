@@ -4,9 +4,12 @@
 Shows OpenCode, Kilo, Claude Code, Codex and llmtool processes, and the progress of
 recent llmtool tasks (stage, model, result, tokens, tool calls with file paths)
 read from the harness evidence and each job's own OpenCode database. No model calls,
-repository mutation, credentials, or daemon. The only network access is read-only
-`gh api` GETs for Activity headlines (on by default since Owner 2026-10-24;
---no-github turns it off). This prototype
+repository mutation, stored credentials, or daemon. The only network access is read-only
+GitHub API GETs for Activity headlines (on by default since Owner 2026-10-24;
+--no-github turns it off): the running screen sends them to api.github.com itself
+with the token `gh auth token` prints, kept in memory only and never shown or
+logged, because each `gh api` process costs ~0.15 s CPU (Issue #625); --once,
+--gh-cli, or any trouble reaching GitHub that way use `gh api` instead. This prototype
 reports only OS-observed processes; it does NOT infer model steps or attest
 task completion/review decisions. Its Activity view is limited to local task
 evidence and does not invent cross-session dispatch, delivery, review or acceptance.
@@ -22,7 +25,10 @@ named only when a record binds it, never guessed. A session untouched for 6 hour
 and finished subagent work for 30 minutes; office data is rebuilt at most every
 5 seconds, and a rebuild reads again only the session, registry, runner-log and
 llmtool records whose file changed (Issue #625); GitHub is read every 30 seconds,
-later while gh keeps failing. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
+later while gh keeps failing. The process table comes from the kernel's process
+list each poll and from `ps -A` every 15 seconds (it prints the same rows but
+costs ~0.1 s CPU a call): only the R/S letter in STAT, and a new root or system
+daemon process, may lag by that. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
 running `llmtool task remote-test`, else its newest local receipt or outcome.
 
 Also lists the other members of every observed agent process group, plus their
@@ -41,13 +47,16 @@ import os
 import re
 import shutil
 import stat
+import struct
 import urllib.parse
 import functools
 import hashlib
+import http.client
 import subprocess
 import sys
 import threading
 import time
+import typing
 
 # Intentionally exclude every raw process command line from rendered output.
 PS_ARGS = ("/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,etime=,stat=,command=")
@@ -274,27 +283,35 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
     PGID. Only PIDs already seen in that group while it was agent-led count as
     left behind, so an unrelated newer process reusing the PGID is not blamed.
     """
+    return snapshot_from(ps_rows(output), self_pid, remembered)
+
+
+def ps_rows(output: str) -> list[tuple]:
+    """(pid, ppid, pgid, etime, stat, command) for each line of ps output."""
+    rows = []
+    for line in output.splitlines():
+        found = LINE.match(line)
+        if found is not None:
+            rows.append((int(found.group(1)), int(found.group(2)), int(found.group(3)),
+                         found.group(4), found.group(5), found.group(6)))
+    return rows
+
+
+def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Snapshot:
+    """entries: (pid, ppid, pgid, etime, stat, command); etime may also be a
+    callable returning it, formatted only for the processes kept."""
     remembered = remembered or {}
     rows = {}
     hosts = set()
-    for line in output.splitlines():
-        found = LINE.match(line)
-        if found is None:
-            continue
-        pid, ppid, pgid = (int(v) for v in found.group(1, 2, 3))
+    for pid, ppid, pgid, elapsed, stat, command in entries:
         if pid == self_pid or ppid == self_pid:  # this monitor and its own ps
             continue
-        elapsed = found.group(4)
-        stat = found.group(5)
-        role = classify(found.group(6))
+        role = classify(command)
         if role == "llmtool HOST":
-            job = _host_job(found.group(6))
+            job = _host_job(command)
             if job:
                 hosts.add(job)
-        rows[pid] = (ppid, pgid,
-                     elapsed if len(elapsed) <= 18 else "UNKNOWN",
-                     stat if ALLOWED_STATE.fullmatch(stat) else "?",
-                     role, safe_name(found.group(6)), _remote_test_job(found.group(6)))
+        rows[pid] = (ppid, pgid, elapsed, stat if ALLOWED_STATE.fullmatch(stat) else "?", role, command)
     matched = {pid for pid, row in rows.items()
                if row[4] is not None and row[4] not in NO_EXPAND}
     # Expand a whole process group only when the agent leads it (as llmtool's
@@ -318,7 +335,7 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
         return None
 
     result = []
-    for pid, (ppid, pgid, elapsed, stat, role, name, job) in rows.items():
+    for pid, (ppid, pgid, elapsed, stat, role, command) in rows.items():
         ancestor = agent_ancestor(pid)
         if role is None:
             if ancestor is not None:
@@ -331,9 +348,13 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
                 continue
         else:
             owner = label(ancestor) if ancestor is not None else ""
+        if callable(elapsed):
+            elapsed = elapsed()
+        elapsed = elapsed if len(elapsed) <= 18 else "UNKNOWN"
         if stat.startswith("Z"):
             role += " (zombie)"
-        result.append(Process(pid, ppid, pgid, elapsed, stat, role, name, owner, job))
+        result.append(Process(pid, ppid, pgid, elapsed, stat, role, safe_name(command), owner,
+                              _remote_test_job(command)))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -344,12 +365,231 @@ def parse_processes(output: str, self_pid: int, remembered: dict | None = None) 
     return Snapshot(result, watched, lingering, frozenset(hosts))
 
 
-def collect(remembered: dict | None = None) -> Snapshot:
+def run_ps() -> str:
     response = subprocess.run(PS_ARGS, check=False, capture_output=True, text=True,
                               timeout=4, shell=False)
     if response.returncode:
         raise RuntimeError(f"ps exited with status {response.returncode}")
-    return parse_processes(response.stdout, os.getpid(), remembered)
+    return response.stdout
+
+
+def run_ps_users(uids) -> str:
+    """The same columns for these accounts' processes only: ~0.005 s CPU
+    instead of ~0.1 s for `ps -A`. Nothing matched or a failed ps is ""."""
+    try:
+        response = subprocess.run(
+            ("/bin/ps", "-U", ",".join(str(uid) for uid in sorted(uids)), "-o", PS_ARGS[-1]),
+            check=False, capture_output=True, text=True, timeout=4, shell=False)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return response.stdout if response.returncode == 0 else ""
+
+
+# `ps -A` costs ~0.1 s CPU per call on the Owner's Mac (it is setuid root and
+# walks every thread of every process), which alone is >10% of a core at the
+# 1 s refresh (Issue #625). Between real ps runs the same lines are rebuilt
+# from one sysctl(KERN_PROC_ALL) call: pid, ppid, pgid and start time are
+# exact, the command is read once per new process (KERN_PROCARGS2), and the
+# STAT column is the one ps last printed for that process. A new process of
+# another account (an Actions runner job) is read with `ps -U` for that
+# account only; root and system daemons wait for the next `ps -A`.
+PS_FULL_EVERY = 15.0   # seconds: `ps -A` at least this often (STAT, root processes' commands)
+PS_MIN_GAP = 4.0       # seconds: `ps -U` no more often than this for another account's newcomer
+KINFO_SIZE = 648       # sizeof(struct kinfo_proc) on 64-bit macOS
+SZOMB, SSTOP = 5, 4    # extern_proc.p_stat values
+P_CONTROLT, EPROC_SLEADER = 0x2, 0x2
+
+
+class KProc(typing.NamedTuple):
+    pid: int
+    ppid: int
+    pgid: int
+    start: int    # seconds since the epoch
+    start_us: int
+    pstat: int
+    comm: bytes
+    uid: int
+    flag: int = 0
+    eflag: int = 0
+    tpgid: int = 0
+    nice: int = 0
+
+
+# struct kinfo_proc fields read, by offset: p_starttime, p_flag, p_stat, p_pid,
+# p_nice, p_comm, e_ucred.cr_uid, e_ppid, e_pgid, e_tpgid, e_flag.
+_KINFO = struct.Struct("<qi20xib3xi198xb17s160xI136xii8xi32xi32x")
+
+
+class _Sysctl:
+    """libc sysctl through ctypes; every method returns None when unavailable."""
+
+    def __init__(self) -> None:
+        import ctypes
+        self.ctypes = ctypes
+        self.libc = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
+        self.libc.sysctl.argtypes = (ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+                                     ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t)
+        self.args_buf = ctypes.create_string_buffer(1 << 18)
+
+    def _call(self, mib: tuple, buf, size: int):
+        ctypes = self.ctypes
+        length = ctypes.c_size_t(size)
+        if self.libc.sysctl((ctypes.c_int * len(mib))(*mib), len(mib), buf, ctypes.byref(length), None, 0):
+            return None
+        return length.value
+
+    def processes(self) -> list[KProc] | None:
+        size = self._call((1, 14, 0), None, 0)   # CTL_KERN, KERN_PROC, KERN_PROC_ALL
+        if not size:
+            return None
+        buf = self.ctypes.create_string_buffer(size + 64 * KINFO_SIZE)
+        size = self._call((1, 14, 0), buf, len(buf))
+        if not size or size % KINFO_SIZE:
+            return None
+        return [KProc(pid, ppid, pgid, start, start_us, pstat, comm, uid, flag, eflag, tpgid, nice)
+                for start, start_us, flag, pstat, pid, nice, comm, uid, ppid, pgid, tpgid, eflag
+                in _KINFO.iter_unpack(memoryview(buf)[:size])]
+
+    def command(self, pid: int) -> str | None:
+        """argv joined by spaces, as ps prints it; None when the kernel refuses
+        (another account's process: ps reads those as root)."""
+        size = self._call((1, 49, pid), self.args_buf, len(self.args_buf))   # KERN_PROCARGS2
+        if not size or size < 4:
+            return None
+        raw = self.args_buf.raw[:size]
+        argc = int.from_bytes(raw[:4], sys.byteorder)
+        rest = raw[4:]
+        rest = rest[rest.find(b"\0"):].lstrip(b"\0")   # skip the executable path
+        argv = rest.split(b"\0")[:argc]
+        if argc < 1 or not argv:
+            return None
+        return b" ".join(argv).decode("utf-8", "replace").replace("\n", " ").replace("\r", " ")
+
+
+def _ps_elapsed(seconds: int) -> str:
+    """ps's etime format: [[dd-]hh:]mm:ss."""
+    days, seconds = divmod(max(0, seconds), 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+    if days:
+        return f"{days:02d}-{hours:02d}:{minutes:02d}:{seconds:02d}"
+    if hours:
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes:02d}:{seconds:02d}"
+
+
+def _guess_state(k: KProc) -> str:
+    """ps's STAT from kernel flags, for a process ps has not printed yet. The
+    first letter (R/S from Mach thread states) is a guess until the next ps."""
+    state = {SZOMB: "Z", SSTOP: "T"}.get(k.pstat, "S")
+    state += "<" if k.nice < 0 else "N" if k.nice > 0 else ""
+    state += "s" if k.eflag & EPROC_SLEADER else ""
+    state += "+" if k.flag & P_CONTROLT and k.pgid == k.tpgid else ""
+    return state
+
+
+def _watched_uids() -> frozenset:
+    """Other accounts whose new processes are worth an early `ps -U`: people
+    (uid 500+) and the Actions runner accounts. System daemons, and this
+    account's few unreadable processes, wait for the next `ps -A`."""
+    try:
+        import pwd
+        found = {p.pw_uid for p in pwd.getpwall()
+                 if 500 <= p.pw_uid < 65534 or RUNNER_ACCOUNT.fullmatch(p.pw_name)}
+    except Exception:
+        found = set()
+    return frozenset(found - {os.getuid()})
+
+
+class ProcessTable:
+    """`ps -A -o pid=,ppid=,pgid=,etime=,stat=,command=` text, mostly without ps."""
+
+    def __init__(self, ps=run_ps, kernel=None, clock=time.monotonic, wall=time.time,
+                 watched=None, ps_users=run_ps_users) -> None:
+        self.ps, self.ps_users, self.clock, self.wall = ps, ps_users, clock, wall
+        self.kernel = kernel
+        self.watched = watched
+        self.last_ps = self.last_users = -math.inf
+        self.known: dict = {}   # (pid, start, start_us, comm) -> (stat, command), None = unreadable
+        self.ps_runs = self.user_runs = 0
+
+    def _processes(self) -> list[KProc] | None:
+        if self.kernel is None:
+            try:
+                self.kernel = _Sysctl() if sys.platform == "darwin" else False
+            except (OSError, AttributeError):
+                self.kernel = False
+        if not self.kernel:
+            return None
+        try:
+            found = self.kernel.processes()
+        except Exception:
+            found = None
+        # The layout is checked against this process before it is trusted.
+        if found is not None and not any(k.pid == os.getpid() and k.ppid == os.getppid()
+                                         for k in found):
+            self.kernel, found = False, None
+        return found
+
+    @staticmethod
+    def _adopt(known: dict, procs: list[KProc], rows: list[tuple]) -> None:
+        """Remember what ps printed for each process it shares with procs."""
+        keys = {k.pid: (k.pid, k.start, k.start_us, k.comm) for k in procs}
+        known.update((keys[row[0]], (row[4], row[5])) for row in rows if row[0] in keys)
+
+    def _real(self, now: float, procs: list[KProc] | None) -> list[tuple]:
+        rows = ps_rows(self.ps())
+        self.last_ps, self.ps_runs = now, self.ps_runs + 1
+        if procs is not None:
+            self.known = {}
+            self._adopt(self.known, procs, rows)
+        return rows
+
+    def rows(self) -> list[tuple]:
+        """(pid, ppid, pgid, etime, stat, command) per process, as ps_rows()
+        gives for ps output; etime is a callable between real ps runs."""
+        now = self.clock()
+        procs = self._processes()
+        if procs is None or now - self.last_ps >= PS_FULL_EVERY:
+            return self._real(now, procs)
+        if self.watched is None:
+            self.watched = _watched_uids()
+        rows, known, others = self._rebuild(procs)
+        if others and now - self.last_users >= PS_MIN_GAP:
+            self.last_users, self.user_runs = now, self.user_runs + 1
+            self._adopt(known, procs, ps_rows(self.ps_users(others)))
+            self.known = known
+            rows, known, _ = self._rebuild(procs)
+        self.known = known
+        return rows
+
+    def _rebuild(self, procs: list[KProc]) -> tuple:
+        """(rows, what is known per process, accounts with an unreadable newcomer)."""
+        wall, rows, known, others = int(self.wall()), [], {}, set()
+        for k in procs:
+            key = (k.pid, k.start, k.start_us, k.comm)
+            entry = self.known.get(key, False)
+            if entry is False:
+                command = "<defunct>" if k.pstat == SZOMB else self.kernel.command(k.pid)
+                entry = None if command is None else (_guess_state(k), command)
+            known[key] = entry
+            if entry is None:   # shown from the next ps
+                if k.uid in self.watched:
+                    others.add(k.uid)
+                continue
+            state, command = entry
+            if k.pstat == SZOMB and not state.startswith("Z"):
+                state, command = _guess_state(k), "<defunct>"
+            rows.append((k.pid, k.ppid, k.pgid, functools.partial(_ps_elapsed, wall - k.start),
+                         state, command))
+        return rows, known, others
+
+
+_PROCESS_TABLE = ProcessTable()
+
+
+def collect(remembered: dict | None = None, table: ProcessTable | None = None) -> Snapshot:
+    return snapshot_from((table or _PROCESS_TABLE).rows(), os.getpid(), remembered)
 
 
 def family(role: str) -> str:
@@ -736,6 +976,27 @@ def _native(state_root: str, root: str, directory: str) -> tuple:
         db.close()
 
 
+_task_dir_cache: dict = {}   # evidence dir -> (record file stats, _read_task_dir())
+
+
+def _read_task_dir(directory: str, names: list, files: dict) -> tuple:
+    """(manifest, [(stage, attempt, result, started, result_at)]) from the
+    directory's JSON records; files: their os.stat results."""
+    manifest = _read_json(os.path.join(directory, "manifest.json")) or {}
+    stages = []
+    for entry in names:
+        found = STAGE_FILE.match(entry)
+        if not found:
+            continue
+        stage = found.group(1)
+        attempt = _read_json(os.path.join(directory, entry)) or {}
+        result_name = f"{stage}-result.json"
+        result = _read_json(os.path.join(directory, result_name)) or {}
+        result_at = files[result_name].st_mtime if result and result_name in files else 0.0
+        stages.append((stage, attempt, result, files[entry].st_mtime, result_at))
+    return manifest, stages
+
+
 def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0,
                hosts: frozenset = frozenset()) -> list[Task]:
     """Recently active llmtool harness evidence directories, newest first.
@@ -746,48 +1007,36 @@ def scan_tasks(pattern: str = TASK_GLOB, window_hours: float = 12.0,
     cutoff = time.time() - window_hours * 3600
     tasks = []
     for directory in glob.glob(pattern):
-        manifest_path = os.path.join(directory, "manifest.json")
         # Not the directory's own mtime: the daily /tmp cleaner deleting old
         # files inside it makes a days-old task look new.
         try:
-            newest = max(os.path.getmtime(os.path.join(directory, name))
-                         for name in os.listdir(directory)
-                         if name == "manifest.json" or STAGE_FILE.match(name)
-                         or name.endswith("-result.json"))
+            names = os.listdir(directory)
+            files = {name: os.stat(os.path.join(directory, name)) for name in names
+                     if name == "manifest.json" or STAGE_FILE.match(name)
+                     or name.endswith("-result.json")}
+            newest = max(st.st_mtime for st in files.values())
         except (OSError, ValueError):
             continue
-        if not os.path.isfile(manifest_path) or newest < cutoff:
+        if "manifest.json" not in files or not stat.S_ISREG(files["manifest.json"].st_mode) \
+                or newest < cutoff:
             continue
-        manifest = _read_json(manifest_path) or {}
+        # The JSON records are parsed again only when one of them changed.
+        key = tuple(sorted((name, st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+                           for name, st in files.items()))
+        cached = _task_dir_cache.get(directory)
+        if cached is None or cached[0] != key:
+            cached = (key, _read_task_dir(directory, names, files))
+            _remember(_task_dir_cache, directory, cached)
+        manifest, raw_stages = cached[1]
         root = str(manifest.get("root") or "")
         stages = []
-        try:
-            names = os.listdir(directory)
-        except OSError:
-            continue
-        for entry in names:
-            found = STAGE_FILE.match(entry)
-            if not found:
-                continue
-            stage = found.group(1)
-            attempt_path = os.path.join(directory, entry)
-            attempt = _read_json(attempt_path) or {}
-            result_path = os.path.join(directory, f"{stage}-result.json")
-            result = _read_json(result_path) or {}
-            try:
-                result_at = os.path.getmtime(result_path) if result else 0.0
-            except OSError:
-                result_at = 0.0
+        for stage, attempt, result, started, result_at in raw_stages:
             code = str(result.get("code") or "")
             code = code if CODE_TEXT.fullmatch(code) else ("?" if result else "")
             cleanup = "" if not result else ("ok" if result.get("cleanup_confirmed") is True else "UNKNOWN")
             state_root = str(attempt.get("state_root") or "")
             steps, tin, tout, idle, tools, meta = _native(state_root, root, directory)
             live = (os.path.realpath(directory), stage) in hosts
-            try:
-                started = os.path.getmtime(attempt_path)
-            except OSError:
-                started = 0.0
             stages.append(Stage(stage, _model_short(str(attempt.get("model") or "")), started,
                                 code, cleanup, steps, tin, tout, idle, tools, live, meta, result_at))
         stages.sort(key=lambda s: s.started)
@@ -1302,15 +1551,33 @@ def _gh_error(exc: Exception) -> str:
         next(iter(re.findall(r"HTTP \d{3}", text)), ""), text[:40])
 
 
+GITHUB_API_HOST = "api.github.com"
+GITHUB_TOKEN = re.compile(r"[A-Za-z0-9_]{20,255}")
+
+
+class _UseGh(Exception):
+    """The direct API read is not usable for this call: ask gh instead."""
+
+
 class GitHubSource:
     """Rate-limited, read-only GitHub activity. Failures become a status line."""
 
-    def __init__(self, repo: str, window_hours: float = 12.0, runner=None, clock=time.time) -> None:
+    def __init__(self, repo: str, window_hours: float = 12.0, runner=None, clock=time.time,
+                 direct: bool = False) -> None:
         if not GITHUB_REPO.fullmatch(repo or ""):
             raise ValueError("--github expects OWNER/REPO")
         self.repo, self.window = repo, window_hours * 3600
         self.runner = runner or subprocess.run
         self.clock = clock
+        # direct: GET api.github.com with gh's own token instead of forking gh
+        # for every read (~0.15 s CPU each, ~10 per refresh; Issue #625). Any
+        # trouble before the first direct answer, or a rejected token, falls
+        # back to gh. The token stays in this object, never in a message.
+        self.direct = direct
+        self._token: str | None = None
+        self._conn = None
+        self._direct_ok = False
+        self.connect = lambda: http.client.HTTPSConnection(GITHUB_API_HOST, timeout=GITHUB_TIMEOUT)
         self.events: list[ActivityEvent] = []
         self.pending: list[OwnerPending] = []
         self.scope = ""   # what the ★ list could see, said next to it
@@ -1327,6 +1594,11 @@ class GitHubSource:
         self.wait = GITHUB_REFRESH   # seconds between attempts; grows while gh keeps failing
 
     def _get(self, path: str):
+        if self.direct:
+            try:
+                return self._get_direct(path)
+            except _UseGh:
+                pass
         gh = shutil.which("gh")
         if not gh:
             raise RuntimeError("找不到 gh 指令")
@@ -1339,6 +1611,57 @@ class GitHubSource:
         if len(done.stdout) > GITHUB_LIMIT:
             raise RuntimeError("回應過大")
         return json.loads(done.stdout)
+
+    def _get_direct(self, path: str):
+        if self._token is None:
+            gh = shutil.which("gh")
+            if not gh:
+                raise RuntimeError("找不到 gh 指令")
+            done = self.runner([gh, "auth", "token", "--hostname", "github.com"],
+                               capture_output=True, timeout=GITHUB_TIMEOUT, check=False)
+            token = (done.stdout or b"").strip().decode("ascii", "replace")
+            if done.returncode or not GITHUB_TOKEN.fullmatch(token):
+                self.direct = False
+                raise _UseGh
+            self._token = token
+        headers = {"Authorization": f"token {self._token}", "Accept": "application/vnd.github+json",
+                   "User-Agent": "llmtool-monitor"}
+        for attempt in (1, 2):
+            fresh = self._conn is None
+            if fresh:
+                self._conn = self.connect()
+            try:
+                self._conn.request("GET", "/" + path, headers=headers)
+                response = self._conn.getresponse()
+                body = response.read(GITHUB_LIMIT + 1)
+                if response.getheader("Connection", "").lower() == "close":
+                    self._close()
+                break
+            except Exception as exc:
+                self._close()
+                if not fresh and attempt == 1:
+                    continue   # a kept-alive connection the server had closed
+                if not self._direct_ok:   # e.g. only a proxy reaches GitHub: gh knows how
+                    self.direct = False
+                    raise _UseGh from None
+                raise OSError(type(exc).__name__) from None
+        if response.status == 401:   # gh may hold a renewed token
+            self._token = None
+            raise _UseGh
+        self._direct_ok = True
+        if response.status != 200:
+            raise RuntimeError(f"gh api 失敗（HTTP {response.status}）")
+        if len(body) > GITHUB_LIMIT:
+            raise RuntimeError("回應過大")
+        return json.loads(body)
+
+    def _close(self) -> None:
+        conn, self._conn = self._conn, None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
     def due(self) -> bool:
         """Whether a new read may start: self.wait seconds since the last one
@@ -1430,6 +1753,7 @@ class GitHubSource:
         self.ci_view = view   # the runners show now; their jobs follow below
         if self.want_ci or view.runners:
             stamps: dict = {}   # run id -> updated_at from the runs list
+            read: dict = {}     # run id -> job list read during this refresh
 
             def jobs_of(run):
                 # An unfinished run's job list is read again only once the
@@ -1438,7 +1762,9 @@ class GitHubSource:
                 if (cached is not None and stamp is not None and cached[0] == stamp
                         and self.clock() - cached[1] < GITHUB_JOBS_TTL):
                     return cached[2]
-                found = self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
+                if run not in read:
+                    read[run] = self._get(f"repos/{self.repo}/actions/runs/{run}/jobs")
+                found = read[run]
                 if stamp is not None:
                     self._jobs[run] = (stamp, self.clock(), found)
                 return found
@@ -1920,10 +2246,26 @@ def _place(cwd, canonical: str) -> tuple[str, str] | None:
     like a task root, else None (not this repository)."""
     if type(cwd) is not str or not cwd:
         return None
+    tasks = registered_tasks(canonical)
+    # The same few session folders are placed on every office rebuild; the
+    # answer is kept while the D6 registry read is the same, up to a minute.
+    hit = _place_cache.get((cwd, canonical))
+    if hit is not None and hit[0] is tasks and 0 <= time.monotonic() - hit[1] < PLACE_TTL:
+        return hit[2]
+    place = _find_place(cwd, canonical, tasks)
+    _remember(_place_cache, (cwd, canonical), (tasks, time.monotonic(), place))
+    return place
+
+
+_place_cache: dict = {}   # (cwd, canonical) -> (registered_tasks() answer, when, place)
+PLACE_TTL = 60.0
+
+
+def _find_place(cwd: str, canonical: str, tasks: dict) -> tuple[str, str] | None:
     real = os.path.realpath(cwd)
     if real == canonical or real.startswith(canonical + os.sep):
         return "pm", ""
-    for task_id, (root, _) in registered_tasks(canonical).items():
+    for task_id, (root, _) in tasks.items():
         if real == root or real.startswith(root + os.sep):
             return "task", task_id
     parts = real.split(os.sep)
@@ -4585,8 +4927,13 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                                          row.name))
 
 
+def _char_width(char: str) -> int:
+    return 2 if unicodedata.east_asian_width(char) in "WF" else 1
+
+
+@functools.lru_cache(maxsize=4096)   # the same lines are measured on every repaint
 def _width(text: str) -> int:
-    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+    return sum(map(_char_width, text))
 
 
 def _pad(text: str, width: int) -> str:
@@ -4719,10 +5066,16 @@ NO_LINE_START = "）」』】，。、；：！？)]}"
 def _wrap(text: str, cols: int) -> list[str]:
     """text split into lines of at most cols display columns (at least one),
     broken after ；，、 or a space where possible, never before a closing mark."""
+    return list(_wrapped(text, cols))
+
+
+@functools.lru_cache(maxsize=1024)   # repainted once a second with the same rows
+def _wrapped(text: str, cols: int) -> tuple:
     pieces = []
     while _width(text) > cols:
-        fit = 0
-        while _width(text[:fit + 1]) <= cols:
+        fit, used = 0, 0
+        while used + _char_width(text[fit]) <= cols:
+            used += _char_width(text[fit])
             fit += 1
         cut = max((i + 1 for i in range(fit) if text[i] in BREAK_AFTER), default=0)
         if cut < fit // 2:   # no good break point in the second half: break anywhere
@@ -4731,7 +5084,7 @@ def _wrap(text: str, cols: int) -> list[str]:
                 cut -= 1
         pieces.append(text[:cut].rstrip())
         text = text[cut:].lstrip(" ")
-    return pieces + [text]
+    return tuple(pieces + [text])
 
 
 def _row_style(state: str) -> str:
@@ -5067,10 +5420,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="compatibility option; GitHub Activity is already on by default")
     parser.add_argument("--no-github", action="store_true",
                         help=f"turn off the read-only gh api Activity on {DEFAULT_GITHUB_REPO} (no network)")
+    parser.add_argument("--gh-cli", action="store_true",
+                        help="read GitHub only through `gh api` processes (never holds gh's token; more CPU)")
     args = parser.parse_args(argv)
     if not 0.5 <= args.interval <= 60:
         parser.error("--interval must be between 0.5 and 60 seconds")
-    github = None if args.no_github else GitHubSource(DEFAULT_GITHUB_REPO)
+    github = None if args.no_github else GitHubSource(DEFAULT_GITHUB_REPO,
+                                                       direct=not (args.once or args.gh_cli))
     if args.once:
         return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)

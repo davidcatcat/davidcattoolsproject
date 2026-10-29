@@ -4489,3 +4489,317 @@ class RefreshCostTests(unittest.TestCase):
             mon.run_curses(screen, 3600.0, False, monitor)
         # One paint for the first poll, one after the key: never one per getch.
         self.assertEqual(screen.paints, 2)
+
+
+class FakeKernel:
+    """Stands in for _Sysctl: a process list and the commands it may read."""
+
+    def __init__(self, procs, commands):
+        self.procs, self.commands, self.reads = list(procs), dict(commands), []
+
+    def processes(self):
+        return list(self.procs)
+
+    def command(self, pid):
+        self.reads.append(pid)
+        return self.commands.get(pid)
+
+
+def kproc(pid, ppid, start, comm=b"x", uid=501, pstat=2, pgid=None, **kwargs):
+    return mon.KProc(pid, ppid, pgid or pid, int(start), 0, pstat, comm, uid, **kwargs)
+
+
+class ProcessTableTests(unittest.TestCase):
+    """Issue #625: `ps -A` runs at most every PS_FULL_EVERY seconds; between
+    runs the same rows come from the kernel's process list."""
+
+    def setUp(self):
+        self.clock, self.wall, self.full, self.users = [100.0], [NOW], [], []
+        self.me = kproc(os.getpid(), os.getppid(), NOW - 50, b"Python")
+        self.agent = kproc(4000, 1, NOW - 3725, b"claude")
+        self.kernel = FakeKernel([self.me, self.agent], {4000: "claude --resume"})
+
+    def _table(self, ps_text):
+        def ps():
+            self.full.append(self.clock[0])
+            return ps_text() if callable(ps_text) else ps_text
+
+        def ps_users(uids):
+            self.users.append(set(uids))
+            return self.user_text
+        self.user_text = ""
+        return mon.ProcessTable(ps=ps, kernel=self.kernel, clock=lambda: self.clock[0],
+                                wall=lambda: self.wall[0], watched=frozenset({450}),
+                                ps_users=ps_users)
+
+    def _rows(self, table):
+        return [(pid, ppid, pgid, etime() if callable(etime) else etime, stat, command)
+                for pid, ppid, pgid, etime, stat, command in table.rows()]
+
+    def test_rows_between_ps_runs_equal_what_ps_would_print(self):
+        table = self._table(f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+                            "4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        first = self._rows(table)
+        self.assertEqual(self.full, [100.0])
+        self.assertIn((4000, 1, 4000, "01:02:05", "Ss+", "claude --resume"), first)
+        self.clock[0] += 1
+        self.wall[0] += 1
+        self.assertEqual(self._rows(table)[1], (4000, 1, 4000, "01:02:06", "Ss+", "claude --resume"))
+        self.assertEqual(self.full, [100.0])   # no second ps
+        self.assertEqual(self.kernel.reads, [])   # commands ps printed are not read again
+        self.clock[0] += mon.PS_FULL_EVERY
+        table.rows()
+        self.assertEqual(len(self.full), 2)   # STAT and other accounts refreshed
+
+    def test_snapshot_from_kernel_rows_matches_parse_of_ps_text(self):
+        text = (f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+                "4000 1 4000 01:02:05 Ss+ claude --resume\n"
+                "4001 4000 4000 00:10 S /bin/zsh -c make\n")
+        self.kernel.procs.append(kproc(4001, 4000, NOW - 10, b"zsh", pgid=4000))
+        table = self._table(text)
+        table.rows()
+        self.assertEqual(mon.collect(table=table), mon.parse_processes(text, os.getpid()))
+
+    def test_new_process_command_is_read_once_and_exec_reads_it_again(self):
+        table = self._table(f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
+                            "4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs.append(kproc(4100, 4000, NOW - 2, b"zsh", eflag=mon.EPROC_SLEADER))
+        self.kernel.commands[4100] = "/bin/zsh -c ls"
+        self.clock[0] += 1
+        self.wall[0] += 1
+        self.assertIn((4100, 4000, 4100, "00:03", "Ss", "/bin/zsh -c ls"), self._rows(table))
+        self.clock[0] += 1
+        self._rows(table)
+        self.assertEqual(self.kernel.reads, [4100])   # remembered
+        # exec: same pid and start, another program name -> read again
+        self.kernel.procs[-1] = kproc(4100, 4000, NOW - 2, b"git", eflag=mon.EPROC_SLEADER)
+        self.kernel.commands[4100] = "git status"
+        self.clock[0] += 1
+        self.assertIn("git status", [row[5] for row in self._rows(table)])
+        self.assertEqual(self.kernel.reads, [4100, 4100])
+
+    def test_other_accounts_newcomer_is_read_with_ps_u_at_a_bounded_pace(self):
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs += [kproc(5000, 1, NOW - 1, b"Runner.Worker", uid=450),
+                              kproc(5001, 1, NOW - 1, b"mdworker", uid=89)]
+        self.user_text = "5000 1 5000 00:01 S /Users/ghrunner/actions-runner/bin/Runner.Worker\n"
+        self.clock[0] += 1
+        rows = self._rows(table)
+        self.assertEqual(self.users, [{450}])   # only the runner account, never root/system
+        self.assertIn((5000, 1, 5000, "00:01", "S",
+                       "/Users/ghrunner/actions-runner/bin/Runner.Worker"), rows)
+        self.assertNotIn(5001, [row[0] for row in rows])   # a system daemon waits for ps -A
+        self.assertEqual(len(self.full), 1)
+        # Another newcomer within PS_MIN_GAP waits; after it, ps -U runs again.
+        self.kernel.procs.append(kproc(5002, 5000, NOW, b"bash", uid=450))
+        self.clock[0] += mon.PS_MIN_GAP / 2
+        self.assertNotIn(5002, [row[0] for row in self._rows(table)])
+        self.assertEqual(len(self.users), 1)
+        self.user_text += "5002 5000 5000 00:00 S /bin/bash -e step.sh\n"
+        self.clock[0] += mon.PS_MIN_GAP
+        self.assertIn(5002, [row[0] for row in self._rows(table)])
+        self.assertEqual(len(self.users), 2)
+        self.assertEqual(self.kernel.reads.count(5000), 1)   # an unreadable command is asked once
+
+    def test_a_process_that_becomes_a_zombie_is_shown_as_ps_shows_it(self):
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs[1] = kproc(4000, 1, NOW - 3725, b"claude", pstat=mon.SZOMB)
+        self.clock[0] += 1
+        self.assertEqual([row[4:] for row in self._rows(table) if row[0] == 4000], [("Z", "<defunct>")])
+
+    def test_kernel_list_that_does_not_show_this_process_falls_back_to_ps(self):
+        self.kernel.procs = [self.agent]   # wrong layout: our own pid is not there
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        table.rows()
+        self.assertEqual(len(self.full), 2)
+        self.assertIs(table.kernel, False)
+
+    def test_ps_elapsed_matches_ps_etime_format(self):
+        self.assertEqual([mon._ps_elapsed(s) for s in (0, 59, 61, 3600, 86399, 86400 + 61, 20 * 86400)],
+                         ["00:00", "00:59", "01:01", "01:00:00", "23:59:59", "01-00:01:01",
+                          "20-00:00:00"])
+
+    def test_real_kernel_rows_agree_with_ps_on_this_mac(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS sysctl layout")
+        kernel = mon._Sysctl()
+        procs = kernel.processes()
+        mine = [k for k in procs if k.pid == os.getpid()]
+        self.assertEqual([(k.ppid, k.uid) for k in mine], [(os.getppid(), os.getuid())])
+        self.assertTrue(mine[0].comm.lower().startswith(b"python"), mine[0].comm)
+        shown = subprocess.run(["/bin/ps", "-o", "pid=,ppid=,pgid=,etime=,stat=,command=", "-p",
+                                str(os.getpid())], capture_output=True, text=True).stdout
+        (pid, ppid, pgid, _, _, command), = mon.ps_rows(shown)
+        self.assertEqual((pid, ppid, pgid, command),
+                         (mine[0].pid, mine[0].ppid, mine[0].pgid, kernel.command(os.getpid())))
+
+
+def _reference_wrap(text, cols):
+    """_wrap before Issue #625: every prefix measured from scratch."""
+    pieces = []
+    while mon._width(text) > cols:
+        fit = 0
+        while mon._width(text[:fit + 1]) <= cols:
+            fit += 1
+        cut = max((i + 1 for i in range(fit) if text[i] in mon.BREAK_AFTER), default=0)
+        if cut < fit // 2:
+            cut = fit
+            while 1 < cut and text[cut] in mon.NO_LINE_START:
+                cut -= 1
+        pieces.append(text[:cut].rstrip())
+        text = text[cut:].lstrip(" ")
+    return pieces + [text]
+
+
+class RepaintCostTests(unittest.TestCase):
+    def test_cached_wrap_equals_the_old_algorithm_and_returns_a_fresh_list(self):
+        import random
+        rng = random.Random(625)
+        alphabet = "ab cd，；、。）」中文字工作test "
+        for _ in range(300):
+            text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 120)))
+            cols = rng.randint(4, 40)   # the views never wrap narrower than this
+            self.assertEqual(mon._wrap(text, cols), _reference_wrap(text, cols), (text, cols))
+        lines = mon._wrap("中文字工作 test，再一次", 6)
+        lines.append("mutated")
+        self.assertNotIn("mutated", mon._wrap("中文字工作 test，再一次", 6))
+
+
+class DirectGitHubTests(unittest.TestCase):
+    """Issue #625: the running monitor reads GitHub over HTTPS with gh's own
+    token (one `gh auth token`), falling back to `gh api`."""
+
+    class Conn:
+        def __init__(self, script, log):
+            self.script, self.log = script, log
+
+        def request(self, method, path, headers):
+            self.log.append((method, path, headers))
+
+        def getresponse(self):
+            item = self.script.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            status, payload = item
+            body = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
+            return __import__("types").SimpleNamespace(
+                status=status, read=lambda n: body[:n], getheader=lambda name, default="": default)
+
+        def close(self):
+            pass
+
+    def _source(self, script, gh):
+        log = []
+        source = mon.GitHubSource("o/r", runner=gh, clock=lambda: NOW, direct=True)
+        source.connect = lambda: self.Conn(script, log)
+        return source, log
+
+    def test_reads_use_one_token_lookup_and_get_only(self):
+        gh = FakeRun((0, b"gho_" + b"a" * 36 + b"\n"))
+        source, log = self._source([(200, [comment(4, NOW - 30, "hello")]), (200, []),
+                                    (200, {"runners": []})], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source.refresh(force=True)
+        self.assertEqual([argv[1:3] for argv, _ in gh.calls], [["auth", "token"]])
+        self.assertEqual([(m, p.split("?")[0]) for m, p, _ in log],
+                         [("GET", "/repos/o/r/issues/comments"), ("GET", "/repos/o/r/pulls"),
+                          ("GET", "/repos/o/r/actions/runners")])
+        self.assertTrue(all(h["Authorization"] == "token gho_" + "a" * 36 for _, _, h in log))
+        self.assertEqual(len(source.events), 1)
+        self.assertNotIn("gho_", source.status)
+
+    def test_http_error_reads_like_gh_and_401_asks_gh(self):
+        gh = FakeRun((0, b"gho_" + b"b" * 36), (0, []), (0, []))
+        source, log = self._source([(200, []), (401, b""), (502, b""), (502, b"")], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            self.assertEqual(source._get("repos/o/r/a"), [])
+            self.assertEqual(source._get("repos/o/r/b"), [])   # token refused: gh answered
+            self.assertEqual(gh.calls[1][0][1:5], ["api", "-X", "GET", "repos/o/r/b"])
+            gh.responses.insert(0, (0, b"gho_" + b"c" * 36))   # the token is looked up again
+            with self.assertRaisesRegex(RuntimeError, r"gh api 失敗（HTTP 502）"):
+                source._get("repos/o/r/c")
+        self.assertTrue(source.direct)
+
+    def test_no_connection_before_any_answer_falls_back_to_gh_for_good(self):
+        gh = FakeRun((0, b"gho_" + b"d" * 36), (0, []), (0, []))
+        source, _ = self._source([OSError("proxy only")], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            self.assertEqual(source._get("repos/o/r/a"), [])
+            self.assertEqual(source._get("repos/o/r/b"), [])
+        self.assertFalse(source.direct)
+        self.assertEqual([argv[1] for argv, _ in gh.calls], ["auth", "api", "api"])
+
+    def test_no_token_falls_back_to_gh(self):
+        gh = FakeRun((1, b""), (0, []))
+        source, log = self._source([], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            self.assertEqual(source._get("repos/o/r/a"), [])
+        self.assertFalse(source.direct)
+        self.assertEqual(log, [])
+
+    def test_once_never_uses_the_direct_reader(self):
+        with patch.object(mon, "run_once", return_value=0) as once:
+            mon.main(["--once"])
+        self.assertFalse(once.call_args[0][0].direct)
+
+    def test_one_refresh_reads_each_run_jobs_once(self):
+        runs = {"workflow_runs": [
+            {"id": 7, "status": "completed", "conclusion": "success", "name": "CI",
+             "head_branch": "b", "updated_at": iso(NOW - 60)},
+            {"id": 8, "status": "in_progress", "name": "CI", "head_branch": "b",
+             "updated_at": iso(NOW - 5)}]}
+        jobs = {"jobs": [{"runner_name": "mac-1", "status": "completed", "conclusion": "success",
+                          "name": "check", "completed_at": iso(NOW - 70)}]}
+        fake = FakeRun((0, []), (0, []), (0, {"runners": []}), (0, runs), (0, jobs), (0, jobs), (0, jobs))
+        source = mon.GitHubSource("o/r", runner=fake, clock=lambda: NOW)
+        source.want_ci = True
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source.refresh(force=True)
+        reads = [argv[4] for argv, _ in fake.calls if "/jobs" in argv[4]]
+        self.assertEqual(len(reads), len(set(reads)))
+
+
+class TaskScanCacheTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        mon._task_dir_cache.clear()
+        self.task = Path(self.tmp.name) / "llmtool-abc"
+        self.task.mkdir()
+        (self.task / "manifest.json").write_text(json.dumps({"task_id": "t-1", "branch": "b"}))
+        (self.task / "dev-attempt.json").write_text(json.dumps({"model": "openai/gpt-x"}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_records_are_parsed_again_only_when_one_changed(self):
+        pattern = str(Path(self.tmp.name) / "llmtool-*")
+        first = mon.scan_tasks(pattern)
+        self.assertEqual([(t.task_id, [s.result for s in t.stages]) for t in first], [("t-1", [""])])
+        opened = []
+        real_read = mon._read_json
+        with patch.object(mon, "_read_json", lambda path, *a: opened.append(path) or real_read(path, *a)):
+            self.assertEqual(mon.scan_tasks(pattern), first)
+            self.assertEqual(opened, [])
+            (self.task / "dev-result.json").write_text(json.dumps({"code": "DONE", "cleanup_confirmed": True}))
+            second = mon.scan_tasks(pattern)
+        self.assertEqual([(s.result, s.cleanup) for s in second[0].stages], [("DONE", "ok")])
+        self.assertTrue(opened)
+        mon._task_dir_cache.clear()
+        self.assertEqual(mon.scan_tasks(pattern), second)   # equals a fresh read
+
+    def test_place_is_recomputed_when_the_d6_registry_changes(self):
+        mon._place_cache.clear()
+        canonical = str(Path(self.tmp.name).resolve() / "repo")
+        cwd = str(Path(self.tmp.name).resolve() / "elsewhere" / "wp-1")
+        answers = iter([{}, {"wp-1": (cwd, "")}])
+        current = [next(answers)]
+        with patch.object(mon, "registered_tasks", lambda c: current[0]):
+            self.assertIsNone(mon._place(cwd, canonical))
+            self.assertIsNone(mon._place(cwd, canonical))   # same registry read: kept
+            current[0] = next(answers)
+            self.assertEqual(mon._place(cwd, canonical), ("task", "wp-1"))
