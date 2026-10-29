@@ -25,12 +25,16 @@ CONTRACT_TOKENS = (
     "role.owner", "role.pm", "role.system", "tool.summary", "tool.error", "meta.usage",
     "rule", "status.bar", "status.key",
 )
+UI_TOKENS = ("ui.menu", "ui.menu.current", "ui.menu.header", "ui.help", "ui.selected", "ui.link")
 
 
 class StyleTokenTests(unittest.TestCase):
-    def test_one_table_maps_every_contract_token(self):
-        self.assertEqual(set(chat_tui_view.STYLE_TOKENS), set(CONTRACT_TOKENS))
-        for token, (colour, mono) in chat_tui_view.STYLE_TOKENS.items():
+    def test_one_table_per_theme_maps_every_contract_token(self):
+        self.assertEqual(set(chat_tui_view.STYLE_TOKENS), {"dark", "light", "mono"})
+        for theme, table in chat_tui_view.STYLE_TOKENS.items():
+            with self.subTest(theme=theme):
+                self.assertEqual(set(table), set(CONTRACT_TOKENS) | set(UI_TOKENS))
+        for token, mono in chat_tui_view.THEME_MONO.items():
             with self.subTest(token=token):
                 self.assertNotIn("fg:", mono)
                 self.assertNotIn("bg:", mono)
@@ -287,11 +291,11 @@ class PMLayoutTests(Base):
 
     def test_status_bar_states_queue_and_keys(self):
         ui = self.ui
-        self.assertEqual(ui.status_text(), "PM | abcdef01 | 待命 | 最新 | F6 滑鼠:開 | F1")
+        self.assertEqual(ui.status_text(), "▸▸ PM 模式 · auto | abcdef01 | 待命 | 最新 | F6 滑鼠:開 | F1")
         self.start()
         ui.pm_outbox.append("next")
         status = ui.status_text()
-        self.assertRegex(status, "^PM \\| abcdef01 \\| 回答中 [0-9.]+s \\| 佇列1 \\| Esc 中斷 \\| ")
+        self.assertRegex(status, "^▸▸ PM 模式 · auto · 佇列 1 \\| abcdef01 \\| 回答中 [0-9.]+s \\| Esc 中斷 \\| ")
         ui.pm_state = "thinking"
         self.assertIn("思考中", ui.status_text())
         ui.pm_outbox.clear()

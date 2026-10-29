@@ -57,6 +57,12 @@ _RECOVERY = {
 }
 
 
+def permission_mode():
+    """The permission mode pm_runtime starts the PM with (W56d status line)."""
+    from . import pm_runtime
+    return pm_runtime.PM_PERMISSION_MODE
+
+
 def error_code(exc):
     """The typed pm_runtime code of an exception, else UNKNOWN (never message text)."""
     return safe_code(getattr(exc, "pm_runtime_code", None))

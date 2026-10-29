@@ -72,8 +72,11 @@ def _pm_working(rows):
 
 
 def _pm_idle(rows):
-    """The status row says the PM turn is over (main: idle; W56 layout: 待命/已中斷)."""
-    return rows[-1].startswith("PM") and any(word in rows[-1] for word in ("idle", "待命", "已中斷"))
+    """The status row says the PM turn is over (main: idle; W56 layout: 待命/已中斷).
+
+    W56d leads the PM status row with "▸▸ PM 模式"; main starts it with "PM".
+    """
+    return rows[-1].startswith(("PM", "▸▸ PM")) and any(word in rows[-1] for word in ("idle", "待命", "已中斷"))
 
 
 def _pm_interrupted(rows):
