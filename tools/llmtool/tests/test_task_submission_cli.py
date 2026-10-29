@@ -1433,6 +1433,28 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(rejection)
         self.assertEqual(artifact, proposal)
 
+    def test_text_developer_recounts_hunks_and_rejects_fake_context(self):
+        source_files = submission_cli._text_developer_source_files(
+            self.executor_root, self.executor_head, ['sample.py'])
+        proposal = (
+            'diff --git a/sample.py b/sample.py\n'
+            '--- a/sample.py\n+++ b/sample.py\n'
+            '@@ -1,9 +1,8 @@\n'
+            ' VALUE = 1\n'
+            '+# updated\n')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            proposal, ['sample.py'], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertIn('@@ -1 +1,2 @@', artifact)
+        self.assertTrue(submission_cli._text_developer_apply_check(
+            self.executor_root, self.executor_head, artifact))
+
+        fake_context = proposal.replace(' VALUE = 1', ' ...')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            fake_context, ['sample.py'], source_files=source_files)
+        self.assertIsNone(artifact)
+        self.assertEqual(rejection, 'DEVELOPER_OUTPUT_INVALID_DIFF')
+
     def test_captured_source_files_admit_allowed_addition_and_deletion(self):
         added = 'tools/llmtool/new_module.py'
         source_files = submission_cli._text_developer_source_files(
@@ -1617,6 +1639,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n')
         client = FakeClient(Reply(patch_text, {
             'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
+            'served_model': 'qwen3.8-27b',
         }))
         store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
@@ -1682,6 +1705,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n')
         client = FakeClient(Reply(patch_text, {
             'prompt_tokens': 20, 'completion_tokens': 15, 'total_tokens': 35,
+            'served_model': 'qwen3.8-27b',
         }))
         args = self._delegate_args(task, read_path=[target], write_path=[target],
                                    context='VALUE = 1\n')
@@ -1704,6 +1728,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(developer['source_sha_binding'], 'D6_REGISTRY_OBSERVED')
         self.assertEqual(developer['artifact'], patch_text)
         self.assertEqual(developer['usage']['total_tokens'], 35)
+        self.assertEqual(developer['usage']['served_model'], 'qwen3.8-27b')
+        stored = store.get(task['task_id'])
+        self.assertEqual(stored['developer']['usage']['served_model'], 'qwen3.8-27b')
         self.assertEqual(developer['max_tokens'], 128)
         self.assertEqual(developer['execution_result'], {
             'status': 'UNVERIFIED', 'code': 'EXECUTOR_EVIDENCE_NOT_ATTACHED',
@@ -1720,7 +1747,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIn('Do not use Markdown fences', system_prompt)
         self.assertIn('diff --git a/example.py b/example.py', system_prompt)
         self.assertIn('@@ -1,3 +1,3 @@\n unchanged line\n-old\n+new\n unchanged line', system_prompt)
-        self.assertIn('creating, deleting or renaming files is not supported', system_prompt)
+        self.assertIn('New files use --- /dev/null and +++ b/path', system_prompt)
+        self.assertIn('deletions use --- a/path and +++ /dev/null', system_prompt)
+        self.assertIn('Renames are not supported', system_prompt)
         self.assertIn('The first line must be the diff --git header', system_prompt)
         self.assertIn('blank lines', system_prompt)
         self.assertIn('Copy context lines verbatim', system_prompt)
@@ -2450,6 +2479,11 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         self.assertNotIn('provided source text', packet)
         self.assertIn('no tools, cannot read files, and all needed file content is provided below.',
                       user)
+        self.assertIn('Never abbreviate or write "..."', system)
+        self.assertIn('Copy context lines verbatim', system)
+        self.assertIn('New files use --- /dev/null and +++ b/path', system)
+        self.assertIn('deletions use --- a/path and +++ /dev/null', system)
+        self.assertNotIn('creating, deleting or renaming files is not supported', system)
         self.assertTrue(context.endswith('Return only the unified diff, starting with "diff --git".'))
 
 

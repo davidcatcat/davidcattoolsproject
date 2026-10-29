@@ -24,11 +24,20 @@ output were tied to the same caret. This module keeps the model in *screen rows*
   pane's selection. Warp also reports no release when the button goes up outside its
   grid, which is why a moving drag copies too (W52 F3).
 
+Styles (W56a): the pane text carries ``(start, end, token)`` spans; ``STYLE_TOKENS`` holds
+one table per theme (dark, light, mono) mapping a display token to a prompt_toolkit style,
+and a theme swaps the whole table (W56d).
+A ``rule`` line is drawn across the pane width and a ``meta.usage`` line right-aligned at
+draw time, so both stay right after a resize. ``render_markdown`` uses ``tui_markdown``
+when it is installed and otherwise shows the text unchanged.
+
 Pure Python apart from ``make_pane`` (the prompt_toolkit control), so it is unit-testable
 without a terminal.
 """
 
 import bisect
+import collections
+import os
 import shutil
 import subprocess
 import sys
@@ -47,11 +56,303 @@ DRAG_COPY_SECONDS = 0.15  # A moving drag copies its selection this long after i
 COPIED_SECONDS = 3.0      # How long the status bar reports a copy.
 DOUBLE_CLICK_SECONDS = 0.35
 TAB_WIDTH = 4
+HANG_LIMIT = 8            # Most leading spaces repeated before a wrapped line's later rows.
+HANG_BULLETS = ("• ", "◦ ", "▪ ")   # tui_markdown bullet glyphs
+FLOW_WIDTH = 1 << 16      # Markdown prose is laid out this wide; the pane soft-wraps it.
 CACHE_LINES = 4096        # Wrapped-line cache entries kept before it is cleared.
+RENDER_CACHE_CHARS = 1 << 20   # Source characters the Markdown render cache may hold.
 COPY_LIMIT_BYTES = 1024 * 1024   # Largest selection handed to the clipboard tool (UTF-8 bytes).
 COPY_SCAN_CHUNK = 65536          # Characters measured at a time while checking that limit.
 WORD_SCAN_LIMIT = COPY_LIMIT_BYTES  # Characters a double-click word may extend in either direction.
 _ZWJ = "\u200d"
+
+try:
+    from . import tui_markdown as _tui_markdown   # W56b+c renderer; optional until it lands
+except ImportError:
+    _tui_markdown = None
+
+# Every display token -> prompt_toolkit style, one table per theme (W56d). These three
+# tables are the only place a colour is named: the TUI's own chrome (menu, help, selection,
+# links) is themed through the "ui." tokens. "mono" is used for NO_COLOR or a terminal
+# without colour and uses only bold/dim/reverse. Unknown tokens are drawn as "text".
+THEME_DARK = {
+    "text": "",
+    "md.bold": "bold",
+    "md.italic": "italic",
+    "md.code": "fg:ansicyan",
+    "md.heading": "bold fg:ansiblue",
+    "md.bullet": "fg:ansicyan",
+    "md.link": "fg:ansiblue underline",
+    "md.quote": "fg:ansibrightblack italic",
+    "md.table.border": "fg:ansibrightblack",
+    "md.table.header": "bold",
+    "md.table.cell": "",
+    "md.codeblock.border": "fg:ansibrightblack",
+    "md.codeblock.lang": "fg:ansibrightblack italic",
+    "md.codeblock": "fg:ansiyellow",
+    "diff.add": "fg:ansigreen",
+    "diff.del": "fg:ansired",
+    "diff.hunk": "fg:ansicyan",
+    "diff.meta": "bold",
+    "diff.lineno": "fg:ansibrightblack",
+    "syntax.keyword": "fg:ansimagenta",
+    "syntax.string": "fg:ansigreen",
+    "syntax.comment": "fg:ansibrightblack italic",
+    "syntax.number": "fg:ansiyellow",
+    "syntax.builtin": "fg:ansicyan",
+    "role.owner": "bold fg:ansigreen",
+    "role.pm": "bold fg:ansicyan",
+    "role.system": "fg:ansiyellow",
+    "tool.summary": "fg:ansibrightblack",
+    "tool.error": "fg:ansired",
+    "meta.usage": "fg:ansibrightblack",
+    "rule": "fg:ansibrightblack",
+    "status.bar": "reverse",
+    "status.key": "reverse bold",
+    "ui.menu": "bg:ansibrightblack fg:ansiwhite",
+    "ui.menu.current": "reverse",
+    "ui.menu.header": "bg:ansibrightblack fg:ansiwhite bold",
+    "ui.help": "italic",
+    "ui.selected": "reverse",
+    "ui.link": "underline",
+}
+# Light terminals: the ANSI yellow and bright black most palettes ship are unreadable on a
+# white background, so this table names darker RGB values (prompt_toolkit maps them to the
+# terminal's colour depth).
+THEME_LIGHT = {
+    "text": "",
+    "md.bold": "bold",
+    "md.italic": "italic",
+    "md.code": "fg:#005f87",
+    "md.heading": "bold fg:#00539c",
+    "md.bullet": "fg:#005f87",
+    "md.link": "fg:#0645ad underline",
+    "md.quote": "fg:#5f5f5f italic",
+    "md.table.border": "fg:#8a8a8a",
+    "md.table.header": "bold",
+    "md.table.cell": "",
+    "md.codeblock.border": "fg:#9e9e9e",
+    "md.codeblock.lang": "fg:#6c6c6c italic",
+    "md.codeblock": "fg:#7a4a00",
+    "diff.add": "fg:#1a7f1a",
+    "diff.del": "fg:#b3001b",
+    "diff.hunk": "fg:#005f87",
+    "diff.meta": "bold",
+    "diff.lineno": "fg:#8a8a8a",
+    "syntax.keyword": "fg:#8700af",
+    "syntax.string": "fg:#1a7f1a",
+    "syntax.comment": "fg:#6c6c6c italic",
+    "syntax.number": "fg:#9a5b00",
+    "syntax.builtin": "fg:#005f87",
+    "role.owner": "bold fg:#1a7f1a",
+    "role.pm": "bold fg:#00539c",
+    "role.system": "fg:#8a5a00",
+    "tool.summary": "fg:#6c6c6c",
+    "tool.error": "fg:#b3001b",
+    "meta.usage": "fg:#7a7a7a",
+    "rule": "fg:#b2b2b2",
+    "status.bar": "bg:#dadada fg:#1c1c1c",
+    "status.key": "bg:#dadada fg:#000000 bold",
+    "ui.menu": "bg:#e8e8e8 fg:#1c1c1c",
+    "ui.menu.current": "bg:#00539c fg:#ffffff",
+    "ui.menu.header": "bg:#d0d0d0 fg:#000000 bold",
+    "ui.help": "italic",
+    "ui.selected": "reverse",
+    "ui.link": "underline",
+}
+THEME_MONO = {
+    "text": "",
+    "md.bold": "bold",
+    "md.italic": "dim",
+    "md.code": "bold",
+    "md.heading": "bold",
+    "md.bullet": "bold",
+    "md.link": "bold",
+    "md.quote": "dim",
+    "md.table.border": "dim",
+    "md.table.header": "bold",
+    "md.table.cell": "",
+    "md.codeblock.border": "dim",
+    "md.codeblock.lang": "dim",
+    "md.codeblock": "",
+    "diff.add": "bold",
+    "diff.del": "dim",
+    "diff.hunk": "bold",
+    "diff.meta": "bold",
+    "diff.lineno": "dim",
+    "syntax.keyword": "bold",
+    "syntax.string": "",
+    "syntax.comment": "dim",
+    "syntax.number": "",
+    "syntax.builtin": "",
+    "role.owner": "bold reverse",
+    "role.pm": "bold",
+    "role.system": "dim",
+    "tool.summary": "dim",
+    "tool.error": "bold",
+    "meta.usage": "dim",
+    "rule": "dim",
+    "status.bar": "reverse",
+    "status.key": "reverse bold",
+    "ui.menu": "reverse",
+    "ui.menu.current": "bold",
+    "ui.menu.header": "reverse bold",
+    "ui.help": "",
+    "ui.selected": "reverse",
+    "ui.link": "",
+}
+# Theme name -> its table; a theme swaps the whole table (W56a contract).
+STYLE_TOKENS = {"dark": THEME_DARK, "light": THEME_LIGHT, "mono": THEME_MONO}
+RULE_CHAR = "─"
+FILL_TOKENS = ("rule",)                 # drawn across the pane: "──── label" fills the row
+RIGHT_TOKENS = ("meta.usage",)          # drawn flush right
+
+
+def colour_enabled(environ=None):
+    """False for NO_COLOR or a terminal without colour (dumb, vt*, *-mono)."""
+    environ = os.environ if environ is None else environ
+    if environ.get("NO_COLOR"):
+        return False
+    term = environ.get("TERM", "")
+    return bool(term) and term != "dumb" and not term.startswith("vt") and not term.endswith("-mono")
+
+
+def token_style(token, colour=True, theme="dark"):
+    """prompt_toolkit style string of a display token (unknown tokens: ``text``).
+
+    ``colour`` False (NO_COLOR, a colourless terminal) always uses the mono table.
+    """
+    table = STYLE_TOKENS.get(theme if colour else "mono") or THEME_DARK
+    style = table.get(token)
+    return table["text"] if style is None else style
+
+
+def render_markdown(text, width):
+    """Lines of (text, token) segments: ``tui_markdown.render`` when present, else plain lines.
+
+    Tables, fenced code, diffs and rules are laid out at ``width``; prose is laid out at
+    FLOW_WIDTH and soft-wrapped by the pane, so a copied paragraph has no line breaks the
+    reply did not have and a resize reflows it.
+    """
+    if _tui_markdown is not None:
+        try:
+            lines = []
+            blocks = _markdown_blocks(text)
+            for number, (fit, chunk) in enumerate(blocks):
+                # The last block may still be streaming: rendered, never cached.
+                lines.extend(_render_block("\n".join(chunk), max(1, width) if fit else FLOW_WIDTH,
+                                           cache=number < len(blocks) - 1))
+            return lines
+        except Exception:
+            pass   # a renderer bug never hides the reply: show it unformatted
+    return [[(line, "text")] for line in text.split("\n")]
+
+
+# (block source, width) -> rendered lines of a finished block, so a streamed reply
+# re-renders only its tail. Bounded by the source characters held (RENDER_CACHE_CHARS).
+_RENDERED = collections.OrderedDict()
+_rendered_chars = [0]
+
+
+def _render_block(source, width, cache=True):
+    key = (source, width)
+    found = _RENDERED.get(key)
+    if found is not None:
+        _RENDERED.move_to_end(key)
+        return found
+    found = _tui_markdown.render(source, width)
+    if cache and len(source) <= RENDER_CACHE_CHARS // 4:
+        _RENDERED[key] = found
+        _rendered_chars[0] += len(source)
+        while _rendered_chars[0] > RENDER_CACHE_CHARS or len(_RENDERED) > CACHE_LINES:
+            (old, _width), _lines = _RENDERED.popitem(last=False)
+            _rendered_chars[0] -= len(old)
+    return found
+
+
+def render_cache_chars():
+    """Source characters held by the Markdown render cache (tests)."""
+    return _rendered_chars[0]
+
+
+class SourceRegion:
+    """Pane text ``[start, end)`` that shows ``source`` rendered at ``width`` with each row
+    prefixed by ``indent``; copies go back to the source (Codex v2/v3 P2)."""
+
+    __slots__ = ("start", "end", "source", "width", "indent", "_map")
+
+    def __init__(self, start, end, source, width=0, indent=""):
+        self.start, self.end, self.source = start, end, source
+        self.width, self.indent, self._map = width, indent, None
+
+    def moved(self, delta):
+        region = SourceRegion(self.start + delta, self.end + delta, self.source, self.width,
+                              self.indent)
+        region._map = self._map
+        return region
+
+    def copy(self, shown, low, high):
+        """Source text for displayed ``[low, high)`` (offsets in the pane): the whole
+        source for a whole selection, else the source span from the first to the last
+        selected character that came from the source (see chat_tui_copymap)."""
+        if low <= self.start and high >= self.end:
+            return self.source
+        first, last = max(low, self.start) - self.start, min(high, self.end) - self.start
+        if self._map is None:
+            from . import chat_tui_copymap
+            display, offsets = chat_tui_copymap.display_map(
+                self.source, self.width, FLOW_WIDTH, _markdown_blocks, _tui_markdown, self.indent)
+            self._map = offsets if display == shown else False
+        if self._map is False:   # never expected: the pane shows other text than the map
+            return shown[first:last]
+        mapped = [offset for offset in self._map[first:last] if offset >= 0]
+        if not mapped:
+            return ""
+        return self.source[min(mapped):max(mapped) + 1]
+
+
+def _markdown_blocks(text):
+    """[(fit, source lines)]: fit blocks (table, fence, diff, rule) need the pane width.
+
+    Mirrors the block scan of ``tui_markdown`` so each block is rendered whole; a prose
+    line is its own block (the renderer lays out each prose line on its own).
+    """
+    md = _tui_markdown
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is not None and md._is_diff_start(lines, first):
+        return [(True, lines)]
+    blocks, index = [], 0
+
+    def add(fit, chunk):
+        blocks.append((fit, list(chunk)))
+
+    while index < len(lines):
+        line = lines[index]
+        end = index + 1
+        fence = md._FENCE.match(line)
+        if fence and not (fence.group(2)[0] == "`" and "`" in fence.group(4)):
+            marker = fence.group(2)
+            while end < len(lines):
+                stripped = lines[end].strip()
+                end += 1
+                if stripped.startswith(marker[0] * len(marker)) and not stripped.strip(marker[0]):
+                    break
+        elif md._is_diff_start(lines, index):
+            while end < len(lines) and md._diff_like(lines[end]):
+                end += 1
+        elif "|" in line and end < len(lines) and "|" in lines[end] \
+                and md._is_table_separator(lines[end]):
+            end += 1
+            while end < len(lines) and "|" in lines[end] and lines[end].strip():
+                end += 1
+        elif not md._RULE.match(line):
+            add(False, [line])
+            index = end
+            continue
+        add(True, lines[index:end])
+        index = end
+    return blocks
 
 
 def utf8_size(text, start, end, limit, measure=None):
@@ -162,6 +463,15 @@ class Wrapper:
         self._clusters[line] = found
         return found
 
+    @staticmethod
+    def hang(line, width):
+        """Indent drawn before a line's wrapped rows: its leading spaces (W56a), so an
+        indented reply paragraph stays indented without hard line breaks in the text."""
+        spaces = len(line) - len(line.lstrip(" "))
+        if line[spaces:spaces + 2] in HANG_BULLETS:
+            spaces += 2   # a rendered bullet item: later rows line up with its text
+        return spaces if 0 < spaces <= min(HANG_LIMIT, width // 2) and spaces < len(line) else 0
+
     def line_rows(self, line, width):
         """[(start, end)] offsets into ``line`` of each row; a cluster never splits."""
         key = (line, width)
@@ -170,8 +480,9 @@ class Wrapper:
             return rows
         rows = []
         start = column = 0
+        hang = self.hang(line, width)
         for begin, _end, span in self.clusters(line):
-            if column + span > width and column > 0:
+            if column + span > (width - hang if rows else width) and column > 0:
                 rows.append((start, begin))
                 start, column = begin, 0
             column += span
@@ -202,6 +513,9 @@ class ConversationView:
         self.rows = [(0, 0, 0)]
         self._starts = [0]
         self._line_rows = [1]    # rows each logical line occupies (incremental re-wrap)
+        self.spans = []          # sorted, disjoint (start, end, token); gaps are "text"
+        self.sources = []        # sorted, disjoint SourceRegions (rendered reply bodies)
+        self._span_starts = []
         self.width = 0
         self.height = 1
         self._dirty = True
@@ -230,9 +544,11 @@ class ConversationView:
 
     # -- text and layout -------------------------------------------------------------
     def set_text(self, text):
+        """Replace the text; spans after the first changed character are dropped."""
         if text == self.text:
             return
         changed = common_prefix_length(self.text, text)
+        self._clip_spans(changed)
         self._changed_from = changed if not self._dirty else min(self._changed_from, changed)
         self.text = text
         self._dirty = True
@@ -243,6 +559,81 @@ class ConversationView:
                 self.clear_selection()
         if not self.following:
             self.unseen = True
+
+    def _clip_spans(self, offset):
+        while self.sources and self.sources[-1].end > offset:
+            self.sources.pop()   # a region is kept whole or dropped (its text changed)
+        index = bisect.bisect_left(self._span_starts, offset)
+        del self.spans[index:], self._span_starts[index:]
+        if self.spans and self.spans[-1][1] > offset:
+            self.spans[-1] = (self.spans[-1][0], offset, self.spans[-1][2])
+
+    def _add_segments(self, offset, segments):
+        """Spans for styled segments placed at ``offset`` (after every existing span)."""
+        for part, token in segments:
+            if part and token != "text":
+                self.spans.append((offset, offset + len(part), token))
+                self._span_starts.append(offset)
+            offset += len(part)
+
+    def set_tail(self, start, segments, sources=()):
+        """Replace the text from ``start`` on with [(text, token)] segments; ``sources``
+        are (begin, end, source, width, indent) regions relative to ``start`` that copy
+        as ``source`` (``width``/``indent``: how the source was rendered)."""
+        self.set_text(self.text[:start] + "".join(part for part, _token in segments))
+        self._clip_spans(start)
+        self._add_segments(start, segments)
+        self.sources.extend(SourceRegion(start + low, start + high, *region)
+                            for low, high, *region in sources if high > low)
+
+    def replace(self, start, end, segments):
+        """Replace ``text[start:end]`` with styled segments; later spans, the reading
+        anchor and the selection move with the text after it."""
+        new = "".join(part for part, _token in segments)
+        delta = len(new) - (end - start)
+        after = [(s + delta, e + delta, t) for s, e, t in self.spans if s >= end]
+        before = [(s, min(e, start), t) for s, e, t in self.spans if s < start]
+        anchor, head = self.anchor, self.head
+        regions = [region if region.end <= start else region.moved(delta)
+                   for region in self.sources if region.end <= start or region.start >= end]
+        self.set_text(self.text[:start] + new + self.text[end:])
+        self.sources = regions
+        self.spans = before
+        self._span_starts = [s for s, _e, _t in before]
+        self._add_segments(start, segments)
+        self.spans.extend(after)
+        self._span_starts.extend(s for s, _e, _t in after)
+        if anchor is not None and head is not None:
+            self.anchor, self.head = (value + delta if value >= end else min(value, start)
+                                      for value in (anchor, head))
+        if self.top_offset >= end:
+            self.top_offset += delta
+
+    def token_at(self, offset):
+        index = bisect.bisect_right(self._span_starts, offset) - 1
+        if index >= 0 and self.spans[index][1] > offset:
+            return self.spans[index][2]
+        return "text"
+
+    def styled(self, start, end):
+        """[(token, start, end)] covering ``text[start:end]``; gaps are "text"."""
+        parts = []
+        index = max(0, bisect.bisect_right(self._span_starts, start) - 1)
+        position = start
+        while position < end and index < len(self.spans):
+            low, high, token = self.spans[index]
+            index += 1
+            if high <= position:
+                continue
+            if low >= end:
+                break
+            if low > position:
+                parts.append(("text", position, low))
+            parts.append((token, max(low, position), min(high, end)))
+            position = min(high, end)
+        if position < end:
+            parts.append(("text", position, end))
+        return parts
 
     def layout(self, width, height):
         """Rows for this width and the first visible row for this height (each render)."""
@@ -339,6 +730,8 @@ class ConversationView:
         line_start = self.text.rfind("\n", 0, start) + 1
         line_end = self.text.find("\n", start)
         line_text = self.text[line_start:None if line_end < 0 else line_end]
+        if start > line_start:
+            column -= self._wrapper.hang(line_text, self.width)
         used = 0
         for begin, _finish, span in self._wrapper.clusters(line_text):
             offset = line_start + begin
@@ -351,6 +744,15 @@ class ConversationView:
             used += span
         return end
 
+    def row_indent(self, index):
+        """Columns of hanging indent drawn before row ``index`` (0 on a line's first row)."""
+        _line, start, _end = self.rows[index]
+        line_start = self.text.rfind("\n", 0, start) + 1
+        if start == line_start:
+            return 0
+        line_end = self.text.find("\n", start)
+        return self._wrapper.hang(self.text[line_start:None if line_end < 0 else line_end], self.width)
+
     def visible_rows(self):
         return range(self.top, min(len(self.rows), self.top + self.height))
 
@@ -362,7 +764,24 @@ class ConversationView:
 
     def selected_text(self):
         span = self.selected_range()
-        return self.text[span[0]:span[1]] if span else ""
+        return self.copy_text(*span) if span else ""
+
+    def copy_text(self, start, end):
+        """What a copy of ``text[start:end]`` puts on the clipboard: displayed text, except
+        that a rendered reply copies as its source Markdown (whole, or the part shown)."""
+        parts, position = [], start
+        index = max(0, bisect.bisect_right([r.start for r in self.sources], start) - 1)
+        for region in self.sources[index:]:
+            if region.start >= end:
+                break
+            if region.end <= position:
+                continue
+            if region.start > position:
+                parts.append(self.text[position:region.start])
+            parts.append(region.copy(self.text[region.start:region.end], position, end))
+            position = min(end, region.end)
+        parts.append(self.text[position:end])
+        return "".join(parts)
 
     def clear_selection(self):
         self.anchor = self.head = None
@@ -425,8 +844,9 @@ class ConversationView:
             self.copied, self.copy_failed = (end - start, time.monotonic()), True
             self.copy_error = "選取超過複製上限 %d KB" % (COPY_LIMIT_BYTES // 1024)
             return ""
-        text = self.text[start:end]
-        self.copy(text)
+        text = self.copy_text(start, end)
+        if not self.copy(text):
+            return ""
         return text
 
     def copy(self, text):
@@ -539,12 +959,43 @@ def parse_mouse(data):
     return kind, button, x - 1, y - 1
 
 
-def make_pane(view, style="class:conversation.selected"):
-    """A prompt_toolkit Window that shows ``view`` one row per line and never wraps."""
+def make_pane(view, style="class:conversation.selected", colour=None, styler=None,
+              linker=None):
+    """A prompt_toolkit Window that shows ``view`` one row per line and never wraps.
+
+    Rows are drawn with their span styles (``styler``, default ``token_style``); a
+    whole-line ``rule`` span fills the row and a whole-line ``meta.usage`` span is drawn
+    flush right. ``linker`` (a callable returning a ``chat_tui_theme.Linker`` or None) adds
+    OSC 8 links: each linked cell is preceded by its open sequence as a zero-width escape;
+    the text, and so selection and copy, is unchanged (W56d).
+    """
     from prompt_toolkit.data_structures import Point
     from prompt_toolkit.layout import Window
     from prompt_toolkit.layout.controls import UIContent, UIControl
     from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.utils import get_cwidth
+
+    colour = colour_enabled() if colour is None else colour
+    styler = styler or (lambda token: token_style(token, colour))
+    linker = linker or (lambda: None)
+
+    def aligned(text, start, end, token, width):
+        """The row's drawn text for a whole-line fill/right token, else None."""
+        if token not in FILL_TOKENS + RIGHT_TOKENS:
+            return None
+        if (start and text[start - 1] != "\n") or (end < len(text) and text[end] != "\n"):
+            return None   # only a line that fits one row is aligned
+        shown = text[start:end]
+        room = width - get_cwidth(shown)
+        if token in FILL_TOKENS:
+            label = shown.lstrip(RULE_CHAR).strip()
+            room = width - get_cwidth(label) - (1 if label else 0)
+            return RULE_CHAR * max(0, room) + (" " + label if label else "")
+        return " " * max(0, room) + shown
+
+    def links_open(url):
+        found = linker()
+        return found.open_sequence(url) if found is not None else ""
 
     class Control(UIControl):
         def is_focusable(self):
@@ -556,11 +1007,42 @@ def make_pane(view, style="class:conversation.selected"):
 
             def get_line(index):
                 _line, start, end = rows[index]
-                if span is None or span[1] <= start or span[0] >= end:
-                    return [("", text[start:end].replace("\t", " " * TAB_WIDTH))]
-                low, high = max(start, span[0]), min(end, span[1])
-                fragments = [("", text[start:low]), (style, text[low:high]), ("", text[high:end])]
-                return [(klass, part.replace("\t", " " * TAB_WIDTH)) for klass, part in fragments if part]
+                parts = view.styled(start, end)
+                selected = span is not None and span[0] < end and span[1] > start
+                if len(parts) == 1:
+                    drawn = aligned(text, start, end, parts[0][0], width)
+                    if drawn is not None:
+                        klass = styler(parts[0][0])
+                        return [((klass + " " + style) if selected else klass, drawn)]
+                links = linker()
+                links = links.links(text, start, end) if links is not None else []
+                link_style = styler("ui.link") if links else ""
+                fragments = []
+                for token, low, high in parts:
+                    klass = styler(token)
+                    cuts = {low, high}
+                    if selected:
+                        cuts |= {min(max(span[0], low), high), min(max(span[1], low), high)}
+                    for link_low, link_high, _url in links:
+                        cuts |= {min(max(link_low, low), high), min(max(link_high, low), high)}
+                    cuts = sorted(cuts)
+                    for cut_low, cut_high in zip(cuts, cuts[1:]):
+                        inside = selected and span[0] <= cut_low and cut_high <= span[1]
+                        piece_style = (klass + " " + style).strip() if inside else klass
+                        piece = text[cut_low:cut_high].replace("\t", " " * TAB_WIDTH)
+                        url = next((u for a, b, u in links if a <= cut_low and cut_high <= b), None)
+                        if url is None:
+                            fragments.append((piece_style, piece))
+                            continue
+                        opening = links_open(url)
+                        piece_style = (piece_style + " " + link_style).strip()
+                        for char in piece:
+                            fragments.append(("[ZeroWidthEscape]", opening))
+                            fragments.append((piece_style, char))
+                indent = view.row_indent(index)
+                if indent:
+                    fragments.insert(0, ("", " " * indent))
+                return [fragment for fragment in fragments if fragment[1]]
 
             # The cursor is hidden; its row is the view's top, so the Window keeps that row.
             return UIContent(get_line=get_line, line_count=len(rows),

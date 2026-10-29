@@ -57,6 +57,12 @@ _RECOVERY = {
 }
 
 
+def permission_mode():
+    """The permission mode pm_runtime starts the PM with (W56d status line)."""
+    from . import pm_runtime
+    return pm_runtime.PM_PERMISSION_MODE
+
+
 def error_code(exc):
     """The typed pm_runtime code of an exception, else UNKNOWN (never message text)."""
     return safe_code(getattr(exc, "pm_runtime_code", None))
@@ -241,4 +247,7 @@ def history_text(result):
             safe_code(turn.get("status")),
             (" tools: " + ", ".join(safe_name(t) for t in tools)) if tools else "",
             safe_text(turn.get("result_text"), "") or "(no stored reply text)"))
+        if type(turn.get("usage")) is dict and turn["usage"]:
+            # The pane shows a short usage line per turn; the full numbers are here (W56a).
+            lines.append("(history) usage: " + usage_text(turn.get("usage")))
     return "\n".join(lines)
