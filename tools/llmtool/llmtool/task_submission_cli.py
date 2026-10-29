@@ -557,6 +557,13 @@ def add_task_submission_parsers(actions):
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
                          help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
+    claude_result = actions.add_parser(
+        'claude-result', help='Record the original PM-bound Claude Developer result')
+    claude_result.add_argument('task_id', help='existing durable Task ID')
+    claude_result.add_argument('--executor-task', required=True,
+                               help='registered D6 Executor task id')
+    claude_result.add_argument('--head', required=True,
+                               help='40-character result HEAD SHA')
     review_prompt = actions.add_parser(
         'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
     review_prompt.add_argument('task_id', help='existing durable Task ID')
@@ -770,6 +777,17 @@ def run_task_advance(args, *, store=None, **adapters):
         reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
     _print(result)
     return 1 if result.get('codes') else 0
+
+
+def run_task_claude_result(args, *, store=None, stdout=None):
+    """Persist the one Claude Developer result against its original PM session."""
+    store = TaskStore() if store is None else store
+    task = store.get(args.task_id)
+    result = store.record_claude_result(
+        args.task_id, pm_session_id=task['pm_session_id'],
+        executor_task_id=args.executor_task, head_sha=args.head)
+    _print(_task_view(result), stdout=stdout)
+    return 0
 
 
 def run_task_review_result(args, *, store=None, github_get=None):
