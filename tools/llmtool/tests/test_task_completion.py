@@ -882,6 +882,72 @@ class TaskCompletionTests(unittest.TestCase):
                          'native-reviewer-session')
         self.assertEqual(evidence['missing_gates'], [])
 
+    def test_codex_formal_pass_requires_claude_task_and_completed_claim(self):
+        result_sha, _ = self._make_result()
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        comment_body = (
+            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v1 | HEAD: {result_sha}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+            self._review_binding(head=result_sha))
+        comment = {'id': 44, 'user': {'login': 'reviewer-user'},
+                   'body': comment_body, 'created_at': '2026-10-21T10:00:00Z',
+                   'updated_at': '2026-10-21T10:00:00Z'}
+
+        case_number = [0]
+
+        def evaluate(*, reviewer='codex-reviewer', author='claude',
+                     review_text=comment_body, binding_body=comment_body,
+                     task_digest='3' * 64):
+            case_number[0] += 1
+            reviewer_root = self.base / ('reviewer-' + str(case_number[0]))
+            reviewer_branch = 'review/' + reviewer + '-' + author + '-' + str(case_number[0])
+            self._git('worktree', 'add', '-b', reviewer_branch,
+                      str(reviewer_root), result_sha)
+            self._write_registration('reviewer-task', reviewer,
+                'native-reviewer-session', reviewer_root, reviewer_branch,
+                result_sha, result_sha, native_session_id='native-reviewer-session',
+                github_login='reviewer-user', state='REVIEW_PENDING')
+            current_comment = dict(comment, body=binding_body)
+            task = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'task_binding': {'contract_digest': task_digest},
+                    'developer': {'provider_profile': author},
+                    'review_dispatch_claim': [{
+                        'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-task',
+                        'version': 1, 'state': 'COMPLETED',
+                        'review_result': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                            'contract_digest': task_digest, 'head': result_sha,
+                            'verdict': 'PASS', 'review_text': review_text}}]}
+            api = self._github_response_sequence(result_sha, pr, [], checks,
+                                                 comments=[current_comment])
+            with patch('llmtool.task_store.TaskStore') as task_store:
+                task_store.return_value.get.return_value = task
+                with patch('llmtool.task_completion._github_get', side_effect=api):
+                    return task_completion.collect_github_evidence(
+                        **self._github_kwargs(result_sha))
+
+        accepted = evaluate()
+        self.assertEqual(accepted['evidence']['formal_review_state'], 'ACCEPTED')
+        self.assertEqual(accepted['missing_gates'], [])
+        self.assertEqual(evaluate(author='codex')['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertEqual(evaluate(reviewer='claude-reviewer')['evidence']['formal_review_state'],
+                         'UNVERIFIED')
+        self.assertEqual(evaluate(binding_body=comment_body.replace('task=' + '1' * 32,
+                           'task=' + '9' * 32))['evidence']['formal_review_state'], 'UNVERIFIED')
+        self.assertEqual(evaluate(review_text=comment_body + '\nDifferent text')
+                         ['evidence']['formal_review_state'], 'UNVERIFIED')
+        mismatched_contract_body = comment_body.replace(
+            'contract=' + '3' * 64, 'contract=' + '4' * 64)
+        self.assertEqual(evaluate(task_digest='4' * 64,
+                                  binding_body=mismatched_contract_body,
+                                  review_text=mismatched_contract_body)
+                         ['evidence']['formal_review_state'], 'UNVERIFIED')
+
     def test_review_binding_must_match_task_run_contract_and_result_head(self):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'

@@ -59,6 +59,16 @@ class DirectResult:
     elapsed_ms: int
     cleanup_status: str
     usage: dict | None
+    final_message: str = ''
+
+
+class _CodexEventResult(tuple):
+    """Three-value parser result with the original agent message as metadata."""
+
+    def __new__(cls, thread_id, fields, usage, final_message):
+        parsed = super().__new__(cls, (thread_id, fields, usage))
+        parsed.final_message = final_message
+        return parsed
 
 
 def _fail(code):
@@ -222,7 +232,7 @@ def _result_from_events(raw):
             _fail('CODEX_FINAL_JSON_INVALID')
         normalized_tests.append(normalized)
     obj['tests'] = normalized_tests
-    return thread_id, obj, usage
+    return _CodexEventResult(thread_id, obj, usage, final)
 
 
 def _d6_has_changes(root):
@@ -466,14 +476,15 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
             _fail('CODEX_INTERRUPTED')
         if process.returncode != 0:
             _fail('CODEX_EXIT_NONZERO')
-        thread_id, result, usage = _result_from_events(bytes(output))
+        parsed = _result_from_events(bytes(output))
+        thread_id, result, usage = parsed
         close_lifecycle()
         cleanup_status = 'CONFIRMED' if lifecycle.cleanup_confirmed else 'UNKNOWN'
         return DirectResult(result['status'], result['summary'], tuple(result['tests']),
                             result['self_review'], result['blocked_reason'], process.returncode,
                             thread_id, hashlib.sha256(output).hexdigest(),
                             max(0, int((time.monotonic() - started) * 1000)),
-                            cleanup_status, usage)
+                            cleanup_status, usage, parsed.final_message)
     except Exception as exc:
         try:
             close_lifecycle(type(exc), exc, exc.__traceback__)
