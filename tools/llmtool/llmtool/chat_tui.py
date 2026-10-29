@@ -57,6 +57,8 @@ KEY_HELP = """Keys
                         then copies it as in any terminal
   F6                    Toggle mouse reporting off/on: off hands the mouse to the terminal
                         (its own select/copy; the wheel then no longer scrolls)
+  F7                    Expand/collapse the latest PM turn's tool summary (one line per
+                        tool with its result; tool input and output are never shown)
   F1                    Toggle this help (shown in place of the conversation)
   F2                    Toggle the last Task detail (Esc also closes it)
   F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
@@ -94,8 +96,10 @@ PM turn keeps the draft and sends nothing (nor does a Task submit) until the tur
 A CWD with spaces: /pm new "/path/with space" or /pm new /path/with\\ space.
 Esc, a failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing more is sent
 until /pm queue send, and the pane lists what is waiting.
-PM replies stream in as pm_runtime reports them; tool use is one line per tool and never
-shows tool input or output. PM thinking is never shown as the answer: while the PM thinks
+PM replies stream in as pm_runtime reports them, under a 「PM」 label; your message shows
+under 「你」 below a rule with the local time. A turn's tool use is one summary line
+(▸ 使用工具 N 次（name ×n；k 次失敗）) and never shows tool input or output; F7 expands it.
+The turn ends with a short usage line (seconds · tokens); /pm history keeps the full usage. PM thinking is never shown as the answer: while the PM thinks
 or works the pane shows a working line (PM 思考中… 12s), updated every second and
 replaced by the reply. Chat replies are never sent to or shown as the PM.
 
@@ -140,8 +144,11 @@ SLASH_COMMANDS = (
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
-STATUS_FIELDS = ("mode", "provider", "model", "state", "usage", "scroll", "mouse", "help")
-STATUS_DROP_ORDER = ("help", "usage", "model", "provider", "scroll", "mouse")
+STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
+                 "scroll", "mouse", "help")
+STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
+STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
+STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
 # PM typewriter: the CLI emits text in bursts (0.6–1 s apart); received text is queued and
 # released every tick at PM_CHARS_PER_TICK (≈67 chars/s). A long queue raises the rate to
@@ -157,6 +164,16 @@ PM_USAGE = ("usage: /pm new [CWD]\n       /pm connect [SESSION [CWD]]\n"
 # The pane's PM working line (W52 F1): redrawn this often while a turn has no text showing.
 PM_WORKING_SECONDS = 1.0
 QUEUE_PREVIEW_COLUMNS = 60   # Columns of each queued message shown by /pm queue and a pause.
+# Layout (W56a): role labels, the indent of a PM reply body, and the owner header prefix
+# the PM paths write (shown as the 「你」 label).
+OWNER_LABEL = "你"
+PM_LABEL = "PM"
+OWNER_PREFIX = "owner → PM"
+BODY_INDENT = "  "
+TOOL_DETAIL_INDENT = "      "
+PM_STATE_LABELS = {"thinking": "思考中", "working": "回答中", "interrupting": "中斷中…",
+                   "idle": "待命", "connecting": "連線中…", "closing": "斷線中…"}
+TURN_STATUS_LABELS = {"INTERRUPTED": "已中斷", "ERROR": "錯誤", "REPLAY": "未重送"}
 
 
 def _enable_mouse_drag_reporting(output):
@@ -289,6 +306,66 @@ def run_chat_tui(session, stdin=None, stdout=None, stderr=None):
         session.active = False
 
 
+def _short_count(value):
+    """2400 -> '2.4k'; small counts stay exact."""
+    if value >= 1000000:
+        return "%.1fM" % (value / 1000000.0)
+    if value >= 1000:
+        return "%.1fk" % (value / 1000.0)
+    return str(value)
+
+
+def usage_line(event, elapsed):
+    """Short turn-end line: '已中斷 · 39.8 秒 · 2.4k tokens' (tokens: input + output)."""
+    status = chat_tui_pm.safe_code(event.get("status"))
+    parts = [] if status == "COMPLETED" else [TURN_STATUS_LABELS.get(status, status)]
+    parts.append("%.1f 秒" % elapsed)
+    usage = event.get("usage") if type(event.get("usage")) is dict else {}
+    counts = [usage.get(key) for key in ("input_tokens", "output_tokens")]
+    counts = [value for value in counts if type(value) is int and type(value) is not bool]
+    if counts:
+        parts.append(_short_count(sum(counts)) + " tokens")
+    return " · ".join(parts)
+
+
+def tool_outcome(event):
+    """ok / error / denied / unknown for a TOOL_RESULT, from its typed reason."""
+    reason = event.get("reason")
+    if reason == "PERMISSION_DENIED":
+        return "denied"
+    if reason == "TOOL_ERROR" or event.get("is_error"):
+        return "error"
+    return "ok" if reason == "OK" else "unknown"
+
+
+TOOL_OUTCOME_TEXT = {None: "… 執行中", "ok": "✓", "error": "✗ 失敗 (TOOL_ERROR)",
+                     "denied": "✗ 自動拒絕 (PERMISSION_DENIED)", "unknown": "? 結果不明"}
+
+
+def tool_summary_lines(calls, expanded):
+    """([(text, token)] segments, failed) for a turn's tools: one line, or one per tool."""
+    names = collections.OrderedDict()
+    for name, _outcome in calls:
+        names[name] = names.get(name, 0) + 1
+    failed = sum(1 for _name, outcome in calls if outcome in ("error", "denied"))
+    running = sum(1 for _name, outcome in calls if outcome is None)
+    detail = "、".join("%s ×%d" % item for item in names.items())
+    if failed:
+        detail += "；%d 次失敗" % failed
+    if running:
+        detail += "；執行中"
+    token = "tool.error" if failed else "tool.summary"
+    head = ("▾ " if expanded else "▸ ") + "使用工具 %d 次（%s）" % (len(calls), detail)
+    segments = [(BODY_INDENT + head, token)]
+    if expanded:
+        width = max(len(name) for name, _outcome in calls)
+        for name, outcome in calls:
+            segments.append(("\n" + TOOL_DETAIL_INDENT + name.ljust(width) + "  "
+                             + TOOL_OUTCOME_TEXT[outcome],
+                             "tool.error" if outcome in ("error", "denied") else "tool.summary"))
+    return segments
+
+
 def _tokens(usage):
     """Compact provider-reported usage for the status bar; UNKNOWN when absent."""
     if usage is None:
@@ -388,6 +465,16 @@ class ChatTUI:
         self._pm_unadopted = None
         self.pm_deltas = False       # text deltas seen since the last assistant/tool boundary
         self.pm_tools = {}
+        # W56a layout: the 「PM」 label is shown once per turn; the turn's tools are one
+        # summary line kept in place. pm_tool_block = [start, end, calls, turn seq] of the
+        # latest summary in the pane (F7 re-renders it expanded or collapsed).
+        self.pm_labelled = False
+        self.pm_tool_calls = []      # [name, outcome] in call order (outcome None: running)
+        self.pm_tool_ids = {}        # tool_use_id -> index in pm_tool_calls
+        self.pm_tool_block = None
+        self.pm_tools_expanded = False
+        self.pm_last_status = None   # TURN_END status of the last finished turn
+        self.colour = chat_tui_view.colour_enabled()
         # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
         # a COMPLETED turn. Esc (W55), a failed/refused turn, Ctrl-C or a disconnect pauses
         # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
@@ -413,7 +500,7 @@ class ChatTUI:
         # The conversation pane keeps its own rows, reading position, selection and
         # follow state (chat_tui_view); no scrollbar: the terminal's own is the only one.
         self.view = chat_tui_view.ConversationView(get_cwidth)
-        self.conversation = chat_tui_view.make_pane(self.view)
+        self.conversation = chat_tui_view.make_pane(self.view, colour=self.colour)
         history_text = ("History is stored locally." if session.history_saved
                         else "History stays in memory.")
         opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
@@ -463,9 +550,11 @@ class ChatTUI:
         self.menu_window = Window(
             FormattedTextControl(self.menu_text), style="class:menu",
             height=lambda: Dimension.exact(max(1, sum(self.picker_layout()))), wrap_lines=False)
-        self.rule_window = Window(height=1, char="-", style="class:rule")
-        self.status_window = Window(FormattedTextControl(self.status_text), style="class:status",
-                                   height=Dimension.exact(1), wrap_lines=False)
+        self.rule_window = Window(height=1, char=chat_tui_view.RULE_CHAR,
+                                  style=self._style("rule"))
+        self.status_window = Window(FormattedTextControl(self.status_fragments),
+                                    style=self._style("status.bar"),
+                                    height=Dimension.exact(1), wrap_lines=False)
         root = HSplit([ConditionalContainer(self.conversation,
                                             filter=~showing_help & ~showing_detail & ~showing_list
                                             & ~showing_events),
@@ -605,6 +694,10 @@ class ChatTUI:
         def _mouse(event):
             self.toggle_mouse()
 
+        @keys.add("f7")
+        def _tools(event):
+            self.toggle_tools()
+
         @keys.add("escape", filter=events_focused & showing_events)
         def _events_close(event):
             self.toggle_events(False)
@@ -668,7 +761,7 @@ class ChatTUI:
         self.view.on_copied = self.app.invalidate   # thread-safe: shows 已複製 when pbcopy is done
 
     # -- rendering -----------------------------------------------------------------
-    def status_text(self):
+    def status_fragments(self):
         session = self.session
         model = selected_provider(session.config).get("model")
         reported = session.last_reported_model
@@ -695,12 +788,12 @@ class ChatTUI:
         # long names never expand the footer. When the terminal is too narrow, fields
         # drop in STATUS_DROP_ORDER; the state stays last and is cut only if alone too wide.
         fields = {
-            "mode": (self.pm_status_field(compact) if self.pm_mode
-                     else "TASK→PM:" + compact(self.task_profile or "", 12)),
+            "mode": "TASK→PM:" + compact(self.task_profile or "", 12),
             "provider": "p:" + compact(session.provider, 10),
             "model": "m:" + compact(reported or model or "default", 14),
             "state": compact(state, 14),
             "usage": "t:" + compact(_tokens(session.last_usage), 14),
+            "keys": self.status_keys(),
             "scroll": self.view.status(),
             "mouse": "F6 滑鼠:" + ("開" if self.mouse_enabled else "關"),
             "help": "F1",
@@ -708,16 +801,47 @@ class ChatTUI:
         width = max(1, self.app.output.get_size().columns)
         # The mode field appears only in Task mode, so the chat footer is unchanged.
         shown = [key for key in STATUS_FIELDS
-                 if key != "mode" or self.task_profile or self.pm_mode]
+                 if key in fields and (key != "mode" or self.task_profile)]
         if self.pm_mode:
-            # Chat provider/model/usage are not the PM's; in PM mode only the PM field shows.
-            shown = ["mode", "scroll", "mouse", "help"]
+            # Chat provider/model/usage are not the PM's; in PM mode only PM fields show.
+            fields.update(self.pm_status_fields(compact))
+            shown = ["mode", "session", "state", "queue", "keys", "scroll", "mouse", "help"]
+        shown = [key for key in shown if fields.get(key)]
         for name in STATUS_DROP_ORDER:
-            if self._get_cwidth(" | ".join(fields[key] for key in shown)) <= width:
+            if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
             if name in shown:
                 shown.remove(name)
-        return fit_width(" | ".join(fields[key] for key in shown), width, self._get_cwidth)
+        if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) > width:
+            return [("", fit_width(STATUS_SEPARATOR.join(fields[key] for key in shown), width,
+                                   self._get_cwidth))]
+        fragments = []
+        for key in shown:
+            if fragments:
+                fragments.append(("", STATUS_SEPARATOR))
+            fragments.append((self._style("status.key") if key in STATUS_KEY_FIELDS else "",
+                              fields[key]))
+        return fragments
+
+    def status_text(self):
+        """The status bar as plain text (what status_fragments draws)."""
+        return "".join(text for _style, text in self.status_fragments())
+
+    def status_keys(self):
+        """Keys that do something right now (status bar)."""
+        keys = []
+        if self.pm_turn_active:
+            keys.append("Esc 中斷")
+        elif self.busy and self.worker_kind == "chat" and not self.send_interrupted:
+            keys.append("Esc 中斷")
+        elif self.pm_mode and self.pm_outbox and self.pm_outbox_paused:
+            keys.append("Enter 送下一則")   # W55: an empty Enter sends the next queued draft
+        if self.pm_mode and self._tool_block_valid():
+            keys.append("F7 工具")
+        return " · ".join(keys)
+
+    def _style(self, token):
+        return chat_tui_view.token_style(token, self.colour)
 
     def picker_entries(self):
         if self.searching:
@@ -869,9 +993,11 @@ class ChatTUI:
         self.input.buffer.set_document(self._Document(fill, len(fill)))
         return True
 
-    def append(self, text, show_working=True):
+    def append(self, text, show_working=True, segments=None, sources=()):
         """Add untrusted text; follow new output only if the caret was at the end.
 
+        ``segments`` ([(text, token)]) styles the block; without it an owner header gets
+        the 「你」 layout, an ``llmtool:`` notice ``role.system`` and anything else ``text``.
         New output closes the Task detail so it is never hidden behind that pane. During a
         PM turn the working line moves below it (not when it opens a PM text block). Output
         of an Owner key or command while a PM block streams goes below that block (W55).
@@ -889,12 +1015,126 @@ class ChatTUI:
             if self.show_events:
                 self.render_events()
         old = self.conversation.text
-        self.conversation.set_text(old + ("\n\n" if old else "") + terminal_safe_text(text))
+        if segments is None:
+            segments = self._notice_segments(terminal_safe_text(text))
+        else:
+            segments = [(terminal_safe_text(part), token) for part, token in segments]
+        separator = "\n\n" if old else ""
+        self.view.set_tail(len(old), [(separator, "text")] + segments,
+                           [(low + len(separator), high + len(separator), *rest)
+                            for low, high, *rest in sources])
         if block is not None:
             self._stream_attach(block)
         if show_working:
             self._pm_working_show()
         self.app.invalidate()
+
+    # -- layout (W56a) -----------------------------------------------------------------
+    def _notice_segments(self, text):
+        if text.startswith(OWNER_PREFIX):
+            return self._owner_segments(text, rule=False)
+        if text.startswith("llmtool:"):
+            return [(text, "role.system")]
+        return [(text, "text")]
+
+    def _append_account(self, before, after):
+        """A PM notice with the #657 account text (``Claude account <dir>``) as role.system."""
+        account = chat_tui_pm.account_text(self.pm_runtime)
+        self.append(before + account + after,
+                    segments=[(before, "text"), (account, "role.system"), (after, "text")])
+
+    @staticmethod
+    def _rule_segments():
+        """A turn rule: drawn across the pane, local time at the right end."""
+        return [(chat_tui_view.RULE_CHAR * 2 + " " + time.strftime("%H:%M"), "rule"), ("\n", "text")]
+
+    def _owner_segments(self, text, rule):
+        """'owner → PM<note>:\nbody' as the 「你」 label (note kept) over the indented body."""
+        header, _newline, body = text.partition("\n")
+        note = header[len(OWNER_PREFIX):].rstrip(":").rstrip()
+        segments = self._rule_segments() if rule else []
+        segments += [(OWNER_LABEL, "role.owner")]
+        if note:
+            segments.append((note, "role.system"))
+        segments.append(("\n" + BODY_INDENT + body.replace("\n", "\n" + BODY_INDENT), "text"))
+        return segments
+
+    def _render_width(self):
+        width = self.view.width
+        if not width:
+            try:
+                width = self.app.output.get_size().columns
+            except Exception:
+                width = 80
+        return max(1, width)
+
+    def _body_segments(self, text, indent):
+        """Reply text (already terminal-safe) through the Markdown renderer, indented."""
+        segments = []
+        for number, line in enumerate(chat_tui_view.render_markdown(
+                text, self._render_width() - len(indent))):
+            if number:
+                segments.append(("\n", "text"))
+            if indent:
+                segments.append((indent, "text"))
+            segments.extend(line)
+        return segments
+
+    def _body(self, text, indent):
+        """(segments, sources) of a reply body: copies of it give back ``text``."""
+        segments = self._body_segments(text, indent)
+        return segments, [(0, sum(len(part) for part, _token in segments), text,
+                           self._render_width() - len(indent), indent)]
+
+    def _pm_open_block(self):
+        """Open the PM text block: under the 「PM」 label the first time in a turn."""
+        if self.pm_labelled:
+            self.append("", show_working=False)   # a blank line, then the block
+            self.pm_block_start = len(self.conversation.text)
+        else:
+            self.append(PM_LABEL, show_working=False, segments=[(PM_LABEL, "role.pm")])
+            self.pm_block_start = len(self.conversation.text) + 1   # after "\n"
+            self.pm_labelled = True
+        self.pm_block_raw = ""
+
+    def _tool_block_valid(self):
+        block = self.pm_tool_block
+        return block is not None and self.conversation.text[block[0]:block[1]] == block[4]
+
+    def _pm_tool_summary(self):
+        """Show this turn's tools as one line (in place once it exists)."""
+        segments = tool_summary_lines(self.pm_tool_calls, self.pm_tools_expanded)
+        shown = "".join(part for part, _token in segments)
+        if self.pm_tool_block is not None and self.pm_tool_block[3] == self._pm_turn_seq \
+                and self._tool_block_valid():
+            self._replace_block(segments, shown)
+            return
+        label = [] if self.pm_labelled else [(PM_LABEL, "role.pm"), ("\n", "text")]
+        self.pm_labelled = True
+        self.append(shown, segments=label + segments)
+        end = len(self.conversation.text)
+        if self.pm_working_at is not None:
+            end = self.pm_working_at    # the working line went back below it
+        self.pm_tool_block = [end - len(shown), end, self.pm_tool_calls, self._pm_turn_seq, shown]
+
+    def _replace_block(self, segments, shown):
+        """Re-render the latest tool summary where it is; offsets after it move along."""
+        start, end = self.pm_tool_block[0], self.pm_tool_block[1]
+        delta = len(shown) - (end - start)
+        self.view.replace(start, end, segments)
+        for name in ("pm_block_start", "pm_working_at", "stream_head", "stream_start"):
+            value = getattr(self, name)
+            if value is not None and value >= end:
+                setattr(self, name, value + delta)
+        self.pm_tool_block[1], self.pm_tool_block[4] = start + len(shown), shown
+        self.app.invalidate()
+
+    def toggle_tools(self):
+        """F7: expand or collapse the latest tool summary (and the ones after it)."""
+        self.pm_tools_expanded = not self.pm_tools_expanded
+        if self._tool_block_valid():
+            segments = tool_summary_lines(self.pm_tool_block[2], self.pm_tools_expanded)
+            self._replace_block(segments, "".join(part for part, _token in segments))
 
     def conversation_visible(self):
         return not (self.show_help or self.show_detail or self.show_list or self.show_events)
@@ -1484,7 +1724,7 @@ class ChatTUI:
         self.send_cancel = threading.Event()
         self.send_interrupted = False
         self.stream_seen = False
-        self.append("you:\n" + text)
+        self.append("you:\n" + text, segments=self._rule_segments() + [("you:", "role.owner"), ("\n" + text, "text")])
         self._loop = asyncio.get_running_loop()
         self.worker = threading.Thread(target=self._request,
                                        args=(text, self.send_cancel, self._loop),
@@ -1530,16 +1770,16 @@ class ChatTUI:
             self._stream_attach("")
         self.stream_raw += text
         self.stream_seen = True
-        self._block_render(self.stream_start, terminal_safe_text(self.stream_raw))
+        self._block_render(self.stream_start, *self._body(terminal_safe_text(self.stream_raw), ""))
 
     def _stream_attach(self, raw):
         """Open the chat reply block at the end of the pane with the text so far."""
         self.stream_head = len(self.conversation.text)
-        self.append("assistant:")
+        self.append("assistant:", segments=[("assistant:", "role.pm")])
         self.stream_raw = raw
         self.stream_start = len(self.conversation.text) + 1   # after "\n"
         if raw:
-            self._block_render(self.stream_start, terminal_safe_text(raw))
+            self._block_render(self.stream_start, *self._body(terminal_safe_text(raw), ""))
 
     def _stream_detach(self):
         """Take an open chat reply block off the pane end; append() puts it back
@@ -1566,7 +1806,10 @@ class ChatTUI:
                 self.append("llmtool: " + (text or ""))
                 return
             if not streamed:
-                self.append("assistant:\n" + (text or ""))
+                body, sources = self._body(terminal_safe_text(text or ""), "")
+                self.append("assistant:\n", segments=[("assistant:", "role.pm"), ("\n", "text")] + body,
+                            sources=[(low + len("assistant:\n"), high + len("assistant:\n"), *rest)
+                                     for low, high, *rest in sources])
             if self.session.last_interrupted:
                 self.append("llmtool: reply interrupted"
                             + (" after the text above; it stays in history as shown"
@@ -1593,23 +1836,28 @@ class ChatTUI:
             self.app.exit(result=0)
 
     # -- real-time PM (pm_runtime only; never ChatSession) ---------------------------
-    def pm_status_field(self, compact):
+    def pm_status_fields(self, compact):
+        """PM-mode status fields: mode, short session id, PM state and queue count."""
         session_id = self.pm_target[0][:8] if self.pm_target else chat_tui_task.UNKNOWN
         state = self.pm_state or chat_tui_task.UNKNOWN
-        if state == "working" and self.pm_turn_started is not None:
-            state = "working %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
-            if self.pm_warm:   # first turn, nothing received yet: cold start, not a slow PM
-                state = "暖機中… %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
-        elif state == "idle" and self.pm_warm:
-            state = "暖機中…"
-        elif state == "thinking":
-            state = "思考中…"
-            if self.pm_turn_started is not None:
-                state += " %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+        elapsed = (" %.1fs" % max(0.0, time.monotonic() - self.pm_turn_started)
+                   if self.pm_turn_started is not None else "")
+        if self.pm_warm and state in ("working", "idle"):
+            # First turn, nothing received yet: cold start, not a slow PM.
+            state = "暖機中…" + (elapsed if state == "working" else "")
+        elif state in ("working", "thinking"):
+            state = PM_STATE_LABELS[state] + elapsed
+        elif state == "idle" and self.pm_last_status == "INTERRUPTED":
+            state = "已中斷"
+        elif state.startswith("error("):
+            state = "錯誤 " + state[len("error("):-1]
+        else:
+            state = PM_STATE_LABELS.get(state, state)
         queued = ""
         if self.pm_outbox:
-            queued = " 佇列%d" % len(self.pm_outbox) + ("暫停" if self.pm_outbox_paused else "")
-        return "PM:" + compact(session_id, 8) + " " + compact(state, 18) + queued
+            queued = "佇列%d" % len(self.pm_outbox) + ("暫停" if self.pm_outbox_paused else "")
+        return {"mode": PM_LABEL, "session": compact(session_id, 8),
+                "state": compact(state, 18), "queue": queued}
 
     def run_pm_command(self, text):
         # Shell-style words, so a CWD with spaces can be quoted or escaped (W52 B3).
@@ -1625,12 +1873,12 @@ class ChatTUI:
                 self.append("PM: not connected. /pm connect uses the saved dedicated PM binding; "
                             "/pm new [CWD] creates one.")
             else:
-                self.append("PM: claude-code session " + self.pm_target[0] + " (cwd "
-                            + chat_tui_pm.safe_text(str(self.pm_target[1])) + "), "
-                            + chat_tui_pm.binding_text(self.pm_binding)
-                            + ", " + chat_tui_pm.account_text(self.pm_runtime)
-                            + ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
-                            + ("; PM mode" if self.pm_mode else "; not in PM mode"))
+                self._append_account(
+                    "PM: claude-code session " + self.pm_target[0] + " (cwd "
+                    + chat_tui_pm.safe_text(str(self.pm_target[1])) + "), "
+                    + chat_tui_pm.binding_text(self.pm_binding) + ", ",
+                    ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
+                    + ("; PM mode" if self.pm_mode else "; not in PM mode"))
             return
         if parts[1:2] == ["queue"] and len(parts) <= 3:
             self.run_queue_command(parts[2] if len(parts) == 3 else None)
@@ -1875,14 +2123,14 @@ class ChatTUI:
         self.pm_mode, self.task_profile, self.pm_state = True, None, "idle"
         # Status shows 暖機中… until the first turn's first output; W41 A: no warm-up message.
         self.pm_warm = True
-        self.append("PM mode: Enter sends each draft in real time to the PM session "
-                    + self.pm_target[0] + " (claude-code, cwd "
-                    + chat_tui_pm.safe_text(str(self.pm_target[1]))
-                    + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_binding)
-                    + "; " + chat_tui_pm.account_text(self.pm_runtime)
-                    + ". pm_runtime checked at connect time that the session did not look "
-                    "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
-                    "connection. Chat replies are never the PM.")
+        self._append_account(
+            "PM mode: Enter sends each draft in real time to the PM session "
+            + self.pm_target[0] + " (claude-code, cwd "
+            + chat_tui_pm.safe_text(str(self.pm_target[1]))
+            + ") through pm_runtime; " + chat_tui_pm.binding_text(self.pm_binding) + "; ",
+            ". pm_runtime checked at connect time that the session did not look "
+            "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
+            "connection. Chat replies are never the PM.")
         if outcome["history_error"]:
             self.append("llmtool: PM history unavailable. "
                         + chat_tui_pm.error_text(outcome["history_error"]))
@@ -1946,7 +2194,9 @@ class ChatTUI:
         self.pm_block_index = None
         self.pm_state = "working"
         self._pm_turn_seq += 1
-        self.append(header + chat_tui_pm.safe_text(text))   # also shows the working line
+        self.pm_labelled, self.pm_tool_calls, self.pm_tool_ids = False, [], {}
+        self.append(header, segments=self._owner_segments(header + chat_tui_pm.safe_text(text),
+                                                        rule=True))   # also shows the working line
         # One idempotency key per submitted draft: pm_runtime never runs it twice.
         key = uuid.uuid4().hex
         self._loop = asyncio.get_running_loop()
@@ -1987,9 +2237,7 @@ class ChatTUI:
         if not text:
             return
         if self.pm_block_raw is None:
-            self.append("PM:", show_working=False)   # the reply replaces the working line
-            self.pm_block_raw = ""
-            self.pm_block_start = len(self.conversation.text) + 1   # after "\n"
+            self._pm_open_block()   # the reply replaces the working line
         self.pm_queue += text
         self._pm_rate = max(self._pm_rate, -(-len(self.pm_queue) // PM_MAX_LAG_TICKS))
         self._pm_schedule_tick()
@@ -2026,17 +2274,20 @@ class ChatTUI:
         self.pm_queue, self._pm_rate = "", PM_CHARS_PER_TICK
 
     def _pm_render(self, final):
-        self._block_render(self.pm_block_start,
-                           terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final))
-                           + "".join("\n\n" + notice for notice in self.pm_tail))
+        shown = terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final))
+        segments, sources = self._body(shown, BODY_INDENT)
+        for notice in self.pm_tail:   # W55: notices stay below the streaming block
+            segments += [("\n\n", "text")] + self._notice_segments(notice)
+        self._block_render(self.pm_block_start, segments, sources)
 
-    def _block_render(self, start, shown):
+    def _block_render(self, start, segments, sources=()):
         """Replace the pane text from a streaming block's start with its current text.
 
         The view keeps its reading position (rows above the block are unchanged) and
         follows only while it is at the bottom.
         """
-        self.conversation.set_text(self.conversation.text[:start - 1] + "\n" + shown)
+        self.view.set_tail(start - 1, [("\n", "text")] + segments,
+                           [(low + 1, high + 1, *rest) for low, high, *rest in sources])
         self.app.invalidate()
 
     def _pm_finalize(self):
@@ -2138,12 +2389,22 @@ class ChatTUI:
         elif kind == "TOOL_USE":
             name = event.get("name") if type(event.get("name")) is str else None
             self.pm_tools[event.get("tool_use_id")] = name
-            self.append("  · tool " + chat_tui_pm.safe_name(name))
+            self.pm_tool_ids[event.get("tool_use_id")] = len(self.pm_tool_calls)
+            self.pm_tool_calls.append([chat_tui_pm.safe_name(name), None])
+            self._pm_finalize()   # the summary never splits a streaming block
+            self._pm_tool_summary()
             self.pm_deltas = False
         elif kind == "TOOL_RESULT":
             if event.get("reason") == "PERMISSION_DENIED":
                 self.pm_turn_refused = True   # a refused turn pauses the queue (finish_pm_turn)
-            self.append(chat_tui_pm.tool_result_text(event, self.pm_tools.get(event.get("tool_use_id"))))
+            index = self.pm_tool_ids.get(event.get("tool_use_id"))
+            if index is None:   # a result without its TOOL_USE still counts
+                index = self.pm_tool_ids[event.get("tool_use_id")] = len(self.pm_tool_calls)
+                self.pm_tool_calls.append([chat_tui_pm.safe_name(
+                    self.pm_tools.get(event.get("tool_use_id"))), None])
+            self.pm_tool_calls[index][1] = tool_outcome(event)
+            self._pm_finalize()
+            self._pm_tool_summary()
         elif kind == "RUNTIME_ERROR":
             code = chat_tui_pm.safe_code(event.get("code"))
             self.pm_state = "error(" + code + ")"
@@ -2157,11 +2418,15 @@ class ChatTUI:
                 self._pm_working_stop()
         elif kind == "TURN_REPLAY":
             self.pm_turn_status = "REPLAY"
-            self.append(chat_tui_pm.replay_text(event))
+            notice = chat_tui_pm.replay_text(event)
+            self.append(notice, segments=[(notice, "role.system")])
         elif kind == "TURN_END":
             self.pm_turn_status = chat_tui_pm.safe_code(event.get("status"))
             elapsed = max(0.0, time.monotonic() - (self.pm_turn_started or time.monotonic()))
-            self.append(chat_tui_pm.turn_end_text(event, elapsed))   # append() flushes first
+            self.pm_last_status = self.pm_turn_status
+            # A short right-aligned line; /pm history keeps the full usage.
+            line = usage_line(event, elapsed)
+            self.append(line, segments=[(line, "meta.usage")])   # append() flushes first
 
     def finish_pm_turn(self, seq=None):
         if self._pm_stale(seq):
