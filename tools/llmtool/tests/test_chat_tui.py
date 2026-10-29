@@ -2864,20 +2864,21 @@ class PMConversationTests(BoundedPMTest):
 
             async def main():
                 task = asyncio.ensure_future(ui.app.run_async(handle_sigint=False))
-                await asyncio.sleep(0.05)
-                for step in steps:
-                    if isinstance(step, str):
-                        pipe.send_text(step)
-                        await asyncio.sleep(0.05)
-                    else:
-                        result = step(ui)
-                        if asyncio.iscoroutine(result):
-                            await result
-                if not task.done() and not ui.app.is_done:
-                    ui.app.exit(result=0)
-                result = await asyncio.wait_for(task, 5)
-                ui.close_pm()
-                return result
+                try:
+                    await asyncio.sleep(0.05)
+                    for step in steps:
+                        if isinstance(step, str):
+                            pipe.send_text(step)
+                            await asyncio.sleep(0.05)
+                        else:
+                            result = step(ui)
+                            if asyncio.iscoroutine(result):
+                                await result
+                    if not task.done() and not ui.app.is_done:
+                        ui.app.exit(result=0)
+                    return await asyncio.wait_for(task, 5)
+                finally:
+                    ui.close_pm()
 
             with tui_cli_signal_scope(ui._handle_signal):
                 return ui, self.run_ui(main)
@@ -3784,7 +3785,7 @@ class PMConversationTests(BoundedPMTest):
             self.fakes[0].gate.set()
             await self.turn_done(ui)
             text = ui.conversation.text
-            self.assertIn('  ▸ 使用工具 1 次（Bash ×1）', text)
+            self.assertRegex(text, '  ▸ Bash（[0-9]+s）')
             self.assertIn('秒 · 2 tokens', text)
             self.assertNotIn('SECRET', text)
 
