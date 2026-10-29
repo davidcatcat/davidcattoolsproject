@@ -101,18 +101,23 @@ def nobody_cli(argv,limit=10,cleanup=False):
     if left<=4: raise subprocess.TimeoutExpired(argv,0)
     command_seconds=max(1,math.floor(min(left-1,limit))-2)
     return run(["sudo","-n","-u","nobody","/usr/bin/timeout","--signal=TERM","--kill-after=2s",str(command_seconds),*argv],limit=command_seconds+4,cleanup=cleanup)
-lock_create='import os; p="/tmp/llmtool-remote-test.lock"; fd=os.open(p,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o666); os.fchmod(fd,0o666); os.close(fd)'
-nobody_uid=int(nobody_cli(["id","-u"],limit=5).stdout.strip())
-created=nobody_cli([python,"-c",lock_create],limit=5)
-if created.returncode and not os.path.exists("/tmp/llmtool-remote-test.lock"): sys.exit(1)
-lock_info=os.lstat("/tmp/llmtool-remote-test.lock")
-if not stat.S_ISREG(lock_info.st_mode) or lock_info.st_uid!=nobody_uid or lock_info.st_mode&0o777!=0o666: sys.exit(1)
-def acquire_lock(path):
-    fd=os.open(path,os.O_RDWR|os.O_NOFOLLOW)
+def open_lock(path):
+    try: fd=os.open(path,os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o600)
+    except OSError: sys.exit(76)
+    try: info=os.fstat(fd)
+    except OSError: os.close(fd); sys.exit(76)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid!=os.getuid() or
+            info.st_mode&0o777!=0o600 or info.st_nlink!=1):
+        os.close(fd); sys.exit(76)
     try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB)
     except BlockingIOError: os.close(fd); raise
     return fd
-try: lock_fd=acquire_lock("/tmp/llmtool-remote-test.lock")
+def final_line(lines):
+    return next((line for line in reversed(lines)
+                 if line.endswith("OK") or line.startswith("FAILED (") or
+                 re.fullmatch(r"OK(?: \((?:skipped=\d+|expected failures=\d+)(?:, (?:skipped=\d+|expected failures=\d+))*\))?", line) or
+                 line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
+try: lock_fd=open_lock(os.path.expanduser("~")+"/.llmtool-remote-test.lock")
 except BlockingIOError: sys.exit(75)
 cleanup_source="""import os,re,shutil,stat,sys,time
 uid=os.getuid(); now=time.time(); keep=sys.argv[1] if len(sys.argv)>1 else ""; test=re.compile(r"llmtool-remote-test\\.[A-Za-z0-9]+\\Z"); logs=re.compile(r"llmtool-remote-log\\.[A-Za-z0-9]+\\Z"); owned_dirs=[]
@@ -171,9 +176,7 @@ try:
                 test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance),capture_stderr=True)
                 test_output=test.stdout+(test.stderr or b""); log+=test_output
                 lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
-                final=next((line for line in reversed(lines)
-                            if line.endswith("OK") or line.startswith("FAILED (") or
-                            line.endswith("FAILED") or line.startswith("ERROR")), "NO_FINAL")
+                final=final_line(lines)
                 finals.append(final)
                 ran+=int(re.search(rb"Ran (\d+) tests?",test_output).group(1)) if re.search(rb"Ran (\d+) tests?",test_output) else 0
                 if test.returncode==124:
@@ -238,7 +241,23 @@ def _config(path=None):
     return value
 
 
+def _task_path_modules(task):
+    developer = task.get('developer') if type(task.get('developer')) is dict else {}
+    declared_paths = set()
+    for field in ('read_paths', 'write_paths'):
+        paths = developer.get(field)
+        if type(paths) is list:
+            declared_paths.update(
+                path for path in paths
+                if type(path) is str and
+                re.fullmatch(r'tools/llmtool/tests/test_[a-z0-9_]{1,80}\.py', path))
+    return tuple(sorted(Path(path).stem for path in declared_paths))
+
+
 def _admitted_modules(task):
+    declared = _task_path_modules(task)
+    if declared:
+        return declared
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
@@ -307,7 +326,7 @@ def _validate_remote_receipt(raw, *, sha, modules):
             return None
     if receipt['result'] == 'PASS' and (receipt['exit_code'] != 0 or
             type(receipt['identity']['uid']) is not int or receipt['identity']['uid'] == 0 or
-            receipt['ran_total'] <= 0 or receipt['failures'] or
+            receipt['fetch_head'] != sha or receipt['ran_total'] <= 0 or receipt['failures'] or
             receipt['tree'] is None or len(receipt['final']) < len(modules) or
             any(not line.endswith('OK') for line in receipt['final'])):
         return None
@@ -359,47 +378,48 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
             type(sha) is not str or not _SHA.fullmatch(sha) or
             type(ref) is not str or not _REF.fullmatch(ref)):
         return denied('ARGUMENT_INVALID')
-    admitted = _admitted_modules(task)
-    selected = tuple(sorted(set(modules or admitted)))
-    if (not selected or len(selected) > _MAX_REMOTE_MODULES or
-            any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
-        return denied('MODULE_NOT_ADMITTED')
     evidence = task.get('completion', {}).get('evidence', {}) if type(task.get('completion')) is dict else {}
+    callback = task.get('developer', {}).get('direct_result_callback') if type(task.get('developer')) is dict else None
+    callback_evidence = callback.get('evidence') if type(callback) is dict else None
+    if not (type(evidence) is dict and evidence.get('common_dir')):
+        evidence = callback_evidence if type(callback_evidence) is dict else evidence
     common_dir = evidence.get('common_dir') if type(evidence) is dict else None
     expected = evidence.get('result', {}).get('result_head') if type(evidence.get('result')) is dict else None
     review = evidence.get('review_pr_ci') if type(evidence) is dict else None
     if pr is not None:
         if type(pr) is not int or not 1 <= pr <= 9999999:
-            return denied('PR_HEAD_NOT_TASK_RESULT')
+            return denied('RECEIPT_HEAD_UNRECORDED')
         if type(review) is dict and 'pr_number' in review:
             if (review.get('pr_number') != pr or
                     type(review.get('head_sha')) is not str):
-                return denied('PR_HEAD_NOT_TASK_RESULT')
+                return denied('RECEIPT_HEAD_MISMATCH')
             expected = review['head_sha']
     try:
         registration = read_d6_registration(executor_task, common_dir)
-        if expected is not None and expected != registration.result_sha:
-            return denied('D6_RESULT_BINDING_MISMATCH')
-        expected = registration.result_sha
-    except (LLMToolError, TypeError):
-        if pr is not None:
-            return denied('PR_HEAD_NOT_TASK_RESULT')
-        expected = None
+        recorded_head = getattr(registration, 'result_sha', None)
+        if type(recorded_head) is not str or _SHA.fullmatch(recorded_head) is None:
+            return denied('RECEIPT_HEAD_UNRECORDED')
+    except Exception:
+        return denied('RECEIPT_HEAD_UNRECORDED')
     if pr is not None and not (type(review) is dict and 'pr_number' in review):
         try:
             pr_data = _github_get(f'pulls/{pr}')
         except Exception:
-            return denied('PR_HEAD_NOT_TASK_RESULT')
+            return denied('RECEIPT_HEAD_UNRECORDED')
         head = pr_data.get('head') if type(pr_data) is dict else None
         if (type(pr_data) is not dict or type(pr_data.get('number')) is not int or
-                pr_data['number'] != pr or
-                type(head) is not dict or
-                type(head.get('sha')) is not str or
-                head['sha'] != registration.result_sha):
-            return denied('PR_HEAD_NOT_TASK_RESULT')
-        expected = registration.result_sha
-    if expected != sha:
-        return denied('SHA_NOT_TASK_RESULT')
+                pr_data['number'] != pr or type(head) is not dict or
+                type(head.get('sha')) is not str):
+            return denied('RECEIPT_HEAD_UNRECORDED')
+        expected = head['sha']
+    if ((expected is not None and expected != recorded_head) or
+            sha != recorded_head or (expected is not None and sha != expected)):
+        return denied('RECEIPT_HEAD_MISMATCH')
+    admitted = _task_path_modules(task)
+    selected = tuple(sorted(set(modules or admitted)))
+    if (not selected or len(selected) > _MAX_REMOTE_MODULES or
+            any(type(x) is not str or not _MODULE.fullmatch(x) or x not in admitted for x in selected)):
+        return denied('MODULE_NOT_ADMITTED')
     try:
         config = _config(config_path)
     except LLMToolError:
@@ -433,6 +453,9 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     if result.returncode != 0 and not stdout:
         if result.returncode == 75:
             return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='REMOTE_BUSY',
+                                   executor_task=executor_task, sha=sha, modules=selected)
+        if result.returncode == 76:
+            return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='REMOTE_LOCK_UNSAFE',
                                    executor_task=executor_task, sha=sha, modules=selected)
         return _record_outcome(store, task_id, task, result='UNAVAILABLE', code='SSH_FAILED',
                                executor_task=executor_task, sha=sha, modules=selected)

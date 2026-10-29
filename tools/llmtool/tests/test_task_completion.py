@@ -649,6 +649,43 @@ class TaskCompletionTests(unittest.TestCase):
             task_completion.bind_executor_task(
                 self.task_id, expected_common_dir=self.common, root=str(self.root))
 
+    def test_advanced_registered_base_accepts_uncommitted_dispatch_diff(self):
+        path = self.root / self.source_path
+        path.write_text(path.read_text() + '\n# approved branch progress\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'approved branch progress')
+        dispatch_source = self._git('rev-parse', 'HEAD')
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = dispatch_source
+        self._write_env2_marker(record, self.root, submitted_head=dispatch_source,
+                                current_head=dispatch_source)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+
+        registration, snapshot = task_completion.bind_executor_task(
+            self.task_id, expected_common_dir=self.common, root=str(self.root))
+        self.assertEqual(registration.source_sha, self.source_sha)
+        self.assertEqual(snapshot.head, dispatch_source)
+        path.write_text(path.read_text() + '\n# uncommitted task result\n')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', dispatch_source],
+            cwd=self.root, text=True)
+        result = task_completion.collect_executor_worktree_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=dispatch_source, expected_result_head=dispatch_source,
+            task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                          'contract_digest': '3' * 64},
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor', write_paths=[self.source_path],
+            read_paths=[self.source_path], artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+        self.assertEqual(result['source_sha'], dispatch_source)
+        self.assertIsNone(result['result_head'])
+        self.assertEqual(result['result_mode'], 'UNCOMMITTED_WORKTREE')
+        self.assertEqual(result['changed_paths'], [self.source_path])
+
     def test_artifact_must_forward_apply_to_the_exact_result_tree(self):
         result_sha, _ = self._make_result()
         wrong_patch = ('diff --git a/' + self.source_path + ' b/' + self.source_path +

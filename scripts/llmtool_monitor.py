@@ -1629,7 +1629,8 @@ class OfficeRow:
     order: int
     key: str = ""       # identity other rows can name as their group
     group: str = ""     # key of the agent that started this one ("" = top level)
-    kind: str = "agent"   # agent | subagent | worker
+    kind: str = "agent"   # agent | subagent | worker | shared (a line about the worker rows
+    #                       whose name starts with its group, shown under them, never folded)
     tui: bool = False     # a Codex thread opened from the terminal CLI
     cli: bool = False     # an interactive Claude session started from the terminal CLI
     # What is known about the member, kept apart from the display text:
@@ -3322,8 +3323,10 @@ def runner_rows(processes: list[Process], now: float, root=None,
                 ci: list | None = None, user_of=process_user) -> list[OfficeRow]:
     """One row per self-hosted GitHub Actions runner (Issue #99): running or
     not, kept apart from this account or not, its current or last job,
-    restarts and where its logs are; the CI queue on the first row. `root` is
-    the folder (or list of folders) where a stopped runner is looked for."""
+    restarts and where its logs are. The runners share one GitHub queue, so
+    the waiting jobs are one line of their own under the runner rows (W47),
+    not a note on runner #1. `root` is the folder (or list of folders) where
+    a stopped runner is looked for."""
     roots = [root] if isinstance(root, str) else list(root or [])
     listeners = sorted((p for p in processes if p.role == "Actions runner"), key=lambda p: p.pid)
     found = []   # (root, listener or None)
@@ -3341,8 +3344,23 @@ def runner_rows(processes: list[Process], now: float, root=None,
     rows = []
     for number, (place, listener) in enumerate(found, 1):
         rows.append(_runner_row(place, listener, processes, now, isolation, ci or [],
-                                number, len(found), queue=number == 1))
+                                number, len(found)))
+    waiting = [run[1] for run in ci or [] if run[0] != "in_progress"]
+    if rows and waiting:
+        rows.append(ci_queue_row(waiting, len(rows)))
     return rows
+
+
+def ci_queue_row(waiting: list[str], runners: int) -> OfficeRow:
+    """The jobs GitHub has not given to any Mac runner yet, said once for all
+    of them: 「mac ci 兩台共用  排隊 N 個：A、B、C…」. Its colour follows the
+    runner rows and the fold never hides it (office_view, _tree)."""
+    name = ("mac ci 兩台共用" if runners == 2 else f"mac ci {runners} 台共用" if runners > 2
+            else "mac ci 排隊")
+    detail = (f"排隊 {len(waiting)} 個：" + "、".join(waiting[:3])
+              + ("…" if len(waiting) > 3 else ""))
+    return OfficeRow(name, "", detail, None, 80 + runners + 1, group=RUNNER_ROW, kind="shared",
+                     evidence="GitHub")
 
 
 def _runner_name(place: str) -> str:
@@ -3357,7 +3375,10 @@ def _runner_name(place: str) -> str:
     return name if RUNNER_NAME.fullmatch(name) else ""
 
 
-def _runner_row(root, listener, processes, now, isolation, ci, number, total, queue):
+RUNNER_ROW = "mac ci runner"   # the Mac runner rows' name; the shared queue line sits under them
+
+
+def _runner_row(root, listener, processes, now, isolation, ci, number, total):
     lines = _runner_log(root)
     starts = sum(text == "Listening for Jobs" and now - when < 86400 for when, text in lines)
     jobs = [(when, text[len("Running job: "):]) for when, text in lines if text.startswith("Running job: ")]
@@ -3405,16 +3426,12 @@ def _runner_row(root, listener, processes, now, isolation, ci, number, total, qu
     if ends and not busy:
         when, name, result = ends[-1]
         notes.append(f"上一個工作：{name} {RUNNER_RESULTS.get(result, result)}（{_ago(now - when)}）")
-    waiting = [run[1] for run in ci if run[0] != "in_progress"] if queue else []
-    if waiting:
-        notes.append(f"排隊 {len(waiting)} 個：" + "、".join(waiting[:3])
-                     + ("…" if len(waiting) > 3 else ""))
     if starts > 1:
         notes.append(f"近 24 小時啟動 {starts} 次")
     logs, home = os.path.join(root, "_diag"), os.path.expanduser("~")
     if os.access(logs, os.R_OK | os.X_OK):   # a folder the Owner cannot open is no help
         notes.append("日誌：" + ("~" + logs[len(home):] if logs.startswith(home + os.sep) else logs))
-    name = "mac ci runner" + (f" #{number}" if total > 1 else "")
+    name = RUNNER_ROW + (f" #{number}" if total > 1 else "")
     return OfficeRow(name, state, "；".join(notes), age, 80 + number, key=runner, kind="worker",
                      evidence="程序", alert=alert)
 
@@ -4304,33 +4321,69 @@ LIVE_SECTION = "即時（讀得到 session 紀錄）"
 STATUS_SECTION = "只看得到狀態（依派工紀錄和程序推算）"
 
 
-def _tree(rows: list[OfficeRow]) -> list[tuple[str, OfficeRow]]:
-    """(prefix, row) in display order: each agent followed by what it started."""
+BANDS = ("?", "+", "!", "dim")   # row colours top to bottom: red, green, yellow, gray
+GRAY = BANDS.index("dim")
+
+
+def _tree(rows: list[OfficeRow], fold: bool = False) -> list[tuple[str, OfficeRow]]:
+    """(prefix, row) in display order: each agent followed by what it started.
+    Each section is ordered by colour band (red, green, yellow, gray; see BANDS),
+    stable within a band, and a group is ranked by its most urgent member so a
+    dimmed parent never drags a working subagent down. With fold, every gray
+    row (its whole group gray too) becomes one count at the end of its section
+    (Owner 2026-10-28: green and yellow stay on screen, key a unfolds). A
+    shared line (kind shared) is not ranked or folded: it goes right after the
+    last shown row it is about (PR #614 review: never between the runner rows),
+    or last of all when they are all folded away (W47)."""
     keys = {row.key for row in rows if row.key}
     children: dict[str, list[OfficeRow]] = {}
     for row in rows:
         if row.group in keys:
             children.setdefault(row.group, []).append(row)
-    out: list[tuple[str, OfficeRow]] = []
-    if any(row.kind != "worker" or row.group in keys for row in rows):
-        out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
 
-    def walk(row: OfficeRow, depth: int) -> None:
+    def below(row: OfficeRow, depth: int) -> list[OfficeRow]:
+        return children.get(row.key, []) if row.key and depth < 3 else []
+
+    def band(row: OfficeRow, depth: int) -> int:
+        return min([BANDS.index(_row_style(row.state)),
+                    *(band(child, depth + 1) for child in below(row, depth))])
+
+    def ordered(items: list[OfficeRow], depth: int) -> list[OfficeRow]:
+        return sorted(items, key=lambda row: band(row, depth))   # stable: band only
+
+    def size(row: OfficeRow, depth: int) -> int:
+        return 1 + sum(size(child, depth + 1) for child in below(row, depth))
+
+    def walk(row: OfficeRow, depth: int, out: list) -> int:
+        """Appends the row and its group to out; returns how many gray rows were
+        folded away instead (every gray member when fold is on)."""
+        if fold and band(row, depth) == GRAY:
+            return size(row, depth)
         out.append(("  " * (depth - 1) + "└ " if depth else "", row))
-        for child in children.get(row.key, []) if row.key and depth < 3 else []:
-            walk(child, depth + 1)
+        return sum(walk(child, depth + 1, out) for child in ordered(below(row, depth), depth + 1))
 
-    for row in rows:
-        if row.group not in keys and row.kind != "worker":
-            walk(row, 0)
+    def section(items: list[OfficeRow], shared: tuple | list = ()) -> list[tuple[str, OfficeRow]]:
+        out: list[tuple[str, OfficeRow]] = []
+        hidden = sum(walk(row, 0, out) for row in ordered(items, 0))
+        for line in shared:   # after the last shown row it is about, whatever its band
+            out.insert(max([i + 1 for i, (_, row) in enumerate(out) if row.name.startswith(line.group)],
+                           default=len(out)), ("", line))
+        if hidden:
+            out.append(("", OfficeRow(f"… 灰色 {hidden} 項", "", "（已摺疊，按 a 展開）", None, 10 ** 6)))
+        return out
+
+    out: list[tuple[str, OfficeRow]] = []
+    agents = [row for row in rows if row.group not in keys and row.kind not in ("worker", "shared")]
+    if any(row.kind not in ("worker", "shared") or row.group in keys for row in rows):
+        out.append(("—", OfficeRow(LIVE_SECTION, "", "", None, 0)))
+        out += section(agents)
     workers = [row for row in rows if row.kind == "worker" and row.group not in keys]
     if workers:
         out.append(("—", OfficeRow(STATUS_SECTION, "", "", None, 0)))
-        out += [("", row) for row in workers]
+        out += section(workers, [row for row in rows if row.kind == "shared"])
     return out
 
 
-RECENT_DONE = 5 * 60   # finished subagent work older than this is folded into one line
 REVIEW_NO_VERDICT = frozenset({NO_VERDICT})
 ALERT_STATES = (STALLED, STOPPED, ATTENTION)
 
@@ -4371,30 +4424,6 @@ def _review_alerts(rows: list[OfficeRow]) -> list[str]:
     return out
 
 
-def _fold_done(rows: list[OfficeRow]) -> list[OfficeRow]:
-    """Finished subagent work older than RECENT_DONE becomes one line per parent.
-    The newest finished review of each PR stays, so its verdict is not hidden."""
-    keys = {row.key for row in rows if row.key}
-    newest: dict[str, OfficeRow] = {}
-    for row in rows:
-        if row.key == "review" and row.state == DONE and row.task:
-            held = newest.get(row.task.split()[1])
-            if held is None or (row.age or 0.0) < (held.age or 0.0):
-                newest[row.task.split()[1]] = row
-    kept, folded = [], {}
-    for row in rows:
-        if (row.state == DONE and row.group in keys and row.age is not None
-                and row.age > RECENT_DONE and row not in newest.values()):
-            folded[row.group] = folded.get(row.group, 0) + 1
-        else:
-            kept.append(row)
-    for group, count in folded.items():
-        when = f"{RECENT_DONE // 60}–{OFFICE_DONE_WINDOW // 60} 分鐘前完成；按 a 展開"
-        kept.append(OfficeRow(f"… 另 {count} 項已完成", "", when, None, 10 ** 6,
-                              group=group, kind="subagent"))
-    return kept
-
-
 DETAIL_COLS = 44   # detail width when the screen width is not known
 DETAIL_MAX = 72    # widest detail column: longer text wraps, the time stays near it
 BREAK_AFTER = "；，、 "   # preferred places to continue on the next line
@@ -4424,16 +4453,27 @@ def _row_style(state: str) -> str:
     return "+" if state == WORKING else "!" if state in ALERT_STATES else "dim"
 
 
+def _line_style(row: OfficeRow, rows: list[OfficeRow]) -> str:
+    """A shared line takes the most urgent colour of the rows it is about
+    (the Mac runners' band); every other row is coloured by its own state."""
+    if row.kind != "shared":
+        return _row_style(row.state)
+    about = [_row_style(other.state) for other in rows if other.name.startswith(row.group)]
+    return min(about, key=BANDS.index, default="dim")
+
+
 def office_view(rows: list[OfficeRow], error: str | None = None,
                 width: int | None = None, expand: bool = False,
                 pending: list[OwnerPending] | None = None,
                 now: float | None = None, scope: str = "") -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     With a screen width, each detail is cut so the time column stays visible.
-    expand lists older finished work too instead of folding it into one line.
+    Rows are ordered red, green, yellow, gray in each section; without expand
+    the gray rows are folded into one count per section (key a in the TUI).
     pending: GitHub requests waiting for the Owner, shown first."""
     working = sum(row.state == WORKING for row in rows)
-    out = [(f"辦公室 · {working} 位工作中 · 共 {len(rows)} 位", "title")]
+    members = sum(row.kind != "shared" for row in rows)   # a shared line is not a member
+    out = [(f"辦公室 · {working} 位工作中 · 共 {members} 位", "title")]
     now = time.time() if now is None else now
     pending = list(pending or [])
     texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
@@ -4484,7 +4524,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     for text in [f"⚠ {text}" for text in alerts] + notes:
         out += [(("  " if i else "") + piece, "!") for i, piece in
                 enumerate(_wrap(text, width - 2) if width else [text])]
-    tree = _tree(rows if expand else _fold_done(rows))
+    tree = _tree(rows, fold=not expand)
     name_cols = max(_width(prefix + _shown(row)) for prefix, row in tree if prefix != "—") + 2
     # The detail column is as wide as the longest detail, up to DETAIL_MAX and
     # what the screen leaves, so the time stays near its text on a wide screen.
@@ -4503,8 +4543,9 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
         line = f"{_pad(prefix + _shown(row), name_cols)}{_pad(row.state, 8)}{pieces[0]}"
         if when:
             line = f"{_pad(line, name_cols + 8 + detail_cols)}  {when}"
-        out.append((line.rstrip(), _row_style(row.state)))
-        out += [(" " * (name_cols + 8) + piece, _row_style(row.state)) for piece in pieces[1:]]
+        style = _line_style(row, rows)
+        out.append((line.rstrip(), style))
+        out += [(" " * (name_cols + 8) + piece, style) for piece in pieces[1:]]
     legend.append("工作中 = 最近有動作，不代表模型正在產生內容")
     if scope:
         legend.append(scope)
@@ -4597,7 +4638,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             curses.init_pair(n, fg, -1)
             colors[key] = curses.color_pair(n)
     view, offset, next_poll = "office", 0, 0.0
-    expanded = False   # office view: also list older finished work (key a)
+    expanded = False   # office view: gray rows folded (default) or listed (key a)
 
     def put(y: int, text: str, attr: int = 0) -> None:
         h, w = stdscr.getmaxyx()
@@ -4667,7 +4708,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             for row, (line, style) in enumerate(lines[offset:offset + body]):
                 put(3 + row, line, styles.get(style, 0))
             hint = ("Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  "
-                    f"a: {'收起' if expanded else '展開'}已完成  q: quit")
+                    f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
         else:
             lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
             offset = max(0, min(offset, len(lines) - body))

@@ -1014,7 +1014,7 @@ expensive-model consumption while preserving fixed acceptance and evidence:
   savings or budget compliance. No new cost or usage collection is required of A11a.
 
 The current design details and engineering guidance live in
-[ROADMAP](../tools/llmtool/ROADMAP.md#architecture-refinement--planning-only) and
+[ROADMAP](../docs/history/llmtool-roadmap-archive-20261028.md#architecture-refinement--planning-only) and
 [WORKFLOW](../tools/llmtool/WORKFLOW.md#task-contract-company-llm-and-evidence).
 Enforcement/execution gates belong to A11b; cheap-first integration, independent
 verification and bounded repair belong to A11c. Neither is implemented or started

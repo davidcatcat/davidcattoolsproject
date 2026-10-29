@@ -128,4 +128,4 @@ Confirm the receipt within 2 minutes of dispatch. Until then record the dispatch
 - notification deduplication and replay protection;
 - confirming Worker status.
 
-Editing documents does not deliver a runtime capability. The [Roadmap](../../tools/llmtool/ROADMAP.md#a11c-work-packages-and-continuation-runtime-gaps) tracks which runtime handoffs are implemented and which are still gaps. Until a handoff is implemented and verified, the PM performs that step manually. The PM never reports a manual step as automatic.
+Editing documents does not deliver a runtime capability. The [Roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#a11c-work-packages-and-continuation-runtime-gaps) tracks which runtime handoffs are implemented and which are still gaps. Until a handoff is implemented and verified, the PM performs that step manually. The PM never reports a manual step as automatic.

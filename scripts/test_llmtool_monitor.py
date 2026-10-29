@@ -2616,7 +2616,7 @@ class OfficeViewTests(unittest.TestCase):
         live = next(row for row in rows if row.detail == "Owner chat")
         self.assertEqual((live.name, live.state, live.kind, live.group),
                          ("claude", mon.IDLE, "agent", ""))
-        lines = mon.office_lines(rows)
+        lines = mon.office_lines(rows, expand=True)   # gray rows listed, not folded
         self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 8 位")   # incl. the EC2 worker
         live = lines.index(f"── {mon.LIVE_SECTION} ──")
         pm = next(i for i, line in enumerate(lines) if "codex 主對話" in line)
@@ -3421,11 +3421,16 @@ class OfficeViewTests(unittest.TestCase):
             {"status": "completed", "name": "old", "head_sha": "c" * 40},
             {"status": "queued", "name": "Mac Runner Smoke Test", "head_sha": "d" * 40,
              "pull_requests": [], "head_branch": "main", "created_at": "2026-10-25T11:56:00Z"}]})
-        named, = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside, ci=ci)
+        named, queue = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside, ci=ci)
         self.assertTrue(named.detail.startswith(
-            "執行中：llmtool Mac CI（PR #339 @aaaaaaa）（10 分鐘）；專用帳號 ghrunner；已開 1 小時；"
-            "排隊 2 個：llmtool Mac CI（PR #334 @bbbbbbb）、Mac Runner Smoke Test（main @ddddddd）"),
+            "執行中：llmtool Mac CI（PR #339 @aaaaaaa）（10 分鐘）；專用帳號 ghrunner；已開 1 小時"),
             named.detail)
+        # The queue is one shared line under the runner (W47), not a note on its row.
+        self.assertNotIn("排隊", named.detail)
+        self.assertEqual((queue.name, queue.state, queue.kind, queue.age, queue.group),
+                         ("mac ci 排隊", "", "shared", None, "mac ci runner"))
+        self.assertEqual(queue.detail,
+                         "排隊 2 個：llmtool Mac CI（PR #334 @bbbbbbb）、Mac Runner Smoke Test（main @ddddddd）")
         # Logs this account cannot read: the job process alone says it is working.
         unread, = mon.runner_rows([listener, worker], now, None, {30: "/nonexistent"}.get, inside)
         self.assertEqual(unread.state, mon.WORKING)
@@ -3513,20 +3518,37 @@ class OfficeViewTests(unittest.TestCase):
         where = {30: roots[0], 40: roots[1]}
         rows = mon.runner_rows([one, two, job], now, roots, where.get,
                                {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci)
+        # Both runners share one GitHub queue: it is said once, on a line of its
+        # own after the runner rows, and on neither runner (Owner, W47).
         self.assertEqual([(r.name, r.state) for r in rows],
-                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.WORKING)])
+                         [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.WORKING),
+                          ("mac ci 兩台共用", "")])
         # Their GitHub names, so the GitHub runner rows leave them out.
-        self.assertEqual([r.key for r in rows], ["davidproject-self-action", "davidproject-self-action-2"])
-        self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", rows[0].detail)
+        self.assertEqual([r.key for r in rows], ["davidproject-self-action", "davidproject-self-action-2", ""])
+        self.assertNotIn("排隊", rows[0].detail)
+        self.assertEqual((rows[2].kind, rows[2].detail), ("shared", "排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）"))
         self.assertTrue(rows[1].detail.startswith(
             "執行中：llmtool Mac CI（PR #343 @aaaaaaa）（3 分鐘）；專用帳號 ghrunner2"), rows[1].detail)
         self.assertNotIn("排隊", rows[1].detail)
         self.assertTrue(rows[1].detail.endswith(f"日誌：{roots[1]}/_diag"))
-        # Runner 2 stopped: its own row says so; runner 1 is unaffected.
+        # Runner 2 stopped: its own row says so; runner 1 is unaffected. An
+        # empty queue gets no line.
         rows = mon.runner_rows([one], now, roots, where.get, {30: "專用帳號 ghrunner"}.get, ci=[])
         self.assertEqual([(r.name, r.state) for r in rows],
                          [("mac ci runner #1", mon.IDLE), ("mac ci runner #2", mon.STOPPED)])
         self.assertEqual(rows[1].alert, "CI runner davidproject-self-action-2 沒在跑")
+        # Only running jobs, none waiting: no line either.
+        rows = mon.runner_rows([one, two, job], now, roots, where.get,
+                               {30: "專用帳號 ghrunner", 40: "專用帳號 ghrunner2"}.get, ci=ci[:1])
+        self.assertEqual([r.name for r in rows], ["mac ci runner #1", "mac ci runner #2"])
+
+    def test_shared_ci_queue_line_names_the_runner_count_and_truncates_like_the_old_note(self):
+        waiting = [f"job {n}" for n in range(1, 6)]
+        line = mon.ci_queue_row(waiting, 2)
+        self.assertEqual((line.name, line.detail), ("mac ci 兩台共用", "排隊 5 個：job 1、job 2、job 3…"))
+        self.assertEqual(mon.ci_queue_row(waiting[:3], 2).detail, "排隊 3 個：job 1、job 2、job 3")
+        self.assertEqual(mon.ci_queue_row(waiting[:1], 1).name, "mac ci 排隊")
+        self.assertEqual(mon.ci_queue_row(waiting[:1], 3).name, "mac ci 3 台共用")
 
     def test_cli_working_in_another_folder_gets_its_running_session(self):
         now = self.NOW
@@ -3646,7 +3668,7 @@ class OfficeViewTests(unittest.TestCase):
             mon.OfficeRow("agy", mon.UNCHECKED, f"{missing}；App 開著", None, 60, kind="worker"),
             mon.OfficeRow("公司 gw", mon.UNCHECKED, missing, None, 70, kind="worker"),
         ]
-        lines = mon.office_lines(rows)
+        lines = mon.office_lines(rows, expand=True)
         text = "\n".join(lines)
         self.assertEqual(lines[1], "⚠ #288 reviewer：3 次結束後 GitHub 沒有結論、1 次 FAIL；目前執行中 @71db418")
         self.assertEqual(lines[2], "⚠ opencode developer：本 repo 最近一次：認證失敗（401），需要重新登入")
@@ -3660,19 +3682,20 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(review.startswith("└ claude reviewer"))
         self.assertTrue(review.endswith("  剛剛"))
         self.assertTrue(next(line for line in lines if line.startswith("agy")).endswith("App 開著"))
-        # older finished work is folded; the newest verdict of each review target stays
-        self.assertNotIn("audit 284 release", text)
-        self.assertNotIn("FAIL」", text)
-        self.assertIn("audit r4 handoff", text)
-        self.assertIn(f"@3f86dc6：{mon.NO_VERDICT}", text)
-        self.assertEqual(text.count("@3f86dc6："), 1)
-        folded = next(line for line in lines if "└ … 另 4 項已完成" in line)
-        self.assertTrue(folded.endswith("5–30 分鐘前完成；按 a 展開"))
-        # expanded (key a in the TUI, always in --once) lists every finished item
-        full = "\n".join(mon.office_lines(rows, expand=True))
-        self.assertIn("audit 284 release", full)
-        self.assertEqual(full.count("@3f86dc6："), 2)
-        self.assertNotIn("另 4 項已完成", full)
+        self.assertIn("audit 284 release", text)
+        self.assertEqual(text.count("@3f86dc6："), 2)
+        # folded (the default in the TUI): every gray row of each section is one count,
+        # the alerts above still say what went wrong
+        folded = mon.office_lines(rows)
+        joined = "\n".join(folded)
+        self.assertEqual(folded[1:4], lines[1:4])
+        self.assertNotIn("audit 284 release", joined)
+        self.assertNotIn("@3f86dc6：", joined)
+        self.assertIn("@71db418（", joined)   # the running review stays
+        self.assertTrue(any(line.startswith("… 灰色 6 項") and line.rstrip().endswith("（已摺疊，按 a 展開）")
+                            for line in folded))
+        self.assertTrue(any(line.startswith("… 灰色 3 項") for line in folded))
+        self.assertFalse(any(line.startswith(("agy", "公司 gw")) for line in folded))
 
     def test_no_review_alert_once_the_newest_review_reached_a_verdict(self):
         rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "", 5, 10, key="T1", main=True),
@@ -3727,7 +3750,7 @@ class OfficeViewTests(unittest.TestCase):
         texts = [text for text, _ in listed]
         self.assertEqual(texts[texts.index(f"── {mon.STATUS_SECTION} ──") - 1], "")
         # on a wide screen the time stays near its text
-        wide = next(text for text, _ in mon.office_view(rows, width=240)
+        wide = next(text for text, _ in mon.office_view(rows, width=240, expand=True)
                     if text.startswith("agy"))
         self.assertTrue(wide.startswith("agy ") and wide.endswith("暫停中  Owner 暫停派工（10-22）"))
         stalled = next(text for text, _ in mon.office_view(rows, width=240)
@@ -3736,11 +3759,178 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(stalled.endswith("  16 分前"))
         self.assertLessEqual(mon._width(stalled), mon._width("└ codex subagent A") + 2 + 8 + mon.DETAIL_MAX + 2 + 7)
         self.assertEqual(view[next(t for t in view if t.startswith("└ codex subagent A"))], "!")
-        self.assertEqual(view[next(t for t in view if t.startswith("agy"))], "dim")
+        self.assertEqual(view[next(t for t in view if t.startswith("… 灰色 1 項"))], "dim")
+        self.assertEqual(next(style for text, style in mon.office_view(rows, width=80, expand=True)
+                              if text.startswith("agy")), "dim")
         self.assertEqual(view[next(t for t in view if t.startswith("⚠ codex subagent A"))], "!")
         self.assertEqual(view[next(iter(view))], "title")
         # without a width (--once) nothing is cut
         self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
+
+    def _listed(self, rows, **kw):
+        """Row lines of the office view (no title, alerts, sections or legend)."""
+        lines = mon.office_lines(rows, **kw)
+        start = next(i for i, line in enumerate(lines) if line.startswith("── ")) + 1
+        return [line for line in lines[start:-1]
+                if line and not line.startswith(("── ", "⚠", "ℹ"))]
+
+    def test_office_orders_each_section_red_green_yellow_gray_and_keeps_order_within_a_band(self):
+        self.assertEqual(mon.BANDS, ("?", "+", "!", "dim"))   # Owner 2026-10-28: 紅、綠、黃、灰
+        # no real state is red yet; the "?" band is exercised in the next test
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待", 30, 10, key="T1"),
+                mon.OfficeRow("claude reviewer", mon.STALLED, "review", 1000, 11),
+                mon.OfficeRow("codex developer", mon.WORKING, "coding", 3, 12),
+                mon.OfficeRow("claude pm", mon.DONE, "finished", 100, 13, cli=True),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, "沒派工", 3600, 14),
+                mon.OfficeRow("claude developer", mon.WORKING, "wiring", 8, 15, cli=True),
+                mon.OfficeRow("EC2 remote-test", mon.PAUSED, "paused", None, 16)]
+        names = [line.split("  ")[0] for line in self._listed(rows, expand=True)]
+        self.assertEqual(names, ["codex developer", "claude developer",      # green, as given
+                                 "claude reviewer", "公司 gw",               # yellow, as given
+                                 "codex 主對話", "claude pm", "EC2 remote-test"])   # gray, as given
+        # the ordering is by colour alone: states inside one band keep their order
+        styles = [style for _, style in mon.office_view(rows, expand=True)
+                  if style in ("+", "!", "dim")][:-1]   # the legend is dimmed too
+        self.assertEqual(styles, ["!", "!", "+", "+", "!", "!", "dim", "dim", "dim"])   # 2 ⚠ lines first
+
+    def test_office_puts_a_red_row_ahead_of_green_rows_in_both_sections(self):
+        # _row_style never yields "?" today (Codex review of PR #575): to exercise
+        # the red band, one sentinel state is styled "?" from outside, without
+        # touching how _row_style decides the other colours.
+        RED = "紅測試"
+        real = mon._row_style
+        rows = [mon.OfficeRow("codex developer", mon.WORKING, "coding", 3, 10),
+                mon.OfficeRow("claude reviewer", mon.STALLED, "review", 1000, 11),
+                mon.OfficeRow("claude pm", mon.IDLE, "等待", 100, 12, cli=True),
+                mon.OfficeRow("codex 主對話", RED, "crashed", 5, 13),           # listed last, red
+                mon.OfficeRow("agy", mon.WORKING, "gw task", 8, 20, kind="worker"),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, "沒派工", 3600, 21, kind="worker"),
+                mon.OfficeRow("EC2 remote-test", RED, "down", 9, 22, kind="worker")]   # listed last, red
+        with patch.object(mon, "_row_style", lambda state: "?" if state == RED else real(state)):
+            listed = mon.office_view(rows, expand=True)
+            folded = self._listed(rows)
+        texts = [text for text, _ in listed]
+        live, status = texts.index(f"── {mon.LIVE_SECTION} ──"), texts.index(f"── {mon.STATUS_SECTION} ──")
+        names = [text.split("  ")[0] for text in texts if text and not text.startswith(("── ", "⚠", "ℹ"))]
+        view = dict(listed)
+        # red first in the live section: ahead of the green developer and the yellow reviewer
+        self.assertEqual(texts[live + 1].split("  ")[0], "codex 主對話")
+        self.assertEqual(view[texts[live + 1]], "?")
+        self.assertEqual(names[1:5], ["codex 主對話", "codex developer", "claude reviewer", "claude pm"])
+        # red first in the Worker section too, ahead of the green agy and the yellow gw
+        self.assertEqual(texts[status + 1].split("  ")[0], "EC2 remote-test")
+        self.assertEqual(view[texts[status + 1]], "?")
+        self.assertEqual(names[5:8], ["EC2 remote-test", "agy", "公司 gw"])
+        # folding gray rows leaves the red rows in place at the top of each section
+        self.assertEqual([line.split("  ")[0] for line in folded],
+                         ["codex 主對話", "codex developer", "claude reviewer", "… 灰色 1 項",
+                          "EC2 remote-test", "agy", "公司 gw"])
+        # the patch is gone: a real state still never reaches the red band
+        self.assertEqual(mon._row_style(RED), "dim")
+
+    def test_office_keeps_groups_together_and_ranks_a_group_by_its_most_urgent_member(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.IDLE, "等待", 30, 10, key="T1"),
+                mon.OfficeRow("codex subagent Dewey", mon.DONE, "audit", 600, 20, group="T1",
+                              kind="subagent"),
+                mon.OfficeRow("codex subagent Huygens", mon.WORKING, "repair", 5, 21, group="T1",
+                              kind="subagent"),
+                mon.OfficeRow("claude pm", mon.WORKING, "dispatch", 3, 11, key="C1", cli=True),
+                mon.OfficeRow("claude subagent", mon.DONE, "report", 900, 12, group="C1",
+                              kind="subagent"),
+                mon.OfficeRow("claude reviewer", mon.STALLED, "review", 1000, 13)]
+        listed = self._listed(rows, expand=True)
+        names = [line.split("  ")[0] for line in listed]
+        # a dimmed parent with a working subagent is green work: it sorts with the
+        # green rows, its children stay under it, working ones first
+        self.assertEqual(names, ["codex 主對話", "└ codex subagent Huygens", "└ codex subagent Dewey",
+                                 "claude pm", "└ claude subagent", "claude reviewer"])
+        # folded: that parent is not gray (its group is not), so it stays; its
+        # finished subagent and the pm's are counted in the one gray line
+        folded = self._listed(rows)
+        self.assertEqual([line.split("  ")[0] for line in folded],
+                         ["codex 主對話", "└ codex subagent Huygens", "claude pm", "claude reviewer",
+                          "… 灰色 2 項"])
+        self.assertTrue(folded[-1].rstrip().endswith("（已摺疊，按 a 展開）"))
+        # a whole gray group is folded with its children counted once each
+        rows.append(mon.OfficeRow("codex 主對話 2", mon.IDLE, "", 40, 30, key="T2"))
+        rows.append(mon.OfficeRow("codex subagent Nye", mon.DONE, "", 700, 31, group="T2", kind="subagent"))
+        self.assertEqual(self._listed(rows)[-1].split("  ")[0], "… 灰色 4 項")
+
+    def test_office_key_a_toggles_the_gray_fold_and_the_default_is_folded(self):
+        rows = [mon.OfficeRow("codex developer", mon.WORKING, "coding", 3, 12),
+                mon.OfficeRow("codex 主對話", mon.IDLE, "等待", 30, 10, key="T1"),
+                mon.OfficeRow("claude pm", mon.DONE, "finished", 100, 13, cli=True)]
+        folded = mon.office_view(rows)   # expand defaults to False: the TUI starts folded
+        texts = [text for text, _ in folded]
+        self.assertEqual(texts.count("codex developer" + texts[-3][len("codex developer"):]), 1)
+        self.assertTrue(any(text.startswith("… 灰色 2 項") and style == "dim" for text, style in folded))
+        self.assertFalse(any(text.startswith(("codex 主對話", "claude pm")) for text in texts))
+        self.assertEqual(folded[0][0], "辦公室 · 1 位工作中 · 共 3 位")   # the title counts everyone
+        unfolded = [text for text, _ in mon.office_view(rows, expand=True)]
+        self.assertTrue(any(text.startswith("codex 主對話") for text in unfolded))
+        self.assertTrue(any(text.startswith("claude pm") for text in unfolded))
+        self.assertFalse(any("灰色" in text for text in unfolded))
+        # nothing gray: no fold line
+        self.assertFalse(any("灰色" in text for text, _ in mon.office_view(rows[:1])))
+        # folded again: the same view as before
+        self.assertEqual(mon.office_view(rows), folded)
+
+    def test_status_only_section_is_ordered_and_folded_the_same_way(self):
+        rows = [mon.OfficeRow("codex 主對話", mon.WORKING, "指揮", 5, 10, key="T1"),
+                mon.OfficeRow("agy", mon.IDLE, "可派工", None, 60, kind="worker"),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, "沒派工", 3600, 70, kind="worker"),
+                mon.OfficeRow("EC2 remote-test", mon.PAUSED, "paused", None, 80, kind="worker"),
+                mon.OfficeRow("opencode developer", mon.WORKING, "跑中", 10, 50, kind="worker")]
+        lines = mon.office_lines(rows, expand=True)
+        start = lines.index(f"── {mon.STATUS_SECTION} ──") + 1
+        self.assertEqual([line.split("  ")[0] for line in lines[start:-1]],
+                         ["opencode developer", "公司 gw", "agy", "EC2 remote-test"])
+        lines = mon.office_lines(rows)
+        start = lines.index(f"── {mon.STATUS_SECTION} ──") + 1
+        self.assertEqual([line.split("  ")[0] for line in lines[start:-1]],
+                         ["opencode developer", "公司 gw", "… 灰色 2 項"])
+        # the live section above has nothing gray and so no fold line of its own
+        self.assertEqual("\n".join(lines).count("灰色"), 1)
+
+    def test_shared_ci_queue_line_sits_under_the_runner_rows_and_is_never_folded(self):
+        def names(lines):
+            start = lines.index(f"── {mon.STATUS_SECTION} ──") + 1
+            return [line.split("  ")[0] for line in lines[start:-1]]
+        queue = mon.ci_queue_row(["llmtool Mac CI（PR #341 @bbbbbbb）"], 2)
+        runners = [mon.OfficeRow("mac ci runner #1", mon.IDLE, "閒置，等工作", 60, 81, kind="worker"),
+                   mon.OfficeRow("mac ci runner #2", mon.WORKING, "執行中：x", 10, 82, kind="worker")]
+        rows = [mon.OfficeRow("codex 主對話", mon.WORKING, "指揮", 5, 10, key="T1"),
+                mon.OfficeRow("公司 gw", mon.ATTENTION, "沒派工", 3600, 70, kind="worker"),
+                *runners, queue,
+                mon.OfficeRow("EC2 remote-test", mon.PAUSED, "paused", None, 80, kind="worker")]
+        # Expanded: the line follows the last runner row shown (#2 works, green;
+        # #1 is gray and listed later), never between them (PR #614 review);
+        # the title counts members only.
+        view = mon.office_view(rows, expand=True)
+        lines = [text for text, _ in view]
+        self.assertEqual(names(lines), ["mac ci runner #2", "公司 gw", "mac ci runner #1",
+                                        "mac ci 兩台共用", "EC2 remote-test"])
+        self.assertTrue(lines[0].startswith("辦公室 · 2 位工作中 · 共 5 位"), lines[0])
+        shared = next(text for text, _ in view if text.startswith("mac ci 兩台共用"))
+        self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", shared)
+        self.assertFalse(shared.rstrip().endswith("前"))   # no time of its own
+        # Its colour is the runners' most urgent band (green while #2 works)...
+        self.assertEqual(dict(view)[shared], "+")
+        # Folded: #1 is gray and folded; the line stays, right under the only runner shown.
+        folded = mon.office_lines(rows)
+        self.assertEqual(names(folded), ["mac ci runner #2", "mac ci 兩台共用", "公司 gw", "… 灰色 2 項"])
+        # Both runners idle: gray rows fold, the queue line does not (jobs wait).
+        idle = [replace(runners[1], state=mon.IDLE), runners[0], queue]
+        view = mon.office_view([rows[0], rows[1], *idle, rows[-1]])
+        texts = [text for text, _ in view]
+        self.assertEqual(names(texts), ["公司 gw", "mac ci 兩台共用", "… 灰色 3 項"])
+        self.assertEqual(dict(view)[next(t for t in texts if t.startswith("mac ci 兩台共用"))], "dim")
+        # One runner: no section header games, the line simply follows it.
+        one = [mon.OfficeRow("mac ci runner", mon.STOPPED, "沒在跑", None, 81, kind="worker",
+                             alert="CI runner 沒在跑"), mon.ci_queue_row(["a", "b"], 1)]
+        view = mon.office_view(one)
+        self.assertEqual(names([t for t, _ in view]), ["mac ci runner", "mac ci 排隊"])
+        self.assertEqual(view[-2][1], "!")   # yellow like the stopped runner it waits for
 
     def test_wrap_breaks_at_punctuation_and_never_starts_with_a_closing_mark(self):
         text = "可派工；本機 llmtool 紀錄（不分 repo）最近一次：輸出被拒（回應格式錯誤）"

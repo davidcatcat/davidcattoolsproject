@@ -608,7 +608,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertFalse(job._attempted)
 
     def test_hard_linked_pinned_runtime_is_admitted_and_runs(self):
-        job=self.job();executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
+        job=self.job(budget=LOAD_TOLERANT_BUDGET);executable=Path(job.runtime.executable);alias=executable.parent/'synthetic-cli-alias'
         os.link(executable,alias)
         self.assertEqual(os.lstat(executable).st_nlink,2)
         self.assertEqual(os.lstat(alias).st_ino,os.lstat(executable).st_ino)
@@ -631,7 +631,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                 spawn.assert_not_called()
 
     def test_native_config_caps_every_request_at_the_output_budget(self):
-        job=self.job(budget=RunBudget(1,8,0,3000,200,128))
+        job=self.job(budget=RunBudget(1,8,0,15000,200,128))
         cfg=w.configuration(job)
         self.assertEqual(cfg['providers'],{'opencode':{'models':{'deepseek-v4.1-flash-free':{
             'limit':{'context':200,'output':128}}}}})
@@ -775,7 +775,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
                      patch.object(w,'_WAITID_FALLBACK',None,create=True), \
                      patch.object(w.CLIProcessLifecycle,'__exit__',record_exit), \
                      patch.object(w,'reject',record_reject):
-                    result=w.run_worker(self.job(),Host())
+                    result=w.run_worker(self.job(budget=LOAD_TOLERANT_BUDGET),Host())
                 self.assertEqual(result.code,'OPENCODE_CLEANUP_UNKNOWN',result)
                 self.assertEqual(result.status,'BLOCKED')
                 self.assertIsNone(result.content)

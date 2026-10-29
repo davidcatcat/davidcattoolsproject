@@ -27,6 +27,17 @@ MAX_HISTORY_TURNS = 200
 _ADAPTERS = {'claude-code': 'claude'}
 _LIVE_WINDOW_SECONDS = 20
 _STDERR_LIMIT = 65536
+# Fixed tool set for the PM process (claude CLI 2.1.312: --strict-mcp-config uses only the
+# servers in --mcp-config, so claude.ai connectors can no longer join mid-session and
+# invalidate the prompt cache). Permission policy is unchanged (--permission-prompts none).
+PM_MCP_CONFIG = '{"mcpServers":{}}'
+# Owner #304: no one-line "what I am about to do" text when the PM uses no tool. Passed
+# with --append-system-prompt on every launch; the CLI snapshots the system prompt on a
+# conversation's first request, so an already started session picks it up after compaction.
+PM_SESSION_INSTRUCTION = (
+    'llmtool PM session rule: when you answer without calling any tool, reply with the '
+    'answer itself and nothing before it; never open with a one-line preamble about what '
+    'you are about to do. A short preamble is fine only in turns where you call tools.')
 _active_runtimes = set()
 _signal_handlers_installed = False
 _previous_signal_handlers = {}
@@ -503,13 +514,28 @@ class PMRuntime:
         if adapter is None:
             raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
         try:
-            cwd = active_pm_inbox.observe_claude_session(
-                self.pm_session_id, self.cwd, self.environ)
             key = active_pm_inbox.pm_session_key(self.pm_session_id)
+            root_arg = self.state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+            root = _ensure_state_dir(Path(root_arg))
+            binding = current_binding(self.pm_session_id, state_root=root)
+            if (binding is not None and binding.get('dedicated') is True and
+                    not binding.get('session_started')):
+                if type(self.cwd) is not str:
+                    raise LLMToolError('PM working directory is invalid')
+                cwd = os.path.normpath(os.path.abspath(self.cwd))
+                if (len(cwd) > 1024 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in cwd) or
+                        not os.path.isdir(cwd) or binding.get('cwd') != cwd):
+                    raise LLMToolError('PM working directory does not match its dedicated binding')
+                # Checked without following symlinks: a symlinked or dangling
+                # component is refused even though the transcript may not exist yet.
+                transcript_present = active_pm_inbox.claude_session_present(
+                    self.pm_session_id, cwd, self.environ)
+            else:
+                cwd = active_pm_inbox.observe_claude_session(
+                    self.pm_session_id, self.cwd, self.environ)
+                transcript_present = True
         except LLMToolError:
             raise _error('PM_SESSION_INVALID', 'PM session binding could not be validated') from None
-        root_arg = self.state_root or Path.home() / '.local/state/llmtool/pm-runtime'
-        root = _ensure_state_dir(Path(root_arg))
         lock_fd = _check_state_file(root / (key + '.lock'), create=True)
         try:
             fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -553,10 +579,12 @@ class PMRuntime:
                              'PM session appears active elsewhere; close it before using pm_runtime')
             env = dict(os.environ if self.environ is None else self.environ)
             session_flag = ('--resume' if binding.get('session_started') or
-                            transcript.exists() else '--session-id')
+                            transcript_present else '--session-id')
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
                     'stream-json', '--verbose', '--include-partial-messages', session_flag,
-                    self.pm_session_id, '--permission-prompts', 'none']
+                    self.pm_session_id, '--permission-prompts', 'none',
+                    '--strict-mcp-config', '--mcp-config', PM_MCP_CONFIG,
+                    '--append-system-prompt', PM_SESSION_INSTRUCTION]
             runner = self.runner
             if runner is None:
                 import subprocess
@@ -817,6 +845,12 @@ class PMRuntime:
                         flushed = flush_block(index, force=True)
                         if flushed is not None:
                             yield flushed
+                    elif event.get('type') == 'content_block_start':
+                        # Thinking never becomes answer text (only text_delta and text
+                        # items do); the UI may show a status while the PM thinks.
+                        block = event.get('content_block') or {}
+                        if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
+                            yield emit('THINKING')
                 elif kind == 'assistant':
                     for position, item in enumerate(
                             _iter_content((line.get('message') or {}).get('content'))):

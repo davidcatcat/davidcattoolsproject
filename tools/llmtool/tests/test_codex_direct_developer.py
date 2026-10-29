@@ -75,11 +75,46 @@ class CodexDirectDeveloperTests(unittest.TestCase):
 
     def run_fake(self, **kwargs):
         timeout = kwargs.pop('timeout', 3)
+        prompt = kwargs.pop('prompt', 'bounded prompt')
         kwargs.setdefault('prelaunch_validate', lambda: True)
         with patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
-            return direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+            return direct.run(root=self.root, prompt=prompt, model='gpt-6-luna',
                 reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
                 timeout=timeout, **kwargs)
+
+    def run_fake_configured(self, configured_timeout):
+        with patch('llmtool.codex_direct_developer.codex_direct_timeout',
+                   return_value=configured_timeout), \
+                patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
+            return direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+                reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
+                prelaunch_validate=lambda: True)
+
+    def test_default_timeout_uses_600_seconds(self):
+        with patch('llmtool.codex_direct_developer.codex_direct_timeout',
+                   return_value=600) as config_loader, \
+                patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):
+            result = direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+                reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
+                prelaunch_validate=lambda: True)
+        self.assertEqual(result.status, 'DONE')
+        config_loader.assert_called_once_with(cwd=self.root.resolve())
+
+    def test_prompt_at_exact_byte_limit_is_accepted_unchanged(self):
+        prompt = 'x' * direct.MAX_PROMPT_BYTES
+        self.assertEqual(self.run_fake(prompt=prompt).status, 'DONE')
+
+    def test_configured_timeout_is_used(self):
+        self.assertEqual(self.run_fake_configured(900).status, 'DONE')
+
+    def test_invalid_config_timeout_fails_with_typed_config_error(self):
+        with patch('llmtool.codex_direct_developer.codex_direct_timeout',
+                   side_effect=LLMToolError('invalid direct timeout')), \
+                self.assertRaises(LLMToolError) as caught:
+            direct.run(root=self.root, prompt='bounded prompt', model='gpt-6-luna',
+                reasoning_effort='high', dispatch_store=object(), dispatch_task_id='a' * 32,
+                prelaunch_validate=lambda: True)
+        self.assertNotIsInstance(caught.exception, direct.DirectCodexError)
 
     def test_done_captures_thread_usage_and_hardening_arguments(self):
         result = self.run_fake()
@@ -509,6 +544,78 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(task_submission_cli._developer_output_rejection(
             diff, ['allowed.py']), 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
 
+    def test_timeout_with_changes_records_digest_against_task_base(self):
+        raw = (b'diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+               b'@@ -1 +1 @@\n-before\n+after\n')
+        base_sha = 'b' * 40
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['src.py'], raw)):
+            code, evidence = task_submission_cli._codex_timeout_outcome(
+                'CODEX_TIMEOUT', True, self.root, base_sha)
+        self.assertEqual(code, 'CODEX_TIMEOUT_WITH_CHANGES')
+        self.assertEqual(evidence, {
+            'changed_paths': ['src.py'],
+            'diff_sha256': hashlib.sha256(raw).hexdigest(),
+            'base_sha': base_sha,
+        })
+
+    def test_timeout_without_changes_keeps_existing_timeout_outcome(self):
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=([], b'')):
+            code, evidence = task_submission_cli._codex_timeout_outcome(
+                'CODEX_TIMEOUT', True, self.root, 'b' * 40)
+        self.assertEqual(code, 'CODEX_TIMEOUT')
+        self.assertIsNone(evidence)
+
+    def test_timeout_diff_treats_decode_failure_as_missing_evidence(self):
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['src.py'], b'\xff')):
+            code, evidence = task_submission_cli._codex_timeout_outcome(
+                'CODEX_TIMEOUT', True, self.root, 'b' * 40)
+        self.assertEqual(code, 'CODEX_TIMEOUT')
+        self.assertIsNone(evidence)
+
+    def test_timeout_diff_does_not_hide_programming_errors(self):
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          side_effect=RuntimeError('fixture bug')):
+            with self.assertRaisesRegex(RuntimeError, 'fixture bug'):
+                task_submission_cli._codex_timeout_diff(self.root, 'b' * 40)
+
+    def test_followup_uses_cumulative_task_base_diff(self):
+        base_sha = 'b' * 40
+        raw = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+               '@@ -1 +1 @@\n-before\n+after\n').encode()
+        previous = {
+            'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+            'error_code': 'CODEX_TIMEOUT_WITH_CHANGES',
+            'execution': {'status': 'TIMEOUT', 'diff_base_sha': base_sha,
+                          'diff_sha256': hashlib.sha256(raw).hexdigest()},
+            'source_sha': base_sha, 'executor_task_id': 'executor-1',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['works'],
+        }
+        self.assertTrue(task_submission_cli._codex_timeout_recovery(
+            previous, executor_task_id='executor-1', source_sha=base_sha,
+            result_head='c' * 40, registration_source_sha=base_sha,
+            registration_result_sha='c' * 40, read_paths=['src.py'],
+            write_paths=['src.py'], acceptance=['works']))
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['src.py'], raw)) as diff:
+            rejection, artifact = task_submission_cli._codex_cumulative_diff_rejection(
+                self.root, base_sha, ['src.py'])
+        self.assertIsNone(rejection)
+        self.assertEqual(artifact, raw.decode())
+        diff.assert_called_once_with(self.root, base_sha)
+
+    def test_followup_cumulative_diff_refuses_out_of_scope_path(self):
+        raw = (b'diff --git a/private.py b/private.py\n--- a/private.py\n'
+               b'+++ b/private.py\n@@ -1 +1 @@\n-before\n+after\n')
+        with patch.object(task_submission_cli.task_completion, '_worktree_diff',
+                          return_value=(['private.py'], raw)):
+            rejection, _ = task_submission_cli._codex_cumulative_diff_rejection(
+                self.root, 'b' * 40, ['src.py'])
+        self.assertEqual(rejection, 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+
     def test_invalid_thread_event_is_not_accepted(self):
         raw = self.events(self.final, thread_id='not-a-native-thread')
         self.write_fake(raw)
@@ -554,6 +661,17 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('"acceptance":["expected behavior"]', prompt)
         self.assertIn('"test_commands":[["python3","-m","unittest"]]', prompt)
         self.assertIn('"wall_clock_seconds":600', prompt)
+
+    def test_prompt_budget_uses_configured_timeout(self):
+        prompt = task_submission_cli._codex_direct_prompt({
+            'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'task_binding': {'contract_digest': 'c' * 64},
+            'task_contract': {'goal': 'bounded goal', 'criteria': [],
+                              'test_commands': [['python3', '-m', 'unittest']]},
+        }, source_sha='d' * 40, read_paths=['src.py'], write_paths=['src.py'],
+            acceptance=['expected behavior'], pm_goal='selected Developer goal',
+            model='gpt-6-luna', reasoning_effort='high', timeout=900)
+        self.assertIn('"wall_clock_seconds":900', prompt)
 
 
 if __name__ == '__main__':

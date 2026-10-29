@@ -15,10 +15,11 @@ import tempfile
 import time
 
 from . import worker_dispatch
+from .config import codex_direct_timeout
 from .errors import LLMToolError
 from .providers.cli_lifecycle import CLIHostTermination, CLIProcessLifecycle
 
-MAX_WALL_CLOCK_SECONDS = 600
+MAX_WALL_CLOCK_SECONDS = 1800
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
@@ -342,10 +343,13 @@ def _argv(executable, root, model, effort, *, pycache_prefix, command_path=None)
 
 
 def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_id,
-        prelaunch_validate=None, timeout=MAX_WALL_CLOCK_SECONDS):
+        prelaunch_validate=None, timeout=None,
+        dispatch_action='DISPATCH'):
     root = Path(root).resolve(strict=True)
     if type(prompt) is not str or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES:
         _fail('CODEX_PROMPT_INVALID')
+    if timeout is None:
+        timeout = codex_direct_timeout(cwd=root)
     if type(timeout) not in (int, float) or not 0 < timeout <= MAX_WALL_CLOCK_SECONDS:
         _fail('CODEX_BUDGET_INVALID')
     executable = shutil.which('codex')
@@ -381,7 +385,7 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                         _fail('CODEX_D6_BINDING_CHANGED')
                 try:
                     worker_dispatch.authorize_dispatch(
-                        dispatch_store, dispatch_task_id, 'codex-developer', 'DISPATCH')
+                        dispatch_store, dispatch_task_id, 'codex-developer', dispatch_action)
                 except worker_dispatch.WorkerDispatchDenied as exc:
                     raise DirectCodexError(exc.dispatch_code) from None
                 try:

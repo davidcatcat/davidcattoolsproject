@@ -27,8 +27,9 @@ WORKERS = frozenset((
 DISPATCH_STATES = frozenset(('ALLOWED', 'PAUSED', 'OWNER_ASSIGNMENT_ONLY'))
 AUDIT_ACTIONS = frozenset((
     'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
-    'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
+    'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY',
 ))
+MAX_TIMEOUT_CONTINUATIONS_PER_TASK = 1
 def _policy_candidates():
     """List policy locations for this actual module layout, in authority order."""
     module = Path(__file__).resolve()
@@ -388,6 +389,7 @@ _PROVIDER_TYPES = {
     'codex': 'codex-cli',
     'opencode': 'opencode-cli',
     'claude': 'claude-cli',
+    'agy': 'agy-cli',
 }
 
 
@@ -441,6 +443,17 @@ def task_store_attempts(current, changes):
         attempts.append((worker or 'unknown', 'DISPATCH'))
         return attempts
 
+    # A timed-out Codex run may continue only after its exact previous record
+    # is compared and the committed D6 result head is registered. The policy
+    # gate below performs those checks before this action is durably audited.
+    if (old_developer.get('provider_profile') == 'codex' and
+            old_developer.get('state') == 'DEVELOPER_OUTCOME_UNKNOWN' and
+            old_developer.get('error_code') == 'CODEX_TIMEOUT_WITH_CHANGES' and
+            new_developer.get('state') == 'DEVELOPER_DISPATCHING' and
+            new_developer.get('assignment_id') != old_developer.get('assignment_id')):
+        attempts.append(('codex-developer', 'TIMEOUT_CONTINUATION'))
+        return attempts
+
     if _developer_identity_changed(old_developer, new_developer):
         worker = worker_key_for(new_developer.get('provider_profile'))
         attempts.append((worker or 'unknown', 'REASSIGN'))
@@ -482,6 +495,8 @@ def worker_key_for(provider_profile):
         return 'claude-reviewer'
     if provider_profile == 'codex':
         return 'codex-developer'
+    if provider_profile == 'agy':
+        return 'agy'
     if provider_profile == 'claude':
         return 'claude-developer'
     return None
@@ -504,6 +519,44 @@ def authorize_task_store_change(current, changes, expected=None):
     decisions = []
     for worker_key, action in attempts:
         decision = evaluate(worker_key, owner_assignment_ref, current.get('task_id'))
+        if action == 'TIMEOUT_CONTINUATION':
+            old_execution = (old_developer.get('execution')
+                             if type(old_developer) is dict else None)
+            new_completion = changes.get('completion', current.get('completion'))
+            evidence = (new_completion.get('evidence')
+                        if type(new_completion) is dict else None)
+            result_head = (evidence.get('result_head')
+                           if type(evidence) is dict else None)
+            bound = (type(expected) is dict and 'developer' in expected and
+                     expected['developer'] == old_developer)
+            same_scope = (type(old_developer) is dict and
+                          all(old_developer.get(field) == new_developer.get(field)
+                              for field in ('provider_profile', 'executor_task_id',
+                                            'source_sha', 'read_paths', 'write_paths',
+                                            'acceptance')))
+            valid_timeout = (
+                type(old_execution) is dict and old_execution.get('status') == 'TIMEOUT' and
+                old_execution.get('diff_base_sha') == old_developer.get('source_sha') and
+                type(old_execution.get('diff_sha256')) is str and
+                re.fullmatch(r'[0-9a-f]{64}', old_execution['diff_sha256']) is not None)
+            valid_result = (type(result_head) is str and
+                            re.fullmatch(r'[0-9a-f]{40}', result_head) is not None and
+                            result_head != old_developer.get('source_sha') and
+                            type(new_completion) is dict and
+                            new_completion.get('executor_task_id') ==
+                            new_developer.get('executor_task_id'))
+            if not (bound and same_scope and valid_timeout and valid_result):
+                decision = PolicyDecision(worker_key, False,
+                                          'WORKER_TIMEOUT_CONTINUATION_PRECONDITION',
+                                          decision.policy_sha256)
+            prior_attempts = sum(
+                1 for item in audit
+                if type(item) is dict and item.get('worker_key') == worker_key and
+                item.get('action') == action)
+            if prior_attempts >= MAX_TIMEOUT_CONTINUATIONS_PER_TASK:
+                decision = PolicyDecision(worker_key, False,
+                                          'WORKER_TIMEOUT_CONTINUATION_LIMIT',
+                                          decision.policy_sha256)
         if action in ('RETRY', 'RECOVERY', 'REPAIR') and type(old_developer) is dict:
             expected_old_state = {
                 'RETRY': (),

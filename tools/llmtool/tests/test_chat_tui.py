@@ -13,10 +13,10 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmtool import chat_tui, chat_tui_pm
+from llmtool import chat_tui, chat_tui_pm, chat_tui_view
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
-from llmtool.providers.base import Reply
+from llmtool.providers.base import ProviderCapabilities, Reply
 from llmtool.providers.cli_lifecycle import tui_cli_signal_scope
 
 try:
@@ -62,6 +62,45 @@ def core_view_json(task_id, **fields):
 class TTY(io.StringIO):
     def isatty(self):
         return True
+
+
+STREAMING = ProviderCapabilities(chat=True, large_context=False, reasoning_control=False,
+                                 streaming=True, code_edit=False, shell=False, git=False)
+
+
+class FakeStream:
+    """A client that streams: the first chunk at once, the rest after gate is set."""
+
+    CAPABILITIES = STREAMING
+
+    def __init__(self, chunks, gate=None):
+        self.chunks = chunks
+        self.gate = gate
+        self.closed = False
+        self.yielded = []
+        self.complete = Mock(side_effect=AssertionError('complete() must not be used'))
+
+    def stream(self, messages):
+        try:
+            for index, chunk in enumerate(self.chunks):
+                if index == 1 and self.gate is not None:
+                    self.gate.wait(5)
+                self.yielded.append(chunk)
+                yield chunk
+        finally:
+            self.closed = True
+        return {'prompt_tokens': 1, 'completion_tokens': 2, 'total_tokens': 3}
+
+
+def lone_escape(ui):
+    """Feed a lone Esc and the key-processor timeout flush, as a terminal would."""
+    from prompt_toolkit.key_binding.key_processor import _Flush as timeout_flush
+    processor = ui.app.key_processor
+    with set_app(ui.app):
+        processor.feed(KeyPress(Keys.Escape, '\x1b'))
+        processor.process_keys()
+        processor.feed(timeout_flush)
+        processor.process_keys()
 
 
 class Base(unittest.TestCase):
@@ -173,6 +212,14 @@ class WidgetTests(Base):
             await asyncio.sleep(0.01)
         raise AssertionError('request did not finish')
 
+    @staticmethod
+    async def until(ui, condition, what='condition'):
+        for _ in range(300):
+            if condition(ui):
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(what + ' not reached')
+
     def test_starts_without_provider_call_and_exits_cleanly(self):
         ui, result = self.drive([])
         self.assertEqual(result, 0)
@@ -261,12 +308,13 @@ class WidgetTests(Base):
         }
         self.factory.return_value = CodexCLIProvider(provider, self.session.config["generation"])
         with patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)):
-            ui, result = self.drive(["問題\r", "\x03", self.idle])
+            ui, result = self.drive(["問題\r", "\x03", "\x03", self.idle])
         self.assertEqual(result, 0)
         self.assertTrue(ui.quit_pending)
         self.assertIn("assistant:\n中文回覆", ui.conversation.text)
         self.assertEqual([turn["content"] for turn in self.session.history], ["問題", "中文回覆"])
-        self.assertEqual(self.session.state, "idle")
+        # The first Ctrl-C asked for an interrupt; the one-piece reply is kept, marked.
+        self.assertEqual(self.session.state, "interrupted")
         with self.assertRaises(ProcessLookupError):
             os.kill(int((self.temp_root / "codex.pid").read_text()), 0)
 
@@ -437,8 +485,8 @@ class WidgetTests(Base):
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
-                                  '/exit', '/quit', '/task submit', '/task show', '/task mode', '/task list', '/task events',
-                                  '/pm connect', '/pm new', '/pm disconnect', '/pm history'])
+                                  '/exit', '/quit', '/pm connect', '/pm new', '/pm disconnect', '/pm history',
+                                  '/task submit', '/task show', '/task mode', '/task list', '/task events'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
@@ -502,6 +550,26 @@ class WidgetTests(Base):
 
     def test_help_documents_the_slash_picker(self):
         self.assertIn('Esc closes the picker', chat_tui.KEY_HELP)
+
+    def test_help_lists_pm_first_and_marks_task_submit_as_dev_test_only(self):
+        # Owner decision 022:A (#525): /pm is the product entry; /task submit stays, labelled.
+        help_text = chat_tui.KEY_HELP
+        self.assertLess(help_text.index('Talk to the PM'), help_text.index('/task submit'))
+        self.assertLess(help_text.index('/pm new'), help_text.index('/task submit'))
+        self.assertIn('開發測試用：只登記，不會派工', help_text.split('/task submit', 1)[1][:200])
+        self.assertIn('Esc (during a reply)', help_text)
+        self.assertNotIn('A request in progress cannot be cancelled', help_text)
+        picker = chat_tui.SLASH_COMMANDS
+        labels = [c[0] for c in picker]
+        self.assertLess(labels.index('/pm connect'), labels.index('/task submit'))
+        self.assertIn('開發測試用：只登記，不會派工', dict((c[0], c[2]) for c in picker)['/task submit'])
+        self.assertEqual(dict((c[0], c[1]) for c in picker)['/task submit'], '/task submit --provider ')
+        ui, _ = self.drive(['/help\r'])
+        shown = ui.conversation.text.split('> /help', 1)[1]
+        self.assertLess(shown.index('/pm new'), shown.index('/task submit'))
+        self.assertIn('開發測試用：只登記，不會派工', shown)
+        self.assertIn('/pm connect (or /pm new) talks to the dedicated PM', ui.conversation.text)
+        self.factory.assert_not_called()
 
     def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
         # Rule: Enter only completes a draft that differs from the chosen suggestion and
@@ -600,7 +668,7 @@ class WidgetTests(Base):
         def wrapped(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 16)
-            self.assertIn('/pm history', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('/task events', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('(12 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
@@ -768,8 +836,11 @@ class WidgetTests(Base):
                 widths[columns] = ui.status_text()
             ui.quit_pending = False
         self.drive([measure], size=size)
-        self.assertEqual(widths[80], 'p:first | m:test | exit pending | t:UNKNOWN | F1')
-        self.assertEqual(widths[40], 'p:first | m:test | exit pending')
+        self.assertEqual(widths[80], 'p:first | m:test | exit pending | t:UNKNOWN | 最新 | F6 滑鼠:開 | F1')
+        # QA O2: the mouse state outlives the F1 hint, usage, model and provider fields.
+        self.assertEqual(widths[50], 'p:first | exit pending | 最新 | F6 滑鼠:開')
+        self.assertEqual(widths[40], 'exit pending | 最新 | F6 滑鼠:開')
+        self.assertEqual(widths[30], 'exit pending | F6 滑鼠:開')
         self.assertEqual(widths[20], 'exit pending')
         self.assertEqual(widths[8], 'exit pe…')
         for columns, status in widths.items():
@@ -849,28 +920,6 @@ class WidgetTests(Base):
         self.assertEqual([turn['content'] for turn in self.session.history],
                          ['ordinary chat', 'reply'])
 
-    def test_tab_switches_focus_and_scroll_preserves_caret(self):
-        long_reply = '\n'.join('row %d' % i for i in range(200))
-        self.client.complete.return_value = Reply(long_reply, {})
-
-        def scrolled_up(ui):
-            self.assertLess(ui.conversation.buffer.cursor_position, len(ui.conversation.text))
-            self.caret = ui.conversation.buffer.cursor_position
-
-        def caret_kept(ui):
-            self.assertEqual(ui.conversation.buffer.cursor_position, self.caret)
-            self.assertIn('connectivity: not probed', ui.conversation.text.splitlines()[-1])
-
-        ui, _ = self.drive([
-            'question\r', self.idle,
-            '\t', lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.conversation)),
-            '\x1b[5~', scrolled_up,
-            '\t', lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
-            '/status\r', caret_kept,
-            '\x1b[6~' * 60,
-            lambda ui: self.assertEqual(ui.conversation.buffer.cursor_position, len(ui.conversation.text)),
-        ])
-
     def test_single_flight_keeps_input_and_blocks_provider_switch(self):
         release = threading.Event()
         started = threading.Event()
@@ -911,18 +960,175 @@ class WidgetTests(Base):
         release = threading.Event()
         self.client.complete.side_effect = lambda messages: (release.wait(5), Reply('late reply', {}))[1]
 
+        def interrupting(ui):
+            self.assertFalse(ui.app.is_done)
+            self.assertFalse(ui.quit_pending)
+            self.assertTrue(ui.send_interrupted)
+            self.assertIn('interrupt requested', ui.conversation.text)
+            self.assertIn('Ctrl-C again exits', ui.conversation.text)
+            self.assertIn('interrupting', ui.status_text())
+
         def pending(ui):
             self.assertFalse(ui.app.is_done)
             self.assertTrue(ui.quit_pending)
-            self.assertIn('cannot be cancelled', ui.conversation.text)
+            self.assertIn('exit requested', ui.conversation.text)
             self.assertIn('exit pending', ui.status_text())
 
         async def finish(ui):
             release.set()
             await self.idle(ui)
-        ui, result = self.drive(['question\r', '\x03', pending, finish])
+        ui, result = self.drive(['question\r', '\x03', interrupting, '\x03', pending, finish])
         self.assertEqual(result, 0)
         self.assertEqual(self.session.history[-1]['content'], 'late reply')
+        self.assertIn('assistant:\nlate reply', ui.conversation.text)
+        self.assertIn('answered in one piece', ui.conversation.text)
+
+    def test_escape_interrupts_a_streaming_reply_and_keeps_the_partial_text(self):
+        # Owner #304: Esc during a reply must stop it, like the PM pane does.
+        gate = threading.Event()
+        fake = FakeStream(['Hello', ' world', ' never shown'], gate)
+        self.factory.return_value = fake
+
+        async def streaming(ui):
+            await self.until(ui, lambda ui: ui.stream_raw is not None)
+            self.assertIn('assistant:\nHello', ui.conversation.text)
+            self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+            self.assertIn('working', ui.status_text())
+
+        async def escaped(ui):
+            self.assertTrue(ui.send_interrupted)
+            self.assertIn('interrupting', ui.status_text())
+            gate.set()                      # one more chunk arrives, then the stream stops
+            await self.idle(ui)
+
+        def after(ui):
+            self.assertEqual(ui.input.text, '')
+            self.assertFalse(ui.busy)
+            self.assertIn('assistant:\nHello world\n\nllmtool: reply interrupted after the text above',
+                          ui.conversation.text)
+            self.assertNotIn('never shown', ui.conversation.text)
+            self.assertIn('interrupted', ui.status_text())
+            self.assertGreater(ui._default_timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
+
+        ui, result = self.drive(['question\r', streaming, lone_escape, escaped, after,
+                                 lambda ui: self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen),
+                                 '/status\r'])
+        self.assertEqual(result, 0)
+        self.assertEqual([t['content'] for t in self.session.history], ['question', 'Hello world'])
+        self.assertEqual(self.session.state, 'interrupted')
+        self.assertTrue(self.session.last_interrupted)
+        self.assertTrue(fake.closed)
+        self.assertEqual(fake.yielded, ['Hello', ' world'])
+        self.assertIn('state: interrupted', ui.conversation.text)
+        fake.complete.assert_not_called()
+
+    def test_ctrl_c_interrupts_a_streaming_reply_and_a_second_ctrl_c_exits(self):
+        gates = [threading.Event(), threading.Event()]
+        fakes = [FakeStream(['one', ' two', ' three'], gates[0]),
+                 FakeStream(['uno', ' dos', ' tres'], gates[1])]
+        self.factory.side_effect = fakes
+
+        async def streaming(ui):
+            await self.until(ui, lambda ui: ui.stream_raw is not None)
+
+        async def first_ctrl_c(ui):
+            ui.request_quit()
+            self.assertFalse(ui.app.is_done)
+            self.assertFalse(ui.quit_pending)
+            self.assertIn('Ctrl-C again exits', ui.conversation.text)
+            gates[0].set()
+            await self.idle(ui)
+            self.assertIn('reply interrupted after the text above', ui.conversation.text)
+            self.assertFalse(ui.quit_pending)
+
+        def second_ctrl_c(ui):
+            ui.request_quit()
+            ui.request_quit()
+            self.assertTrue(ui.quit_pending)
+            self.assertFalse(ui.app.is_done)
+            gates[1].set()
+
+        ui, result = self.drive(['first\r', streaming, first_ctrl_c,
+                                 'second\r', streaming, second_ctrl_c, self.idle])
+        self.assertEqual(result, 0)
+        self.assertTrue(ui.quit_pending)
+        self.assertEqual([t['content'] for t in self.session.history],
+                         ['first', 'one two', 'second', 'uno dos'])
+        self.assertEqual(ui.conversation.text.count('assistant:\n'), 2)
+        # The Ctrl-C notices went above the reply block, which stayed in one piece.
+        self.assertIn('llmtool: Ctrl-C again exits\n\nassistant:\none two\n\nllmtool: reply interrupted',
+                      ui.conversation.text)
+        self.assertTrue(all(fake.closed for fake in fakes))
+
+    def test_streaming_reply_completes_normally_without_interrupt(self):
+        fake = FakeStream(['Hel', 'lo ', '測試'])
+        self.factory.return_value = fake
+        ui, result = self.drive(['q\r', self.idle,
+                                 lambda ui: self.assertIn('t:1+2=3', ui.status_text())])
+        self.assertEqual(result, 0)
+        self.assertEqual(ui.conversation.text.count('assistant:'), 1)
+        self.assertIn('assistant:\nHello 測試', ui.conversation.text)
+        self.assertNotIn('interrupted', ui.conversation.text)
+        self.assertEqual(self.session.history[-1]['content'], 'Hello 測試')
+        self.assertEqual(self.session.state, 'idle')
+        self.assertFalse(self.session.last_interrupted)
+
+    def test_escape_before_any_streamed_text_leaves_history_unchanged(self):
+        gate = threading.Event()
+
+        class SlowStart(FakeStream):
+            def stream(self, messages):
+                gate.wait(5)                  # blocks before the first chunk is requested
+                return super().stream(messages)
+
+        fake = SlowStart(['late'])
+        self.factory.return_value = fake
+
+        async def busy(ui):
+            await self.until(ui, lambda ui: ui.busy)
+            lone_escape(ui)
+            self.assertIn('interrupt requested', ui.conversation.text)
+            gate.set()
+            await self.idle(ui)
+
+        ui, result = self.drive(['q\r', busy])
+        self.assertEqual(result, 0)
+        self.assertIn('llmtool: reply interrupted before any text arrived; history unchanged',
+                      ui.conversation.text)
+        self.assertNotIn('assistant:', ui.conversation.text)
+        self.assertEqual(self.session.history, [])
+        self.assertEqual(self.session.state, 'interrupted')
+        self.assertEqual(fake.yielded, [])      # cancel seen before the first chunk was asked for
+
+    def test_escape_during_a_one_piece_reply_keeps_it_marked_interrupted(self):
+        # All current providers answer in one piece: Esc is acknowledged at once, the
+        # reply is kept when it lands, and the prompt is free again.
+        release = threading.Event()
+        self.client.complete.side_effect = lambda messages: (release.wait(5), Reply('whole', {}))[1]
+
+        async def busy(ui):
+            await self.until(ui, lambda ui: ui.busy)
+            await self.until(ui, lambda ui: ui.app.timeoutlen == chat_tui.ESC_SEQUENCE_TIMEOUT)
+            lone_escape(ui)
+            self.assertIn('interrupt requested', ui.conversation.text)
+            self.assertIn('interrupting', ui.status_text())
+            lone_escape(ui)              # a repeat is a no-op
+            self.assertEqual(ui.conversation.text.count('interrupt requested'), 1)
+            release.set()
+            await self.idle(ui)
+
+        ui, result = self.drive(['q\r', busy, 'next\r', self.idle])
+        self.assertEqual(result, 0)
+        self.assertIn('assistant:\nwhole\n\nllmtool: reply interrupted; the provider answered in one piece',
+                      ui.conversation.text)
+        self.assertEqual([t['content'] for t in self.session.history], ['q', 'whole', 'next', 'whole'])
+        self.assertEqual(self.session.state, 'idle')   # the next request reset the status
+
+    def test_escape_while_idle_or_during_a_task_does_nothing_new(self):
+        ui, _ = self.drive([lone_escape, lambda ui: self.assertFalse(ui.send_interrupted)])
+        self.assertNotIn('interrupt requested', ui.conversation.text)
+        self.assertFalse(ui.interrupt_send())
+        self.factory.assert_not_called()
 
     def test_request_failure_is_sanitized_and_recoverable(self):
         self.client.complete.side_effect = [RuntimeError('PRIVATE stderr'), Reply('ok', {})]
@@ -1875,6 +2081,15 @@ def _delta(text, index=0):
                                               'delta': {'type': 'text_delta', 'text': text}}}
 
 
+def _thinking(index=0, text='PRIVATE_REASONING'):
+    """A thinking block start and delta, as Claude Code streams them before the answer."""
+    return [{'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': index,
+                                               'content_block': {'type': 'thinking', 'thinking': ''}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': index,
+                                               'delta': {'type': 'thinking_delta', 'thinking': text}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': index}}]
+
+
 def _tool_result(tool_id, content, is_error):
     return {'type': 'user', 'message': {'content': [
         {'type': 'tool_result', 'tool_use_id': tool_id, 'content': content, 'is_error': is_error}]}}
@@ -2117,6 +2332,143 @@ class BoundedPMCleanupTests(unittest.TestCase):
 
 
 @unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class PMTypewriterTests(Base):
+    """Received PM text is queued and released at ticks, in order, and flushed at once on
+    block end, turn end and interrupt; without a running loop the tick is driven by hand."""
+
+    def setUp(self):
+        super().setUp()
+        self.pipe = create_pipe_input()
+        self.pipe.__enter__()
+        self.addCleanup(self.pipe.__exit__, None, None, None)
+        self.ui = chat_tui.ChatTUI(self.session, input=self.pipe, output=DummyOutput())
+        self.ui.pm_turn_active, self.ui.pm_turn_started = True, time.monotonic()
+        self.ui.pm_state, self.ui.pm_mode = 'working', True
+
+    def delta(self, text, index=0):
+        self.ui.pm_event({'type': 'TEXT_DELTA', 'text': text, 'block_index': index})
+
+    def shown(self):
+        """Text of the last PM block as the pane shows it (None: no block opened)."""
+        text = self.ui.conversation.text
+        if '\nPM:' not in text:
+            return None
+        rest = text[text.rindex('\nPM:') + 4:]
+        return rest[1:] if rest.startswith('\n') else rest
+
+    def test_text_is_released_in_order_a_few_characters_per_tick(self):
+        # CJK text: an ASCII word is shown only once complete (screen_stream), as before.
+        ui = self.ui
+        self.delta('一二三四五六')
+        self.assertEqual(self.shown(), '')            # the PM: header opens at once
+        self.assertEqual(ui.pm_queue, '一二三四五六')
+        ui._pm_tick()
+        self.assertEqual(self.shown(), '一二')
+        self.delta('七八九十')                        # a later burst joins the queue in order
+        self.assertEqual(ui.pm_queue, '三四五六七八九十')
+        ui._pm_tick()
+        ui._pm_tick()
+        self.assertEqual(self.shown(), '一二三四五六')
+        self.ui.pm_event({'type': 'ASSISTANT_TEXT', 'text': '一二三四五六七八九十'})
+        self.assertEqual(self.shown(), '一二三四五六七八九十')  # block end flushes the rest at once
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        self.assertEqual(ui.conversation.text.count('一二三四五六七八九十'), 1)   # no duplication
+
+    def test_long_queue_drains_within_the_lag_bound(self):
+        ui = self.ui
+        text = ''.join(chr(0x4e00 + i % 200) for i in range(330))   # 330 CJK characters
+        self.delta(text)
+        ticks = 0
+        while ui.pm_queue:
+            ui._pm_tick()
+            ticks += 1
+            self.assertLessEqual(ticks, chat_tui.PM_MAX_LAG_TICKS)
+        self.assertEqual(ticks, chat_tui.PM_MAX_LAG_TICKS)   # 10 per tick, never 2
+        self.assertEqual(self.shown(), text)
+        self.assertEqual(ui._pm_rate, chat_tui.PM_CHARS_PER_TICK)   # back to the base rate
+        ui._pm_tick()                                         # an idle tick is harmless
+        self.assertEqual(self.shown(), text)
+        self.delta('甲乙')
+        self.delta('丙' * 100)                                # a burst while behind raises it
+        self.assertEqual(ui._pm_rate, 4)
+        self.assertGreaterEqual(chat_tui.PM_CHARS_PER_TICK / chat_tui.PM_TICK_SECONDS, 40)
+        self.assertLessEqual(chat_tui.PM_CHARS_PER_TICK / chat_tui.PM_TICK_SECONDS, 80)
+        self.assertLessEqual(chat_tui.PM_MAX_LAG_TICKS * chat_tui.PM_TICK_SECONDS, 1.0)
+
+    def test_turn_end_flushes_everything_before_the_summary(self):
+        ui = self.ui
+        self.delta('hello world')
+        ui.pm_event({'type': 'TURN_END', 'status': 'COMPLETED', 'usage': {}})
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        text = ui.conversation.text
+        self.assertIn('PM:\nhello world\n\n  — PM turn COMPLETED', text)
+
+    def test_interrupt_and_turn_finish_flush_the_queue(self):
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        self.delta('partial answer')
+        ui.interrupt_pm()
+        ui.pm_runtime.interrupt.assert_called_once_with()
+        self.assertIn('PM:\npartial answer\n\nllmtool: interrupt sent to the PM',
+                      ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+        ui.pm_turn_active, ui.pm_interrupted = True, False
+        self.delta('tail', index=1)
+        ui.finish_pm_turn()                           # a turn that ends without TURN_END
+        self.assertIn('PM:\ntail', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+        self.assertIsNone(ui.pm_block_raw)
+        self.assertEqual(ui.pm_state, 'idle')
+
+    def test_new_block_tool_and_other_output_flush_the_previous_block(self):
+        ui = self.ui
+        self.delta('first block', index=0)
+        self.delta('second', index=1)                  # a new content block
+        self.assertIn('PM:\nfirst block\n\nPM:', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, 'second')
+        ui.pm_event({'type': 'TOOL_USE', 'tool_use_id': 't', 'name': 'Read'})
+        self.assertIn('PM:\nsecond\n\n  · tool Read', ui.conversation.text)
+        self.assertEqual(ui.pm_queue, '')
+
+    def test_split_secret_is_screened_at_every_tick(self):
+        key = _fake_key()
+        ui = self.ui
+        seen = []
+        original = ui._pm_render
+
+        def render(final):
+            original(final)
+            seen.append(ui.conversation.text)
+        ui._pm_render = render
+        self.delta('your key is ' + key + ' — rotate it')
+        while ui.pm_queue:
+            ui._pm_tick()
+        ui.pm_event({'type': 'ASSISTANT_TEXT', 'text': 'your key is ' + key + ' — rotate it'})
+        self.assertTrue(seen)
+        for text in seen:
+            self.assertNotIn(key[3:9], text)
+        self.assertIn('your key is [REDACTED] — rotate it', ui.conversation.text)
+
+    def test_tick_is_scheduled_on_the_running_loop(self):
+        ui = self.ui
+        loop = asyncio.new_event_loop()
+        self.addCleanup(loop.close)
+
+        async def main():
+            self.delta('甲乙丙丁')
+            self.assertIsNotNone(ui._pm_tick_handle)
+            await asyncio.sleep(chat_tui.PM_TICK_SECONDS * 6)
+            self.assertEqual(self.shown(), '甲乙丙丁')
+            self.assertIsNone(ui._pm_tick_handle)      # nothing left: no tick pending
+            self.delta('戊己')
+            ui.close_pm()                              # exit cancels a pending tick
+            self.assertIsNone(ui._pm_tick_handle)
+        loop.run_until_complete(main())
+        self.assertEqual(ui.pm_queue, '戊己')          # exit path leaves the queue; no render
+
+
 class PMConversationTests(BoundedPMTest):
     """The real pm_runtime S2 against a scripted fake `claude`; ChatSession is never used.
 
@@ -2130,10 +2482,10 @@ class PMConversationTests(BoundedPMTest):
         from llmtool import pm_runtime
         self.pm_runtime = pm_runtime
         self.state = self.temp_root.resolve() / 'pm-state'
-        self.observe = patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
-                                    side_effect=lambda session, cwd, environ=None: cwd)
-        self.observe.start()
-        self.addCleanup(self.observe.stop)
+        self.observe_patcher = patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
+                                            side_effect=lambda session, cwd, environ=None: cwd)
+        self.observe = self.observe_patcher.start()
+        self.addCleanup(self.observe_patcher.stop)
         self.turns = [_full_turn()]
         test = self
 
@@ -2205,7 +2557,9 @@ class PMConversationTests(BoundedPMTest):
 
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
-            self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8] + ' idle | F1')   # no chat fields
+            self.assertEqual(ui.status_text(), 'PM:' + self.session_id[:8]
+                         + ' 暖機中… | 最新 | F6 滑鼠:開 | F1')   # no chat fields
+            self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
             self.assertIn('PM history: no stored turns', ui.conversation.text)
@@ -2214,9 +2568,12 @@ class PMConversationTests(BoundedPMTest):
             self.assertIn('--include-partial-messages', argv)
 
         async def partial(ui):
+            # The fake holds after 'Hello ': the text reached the pane through typewriter
+            # ticks on the loop, not through an end-of-block flush.
             await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text, 'first delta')
             self.assertTrue(ui.pm_turn_active)
             self.assertIn('working', ui.status_text())
+            self.assertNotIn('暖機中', ui.status_text())   # first output ended the warm-up view
             self.assertNotIn('Hello 老闆', ui.conversation.text)   # streamed, not yet complete
             self.fakes[0].gate.set()
 
@@ -2237,6 +2594,47 @@ class PMConversationTests(BoundedPMTest):
                          ['請問進度？'])
         self.assertEqual(self.session.history, [])
         self.client.complete.assert_not_called()
+
+    def test_warm_up_status_lasts_until_the_first_turns_first_output(self):
+        # Owner W40/W41 (A: no warm-up message is sent): the status shows 暖機中… from connect
+        # until the first turn produces output; later turns show working as before.
+        self.turns = [['HOLD', _delta('早安'), _assistant({'type': 'text', 'text': '早安'}),
+                       _result('早安')],
+                      [_delta('再次'), 'HOLD', _assistant({'type': 'text', 'text': '再次'}),
+                       _result('再次')]]
+
+        def warm_idle(ui):
+            self.assertTrue(ui.pm_warm)
+            self.assertIn('暖機中…', ui.status_text())
+            self.assertNotIn('idle', ui.status_text())
+            self.assertNotIn('暖機', ui.conversation.text)   # status only; nothing was sent
+            self.assertEqual(len(self.fakes[0].users()), 0)
+
+        async def warm_working(ui):
+            await self.until(ui, lambda ui: len(self.fakes[0].users()) == 1, 'turn sent')
+            self.assertTrue(ui.pm_turn_active)
+            self.assertRegex(ui.status_text(), '暖機中… [0-9]+\\.[0-9]s')
+            self.assertNotIn('working', ui.status_text())
+            self.fakes[0].gate.set()
+
+        def answered(ui):
+            self.assertFalse(ui.pm_warm)
+            self.assertIn('PM:\n早安', ui.conversation.text)
+            self.assertIn(' idle ', ui.status_text())
+            self.assertNotIn('暖機', ui.status_text())
+
+        async def second(ui):
+            await self.until(ui, lambda ui: 'PM:\n再次' in ui.conversation.text, 'second delta')
+            self.assertIn('working', ui.status_text())
+            self.assertNotIn('暖機', ui.status_text())
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, warm_idle, '早安\r', warm_working,
+                            self.turn_done, answered, '再來\r', second, self.turn_done,
+                            '/pm disconnect\r',
+                            lambda ui: self.until(ui, lambda ui: ui.pm_runtime is None)])
+        self.assertFalse(ui.pm_warm)
+        self.assertEqual(len(self.fakes[0].users()), 2)   # the Owner's two drafts, nothing else
 
     def test_repeated_enter_resize_and_redraw_send_one_turn(self):
         self.turns = [_full_turn(hold=True)]
@@ -2295,6 +2693,29 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(result, 0)
         self.assertIsNone(ui.pm_runtime)
         self.assertTrue(self.fakes[0].closed_stdin)   # close() ran on exit
+
+    def test_pm_thinking_is_status_only_and_never_shown_as_the_answer(self):
+        # Owner #304: reasoning must not render as the PM answer; at most a 思考中… status.
+        self.turns = [_thinking() + ['HOLD', _delta('台北101', index=1),
+                      _assistant({'type': 'thinking', 'thinking': 'PRIVATE_REASONING', 'signature': 's'},
+                                 {'type': 'text', 'text': '台北101'}),
+                      _result('台北101')]]
+
+        async def thinking(ui):
+            await self.until(ui, lambda ui: ui.pm_state == 'thinking', 'thinking status')
+            self.assertIn('思考中…', ui.status_text())
+            self.assertNotIn('\nPM:\n', ui.conversation.text)   # nothing reached the pane
+            self.assertNotIn('PRIVATE_REASONING', ui.conversation.text)
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, '說出台北觀光地點\r', thinking,
+                            self.turn_done])
+        text = ui.conversation.text
+        self.assertIn('PM:\n台北101', text)
+        self.assertNotIn('PRIVATE_REASONING', text)
+        self.assertNotIn('思考中', text)
+        self.assertEqual(ui.pm_state, 'idle')
+        self.assertNotIn('思考中', ui.status_text())
 
     def test_pm_status_field_fits_a_narrow_terminal(self):
         size = [Size(rows=24, columns=80)]
@@ -2419,8 +2840,9 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
                             self.connect(), self.connected])
         created = self.api.current_binding()['native_session_id']
-        self.assertIn('Dedicated PM session ' + created + ' created by pm_runtime', ui.conversation.text)
-        self.assertIn('the TUI has not verified that session', ui.conversation.text)
+        self.assertIn('Dedicated PM session ' + created + ' dedicated binding created',
+                      ui.conversation.text)
+        self.assertIn('the session starts on the first message', ui.conversation.text)
         self.assertEqual(ui.pm_target[0], created)
         argv = self.fakes[-1].argv
         self.assertEqual(argv[argv.index('--session-id') + 1], created)
@@ -2457,6 +2879,13 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('  · tool Read: done', text)
         self.assertNotIn('file content', text)
 
+    def test_fresh_binding_connects_without_transcript(self):
+        ui, _ = self.drive([self.connect(), self.connected])
+        self.assertTrue(ui.pm_mode)
+        self.assertFalse(self.observe.called)
+        self.assertFalse(self.binding['session_started'])
+        self.assertIn('--session-id', self.fakes[0].argv)
+
     def test_same_send_key_is_replayed_not_resent(self):
         fixed = Mock(hex='k' * 32)
         self.turns = [[_delta('first answer '), _result('first answer')], [_result('never')]]
@@ -2484,7 +2913,11 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(self.fakes[0].users(), [])
 
     def test_connect_errors_show_code_and_recovery(self):
-        self.observe.stop()
+        binding = self.pm_runtime.current_binding(self.session_id, state_root=self.state)
+        binding['session_started'] = True
+        self.pm_runtime._write_json_atomic(
+            self.state, self.pm_runtime._binding_path(self.state, self.session_id), binding)
+        self.observe_patcher.stop()
         with patch.object(self.pm_runtime.active_pm_inbox, 'observe_claude_session',
                           side_effect=chat_tui.LLMToolError('PRIVATE path detail')):
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
@@ -2492,7 +2925,7 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('PM not connected. PM runtime error PM_SESSION_INVALID', ui.conversation.text)
         self.assertNotIn('PRIVATE', ui.conversation.text)
         self.assertFalse(ui.pm_mode)
-        self.observe.start()
+        self.observe_patcher.start()
         holder = self.make_runtime(self.session_id, str(self.temp_root)).open()   # another driver holds it
         try:
             ui, _ = self.drive([self.connect(), lambda ui: self.until(
@@ -2540,6 +2973,753 @@ class PMConversationTests(BoundedPMTest):
             ui.run()
         runtime.close.assert_called_once()
         self.assertIsNone(ui.pm_runtime)
+
+
+def pane_rows(ui):
+    """Conversation pane rows as rendered on the last screen (above the rule row)."""
+    screen = ui.app.renderer.last_rendered_screen
+    rows = []
+    for y in range(ui.app.output.get_size().rows):
+        cells = screen.data_buffer[y]
+        text = ''.join(cells[x].char for x in range(ui.app.output.get_size().columns)).rstrip()
+        if text.startswith('-----'):
+            break
+        rows.append(text)
+    return rows
+
+
+def selected_cells(ui):
+    """Count of rendered cells drawn with the selection style."""
+    screen = ui.app.renderer.last_rendered_screen
+    size = ui.app.output.get_size()
+    return sum(1 for y in range(size.rows) for x in range(size.columns)
+               if 'selected' in screen.data_buffer[y][x].style)
+
+
+WHEEL_UP, WHEEL_DOWN = '\x1b[<64;10;5M', '\x1b[<65;10;5M'
+
+
+def press(x, y):
+    return '\x1b[<0;%d;%dM' % (x, y)
+
+
+def drag(x, y):
+    return '\x1b[<32;%d;%dM' % (x, y)
+
+
+def release(x, y):
+    return '\x1b[<0;%d;%dm' % (x, y)
+
+
+CJK_LINES = '\n'.join('%03d 中文長行測試abcdefghij ' % i * 1 + '中文長行測試abcdefghij ' * 15 for i in range(120))
+SHORT_LINES = '\n'.join('%03d short line' % i for i in range(120))
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt_toolkit not installed')
+class ConversationViewTests(unittest.TestCase):
+    """The pane model alone: rows, reading position, follow state, selection, clipboard."""
+
+    def make(self, text, width=20, height=5):
+        copies = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: copies.append(t) or True)
+        view.set_text(text)
+        view.layout(width, height)
+        return view, copies
+
+    def test_wraps_by_display_width_and_never_splits_a_wide_char(self):
+        view, _ = self.make('中文字測試中文字測試x\nab\n\n' + 'y' * 25 + '\n' + 'z' * 20, width=10, height=3)
+        shown = [view.text[s:e] for _l, s, e in view.rows]
+        self.assertEqual(shown, ['中文字測試', '中文字測試', 'x', 'ab', '', 'y' * 10, 'y' * 10, 'yyyyy',
+                                 'z' * 10, 'z' * 10])   # an exactly full line adds no blank row
+        for text in shown:
+            self.assertLessEqual(get_cwidth(text), 10)
+        self.assertEqual(view.offset_at(0, 3), 1)      # right half of the second wide char
+        self.assertEqual(view.offset_at(0, 99), 5)     # past the row end: the row end
+        self.assertEqual(view.row_of(view.text.index('ab')), 3)
+        self.assertEqual(view.row_of(len(view.text)), 9)
+
+    def test_following_is_explicit_and_resumes_only_at_the_bottom(self):
+        view, _ = self.make('\n'.join(str(i) for i in range(50)), height=10)
+        self.assertTrue(view.following)
+        self.assertEqual(view.top, 40)
+        view.scroll_rows(-1)
+        self.assertFalse(view.following)
+        self.assertEqual(view.top, 39)
+        view.set_text(view.text + '\nnew')          # new output: the view stays put
+        view.layout(20, 10)
+        self.assertEqual(view.top, 39)
+        self.assertTrue(view.unseen)
+        self.assertIn('捲動', view.status())
+        self.assertIn('⇣新輸出', view.status())
+        view.scroll_rows(1)
+        self.assertFalse(view.following)            # one row below: still not at the bottom
+        view.scroll_rows(1)
+        self.assertTrue(view.following)             # arrived: follows again
+        self.assertEqual(view.top, 41)
+        self.assertEqual(view.status(), '最新')
+        view.page(-1)
+        self.assertEqual(view.top, 41 - 9)
+        view.to_bottom()
+        self.assertTrue(view.following)
+        view.to_top()
+        self.assertEqual(view.top, 0)
+        view.scroll_rows(-5)
+        self.assertEqual(view.top, 0)               # clamped
+
+    def test_resize_keeps_the_text_at_the_top_of_the_view(self):
+        view, _ = self.make(CJK_LINES, width=80, height=20)
+        view.scroll_rows(-30)
+        anchor = view.text[view.top_offset:view.top_offset + 8]
+        top = view.top
+        view.layout(45, 24)                         # narrower and taller: rows re-wrap
+        self.assertEqual(view.text[view.top_offset:view.top_offset + 8], anchor)
+        self.assertFalse(view.following)
+        # QA O3: back and forth never drifts, because the anchor offset is kept across re-wraps.
+        for _ in range(3):
+            view.layout(80, 20)
+            self.assertEqual(view.top, top)
+            view.layout(45, 24)
+            self.assertEqual(view.text[view.top_offset:view.top_offset + 8], anchor)
+        view.scroll_rows(-1)                        # scrolling moves the anchor again
+        self.assertNotEqual(view.text[view.top_offset:view.top_offset + 8], anchor)
+        view.to_bottom()
+        view.layout(120, 10)
+        self.assertEqual(view.top, view.max_top())
+
+    def test_selection_offsets_give_exactly_the_selected_text(self):
+        view, copies = self.make(CJK_LINES, width=80, height=20)
+        view.scroll_rows(-100)
+        start = view.offset_at(view.top, 4)
+        view.begin_drag(start)
+        view.extend_drag(view.offset_at(view.top + 45, 7))        # beyond the visible rows
+        self.assertEqual(view.status(), '已選 %d 字' % (view.head - start))
+        text = view.end_drag(view.head)
+        self.assertEqual(text, view.text[start:view.head])
+        self.assertTrue(view.wait_copy())
+        self.assertEqual(copies, [text])
+        self.assertIn('\n', text)
+        self.assertIn('中文長行測試', text)
+        self.assertEqual(view.status(), '已複製 %d 字' % len(text))
+        # Streaming below keeps the selection; a shrunk text clamps it.
+        view.set_text(view.text + '\nstreamed 中文 more')
+        self.assertEqual(view.selected_text(), text)
+        view.set_text(view.text[:start + 3])
+        self.assertEqual(view.selected_text(), text[:3])
+        view.set_text(view.text[:start])
+        self.assertIsNone(view.selected_range())
+
+    def test_click_clears_and_double_click_selects_a_word(self):
+        view, copies = self.make('hello 世界 word\nnext', width=40, height=5)
+        view.begin_drag(2)
+        self.assertEqual(view.end_drag(2), '')
+        self.assertIsNone(view.selected_range())
+        view.begin_drag(2)
+        self.assertEqual(view.end_drag(2), 'hello')
+        view.wait_copy()
+        self.assertEqual(copies, ['hello'])
+        self.assertEqual(view.selected_range(), (0, 5))
+        view.begin_drag(7)
+        view.end_drag(7)
+        view.begin_drag(7)
+        self.assertEqual(view.end_drag(7), '世界')
+
+    def test_copy_failure_is_reported_not_raised(self):
+        view = chat_tui_view.ConversationView(get_cwidth, copier=Mock(side_effect=OSError('no pbcopy')))
+        view.set_text('abc')
+        view.layout(10, 2)
+        view.begin_drag(0)
+        self.assertEqual(view.end_drag(3), 'abc')
+        self.assertTrue(view.wait_copy())
+        self.assertTrue(view.copy_failed)
+        self.assertIn('複製失敗', view.status())
+
+    def test_copy_runs_off_the_ui_thread_and_refuses_oversized_selections(self):
+        import threading
+        started, release, seen = threading.Event(), threading.Event(), []
+
+        def slow_copier(text):
+            seen.append(threading.current_thread().name)
+            started.set()
+            release.wait(5)
+            return True
+        view = chat_tui_view.ConversationView(get_cwidth, copier=slow_copier)
+        view.set_text('中文' * 10)
+        view.layout(20, 2)
+        view.begin_drag(0)
+        self.assertEqual(view.end_drag(4), '中文中文')      # returns at once: the copy is pending
+        self.assertTrue(started.wait(2))
+        self.assertEqual(view.status(), '複製中…')
+        self.assertTrue(view.copy_pending())
+        release.set()
+        self.assertTrue(view.wait_copy())
+        self.assertEqual(seen, ['llmtool-clipboard'])
+        self.assertEqual(view.status(), '已複製 4 字')
+        with patch('llmtool.chat_tui_view.COPY_LIMIT_BYTES', 8):
+            calls = []
+            view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: calls.append(t) or True)
+            view.set_text('中文' * 10)
+            view.layout(20, 2)
+            view.begin_drag(0)
+            self.assertEqual(view.end_drag(4), '')           # 12 UTF-8 bytes > 8: refused
+            self.assertEqual(calls, [])
+            self.assertTrue(view.copy_failed)
+            self.assertEqual(view.selected_range(), (0, 4))   # still highlighted
+            self.assertEqual(view.status(), '選取超過複製上限 0 KB')
+            view.begin_drag(0)
+            self.assertEqual(view.end_drag(2), '中文')       # 6 bytes: copied
+            self.assertTrue(view.wait_copy())
+            self.assertEqual(calls, ['中文'])
+
+    def test_double_click_word_goes_through_the_byte_limit_and_a_bounded_scan(self):
+        # Codex review v3: select_word sliced the whole word and bypassed copy_range.
+        calls = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: calls.append(t) or True)
+        word = '中' * 400000                                   # 1.2 MB of UTF-8, no blanks
+        view.set_text('a ' + word + ' b')
+        view.layout(80, 10)
+        with patch('llmtool.chat_tui_view.utf8_size', wraps=chat_tui_view.utf8_size) as sized:
+            self.assertEqual(view.select_word(2 + 1000), '')   # refused
+            sized.assert_called_once()
+        self.assertEqual(calls, [])
+        self.assertTrue(view.copy_failed)
+        self.assertEqual(view.status(), '選取超過複製上限 1024 KB')
+        self.assertEqual(view.selected_range(), (2, 2 + len(word)))   # selected, not copied
+        with patch('llmtool.chat_tui_view.WORD_SCAN_LIMIT', 5):
+            self.assertEqual(view.select_word(2 + 1000), '中' * 10)    # bounded scan: 5 each way
+            self.assertTrue(view.wait_copy())
+        self.assertEqual(calls, ['中' * 10])
+
+    def test_rapid_copies_are_serialized_and_the_newest_wins(self):
+        # Codex review v3: independent workers could run pbcopy concurrently and an older
+        # one could overwrite the clipboard or report after a newer copy.
+        import threading
+        release = threading.Event()
+        running, overlap, order = [0], [0], []
+
+        def slow_copier(text):
+            running[0] += 1
+            overlap[0] = max(overlap[0], running[0])
+            order.append(text)
+            if text == 'first':
+                release.wait(5)
+            running[0] -= 1
+            return text != 'first'                              # the stale one even fails
+        view = chat_tui_view.ConversationView(get_cwidth, copier=slow_copier)
+        view.set_text('first second third')
+        view.layout(80, 2)
+        self.assertTrue(view.copy('first'))
+        for _ in range(100):
+            if order:
+                break
+            time.sleep(0.01)
+        self.assertTrue(view.copy('second'))                    # queued behind the running one
+        self.assertTrue(view.copy('third'))                     # supersedes 'second' in the queue
+        self.assertEqual(view.status(), '複製中…')
+        release.set()
+        self.assertTrue(view.wait_copy())
+        self.assertEqual(order, ['first', 'third'])             # serialized, newest wins
+        self.assertEqual(overlap[0], 1)                         # never two copier calls at once
+        self.assertFalse(view.copy_failed)                      # the stale failure is ignored
+        self.assertEqual(view.status(), '已複製 5 字')          # describes 'third'
+
+    def test_streamed_chunks_rewrap_only_the_changed_tail(self):
+        # QA D2: with > 4096 lines every chunk re-wrapped everything (476 ms per chunk at
+        # 6000 lines). Only the changed line(s) are wrapped now; the result equals a full wrap.
+        lines = ['L%05d 中文與 English mixed 長行內容 lorem ipsum dolor sit amet 再加中文確保超過八十欄寬度 abc' % i
+                 for i in range(10000)]
+        text = '\n'.join(lines)
+        view = chat_tui_view.ConversationView(get_cwidth)
+        view.set_text(text)
+        view.layout(80, 21)
+        self.assertEqual(len(view.rows), 20000)
+        wrapper = view._wrapper
+        started = time.monotonic()
+        with patch.object(wrapper, 'line_rows', wraps=wrapper.line_rows) as wrapped:
+            for i in range(100):
+                text += '片段' if i % 10 else '\nnew line'
+                view.set_text(text)
+                view.layout(80, 21)
+                self.assertLessEqual(wrapped.call_count, 2, 'chunk %d' % i)   # the tail only
+                wrapped.reset_mock()
+        elapsed = time.monotonic() - started
+        self.assertLess(elapsed / 100, 0.05)                      # per chunk, generous for CI
+        view.scroll_rows(-5)
+        text = text[:-300] + '\nreplaced tail 中文'                   # a streaming block re-render
+        view.set_text(text)
+        view.layout(80, 21)
+        fresh = chat_tui_view.ConversationView(get_cwidth)
+        fresh.set_text(text)
+        fresh.layout(80, 21)
+        self.assertEqual(view.rows, fresh.rows)
+        self.assertEqual(view._line_rows, fresh._line_rows)
+        view.layout(45, 21)                                       # a width change: full re-wrap
+        fresh.layout(45, 21)
+        self.assertEqual(view.rows, fresh.rows)
+
+    def test_copy_worker_exit_and_enqueue_are_atomic(self):
+        # Codex review v4: a copy arriving after the worker saw an empty queue but before its
+        # thread died found the old thread "alive", started no worker, and was never copied.
+        import threading
+        order = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: order.append(t) or True)
+        view.set_text('x')
+        view.layout(10, 2)
+
+        class StillAlive:            # the old worker thread object, not yet finished
+            def is_alive(self):
+                return True
+
+            def join(self, timeout=None):
+                pass
+        view._copy_thread = StillAlive()
+        view._copy_next = None
+        view._copy_worker()                                   # the worker's last pass
+        self.assertIsNone(view._copy_thread)                  # cleared under the lock
+        self.assertTrue(view.copy('late'))                    # so this starts a worker
+        self.assertTrue(view.wait_copy())
+        self.assertEqual(order, ['late'])
+        # Stress: requests from two threads are never lost and the last one wins.
+        done = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: done.append(t) or True)
+        view.set_text('x')
+        view.layout(10, 2)
+
+        def burst(tag):
+            for i in range(200):
+                view.copy('%s%03d' % (tag, i))
+        threads = [threading.Thread(target=burst, args=(tag,)) for tag in 'ab']
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        last = view._copy_next[1] if view._copy_next else None
+        self.assertTrue(view.wait_copy())
+        self.assertIsNone(view._copy_next)
+        self.assertIsNone(view._copy_thread)
+        self.assertTrue(done[-1] in ('a199', 'b199') or done[-1] == last)
+        self.assertEqual(view.status(), '已複製 4 字')
+
+    def test_oversized_selection_is_refused_without_measuring_or_building_it_whole(self):
+        # Codex review v2: the limit check must not encode (or slice) the whole selection on
+        # the UI thread. Measured chunks are bounded and the scan stops at the first excess.
+        text = '中文abc' * 400000                              # 2 M chars, ~3.2 MB of UTF-8
+        measured = []
+
+        def measure(part):
+            measured.append(len(part))
+            return len(part.encode('utf-8'))
+        size = chat_tui_view.utf8_size(text, 0, len(text), 1024 * 1024, measure=measure)
+        self.assertGreater(size, 1024 * 1024)
+        self.assertLessEqual(len(measured), 1024 * 1024 // chat_tui_view.COPY_SCAN_CHUNK + 1)
+        self.assertTrue(all(n <= chat_tui_view.COPY_SCAN_CHUNK for n in measured))
+        self.assertEqual(chat_tui_view.utf8_size('中文abc', 0, 5, 100), 9)   # exact under the limit
+        self.assertEqual(chat_tui_view.utf8_size(text, 10, 10, 100), 0)
+        calls = []
+        view = chat_tui_view.ConversationView(get_cwidth, copier=lambda t: calls.append(t) or True)
+        view.set_text(text)
+        view.layout(80, 10)
+        view.begin_drag(0)
+        with patch('llmtool.chat_tui_view.utf8_size', wraps=chat_tui_view.utf8_size) as sized:
+            self.assertEqual(view.end_drag(len(text)), '')
+            sized.assert_called_once_with(text, 0, len(text), chat_tui_view.COPY_LIMIT_BYTES)
+        self.assertEqual(calls, [])
+        self.assertIsNone(view._copy_thread)
+        self.assertEqual(view.status(), '選取超過複製上限 1024 KB')
+        self.assertEqual(view.selected_range(), (0, len(text)))
+
+    def test_wrapping_and_clicks_keep_grapheme_clusters_whole(self):
+        family, flag, accented, heart = ('\U0001F468\u200d\U0001F469\u200d\U0001F467',
+                                        '\U0001F1F9\U0001F1FC', 'e\u0301', '\u2764\ufe0f')
+        line = 'ab' + family + 'cd' + flag + accented + 'f中' + heart + 'g'
+        wrapper = chat_tui_view.Wrapper(get_cwidth)
+        self.assertEqual([line[s:e] for s, e, _w in wrapper.clusters(line)],
+                         ['a', 'b', family, 'c', 'd', flag, accented, 'f', '中', heart, 'g'])
+        # Widths are what prompt_toolkit's renderer draws (per code point), so rows never overflow.
+        self.assertEqual([w for _s, _e, w in wrapper.clusters(line)],
+                         [1, 1, 6, 1, 1, 4, 1, 1, 2, 1, 1])
+        for width in range(4, 25):
+            rows = [line[s:e] for s, e in wrapper.line_rows(line, width)]
+            self.assertEqual(''.join(rows), line)
+            for row in rows:
+                for cluster in (family, flag, accented, heart):
+                    self.assertFalse(0 < sum(1 for c in cluster if c in row) < len(cluster),
+                                     'width %d split %r in %r' % (width, cluster, row))
+                self.assertFalse(row.endswith('\u200d') or row.startswith('\u0301'))
+                self.assertLessEqual(sum(get_cwidth(c) for c in row), max(width, 6))
+        view, copies = self.make(line, width=8, height=4)
+        self.assertEqual(view.offset_at(0, 2), 2)       # family starts at column 2
+        self.assertEqual(view.offset_at(0, 5), 2)       # inside the family: its start
+        self.assertEqual(view.offset_at(1, 3), line.index(flag))   # inside the flag
+        view.begin_drag(view.offset_at(0, 3))
+        self.assertEqual(view.end_drag(view.offset_at(1, 3)), family + 'cd')
+        view.wait_copy()
+        self.assertEqual(copies, [family + 'cd'])
+
+    def test_clipboard_tool_is_called_with_the_exact_text(self):
+        with patch('llmtool.chat_tui_view.shutil.which', return_value='/usr/bin/pbcopy'), \
+                patch('llmtool.chat_tui_view.subprocess.run') as run:
+            run.return_value = Mock(returncode=0)
+            self.assertTrue(chat_tui_view.copy_to_clipboard('中文 text\nline'))
+            self.assertEqual(run.call_args.kwargs['input'], '中文 text\nline'.encode('utf-8'))
+        with patch('llmtool.chat_tui_view.shutil.which', return_value=None):
+            self.assertFalse(chat_tui_view.copy_to_clipboard('x'))
+
+    def test_parse_mouse_sgr_and_x10(self):
+        from prompt_toolkit.mouse_events import MouseButton, MouseEventType
+        self.assertEqual(chat_tui_view.parse_mouse('\x1b[<64;10;5M'),
+                         (MouseEventType.SCROLL_UP, MouseButton.NONE, 9, 4))
+        self.assertEqual(chat_tui_view.parse_mouse('\x1b[<32;3;2M'),
+                         (MouseEventType.MOUSE_MOVE, MouseButton.LEFT, 2, 1))
+        self.assertEqual(chat_tui_view.parse_mouse('\x1b[<0;3;2m'),
+                         (MouseEventType.MOUSE_UP, MouseButton.LEFT, 2, 1))
+        self.assertEqual(chat_tui_view.parse_mouse('\x1b[M' + chr(32) + chr(33) + chr(34)),
+                         (MouseEventType.MOUSE_DOWN, MouseButton.LEFT, 0, 1))
+        self.assertIsNone(chat_tui_view.parse_mouse('\x1b[<999;1;1M'))
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt_toolkit not installed')
+class ScrollSelectTests(Base):
+    """W42 Owner acceptance: wheel, reading position, drag selection and copy, on screen."""
+
+    drive = WidgetTests.drive
+    idle, until = staticmethod(WidgetTests.idle), staticmethod(WidgetTests.until)
+
+    def setUp(self):
+        super().setUp()
+        self.copies = []
+        patch('llmtool.chat_tui_view.copy_to_clipboard',
+              side_effect=lambda text: self.copies.append(text) or True).start()
+
+    async def settle(self, ui, seconds=0.08):
+        ui.app.invalidate()
+        await asyncio.sleep(seconds)
+
+    def test_wheel_up_moves_wrapped_cjk_lines_one_row_per_event_and_back(self):
+        # Owner simulation 1: 120 wrapped CJK/English lines, 12 wheel-ups left the view
+        # stuck (vertical_scroll 121 throughout); short lines moved one line per event.
+        seen = {}
+
+        async def fill(ui):
+            ui.append(CJK_LINES)
+            await self.settle(ui)
+            rows = pane_rows(ui)
+            self.assertIn('119 中文長行測試', ''.join(rows))   # bottom shown
+            seen['bottom'] = rows
+
+        async def wheel_up(ui):
+            previous = pane_rows(ui)
+            for step in range(1, 13):
+                ui.app.key_processor.feed(KeyPress(Keys.Vt100MouseEvent, WHEEL_UP))
+                ui.app.key_processor.process_keys()
+                await self.settle(ui)
+                rows = pane_rows(ui)
+                # Exactly one row of movement: the old top row is now the second row.
+                self.assertEqual(rows[1], previous[0], 'wheel up #%d' % step)
+                self.assertNotEqual(rows[0], previous[0], 'wheel up #%d' % step)
+                previous = rows
+            seen['up'] = previous
+            self.assertNotIn('最新', ui.status_text())
+            self.assertIn('捲動', ui.status_text())
+
+        async def wheel_down(ui):
+            previous = pane_rows(ui)
+            for step in range(1, 13):
+                ui.app.key_processor.feed(KeyPress(Keys.Vt100MouseEvent, WHEEL_DOWN))
+                ui.app.key_processor.process_keys()
+                await self.settle(ui)
+                rows = pane_rows(ui)
+                self.assertEqual(rows[0], previous[1], 'wheel down #%d' % step)
+                previous = rows
+            self.assertEqual(previous, seen['bottom'])   # back where it started: following
+            self.assertEqual(ui.status_text().split(' | ')[-3], '最新')
+
+        ui, _ = self.drive(['draft', fill, wheel_up, wheel_down,
+                            lambda ui: self.assertEqual(ui.input.text, 'draft')],
+                           size=[Size(rows=24, columns=80)])
+        self.factory.assert_not_called()
+
+    def test_short_lines_scroll_one_row_per_wheel_event_and_keep_position_on_append(self):
+        async def fill(ui):
+            ui.append(SHORT_LINES)
+            await self.settle(ui)
+            self.assertTrue(pane_rows(ui)[-1].startswith('119 short line'))
+
+        async def scrolled(ui):
+            await self.settle(ui)
+            self.assertTrue(pane_rows(ui)[-1].startswith('107 short line'))   # 12 rows up
+            ui.append('STREAM NEW OUTPUT')
+            await self.settle(ui)
+            self.assertTrue(pane_rows(ui)[-1].startswith('107 short line'))   # position kept
+            self.assertIn('⇣新輸出', ui.status_text())
+
+        async def back(ui):
+            await self.settle(ui)
+            self.assertTrue(pane_rows(ui)[-1].startswith('STREAM NEW OUTPUT'))
+            self.assertIn('最新', ui.status_text())
+
+        self.drive([fill, WHEEL_UP * 12, scrolled, WHEEL_DOWN * 14, back],
+                   size=[Size(rows=24, columns=80)])
+
+    def test_drag_to_the_top_edge_keeps_scrolling_and_extends_the_selection(self):
+        # Owner simulation 2: ten drag events at the top edge and a 0.7 s hold never
+        # scrolled. Now each edge event and each 50 ms tick scroll one row.
+        tops = {}
+
+        async def fill(ui):
+            ui.append(SHORT_LINES)
+            await self.settle(ui)
+
+        async def dragged(ui):
+            await self.settle(ui)
+            tops['before'] = pane_rows(ui)[0]
+            self.assertGreater(selected_cells(ui), 0)
+
+        async def held(ui):
+            await asyncio.sleep(0.4)      # held at the edge without any new mouse event
+            await self.settle(ui)
+            tops['held'] = pane_rows(ui)[0]
+            self.assertLessEqual(int(tops['held'][:3]), int(tops['before'][:3]) - 3)
+
+        def released(ui):
+            self.assertTrue(ui.view.wait_copy())
+            text = ui.view.selected_text()
+            start, end = ui.view.selected_range()
+            _line, row_start, _row_end = ui.view.rows[ui.view.row_of(start)]
+            top_label = int(ui.view.text[row_start:row_start + 3])
+            # Extended to column 4 of the top row reached while held (or further up).
+            self.assertLessEqual(top_label, int(tops['held'][:3]))
+            self.assertEqual(start - row_start, 4)
+            self.assertTrue(text.startswith('short line'))
+            _line, anchor_start, _row_end = ui.view.rows[ui.view.row_of(end)]
+            anchor_label = int(ui.view.text[anchor_start:anchor_start + 3])   # the press row
+            self.assertEqual(len(text.splitlines()), anchor_label - top_label + 1)
+            self.assertEqual(self.copies, [text])
+            self.assertIn('已複製 %d 字' % len(text), ui.status_text())
+
+        self.drive([fill, press(5, 11), drag(5, 10), drag(5, 1), drag(5, 1), drag(5, 1), dragged,
+                    held, release(5, 1), released, lambda ui: ui.view.clear_selection()],
+                   size=[Size(rows=24, columns=80)])
+
+    def test_drag_below_the_pane_scrolls_down_and_selection_survives_streaming(self):
+        # Owner simulation 3: one _block_render() call dropped the selection.
+        state = {}
+
+        async def fill(ui):
+            ui.append(CJK_LINES)
+            await self.settle(ui)
+            for _ in range(40):
+                ui.app.key_processor.feed(KeyPress(Keys.Vt100MouseEvent, WHEEL_UP))
+            ui.app.key_processor.process_keys()
+            await self.settle(ui)
+
+        async def selected(ui):
+            await self.settle(ui)
+            self.assertGreater(selected_cells(ui), 50)   # a first drag selects: no click to focus
+            state['text'] = ui.view.selected_text()
+            self.assertGreater(len(state['text']), 100)
+            state['cells'] = selected_cells(ui)
+            state['top'] = pane_rows(ui)[0]
+            # A streaming re-render below the selection keeps it and the reading position.
+            ui.stream_raw = ''
+            ui.busy, ui.worker_kind = True, 'chat'
+            ui._stream_attach('stream slice 中文')
+            ui._block_render(ui.stream_start, 'stream slice 中文 more')
+            ui.busy = False
+            await self.settle(ui)
+            self.assertEqual(ui.view.selected_text(), state['text'])
+            self.assertEqual(selected_cells(ui), state['cells'])
+            self.assertEqual(pane_rows(ui)[0], state['top'])
+            self.assertTrue(ui.conversation.text.endswith('stream slice 中文 more'))
+
+        async def resized(ui):
+            await self.settle(ui)
+            self.assertEqual(ui.view.selected_text(), state['text'])   # offsets, not cells
+            self.assertIn(state['top'][:8], ''.join(pane_rows(ui)[:2]))   # same text on top
+
+        size = [Size(rows=24, columns=80)]
+
+        def resize(ui):
+            size[0] = Size(rows=24, columns=45)
+            ui.app._on_resize()
+
+        self.drive([fill, press(3, 2), drag(3, 5), drag(3, 20), drag(3, 20), release(3, 20),
+                    selected, resize, resized, lambda ui: ui.view.clear_selection()], size=size)
+
+    def test_click_on_the_first_or_last_row_never_scrolls_selects_or_copies(self):
+        # QA D1: a plain click on the pane's first/last row scrolled one row, selected and
+        # overwrote the clipboard; a double-click there copied the wrong fragment.
+        seen = {}
+
+        async def fill(ui):
+            ui.append(SHORT_LINES)
+            await self.settle(ui)
+            for _ in range(20):
+                ui.app.key_processor.feed(KeyPress(Keys.Vt100MouseEvent, WHEEL_UP))
+            ui.app.key_processor.process_keys()
+            await self.settle(ui)
+            seen['rows'] = pane_rows(ui)
+            self.assertTrue(seen['rows'][0].startswith('0'))
+
+        async def unchanged(ui):
+            await self.settle(ui)
+            self.assertEqual(pane_rows(ui), seen['rows'])
+            self.assertIsNone(ui.view.selected_range())
+            self.assertFalse(ui.view.following)
+            self.assertEqual(self.copies, [])
+
+        async def word(ui):
+            await self.settle(ui)
+            self.assertEqual(pane_rows(ui), seen['rows'])            # still no scroll
+            self.assertTrue(ui.view.wait_copy())
+            self.assertEqual(self.copies, [seen['rows'][0][:3]])      # the label under the click
+            ui.view.clear_selection()
+
+        async def to_bottom(ui):
+            ui.view.to_bottom()
+            await self.settle(ui)
+            self.assertTrue(ui.view.following)
+
+        async def still_following(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.following)
+            self.assertIsNone(ui.view.selected_range())
+
+        bottom = 21   # pane rows 1..21 at 24 rows (rule, input, status below)
+        self.drive([fill, press(5, 1), release(5, 1), unchanged,
+                    press(5, bottom), release(5, bottom), unchanged,
+                    press(5, 1), drag(5, 1), release(5, 1), unchanged,       # a motion report in place
+                    press(2, 1), release(2, 1), press(2, 1), release(2, 1), word,
+                    to_bottom, press(5, 1), release(5, 1), still_following],
+                   size=[Size(rows=24, columns=80)])
+
+    def test_pageup_pagedown_arrows_and_home_end_scroll_rows(self):
+        long_reply = '\n'.join('row %d' % i for i in range(200))
+        self.client.complete.return_value = Reply(long_reply, {})
+
+        async def paged_up(ui):
+            await self.settle(ui)
+            self.assertFalse(ui.view.following)
+            page = ui.view.height - 1
+            self.assertEqual(ui.view.top, ui.view.max_top() - 2 * page)
+            ui.append('new while paged up')
+            await self.settle(ui)
+            self.assertEqual(ui.view.top, ui.view.max_top() - 2 * page - 2)   # same text on top
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+
+        async def focused_rows(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.app.layout.has_focus(ui.conversation))
+            top = ui.view.top
+            ui.app.key_processor.feed(KeyPress(Keys.Up))
+            ui.app.key_processor.process_keys()
+            self.assertEqual(ui.view.top, top - 1)
+            ui.app.key_processor.feed(KeyPress(Keys.Down))
+            ui.app.key_processor.process_keys()
+            self.assertEqual(ui.view.top, top)
+            ui.app.key_processor.feed(KeyPress(Keys.Home))
+            ui.app.key_processor.process_keys()
+            self.assertEqual(ui.view.top, 0)
+            ui.app.key_processor.feed(KeyPress(Keys.End))
+            ui.app.key_processor.process_keys()
+            self.assertTrue(ui.view.following)
+
+        ui, _ = self.drive(['question\r', self.idle, '\x1b[5~\x1b[5~', paged_up,
+                            '\t', focused_rows, '\t', '\x1b[5~', '\x1b[6~' * 60,
+                            lambda ui: self.assertTrue(ui.view.following)])
+        self.assertTrue(ui.app.layout.has_focus(ui.input))
+
+    def test_f6_hands_the_mouse_to_the_terminal_and_back(self):
+        async def mouse_off(ui):
+            await self.settle(ui)
+            self.assertFalse(ui.mouse_enabled)
+            self.assertFalse(ui.app.mouse_support())
+            self.assertIn('mouse off; drag to select and copy text with the terminal',
+                          ui.conversation.text)
+            self.assertIn('F6 滑鼠:關', ui.status_text())
+            self.assertLessEqual(get_cwidth(ui.status_text()), 80)
+
+        ui, _ = self.drive(['\x1b[17~', mouse_off, '\x1b[17~',
+                            lambda ui: self.assertTrue(ui.mouse_enabled)],
+                           size=[Size(rows=24, columns=80)])
+        self.assertIn('mouse on; the wheel scrolls the conversation and a drag selects', ui.conversation.text)
+        self.assertIn('Drag', chat_tui.KEY_HELP)
+        self.assertIn('F6', chat_tui.KEY_HELP)
+
+    def test_mouse_modes_include_button_event_tracking(self):
+        output = DummyOutput()
+        output.write_raw = Mock()
+        chat_tui._enable_mouse_drag_reporting(output)
+        output.enable_mouse_support()
+        output.disable_mouse_support()
+        self.assertEqual([c.args[0] for c in output.write_raw.call_args_list],
+                         ['\x1b[?1002h', '\x1b[?1002l'])
+
+    def test_ctrl_c_with_a_selection_copies_and_clears_instead_of_exiting(self):
+        async def selected(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.selected_range())
+            self.assertTrue(ui.view.wait_copy())
+            self.assertEqual(len(self.copies), 1)
+
+        async def after_ctrl_c(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.wait_copy())
+            self.assertIsNone(ui.view.selected_range())
+            self.assertIn('已複製 ', ui.status_text())
+            self.assertIn('再按 Ctrl-C 中斷', ui.status_text())            # QA O1 hint
+            self.assertEqual(self.copies, [self.copies[0], self.copies[0]])
+            self.assertFalse(ui.quit_pending)
+            self.assertIsNone(ui.app.future.result() if ui.app.future.done() else None)
+
+        ui, result = self.drive([lambda ui: ui.append(SHORT_LINES), press(3, 2), drag(3, 4),
+                                 release(3, 4), selected, '\x03', after_ctrl_c])
+        self.assertEqual(result, 0)   # the drive's final Ctrl-C (no selection) still exits
+
+    def test_pane_switch_ends_drag_timer_and_selection_so_ctrl_c_interrupts_again(self):
+        # Codex review v4: with F2/F3/F4 open, a hidden selection kept capturing Ctrl-C, and a
+        # pending edge auto-scroll timer could keep scrolling and extending it.
+        async def dragging_at_edge(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.dragging)
+            self.assertIsNotNone(ui._autoscroll_handle)
+            self.assertTrue(ui.view.selected_range())
+
+        async def events_pane(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.show_events)
+            self.assertFalse(ui.conversation_visible())
+            self.assertIsNone(ui._autoscroll_handle)
+            self.assertFalse(ui.view.dragging)
+            self.assertIsNone(ui.view.selected_range())
+
+        async def selected_then_list(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.view.selected_range())
+            ui.toggle_list(True)
+            await self.settle(ui)
+            self.assertIsNone(ui.view.selected_range())
+            self.assertFalse(ui.conversation_visible())
+
+        async def exited(ui):
+            await self.settle(ui)
+            self.assertFalse(ui.app.is_running)              # Ctrl-C in the list pane exited
+
+        ui, result = self.drive([lambda ui: ui.append(SHORT_LINES), press(5, 11), drag(5, 10),
+                                 drag(5, 1), dragging_at_edge, '\x1b[14~', events_pane,
+                                 '\x1b[14~', press(3, 2), drag(3, 4), release(3, 4),
+                                 selected_then_list, '\x03', exited])
+        self.assertEqual(result, 0)
+        self.assertEqual(len(self.copies), 1)                 # only the drag release copied
+
+    def test_clicks_on_the_pane_keep_input_focus_and_wheel_never_recalls_history(self):
+        async def check(ui):
+            await self.settle(ui)
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+            self.assertEqual(ui.input.text, 'draft')
+            self.assertIsNone(ui.view.selected_range())
+
+        self.drive(['first\r', self.idle, 'draft', press(3, 2), release(3, 2),
+                    WHEEL_UP * 3, WHEEL_DOWN * 3, check])
 
 
 if __name__ == '__main__':

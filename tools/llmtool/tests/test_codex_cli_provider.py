@@ -210,7 +210,7 @@ else:
 
     def test_prompt_larger_than_pipe_buffer_is_transported(self):
         prompt = "evidence " * 32768
-        self.client().complete([{"role": "user", "content": prompt}])
+        self.client(timeout_seconds=30).complete([{"role": "user", "content": prompt}])
         self.assertEqual(self.captured()["prompt"], "USER:\n" + prompt)
 
     def test_provider_never_opens_auth_or_prompt_files(self):
@@ -306,7 +306,7 @@ else:
     def test_descendant_pipe_handles_are_bounded_by_timeout(self):
         self.fake("descendant")
         with self.assertRaisesRegex(LLMToolError, "^Codex CLI timed out$"):
-            self.complete(timeout_seconds=1)
+            self.complete(timeout_seconds=3)
         self.assertFalse(Path(self.captured()["cwd"]).exists())
 
     def test_nonzero_error_does_not_leak_prompt_stderr_or_secret(self):

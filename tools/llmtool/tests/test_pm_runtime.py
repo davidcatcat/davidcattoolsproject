@@ -79,10 +79,10 @@ class PMRuntimeTests(unittest.TestCase):
         self.root = Path(self.temp.name) / 'state'
         pm_runtime._ensure_state_dir(self.root)
         self.cwd = self.temp.name
-        self.observe = patch.object(pm_runtime.active_pm_inbox,
-                                    'observe_claude_session', return_value=self.cwd)
-        self.observe.start()
-        self.addCleanup(self.observe.stop)
+        self.observe_patcher = patch.object(pm_runtime.active_pm_inbox,
+                                            'observe_claude_session', return_value=self.cwd)
+        self.observe = self.observe_patcher.start()
+        self.addCleanup(self.observe_patcher.stop)
         pm_runtime._write_json_atomic(self.root, pm_runtime._binding_path(self.root, SESSION), {
             'runtime': 'claude-code', 'native_session_id': SESSION, 'cwd': self.cwd,
             'dedicated': True, 'created_at': pm_runtime._timestamp(lambda: 1),
@@ -111,6 +111,38 @@ class PMRuntimeTests(unittest.TestCase):
         self.addCleanup(runtime.close)
         return runtime
 
+    def test_thinking_blocks_are_status_only_and_never_answer_text(self):
+        # Owner #304: a reasoning block must not render as the PM answer; the UI gets
+        # a THINKING status event and only text blocks become TEXT_DELTA/ASSISTANT_TEXT.
+        process = FakeProcess(encoded(
+            {'type': 'stream_event', 'event': {'type': 'message_start', 'message': {}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': 0,
+             'content_block': {'type': 'thinking', 'thinking': ''}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 0,
+             'delta': {'type': 'thinking_delta', 'thinking': 'PRIVATE_REASONING no tools needed'}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_stop', 'index': 0}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': 1,
+             'content_block': {'type': 'text', 'text': ''}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_delta', 'index': 1,
+             'delta': {'type': 'text_delta', 'text': '台北101'}}},
+            {'type': 'stream_event', 'event': {'type': 'content_block_start', 'index': 2,
+             'content_block': {'type': 'redacted_thinking', 'data': 'OPAQUE'}}},
+            {'type': 'assistant', 'message': {'content': [
+                {'type': 'thinking', 'thinking': 'PRIVATE_REASONING no tools needed', 'signature': 'x'},
+                {'type': 'text', 'text': '台北101'}]}},
+            {'type': 'result', 'result': '台北101', 'usage': {'input_tokens': 1}}))
+        runtime = self.runtime(process)
+        runtime.open()
+        events = list(runtime.send('說出台北觀光地點'))
+        self.assertEqual([event['type'] for event in events],
+                         ['THINKING', 'TEXT_DELTA', 'THINKING', 'ASSISTANT_TEXT', 'TURN_END'])
+        self.assertEqual([event['text'] for event in events if 'text' in event], ['台北101', '台北101'])
+        self.assertNotIn('PRIVATE_REASONING', json.dumps(events, ensure_ascii=False))
+        self.assertNotIn('OPAQUE', json.dumps(events, ensure_ascii=False))
+        self.assertEqual(events[-1]['result_text'], '台北101')
+        history = pm_runtime.read_history(SESSION, state_root=self.root)
+        self.assertNotIn('PRIVATE_REASONING', json.dumps(history, ensure_ascii=False))
+
     def test_argv_cwd_stream_events_and_history(self):
         process = FakeProcess(encoded(
             {'type': 'stream_event', 'event': {'type': 'content_block_delta',
@@ -123,12 +155,15 @@ class PMRuntimeTests(unittest.TestCase):
             {'type': 'result', 'result': 'Done', 'usage': {'input_tokens': 1}}))
         runtime = self.runtime(process)
         runtime.open()
+        self.observe.assert_not_called()
         events = list(runtime.send('Owner request'))
         argv, cwd, _ = self.calls[0]
         self.assertEqual(argv, ['claude', '-p', '--input-format', 'stream-json',
                                 '--output-format', 'stream-json', '--verbose',
                                 '--include-partial-messages', '--session-id', SESSION,
-                                '--permission-prompts', 'none'])
+                                '--permission-prompts', 'none',
+                                '--strict-mcp-config', '--mcp-config', '{"mcpServers":{}}',
+                                '--append-system-prompt', pm_runtime.PM_SESSION_INSTRUCTION])
         self.assertEqual(cwd, self.cwd)
         self.assertEqual([event['type'] for event in events],
                          ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TOOL_USE', 'TOOL_RESULT', 'TURN_END'])
@@ -139,6 +174,29 @@ class PMRuntimeTests(unittest.TestCase):
         page = pm_runtime.read_history(SESSION, state_root=self.root)
         self.assertEqual(page['turns'][0]['status'], 'COMPLETED')
         self.assertEqual(page['turns'][0]['owner_text'], 'Owner request')
+
+    def test_argv_fixes_tool_set_and_adds_pm_instruction_on_every_launch(self):
+        # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated
+        # the prompt cache, so the PM process runs with a fixed, empty MCP set (claude CLI
+        # 2.1.312 --strict-mcp-config + --mcp-config); #304: the PM answers without a
+        # preamble when it uses no tool (--append-system-prompt). Permission policy unchanged.
+        runtime = self.runtime(FakeProcess())
+        runtime.open()
+        runtime.close()
+        argv = self.calls[-1][0]
+        self.assertIn('--strict-mcp-config', argv)
+        self.assertEqual(json.loads(argv[argv.index('--mcp-config') + 1]), {'mcpServers': {}})
+        self.assertEqual(argv[argv.index('--mcp-config') + 1], pm_runtime.PM_MCP_CONFIG)
+        instruction = argv[argv.index('--append-system-prompt') + 1]
+        self.assertEqual(instruction, pm_runtime.PM_SESSION_INSTRUCTION)
+        self.assertIn('preamble', instruction)
+        self.assertIn('without calling any tool', instruction)
+        self.assertEqual(argv[argv.index('--permission-prompts') + 1], 'none')
+        self.assertNotIn('--dangerously-skip-permissions', argv)
+        self.assertNotIn('--permission-mode', argv)
+        self.assertEqual(argv.count('--strict-mcp-config'), 1)
+        self.assertEqual(argv.count('--append-system-prompt'), 1)
+        self.assertEqual(argv.index('--permission-prompts'), argv.index(SESSION) + 1)
 
     def test_busy_lock_does_not_start_second_process(self):
         first, second = self.runtime(), self.runtime()
@@ -243,31 +301,21 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertFalse(binding['session_started'])
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
-        class RealCLIShapeFake:
-            def __init__(self, argv):
-                self.argv = argv
-                self.stdin = None if '-p' not in argv else io.BytesIO()
-                self.error = ('Error: Input must be provided either through stdin or as a '
-                              'prompt argument when using --print')
-
-            def wait(self, timeout=None):
-                return 1 if self.stdin is None else 0
-
-        legacy = RealCLIShapeFake(['claude', '--session-id', SESSION])
-        self.assertIsNone(legacy.stdin)
-        self.assertEqual(legacy.wait(), 1)
-        self.assertIn('Input must be provided either through stdin', legacy.error)
-
     def test_completed_first_turn_marks_binding_for_resume_on_next_open(self):
         process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
-        runtime = self.runtime(process)
+        runtime = self.runtime(process, clock=time.time)
         runtime.open()
         list(runtime.send('first request'))
         runtime.close()
         binding = pm_runtime.current_binding(SESSION, state_root=self.root)
         self.assertTrue(binding['session_started'])
+        transcript = pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+        transcript.parent.mkdir(parents=True, exist_ok=True)
+        transcript.write_text('{}', encoding='utf-8')
+        self.observe_patcher.stop()
 
-        later = self.runtime(FakeProcess())
+        later = self.runtime(FakeProcess(), clock=time.time)
         later.open()
         argv = self.calls[-1][0]
         self.assertIn('--resume', argv)
@@ -330,10 +378,10 @@ class PMRuntimeTests(unittest.TestCase):
 
     def test_open_refuses_non_dedicated_session(self):
         (self.root / (SESSION + '.binding.json')).unlink()
+        self.observe_patcher.stop()
         with self.assertRaises(LLMToolError) as raised:
             self.runtime().open()
-        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_NOT_DEDICATED')
-        self.assertIn('create', str(raised.exception))
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
 
     def test_open_failure_after_lifecycle_registration_unregisters(self):
         register = pm_runtime._register_lifecycle
@@ -517,6 +565,46 @@ class PMRuntimeTests(unittest.TestCase):
             with self.assertRaises(LLMToolError) as raised:
                 runtime.open()
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_LIVE_ELSEWHERE')
+
+    def _fresh_transcript_path(self):
+        self.observe_patcher.stop()
+        return pm_runtime.active_pm_inbox.claude_session_file(
+            SESSION, self.cwd, {'HOME': self.temp.name})
+
+    def test_first_open_refuses_symlinked_transcript_parent_before_launch(self):
+        transcript = self._fresh_transcript_path()
+        elsewhere = Path(self.temp.name) / 'elsewhere'
+        elsewhere.mkdir()
+        transcript.parent.parent.mkdir(parents=True)
+        transcript.parent.symlink_to(elsewhere, target_is_directory=True)
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
+        self.assertEqual(self.calls, [])
+
+    def test_first_open_refuses_dangling_transcript_symlink_before_launch(self):
+        transcript = self._fresh_transcript_path()
+        transcript.parent.mkdir(parents=True)
+        transcript.symlink_to(Path(self.temp.name) / 'missing.jsonl')
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_INVALID')
+        self.assertEqual(self.calls, [])
+
+    def test_first_open_without_transcript_in_real_directory_uses_session_id(self):
+        transcript = self._fresh_transcript_path()
+        transcript.parent.mkdir(parents=True)
+        self.assertFalse(transcript.exists())
+        runtime = self.runtime()
+        runtime.open()
+        argv = self.calls[0][0]
+        self.assertIn('--session-id', argv)
+        self.assertNotIn('--resume', argv)
+        runtime.close()
 
     def test_stream_metadata_and_text_rebuild_without_duplication(self):
         process = FakeProcess(encoded(

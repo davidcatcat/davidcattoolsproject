@@ -12,7 +12,7 @@ TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
 EXECUTOR, REVIEWER, PR = 'executor-d6', 'reviewer-d6', 42
 
 
-def _store(root):
+def _store(root, *, claim_state='DISPATCHED', account_mode='DEFAULT_SECOND_ACCOUNT'):
     contract = {
         'schema_version': 1, 'contract_version': 1, 'task_id': TASK,
         'goal': 'test review results', 'authorized_scope': ['pm-planning'],
@@ -22,8 +22,9 @@ def _store(root):
     parsed = task_store.parse_task_contract(json.dumps(contract))
     stamp = '2026-10-27T00:00:00Z'
     claim = {'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD, 'version': 1,
-             'state': 'DISPATCHED', 'reviewer_task': REVIEWER,
-             'native_session_id': 'review-session', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+             'state': claim_state, 'reviewer_task': REVIEWER,
+             'native_session_id': None if claim_state == 'CLAIMED' else 'review-session',
+             'account_mode': account_mode,
              'claimed_at': stamp, 'updated_at': stamp}
     record = {
         'schema_version': 2, 'task_id': TASK, 'run_id': RUN,
@@ -44,15 +45,66 @@ def _store(root):
     return store
 
 
+def _developer_record(family):
+    cli_family = family in ('codex', 'opencode', 'agy')
+    waiting = family == 'claude'
+    artifact = None if waiting else 'diff'
+    return {
+        'assignment_id': 'e' * 32, 'selection_source': 'PM',
+        'state': 'DEVELOPER_PENDING' if waiting else 'DEVELOPER_RESPONDED',
+        'provider_profile': family,
+        'provider_type': {'claude': None, 'codex': 'codex-cli',
+                          'company-gw': 'openai-compatible',
+                          'opencode': 'opencode-cli', 'agy': 'agy-cli'}[family],
+        'model': None if family in ('claude', 'company-gw') else 'gpt-6-luna',
+        'backend_session_semantics': ('CLI_REPORTED_SESSION_ID' if cli_family
+                                      else 'NO_NATIVE_SESSION_ID_EXPOSED'),
+        'session_id': 'developer-session', 'source_sha': HEAD,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': ['tools/llmtool'], 'write_paths': ['tools/llmtool'],
+        'acceptance': ['Record a bounded review disposition.'], 'context_sha256': 'f' * 64,
+        'egress_basis': 'Bounded task context', 'input_bytes': 1,
+        'max_tokens': None if cli_family else 1000,
+        'artifact_format': 'unified_diff', 'artifact': artifact,
+        'artifact_sha256': hashlib.sha256(artifact.encode()).hexdigest()
+        if artifact is not None else None,
+        'usage': None, 'error_code': None,
+        'created_at': '2026-10-27T00:00:00Z',
+        **({'owner_assignment_ref':
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854'}
+           if family == 'claude' else {}),
+    }
+
+
+class FamilyStore:
+    def __init__(self, store, family):
+        self.store, self.family = store, family
+
+    def get(self, task_id):
+        record = self.store.get(task_id)
+        record['developer'] = _developer_record(self.family)
+        return record
+
+    def record_completion_event(self, *args, **kwargs):
+        return self.store.record_completion_event(*args, **kwargs)
+
+
 def _comment(status='PASS', *, actor='Claude', head=HEAD, version=1,
              comment_id=7, created='2026-10-27T01:00:00Z', extra=''):
     stamp = 'PASS' if status == 'PASS' else 'FAIL' if status in ('FAIL', 'FIX') else status
     marker_status = 'PASS' if status == 'PASS' else 'FIX' if status == 'FIX' else 'FAIL'
     body = (f'<!-- activity: type=review_verdict actor={actor} target=PM status={marker_status} -->\n'
             f'Verdict: {stamp} | Version: v{version} | HEAD: {head}\n')
-    if actor == 'Claude' and status == 'PASS':
-        body += (f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
-                 f'contract={CONTRACT} head={head}\nFORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n')
+    if actor in ('Claude', 'Codex'):
+        if actor == 'Codex' and status == 'PASS':
+            body += ('FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+                     f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
+                     f'contract={CONTRACT} head={head}\n')
+        else:
+            body += (f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={RUN} '
+                     f'contract={CONTRACT} head={head}\n')
+            if status == 'PASS':
+                body += 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
     body += extra
     return {'id': comment_id, 'body': body, 'created_at': created, 'updated_at': created,
             'user': {'login': 'shared-agent'}}
@@ -66,13 +118,14 @@ class ReviewResultTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_result(self, comments, **kwargs):
+    def run_result(self, comments, *, github_get=None, **kwargs):
         digest = self.store.get(TASK)['task_binding']['contract_digest']
         comments = [dict(comment, body=comment['body'].replace(CONTRACT, digest))
                     for comment in comments]
         return review_result.record_review_result(
             store=self.store, task_id=TASK, executor_task=EXECUTOR, pr_number=PR,
-            github_get=lambda path: comments, **kwargs)
+            github_get=(lambda path: comments) if github_get is None else github_get,
+            **kwargs)
 
     def test_formal_claude_pass_is_recorded_and_replay_is_idempotent(self):
         first = self.run_result([_comment()])
@@ -83,6 +136,26 @@ class ReviewResultTests(unittest.TestCase):
         event = self.store.get(TASK)['completion_events'][0]
         self.assertEqual(event['source'], 'REVIEWER')
         self.assertEqual(event['source_sha'], HEAD)
+
+    def test_completed_codex_claim_is_recorded_without_github_fetch(self):
+        codex_root = Path(self.temp.name) / 'codex'
+        codex_root.mkdir(mode=0o700)
+        codex_store = _store(codex_root, claim_state='CLAIMED', account_mode='CODEX_CLI')
+        record = codex_store.get(TASK)
+        digest = record['task_binding']['contract_digest']
+        claim = record['review_dispatch_claim'][0]
+        review_text = _comment(actor='Codex')['body'].replace(CONTRACT, digest)
+        completed = dict(claim, state='COMPLETED', native_session_id='review-session')
+        completed['review_result'] = {
+            'task_id': TASK, 'run_id': RUN, 'contract_digest': digest,
+            'head': HEAD, 'verdict': 'PASS', 'review_text': review_text,
+        }
+        codex_store.compare_and_update(
+            TASK, expected={'record_sha256': record['record_sha256']},
+            review_dispatch_claim=[completed])
+        self.store = FamilyStore(codex_store, 'claude')
+        result = self.run_result([], github_get=lambda _path: self.fail('unexpected GitHub read'))
+        self.assertEqual(result['state'], 'REVIEW_PASS')
 
     def test_fail_and_blocked_no_verdict(self):
         failed = self.run_result([_comment('FIX')])
@@ -104,6 +177,43 @@ class ReviewResultTests(unittest.TestCase):
 
     def test_codex_pass_is_advisory(self):
         self.assertEqual(self.run_result([_comment(actor='Codex')])['state'], 'NOT_READY')
+
+    def test_bound_codex_pass_is_formal_only_for_claude_task(self):
+        self.store = FamilyStore(self.store, 'claude')
+        self.assertEqual(self.run_result([_comment(actor='Codex')])['state'], 'REVIEW_PASS')
+
+    def test_codex_binding_is_found_after_other_nonempty_lines(self):
+        self.store = FamilyStore(self.store, 'claude')
+        comment = _comment(actor='Codex')
+        lines = comment['body'].splitlines()
+        binding = next(line for line in lines if line.startswith('LLMTOOL-REVIEW-BINDING'))
+        lines.remove(binding)
+        lines.extend(('Finding: reviewed the bound diff', binding))
+        comment['body'] = '\n'.join(lines)
+        self.assertEqual(self.run_result([comment])['state'], 'REVIEW_PASS')
+
+    def test_codex_pass_with_mismatched_binding_is_advisory(self):
+        self.store = FamilyStore(self.store, 'claude')
+        comment = _comment(actor='Codex')
+        comment['body'] = comment['body'].replace(f'task={TASK}', 'task=wrong')
+        self.assertEqual(self.run_result([comment])['state'], 'NOT_READY')
+
+    def test_bound_codex_nonpass_is_recorded_only_for_claude_task(self):
+        self.store = FamilyStore(self.store, 'claude')
+        self.assertEqual(self.run_result([_comment('FIX', actor='Codex')])['state'],
+                         'REVIEW_FAIL')
+
+    def test_unbound_codex_nonpass_is_ignored(self):
+        self.store = FamilyStore(self.store, 'claude')
+        comment = _comment('FIX', actor='Codex')
+        comment['body'] = comment['body'].replace(f'run={RUN}', 'run=wrong')
+        self.assertEqual(self.run_result([comment])['state'], 'NOT_READY')
+
+    def test_codex_pass_stays_advisory_for_codex_and_gw_tasks(self):
+        for family in ('codex', 'company-gw'):
+            self.store = FamilyStore(self.store, family)
+            self.assertEqual(self.run_result([_comment(actor='Codex')])['state'],
+                             'NOT_READY')
 
     def test_event_survives_taskstore_restart(self):
         self.run_result([_comment()])

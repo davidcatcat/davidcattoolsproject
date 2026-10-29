@@ -17,6 +17,7 @@ from llmtool.cli import main
 from llmtool.errors import LLMToolError
 from llmtool.providers import PROVIDER_REGISTRY, get_provider_capabilities
 from llmtool.providers.openai import API_ORIGIN, OpenAIProvider
+from llmtool.providers.openai_compatible import OpenAICompatibleClient
 
 
 FAKE_KEY = "sk-test-example"
@@ -285,6 +286,273 @@ class OpenAIProviderTests(unittest.TestCase):
             self.assertTrue(FAKE_KEY not in output and "PRIVATE_PROMPT" not in output,
                             "credential or prompt escaped into CLI output")
             self.assertEqual(self.server.requests[0]["path"], "/v1/responses")
+
+    def test_openai_compatible_streaming_sse_and_response_cleanup(self):
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, lines):
+                self.lines = iter(lines)
+                self.pending = b""
+                self.closed = False
+
+            def readline(self, limit):
+                while b"\n" not in self.pending:
+                    chunk = next(self.lines, b"")
+                    if not chunk:
+                        break
+                    self.pending += chunk
+                if b"\n" in self.pending:
+                    line, self.pending = self.pending.split(b"\n", 1)
+                    line += b"\n"
+                else:
+                    line, self.pending = self.pending, b""
+                return line[:limit]
+
+            def close(self):
+                self.closed = True
+
+        def make_client(response):
+            provider = {
+                "base_url": "https://gateway.example", "model": "test-model",
+                "timeout_seconds": 2, "provider_options": {},
+            }
+            client = OpenAICompatibleClient(provider, {"temperature": 0, "max_tokens": 20}, FAKE_KEY)
+            client.opener.open = lambda req, timeout: opened.append((req, timeout)) or response
+            return client
+
+        opened = []
+        response = FakeResponse([
+            b'retry: 1000\n\n',
+            b'data: {"choices":[{"delta":{"role":"assistant","content":""}}]}\n\n',
+            b'data: {"choices":[{"delta":{"reasoning":"hidden"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"Hello "}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"world"},"finish_reason":"stop","stop_reason":null}]}\n\n',
+            b'data: {"choices":[],"usage":{"prompt_tokens":3,"completion_tokens":2,"total_tokens":5}}\n\n',
+            b"data: [DONE]\n\n",
+        ])
+        client = make_client(response)
+        self.assertEqual(list(client.stream([{"role": "user", "content": "question"}])),
+                         ["Hello ", "world"])
+        self.assertTrue(response.closed)
+        req, timeout = opened[0]
+        self.assertTrue(json.loads(req.data)["stream"])
+        self.assertEqual(req.get_header("Accept"), "text/event-stream")
+        self.assertEqual(timeout, 2)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1},"id":"event-1","object":"chunk","created":1,"model":"test-model","system_fingerprint":"fp"}\n\n',
+        ])
+        self.assertEqual(list(make_client(response).stream([{"role": "user", "content": "question"}])),
+                         ["answer"])
+        self.assertTrue(response.closed)
+
+        envelope = {
+            "created": 1761696000,
+            "id": "chatcmpl-real-stream",
+            "model": "gw-model",
+            "object": "chat.completion.chunk",
+        }
+        captured_events = [
+            {
+                **envelope,
+                "prompt_text": None,
+                "prompt_token_ids": None,
+                "choices": [{
+                    "delta": {"content": "", "role": "assistant"},
+                    "finish_reason": None,
+                    "index": 0,
+                    "logprobs": None,
+                }],
+            }
+        ]
+        expected_content = []
+        for index in range(1, 67):
+            content_event = index % 2 == 0
+            delta_field = "content" if content_event else "reasoning"
+            value = chr(ord("a") + (index // 2) % 26) if content_event else "private reasoning"
+            if content_event:
+                expected_content.append(value)
+            captured_events.append({
+                **envelope,
+                "choices": [{
+                    "delta": {delta_field: value},
+                    "index": 0,
+                    "token_ids": None,
+                }],
+            })
+        captured_events.append({
+            **envelope,
+            "choices": [{
+                "delta": {"content": "!"},
+                "finish_reason": "stop",
+                "index": 0,
+                "stop_reason": None,
+                "token_ids": None,
+            }],
+        })
+        expected_content.append("!")
+        captured_events.append({
+            **envelope,
+            "system_fingerprint": "fp-real-stream",
+            "choices": [],
+            "usage": {
+                "completion_tokens": 67,
+                "completion_tokens_details": {"reasoning_tokens": 33},
+                "prompt_tokens": 12,
+                "total_tokens": 79,
+            },
+        })
+        self.assertEqual(len(captured_events), 69)
+        response = FakeResponse([
+            *(b"data: " + json.dumps(event).encode("utf-8") + b"\n\n"
+              for event in captured_events),
+            b"data: [DONE]\n\n",
+        ])
+        self.assertEqual(
+            list(make_client(response).stream([{"role": "user", "content": "question"}])),
+            expected_content,
+        )
+        self.assertTrue(response.closed)
+
+        for event in (
+            b'data: {"choices":[{"delta":{}}],"prompt_text":"unexpected"}\n\n',
+            b'data: {"choices":[{"delta":{}}],"prompt_token_ids":[]}\n\n',
+            b'data: {"choices":[{"delta":{},"token_ids":[1]}]}\n\n',
+            b'data: {"choices":[]}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1},"message":{"content":"late"}}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1},"unexpected":"value"}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1,"details":{"text":"late"}}}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":1,"total_tokens":2}}\n\n',
+            b'data: {"choices":[],"usage":{"total_tokens":true}}\n\n',
+            b'data: {"choices":[{"delta":{}}],"usage":{"total_tokens":1}}\n\n',
+        ):
+            response = FakeResponse([
+                b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
+                event,
+            ])
+            with self.assertRaises(LLMToolError) as caught:
+                list(make_client(response).stream([{"role": "user", "content": "question"}]))
+            self.assertIn("invalid streaming data", str(caught.exception))
+            self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{"content":"answer"},"finish_reason":"stop"}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"late"}}]}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("invalid streaming data", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse([b"data: [DONE]\n\n"])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("ended before finish_reason=stop", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{"content":"partial"}}]}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("ended before finish_reason=stop", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[],"usage":{"total_tokens":1}}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("invalid streaming data", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        for event in (
+            b'data: {"choices":[{"delta":{},"unexpected":null}]}\n\n',
+            b'data: {"choices":[{"delta":{"role":"user"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":2}}]}\n\n',
+            b'data: {"choices":[{"delta":{}},{"delta":{}}]}\n\n',
+            b'data: {"choices":[{"delta":{},"index":true}]}\n\n',
+            b'data: {"choices":[{"delta":{},"logprobs":{}}]}\n\n',
+            b'data: {"choices":[{"delta":{}}],"usage":{"total_tokens":0}}\n\n',
+        ):
+            response = FakeResponse([event])
+            with self.assertRaises(LLMToolError) as caught:
+                list(make_client(response).stream([{"role": "user", "content": "question"}]))
+            self.assertIn("invalid streaming data", str(caught.exception))
+            self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("invalid streaming data", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n\n',
+        ])
+        with self.assertRaises(LLMToolError) as caught:
+            list(make_client(response).stream([{"role": "user", "content": "question"}]))
+        self.assertIn("incomplete result", str(caught.exception))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse([
+            b'data: {"choices":[{"delta":{"content":"first"}}]}\n\n',
+            b'data: {"choices":[{"delta":{"content":"second"}}]}\n\n',
+        ])
+        chunks = make_client(response).stream([{"role": "user", "content": "question"}])
+        self.assertEqual(next(chunks), "first")
+        chunks.close()
+        self.assertTrue(response.closed)
+
+    def test_openai_compatible_streaming_byte_limit_and_complete_body(self):
+        class FakeResponse:
+            status = 200
+
+            def __init__(self, raw):
+                self.raw = raw
+                self.closed = False
+
+            def readline(self, limit):
+                value, self.raw = self.raw[:limit], self.raw[limit:]
+                return value
+
+            def read(self, limit):
+                value, self.raw = self.raw[:limit], b""
+                return value
+
+            def close(self):
+                self.closed = True
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.close()
+
+        provider = {
+            "base_url": "https://gateway.example", "model": "test-model",
+            "timeout_seconds": 2, "provider_options": {},
+        }
+        client = OpenAICompatibleClient(provider, {"temperature": 0, "max_tokens": 20}, FAKE_KEY)
+        response = FakeResponse(b"data: " + b"x" * 20 + b"\n")
+        client.opener.open = lambda req, timeout: response
+        with patch("llmtool.providers.openai_compatible.RESPONSE_LIMIT", 16):
+            with self.assertRaises(LLMToolError):
+                list(client.stream([{"role": "user", "content": "question"}]))
+        self.assertTrue(response.closed)
+
+        response = FakeResponse(json.dumps({
+            "choices": [{"finish_reason": "stop", "message": {"content": "unchanged"}}],
+        }).encode())
+        request_body = []
+        client.opener.open = lambda req, timeout: request_body.append(req.data) or response
+        reply = client.complete([{"role": "user", "content": "question"}])
+        self.assertEqual(reply.content, "unchanged")
+        self.assertNotIn("stream", json.loads(request_body[0]))
 
 
 if __name__ == "__main__":

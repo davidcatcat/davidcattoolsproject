@@ -66,7 +66,7 @@ Cloud needs repository and push authorization; it does not automatically
 inherit Mac checkout, VPN/Keychain or unpushed files. GitHub refs remain
 shared between independent Cloud and Mac branches. See
 [Workflow](WORKFLOW.md#d-007-independent-mobile-codex-cloud-delivery),
-[Roadmap](ROADMAP.md#owner-accepted-collaboration-architecture-and-mobile-codex-cloud-lane-2026-10-17)
+[Roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#owner-accepted-collaboration-architecture-and-mobile-codex-cloud-lane-2026-10-17)
 and [official Codex Cloud guide](https://help.openai.com/en/articles/20001545-using-codex-cloud).
 
 ## Roadmap status
@@ -296,8 +296,9 @@ policy, or approval.** In particular, `code_edit`, `shell`, or `git` metadata do
 permission or cause llmtool to modify files, execute commands, or operate Git. Capability metadata
 is implementation-owned and is not stored in user/project config.
 
-The `openai` and `openai-compatible` providers declare `chat: yes`, `large_context: yes`,
-`reasoning_control: yes`, `streaming: no`, `code_edit: no`, `shell: no`, and `git: no`.
+The `openai` provider declares `chat: yes`, `large_context: yes`, `reasoning_control: yes`,
+`streaming: no`, `code_edit: no`, `shell: no`, and `git: no`. The `openai-compatible` provider
+declares the same capabilities except `streaming: yes`.
 `claude-cli` and `codex-cli` declare only `chat: yes`; their `large_context`, `reasoning_control`, `streaming`,
 `code_edit`, `shell`, and `git` capabilities are false.
 `large_context` describes support for large-context workflows, not a fixed context window;
@@ -580,6 +581,15 @@ active_provider: office-qwen
 `openai` profile 不使用 `base_url`，並在模型請求時要求 model 和明確設定的 API key 或
 `api_key_env`。`OPENAI_API_KEY` 只會在使用者將它指定為 `api_key_env` 後讀取。
 
+### Codex direct 執行時間上限（user config）
+
+`codex_direct.timeout_seconds` 只能寫在 user config（`~/.config/llmtool/config.yaml`），專案 `.llmtool.yaml` 不能設定，也不受 `active_provider` 或專案設定錯誤影響（AUDIT-027，#603）。預設 600 秒，上限 1800 秒；必須是正整數，超出範圍、0、負數、小數、字串或布林值會以 typed 設定錯誤拒絕，不會自動夾到範圍內。Codex 任務封包的 budget、prompt 與實際 timeout 使用同一個值。
+
+```yaml
+codex_direct:
+  timeout_seconds: 900
+```
+
 ### Project config 的低信任邊界
 
 `.llmtool.yaml` **只能**修改已由 user/default 定義的 provider 的 `model`、
@@ -681,8 +691,11 @@ llmtool task submit --provider my-pm "Add a health-check command to the service 
 llmtool task show 0123456789abcdef0123456789abcdef
 ```
 
-`task submit` requires an explicitly configured provider profile; it never picks a
-default or falls back to another provider. It creates a local Task, Run and logical
+`task submit` (and `/task submit` in `chat --tui`) is the developer/test intake
+path — 開發測試用：只登記，不會派工: it records a Task and dispatches nothing. The
+product entry for talking to the PM is the dedicated Claude Code PM (`/pm new`,
+`/pm connect` in `chat --tui`). `task submit` requires an explicitly configured
+provider profile; it never picks a default or falls back to another provider. It creates a local Task, Run and logical
 PM Session record before calling the provider. The returned Task ID can be used
 with `task show` in a later CLI process. Records live under
 `~/.local/state/llmtool/tasks` with owner-only directory/file permissions. Request
@@ -1634,7 +1647,7 @@ context limits may eventually cause a recoverable failure. Live smoke is NOT-TES
 
 ### TUI UI/UX decision and planned polish (Owner accepted 2026-10-22)
 
-See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](ROADMAP.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20).
+See [the dedicated TUI UI/UX meeting](../../docs/meetings/2026-10-22-llmtool-tui-ui-ux-decision.md) and the [A3.5 UX follow-up roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#a35-ux-follow-up--codexclaude-style-interactive-terminal-owner-request-2026-10-20).
 
 **TUI is presentation and interaction only.** Current `llmtool chat --tui` supplies a scrollable conversation, multi-line composer, F1 help, keyboard navigation and honest status. Its conversation history remains memory-only; closing the chat does **not** establish persistent Task resume or detached background work.
 
@@ -1654,17 +1667,37 @@ shell, Git or file-write permission. Layout: a scrollable conversation pane, a
 persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
 Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
 on the first/last input line recall earlier inputs from this process only; Tab
-switches focus between input and conversation; PageUp/PageDown scroll; F1 toggles
-key help; Ctrl-C (or Ctrl-D on empty input) exits with status 0. Resize and wide
-Unicode are handled by the terminal UI. Model output, reported model names and
-errors are untrusted and rendered through the same control-character escaping as
-TTY line mode. New output only auto-scrolls when the conversation caret is at the
-end, so a scrolled-back position is preserved.
+switches focus between input and conversation; PageUp/PageDown (Fn+↑/↓ on a Mac
+keyboard) scroll the conversation one screen and the mouse wheel or trackpad one
+row per wheel step (mouse reporting is on by default); F1 toggles key help; Ctrl-C
+(or Ctrl-D on empty input) exits with status 0. Model output, reported model names
+and errors are untrusted and rendered through the same control-character escaping
+as TTY line mode.
+
+The conversation pane keeps its own reading position, selection and follow state
+(`chat_tui_view.py`), in screen rows rather than prompt-toolkit's caret-anchored
+logical lines, so wrapped long lines and CJK text scroll one row per wheel step
+without sticking or jumping. New output never moves a scrolled-back view (the
+status bar shows `捲動 N% ⇣新輸出`); scrolling back to the bottom resumes following
+(`最新`). A resize keeps the text that was at the top of the view. Dragging in the
+pane selects text; dragging past the top or bottom edge keeps scrolling and extends
+the selection; releasing copies exactly the selected text (CJK, wrapped lines,
+several screens) to the system clipboard with `pbcopy` (`wl-copy`/`xclip`/`xsel`
+elsewhere) and the status bar shows `已複製 N 字`, so Cmd+V pastes it. The pane
+has no scrollbar of its own. Terminal.app never passes Cmd+C to the application and
+has no OSC 52, which is why the copy happens on release; Ctrl-C with a selection
+copies it again and clears it instead of exiting. F6 hands the mouse back to the
+terminal (its own select/copy; the wheel then no longer scrolls the pane);
+Terminal.app also selects natively with Fn-drag and Warp with Shift-drag while
+mouse reporting is on.
 
 One request is in flight at a time: Enter while busy keeps the typed input and
-sends nothing; commands such as `/provider` are not run while busy. A request
-cannot be cancelled: exit while busy is marked pending and happens once the
-request finishes or reaches the provider's own timeout. If prompt-toolkit 3.x is
+sends nothing; commands such as `/provider` are not run while busy. Esc, or the
+first Ctrl-C, interrupts a chat reply: a provider that streams stops at its next
+chunk and the text shown so far stays in history marked interrupted; a provider
+that answers in one piece (all current providers) returns first, and that reply is
+then shown marked interrupted. A second Ctrl-C marks exit pending, which happens
+once the request ends or reaches the provider's own timeout. If prompt-toolkit 3.x is
 absent, or stdin/stdout is not a terminal (pipes, redirects), `--tui` prints a
 notice to stderr and runs the line chat before any UI starts. If the UI fails
 after starting, it prints a sanitized error and exits 1; it never replays input

@@ -90,6 +90,8 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
+_REVIEW_DISPATCH_RESULT_FIELDS = frozenset((
+    'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review_text'))
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'attempt', 'state',
     'comment_id', 'packet_sha256', 'claimed_at'))
@@ -179,6 +181,7 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
     'created_at',
 ))
 _DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DEVELOPER_EXECUTOR_TASK_FIELDS = frozenset(('executor_task_id',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DEVELOPER_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
@@ -186,15 +189,24 @@ _DEVELOPER_SHAPES = (
     _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
 )
+_DEVELOPER_TASK_ID_SHAPES = tuple(
+    shape | _DEVELOPER_EXECUTOR_TASK_FIELDS for shape in _DEVELOPER_SHAPES
+)
+_DEVELOPER_BASE_SHAPES = (*_DEVELOPER_SHAPES, *_DEVELOPER_TASK_ID_SHAPES)
 _DEVELOPER_EXTENSION_SHAPES = tuple(
-    shape | extension for shape in _DEVELOPER_SHAPES
+    shape | extension for shape in _DEVELOPER_BASE_SHAPES
     for extension in (frozenset(('normalizations',)),
                       frozenset(('rejected_output_capture',)),
                       frozenset(('normalizations', 'rejected_output_capture')))
 )
 _DEVELOPER_BLOCKED_REASON_SHAPES = tuple(
     shape | frozenset(('blocked_reason',))
-    for shape in (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
+    for shape in (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES)
+)
+_DEVELOPER_PROGRESS_SHAPES = tuple(
+    shape | frozenset(('progress',))
+    for shape in (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+                  *_DEVELOPER_BLOCKED_REASON_SHAPES)
 )
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
@@ -204,6 +216,11 @@ _DIRECT_EXECUTION_FIELDS = frozenset((
 _DIRECT_EXECUTION_BINDING_FIELDS = _DIRECT_EXECUTION_FIELDS | frozenset((
     'native_session_binding',
 ))
+_DEVELOPER_EXECUTION_DIFF_FIELDS = frozenset(('diff_sha256', 'diff_base_sha'))
+_DEVELOPER_EXECUTION_DIFF_SHAPES = (
+    _DIRECT_EXECUTION_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
+    _DIRECT_EXECUTION_BINDING_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
+)
 _DEVELOPER_REJECTION_CODES = frozenset((
     'DEVELOPER_OUTPUT_REJECTED', 'DEVELOPER_OUTPUT_INVALID_ENVELOPE',
     'DEVELOPER_OUTPUT_INVALID_DIFF', 'DEVELOPER_OUTPUT_OUT_OF_SCOPE',
@@ -246,6 +263,9 @@ WORKER_AVAILABILITY_MAX_BYTES = 32 * 1024
 WORKER_AVAILABILITY_MAX_AGE_DAYS = 30
 TASK_UPDATE_LOCK_TIMEOUT_SECONDS = 2.0
 TASK_UPDATE_LOCK_POLL_SECONDS = 0.01
+_TASK_STORE_CONTENTION_ERRNOS = frozenset(
+    value for value in (errno.EAGAIN, errno.EWOULDBLOCK, errno.EBUSY, errno.EINTR)
+    if value is not None)
 WORKER_KEYS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
     'company-gw', 'claude-reviewer',
@@ -281,6 +301,10 @@ def _fail(code='TASK_STORE_INVALID'):
     error.task_store_code = category
     error.task_store_error_code = safe_code
     raise error from None
+
+
+def _is_contention_error(error):
+    return error.errno in _TASK_STORE_CONTENTION_ERRNOS
 
 
 def _validate_usage(value):
@@ -635,14 +659,17 @@ def _validate(record):
             _fail('REVIEW_DISPATCH_CLAIM_INVALID')
         identities = set()
         for item in claims:
-            if (type(item) is not dict or set(item) != _REVIEW_DISPATCH_CLAIM_FIELDS or
+            if (type(item) is not dict or
+                    set(item) not in (_REVIEW_DISPATCH_CLAIM_FIELDS,
+                                      _REVIEW_DISPATCH_CLAIM_FIELDS |
+                                      frozenset(('review_result',))) or
                     type(item.get('executor_task')) is not str or
                     not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
                     type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
                     type(item.get('head_sha')) is not str or
                     re.fullmatch(r'[0-9a-f]{40}', item['head_sha']) is None or
                     type(item.get('version')) is not int or not 1 <= item['version'] <= 9999 or
-                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'UNKNOWN') or
+                    item.get('state') not in ('CLAIMED', 'DISPATCHED', 'COMPLETED', 'UNKNOWN') or
                     (item.get('reviewer_task') is not None and
                      (type(item['reviewer_task']) is not str or
                       not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['reviewer_task']))) or
@@ -651,14 +678,32 @@ def _validate(record):
                       not 1 <= len(item['native_session_id']) <= 256 or
                       any(ord(c) < 0x20 or ord(c) == 0x7f for c in item['native_session_id']))) or
                     item.get('account_mode') not in ('EXPLICIT_CLAUDE_CONFIG_DIR',
-                                                      'DEFAULT_SECOND_ACCOUNT') or
+                                                      'DEFAULT_SECOND_ACCOUNT',
+                                                      'CODEX_CLI') or
                     type(item.get('claimed_at')) is not str or
                     type(item.get('updated_at')) is not str or
                     (item['state'] == 'CLAIMED' and
                      (item['reviewer_task'] is None or item['native_session_id'] is not None)) or
                     (item['state'] == 'DISPATCHED' and
-                     (item['reviewer_task'] is None or item['native_session_id'] is None))):
+                     (item['reviewer_task'] is None or item['native_session_id'] is None)) or
+                    (item['state'] == 'COMPLETED' and
+                     (item['reviewer_task'] is None or item['native_session_id'] is None or
+                      'review_result' not in item)) or
+                    (item['state'] != 'COMPLETED' and 'review_result' in item)):
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
+            if item['state'] == 'COMPLETED':
+                result = item['review_result']
+                task_binding = record.get('task_binding')
+                if (type(result) is not dict or set(result) != _REVIEW_DISPATCH_RESULT_FIELDS or
+                        result.get('task_id') != record.get('task_id') or
+                        result.get('run_id') != record.get('run_id') or
+                        type(task_binding) is not dict or
+                        result.get('contract_digest') != task_binding.get('contract_digest') or
+                        result.get('head') != item['head_sha'] or
+                        result.get('verdict') not in ('PASS', 'FIX', 'FAIL', 'BLOCKED') or
+                        type(result.get('review_text')) is not str or
+                        len(result['review_text'].encode('utf-8', 'replace')) > 65536):
+                    _fail('REVIEW_DISPATCH_CLAIM_INVALID')
             identity = (item['pr'], item['head_sha'], item['version'])
             if identity in identities:
                 _fail('REVIEW_DISPATCH_CLAIM_INVALID')
@@ -756,7 +801,7 @@ def _validate(record):
                     re.fullmatch(r'[a-z][a-z0-9-]{0,63}', entry['worker_key']) is None or
                     entry['action'] not in (
                         'DISPATCH', 'RETRY', 'REASSIGN', 'RECOVERY', 'REPAIR',
-                        'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
+                        'TIMEOUT_CONTINUATION', 'REVIEWER_HANDOFF', 'REVIEWER_RETRY') or
                     entry['decision'] not in ('ALLOWED', 'BLOCKED') or
                     type(entry['reason_code']) is not str or
                     re.fullmatch(r'[A-Z0-9_]{1,64}', entry['reason_code']) is None or
@@ -890,7 +935,7 @@ def _validate(record):
         if assignment is not None:
             if (type(assignment) is not dict or set(assignment) != _PM_ASSIGNMENT_FIELDS or
                     type(assignment['schema_version']) is not int or assignment['schema_version'] != 1 or
-                    assignment['route'] not in ('company-gw', 'codex', 'opencode', 'none') or
+                    assignment['route'] not in ('company-gw', 'codex', 'opencode', 'agy', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
                     len(assignment['goal'].encode('utf-8')) > 512 or
@@ -938,7 +983,7 @@ def _validate(record):
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
                     type(assignment) is not dict or
-                    assignment.get('route') not in ('company-gw', 'opencode', 'codex') or
+                    assignment.get('route') not in ('company-gw', 'opencode', 'codex', 'agy') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {
@@ -954,19 +999,24 @@ def _validate(record):
             _fail()
         developer = record['developer']
         if developer is not None:
-            assignment_shapes = (*_DEVELOPER_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
-                                 *_DEVELOPER_BLOCKED_REASON_SHAPES)
+            assignment_shapes = (*_DEVELOPER_BASE_SHAPES,
+                                 *_DEVELOPER_EXTENSION_SHAPES,
+                                 *_DEVELOPER_BLOCKED_REASON_SHAPES,
+                                 *_DEVELOPER_PROGRESS_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
+                _fail()
+            if ('executor_task_id' in developer and
+                    not _safe_identifier(developer['executor_task_id'], D6_TASK_ID)):
                 _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
                     developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
-                                               'DEVELOPER_OUTPUT_REJECTED') or
-                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude') or
+                                               'DEVELOPER_OUTPUT_REJECTED', 'BLOCKED') or
+                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude', 'agy') or
                     developer['provider_type'] not in (
-                        None, 'openai-compatible', 'codex-cli', 'opencode-cli') or
+                        None, 'openai-compatible', 'codex-cli', 'opencode-cli', 'agy-cli') or
                     developer['backend_session_semantics'] not in (
                         'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
@@ -990,9 +1040,11 @@ def _validate(record):
             if 'owner_assignment_ref' in developer:
                 from .worker_dispatch import _OWNER_COMMENT_REF
                 ref = developer['owner_assignment_ref']
-                if (developer['provider_profile'] != 'claude' or
+                if (developer['provider_profile'] not in ('claude', 'agy') or
                         type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
                     _fail()
+            if developer['provider_profile'] == 'agy' and 'owner_assignment_ref' not in developer:
+                _fail()
             if 'normalizations' in developer:
                 tokens = developer['normalizations']
                 if (developer['state'] != 'DEVELOPER_RESPONDED' or
@@ -1028,6 +1080,11 @@ def _validate(record):
                         ('NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                      developer['max_tokens'] is not None)):
                 _fail()
+            if (developer['provider_profile'] == 'agy' and
+                    (developer['provider_type'] not in (None, 'agy-cli') or
+                     developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
+                     developer['max_tokens'] is not None)):
+                _fail()
             if (developer['provider_profile'] == 'claude' and
                     (developer['provider_type'] is not None or
                      developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
@@ -1037,10 +1094,11 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] not in ('opencode', 'codex') or
+                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
                             type(execution) is not dict or
                             set(execution) not in (
-                                _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS) or
+                                _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,
+                                *_DEVELOPER_EXECUTION_DIFF_SHAPES) or
                             ('native_session_binding' in execution and
                              (developer['provider_profile'] != 'codex' or
                               type(execution['native_session_binding']) is not str or
@@ -1054,6 +1112,7 @@ def _validate(record):
                              (type(execution['native_session_id']) is not str or
                               re.fullmatch(
                                   r'ses_[A-Za-z0-9]{1,100}' if developer['provider_profile'] == 'opencode'
+                                  else r'[A-Za-z0-9_-]{8,128}' if developer['provider_profile'] == 'agy'
                                   else r'[0-9a-fA-F-]{16,64}',
                                   execution['native_session_id']) is None)) or
                             (execution['process_exit_code'] is not None and
@@ -1077,6 +1136,16 @@ def _validate(record):
                                            execution['source_manifest_sha256']) is None)) or
                             execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
                             execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
+                        _fail()
+                    if set(execution) in _DEVELOPER_EXECUTION_DIFF_SHAPES and (
+                            developer.get('error_code') != 'CODEX_TIMEOUT_WITH_CHANGES' or
+                            developer.get('provider_profile') != 'codex' or
+                            execution['status'] != 'TIMEOUT' or
+                            type(execution.get('diff_sha256')) is not str or
+                            re.fullmatch(r'[0-9a-f]{64}', execution['diff_sha256']) is None or
+                            type(execution.get('diff_base_sha')) is not str or
+                            re.fullmatch(r'[0-9a-f]{40}', execution['diff_base_sha']) is None or
+                            execution['diff_base_sha'] != developer['source_sha']):
                         _fail()
                     if execution['status'] in ('SUCCEEDED', 'DONE') and (
                             execution['native_session_id'] is None or
@@ -1145,10 +1214,23 @@ def _validate(record):
             if 'blocked_reason' in developer:
                 reason = developer['blocked_reason']
                 execution = developer.get('execution')
-                if (developer['provider_profile'] != 'codex' or
-                        developer['state'] != 'DEVELOPER_OUTCOME_UNKNOWN' or
-                        developer['error_code'] != 'CODEX_BLOCKED' or
-                        type(execution) is not dict or execution.get('status') != 'BLOCKED' or
+                agy_isolation_block = (
+                    developer['provider_profile'] == 'agy' and
+                    developer['state'] == 'BLOCKED' and
+                    developer['error_code'] == 'BLOCKED_WRITE_ISOLATION' and
+                    reason in ('BLOCKED_WRITE_ISOLATION', 'UNSUPPORTED_BOUNDARY',
+                               'BOUNDARY_PREPARATION_FAILED', 'BOUNDARY_UNVERIFIED'))
+                agy_dispatch_block = (
+                    developer['provider_profile'] == 'agy' and
+                    developer['state'] == 'BLOCKED' and
+                    developer['error_code'] == 'AGY_DISPATCH_DENIED' and
+                    reason == 'OWNER_DISPATCH_DENIED')
+                codex_block = (
+                    developer['provider_profile'] == 'codex' and
+                    developer['state'] == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                    developer['error_code'] == 'CODEX_BLOCKED' and
+                    type(execution) is dict and execution.get('status') == 'BLOCKED')
+                if (not (agy_isolation_block or agy_dispatch_block or codex_block) or
                         type(reason) is not str or
                         len(reason.encode('utf-8')) > 2048 or
                         any((ord(char) < 32 and char not in '\t\n\r') or
@@ -1160,14 +1242,36 @@ def _validate(record):
                 'company-gw': 'openai-compatible',
                 'codex': 'codex-cli',
                 'opencode': 'opencode-cli',
+                'agy': 'agy-cli',
             }.get(developer['provider_profile'])
             token_cap_required = not (
-                developer['provider_profile'] == 'codex' and
-                developer['provider_type'] == 'codex-cli')
+                developer['provider_profile'] in ('codex', 'agy') and
+                developer['provider_type'] in ('codex-cli', 'agy-cli'))
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
                 _fail()
+            if 'progress' in developer:
+                progress = developer['progress']
+                if (developer['provider_profile'] != 'agy' or
+                        developer['state'] != 'BLOCKED' or type(progress) is not dict or
+                        set(progress) != {'state', 'head_sha', 'changed_files',
+                                          'unfinished_checks', 'session_id'} or
+                        progress.get('state') != 'QUOTA_EXHAUSTED' or
+                        (progress.get('head_sha') != 'UNKNOWN' and
+                         (type(progress.get('head_sha')) is not str or
+                          re.fullmatch(r'[0-9a-f]{40}', progress['head_sha']) is None)) or
+                        type(progress.get('changed_files')) is not list or
+                        len(progress['changed_files']) > 200 or
+                        any(type(path) is not str or len(path) > 512
+                            for path in progress['changed_files']) or
+                        type(progress.get('unfinished_checks')) is not list or
+                        any(type(item) is not str or len(item) > 128
+                            for item in progress['unfinished_checks']) or
+                        (progress.get('session_id') is not None and
+                         (type(progress['session_id']) is not str or
+                          re.fullmatch(r'[A-Za-z0-9_-]{8,128}', progress['session_id']) is None))):
+                    _fail()
             if dev_state == 'DEVELOPER_DISPATCHING' and (
                     developer['provider_type'] != expected_provider or artifact is not None or
                     usage is not None or developer['error_code'] is not None or
@@ -1189,6 +1293,11 @@ def _validate(record):
                     developer['provider_type'] is None or artifact is None or
                     developer['error_code'] is not None or
                     (token_cap_required and developer['max_tokens'] is None)):
+                _fail()
+            if dev_state == 'BLOCKED' and (
+                    developer['provider_profile'] != 'agy' or
+                    developer['provider_type'] != 'agy-cli' or
+                    developer['error_code'] is None or artifact is not None):
                 _fail()
             if developer['provider_profile'] == 'opencode':
                 execution = developer.get('execution')
@@ -1219,7 +1328,7 @@ def _validate(record):
                     'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
-                if (developer['provider_profile'] not in ('opencode', 'codex') or
+                if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
                         type(callback) is not dict or
                         set(callback) not in (callback_fields, callback_fields | {'review_handoff'},
                             callback_fields | {'review_handoff', 'review_return'}) or
@@ -1727,7 +1836,18 @@ class TaskStore:
                         follow_symlinks=False)
                 os.unlink(temporary, dir_fd=directory)
             else:
-                os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+                deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+                while True:
+                    try:
+                        os.replace(temporary, name, src_dir_fd=directory,
+                                   dst_dir_fd=directory)
+                        break
+                    except OSError as exc:
+                        if not _is_contention_error(exc):
+                            raise
+                        if time.monotonic() >= deadline:
+                            _fail('TASK_STORE_BUSY')
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             os.fsync(directory)
         except FileExistsError:
             _fail('TASK_STORE_CONFLICT')
@@ -2368,6 +2488,12 @@ class TaskStore:
                         if time.monotonic() >= deadline:
                             raise
                         time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
+                    except OSError as exc:
+                        if not _is_contention_error(exc):
+                            raise
+                        if time.monotonic() >= deadline:
+                            _fail('TASK_STORE_BUSY')
+                        time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
                 info = os.fstat(lock_fd)
                 if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
                         stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
@@ -2391,8 +2517,12 @@ class TaskStore:
                     if time.monotonic() >= deadline:
                         _fail('TASK_STORE_BUSY')
                     time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
-                except OSError:
-                    _fail('TASK_STORE_UNAVAILABLE')
+                except OSError as exc:
+                    if not _is_contention_error(exc):
+                        _fail('TASK_STORE_UNAVAILABLE')
+                    if time.monotonic() >= deadline:
+                        _fail('TASK_STORE_BUSY')
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
             current = self._read_at(directory, task_id)
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
@@ -2416,10 +2546,13 @@ class TaskStore:
                             before, after = old_claims[index], new_claims[index]
                             allowed_claim_transition = (
                                 before.get('state') == 'CLAIMED' and
-                                after.get('state') in ('UNKNOWN', 'DISPATCHED') and
+                                after.get('state') in ('UNKNOWN', 'DISPATCHED', 'COMPLETED') and
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
                                     'account_mode', 'claimed_at', 'reviewer_task')) and
+                                (before.get('state') == 'CLAIMED' and
+                                 (after.get('state') == 'COMPLETED' or
+                                  ('review_result' not in after))) and
                                 all(old == new for i, (old, new) in
                                     enumerate(zip(old_claims, new_claims)) if i != index))
                 if not allowed_claim_transition:
