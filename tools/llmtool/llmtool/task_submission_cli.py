@@ -2984,6 +2984,10 @@ def run_task_delegate(args, *, store=None):
         _print(_task_view(saved))
         return 1
     usage = reply_usage(result.metadata)
+    served_model = result.metadata.get('served_model')
+    if args.provider == 'company-gw' and type(served_model) is str:
+        usage = {} if usage is None else dict(usage)
+        usage['served_model'] = served_model
     source_files = _text_developer_source_files(
         registration.root, source_sha, write_paths)
     if source_files is None:
