@@ -201,6 +201,59 @@ def _pm_assignment(response):
         return None
 
 
+def _pm_assignment_limit_error(response):
+    """Return a safe, specific diagnostic for an otherwise shaped PM assignment."""
+    try:
+        value = _strict_json_object(response)
+        assignment = value.get('developer_assignment')
+        if (type(value) is not dict or value.get('schema_version') != 1 or
+                type(value.get('schema_version')) is not int or
+                type(assignment) is not dict or
+                set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
+                assignment['route'] not in ('company-gw', 'codex', 'opencode', 'agy', 'none') or
+                assignment['risk'] not in ('LOW', 'OTHER') or
+                type(assignment['goal']) is not str or
+                type(assignment['acceptance']) is not list):
+            return None
+        count = len(assignment['acceptance'])
+        if not 1 <= count <= 16:
+            return f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)'
+        goal_bytes = len(assignment['goal'].encode('utf-8'))
+        if goal_bytes > 512:
+            return f'PM_RESPONSE_GOAL_TOO_LONG: goal is {goal_bytes} bytes (max 512)'
+        for index, item in enumerate(assignment['acceptance']):
+            if type(item) is str:
+                item_bytes = len(item.encode('utf-8'))
+                if item_bytes > 512:
+                    return (f'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[{index}] is '
+                            f'{item_bytes} bytes (max 512)')
+    except (ValueError, TypeError, UnicodeError):
+        return None
+    return None
+
+
+def _validate_acceptance_scope(acceptance):
+    if type(acceptance) is not list:
+        raise LLMToolError('developer acceptance scope is invalid')
+    count = len(acceptance)
+    if not 1 <= count <= 16:
+        raise LLMToolError(
+            f'PM_RESPONSE_ACCEPTANCE_COUNT: {count} items (allowed 1-16)')
+    result = []
+    for index, item in enumerate(acceptance):
+        if type(item) is str:
+            try:
+                item_bytes = len(item.encode('utf-8'))
+            except UnicodeError:
+                item_bytes = None
+            if item_bytes is not None and item_bytes > 512:
+                raise LLMToolError(
+                    f'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[{index}] is '
+                    f'{item_bytes} bytes (max 512)')
+        result.append(_screen_text(item, 512))
+    return result
+
+
 def _strict_json_object(raw):
     """Parse bounded JSON while rejecting duplicate keys and non-standard constants."""
     def unique_pairs(pairs):
@@ -244,6 +297,9 @@ def _read_pm_record_input(stream=None):
     assignment = _pm_assignment(response)
     if (assignment is None or assignment['route'] not in ('company-gw', 'opencode', 'codex', 'agy') or
             assignment['risk'] != 'LOW'):
+        limit_error = _pm_assignment_limit_error(response)
+        if limit_error is not None:
+            raise LLMToolError(limit_error)
         raise LLMToolError('PM response must recommend one low-risk supported Developer assignment')
     return request, response, assignment
 
@@ -2878,6 +2934,7 @@ def run_task_codex_delegate(args, *, store):
 
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
+    _validate_acceptance_scope(args.acceptance)
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
