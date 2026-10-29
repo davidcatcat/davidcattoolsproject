@@ -12,6 +12,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -231,8 +232,10 @@ class TaskStoreTests(unittest.TestCase):
             'error_code': None, 'created_at': '2026-10-23T00:00:00Z',
         }
 
-    def _claude_result_task(self):
+    def _claude_result_task(self, pm_session_id=None):
         task = self._codex_dispatch_task()
+        if pm_session_id is not None:
+            task['pm_session_id'] = pm_session_id
         self.store.create(task)
         developer = self._developer_assignment(provider='claude')
         developer['owner_assignment_ref'] = (
@@ -282,11 +285,21 @@ class TaskStoreTests(unittest.TestCase):
             task_submission_cli_module.run_task_claude_result(args, store=self.store)
         self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
                          'DEVELOPER_PENDING')
-        args.pm_session = task['pm_session_id'][len('pm-'):]
+        args.pm_session = task['pm_session_id']
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             self.assertEqual(task_submission_cli_module.run_task_claude_result(
                 args, store=self.store, stdout=io.StringIO()), 0)
         self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                         'DEVELOPER_RESPONDED')
+
+        native_pm_session_id = str(uuid.uuid4())
+        uuid_task = self._claude_result_task(pm_session_id='pm-' + native_pm_session_id)
+        args.task_id = uuid_task['task_id']
+        args.pm_session = native_pm_session_id
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.assertEqual(task_submission_cli_module.run_task_claude_result(
+                args, store=self.store, stdout=io.StringIO()), 0)
+        self.assertEqual(self.store.get(uuid_task['task_id'])['developer']['state'],
                          'DEVELOPER_RESPONDED')
 
     def test_claude_result_rejects_wrong_state(self):
