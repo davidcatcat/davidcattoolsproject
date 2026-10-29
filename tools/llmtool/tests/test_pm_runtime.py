@@ -149,7 +149,8 @@ class PMRuntimeTests(unittest.TestCase):
              'delta': {'type': 'text_delta', 'text': 'Hi'}}},
             {'type': 'assistant', 'message': {'content': [
                 {'type': 'text', 'text': 'Hello'},
-                {'type': 'tool_use', 'id': 'tool-1', 'name': 'Read', 'input': {'path': 'hidden'}}]}},
+                {'type': 'tool_use', 'id': 'tool-1', 'name': 'Read',
+                 'input': {'path': 'docs/a.md', 'content': 'hidden'}}]}},
             {'type': 'user', 'message': {'content': [
                 {'type': 'tool_result', 'tool_use_id': 'tool-1', 'content': 'hidden output'}]}},
             {'type': 'result', 'result': 'Done', 'usage': {'input_tokens': 1}}))
@@ -168,12 +169,27 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual([event['type'] for event in events],
                          ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TOOL_USE', 'TOOL_RESULT', 'TURN_END'])
         self.assertNotIn('hidden', repr(events))
+        self.assertEqual(events[2]['description'], 'Read docs/a.md')   # W57: what it does
         sent = json.loads(process.stdin.getvalue().decode().splitlines()[0])
         self.assertEqual(sent['type'], 'user')
         runtime.close()
         page = pm_runtime.read_history(SESSION, state_root=self.root)
         self.assertEqual(page['turns'][0]['status'], 'COMPLETED')
         self.assertEqual(page['turns'][0]['owner_text'], 'Owner request')
+
+    def test_tool_description_is_the_description_or_a_target_never_the_command(self):
+        describe = pm_runtime._tool_description
+        self.assertEqual(describe('Bash', {'command': 'rm -rf x', 'description': 'List  files\n'}),
+                         'List files')
+        self.assertIsNone(describe('Bash', {'command': 'cat ~/.netrc'}))   # no description
+        self.assertEqual(describe('Grep', {'pattern': 'def main', 'path': 'src'}), 'Grep def main')
+        self.assertEqual(describe('Edit', {'file_path': '/r/a.py', 'old_string': 'x'}), 'Edit /r/a.py')
+        self.assertIsNone(describe('Read', 'not a dict'))
+        self.assertIsNone(describe('Read', {'file_path': '  '}))
+        self.assertEqual(len(describe('Bash', {'description': 'x' * 999})),
+                         pm_runtime.TOOL_DESCRIPTION_CHARS)
+        key = 'gh' + 'p_' + 'A1b2C3d4E5f6G7h8J9k0' * 2
+        self.assertNotIn(key, describe('Bash', {'description': 'push with ' + key}) or '')
 
     def test_argv_fixes_tool_set_and_adds_pm_instruction_on_every_launch(self):
         # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated

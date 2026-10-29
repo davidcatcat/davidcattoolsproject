@@ -26,6 +26,7 @@ from .errors import LLMToolError
 from .providers.cli_lifecycle import CLIHostTermination, background_cli_invocation, tui_cli_signal_scope
 from .terminal import terminal_safe_text
 
+# A template: key_help() fills in the developer-only parts (W57).
 KEY_HELP = """Keys
   Enter                 Send message (or run /command)
   Ctrl-J, Esc Enter     Insert newline (multiline message); paste keeps newlines
@@ -59,22 +60,16 @@ KEY_HELP = """Keys
   F6                    Toggle mouse reporting off/on: off hands the mouse to the terminal
                         (its own select/copy; the wheel then no longer scrolls)
   F7                    Expand/collapse the latest PM turn's tool summary (one line per
-                        tool with its result; tool input and output are never shown)
+                        call: what it does, its result and seconds; never its command
+                        or output)
   F1                    Toggle this help (shown in place of the conversation)
-  F2                    Toggle the last Task detail (Esc also closes it)
-  F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
-                        detail, F5 or r refreshes, Esc closes; refreshes itself every
-                        %d s while shown (local TaskStore read only, no AI call)
-  F4                    Toggle recent events across Tasks (/task events): newest first;
-                        F5 or r refreshes, Esc closes; never acknowledges or polls
-  Esc (during a reply)  Interrupt the chat reply: a streamed reply stops at its next chunk
+%s  Esc (during a reply)  Interrupt the chat reply: a streamed reply stops at its next chunk
                         and the text shown so far stays, marked interrupted; a provider
                         that answers in one piece returns first, then that reply is shown
                         marked interrupted. Ctrl-C interrupts first, a second Ctrl-C exits.
                         Esc works with focus in the input or in the conversation pane
   Ctrl-C, Ctrl-D        Exit (Ctrl-D only with empty input)
-A Task submit in progress cannot be cancelled; exit waits for it to finish or time out.
-
+%s
 Talk to the PM: the dedicated Claude Code PM (/pm …) is the product entry
   /pm new [CWD]         Create a dedicated PM session (pm_runtime create_dedicated_pm; CWD
                         defaults to the current directory) and save it as the binding
@@ -92,29 +87,21 @@ Talk to the PM: the dedicated Claude Code PM (/pm …) is the product entry
                         and pause the queue: nothing more is sent. Enter on an empty draft
                         sends the next queued message, /pm queue send resumes them all.
                         Ctrl-C interrupts and pauses the queue; a second Ctrl-C exits
-A PM turn and a chat or Task request never run together: after /task mode, Enter during a
-PM turn keeps the draft and sends nothing (nor does a Task submit) until the turn ends.
+A PM turn and a chat request never run together: in chat mode, Enter during a PM turn
+keeps the draft and sends nothing until the turn ends.
 A CWD with spaces: /pm new "/path/with space" or /pm new /path/with\\ space.
 Esc, a failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing more is sent
 until /pm queue send, and the pane lists what is waiting.
 PM replies stream in as pm_runtime reports them, under a 「PM」 label; your message shows
-under 「你」 below a rule with the local time. A turn's tool use is one summary line
-(▸ 使用工具 N 次（name ×n；k 次失敗）) and never shows tool input or output; F7 expands it.
-The turn ends with a short usage line (seconds · tokens); /pm history keeps the full usage. PM thinking is never shown as the answer: while the PM thinks
+under 「你」 below a rule with the local time. A turn's tool use is one line saying what it
+does (▸ 執行中：description… 23s, counting every second, then ✓ description（4s）or
+✗ description（38s，失敗）; the tool name only when the PM gave no description); F7 lists
+every call. Commands and tool output are never
+shown. The turn ends with a short usage line (seconds · tokens). /pm history shows the
+stored turns in the same layout (PM 歷史（最近 N 輪，存在本機）). PM thinking is never shown as the answer: while the PM thinks
 or works the pane shows a working line (PM 思考中… 12s), updated every second and
 replaced by the reply. Chat replies are never sent to or shown as the PM.
 
-Formal task commands (developer/test path, separate from ordinary chat; results come
-only from llmtool Core and nothing is dispatched)
-  /task submit --provider PROFILE REQUEST
-                        開發測試用：只登記，不會派工 — records one Task in Core (also from
-                        chat mode, and to resend a request Task mode refused as a repeat)
-  /task mode PROFILE    Task mode: Enter submits each non-command draft as a formal PM
-                        Task to PM provider PROFILE (no implicit default); "task>" prompt
-  /task mode off        Back to chat mode: Enter sends to the chat provider again
-  /task show TASK_ID    Open a Task's detail
-  /task list            Open the Task list (stage, update time, request) from TaskStore
-  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
 Display
   /theme [dark|light|auto]
                         Colour theme; auto follows the terminal background (COLORFGBG) and
@@ -128,17 +115,61 @@ this PM session with a Developer or Reviewer at work, read from TaskStore every 
 ↓ 查看 · 佇列 N. With an empty input, Down opens the background list (role, Task/PR, state,
 age); Esc closes it.
 
+A chat reply is never a Task: to dispatch work, /pm connect and tell the PM.%s"""
+
+# W57: Task mode is a developer/test path, shown and usable only with LLMTOOL_TUI_DEV=1 or
+# llmtool chat --tui --dev; without it /task prints TASK_HIDDEN and nothing else.
+DEV_ENV = "LLMTOOL_TUI_DEV"
+TASK_HIDDEN = "Task 模式是開發測試用；要派工請用 /pm connect 和 PM 說"
+DEV_KEY_HELP = """  F2                    Toggle the last Task detail (Esc also closes it)
+  F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
+                        detail, F5 or r refreshes, Esc closes; refreshes itself every
+                        %d s while shown (local TaskStore read only, no AI call)
+  F4                    Toggle recent events across Tasks (/task events): newest first;
+                        F5 or r refreshes, Esc closes; never acknowledges or polls
+""" % chat_tui_status.REFRESH_SECONDS
+DEV_EXIT_HELP = "A Task submit in progress cannot be cancelled; exit waits for it to finish or time out.\n"
+DEV_TASK_HELP = """
+
+Developer mode (LLMTOOL_TUI_DEV=1 or --dev)
+Formal task commands (developer/test path, separate from ordinary chat; results come
+only from llmtool Core and nothing is dispatched)
+  /task submit --provider PROFILE REQUEST
+                        開發測試用：只登記，不會派工 — records one Task in Core (also from
+                        chat mode, and to resend a request Task mode refused as a repeat)
+  /task mode profile PROFILE
+                        Task mode: Enter submits each non-command draft as a formal PM
+                        Task to PM provider PROFILE (no implicit default); "task>" prompt
+  /task mode off        Back to chat mode: Enter sends to the chat provider again
+  /task show TASK_ID    Open a Task's detail
+  /task list            Open the Task list (stage, update time, request) from TaskStore
+  /task events          Open recent events across Tasks (inbox, GitHub, tests, reviews)
+A PM turn and a Task request never run together either: after /task mode, Enter during a
+PM turn keeps the draft and submits nothing until the turn ends.
 A Task receipt shows the PM provider, Task ID, Run ID and state recorded by Core;
-已建立／待派工 means no Developer has been dispatched. A chat reply is never a Task.
+已建立／待派工 means no Developer has been dispatched.
 Stage and next responsible are derived by the TUI from Core fields; values Core does
-not record are UNKNOWN or NOT_AVAILABLE.""" % (chat_tui_status.REFRESH_SECONDS,
-                                                    chat_tui_status.REFRESH_SECONDS)
+not record are UNKNOWN or NOT_AVAILABLE."""
+
+
+def dev_enabled(environ=None):
+    """The developer flag: LLMTOOL_TUI_DEV=1 (the --dev option passes dev=True)."""
+    return (os.environ if environ is None else environ).get(DEV_ENV) == "1"
+
+
+def key_help(dev):
+    """The key and command help; the Task (developer/test) parts only with the dev flag."""
+    if dev:
+        return KEY_HELP % (DEV_KEY_HELP, DEV_EXIT_HELP, chat_tui_status.REFRESH_SECONDS,
+                           DEV_TASK_HELP)
+    return KEY_HELP % ("", "", chat_tui_status.REFRESH_SECONDS, "")
+
 
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
 # Picking one edits the input draft; it never runs the command.
 SLASH_COMMANDS = (
     ("/help", "/help", "Show commands"),
-    ("/status", "/status", "Show provider, model, skill, turns and status"),
+    ("/status", "/status", "狀態：PM 模式看 PM，聊天模式看供應商與模型"),
     ("/provider", "/provider ", "List profiles or switch provider"),
     ("/skill", "/skill ", "List skills, select one, or clear"),
     ("/clear", "/clear", "Clear conversation"),
@@ -153,7 +184,7 @@ SLASH_COMMANDS = (
     ("/task submit", "/task submit --provider ",
      "開發測試用：只登記，不會派工 (--provider PROFILE REQUEST)"),
     ("/task show", "/task show ", "Show a task by TASK_ID"),
-    ("/task mode", "/task mode ", "Task mode for drafts: PROFILE, or off"),
+    ("/task mode", "/task mode ", "Task mode for drafts: profile PROFILE, or off"),
     ("/task list", "/task list", "Task list with status from TaskStore"),
     ("/task events", "/task events", "Recent Task events from TaskStore"),
     ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
@@ -194,7 +225,8 @@ BODY_INDENT = "  "
 TOOL_DETAIL_INDENT = "      "
 PM_STATE_LABELS = {"thinking": "思考中", "working": "回答中", "interrupting": "中斷中…",
                    "idle": "待命", "connecting": "連線中…", "closing": "斷線中…"}
-TURN_STATUS_LABELS = {"INTERRUPTED": "已中斷", "ERROR": "錯誤", "REPLAY": "未重送"}
+TURN_STATUS_LABELS = {"INTERRUPTED": "已中斷", "ERROR": "錯誤", "REPLAY": "未重送",
+                      "ACTIVE": "未結束"}
 
 
 def _enable_mouse_drag_reporting(output):
@@ -219,13 +251,15 @@ def _enable_mouse_drag_reporting(output):
     output.disable_mouse_support = disable_with_drag
 
 
-def slash_matches(text):
-    """Commands matching a one-line slash draft: prefix matches first, then substring."""
+def slash_matches(text, dev=True):
+    """Commands matching a one-line slash draft: prefix matches first, then substring.
+    Without the dev flag the /task commands are not offered."""
     if "\n" in text or not text.startswith("/"):
         return []
     query = text.lower()
-    prefix = [c for c in SLASH_COMMANDS if c[0].startswith(query)]
-    inside = [c for c in SLASH_COMMANDS if c not in prefix and len(query) > 2 and query[1:] in c[0]]
+    commands = [c for c in SLASH_COMMANDS if dev or not c[0].startswith("/task")]
+    prefix = [c for c in commands if c[0].startswith(query)]
+    inside = [c for c in commands if c not in prefix and len(query) > 2 and query[1:] in c[0]]
     return prefix + inside
 
 
@@ -301,7 +335,7 @@ def tui_unavailable_reason(stdin, stdout):
     return None
 
 
-def run_chat_tui(session, stdin=None, stdout=None, stderr=None):
+def run_chat_tui(session, stdin=None, stdout=None, stderr=None, dev=False):
     stdin = sys.stdin if stdin is None else stdin
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
@@ -313,7 +347,7 @@ def run_chat_tui(session, stdin=None, stdout=None, stderr=None):
     try:
         ui = None
         try:
-            ui = ChatTUI(session)
+            ui = ChatTUI(session, dev=dev or None)
             status = ui.run()
         except Exception:
             status = 1
@@ -349,6 +383,19 @@ def usage_line(event, elapsed):
     return " · ".join(parts)
 
 
+def history_usage_line(turn):
+    """The short turn-end line for a stored turn: status, seconds and tokens it recorded."""
+    status = turn["status"]
+    parts = [] if status == "COMPLETED" else [TURN_STATUS_LABELS.get(status, status)]
+    if turn["elapsed"] is not None:
+        parts.append("%.1f 秒" % turn["elapsed"])
+    counts = [turn["usage"].get(key) for key in ("input_tokens", "output_tokens")]
+    counts = [value for value in counts if type(value) is int and type(value) is not bool]
+    if counts:
+        parts.append(_short_count(sum(counts)) + " tokens")
+    return " · ".join(parts)
+
+
 def tool_outcome(event):
     """ok / error / denied / unknown for a TOOL_RESULT, from its typed reason."""
     reason = event.get("reason")
@@ -359,32 +406,59 @@ def tool_outcome(event):
     return "ok" if reason == "OK" else "unknown"
 
 
-TOOL_OUTCOME_TEXT = {None: "… 執行中", "ok": "✓", "error": "✗ 失敗 (TOOL_ERROR)",
-                     "denied": "✗ 自動拒絕 (PERMISSION_DENIED)", "unknown": "? 結果不明"}
+TOOL_FAILURE_TEXT = {"error": "失敗", "denied": "自動拒絕"}
 
 
-def tool_summary_lines(calls, expanded):
-    """([(text, token)] segments, failed) for a turn's tools: one line, or one per tool."""
-    names = collections.OrderedDict()
-    for name, _outcome in calls:
-        names[name] = names.get(name, 0) + 1
-    failed = sum(1 for _name, outcome in calls if outcome in ("error", "denied"))
-    running = sum(1 for _name, outcome in calls if outcome is None)
-    detail = "、".join("%s ×%d" % item for item in names.items())
-    if failed:
-        detail += "；%d 次失敗" % failed
-    if running:
-        detail += "；執行中"
+def _seconds(started, ended):
+    """Whole seconds between two monotonic times, or None when the start is unknown."""
+    return None if started is None or ended is None else int(max(0.0, ended - started))
+
+
+def tool_item(call, now):
+    """One tool call as the Owner reads it (W57): ▸ 執行中：… 23s / ✓ …（4s）/ ✗ …（38s，原因）.
+
+    ``call`` is [label, outcome, started, ended] (monotonic times; started None when the
+    TOOL_USE was never seen, and then no duration is shown)."""
+    label, outcome, started, ended = call
+    if outcome is None:
+        seconds = _seconds(started, now)
+        return "▸ 執行中：" + label + "…" + ("" if seconds is None else " %ds" % seconds)
+    seconds = _seconds(started, ended)
+    notes = [] if seconds is None else ["%ds" % seconds]
+    if outcome == "ok":
+        mark = "✓ "
+    elif outcome in TOOL_FAILURE_TEXT:
+        mark = "✗ "
+        notes.append(TOOL_FAILURE_TEXT[outcome])
+    else:
+        mark = "? "
+        notes.append("結果不明")
+    return mark + label + ("（" + "，".join(notes) + "）" if notes else "")
+
+
+def tool_summary_lines(calls, expanded, now=None):
+    """[(text, token)] segments for a turn's tools: collapsed, the running call or the last
+    one on one line; expanded (F7), one line per call. ``now`` is the monotonic clock."""
+    now = time.monotonic() if now is None else now
+    failed = sum(1 for call in calls if call[1] in TOOL_FAILURE_TEXT)
     token = "tool.error" if failed else "tool.summary"
-    head = ("▾ " if expanded else "▸ ") + "使用工具 %d 次（%s）" % (len(calls), detail)
-    segments = [(BODY_INDENT + head, token)]
+    note = "（%d 次失敗）" % failed if failed else ""
     if expanded:
-        width = max(len(name) for name, _outcome in calls)
-        for name, outcome in calls:
-            segments.append(("\n" + TOOL_DETAIL_INDENT + name.ljust(width) + "  "
-                             + TOOL_OUTCOME_TEXT[outcome],
-                             "tool.error" if outcome in ("error", "denied") else "tool.summary"))
-    return segments
+        segments = [(BODY_INDENT + "▾ 使用工具 %d 次" % len(calls) + note, token)]
+        for call in calls:
+            segments.append(("\n" + TOOL_DETAIL_INDENT + tool_item(call, now),
+                             "tool.error" if call[1] in TOOL_FAILURE_TEXT else "tool.summary"))
+        return segments
+    running = [call for call in calls if call[1] is None]
+    if running:
+        line = tool_item(running[-1], now)
+        if len(calls) > 1:
+            line += "（第 %d 個工具%s）" % (len(calls), "；%d 次失敗" % failed if failed else "")
+        return [(BODY_INDENT + line, token)]
+    # The last failure, when there is one, is what the Owner needs to see; else the last call.
+    shown = ([call for call in calls if call[1] in TOOL_FAILURE_TEXT] or calls)[-1]
+    head = "▸ " if len(calls) == 1 else "▸ 使用工具 %d 次%s：" % (len(calls), note)
+    return [(BODY_INDENT + head + tool_item(shown, now), token)]
 
 
 def _tokens(usage):
@@ -397,7 +471,7 @@ def _tokens(usage):
 class ChatTUI:
     """Conversation pane, persistent multiline input, help and status bar."""
 
-    def __init__(self, session, input=None, output=None, pm_api=None):
+    def __init__(self, session, input=None, output=None, pm_api=None, dev=None):
         from prompt_toolkit.application import Application
         from prompt_toolkit.document import Document
         from prompt_toolkit.filters import Condition, has_focus
@@ -417,6 +491,7 @@ class ChatTUI:
         self._app_styles = {}
         self._get_cwidth = get_cwidth
         self.session = session
+        self.dev = dev_enabled() if dev is None else dev   # W57: Task mode only with the flag
         self.busy = False
         self.quit_pending = False
         self.show_help = False
@@ -492,7 +567,7 @@ class ChatTUI:
         # summary line kept in place. pm_tool_block = [start, end, calls, turn seq] of the
         # latest summary in the pane (F7 re-renders it expanded or collapsed).
         self.pm_labelled = False
-        self.pm_tool_calls = []      # [name, outcome] in call order (outcome None: running)
+        self.pm_tool_calls = []      # [label, outcome, started, ended] in call order (W57)
         self.pm_tool_ids = {}        # tool_use_id -> index in pm_tool_calls
         self.pm_tool_block = None
         self.pm_tools_expanded = False
@@ -553,8 +628,8 @@ class ChatTUI:
             terminal_safe_text(opening
                                + "\nChat mode talks to the chat provider directly; it is not a PM."
                                + " /pm connect (or /pm new) talks to the dedicated PM."
-                               + " /task submit is for development testing only: it records"
-                               + " a Task and dispatches nothing."))
+                               + (" /task submit is for development testing only: it records"
+                                  " a Task and dispatches nothing." if self.dev else "")))
         self.input = TextArea(multiline=True, wrap_lines=True, focus_on_click=True,
                               prompt=lambda: ("pm> " if self.pm_mode else
                                               "task> " if self.task_profile else "> "),
@@ -564,7 +639,7 @@ class ChatTUI:
                               history=InMemoryHistory(),
                               # Ctrl-R search never edits the draft; Enter or Esc ends it.
                               read_only=Condition(lambda: self.searching))
-        self.help = TextArea(text=KEY_HELP + "\n\n" + HELP, read_only=True, scrollbar=True,
+        self.help = TextArea(text=self.help_text(), read_only=True, scrollbar=True,
                              wrap_lines=True, style="class:help",
                              height=Dimension(min=1, weight=1))
         self.detail = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True,
@@ -742,15 +817,15 @@ class ChatTUI:
         def _help(event):
             self.toggle_help()
 
-        @keys.add("f2")
+        @keys.add("f2", filter=Condition(lambda: self.dev))
         def _detail(event):
             self.toggle_detail(not self.show_detail)
 
-        @keys.add("f3")
+        @keys.add("f3", filter=Condition(lambda: self.dev))
         def _list(event):
             self.toggle_list(not self.show_list)
 
-        @keys.add("f4")
+        @keys.add("f4", filter=Condition(lambda: self.dev))
         def _events(event):
             self.toggle_events(not self.show_events)
 
@@ -929,6 +1004,57 @@ class ChatTUI:
             return " (not saved: " + (exc.strerror or "write failed") + ")"
         return ""
 
+    def help_text(self):
+        return key_help(self.dev) + "\n\n" + HELP
+
+    def status_report(self):
+        """/status (W57): what the current mode is talking to, in the status bar's words."""
+        theme = "主題：%s（目前 %s%s）" % (self.settings["theme"], self.theme,
+                                     "" if self.colour else "，無色彩")
+        if self.pm_mode and self.pm_target:
+            count = self.background_count()
+            if self.pm_outbox:
+                queue = "%d 則" % len(self.pm_outbox) + (
+                    "（暫停：" + self.pm_outbox_paused + "）" if self.pm_outbox_paused else "")
+            else:
+                queue = "沒有"
+            lines = ["狀態（PM 模式）",
+                     "PM session：" + self.pm_target[0] + "（claude-code，cwd "
+                     + chat_tui_pm.safe_text(str(self.pm_target[1])) + "）",
+                     "Claude 帳號目錄：" + chat_tui_pm.safe_text(
+                         getattr(self.pm_runtime, "claude_config_dir", None)),
+                     "權限模式：" + chat_tui_pm.permission_mode()
+                     + "（自動，不跳出確認）",
+                     "PM 狀態：" + self.pm_status_fields(lambda value, _width: value)["state"],
+                     "背景：" + ("讀取中" if count is None else "讀取失敗" if count == "?"
+                               else "%d 件進行中" % count),
+                     "佇列：" + queue, theme]
+            return "\n  ".join(lines)
+        session = self.session
+        model = selected_provider(session.config).get("model")
+        served = session.last_served_model or session.last_reported_model
+        if served is None:
+            served = "尚未呼叫" if session.last_elapsed is None else "上次回覆沒有回報"
+        state = {"idle": "待命", "working": "處理中", "interrupted": "已中斷"}.get(
+            session.state, session.state)
+        if session.state == "error":
+            state = "錯誤（" + (session.last_error_code or "未分類") + "）"
+        lines = ["狀態（聊天模式，不是 PM）",
+                 "供應商：" + session.provider + "（" + selected_provider(session.config)["type"]
+                 + "）",
+                 "設定的模型：" + (model or "供應商預設"),
+                 "實際模型：" + served,
+                 "技能：" + (session.skill.name if session.skill else "無"),
+                 "對話：%d 輪" % (len(session.history) // 2),
+                 "狀態：" + state
+                 + ("（上次 %.1f 秒）" % session.last_elapsed
+                    if session.last_elapsed is not None else ""),
+                 "用量：" + ("尚無" if session.last_usage is None
+                           else _tokens(session.last_usage) + " tokens（供應商回報）"),
+                 "連線：未檢查",
+                 theme]
+        return "\n  ".join(lines)
+
     def run_display_command(self, text):
         """/theme [dark|light|auto] and /links [on|off]: change, save and report."""
         parts = text.split()
@@ -1029,7 +1155,7 @@ class ChatTUI:
         if buffer.cursor_position != len(text) or self.busy:
             items = []
         else:
-            items = slash_matches(text)
+            items = slash_matches(text, self.dev)
         self._set_menu(items)
 
     def _set_menu(self, items):
@@ -1246,6 +1372,14 @@ class ChatTUI:
                 setattr(self, name, value + delta)
         self.pm_tool_block[1], self.pm_tool_block[4] = start + len(shown), shown
         self.app.invalidate()
+
+    def _pm_tool_tick(self):
+        """Every working-line tick: a running tool's seconds advance in its line (W57)."""
+        block = self.pm_tool_block
+        if (block is not None and block[3] == self._pm_turn_seq and self._tool_block_valid()
+                and any(call[1] is None for call in block[2])):
+            segments = tool_summary_lines(block[2], self.pm_tools_expanded)
+            self._replace_block(segments, "".join(part for part, _token in segments))
 
     def toggle_tools(self):
         """F7: expand or collapse the latest tool summary (and the ones after it)."""
@@ -1670,10 +1804,16 @@ class ChatTUI:
             self.run_pm_command(text)
             return
         if text.strip().split(maxsplit=1)[0] == "/task":
-            self.run_task_command(text)
+            if self.dev:
+                self.run_task_command(text)
+            else:
+                self.append("llmtool: " + TASK_HIDDEN)
             return
         if text.strip() == "/help":
-            self.append(KEY_HELP + "\n\n" + HELP)
+            self.append(self.help_text())
+            return
+        if text.strip() == "/status":
+            self.append(self.status_report())
             return
         if text.strip().split(maxsplit=1)[0] in ("/theme", "/links"):
             self.run_display_command(text.strip())
@@ -1722,12 +1862,17 @@ class ChatTUI:
         if len(parts) == 2 and parts[1] == "events":
             self.toggle_events(True)
             return
-        if len(parts) == 3 and parts[1] == "mode":
-            self.set_task_mode(parts[2])
+        words = text.split()
+        if words[1:] == ["mode", "off"]:
+            self.set_task_mode("off")
+            return
+        if len(words) == 4 and words[1:3] == ["mode", "profile"]:
+            self.set_task_mode(words[3])   # W57: the word "profile" is never a profile name
             return
         self.append("usage: /task submit --provider PROFILE REQUEST\n"
                     "       /task show TASK_ID\n"
-                    "       /task mode PROFILE|off\n"
+                    "       /task mode profile PROFILE\n"
+                    "       /task mode off\n"
                     "       /task list\n"
                     "       /task events")
 
@@ -2347,11 +2492,7 @@ class ChatTUI:
             ". pm_runtime checked at connect time that the session did not look "
             "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
             "connection. Chat replies are never the PM.")
-        if outcome["history_error"]:
-            self.append("llmtool: PM history unavailable. "
-                        + chat_tui_pm.error_text(outcome["history_error"]))
-        else:
-            self.append(chat_tui_pm.history_text(outcome["history"]))
+        self._append_history(outcome["history"], outcome["history_error"])
 
     @staticmethod
     def _close_runtime(runtime):
@@ -2380,8 +2521,51 @@ class ChatTUI:
 
     def finish_pm_history(self, history, code):
         self.pm_pending = False
-        self.append(("llmtool: PM history unavailable. " + chat_tui_pm.error_text(code)) if code
-                    else chat_tui_pm.history_text(history))
+        self._append_history(history, code)
+
+    def _append_history(self, history, code):
+        if code:
+            self.append("llmtool: PM history unavailable. " + chat_tui_pm.error_text(code))
+            return
+        segments, sources = self._history_segments(history)
+        self.append("".join(part for part, _token in segments), segments=segments,
+                    sources=sources)
+
+    def _history_segments(self, history):
+        """Stored turns in the live layout (W57): a rule with the time, 「你」 and 「PM」
+        labels, Markdown bodies, the turn's tools on one line and a short usage line."""
+        turns, total = chat_tui_pm.history_turns(history)
+        header = "PM 歷史（最近 %d 輪，存在本機）" % len(turns)
+        if total > len(turns):
+            header += "，共 %d 輪" % total
+        segments = [(header, "role.system")]
+        if not turns:
+            segments.append(("\n" + BODY_INDENT + "還沒有存下的對話", "text"))
+        sources = []
+        for turn in turns:
+            segments += [("\n\n", "text"),
+                         (chat_tui_view.RULE_CHAR * 2 + " " + turn["time"], "rule"),
+                         ("\n", "text")]
+            if turn["background"]:
+                segments.append((PM_LABEL + "（背景通知）", "role.pm"))
+            else:
+                segments += [(OWNER_LABEL, "role.owner"),
+                             ("\n" + BODY_INDENT + terminal_safe_text(turn["owner"]).replace(
+                                 "\n", "\n" + BODY_INDENT), "text"),
+                             ("\n\n" + PM_LABEL, "role.pm")]
+            if turn["tools"]:
+                segments += [("\n" + BODY_INDENT + "▸ 用過的工具：" + "、".join(turn["tools"]),
+                              "tool.summary"), ("\n", "text")]
+            segments.append(("\n", "text"))
+            reply = terminal_safe_text(turn["reply"]) or "（沒有存下回覆文字）"
+            body, body_sources = self._body(reply, BODY_INDENT)
+            offset = sum(len(part) for part, _token in segments)
+            sources += [(low + offset, high + offset, *rest) for low, high, *rest in body_sources]
+            segments += body
+            line = history_usage_line(turn)
+            if line:
+                segments += [("\n\n", "text"), (line, "meta.usage")]
+        return segments, sources
 
     def submit_pm(self, text):
         """Enter in PM mode: one pm_runtime turn at a time; the draft leaves the editor and
@@ -2553,6 +2737,7 @@ class ChatTUI:
     def _pm_working_tick(self):
         self._pm_working_handle = None
         if self.pm_turn_active:
+            self._pm_tool_tick()
             self._pm_working_show()   # Shows it again after a block or tool, or redraws it.
             self.app.invalidate()
 
@@ -2603,10 +2788,10 @@ class ChatTUI:
             self.pm_deltas = False
             self._pm_working_show()   # until the next text, tool or the turn end
         elif kind == "TOOL_USE":
-            name = event.get("name") if type(event.get("name")) is str else None
-            self.pm_tools[event.get("tool_use_id")] = name
+            label = chat_tui_pm.tool_label(event)   # W57: what it does, else its name
+            self.pm_tools[event.get("tool_use_id")] = label
             self.pm_tool_ids[event.get("tool_use_id")] = len(self.pm_tool_calls)
-            self.pm_tool_calls.append([chat_tui_pm.safe_name(name), None])
+            self.pm_tool_calls.append([label, None, time.monotonic(), None])
             self._pm_finalize()   # the summary never splits a streaming block
             self._pm_tool_summary()
             self.pm_deltas = False
@@ -2616,9 +2801,11 @@ class ChatTUI:
             index = self.pm_tool_ids.get(event.get("tool_use_id"))
             if index is None:   # a result without its TOOL_USE still counts
                 index = self.pm_tool_ids[event.get("tool_use_id")] = len(self.pm_tool_calls)
-                self.pm_tool_calls.append([chat_tui_pm.safe_name(
-                    self.pm_tools.get(event.get("tool_use_id"))), None])
+                self.pm_tool_calls.append([self.pm_tools.get(event.get("tool_use_id"),
+                                                             chat_tui_pm.safe_name(None)),
+                                           None, None, None])   # start unknown: no duration
             self.pm_tool_calls[index][1] = tool_outcome(event)
+            self.pm_tool_calls[index][3] = time.monotonic()
             self._pm_finalize()
             self._pm_tool_summary()
         elif kind == "RUNTIME_ERROR":

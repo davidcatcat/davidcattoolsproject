@@ -142,6 +142,27 @@ def _screen_stream_text(value):
     return screened
 
 
+# W57: what a tool call does, for the TUI line. Bash's own description, else the tool name
+# with its path or pattern; never a command or any other input field.
+_TOOL_TARGET_KEYS = ('pattern', 'file_path', 'notebook_path', 'path', 'url')
+TOOL_DESCRIPTION_CHARS = 240
+
+
+def _tool_description(name, tool_input):
+    if not isinstance(tool_input, dict):
+        return None
+    text = tool_input.get('description')
+    if not (isinstance(text, str) and text.strip()):
+        target = next((tool_input[key] for key in _TOOL_TARGET_KEYS
+                       if isinstance(tool_input.get(key), str) and tool_input[key].strip()), None)
+        if target is None:
+            return None
+        text = name + ' ' + target
+    text = ' '.join(text.split())[:TOOL_DESCRIPTION_CHARS]
+    screened = _screen_stream_text(text)
+    return None if screened == '[withheld]' else screened
+
+
 _STREAM_SECRET_START = re.compile(
     r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
     r'\b(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
@@ -897,7 +918,8 @@ class PMRuntime:
                             if isinstance(name, str):
                                 if name not in record['tool_names']:
                                     record['tool_names'].append(name)
-                                yield emit('TOOL_USE', tool_use_id=tool_id, name=name)
+                                yield emit('TOOL_USE', tool_use_id=tool_id, name=name,
+                                           description=_tool_description(name, item.get('input')))
                 elif kind == 'user':
                     for item in _iter_content((line.get('message') or {}).get('content')):
                         if isinstance(item, dict) and item.get('type') == 'tool_result':

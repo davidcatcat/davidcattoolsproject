@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmtool import chat_tui, chat_tui_pm, chat_tui_view
+from llmtool import chat_tui, chat_tui_pm, chat_tui_view, tui_markdown
 from tests.test_chat_tui import HAVE_TOOLKIT, Base
 
 if HAVE_TOOLKIT:
@@ -180,22 +180,61 @@ class TurnTextTests(unittest.TestCase):
                          "已中斷 · 1.0 秒")
         self.assertEqual(chat_tui.usage_line({"status": "odd status"}, 0.5), "UNKNOWN · 0.5 秒")
 
-    def test_tool_summary_counts_names_and_failures(self):
-        calls = [["Bash", "ok"], ["Read", "error"], ["Bash", "ok"], ["Bash", "denied"],
-                 ["Read", "ok"], ["Bash", "ok"]]
-        segments = chat_tui.tool_summary_lines(calls, expanded=False)
-        self.assertEqual(segments, [("  ▸ 使用工具 6 次（Bash ×4、Read ×2；2 次失敗）", "tool.error")])
-        ok = chat_tui.tool_summary_lines([["Read", "ok"], ["Grep", None]], expanded=True)
-        self.assertEqual(ok, [("  ▾ 使用工具 2 次（Read ×1、Grep ×1；執行中）", "tool.summary"),
-                              ("\n      Read  ✓", "tool.summary"),
-                              ("\n      Grep  … 執行中", "tool.summary")])
+    def test_tool_summary_says_what_each_call_does(self):
+        # W57: [label, outcome, started, ended]; the collapsed line shows the last failure.
+        calls = [["列出檔案", "ok", 10.0, 11.0], ["Read a.py", "error", 11.0, 49.5],
+                 ["Bash", "ok", 50.0, 54.9], ["跑測試", "denied", 55.0, 55.2]]
+        segments = chat_tui.tool_summary_lines(calls, expanded=False, now=60.0)
+        self.assertEqual(segments, [("  ▸ 使用工具 4 次（2 次失敗）：✗ 跑測試（0s，自動拒絕）",
+                                     "tool.error")])
+        one = chat_tui.tool_summary_lines([["列出檔案", "ok", 10.0, 14.2]], False, now=60.0)
+        self.assertEqual(one, [("  ▸ ✓ 列出檔案（4s）", "tool.summary")])
+        expanded = chat_tui.tool_summary_lines(calls, expanded=True, now=60.0)
+        self.assertEqual(expanded, [("  ▾ 使用工具 4 次（2 次失敗）", "tool.error"),
+                                    ("\n      ✓ 列出檔案（1s）", "tool.summary"),
+                                    ("\n      ✗ Read a.py（38s，失敗）", "tool.error"),
+                                    ("\n      ✓ Bash（4s）", "tool.summary"),
+                                    ("\n      ✗ 跑測試（0s，自動拒絕）", "tool.error")])
 
-    def test_history_keeps_the_full_usage(self):
-        text = chat_tui_pm.history_text({"turns": [{
-            "started_at": "t", "owner_text": "hi", "status": "COMPLETED", "result_text": "ok",
-            "usage": {"input_tokens": 5, "output_tokens": 7, "cache_read_input_tokens": 9}}]})
-        self.assertIn("(history) usage: input 5, output 7, cache read input 9 (provider-reported)",
-                      text)
+    def test_running_call_shows_live_seconds_and_unknown_start_shows_none(self):
+        running = [["列出檔案", "ok", 0.0, 1.0], ["跑 focused 測試", None, 10.0, None]]
+        self.assertEqual(chat_tui.tool_summary_lines(running, False, now=33.4),
+                         [("  ▸ 執行中：跑 focused 測試… 23s（第 2 個工具）", "tool.summary")])
+        self.assertEqual(chat_tui.tool_summary_lines(running[1:], False, now=11.0),
+                         [("  ▸ 執行中：跑 focused 測試… 1s", "tool.summary")])
+        # A TOOL_RESULT without its TOOL_USE: no start, so no duration is guessed.
+        orphan = [["UNKNOWN", "error", None, 5.0]]
+        self.assertEqual(chat_tui.tool_summary_lines(orphan, False, now=9.0),
+                         [("  ▸ ✗ UNKNOWN（失敗）", "tool.error")])
+        self.assertEqual(chat_tui.tool_item(["x", "ok", None, 5.0], 9.0), "✓ x")
+        self.assertEqual(chat_tui.tool_item(["x", None, None, None], 9.0), "▸ 執行中：x…")
+        self.assertEqual(chat_tui.tool_item(["x", "unknown", 1.0, 3.0], 9.0), "? x（2s，結果不明）")
+
+    def test_tool_label_uses_the_description_screened_and_bounded(self):
+        label = chat_tui_pm.tool_label
+        self.assertEqual(label({"name": "Bash", "description": "列出\n  檔案"}), "列出 檔案")
+        self.assertEqual(label({"name": "Bash"}), "Bash")                  # no description
+        self.assertEqual(label({"name": "Bash", "description": "  "}), "Bash")
+        self.assertEqual(label({"name": "Bash", "description": 7}), "Bash")
+        secret = "export TOKEN=ghp_" + "a" * 36
+        shown = label({"name": "Bash", "description": secret})
+        self.assertNotIn("a" * 36, shown)
+        long = label({"name": "Read", "description": "長" * 200})
+        self.assertIn(tui_markdown.display_width(long), (chat_tui_pm.TOOL_LABEL_CELLS - 1,
+                                                         chat_tui_pm.TOOL_LABEL_CELLS))
+        self.assertTrue(long.endswith("…"))
+        self.assertEqual(label({"name": "Bash", "description": "a\x1b[31mb\u202e"}), "a[31mb")
+
+    def test_history_usage_line_is_short(self):
+        turns, total = chat_tui_pm.history_turns({"turns": [{
+            "started_at": "2026-10-30T01:00:00+00:00", "ended_at": "2026-10-30T01:00:04.5+00:00",
+            "owner_text": "hi", "status": "INTERRUPTED", "result_text": "ok",
+            "usage": {"input_tokens": 1500, "output_tokens": 700, "cache_read_input_tokens": 9}}]})
+        self.assertEqual(total, 1)
+        self.assertEqual(chat_tui.history_usage_line(turns[0]), "已中斷 · 4.5 秒 · 2.2k tokens")
+        turns, _total = chat_tui_pm.history_turns({"turns": [{"started_at": "bad"}]})
+        self.assertEqual(turns[0]["time"], "時間不明")
+        self.assertEqual(chat_tui.history_usage_line(turns[0]), "UNKNOWN")
 
 
 @unittest.skipUnless(HAVE_TOOLKIT, "prompt_toolkit not installed")
@@ -240,7 +279,7 @@ class PMLayoutTests(Base):
         text = ui.conversation.text
         body = text[text.rindex("── "):]
         self.assertRegex(body, "^── [0-9]{2}:[0-9]{2}\n你\n  請問\n\nPM\n  先看 檔案\n\n"
-                               "  ▸ 使用工具 2 次（Read ×1、Bash ×1；1 次失敗）\n\n  結論\n\n"
+                               "  ▸ 使用工具 2 次（1 次失敗）：✗ Bash（0s，失敗）\n\n  結論\n\n"
                                "[0-9]+\\.[0-9] 秒 · 1.2k tokens$")
         self.assertEqual(self.tokens("你"), {"role.owner"})
         self.assertEqual(self.tokens("檔案"), {"md.bold"})      # tui_markdown rendered the body
@@ -252,25 +291,52 @@ class PMLayoutTests(Base):
     def test_summary_updates_in_place_while_text_follows_and_f7_expands_it(self):
         ui = self.ui
         self.start()
-        self.event("TOOL_USE", tool_use_id="a", name="Read")
+        self.event("TOOL_USE", tool_use_id="a", name="Read", description="Read chat_tui.py")
         self.event("TEXT_DELTA", text="中間", block_index=1)
         ui._pm_flush()
         ui._pm_render(final=False)
-        self.event("TOOL_USE", tool_use_id="b", name="Read")
+        self.event("TOOL_USE", tool_use_id="b", name="Bash", description="跑 focused 測試")
         text = ui.conversation.text
-        self.assertEqual(text.count("使用工具"), 1)               # one line, updated in place
-        self.assertIn("PM\n  ▸ 使用工具 2 次（Read ×2；執行中）\n\n  中間", text)
+        self.assertEqual(text.count("執行中："), 1)               # one line, updated in place
+        self.assertIn("PM\n  ▸ 執行中：跑 focused 測試… 0s（第 2 個工具）\n\n  中間", text)
         self.assertIn("F7 工具", ui.status_text())
         ui.toggle_tools()
-        self.assertIn("  ▾ 使用工具 2 次（Read ×2；執行中）\n      Read  … 執行中\n"
-                      "      Read  … 執行中\n\n  中間", ui.conversation.text)
+        self.assertIn("  ▾ 使用工具 2 次\n      ▸ 執行中：Read chat_tui.py… 0s\n"
+                      "      ▸ 執行中：跑 focused 測試… 0s\n\n  中間", ui.conversation.text)
         self.event("TOOL_RESULT", tool_use_id="a", reason="PERMISSION_DENIED")
-        self.assertIn("      Read  ✗ 自動拒絕 (PERMISSION_DENIED)", ui.conversation.text)
+        self.assertIn("      ✗ Read chat_tui.py（0s，自動拒絕）", ui.conversation.text)
         self.assertEqual(self.tokens("▾ 使用工具"), {"tool.error"})
         ui.toggle_tools()
-        self.assertIn("  ▸ 使用工具 2 次（Read ×2；1 次失敗；執行中）\n\n  中間", ui.conversation.text)
-        self.assertNotIn("      Read", ui.conversation.text)
+        self.assertIn("  ▸ 執行中：跑 focused 測試… 0s（第 2 個工具；1 次失敗）\n\n  中間",
+                      ui.conversation.text)
+        self.assertNotIn("      ✗", ui.conversation.text)
         self.assertTrue(ui.conversation.text.endswith(ui.pm_working_text))   # working line kept last
+
+    def test_running_seconds_advance_on_the_working_tick(self):
+        ui = self.ui
+        self.start()
+        self.event("TOOL_USE", tool_use_id="a", name="Bash", description="跑 focused 測試")
+        self.assertIn("▸ 執行中：跑 focused 測試… 0s", ui.conversation.text)
+        ui.pm_tool_calls[0][2] -= 23.2   # the call started 23 s ago
+        ui._pm_working_tick()            # the existing 1 s tick, not a new timer
+        self.assertIn("▸ 執行中：跑 focused 測試… 23s", ui.conversation.text)
+        self.assertEqual(ui.conversation.text.count("執行中："), 1)
+        self.assertTrue(ui.conversation.text.endswith(ui.pm_working_text))
+        ui.pm_tool_calls[0][2] -= 1.0
+        ui._pm_working_tick()
+        self.assertIn("… 24s", ui.conversation.text)
+        self.event("TOOL_RESULT", tool_use_id="a", reason="OK")
+        self.assertRegex(ui.conversation.text, "  ▸ ✓ 跑 focused 測試（24s）")
+        before = ui.conversation.text
+        ui._pm_working_tick()            # nothing running: the finished line stays as it is
+        self.assertIn("✓ 跑 focused 測試（24s）", ui.conversation.text)
+        self.assertEqual(before.count("✓"), ui.conversation.text.count("✓"))
+
+    def test_result_without_tool_use_has_no_duration(self):
+        ui = self.ui
+        self.start()
+        self.event("TOOL_RESULT", tool_use_id="zz", reason="TOOL_ERROR")
+        self.assertIn("  ▸ ✗ UNKNOWN（失敗）", ui.conversation.text)
 
     def test_account_text_is_a_system_notice(self):
         ui = self.ui

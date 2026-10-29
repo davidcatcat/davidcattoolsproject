@@ -103,6 +103,15 @@ def _reported_model(provider_type, metadata):
         return None
 
 
+def _served_model(metadata):
+    """The model a gateway says it served (metadata served_model), when it has that shape."""
+    try:
+        model = metadata.get("served_model") if type(metadata) in (dict, MappingProxyType) else None
+        return model if type(model) is str and _MODEL_PATTERN.fullmatch(model) else None
+    except Exception:
+        return None
+
+
 def _error_code(exc):
     """Typed diagnostic code only; never classify from message text."""
     try:
@@ -134,6 +143,7 @@ class ChatSession:
         self.last_elapsed = None
         self.last_usage = None
         self.last_reported_model = None
+        self.last_served_model = None
         self.last_error_code = None
         self.last_interrupted = False
 
@@ -245,6 +255,7 @@ class ChatSession:
         # Secondary metadata never raises and is computed before history changes.
         usage = reply_usage(reply.metadata)
         reported = _reported_model(provider_type, reply.metadata)
+        served = _served_model(reply.metadata)
         self.history.extend((user, {"role": "assistant", "content": reply.content}))
         if self._history_store is not None:
             self._history_store.save(self.history)
@@ -252,6 +263,7 @@ class ChatSession:
         self.last_elapsed = max(0.0, time.monotonic() - started)
         self.last_usage = usage
         self.last_reported_model = reported
+        self.last_served_model = served
         self.request_started = None
         self.last_interrupted = interrupted
         self.state = "interrupted" if interrupted else "idle"
