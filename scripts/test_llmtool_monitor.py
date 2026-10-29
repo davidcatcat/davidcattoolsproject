@@ -2051,6 +2051,23 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((row.state, row.main, row.kind), (mon.DONE, False, "subagent"))
         self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows())))
 
+    def test_stalled_codex_exec_is_done_when_process_is_gone_or_silent_for_an_hour(self):
+        meta = {"id": "E1", "cwd": str(self.task), "thread_source": "user",
+                "originator": "codex_exec"}
+        self._codex("exec", meta, ["task_started"], age=20 * 60)
+        row = self.by_name(self.rows())["codex developer"]
+        self.assertEqual(row.state, mon.DONE)
+        self.assertTrue(row.codex_exec_started)
+        self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows())))
+
+        codex = mon.Process(83, 1, 83, "00:30", "S", "Codex CLI", "codex", "")
+        row = self.by_name(self.rows([codex]))["codex developer"]
+        self.assertEqual(row.state, mon.STALLED)
+
+        self._codex("exec", meta, ["task_started"], age=61 * 60)
+        row = self.by_name(self.rows([codex]))["codex developer"]
+        self.assertEqual(row.state, mon.DONE)
+
     def test_codex_rows_show_what_they_do_like_claude_rows(self):
         path = self.codex.parent / "state.sqlite"
         db = sqlite3.connect(path)
