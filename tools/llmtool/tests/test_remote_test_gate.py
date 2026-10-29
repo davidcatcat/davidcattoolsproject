@@ -83,16 +83,17 @@ class RemoteTestGateTests(unittest.TestCase):
                       reasoning_effort='high')
         with patch.object(remote_test, '_config', return_value={}):
             remote = task_submission_cli._codex_direct_prompt(task, **common)
-        self.assertIn('Do not run unittest suites in the sandbox.', remote)
+        self.assertIn('Do not run unittest in the sandbox.', remote)
         self.assertIn('"test_policy":"REMOTE_RECEIPT"', remote)
-        self.assertNotIn('Run the test_commands listed in the Task Contract', remote)
+        self.assertNotIn('Run only listed test_commands', remote)
+        self.assertNotIn('Run only listed test_commands;', remote)
 
         def unavailable():
             raise LLMToolError('unavailable')
 
         with patch.object(remote_test, '_config', side_effect=unavailable):
             local = task_submission_cli._codex_direct_prompt(task, **common)
-        self.assertIn('Run the test_commands listed in the Task Contract;', local)
+        self.assertIn('Run only listed test_commands;', local)
         self.assertIn('"test_policy":"LOCAL"', local)
 
     def test_direct_callback_defers_remote_tests_and_keeps_local_execution(self):
