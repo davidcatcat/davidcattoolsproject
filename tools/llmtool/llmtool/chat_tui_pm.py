@@ -232,8 +232,11 @@ def history_text(result):
     for turn in shown:
         # Stored history is not validated by pm_runtime: every shown field is screened.
         tools = turn.get("tool_names") if type(turn.get("tool_names")) is list else []
-        lines.append("(history) %s  owner → PM:\n%s" % (
-            safe_text(turn.get("started_at")), safe_text(turn.get("owner_text"))))
+        if turn.get("origin") == "background":   # a turn Claude Code started by itself
+            lines.append("(history) %s  PM（背景通知）" % safe_text(turn.get("started_at")))
+        else:
+            lines.append("(history) %s  owner → PM:\n%s" % (
+                safe_text(turn.get("started_at")), safe_text(turn.get("owner_text"))))
         lines.append("(history) PM [%s]%s:\n%s" % (
             safe_code(turn.get("status")),
             (" tools: " + ", ".join(safe_name(t) for t in tools)) if tools else "",

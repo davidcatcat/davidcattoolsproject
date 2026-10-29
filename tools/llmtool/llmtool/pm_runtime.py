@@ -2,6 +2,7 @@
 
 import fcntl
 import atexit
+import collections
 import json
 import os
 import re
@@ -38,6 +39,10 @@ PM_SESSION_INSTRUCTION = (
     'llmtool PM session rule: when you answer without calling any tool, reply with the '
     'answer itself and nothing before it; never open with a one-line preamble about what '
     'you are about to do. A short preamble is fine only in turns where you call tools.')
+# Stream-json lines that only a turn produces. Anything else that arrives between turns
+# (system notices, a late control_response) is not the start of a Claude Code turn.
+_TURN_LINE_TYPES = ('stream_event', 'assistant', 'user', 'result')
+_STDOUT_EOF = object()
 _active_runtimes = set()
 _signal_handlers_installed = False
 _previous_signal_handlers = {}
@@ -406,6 +411,11 @@ class PMRuntime:
         self._unknown_lines = 0
         self._stderr_buffer = bytearray()
         self._stderr_thread = None
+        # The child's stdout is read for the whole connection, not only during an Owner
+        # turn: Claude Code also starts turns by itself (background task notifications).
+        self._lines = None
+        self._lines_cond = threading.Condition(self._state_lock)
+        self._stdout_thread = None
         self._idempotency = {}
 
     def __enter__(self):
@@ -604,6 +614,11 @@ class PMRuntime:
                     args, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE, bufsize=0, start_new_session=True)
             self._child = runner(argv, cwd, env)
+            self._lines = collections.deque()
+            self._stdout_thread = threading.Thread(
+                target=self._pump_stdout, args=(self._child, self._lines),
+                name='llmtool-pm-stdout', daemon=True)
+            self._stdout_thread.start()
             self._stderr_buffer = bytearray()
             if getattr(self._child, 'stderr', None) is not None:
                 self._stderr_thread = threading.Thread(target=self._capture_stderr, daemon=True)
@@ -649,6 +664,40 @@ class PMRuntime:
                 self._child.stdin.flush()
             except (OSError, BrokenPipeError, AttributeError):
                 raise _error('PM_PROCESS_EXITED', 'PM runtime process is unavailable') from None
+
+    def _pump_stdout(self, child, lines):
+        try:
+            for raw in child.stdout:
+                with self._lines_cond:
+                    lines.append(raw)
+                    self._lines_cond.notify_all()
+        except (OSError, ValueError):
+            pass   # A closed or unreadable stdout ends like EOF.
+        finally:
+            with self._lines_cond:
+                lines.append(_STDOUT_EOF)
+                self._lines_cond.notify_all()
+
+    def _read_lines(self, lines):
+        """Yield stdout lines in order; EOF stays queued so every later reader sees it."""
+        while True:
+            with self._lines_cond:
+                self._lines_cond.wait_for(lambda: lines or self._closed)
+                if not lines or lines[0] is _STDOUT_EOF:
+                    return
+                raw = lines.popleft()
+            yield raw
+
+    def _starts_turn(self, raw):
+        """True when an unclaimed line belongs to a turn (or must surface as an error)."""
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_STREAM_LINE_BYTES:
+            return True
+        try:
+            line = json.loads(bytes(raw).decode('utf-8'))
+        except (ValueError, UnicodeError):
+            return True
+        return (not isinstance(line, dict) or line.get('type') in _TURN_LINE_TYPES or
+                _contains_different_session(line, self.pm_session_id))
 
     def _capture_stderr(self):
         stream = getattr(self._child, 'stderr', None)
@@ -701,16 +750,10 @@ class PMRuntime:
                     return iter(({'type': 'TURN_REPLAY', 'turn_id': existing['turn_id'],
                                   'seq': existing['seq'], 'status': existing['status']},))
             if self._turn is not None:
+                # Also while a background turn runs: the caller holds the message until
+                # it ends, so Claude Code never folds it into that turn.
                 raise _error('PM_TURN_ACTIVE', 'PM turn is already active')
-            turns = self._history_read()
-            record = {'turn_id': uuid.uuid4().hex, 'seq': max(
-                (turn.get('seq', 0) for turn in turns if isinstance(turn, dict)), default=0) + 1,
-                'started_at': _timestamp(self.clock), 'ended_at': None,
-                'owner_text': text, 'status': 'ACTIVE', 'result_text': '',
-                'tool_names': [], 'usage': {}, 'idempotency_key': idempotency_key}
-            turns.append(record)
-            self._history_write(turns)
-            self._turn = record
+            record = self._start_record(text, idempotency_key)
             if idempotency_key is not None:
                 self._idempotency[idempotency_key] = record
             try:
@@ -722,6 +765,50 @@ class PMRuntime:
                 self._persist_turn(record)
                 self._turn = None
                 raise
+        return self._events(record)
+
+    def _start_record(self, owner_text, idempotency_key, origin=None):
+        turns = self._history_read()
+        record = {'turn_id': uuid.uuid4().hex, 'seq': max(
+            (turn.get('seq', 0) for turn in turns if isinstance(turn, dict)), default=0) + 1,
+            'started_at': _timestamp(self.clock), 'ended_at': None,
+            'owner_text': owner_text, 'status': 'ACTIVE', 'result_text': '',
+            'tool_names': [], 'usage': {}, 'idempotency_key': idempotency_key}
+        if origin is not None:
+            record['origin'] = origin
+        turns.append(record)
+        self._history_write(turns)
+        self._turn = record
+        return record
+
+    def background_turn(self, timeout=None):
+        """Wait up to timeout seconds for a turn Claude Code starts by itself (a background
+        task notification) and return its event iterator, or None.
+
+        Between turns, lines that are not part of a turn are dropped here. The turn is
+        recorded with origin "background" and its own timing and usage; send() refuses
+        with PM_TURN_ACTIVE until it ends. Raises PM_PROCESS_EXITED once the child's
+        stdout has ended between turns.
+        """
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._lines_cond:
+            while True:
+                lines = self._lines
+                if self._closed or self._child is None or lines is None:
+                    return None
+                if self._turn is None:
+                    while lines and lines[0] is not _STDOUT_EOF and not self._starts_turn(lines[0]):
+                        lines.popleft()
+                        self._unknown_lines += 1
+                    if lines and lines[0] is _STDOUT_EOF:
+                        raise _error('PM_PROCESS_EXITED', 'PM runtime process has exited')
+                    if lines:
+                        break
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return None
+                self._lines_cond.wait(remaining)
+            record = self._start_record('', None, origin='background')
         return self._events(record)
 
     def _persist_turn(self, record):
@@ -751,9 +838,10 @@ class PMRuntime:
             self._persist_turn(record)
             if self._turn is record:
                 self._turn = None
+                self._lines_cond.notify_all()   # a waiting background_turn may claim lines now
 
     def _events(self, record):
-        child = self._child
+        lines = self._lines
         event_seq = 0
         blocks = {}
         withheld_blocks = set()
@@ -792,7 +880,7 @@ class PMRuntime:
                     yield event
 
         try:
-            for raw in child.stdout:
+            for raw in self._read_lines(lines):
                 if self._was_interrupted:
                     yield from flush_all_blocks()
                 if self._closed:
@@ -976,6 +1064,7 @@ class PMRuntime:
             self._closed = True
             child = self._child
             active_turn = self._turn
+            self._lines_cond.notify_all()
         error = None
         had_child = child is not None
         if active_turn is not None:

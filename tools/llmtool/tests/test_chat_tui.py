@@ -2135,6 +2135,15 @@ class FakeClaude:
     def users(self):
         return [line for line in self.written if line.get('type') == 'user']
 
+    def unsolicited(self, script, delay=0.0):
+        """Play a turn Claude Code starts by itself (a background task notification)."""
+        def play():
+            time.sleep(delay)
+            self._play(script)
+        thread = threading.Thread(target=play, name='fake-claude-play', daemon=True)
+        self.threads.append(thread)
+        thread.start()
+
 
 def _delta(text, index=0):
     """A Claude Code stream-json partial text event, as pm_runtime S2 parses it."""
@@ -3535,6 +3544,112 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual([t['content'] for t in self.session.history], ['chat now', 'reply'])
         self.assertEqual(len(self.fakes[0].users()), 1)       # nothing more reached the PM
         self.assertTrue(self.fakes[0].closed_stdin)
+
+    def test_background_turn_between_owner_sends_is_shown_live_as_its_own_turn(self):
+        # P0-3 (Owner TUI run 2026-10-29): task-notification turns were not shown until the
+        # next Owner send, which then ended on the stale background result.
+        self.turns = [[_delta('已派工'), _result('已派工', usage={'output_tokens': 1})],
+                      [_delta('進度：'), 'HOLD', _delta('PR 已開'),
+                       _assistant({'type': 'text', 'text': '進度：PR 已開'}),
+                       _result('進度：PR 已開', usage={'output_tokens': 3})]]
+        background = [_delta('Codex 回報'), 'HOLD',
+                      _assistant({'type': 'text', 'text': 'Codex 回報'},
+                                 {'type': 'tool_use', 'id': 'b1', 'name': 'Bash', 'input': {}}),
+                      _tool_result('b1', 'SECRET_OUTPUT', False),
+                      _result('Codex 回報', usage={'output_tokens': 2})]
+
+        async def live(ui):
+            self.fakes[0].unsolicited(background, delay=0.2)
+            await self.until(ui, lambda ui: 'PM（背景通知）:\nCodex 回報' in ui.conversation.text,
+                             'background text shown live')
+            self.assertTrue(ui.pm_turn_active)
+            self.assertIn('PM（背景通知）：Claude Code 自行開始一輪', ui.conversation.text)
+            self.assertEqual(len(self.fakes[0].users()), 1)   # nothing was sent for it
+            self.fakes[0].gate.set()
+            await self.turn_done(ui)
+            text = ui.conversation.text
+            self.assertIn('  · tool Bash: done', text)
+            self.assertIn('usage: output 2 (provider-reported)', text)
+            self.assertNotIn('SECRET', text)
+
+        async def owner_reply(ui):
+            await self.until(ui, lambda ui: 'PM:\n進度：' in ui.conversation.text, 'reply')
+            self.fakes[0].gate.set()
+            await self.turn_done(ui)
+
+        ui, _ = self.drive([self.connect(), self.connected, '派工\r', self.turn_done, live,
+                            '回報進度\r', owner_reply])
+        text = ui.conversation.text
+        self.assertEqual(text.count('— PM turn COMPLETED'), 3)
+        owner = text.index('owner → PM:\n回報進度')
+        self.assertIn('進度：PR 已開', text[owner:])
+        self.assertIn('usage: output 3 (provider-reported)', text[owner:])
+        self.assertNotIn('Codex 回報', text[owner:])   # the background reply stays its own turn
+        turns = self.api.read_history(self.session_id)['turns']
+        shown = chat_tui_pm.history_text({'turns': turns})
+        self.assertIn('  PM（背景通知）\n(history) PM [COMPLETED] tools: Bash:\nCodex 回報', shown)
+        self.assertIn('  owner → PM:\n回報進度', shown)
+        self.assertEqual([(t['owner_text'], t.get('origin'), t['usage']) for t in turns],
+                         [('派工', None, {'output_tokens': 1}),
+                          ('', 'background', {'output_tokens': 2}),
+                          ('回報進度', None, {'output_tokens': 3})])
+
+    def test_owner_message_during_a_background_turn_waits_in_the_queue_and_is_answered(self):
+        # P0-3: the Owner message sent mid background turn was absorbed by Claude Code
+        # (queue-operation remove, absorbed_mid_turn) and never got a turn of its own.
+        self.turns = [[_delta('收到'), _result('收到')]]
+
+        async def background(ui):
+            self.fakes[0].unsolicited([_delta('背景'), 'HOLD', _result('背景')])
+            await self.until(ui, lambda ui: 'PM（背景通知）:\n背景' in ui.conversation.text)
+
+        async def queued(ui):
+            await asyncio.sleep(0.2)
+            self.assertEqual(list(ui.pm_outbox), ['繼續推進，回報進度'])
+            self.assertIn('owner → PM（已排入佇列（第 1 則））:\n繼續推進，回報進度',
+                          ui.conversation.text)
+            self.assertEqual(self.fakes[0].users(), [])   # held while the background turn runs
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, background, '繼續推進，回報進度\r', queued,
+                            lambda ui: self.until(ui, lambda ui: 'PM:\n收到' in ui.conversation.text
+                                                  and not ui.pm_turn_active, 'answered')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['繼續推進，回報進度'])
+        self.assertIn('owner → PM（自佇列送出，剩 0 則）:\n繼續推進，回報進度', ui.conversation.text)
+        self.assertEqual(ui.conversation.text.count('— PM turn COMPLETED'), 2)
+
+    def test_send_refused_by_a_background_turn_is_held_then_sent_when_it_ends(self):
+        # The race: pm_runtime claims a background turn just before the Owner's Enter is
+        # shown as one. The refused draft goes back to the queue, never to Claude Code.
+        self.turns = [[_delta('收到'), _result('收到')]]
+        claimed = {}
+
+        async def race(ui):
+            self.fakes[0].unsolicited([_delta('背景'), _result('背景')])
+            # Claim it the way the watcher does, before the TUI shows it.
+            claimed['events'] = ui.pm_runtime.background_turn(timeout=5)
+            self.assertIsNotNone(claimed['events'])
+
+        async def held(ui):
+            await self.until(ui, lambda ui: not ui.pm_turn_active, 'held turn ended')
+            self.assertEqual(list(ui.pm_outbox), ['回報進度'])
+            self.assertIn('這則訊息沒有送出，保留在佇列第 1 則', ui.conversation.text)
+            self.assertIsNone(ui.pm_outbox_paused)
+            self.assertEqual(self.fakes[0].users(), [])
+            turn = {'runtime': ui.pm_runtime, 'seq': None, 'events': [], 'ended': False}
+            ui.pm_background_start(turn)
+            for event in claimed['events']:
+                ui.pm_background_event(turn, event)
+            ui.pm_background_end(turn)
+
+        with patch.object(chat_tui.ChatTUI, '_pm_watch', lambda self, runtime, loop: None):
+            ui, _ = self.drive([self.connect(), self.connected, race, '回報進度\r', held,
+                                lambda ui: self.until(ui, lambda ui: 'PM:\n收到' in ui.conversation.text
+                                                      and not ui.pm_turn_active, 'answered')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['回報進度'])
+        self.assertIn('PM（背景通知）:\n背景', ui.conversation.text)
 
     def test_run_closes_the_pm_runtime_even_when_the_app_fails(self):
         with create_pipe_input() as pipe:   # never the real stdin (CI has no terminal)

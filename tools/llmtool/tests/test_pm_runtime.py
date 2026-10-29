@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import queue
 import signal
 import sys
 import tempfile
@@ -65,6 +66,34 @@ class FakeProcess:
         return 0
 
     stuck = False
+
+
+class LiveProcess(FakeProcess):
+    """A child whose stdout lines arrive when the test feeds them, like a real pipe."""
+
+    def __init__(self):
+        super().__init__()
+        self.feed = queue.Queue()
+        self.stdout = iter(self.feed.get, None)
+
+    def emit(self, *values):
+        for line in encoded(*values):
+            self.feed.put(line)
+
+    def terminate(self):
+        super().terminate()
+        self.feed.put(None)
+
+    def users(self):
+        return [json.loads(line) for line in self.stdin.getvalue().splitlines()
+                if json.loads(line).get('type') == 'user']
+
+
+def _bg_turn(text, tokens):
+    return ({'type': 'stream_event', 'event': {'type': 'message_start', 'message': {}}},
+            _runtime_delta(0, text),
+            {'type': 'assistant', 'message': {'content': [{'type': 'text', 'text': text}]}},
+            {'type': 'result', 'result': text, 'usage': {'output_tokens': tokens}})
 
 
 class PMRuntimeTests(unittest.TestCase):
@@ -890,6 +919,78 @@ class PMRuntimeTests(unittest.TestCase):
             runtime.close(timeout=0)
             runtime.close(timeout=0)
         self.assertIsNone(runtime._turn)
+
+    def test_unsolicited_turn_between_sends_is_a_background_turn_with_its_own_usage(self):
+        # P0-3 (Owner TUI run 2026-10-29, PM 0d2524b7): Claude Code started turns by itself
+        # for task notifications between Owner sends. stdout was read only inside send(),
+        # so the next send ended on the stale background `result` (COMPLETED in 0.5s).
+        process = LiveProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        process.emit(*_bg_turn('第一輪', 1))
+        first = list(runtime.send('派工'))
+        self.assertEqual(first[-1]['usage'], {'output_tokens': 1})
+        self.assertIsNone(runtime.background_turn(timeout=0.05))   # idle: nothing to claim
+        process.emit({'type': 'system', 'subtype': 'status'},   # not a turn: dropped
+                     {'type': 'control_response', 'response': {}},
+                     *_bg_turn('Codex 已回報', 2))
+        background = list(runtime.background_turn(timeout=5))
+        self.assertEqual([event['type'] for event in background],
+                         ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
+        self.assertEqual(background[-1]['result_text'], 'Codex 已回報')
+        self.assertEqual(background[-1]['usage'], {'output_tokens': 2})
+        process.emit(*_bg_turn('進度如下', 3))
+        second = list(runtime.send('回報進度'))
+        self.assertEqual(second[-1]['result_text'], '進度如下')   # not the background reply
+        self.assertEqual(second[-1]['usage'], {'output_tokens': 3})
+        turns = pm_runtime.read_history(SESSION, state_root=self.root)['turns']
+        self.assertEqual([(t['seq'], t['owner_text'], t.get('origin'), t['result_text'],
+                           t['usage'], t['status']) for t in turns],
+                         [(1, '派工', None, '第一輪', {'output_tokens': 1}, 'COMPLETED'),
+                          (2, '', 'background', 'Codex 已回報', {'output_tokens': 2}, 'COMPLETED'),
+                          (3, '回報進度', None, '進度如下', {'output_tokens': 3}, 'COMPLETED')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in process.users()],
+                         ['派工', '回報進度'])
+
+    def test_owner_send_during_a_background_turn_is_held_not_written(self):
+        # The Owner message must not reach Claude Code mid-turn: it absorbs it into the
+        # running background turn (queue-operation remove, absorbed_mid_turn) and no turn
+        # of its own ever answers it.
+        process = LiveProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        process.emit({'type': 'stream_event', 'event': {'type': 'message_start', 'message': {}}},
+                     _runtime_delta(0, '背景'))
+        events = runtime.background_turn(timeout=5)
+        self.assertEqual(next(events)['type'], 'TEXT_DELTA')
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.send('繼續推進，回報進度')
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_TURN_ACTIVE')
+        self.assertEqual(process.users(), [])
+        process.emit({'type': 'result', 'result': '背景', 'usage': {}})
+        self.assertEqual(list(events)[-1]['type'], 'TURN_END')
+        process.emit(*_bg_turn('收到', 1))
+        self.assertEqual(list(runtime.send('繼續推進，回報進度'))[-1]['result_text'], '收到')
+        self.assertEqual([u['message']['content'][0]['text'] for u in process.users()],
+                         ['繼續推進，回報進度'])
+
+    def test_background_turn_waits_for_an_owner_turn_and_returns_none_after_close(self):
+        process = LiveProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        owner = runtime.send('請問')
+        process.emit(_runtime_delta(0, '答'))
+        self.assertEqual(next(owner)['text'], '答')
+        # Owner turn lines are never claimed as a background turn.
+        self.assertIsNone(runtime.background_turn(timeout=0.05))
+        process.emit({'type': 'result', 'result': '答', 'usage': {}})
+        self.assertEqual(list(owner)[-1]['status'], 'COMPLETED')
+        process.feed.put(None)   # the child's stdout ends between turns
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.background_turn(timeout=5)
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_PROCESS_EXITED')
+        runtime.close(timeout=0)
+        self.assertIsNone(runtime.background_turn(timeout=5))
 
 
 if __name__ == '__main__':
