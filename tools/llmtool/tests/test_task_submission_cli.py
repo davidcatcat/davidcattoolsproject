@@ -680,7 +680,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
     def test_task_delegate_reports_acceptance_item_size_without_echoing_text(self):
         secretish = 'x' * 513
-        args = Namespace(acceptance=[secretish])
+        args = Namespace(provider='codex', acceptance=[secretish])
         with self.assertRaises(LLMToolError) as raised:
             run_task_delegate(args, store=object())
         self.assertEqual(str(raised.exception),
