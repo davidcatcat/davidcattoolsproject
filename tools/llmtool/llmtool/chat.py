@@ -141,6 +141,11 @@ class ChatSession:
     def provider(self):
         return self.config["active_provider"]
 
+    @property
+    def history_saved(self):
+        """Whether this session can save history to its private local store."""
+        return self._history_store is not None and self._history_store.enabled
+
     def status(self):
         return ("provider: " + self.provider + "\n"
                 "type: " + selected_provider(self.config)["type"] + "\n"
