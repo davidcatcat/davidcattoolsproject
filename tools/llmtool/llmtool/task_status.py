@@ -44,6 +44,8 @@ def derive_state(record):
     """Derive only states supported by recognized persisted values."""
     if type(record) is not dict:
         return 'UNKNOWN'
+    if 'abandonment' in record:
+        return 'ABANDONED'
     events = record.get('completion_events')
     events = events if type(events) is list else []
     if any(type(event) is dict and event.get('source') == 'GITHUB' and
