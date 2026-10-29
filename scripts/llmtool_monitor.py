@@ -2083,6 +2083,7 @@ class OfficeRow:
     outcome: str = ""     # a finished one-shot review: verdict word or why it has none
     alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
     sid: str = ""         # short session id shown after the name, to match a window's /status
+    codex_exec_started: bool = False  # non-subagent `codex exec` whose latest marker is task_started
 
 
 def _shown(row: "OfficeRow") -> str:
@@ -2952,13 +2953,16 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
         return ("main", payload.get("id"),
                 OfficeRow(f"codex {role}", state, action or title or _place_label(place), age, 10,
                           key=key, tui=tui, role=role, task=f"task {place[1]}",
-                          evidence="codex 紀錄", sid=sid))
+                          evidence="codex 紀錄", sid=sid,
+                          codex_exec_started=(payload.get("originator") == "codex_exec" and
+                                              last == "task_started")))
     if payload.get("originator") == "codex_exec":
         # A `codex exec` run, like a `claude -p` run: one call that exits when
         # its task is done, wherever it runs. Nothing says who started it.
         return ("sub", None, OfficeRow("codex 單次呼叫", state, (action or title or _place_label(place))
                                        + since, age, 30, key=key, kind="subagent",
-                                       evidence="codex 紀錄", sid=sid))
+                                       evidence="codex 紀錄", sid=sid,
+                                       codex_exec_started=last == "task_started"))
     if place[0] == "unregistered":
         return ("main", payload.get("id"),
                 OfficeRow("codex 對話", state, action or title or _place_label(place),
@@ -3313,7 +3317,8 @@ def _ended_calls(subs, live_calls) -> set:
 
 def codex_rows(now: float, root: str | None = None,
                canonical: str | None = None,
-               live_calls: list[float] | None = None, verdicts: dict | None = None) -> list[OfficeRow]:
+               live_calls: list[float] | None = None, verdicts: dict | None = None, *,
+               codex_running: bool = False) -> list[OfficeRow]:
     """live_calls: how many seconds ago each Codex-started one-shot claude
     process now running started (as negative offsets from now), or None when
     the process table was not read. verdicts: review_verdicts() of the GitHub
@@ -3329,7 +3334,7 @@ def codex_rows(now: float, root: str | None = None,
     history = {"db": open_codex_history(CODEX_HISTORY), "titles": open_codex_history(CODEX_STATE)}
     try:
         return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions,
-                           live_calls, verdicts)
+                           live_calls, verdicts, codex_running)
     finally:
         for db in history.values():
             if db is not None:
@@ -3337,7 +3342,7 @@ def codex_rows(now: float, root: str | None = None,
 
 
 def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
-                live_calls=None, verdicts=None) -> list[OfficeRow]:
+                live_calls=None, verdicts=None, codex_running=False) -> list[OfficeRow]:
     calls = {}   # id(review row) -> (pr, head, time)
     for path in paths:
         try:
@@ -3350,6 +3355,9 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
             continue
         scanned.add(path)
         kind, key, row = found[:3]
+        if (row.codex_exec_started and row.state == STALLED and
+                (not codex_running or (row.age is not None and row.age > 60 * 60))):
+            row = replace(row, state=DONE)
         if kind == "main":
             mains[key] = row
             actions[key] = found[3] if len(found) > 3 else ""
@@ -5083,7 +5091,9 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # so an empty list means nothing is running, not "unknown".
     running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
     calls = [-(_elapsed_seconds(p.elapsed) or 0.0) for p in running]
-    rows = (codex_rows(now, codex_root, canonical, calls, verdicts)
+    codex_running = any(p.role.startswith("Codex CLI") for p in processes)
+    rows = (codex_rows(now, codex_root, canonical, calls, verdicts,
+                       codex_running=codex_running)
             + claude_rows(now, claude_root, canonical, live))
     # Each running CLI is attached to one thread.
     clis = agent_clis(processes, sessions)
