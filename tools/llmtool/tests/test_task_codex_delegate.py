@@ -131,7 +131,7 @@ class CodexDelegateTests(unittest.TestCase):
             return_record=True)
 
     def _fake_codex(self, *, ignored=False, bytecode=False, overwrite_ignored=None,
-                    empty_diff=False):
+                    empty_diff=False, large_diff=False):
         final = {'status': 'DONE', 'summary': 'updated', 'tests': [],
                  'self_review': 'checked', 'blocked_reason': None}
         events = '\n'.join((
@@ -144,7 +144,9 @@ class CodexDelegateTests(unittest.TestCase):
         script = self.bin / 'codex'
         source_path = str(self.root / 'src.py')
         script_body = '#!' + os.sys.executable + '\nfrom pathlib import Path\nimport os,sys\n'
-        if not empty_diff:
+        if large_diff:
+            script_body += 'Path(' + repr(source_path) + ").write_text('VALUE = 2\\n' + ('x' * 70000))\n"
+        elif not empty_diff:
             script_body += 'Path(' + repr(source_path) + ").write_text('VALUE = 2\\n')\n"
         if ignored:
             ignored_path = (str(ignored) if isinstance(ignored, (str, Path)) else
@@ -176,10 +178,10 @@ class CodexDelegateTests(unittest.TestCase):
                   overwrite_ignored=None, malformed_diff=None, callback_handler=None,
                   registration=None, bound_registration=None, codex_error=None,
                   codex_result=None, codex_timeout=600, run_observer=None,
-                  empty_diff=False):
+                  empty_diff=False, large_diff=False):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored,
-                         empty_diff=empty_diff)
+                         empty_diff=empty_diff, large_diff=large_diff)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
             acceptance=['src.py is changed'], executor_task='executor-task-1',
             read_path=['src.py'], write_path=['src.py'],
@@ -293,6 +295,14 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertIn('[REDACTED]', captured)
         self.assertNotIn(credential_like, captured)
         self.assertLessEqual(len(captured.encode('utf-8')), task_submission_cli.RESPONSE_LIMIT)
+        callback.assert_not_called()
+
+    def test_oversized_cumulative_diff_keeps_too_large_rejection(self):
+        task = self._task()
+        with redirect_stdout(io.StringIO()):
+            _result, saved, callback = self._dispatch(task, large_diff=True)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_TOO_LARGE')
         callback.assert_not_called()
 
     def test_capture_write_failure_keeps_typed_rejection(self):
