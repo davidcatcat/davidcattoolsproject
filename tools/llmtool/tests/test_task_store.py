@@ -235,8 +235,8 @@ class TaskStoreTests(unittest.TestCase):
         self.store.create(task)
         developer = self._developer_assignment(provider='claude')
         developer['owner_assignment_ref'] = (
-            'https://github.com/davidcatcat/davidcattoolsproject/issues/525'
-            '#issuecomment-6468216854')
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+            '#issuecomment-1')
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             self.store.compare_and_update(
                 task['task_id'], expected={'developer': None}, developer=developer)
