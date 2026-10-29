@@ -182,10 +182,24 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             (original_device + 1, root.lstat().st_dev, worktree_head))
         self.assertEqual(lifecycle._identity_reasons(
             root, rebound, self.source, self.source / ".git", self.tasks), [])
-        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+        def complete_bootstrap(bootstrap_root, bootstrap_task_id):
+            self.assertEqual(bootstrap_root, root)
+            self.assertEqual(bootstrap_task_id, "device-rebind")
+            current = lifecycle._read_registry_record(record_path)
+            self.assertEqual(current["head_sha"], worktree_head)
+            current["env2_pass_marker"] = {
+                **before["env2_pass_marker"],
+                "submitted_head_sha": worktree_head,
+                "current_head_sha": worktree_head,
+            }
+            lifecycle._replace_record(record_path, current)
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap",
+                             side_effect=complete_bootstrap) as bootstrap:
             recorded = lifecycle.record_result(
                 task_id="device-rebind", canonical_root=self.source, root=root,
                 workspace_root=self.tasks)
+        bootstrap.assert_called_once_with(root, "device-rebind")
         self.assertEqual(recorded, worktree_head)
         self.assertEqual(lifecycle._read_registry_record(record_path)["head_sha"],
                          worktree_head)
