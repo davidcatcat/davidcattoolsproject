@@ -1071,9 +1071,13 @@ def _recount_developer_hunks(value):
                 continue
             break
 
-        suffix_start = header.rfind('@@') + 2
-        recounted = (f'@@ -{match.group(1)},{old_count} '
-                     f'+{match.group(3)},{new_count} @@{header[suffix_start:]}')
+        if (int(match.group(2) or '1') != old_count or
+                int(match.group(4) or '1') != new_count):
+            suffix_start = header.rfind('@@') + 2
+            recounted = (f'@@ -{match.group(1)},{old_count} '
+                         f'+{match.group(3)},{new_count} @@{header[suffix_start:]}')
+        else:
+            recounted = header
         newline = raw_header[len(header):]
         result.append(recounted + newline)
         result.extend(body)
