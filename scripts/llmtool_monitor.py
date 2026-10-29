@@ -4176,8 +4176,8 @@ def _ci_queue_groups(view: CiView | None, local=()) -> tuple[list[str], list[str
                       for name, _system, _status, _busy, labels in view.runners or []}
     mac_names = set(local)
     mac_labels = set().union(*(labels_by_name.get(name, set()) for name in mac_names))
-    linux_labels = set().union(*(labels_by_name.get(name, set()) for name, *_ in view.runners or []
-                                 if name not in mac_names and name.startswith("ec2-")))
+    linux_labels = set().union(*(labels_by_name.get(name, set()) for name, system, *_ in view.runners or []
+                                 if name not in mac_names and _runner_system(name, system) == "linux"))
     mac, linux, unassigned = [], [], []
     seen = set()
     for wanted, text in view.queued:
@@ -4258,7 +4258,10 @@ def github_runner_rows(view: CiView | None, now: float, local=(), ci: list | Non
         _mac_waiting, linux_waiting, unassigned = _ci_queue_groups(view, local)
         if linux_names and linux_waiting:
             rows.append(ci_queue_row(linux_waiting, len(linux_names), "linux"))
-        if unassigned:
+        # Queue rows describe work waiting for a runner in this view. With no
+        # non-local runners registered there is no remote queue to attribute;
+        # the local Mac row owns its own matching queue.
+        if unassigned and linux_names:
             rows.append(ci_queue_row(unassigned, 0, "unassigned"))
     return rows
 
