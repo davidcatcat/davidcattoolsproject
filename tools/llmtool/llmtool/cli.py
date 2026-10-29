@@ -41,6 +41,7 @@ TASK_ACTIONS = {
     'abandon': ('run_task_abandon', False),
     'ack': ('run_task_ack', False),
     'advance': ('run_task_advance', False),
+    'claude-result': ('run_task_claude_result', False),
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate', True),
     'github-events': ('run_task_github_events', False),
