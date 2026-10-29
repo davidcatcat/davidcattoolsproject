@@ -581,6 +581,15 @@ active_provider: office-qwen
 `openai` profile 不使用 `base_url`，並在模型請求時要求 model 和明確設定的 API key 或
 `api_key_env`。`OPENAI_API_KEY` 只會在使用者將它指定為 `api_key_env` 後讀取。
 
+### Codex direct 執行時間上限（user config）
+
+`codex_direct.timeout_seconds` 只能寫在 user config（`~/.config/llmtool/config.yaml`），專案 `.llmtool.yaml` 不能設定，也不受 `active_provider` 或專案設定錯誤影響（AUDIT-027，#603）。預設 600 秒，上限 1800 秒；必須是正整數，超出範圍、0、負數、小數、字串或布林值會以 typed 設定錯誤拒絕，不會自動夾到範圍內。Codex 任務封包的 budget、prompt 與實際 timeout 使用同一個值。
+
+```yaml
+codex_direct:
+  timeout_seconds: 900
+```
+
 ### Project config 的低信任邊界
 
 `.llmtool.yaml` **只能**修改已由 user/default 定義的 provider 的 `model`、
