@@ -1771,33 +1771,42 @@ class TaskStore:
 
     def _read_at(self, directory, task_id):
         name = self._name(task_id)
-        try:
-            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-            before = os.fstat(fd)
-            if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
-                    stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
-                    before.st_size > MAX_RECORD_BYTES):
-                os.close(fd)
+        for attempt in range(3):
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=directory)
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
+                        stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
+                        before.st_size > MAX_RECORD_BYTES):
+                    os.close(fd)
+                    _fail()
+                with os.fdopen(fd, 'rb') as stream:
+                    raw = stream.read(MAX_RECORD_BYTES + 1)
+                    stream.seek(0)
+                    repeated = stream.read(MAX_RECORD_BYTES + 1)
+                    after = os.fstat(stream.fileno())
+                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                if (len(raw) > MAX_RECORD_BYTES or raw != repeated or
+                        _identity(before) != _identity(after)):
+                    _fail()
+                if (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino):
+                    if attempt < 2:
+                        continue
+                    _fail('TASK_STORE_BUSY')
+                if _identity(before) != _identity(current):
+                    _fail()
+                value = json.loads(raw.decode('utf-8'), object_pairs_hook=self._unique_pairs,
+                                   parse_constant=lambda _: _fail())
+                if value.get('task_id') != task_id:
+                    _fail()
+                return _validate(value)
+            except LLMToolError:
+                raise
+            except FileNotFoundError:
+                raise LLMToolError('task not found') from None
+            except Exception:
                 _fail()
-            with os.fdopen(fd, 'rb') as stream:
-                raw = stream.read(MAX_RECORD_BYTES + 1)
-                stream.seek(0)
-                repeated = stream.read(MAX_RECORD_BYTES + 1)
-                after = os.fstat(stream.fileno())
-            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
-            if len(raw) > MAX_RECORD_BYTES or raw != repeated or _identity(before) != _identity(after) or _identity(before) != _identity(current):
-                _fail()
-            value = json.loads(raw.decode('utf-8'), object_pairs_hook=self._unique_pairs,
-                               parse_constant=lambda _: _fail())
-            if value.get('task_id') != task_id:
-                _fail()
-            return _validate(value)
-        except LLMToolError:
-            raise
-        except FileNotFoundError:
-            raise LLMToolError('task not found') from None
-        except Exception:
-            _fail()
 
     @staticmethod
     def _unique_pairs(pairs):

@@ -1,3 +1,4 @@
+import fcntl
 import hashlib
 import json
 import os
@@ -738,6 +739,84 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
         self.assertEqual(path.stat().st_nlink, 1)
         self.assertEqual(loaded['task_binding']['task_id'], loaded['task_id'])
+
+    def test_get_retries_when_atomic_replace_lands_after_open(self):
+        value = record()
+        self.store.create(value)
+        original_stat = os.stat
+        replacing = [False]
+        replaced = [False]
+        updated = []
+
+        def replace_before_path_stat(path, *args, **kwargs):
+            if (path == value['task_id'] + '.json' and not replacing[0] and
+                    not replaced[0]):
+                replaced[0] = True
+                replacing[0] = True
+                try:
+                    updated.append(self.store.update(
+                        value['task_id'], state='PM_UNAVAILABLE',
+                        error_code='PROVIDER_TIMEOUT'))
+                finally:
+                    replacing[0] = False
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(task_store_module.os, 'stat', side_effect=replace_before_path_stat):
+            loaded = self.store.get(value['task_id'])
+
+        self.assertTrue(replaced[0])
+        self.assertEqual(loaded, updated[0])
+
+    def test_get_reports_busy_when_path_keeps_changing(self):
+        value = record()
+        self.store.create(value)
+        original_stat = os.stat
+        replacing = [False]
+        replacements = []
+
+        def replace_before_path_stat(path, *args, **kwargs):
+            if path == value['task_id'] + '.json' and not replacing[0]:
+                replacing[0] = True
+                try:
+                    replacements.append(self.store.update(
+                        value['task_id'], state='PM_UNAVAILABLE',
+                        error_code='PROVIDER_TIMEOUT'))
+                finally:
+                    replacing[0] = False
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(task_store_module.os, 'stat', side_effect=replace_before_path_stat):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.get(value['task_id'])
+
+        self.assertEqual(len(replacements), 3)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_BUSY')
+
+    def test_get_rejects_self_inconsistent_open_descriptor(self):
+        value = record()
+        self.store.create(value)
+        path = self.root / (value['task_id'] + '.json')
+        target_inode = path.stat().st_ino
+        original_fstat = os.fstat
+        task_fd_calls = [0]
+
+        def inconsistent_fstat(fd):
+            info = original_fstat(fd)
+            if info.st_ino == target_inode:
+                task_fd_calls[0] += 1
+                if task_fd_calls[0] == 2:
+                    return SimpleNamespace(
+                        st_dev=info.st_dev, st_ino=info.st_ino, st_mode=info.st_mode,
+                        st_uid=info.st_uid, st_gid=info.st_gid, st_size=info.st_size + 1,
+                        st_mtime_ns=info.st_mtime_ns, st_nlink=info.st_nlink)
+            return info
+
+        with patch.object(task_store_module.os, 'fstat', side_effect=inconsistent_fstat):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.get(value['task_id'])
+
+        self.assertEqual(task_fd_calls[0], 2)
+        self.assertEqual(caught.exception.task_store_error_code, 'TASK_STORE_INVALID')
 
     def test_atomic_update_preserves_integrity_and_retains_lock_inode(self):
         value = record()
