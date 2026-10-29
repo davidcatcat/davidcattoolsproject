@@ -1445,7 +1445,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         artifact, _tokens, rejection = submission_cli._developer_normalized_output(
             proposal, ['sample.py'], source_files=source_files)
         self.assertIsNone(rejection)
-        self.assertIn('@@ -1,1 +1,2 @@', artifact)
+        self.assertIn('@@ -1 +1,2 @@', artifact)
         self.assertTrue(submission_cli._text_developer_apply_check(
             self.executor_root, self.executor_head, artifact))
 
