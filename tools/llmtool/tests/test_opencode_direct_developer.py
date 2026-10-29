@@ -452,17 +452,36 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 self.assertFalse(marker.exists())
 
     def test_configured_free_model_is_passed_to_cli_and_config(self):
-        cli = self.fake_cli(self.event('step_start') + '\n', model='opencode/other-model-free')
+        model = 'opencode/other-model-free#high'
+        cli = self.fake_cli(self.event('step_start') + '\n', model=model)
         result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
             write_paths=['source.py'], prompt='bounded task prompt',
-            timeout_seconds=5, executable=cli, model='opencode/other-model-free')
+            timeout_seconds=5, executable=cli, model=model)
         self.assertEqual(result.exit_code, 0)
+
+    def test_default_variant_model_is_passed_to_cli_and_config(self):
+        self.assertEqual(MODEL, 'opencode/deepseek-v4.1-flash-free#high')
+        cli = self.fake_cli(self.event('step_start') + '\n')
+        result = self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+            write_paths=['source.py'], prompt='bounded task prompt',
+            timeout_seconds=5, executable=cli)
+        self.assertEqual(result.exit_code, 0)
+
+    def test_free_model_variants_are_accepted(self):
+        for model in ('opencode/example-free', 'opencode/example-free#high'):
+            with self.subTest(model=model):
+                self.assertEqual(configuration(read_paths=['source.py'],
+                    write_paths=['source.py'], model=model)['model'], model)
 
     def test_non_free_or_malformed_model_is_rejected_before_any_cli_launch(self):
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
         for model in ('opencode/paid-model', 'other/name-free', 'opencode/a/b-free',
-                      'opencode/-free', 'opencode/x-free\n', None):
+                      'opencode/-free', 'opencode/x-free\n', None,
+                      'opencode/example-paid#high', 'opencode/example-free#',
+                      'opencode/example-free#HIGH', 'opencode/example-free#a b',
+                      'opencode/example-free#x#y',
+                      'opencode/example-free#abcdefghijklmnopq'):
             with self.subTest(model=model):
                 with self.assertRaises(DirectOpenCodeError) as caught:
                     self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
