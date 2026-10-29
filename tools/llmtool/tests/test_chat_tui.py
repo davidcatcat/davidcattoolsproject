@@ -486,7 +486,7 @@ class WidgetTests(Base):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
                                   '/exit', '/quit', '/pm connect', '/pm new', '/pm disconnect', '/pm history',
-                                  '/task submit', '/task show', '/task mode', '/task list', '/task events'])
+                                  '/pm queue', '/task submit', '/task show', '/task mode', '/task list', '/task events'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
@@ -652,24 +652,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 17)
+            self.assertEqual(len(ui.menu_items), 18)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/help', rows[0])
-            self.assertIn('12 more (0 above, 12 below)', rows[-1])
+            self.assertIn('13 more (0 above, 13 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/help', ''.join(rows))
             self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('12 more (2 above, 10 below)', rows[-1])
+            self.assertIn('13 more (2 above, 11 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 16)
+            self.assertEqual(ui.menu_index, 17)
             self.assertIn('/task events', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(12 above, 0 below)', rows[-1])
+            self.assertIn('(13 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -1021,6 +1021,51 @@ class WidgetTests(Base):
         self.assertEqual(fake.yielded, ['Hello', ' world'])
         self.assertIn('state: interrupted', ui.conversation.text)
         fake.complete.assert_not_called()
+
+    def test_escape_interrupts_a_chat_reply_with_focus_in_the_conversation_pane(self):
+        # W52 B2: Tab to read the reply, then Esc: it interrupts and keeps a selection.
+        copies = []
+        patch('llmtool.chat_tui_view.copy_to_clipboard', side_effect=copies.append).start()
+        gate = threading.Event()
+        fake = FakeStream(['Hello', ' world', ' never shown'], gate)
+        self.factory.return_value = fake
+
+        async def streaming(ui):
+            await self.until(ui, lambda ui: ui.stream_raw is not None)
+
+        def reading(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.conversation))
+            ui.view.anchor, ui.view.head = 0, 6     # a selection W42 keeps
+
+        async def escaped(ui):
+            self.assertTrue(ui.send_interrupted)
+            self.assertEqual(ui.view.selected_range(), (0, 6))
+            gate.set()
+            await self.idle(ui)
+
+        ui, result = self.drive(['question\r', streaming, '\t', reading, lone_escape, escaped,
+                                 lambda ui: ui.view.clear_selection()])
+        self.assertEqual(copies, [])
+        self.assertEqual(result, 0)
+        self.assertNotIn('never shown', ui.conversation.text)
+        self.assertEqual(self.session.state, 'interrupted')
+
+    def test_escape_in_the_conversation_pane_without_a_reply_keeps_the_selection(self):
+        copies = []
+        patch('llmtool.chat_tui_view.copy_to_clipboard', side_effect=copies.append).start()
+        def reading(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.conversation))
+            ui.view.anchor, ui.view.head = 0, 6
+
+        def kept(ui):
+            self.assertEqual(ui.view.selected_range(), (0, 6))
+            self.assertFalse(ui.send_interrupted)
+
+        ui, result = self.drive(['\t', reading, lone_escape, kept,
+                                 lambda ui: ui.view.clear_selection()])
+        self.assertEqual(result, 0)
+        self.assertEqual(copies, [])
+        self.factory.assert_not_called()
 
     def test_ctrl_c_interrupts_a_streaming_reply_and_a_second_ctrl_c_exits(self):
         gates = [threading.Event(), threading.Event()]
@@ -2035,7 +2080,7 @@ class FakeClaude:
     def _emit(self, obj):
         try:
             os.write(self._write, (self._json.dumps(obj) + '\n').encode('utf-8'))
-        except OSError:
+        except (OSError, TypeError):   # closed (TypeError: _end() ran between check and write)
             pass
 
     def _play(self, script):
@@ -2351,6 +2396,8 @@ class PMTypewriterTests(Base):
     def shown(self):
         """Text of the last PM block as the pane shows it (None: no block opened)."""
         text = self.ui.conversation.text
+        if self.ui.pm_working_at is not None:   # the working line below the block (W52 F1)
+            text = text[:self.ui.pm_working_at]
         if '\nPM:' not in text:
             return None
         rest = text[text.rindex('\nPM:') + 4:]
@@ -2636,8 +2683,8 @@ class PMConversationTests(BoundedPMTest):
         self.assertFalse(ui.pm_warm)
         self.assertEqual(len(self.fakes[0].users()), 2)   # the Owner's two drafts, nothing else
 
-    def test_repeated_enter_resize_and_redraw_send_one_turn(self):
-        self.turns = [_full_turn(hold=True)]
+    def test_repeated_enter_resize_and_redraw_send_one_turn_and_queue_the_draft(self):
+        self.turns = [_full_turn(hold=True), [_delta('ok'), _result('ok')]]
         size = [Size(rows=24, columns=80)]
 
         def resize(ui):
@@ -2647,14 +2694,352 @@ class PMConversationTests(BoundedPMTest):
 
         async def busy(ui):
             await self.until(ui, lambda ui: 'PM:\nHello' in ui.conversation.text)
-            self.assertIn('a PM turn is in progress; input kept', ui.conversation.text)
-            self.assertEqual(ui.input.text, 'second')
-            ui.input.buffer.reset()
+            self.assertIn('owner → PM（已排入佇列（第 1 則））:\nsecond', ui.conversation.text)
+            self.assertEqual(ui.input.text, '')            # the draft left the editor
+            self.assertEqual(list(ui.pm_outbox), ['second'])
+            self.assertEqual(len(self.fakes[0].users()), 1)   # empty Enters sent nothing
             self.fakes[0].gate.set()
 
         ui, _ = self.drive([self.connect(), self.connected, 'one\r', '\r\r', resize,
                             'second\r', busy, self.turn_done], size=size)
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['one', 'second'])
+        self.assertIn('owner → PM（自佇列送出，剩 0 則）:\nsecond', ui.conversation.text)
+
+    def test_three_drafts_typed_during_a_turn_are_sent_in_order_one_turn_at_a_time(self):
+        # W52 F2: Enter during a turn queues (FIFO); each COMPLETED turn sends the next.
+        self.turns = [[_delta('第一'), 'HOLD', _result('第一')],
+                      [_delta('A'), 'HOLD', _result('A')],
+                      [_delta('B'), _result('B')],
+                      [_delta('C'), _result('C')]]
+
+        async def queued(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 3, 'three queued')
+            text = ui.conversation.text
+            for number, draft in ((1, 'a'), (2, 'b'), (3, 'c')):
+                self.assertIn('owner → PM（已排入佇列（第 %d 則））:\n%s' % (number, draft), text)
+            self.assertIn('佇列3', ui.status_text())
+            self.assertEqual(len(self.fakes[0].users()), 1)
+            self.fakes[0].gate.set()
+
+        async def second_turn(ui):
+            await self.until(ui, lambda ui: len(self.fakes[0].users()) == 2, 'a sent')
+            self.assertTrue(ui.pm_turn_active)
+            self.assertEqual(list(ui.pm_outbox), ['b', 'c'])   # one turn at a time
+            self.assertIn('佇列2', ui.status_text())
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, 'first\r', 'a\r', 'b\r', 'c\r',
+                            queued, second_turn,
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active
+                                                  and not ui.pm_outbox, 'queue drained')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['first', 'a', 'b', 'c'])
+        self.assertEqual(ui.conversation.text.count('— PM turn COMPLETED'), 4)
+        self.assertNotIn('佇列', ui.status_text())
+
+    def test_failed_turn_pauses_the_queue_until_queue_send(self):
+        self.turns = [[_delta('x'), 'HOLD', _result('boom', is_error=True, subtype='error')],
+                      [_delta('later'), _result('later')]]
+
+        async def queued(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1, 'queued')
+            self.fakes[0].gate.set()
+
+        async def paused(ui):
+            await self.turn_done(ui)
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(self.fakes[0].users()), 1)     # nothing more was sent
+            self.assertEqual(list(ui.pm_outbox), ['next one'])
+            text = ui.conversation.text
+            self.assertIn('PM 佇列暫停，沒有送出：1 則，暫停（上一回合失敗 PM_PROCESS_EXITED）', text)
+            self.assertIn('  1. next one', text)
+            self.assertIn('/pm queue send 繼續送出', text)
+            self.assertIn('佇列1暫停', ui.status_text())
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', queued, paused,
+                            '/pm queue\r',
+                            lambda ui: self.assertIn('PM 佇列：1 則，暫停', ui.conversation.text),
+                            '/pm queue send\r',
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_outbox
+                                                  and not ui.pm_turn_active, 'resumed')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['go', 'next one'])
+
+    def test_permission_denied_tool_pauses_the_queue_even_when_the_turn_completes(self):
+        # #636 Codex review v1: a refused tool is a refused turn; the queue must not go on.
+        denied = {'type': 'user', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'Permission denied',
+             'is_error': True, 'permission_denial': True}]}}
+        self.turns = [[_delta('x'), 'HOLD',
+                       _assistant({'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {}}),
+                       denied, _assistant({'type': 'text', 'text': 'could not run it'}),
+                       _result('could not run it')],
+                      [_delta('later'), _result('later')]]
+
+        async def queued(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1, 'queued')
+            self.fakes[0].gate.set()
+
+        async def paused(ui):
+            await self.turn_done(ui)
+            await asyncio.sleep(0.1)
+            text = ui.conversation.text
+            self.assertIn('auto-denied (pm_runtime reason PERMISSION_DENIED', text)
+            self.assertIn('— PM turn COMPLETED', text)
+            self.assertEqual(len(self.fakes[0].users()), 1)     # nothing more was sent
+            self.assertEqual(list(ui.pm_outbox), ['next one'])
+            self.assertIn('PM 佇列暫停，沒有送出：1 則，暫停（權限被拒）', text)
+            self.assertIn('  1. next one', text)
+            self.assertIn('佇列1暫停', ui.status_text())
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', queued, paused,
+                            '/pm queue send\r',
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_outbox
+                                                  and not ui.pm_turn_active, 'resumed')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['go', 'next one'])
+        self.assertIsNone(ui.pm_outbox_paused)
+
+    def _race(self, interrupt):
+        """A turn that ends COMPLETED although an interrupt was requested meanwhile."""
+        self.turns = [[_delta('一'), 'HOLD', _result('done')], [_delta('二'), _result('next')]]
+
+        async def queued(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1
+                             and 'PM:\n一' in ui.conversation.text, 'queued mid-turn')
+            ui.pm_runtime.interrupt = Mock()   # pm_runtime never hears it: the turn completes
+            interrupt(ui)
+            self.assertTrue(ui.pm_interrupted)
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', queued,
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active
+                                                  and (ui.pm_outbox_paused or not ui.pm_outbox),
+                                                  'turn end'),
+                            lambda ui: asyncio.sleep(0.1)])
+        self.assertIn('— PM turn COMPLETED', ui.conversation.text)
+        return ui
+
+    def test_ctrl_c_then_a_completed_turn_end_still_pauses_the_queue(self):
+        # #636 Codex review v2 finding 1: a COMPLETED that raced Ctrl-C sent the next one.
+        ui = self._race(lambda ui: ui.request_quit())
         self.assertEqual(len(self.fakes[0].users()), 1)
+        self.assertEqual(list(ui.pm_outbox), ['next one'])
+        self.assertIn('暫停（Ctrl-C 中斷）', ui.conversation.text)
+
+    def test_escape_then_a_completed_turn_end_continues_the_queue(self):
+        ui = self._race(lambda ui: ui.interrupt_pm())
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['go', 'next one'])
+        self.assertIsNone(ui.pm_outbox_paused)
+
+    def test_disconnect_mid_turn_leaves_no_working_timer_and_ignores_the_old_worker(self):
+        # #636 Codex review v2 finding 2: after a disconnect mid-turn, append() redrew the
+        # working line and scheduled another tick.
+        self.turns = [_thinking() + ['HOLD', _result('late')]]
+        seen = {}
+
+        async def thinking(ui):
+            await self.until(ui, lambda ui: ui.conversation.text.endswith('PM 思考中… 0s'),
+                             'working line')
+            self.assertIsNotNone(ui._pm_working_handle)
+            seen['seq'] = ui._pm_turn_seq
+
+        async def disconnected(ui):
+            await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_pending,
+                             'disconnected')
+            self.assertFalse(ui.pm_turn_active)
+            self.assertIsNone(ui._pm_working_handle)
+            self.assertIsNone(ui.pm_working_at)
+            ui.append('later output')
+            self.assertIsNone(ui._pm_working_handle)
+            self.assertTrue(ui.conversation.text.endswith('later output'))
+            await asyncio.sleep(1.3)                  # a surviving tick would redraw by now
+            self.assertTrue(ui.conversation.text.endswith('later output'))
+            # The old turn's worker posting late is ignored.
+            before = ui.conversation.text
+            ui.pm_event({'type': 'TEXT_DELTA', 'text': 'stale', 'block_index': 0}, seen['seq'])
+            ui.finish_pm_turn(seen['seq'])
+            self.assertEqual(ui.conversation.text, before)
+
+        ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking,
+                            '/pm disconnect\r', disconnected])
+        self.assertNotIn('PM 思考中', ui.conversation.text)
+        self.assertNotIn('PM 處理中', ui.conversation.text)
+
+    def test_exit_mid_turn_cancels_every_timer(self):
+        self.turns = [_thinking() + ['HOLD', _result('late')]]
+
+        async def thinking(ui):
+            await self.until(ui, lambda ui: ui._pm_working_handle is not None, 'working line')
+
+        ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking])
+        # drive() exits the app and runs close_pm(), as run() does on exit.
+        self.assertFalse(ui.pm_turn_active)
+        self.assertIsNone(ui._pm_working_handle)
+        self.assertIsNone(ui._pm_tick_handle)
+        self.assertIsNone(ui._autoscroll_handle)
+        self.assertIsNone(ui._drag_copy_handle)
+
+    def test_queue_send_during_a_pm_request_worker_does_not_resume_into_a_stall(self):
+        self.turns = [[_delta('x'), 'HOLD', _result('boom', is_error=True, subtype='error')]]
+
+        async def paused(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1, 'queued')
+            self.fakes[0].gate.set()
+            await self.turn_done(ui)
+            await self.until(ui, lambda ui: ui.pm_outbox_paused, 'paused')
+            ui.pm_pending = True               # a /pm history worker is running
+            ui.run_queue_command('send')
+            self.assertTrue(ui.pm_outbox_paused)
+            self.assertIn('/pm queue send again when it ends', ui.conversation.text)
+            ui.pm_pending = False
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'wait\r', paused])
+        self.assertEqual(len(self.fakes[0].users()), 1)
+
+    def test_escape_continues_the_queue_ctrl_c_pauses_it_and_clear_counts(self):
+        self.turns = [[_delta('one'), 'HOLD', _result('stopped')],
+                      [_delta('two'), 'HOLD', _result('stopped')]]
+
+        async def streaming(ui):
+            await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_raw is not None)
+
+        async def after_escape(ui):
+            # Esc interrupted only the first turn; the queued draft went next.
+            await self.until(ui, lambda ui: len(self.fakes[0].users()) == 2, 'queue continued')
+            self.assertEqual(list(ui.pm_outbox), ['q2'])
+
+        async def after_ctrl_c(ui):
+            await self.turn_done(ui)
+            await asyncio.sleep(0.1)
+            self.assertEqual(len(self.fakes[0].users()), 2)
+            self.assertIn('暫停（Ctrl-C 中斷）', ui.conversation.text)
+            self.assertFalse(ui.app.is_done)
+
+        ui, _ = self.drive([self.connect(), self.connected, 'start\r', streaming, 'q1\r', 'q2\r',
+                            lone_escape, after_escape, streaming,
+                            lambda ui: ui.request_quit(), after_ctrl_c,
+                            '/pm queue clear\r',
+                            lambda ui: self.assertIn('PM 佇列已清除 1 則（未送出）',
+                                                     ui.conversation.text)])
+        self.assertEqual(list(ui.pm_outbox), [])
+
+    def test_disconnect_keeps_the_queue_listed_and_exit_reports_it(self):
+        self.turns = [[_delta('one'), 'HOLD', _result('one')]]
+
+        async def queued(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1, 'queued')
+
+        async def disconnected(ui):
+            await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_turn_active,
+                             'disconnected')
+            self.assertEqual(list(ui.pm_outbox), ['wait'])
+            self.assertIn('暫停（PM 已斷線）', ui.conversation.text)
+            self.assertIn('  1. wait', ui.conversation.text)
+
+        def first_ctrl_c(ui):
+            ui.request_quit()
+            self.assertFalse(ui.app.is_done)
+            self.assertIn('PM 佇列還有 1 則未送出', ui.conversation.text)
+
+        ui, result = self.drive([self.connect(), self.connected, 'start\r', 'wait\r', queued,
+                                 '/pm disconnect\r', disconnected, first_ctrl_c,
+                                 lambda ui: ui.request_quit()])
+        self.assertEqual(result, 0)
+        self.assertEqual(len(self.fakes[0].users()), 1)
+        self.assertIn('  1. wait', ui.unsent_queue_text())
+
+    def test_mode_switch_never_starts_a_chat_or_task_request_during_a_pm_turn(self):
+        # W52 B1 (Owner QA probe, ported): /task mode off, then Enter during a PM turn
+        # started a chat request beside it. Now the draft is kept and nothing is sent.
+        self.turns = [_full_turn(hold=True)]
+
+        async def active(ui):
+            await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_raw is not None)
+
+        async def refused(ui):
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.pm_turn_active)
+            self.assertEqual(self.factory.call_count, 0)
+            self.assertEqual(ui.input.text, 'chat while PM active')     # draft kept
+            self.assertIn('a PM turn is in progress; this draft was not sent (input kept)',
+                          ui.conversation.text)
+            self.assertFalse(ui.busy)
+            self.assertEqual(list(ui.pm_outbox), [])                    # not queued for the PM
+
+        async def task_refused(ui):
+            await asyncio.sleep(0.1)
+            self.assertIn('a PM turn is in progress; /task submit was not sent',
+                          ui.conversation.text)
+            self.assertFalse(ui.busy)
+            ui.input.buffer.reset()
+            ui.input.buffer.insert_text('chat while PM active')
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, 'PM request\r', active,
+                            '/task mode off\r', 'chat while PM active\r', refused,
+                            lambda ui: ui.input.buffer.reset(),
+                            '/task submit --provider second hello\r', task_refused,
+                            self.turn_done, '\r', self.idle])
+        self.assertEqual(self.factory.call_count, 1)        # sent once the PM turn ended
+        self.assertEqual(len(self.fakes[0].users()), 1)
+
+    def test_escape_interrupts_the_pm_turn_with_focus_in_the_conversation_pane(self):
+        # W52 B2 (Owner QA probe, ported): Tab into the conversation, then a lone Esc.
+        patch('llmtool.chat_tui_view.copy_to_clipboard', side_effect=AssertionError).start()
+        self.turns = [[_delta('one'), 'HOLD', _result('stopped')],
+                      [_delta('two'), _result('two')]]
+
+        async def active(ui):
+            await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_raw is not None)
+
+        def reading(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.conversation))
+            ui.view.anchor, ui.view.head = 0, 6
+
+        def interrupted(ui):
+            self.assertTrue(ui.pm_interrupted)
+            self.assertEqual(ui.view.selected_range(), (0, 6))   # the selection stays
+
+        ui, _ = self.drive([self.connect(), self.connected, 'PM request\r', active, 'queued\r',
+                            '\t', reading, lone_escape, interrupted,
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active
+                                                  and not ui.pm_outbox, 'queue continued')])
+        self.assertIn('— PM turn INTERRUPTED', ui.conversation.text)
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['PM request', 'queued'])                # Esc continued the queue
+
+    def test_working_line_shows_at_once_ticks_each_second_and_gives_way_to_text(self):
+        # W52 F1: a long think showed only "owner → PM:"; now the pane says so, every second.
+        self.turns = [_thinking() + ['HOLD', _delta('答案', index=1), 'HOLD',
+                                     _assistant({'type': 'text', 'text': '答案'}), _result('答案')]]
+        seen = {}
+
+        async def working(ui):
+            started = time.monotonic()
+            await self.until(ui, lambda ui: '\n\nPM ' in ui.conversation.text, 'working line')
+            self.assertLess(time.monotonic() - started, 1.0)
+            await self.until(ui, lambda ui: ui.pm_state == 'thinking', 'thinking')
+            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 0s'))
+            await asyncio.sleep(1.2)
+            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 1s'))
+            self.assertEqual(ui.conversation.text.count('PM 思考中…'), 1)   # redrawn in place
+            self.assertNotIn('PRIVATE_REASONING', ui.conversation.text)
+            self.fakes[0].gate.set()
+
+        async def text_arrived(ui):
+            await self.until(ui, lambda ui: 'PM:\n答案' in ui.conversation.text, 'text')
+            seen['text'] = ui.conversation.text
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, '想一想\r', working, text_arrived,
+                            self.turn_done])
+        self.assertNotIn('思考中', seen['text'])     # replaced when the text arrived
+        self.assertNotIn('PM 思考中', ui.conversation.text)
+        self.assertNotIn('PM 處理中', ui.conversation.text)
+        self.assertIsNone(ui._pm_working_handle)
 
     def test_escape_interrupts_and_ctrl_c_interrupts_then_exits(self):
         self.turns = [[_delta('working…'), 'HOLD', _result('stopped')],
@@ -2848,6 +3233,26 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(argv[argv.index('--session-id') + 1], created)
         ui, _ = self.drive(['/pm connect ' + created + ' ' + cwd + '\r', self.connected])
         self.assertEqual(ui.pm_target, (created, cwd))
+
+    def test_pm_paths_with_spaces_are_quoted_or_escaped_and_bad_quotes_are_explained(self):
+        # W52 B3: text.split() broke "/private/tmp/tui qa" into two words.
+        spaced = self.temp_root / 'tui qa'
+        spaced.mkdir()
+        calls = []
+        real = self.api.create_dedicated
+        self.api.create_dedicated = lambda cwd: calls.append(cwd) or real(cwd)
+        ui, _ = self.drive(['/pm new "%s"\r' % spaced, self.pending_done,
+                            '/pm new %s\r' % str(spaced).replace(' ', '\\ '), self.pending_done,
+                            '/pm new "%s\r' % spaced, self.pending_done])
+        self.assertEqual(calls, [str(spaced), str(spaced)])
+        text = ui.conversation.text
+        self.assertEqual(text.count('dedicated binding created (cwd ' + str(spaced)), 2)
+        self.assertIn('llmtool: /pm: unbalanced quote or trailing backslash', text)
+        self.assertIn('usage: /pm new [CWD]', text)
+        self.assertNotIn('Traceback', text)
+        created = self.api.current_binding()['native_session_id']
+        ui, _ = self.drive(['/pm connect %s "%s"\r' % (created, spaced), self.connected])
+        self.assertEqual(ui.pm_target, (created, str(spaced)))
 
     def test_not_dedicated_and_live_elsewhere_are_refused(self):
         import uuid as _uuid
@@ -3493,11 +3898,40 @@ class ScrollSelectTests(Base):
             _line, anchor_start, _row_end = ui.view.rows[ui.view.row_of(end)]
             anchor_label = int(ui.view.text[anchor_start:anchor_start + 3])   # the press row
             self.assertEqual(len(text.splitlines()), anchor_label - top_label + 1)
-            self.assertEqual(self.copies, [text])
+            self.assertEqual(self.copies[-1], text)   # copied while dragging, then on release
             self.assertIn('已複製 %d 字' % len(text), ui.status_text())
 
         self.drive([fill, press(5, 11), drag(5, 10), drag(5, 1), drag(5, 1), drag(5, 1), dragged,
                     held, release(5, 1), released, lambda ui: ui.view.clear_selection()],
+                   size=[Size(rows=24, columns=80)])
+
+    def test_drag_whose_release_never_arrives_is_already_on_the_clipboard(self):
+        # W52 F3, Warp log 03:56:52Z: drag events, then no Released, then Warp's own Copy
+        # (Cmd+C never reaches the app). The moving drag must have copied by itself.
+        async def no_release(ui):
+            await asyncio.sleep(chat_tui_view.DRAG_COPY_SECONDS + 0.15)
+            self.assertTrue(ui.view.wait_copy())
+            self.assertTrue(ui.view.dragging)               # still no mouse up
+            self.assertEqual(self.copies[-1], ui.view.selected_text())
+            self.assertIn('short line\n', self.copies[-1])   # two rows of the pane
+            self.assertIn('已複製 %d 字' % len(self.copies[-1]), ui.status_text())
+
+        async def clicked_again(ui):
+            await self.settle(ui)
+            self.assertIsNone(ui._drag_copy_handle)
+            self.assertIsNone(ui.view.selected_range())     # a plain click ends the stale drag
+
+        self.drive([lambda ui: ui.append(SHORT_LINES), press(7, 10), drag(9, 11), drag(12, 12),
+                    no_release, press(4, 4), release(4, 4), clicked_again],
+                   size=[Size(rows=24, columns=80)])
+
+    def test_click_without_movement_never_copies(self):
+        async def check(ui):
+            await asyncio.sleep(chat_tui_view.DRAG_COPY_SECONDS + 0.15)
+            self.assertEqual(self.copies, [])
+            self.assertIsNone(ui._drag_copy_handle)
+
+        self.drive([lambda ui: ui.append(SHORT_LINES), press(7, 10), release(7, 10), check],
                    size=[Size(rows=24, columns=80)])
 
     def test_drag_below_the_pane_scrolls_down_and_selection_survives_streaming(self):
@@ -3644,6 +4078,10 @@ class ScrollSelectTests(Base):
         self.assertIn('mouse on; the wheel scrolls the conversation and a drag selects', ui.conversation.text)
         self.assertIn('Drag', chat_tui.KEY_HELP)
         self.assertIn('F6', chat_tui.KEY_HELP)
+        # W52 F3: the working gestures per terminal are stated exactly.
+        self.assertIn('Warp and Terminal.app: drag, then Cmd+V', chat_tui.KEY_HELP)
+        self.assertIn('Cmd+C goes to the terminal, never to llmtool', chat_tui.KEY_HELP)
+        self.assertIn('Shift-drag (Warp), Fn-drag (Terminal.app)', chat_tui.KEY_HELP)
 
     def test_mouse_modes_include_button_event_tracking(self):
         output = DummyOutput()
@@ -3695,6 +4133,8 @@ class ScrollSelectTests(Base):
         async def selected_then_list(ui):
             await self.settle(ui)
             self.assertTrue(ui.view.selected_range())
+            self.assertEqual(self.copies[-1], ui.view.selected_text())
+            copies['before'] = len(self.copies)
             ui.toggle_list(True)
             await self.settle(ui)
             self.assertIsNone(ui.view.selected_range())
@@ -3704,12 +4144,13 @@ class ScrollSelectTests(Base):
             await self.settle(ui)
             self.assertFalse(ui.app.is_running)              # Ctrl-C in the list pane exited
 
+        copies = {}
         ui, result = self.drive([lambda ui: ui.append(SHORT_LINES), press(5, 11), drag(5, 10),
                                  drag(5, 1), dragging_at_edge, '\x1b[14~', events_pane,
                                  '\x1b[14~', press(3, 2), drag(3, 4), release(3, 4),
                                  selected_then_list, '\x03', exited])
         self.assertEqual(result, 0)
-        self.assertEqual(len(self.copies), 1)                 # only the drag release copied
+        self.assertEqual(len(self.copies), copies['before'])  # Ctrl-C in the list copied nothing
 
     def test_clicks_on_the_pane_keep_input_focus_and_wheel_never_recalls_history(self):
         async def check(ui):
