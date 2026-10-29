@@ -31,7 +31,7 @@
   - Keep credential, secret, personal/customer-data and restricted-log protection unchanged. Do not infer containment from prompt text or a resident TUI PID.
 
 - **AGY direct Developer:**
-  - AGY is `OWNER_ASSIGNMENT_ONLY`: no auto dispatch, retry or fallback without the exact recorded Owner Task assignment.
+  - AGY follows its [worker-dispatch.json](tools/llmtool/worker-dispatch.json) row: `ALLOWED` permits PM-selected dispatch under Owner #289 c6506062108; `OWNER_ASSIGNMENT_ONLY` requires the exact recorded Owner Task assignment. No automatic retry or fallback.
   - When authorized, direct AGY CLI work may use the OpenCode-style registered D6 worktree path without waiting for Host D4/G3/M2. Validate AGY authentication, actual model, executable/session semantics, least-privilege writable allowlist, remaining quota and required reviews before execution.
   - `ALLOWED` or an assigned policy result alone does not prove a working adapter.
   - On quota exhaustion, record bounded Task progress, SHA, changed files, unfinished checks and state (including UNKNOWN); release Writer ownership before reassignment. Never replay uncertain mutations or buy a fallback.

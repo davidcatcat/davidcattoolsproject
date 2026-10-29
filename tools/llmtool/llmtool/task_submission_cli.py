@@ -2451,7 +2451,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             except LLMToolError:
                 raise RouteError('AGY_D6_BINDING_CHANGED') from None
             decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
-            if decision.allowed is True and decision.reason_code == 'OWNER_ASSIGNMENT_MATCHED':
+            if (decision.allowed is True and decision.reason_code in (
+                    'OWNER_POLICY_ALLOWED', 'OWNER_ASSIGNMENT_MATCHED')):
                 return decision
             owner_gate_denied = True
             return False

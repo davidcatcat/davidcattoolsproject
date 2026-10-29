@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from llmtool import review_dispatch, task_completion, task_submission_cli, worker_dispatch
 from llmtool.developer_routes import RouteError
+from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
 
 
@@ -225,6 +226,42 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(task['developer']['error_code'], 'AGY_DISPATCH_DENIED')
         self.assertEqual(task['developer']['blocked_reason'], 'OWNER_DISPATCH_DENIED')
         self.assertEqual(inbox_events, [])
+
+    def test_agy_route_gate_denies_unknown_allowed_reason(self):
+        initial = SimpleNamespace(allowed=True, reason_code='OWNER_POLICY_ALLOWED')
+        unknown = SimpleNamespace(allowed=True, reason_code='UNRECOGNIZED_REASON')
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            decisions=(initial, unknown))
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['error_code'], 'AGY_DISPATCH_DENIED')
+        self.assertEqual(task['developer']['blocked_reason'], 'OWNER_DISPATCH_DENIED')
+        self.assertEqual(inbox_events, [])
+
+    def test_agy_route_gate_accepts_policy_allowed_and_assignment_match_only(self):
+        for reason in ('OWNER_POLICY_ALLOWED', 'OWNER_ASSIGNMENT_MATCHED'):
+            with self.subTest(reason=reason):
+                decision = SimpleNamespace(allowed=True, reason_code=reason)
+                status, task, inbox_events, _prompts = self._run_agy_delegate(
+                    decisions=(decision, decision))
+                self.assertEqual(status, 0)
+                self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
+                self.assertEqual(len(inbox_events), 1)
+
+    def test_agy_adapter_gate_denies_paused_assignment_required_and_unknown(self):
+        for decision in (
+                SimpleNamespace(allowed=False, reason_code='OWNER_PAUSED'),
+                SimpleNamespace(allowed=False, reason_code='OWNER_ASSIGNMENT_REQUIRED'),
+                SimpleNamespace(allowed=True, reason_code='UNRECOGNIZED_REASON')):
+            with self.subTest(reason=decision.reason_code), \
+                    patch.object(worker_dispatch, 'evaluate', return_value=decision):
+                self.assertFalse(owner_assignment_gate('a' * 32, 'owner-ref')())
+
+    def test_agy_adapter_gate_accepts_only_recognized_allowed_reasons(self):
+        for reason in ('OWNER_POLICY_ALLOWED', 'OWNER_ASSIGNMENT_MATCHED'):
+            decision = SimpleNamespace(allowed=True, reason_code=reason)
+            with self.subTest(reason=reason), \
+                    patch.object(worker_dispatch, 'evaluate', return_value=decision):
+                self.assertIs(owner_assignment_gate('a' * 32, 'owner-ref')(), decision)
 
     def test_agy_large_diff_has_distinct_output_error(self):
         status, task, inbox_events, _prompts = self._run_agy_delegate(diff_bytes=b'x' * (64 * 1024 + 1))
