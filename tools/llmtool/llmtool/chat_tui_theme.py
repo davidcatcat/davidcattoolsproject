@@ -132,17 +132,27 @@ def save_settings(settings, path=None):
 
 # -- links -----------------------------------------------------------------------------
 def repo_info(cwd=None):
-    """(git top-level directory or None, "owner/repo" of a GitHub origin or None)."""
+    """(git top-level directory or None, "owner/repo" of a GitHub origin or None).
+
+    Links are an extra: any failure of git (missing, slow, odd output) gives (None, None).
+    It can take 2 x GIT_SECONDS, so the TUI calls it off the UI thread.
+    """
     def git(*args):
         try:
             done = subprocess.run(("git",) + args, cwd=cwd, capture_output=True, text=True,
                                   timeout=GIT_SECONDS, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
+            if done.returncode != 0 or not isinstance(done.stdout, str):
+                return None
+            return done.stdout.strip() or None
+        except Exception:
             return None
-        return done.stdout.strip() if done.returncode == 0 else None
 
+    # Only an absolute, existing directory is a repo root; anything else is no repo info.
+    top = git("rev-parse", "--show-toplevel")
+    if not top or not os.path.isabs(top) or not os.path.isdir(top):
+        return None, None
     match = _GITHUB_REMOTE.match(git("config", "--get", "remote.origin.url") or "")
-    return git("rev-parse", "--show-toplevel"), match.group(1) if match else None
+    return os.path.realpath(top), match.group(1) if match else None
 
 
 class Linker:
