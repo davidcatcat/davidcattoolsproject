@@ -1,6 +1,7 @@
 """Interactive UX and state regressions; no live model or auth dependencies."""
 import copy
 import io
+import json
 import os
 import sys
 import tempfile
@@ -56,7 +57,7 @@ providers:
 
     def cli(self, args, lines):
         out, err = io.StringIO(), io.StringIO()
-        with patch.dict(os.environ, {}, clear=True), patch('llmtool.config.user_config_path', return_value=self.path), patch('llmtool.config.Path.cwd', return_value=self.home), patch('builtins.input', side_effect=list(lines)+[EOFError()]), redirect_stdout(out), redirect_stderr(err):
+        with patch.dict(os.environ, {}, clear=True), patch('llmtool.config.user_config_path', return_value=self.path), patch('llmtool.config.Path.cwd', return_value=self.home), patch('llmtool.cli.Path.home', return_value=self.home), patch('builtins.input', side_effect=list(lines)+[EOFError()]), redirect_stdout(out), redirect_stderr(err):
             status = main(args)
         return status, out.getvalue(), err.getvalue()
 
@@ -225,6 +226,105 @@ providers:
 
     def test_empty_history(self):
         self.assertEqual(self.session.command('/history'), 'conversation history is empty')
+
+    def test_history_save_and_reload(self):
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        session = ChatSession(self.config, history_path=history_path)
+        session.send('question')
+        reloaded = ChatSession(self.config, history_path=history_path)
+        self.assertEqual(reloaded.history, [
+            {'role': 'user', 'content': 'question'},
+            {'role': 'assistant', 'content': 'reply'},
+        ])
+        self.assertEqual((history_path.parent.stat().st_mode & 0o777), 0o700)
+        self.assertEqual((history_path.stat().st_mode & 0o777), 0o600)
+
+    def test_history_clear_empties_file(self):
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        session = ChatSession(self.config, history_path=history_path)
+        session.send('question')
+        self.assertTrue(history_path.exists())
+        session.command('/clear')
+        self.assertEqual(session.history, [])
+        self.assertEqual(json.loads(history_path.read_text()), [])
+
+    def test_failed_turn_not_saved(self):
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        session = ChatSession(self.config, history_path=history_path)
+        self.client.complete.side_effect = RuntimeError('private failure')
+        with self.assertRaises(LLMToolError):
+            session.send('question')
+        self.assertFalse(history_path.exists())
+        self.assertEqual(session.history, [])
+
+    def test_interrupted_turn_not_saved(self):
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        session = ChatSession(self.config, history_path=history_path)
+        session.send('question', cancel=Mock(is_set=Mock(return_value=True)))
+        self.assertFalse(history_path.exists())
+        self.assertEqual(len(session.history), 2)
+
+    def test_unsafe_or_malformed_history_is_ignored(self):
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        history_path.parent.mkdir(parents=True, mode=0o700)
+        history_path.parent.chmod(0o700)
+        history_path.write_text('{bad json')
+        history_path.chmod(0o600)
+        session = ChatSession(self.config, history_path=history_path)
+        self.assertEqual(session.history, [])
+        self.assertIsNotNone(session.history_notice)
+        session.history_notice = None
+        history_path.unlink()
+        history_path.symlink_to(self.home / 'target')
+        session = ChatSession(self.config, history_path=history_path)
+        self.assertEqual(session.history, [])
+        self.assertIsNotNone(session.history_notice)
+
+    def test_sensitive_history_is_withheld(self):
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        session = ChatSession(self.config, history_path=history_path)
+        self.client.complete.return_value = Reply('api_key=PRIVATE_VALUE', {})
+        session.send('question')
+        stored = history_path.read_text()
+        self.assertIn('[withheld]', stored)
+        self.assertNotIn('PRIVATE_VALUE', stored)
+
+    def test_history_caps_turns_and_bytes(self):
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        session = ChatSession(self.config, history_path=history_path)
+        session.history = [item for number in range(205) for item in (
+            {'role': 'user', 'content': 'q%d' % number},
+            {'role': 'assistant', 'content': 'a%d' % number})]
+        session._history_store.save(session.history)
+        stored = history_path.read_bytes()
+        turns = json.loads(stored)
+        self.assertLessEqual(len(turns), 400)
+        self.assertLessEqual(len(stored), 256 * 1024)
+        self.assertEqual(turns[0]['content'], 'q5')
+        session.history = [
+            {'role': 'user', 'content': 'x' * (200 * 1024)},
+            {'role': 'assistant', 'content': 'y' * (200 * 1024)},
+        ]
+        session._history_store.save(session.history)
+        self.assertLessEqual(history_path.stat().st_size, 256 * 1024)
+
+    def test_none_history_path_writes_nothing(self):
+        before = set(self.home.rglob('history.json'))
+        self.send('question')
+        self.assertEqual(set(self.home.rglob('history.json')), before)
+
+    def test_cli_no_history_opt_out(self):
+        status, out, err = self.cli(['chat', '--no-history'], ['question', '/exit'])
+        self.assertEqual((status, err), (0, ''))
+        self.assertIn('History stays in memory.', out)
+        self.assertFalse((self.home / '.local/state/llmtool/chat/history.json').exists())
+
+    def test_cli_default_enables_history(self):
+        status, out, err = self.cli(['chat'], ['question', '/exit'])
+        history_path = self.home / '.local/state/llmtool/chat/history.json'
+        self.assertEqual((status, err), (0, ''))
+        self.assertTrue(history_path.exists())
+        self.assertEqual(len(json.loads(history_path.read_text())), 2)
 
     def test_provider_error_rollback_recovery_sanitized(self):
         self.send('prior')

@@ -1,4 +1,4 @@
-"""Memory-only conversation state and a text REPL; no action execution."""
+"""Conversation state and a text REPL; no action execution."""
 
 import copy
 import re
@@ -15,6 +15,7 @@ from .providers import client_type, create_client
 from .providers.base import ProviderCapabilities, Reply
 from .skills import discover_skills, load_skill
 from .terminal import human_output
+from .chat_history import ChatHistory
 
 HELP = """/help                 Show commands
 /status               Show provider, model, skill, turns and last-request status
@@ -114,13 +115,15 @@ def _error_code(exc):
 
 
 class ChatSession:
-    """A config snapshot plus successful turns. Never saves config or history."""
+    """A config snapshot plus successful turns, optionally backed by private history."""
 
-    def __init__(self, config, skill=None):
+    def __init__(self, config, skill=None, history_path=None):
         self.config = copy.deepcopy(config)
         selected_provider(self.config)
         self.skill = skill
-        self.history = []
+        self._history_store = ChatHistory(history_path) if history_path is not None else None
+        self.history = self._history_store.load() if self._history_store is not None else []
+        self.history_notice = self._history_store.notice if self._history_store is not None else None
         self.active = True
         self.reset_status()
 
@@ -238,6 +241,9 @@ class ChatSession:
         usage = reply_usage(reply.metadata)
         reported = _reported_model(provider_type, reply.metadata)
         self.history.extend((user, {"role": "assistant", "content": reply.content}))
+        if self._history_store is not None and not interrupted:
+            self._history_store.save(self.history)
+            self.history_notice = self._history_store.notice
         self.last_elapsed = max(0.0, time.monotonic() - started)
         self.last_usage = usage
         self.last_reported_model = reported
@@ -281,6 +287,9 @@ class ChatSession:
             )
         if command == "/clear":
             self.history.clear()
+            if self._history_store is not None:
+                self._history_store.clear()
+                self.history_notice = self._history_store.notice
             self.reset_status()
             return "conversation cleared"
         if command == "/history":
@@ -304,7 +313,13 @@ def run_chat(session, read_line=None, stdout=None, stderr=None):
     stdout = sys.stdout if stdout is None else stdout
     stderr = sys.stderr if stderr is None else stderr
     print("LLMTool interactive chat\n" + session.status(), file=stdout)
-    print("History stays in memory. /help for commands.", file=stdout)
+    if session._history_store is None:
+        print("History stays in memory. /help for commands.", file=stdout)
+    else:
+        print("History is stored locally. /help for commands.", file=stdout)
+    if session.history_notice:
+        print("llmtool: " + session.history_notice, file=stderr)
+        session.history_notice = None
     try:
         while session.active:
             print("> ", end="", file=stdout, flush=True)
@@ -315,6 +330,9 @@ def run_chat(session, read_line=None, stdout=None, stderr=None):
                 output = session.command(line) if line.lstrip().startswith("/") else session.send(line)
                 if output is not None:
                     print(human_output(output, stdout), file=stdout)
+                if session.history_notice:
+                    print("llmtool: " + session.history_notice, file=stderr)
+                    session.history_notice = None
             except LLMToolError as exc:
                 print("llmtool: " + str(exc), file=stderr)
             except (OSError, UnicodeError):
