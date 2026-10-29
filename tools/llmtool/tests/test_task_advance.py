@@ -1,9 +1,12 @@
 import hashlib
+import io
 import json
 import unittest
+from contextlib import redirect_stdout
 from unittest.mock import patch
 
 from llmtool import task_advance
+from llmtool import task_submission_cli
 from llmtool.cli import main, parser_for_cli
 
 
@@ -833,6 +836,78 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(result['next'], 'DISPATCH_REVIEW')
         self.assertEqual(result['codes'], ['ACK_SKIPPED'])
         self.assertEqual(result['acked'], [])
+
+    def test_cli_advance_prints_one_json_object_for_action_steps(self):
+        cases = []
+
+        repair_record = base_record(
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'DISPATCHED'}],
+            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD,
+                                'version': 1, 'outcome': 'REVIEW_FAIL'}])
+        def repair_review(**_kwargs):
+            print('{"repair_task_id":"repair-new"}')
+            return {'ignored': True}
+        cases.append((repair_record, {'repair_review_call': repair_review,
+                                      'cwd': '/repo/task'}, 'REPAIR_REVIEW', None))
+
+        retry_record = base_record(
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'DISPATCHED'}],
+            review_repair_claims=[{'head_sha': HEAD, 'state': 'DISPATCHED',
+                                   'repair_task_id': 'repair-old', 'attempt': 1}],
+            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD,
+                                'version': 1, 'outcome': 'REVIEW_FAIL'}])
+        class RetryStore:
+            def get(self, task_id):
+                if task_id == 'repair-old':
+                    return {'developer': {'state': 'DEVELOPER_UNAVAILABLE'}}
+                return retry_record
+        def repair_retry(**_kwargs):
+            print('{"repair_task_id":"repair-retry"}')
+            return {'ignored': True}
+        cases.append((retry_record, {'repair_review_call': repair_retry,
+                                     'cwd': '/repo/task'}, 'REPAIR_RETRY', RetryStore()))
+
+        completion_record = base_record(
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'DISPATCHED'}],
+            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD,
+                                'version': 1, 'outcome': 'REVIEW_PASS'}])
+        def run_completion(_args, **_kwargs):
+            print('{"completion":"recorded"}')
+            return 0
+        cases.append((completion_record, {'run_task_complete_call': run_completion},
+                      'RUN_TASK_COMPLETE', None))
+
+        dispatch_record = base_record()
+        def dispatch_review(**_kwargs):
+            print('{"reviewer_task":"reviewer-new"}')
+            return {'ignored': True}
+        cases.append((dispatch_record, {'dispatch_review_call': dispatch_review},
+                      'DISPATCH_REVIEW', None))
+
+        for record, adapters, expected_step, custom_store in cases:
+            with self.subTest(step=expected_step):
+                store = custom_store or type('Store', (), {
+                    'get': lambda self, _task_id: record})()
+                with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                     patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                     patch.object(task_advance, '_review_outcomes', return_value=[]):
+                    args = parser_for_cli().parse_args([
+                        'task', 'advance', record['task_id'], '--pr', '17'])
+                    output = io.StringIO()
+                    with redirect_stdout(output):
+                        task_submission_cli.run_task_advance(args, store=store,
+                            github_get=lambda _path: [], **adapters)
+                lines = output.getvalue().splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertTrue(lines[0])
+                result = json.loads(lines[0])
+                self.assertEqual(result['task_id'], record['task_id'])
+                self.assertEqual(result['step'], expected_step)
+                self.assertIn('next', result)
+                self.assertIn('codes', result)
 
 
 if __name__ == '__main__':
