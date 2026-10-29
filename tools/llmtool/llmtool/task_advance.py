@@ -8,7 +8,7 @@ import json
 import shutil
 from argparse import Namespace
 
-from . import github_events, review_dispatch, review_repair, review_result
+from . import active_pm_inbox, github_events, review_dispatch, review_repair, review_result
 from . import task_completion, task_submission_cli
 from .errors import LLMToolError
 from .task_store import TaskStore
@@ -176,6 +176,44 @@ def _pr_snapshot(number, github_get):
     return value if type(value) is dict else None
 
 
+def _ack_consumed_events(result, record, store, result_head):
+    """Best-effort ACK of completion events consumed by this advance decision."""
+    acked = []
+    skipped = False
+    closed = result.get('step') == 'CLOSED'
+    try:
+        latest_record = store.get(record.get('task_id'))
+        if type(latest_record) is not dict:
+            latest_record = record
+    except Exception:
+        latest_record = record
+    events = latest_record.get('completion_events', [])
+    if type(events) is list:
+        for event in events:
+            if type(event) is not dict or event.get('state') == 'ACKED':
+                continue
+            source_sha = event.get('source_sha')
+            eligible = closed or (
+                type(source_sha) is str and
+                re.fullmatch(r'[0-9a-f]{40}', source_sha) is not None and
+                type(result_head) is str and source_sha != result_head)
+            if not eligible:
+                continue
+            session_id = latest_record.get('pm_session_id')
+            if type(session_id) is not str:
+                skipped = True
+                continue
+            try:
+                active_pm_inbox.ack(store, event.get('event_id'), session_id)
+                acked.append(event['event_id'])
+            except Exception:
+                skipped = True
+    result['acked'] = acked
+    if skipped and 'ACK_SKIPPED' not in result.get('codes', []):
+        result.setdefault('codes', []).append('ACK_SKIPPED')
+    return result
+
+
 def _review_outcomes(record, claims, github_get):
     """Read verdicts bound to claims; completion events intentionally hold hashes only."""
     from . import review_result as result_module
@@ -305,7 +343,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         record = store.get(task_id)
     except Exception:
         return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
-                'next': 'REFUSED', 'codes': ['TASK_RECORD_UNAVAILABLE']}
+                'next': 'REFUSED', 'codes': ['TASK_RECORD_UNAVAILABLE'], 'acked': []}
     executor_task = (record.get('completion') or {}).get('executor_task_id')
     number = _pr_number(record, pr_number)
     get = task_completion._github_get if github_get is None else github_get
@@ -346,17 +384,22 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         try:
             invoke(store, record, 'github-task-advance', event_id,
                    merge_number, None, 'merge', 'MERGED', merge_sha)
-            return {'task_id': task_id, 'step': 'CLOSED', 'result': None,
-                    'next': 'CLOSED', 'codes': []}
+            return _ack_consumed_events(
+                {'task_id': task_id, 'step': 'CLOSED', 'result': None,
+                 'next': 'CLOSED', 'codes': []}, record, store,
+                d6.get('result_head') if type(d6) is dict else None)
         except Exception as exc:
-            return {'task_id': task_id, 'step': 'REFUSED', 'result': None,
-                    'next': 'REFUSED', 'codes': [_refusal(exc, 'completion_code') if
-                        getattr(exc, 'completion_code', None) else
-                        _refusal(exc, 'task_store_error_code')]}
+            return _ack_consumed_events(
+                {'task_id': task_id, 'step': 'REFUSED', 'result': None,
+                 'next': 'REFUSED', 'codes': [_refusal(exc, 'completion_code') if
+                     getattr(exc, 'completion_code', None) else
+                     _refusal(exc, 'task_store_error_code')]}, record, store,
+                d6.get('result_head') if type(d6) is dict else None)
     if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
         code = d6.get('code') if type(d6.get('code')) is str else 'D6_BINDING_UNAVAILABLE'
-        return {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
-                'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}
+        return _ack_consumed_events(
+            {'task_id': task_id, 'step': 'D6_BINDING_UNAVAILABLE', 'result': None,
+             'next': 'D6_BINDING_UNAVAILABLE', 'codes': [code]}, record, store, None)
     step = decide(record, d6, pr, related)
     result, codes = None, []
     if step == 'DISPATCH_REVIEW':
@@ -523,5 +566,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         codes.append(step)
     next_action = ('resume the reviewer to post its verdict' if step == 'REVIEW_NOT_POSTED'
                    else step)
-    return {'task_id': task_id, 'step': step, 'result': result,
-            'next': next_action, 'codes': codes}
+    return _ack_consumed_events(
+        {'task_id': task_id, 'step': step, 'result': result,
+         'next': next_action, 'codes': codes}, record, store,
+        d6.get('result_head') if type(d6) is dict else None)
