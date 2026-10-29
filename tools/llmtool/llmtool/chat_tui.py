@@ -391,6 +391,7 @@ class ChatTUI:
         self.pm_outbox_paused = None
         self.pm_turn_status = None   # TURN_END status of the current turn
         self.pm_turn_error = None    # RUNTIME_ERROR code of the current turn
+        self.pm_turn_refused = False # a tool was refused (PERMISSION_DENIED) in this turn
         self.pm_interrupt_by = None  # "esc" or "ctrl-c"
         self._quit_warned = False    # first Ctrl-C with queued messages only warned
         # W52 F1: the working line at the end of the pane while a turn shows no text yet.
@@ -1879,6 +1880,7 @@ class ChatTUI:
         self.pm_turn_active, self.pm_turn_started = True, time.monotonic()
         self.pm_interrupted, self.pm_deltas, self.pm_tools = False, False, {}
         self.pm_turn_status = self.pm_turn_error = self.pm_interrupt_by = None
+        self.pm_turn_refused = False
         self.pm_block_index = None
         self.pm_state = "working"
         self.append(header + chat_tui_pm.safe_text(text))   # also shows the working line
@@ -2049,6 +2051,8 @@ class ChatTUI:
             self.append("  · tool " + chat_tui_pm.safe_name(name))
             self.pm_deltas = False
         elif kind == "TOOL_RESULT":
+            if event.get("reason") == "PERMISSION_DENIED":
+                self.pm_turn_refused = True   # a refused turn pauses the queue (finish_pm_turn)
             self.append(chat_tui_pm.tool_result_text(event, self.pm_tools.get(event.get("tool_use_id"))))
         elif kind == "RUNTIME_ERROR":
             code = chat_tui_pm.safe_code(event.get("code"))
@@ -2080,6 +2084,8 @@ class ChatTUI:
                 self._pm_pause("PM 已斷線")
             elif error is not None:
                 self._pm_pause("上一回合失敗 " + error)
+            elif self.pm_turn_refused:
+                self._pm_pause("權限被拒")   # even when the turn still ended COMPLETED
             elif status == "COMPLETED" or (status == "INTERRUPTED" and self.pm_interrupt_by == "esc"):
                 self._pm_send_next()
             elif status == "INTERRUPTED":

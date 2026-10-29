@@ -2766,6 +2766,41 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['go', 'next one'])
 
+    def test_permission_denied_tool_pauses_the_queue_even_when_the_turn_completes(self):
+        # #636 Codex review v1: a refused tool is a refused turn; the queue must not go on.
+        denied = {'type': 'user', 'message': {'content': [
+            {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'Permission denied',
+             'is_error': True, 'permission_denial': True}]}}
+        self.turns = [[_delta('x'), 'HOLD',
+                       _assistant({'type': 'tool_use', 'id': 't1', 'name': 'Bash', 'input': {}}),
+                       denied, _assistant({'type': 'text', 'text': 'could not run it'}),
+                       _result('could not run it')],
+                      [_delta('later'), _result('later')]]
+
+        async def queued(ui):
+            await self.until(ui, lambda ui: len(ui.pm_outbox) == 1, 'queued')
+            self.fakes[0].gate.set()
+
+        async def paused(ui):
+            await self.turn_done(ui)
+            await asyncio.sleep(0.1)
+            text = ui.conversation.text
+            self.assertIn('auto-denied (pm_runtime reason PERMISSION_DENIED', text)
+            self.assertIn('— PM turn COMPLETED', text)
+            self.assertEqual(len(self.fakes[0].users()), 1)     # nothing more was sent
+            self.assertEqual(list(ui.pm_outbox), ['next one'])
+            self.assertIn('PM 佇列暫停，沒有送出：1 則，暫停（權限被拒）', text)
+            self.assertIn('  1. next one', text)
+            self.assertIn('佇列1暫停', ui.status_text())
+
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'next one\r', queued, paused,
+                            '/pm queue send\r',
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_outbox
+                                                  and not ui.pm_turn_active, 'resumed')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['go', 'next one'])
+        self.assertIsNone(ui.pm_outbox_paused)
+
     def test_escape_continues_the_queue_ctrl_c_pauses_it_and_clear_counts(self):
         self.turns = [[_delta('one'), 'HOLD', _result('stopped')],
                       [_delta('two'), 'HOLD', _result('stopped')]]
