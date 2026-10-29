@@ -81,16 +81,18 @@ Talk to the PM: the dedicated Claude Code PM (/pm …) is the product entry
   /pm history           Show the turns pm_runtime stored for this PM session
   /pm                   Show the connected PM and its state
   Enter (during a turn) Queue the draft (已排入佇列（第 N 則）): queued messages are sent one turn
-                        at a time, in order, each after the previous turn COMPLETED
+                        at a time, in order, each after the previous turn COMPLETED; a
+                        notice during a streaming reply is shown below it, never inside it
   /pm queue             List the queued messages; /pm queue clear drops them,
-                        /pm queue send resumes a paused queue
-  Esc (during a turn)   Interrupt the PM turn (focus in the input or the conversation pane);
-                        the queue then continues. Ctrl-C interrupts and pauses the queue;
-                        a second Ctrl-C exits
+                        /pm queue send resumes a paused queue (sends them all)
+  Esc (during a turn)   Interrupt the PM turn (focus in the input or the conversation pane)
+                        and pause the queue: nothing more is sent. Enter on an empty draft
+                        sends the next queued message, /pm queue send resumes them all.
+                        Ctrl-C interrupts and pauses the queue; a second Ctrl-C exits
 A PM turn and a chat or Task request never run together: after /task mode, Enter during a
 PM turn keeps the draft and sends nothing (nor does a Task submit) until the turn ends.
 A CWD with spaces: /pm new "/path/with space" or /pm new /path/with\\ space.
-A failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing more is sent
+Esc, a failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing more is sent
 until /pm queue send, and the pane lists what is waiting.
 PM replies stream in as pm_runtime reports them; tool use is one line per tool and never
 shows tool input or output. PM thinking is never shown as the answer: while the PM thinks
@@ -374,6 +376,7 @@ class ChatTUI:
         self.pm_block_raw = None     # raw text of the streaming PM block (None: no block open)
         self.pm_block_start = 0      # where that block's displayed text starts in the pane
         self.pm_queue = ""           # received PM text not yet released to the pane
+        self.pm_tail = []            # notices shown below the open PM block (W55 F2-b)
         self._pm_tick_handle = None  # loop.call_later handle of the next typewriter tick
         self._pm_rate = PM_CHARS_PER_TICK   # characters released per tick (raised when behind)
         self.pm_warm = False         # connected, nothing received yet: the PM process is cold
@@ -385,8 +388,8 @@ class ChatTUI:
         self.pm_deltas = False       # text deltas seen since the last assistant/tool boundary
         self.pm_tools = {}
         # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
-        # a COMPLETED turn (or an Esc interrupt). A failed/refused turn, Ctrl-C or a
-        # disconnect pauses it (the reason text) until /pm queue send.
+        # a COMPLETED turn. Esc (W55), a failed/refused turn, Ctrl-C or a disconnect pauses
+        # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
         self.pm_outbox = collections.deque()
         self.pm_outbox_paused = None
         self.pm_turn_status = None   # TURN_END status of the current turn
@@ -1240,6 +1243,8 @@ class ChatTUI:
             return
         if not text.strip():
             self.input.buffer.reset()
+            if self.pm_mode and self.pm_outbox and self.pm_outbox_paused:
+                self._pm_resume(everything=False)   # W55: Enter sends the next queued draft
             return
         if text.lstrip().startswith("/"):
             self.input.buffer.reset(append_to_history=True)
@@ -1660,24 +1665,37 @@ class ChatTUI:
             self.pm_outbox_paused = None
             self.append("llmtool: PM 佇列已清除 %d 則（未送出）" % count)
         elif action == "send":
-            if not self.pm_outbox:
-                self.append("llmtool: PM 佇列是空的")
-            elif self.pm_runtime is None:
-                self.append("llmtool: PM 未連線；/pm connect 之後再 /pm queue send（佇列保留 %d 則）"
-                            % len(self.pm_outbox))
-            elif self.pm_pending or self.pm_state == "closing":
-                # finish_pm_connect/history/disconnect never send: resuming now would stall.
-                self.append("llmtool: a PM connect/disconnect/history request is in progress; "
-                            "/pm queue send again when it ends（佇列保留 %d 則）" % len(self.pm_outbox))
-            elif self.pm_turn_active:
-                self.pm_outbox_paused = None
-                self.append("llmtool: PM 佇列繼續：目前回合結束後送出下一則（共 %d 則）"
-                            % len(self.pm_outbox))
-            else:
-                self.pm_outbox_paused = None
-                self._pm_send_next()
+            self._pm_resume(everything=True)
         else:
             self.append("usage: /pm queue [clear|send]")
+
+    def _pm_resume(self, everything):
+        """/pm queue send resumes the whole queue; Enter on an empty draft (W55) sends only
+        the next queued draft and the rest stays paused."""
+        again = "/pm queue send" if everything else "Enter"
+        if not self.pm_outbox:
+            self.append("llmtool: PM 佇列是空的")
+        elif self.pm_runtime is None:
+            self.append("llmtool: PM 未連線；/pm connect 之後再 %s（佇列保留 %d 則）"
+                        % (again, len(self.pm_outbox)))
+        elif self.pm_pending or self.pm_state == "closing":
+            # finish_pm_connect/history/disconnect never send: resuming now would stall.
+            self.append("llmtool: a PM connect/disconnect/history request is in progress; "
+                        "%s again when it ends（佇列保留 %d 則）" % (again, len(self.pm_outbox)))
+        elif not everything and self.pm_turn_active:
+            self._pm_notice("llmtool: PM 本輪尚未結束；結束後按 Enter 送下一則（佇列暫停，剩 %d 則）"
+                            % len(self.pm_outbox))
+        elif self.pm_turn_active:
+            self.pm_outbox_paused = None
+            self._pm_notice("llmtool: PM 佇列繼續：目前回合結束後送出下一則（共 %d 則）"
+                            % len(self.pm_outbox))
+        elif everything:
+            self.pm_outbox_paused = None
+            self._pm_send_next()
+        else:
+            text = self.pm_outbox.popleft()   # still paused: the rest waits for the next Enter
+            self._pm_start_turn(text, "owner → PM（自佇列送出，佇列暫停，剩 %d 則）:\n"
+                                % len(self.pm_outbox))
 
     def _queue_text(self, title):
         if not self.pm_outbox:
@@ -1691,13 +1709,27 @@ class ChatTUI:
                                                        self._get_cwidth))
         return "\n".join(lines)
 
-    def _pm_pause(self, reason):
+    def _pm_pause(self, reason, text=None):
         """Stop sending queued messages; they stay listed and /pm queue send resumes."""
         if not self.pm_outbox or self.pm_outbox_paused:
             return
         self.pm_outbox_paused = reason
-        self.append(self._queue_text("llmtool: PM 佇列暫停，沒有送出")
-                    + "\n/pm queue send 繼續送出；/pm queue clear 清除")
+        self._pm_notice(text or (self._queue_text("llmtool: PM 佇列暫停，沒有送出")
+                                 + "\n/pm queue send 繼續送出；/pm queue clear 清除"))
+
+    def _pm_esc_pause(self):
+        self._pm_pause("Esc 中斷", "llmtool: 已中斷；佇列已暫停（剩 %d 則）：Enter 送下一則，"
+                       "/pm queue send 全部送出，/pm queue clear 清空" % len(self.pm_outbox))
+
+    def _pm_notice(self, text):
+        """W55 F2-b: a notice while a PM block streams goes below that block (the tail), so
+        the reply stays one contiguous block; otherwise it is appended as usual."""
+        if self.pm_block_raw is None:
+            self.append(text)
+            return
+        self._pm_flush()   # the text received so far is shown above the notice
+        self.pm_tail.append(terminal_safe_text(text))
+        self._pm_render(final=False)
 
     def _pm_send_next(self):
         if not self.pm_outbox or self.pm_outbox_paused or self.pm_turn_active:
@@ -1877,10 +1909,10 @@ class ChatTUI:
         if self.pm_turn_active or self.pm_outbox:
             # W52 F2: a turn is running (or a paused queue waits): queue it, in order.
             self.pm_outbox.append(text)
-            self.append("owner → PM（已排入佇列（第 %d 則））:\n" % len(self.pm_outbox)
-                        + chat_tui_pm.safe_text(text)
-                        + ("\n  — 佇列暫停（" + self.pm_outbox_paused + "）；/pm queue send 繼續"
-                           if self.pm_outbox_paused else ""))
+            self._pm_notice("owner → PM（已排入佇列（第 %d 則））:\n" % len(self.pm_outbox)
+                            + chat_tui_pm.safe_text(text)
+                            + ("\n  — 佇列暫停（" + self.pm_outbox_paused + "）；/pm queue send 繼續"
+                               if self.pm_outbox_paused else ""))
             if not self.pm_turn_active:
                 self._pm_send_next()
             return
@@ -1975,7 +2007,8 @@ class ChatTUI:
 
     def _pm_render(self, final):
         self._block_render(self.pm_block_start,
-                           terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final)))
+                           terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final))
+                           + "".join("\n\n" + notice for notice in self.pm_tail))
 
     def _block_render(self, start, shown):
         """Replace the pane text from a streaming block's start with its current text.
@@ -1993,6 +2026,7 @@ class ChatTUI:
             return
         self._pm_render(final=True)
         self.pm_block_raw = None
+        self.pm_tail = []   # the notices stay where they are, below the finished block
 
     # -- working line (W52 F1) -----------------------------------------------------------
     def _pm_working_line(self):
@@ -2123,11 +2157,13 @@ class ChatTUI:
                 self._pm_pause("PM 已斷線")
             elif self.pm_interrupt_by == "ctrl-c":
                 self._pm_pause("Ctrl-C 中斷")   # whatever the end: a COMPLETED can race it
+            elif self.pm_interrupt_by == "esc":
+                self._pm_esc_pause()   # W55: drafts queued after Esc are not sent either
             elif error is not None:
                 self._pm_pause("上一回合失敗 " + error)
             elif self.pm_turn_refused:
                 self._pm_pause("權限被拒")   # even when the turn still ended COMPLETED
-            elif status == "COMPLETED" or (status == "INTERRUPTED" and self.pm_interrupt_by == "esc"):
+            elif status == "COMPLETED":
                 self._pm_send_next()
             else:
                 self._pm_pause("上一回合沒有完成（" + (status or "沒有 TURN_END") + "）")
@@ -2138,13 +2174,16 @@ class ChatTUI:
             return
         self.pm_interrupted, self.pm_state = True, "interrupting"
         self.pm_interrupt_by = by
-        self.append("llmtool: interrupt sent to the PM; waiting for the turn to end")   # flushes
+        # W55: visible at once, below a streaming reply, before the turn actually ends.
+        self._pm_notice("llmtool: 已中斷，等待 PM 結束本輪…")
+        if by == "esc":
+            self._pm_esc_pause()   # nothing is sent after an Esc interrupt
         try:
             self.pm_runtime.interrupt()
         except LLMToolError as exc:
-            self.append("llmtool: " + chat_tui_pm.error_text(chat_tui_pm.error_code(exc)))
+            self._pm_notice("llmtool: " + chat_tui_pm.error_text(chat_tui_pm.error_code(exc)))
         except Exception:
-            self.append("llmtool: " + chat_tui_pm.error_text(chat_tui_task.UNKNOWN))
+            self._pm_notice("llmtool: " + chat_tui_pm.error_text(chat_tui_task.UNKNOWN))
 
     def close_pm(self):
         """Exit path: close the adopted runtime and any one a connect worker opened but has
