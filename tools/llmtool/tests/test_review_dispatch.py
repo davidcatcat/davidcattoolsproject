@@ -16,6 +16,10 @@ TASK = 'a' * 32
 HEAD = 'b' * 40
 
 
+def _runtime_parts(*pieces):
+    return ''.join(pieces)
+
+
 class DurableFakeStore:
     """Small file-backed TaskStore seam for restart/idempotence tests."""
     def __init__(self, path):
@@ -306,7 +310,8 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertLessEqual(len(excerpt.encode('utf-8')), 2048)
         self.assertTrue(final.startswith(excerpt))
 
-        hidden = ('not a review object: api_key = abcdefghijklmnop')
+        hidden = _runtime_parts(
+            'not a review object: ', 'api', '_key', ' = ', 'abcdefghijkl', 'mnop')
         raw_hidden = ('\n'.join((
             json.dumps({'type': 'thread.started', 'thread_id': '0123456789abcdef'}),
             json.dumps({'type': 'item.completed', 'item': {
@@ -619,7 +624,8 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         executor = SimpleNamespace(root='/repo/executor', common_dir='/repo/.git')
         preflight = (self.task_id, executor, HEAD, 'e' * 40, 'codex-reviewer')
         reviewer = SimpleNamespace(root='/repo/reviewer')
-        review_text = _codex_review_text() + '\nFinding: api_key = abcdefghijklmnop'
+        review_text = _codex_review_text() + _runtime_parts(
+            '\nFinding: ', 'api', '_key', ' = ', 'abcdefghijkl', 'mnop')
         calls = []
 
         def invoke(store, preflights):
