@@ -1433,6 +1433,28 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertIsNone(rejection)
         self.assertEqual(artifact, proposal)
 
+    def test_text_developer_recounts_hunks_and_rejects_fake_context(self):
+        source_files = submission_cli._text_developer_source_files(
+            self.executor_root, self.executor_head, ['sample.py'])
+        proposal = (
+            'diff --git a/sample.py b/sample.py\n'
+            '--- a/sample.py\n+++ b/sample.py\n'
+            '@@ -1,9 +1,8 @@\n'
+            ' VALUE = 1\n'
+            '+# updated\n')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            proposal, ['sample.py'], source_files=source_files)
+        self.assertIsNone(rejection)
+        self.assertIn('@@ -1,1 +1,2 @@', artifact)
+        self.assertTrue(submission_cli._text_developer_apply_check(
+            self.executor_root, self.executor_head, artifact))
+
+        fake_context = proposal.replace(' VALUE = 1', ' ...')
+        artifact, _tokens, rejection = submission_cli._developer_normalized_output(
+            fake_context, ['sample.py'], source_files=source_files)
+        self.assertIsNone(artifact)
+        self.assertEqual(rejection, 'DEVELOPER_OUTPUT_INVALID_DIFF')
+
     def test_codex_delegate_missing_developer_profile_fails_closed_without_pm_fallback(self):
         task = self._pm_task_with_codex_assignment()
         output = io.StringIO()
@@ -2421,6 +2443,11 @@ class DeveloperOutputShapeMatrixTests(unittest.TestCase):
         self.assertNotIn('provided source text', packet)
         self.assertIn('no tools, cannot read files, and all needed file content is provided below.',
                       user)
+        self.assertIn('Never abbreviate or write "..."', system)
+        self.assertIn('Copy context lines verbatim', system)
+        self.assertIn('New files use --- /dev/null and +++ b/path', system)
+        self.assertIn('deletions use --- a/path and +++ /dev/null', system)
+        self.assertNotIn('creating, deleting or renaming files is not supported', system)
         self.assertTrue(context.endswith('Return only the unified diff, starting with "diff --git".'))
 
 
