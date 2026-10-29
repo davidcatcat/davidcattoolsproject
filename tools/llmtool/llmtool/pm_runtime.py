@@ -17,7 +17,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import active_pm_inbox
+from . import active_pm_inbox, config as llmtool_config
 from .errors import LLMToolError
 from .test_output_excerpts import _emitted_sensitive
 
@@ -393,6 +393,7 @@ class PMRuntime:
         self.state_root = state_root
         self.environ = environ
         self.clock = clock or time.time
+        self.claude_config_dir = None  # The Claude account directory the PM runs under.
         self._key = None
         self._lock_fd = None
         self._child = None
@@ -513,6 +514,18 @@ class PMRuntime:
         adapter = _ADAPTERS.get(self.runtime)
         if adapter is None:
             raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
+        base_env = os.environ if self.environ is None else self.environ
+        try:
+            # Trusted user config only; the user config is under the same HOME
+            # the transcript lookup uses.
+            config_dir = llmtool_config.pm_claude_config_dir(
+                None if self.environ is None else self.environ.get('HOME'))
+        except LLMToolError:
+            raise _error('PM_CONFIG_INVALID',
+                         'pm_runtime.claude_config_dir in the user config is invalid') from None
+        env = dict(base_env)
+        if config_dir is not None:
+            env['CLAUDE_CONFIG_DIR'] = config_dir
         try:
             key = active_pm_inbox.pm_session_key(self.pm_session_id)
             root_arg = self.state_root or Path.home() / '.local/state/llmtool/pm-runtime'
@@ -529,10 +542,10 @@ class PMRuntime:
                 # Checked without following symlinks: a symlinked or dangling
                 # component is refused even though the transcript may not exist yet.
                 transcript_present = active_pm_inbox.claude_session_present(
-                    self.pm_session_id, cwd, self.environ)
+                    self.pm_session_id, cwd, env)
             else:
                 cwd = active_pm_inbox.observe_claude_session(
-                    self.pm_session_id, self.cwd, self.environ)
+                    self.pm_session_id, self.cwd, env)
                 transcript_present = True
         except LLMToolError:
             raise _error('PM_SESSION_INVALID', 'PM session binding could not be validated') from None
@@ -564,7 +577,7 @@ class PMRuntime:
             if binding is None or binding.get('cwd') != cwd:
                 raise _error('PM_SESSION_NOT_DEDICATED',
                              'PM session is not dedicated; create a dedicated PM session and retry')
-            transcript = active_pm_inbox.claude_session_file(self.pm_session_id, cwd, self.environ)
+            transcript = active_pm_inbox.claude_session_file(self.pm_session_id, cwd, env)
             clock_value = self.clock()
             now = clock_value.timestamp() if isinstance(clock_value, datetime) else float(clock_value)
             try:
@@ -577,7 +590,6 @@ class PMRuntime:
                     ignore_recent_transcript=self._has_owned_session or recently_closed):
                 raise _error('PM_SESSION_LIVE_ELSEWHERE',
                              'PM session appears active elsewhere; close it before using pm_runtime')
-            env = dict(os.environ if self.environ is None else self.environ)
             session_flag = ('--resume' if binding.get('session_started') or
                             transcript_present else '--session-id')
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
@@ -597,6 +609,7 @@ class PMRuntime:
                 self._stderr_thread = threading.Thread(target=self._capture_stderr, daemon=True)
                 self._stderr_thread.start()
             self.cwd = cwd
+            self.claude_config_dir = str(transcript.parents[2])
             self._closed = False
             _register_lifecycle(self)
             self._has_owned_session = True
