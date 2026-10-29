@@ -14,6 +14,9 @@ import time
 import unittest
 from pathlib import Path
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from tui_pty_driver import screen_rows  # noqa: E402
+
 
 SOURCE = r'''
 import os
@@ -35,8 +38,11 @@ chat.create_client = lambda config, value: FakeClient()
 chat._streams = lambda client: True
 
 def fake_copy(text):
-    with open(os.environ["FAKE_COPY_FILE"], "w", encoding="utf-8") as output:
+    # Atomic: the clipboard worker thread writes while the test may already be reading.
+    path = os.environ["FAKE_COPY_FILE"]
+    with open(path + ".part", "w", encoding="utf-8") as output:
         output.write(text)
+    os.replace(path + ".part", path)
     return True
 
 chat_tui_view.copy_to_clipboard = fake_copy
@@ -126,6 +132,8 @@ class ChatTUIPTYTests(unittest.TestCase):
     def _spawn(self, delay):
         self.pid, self.master = pty.fork()
         if self.pid == 0:
+            # 80x24 like the pyte screen, set before the TUI asks (fd 0 is the slave here).
+            fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 80, 0, 0))
             environment = os.environ.copy()
             for name in ("TERM_PROGRAM",):
                 environment.pop(name, None)
@@ -158,8 +166,10 @@ class ChatTUIPTYTests(unittest.TestCase):
                 self.stream.feed(data)
 
     def rows(self):
+        # Not screen.display: it raises IndexError on a wide-character half the TUI's
+        # shifted CJK redraw leaves mid-frame (see tui_pty_driver.screen_rows).
         with self.lock:
-            return [self.screen.display[row].rstrip() for row in range(self.screen.lines)]
+            return screen_rows(self.screen)
 
     def wait_for(self, condition, description, timeout=15):
         deadline = time.monotonic() + min(timeout, 15)
@@ -187,6 +197,19 @@ class ChatTUIPTYTests(unittest.TestCase):
                 unchanged_since = now
             time.sleep(0.025)
         self.fail("screen did not stabilize after " + description + ": " + repr(self.rows()))
+
+    def wait_for_stable_copy(self, stable_for=0.3):
+        """The clipboard text once the release copy is in (drag-time copies come first)."""
+        deadline = time.monotonic() + 15
+        previous, since = None, time.monotonic()
+        while time.monotonic() < deadline:
+            current = self.copy_path.read_text(encoding="utf-8")
+            if current != previous:
+                previous, since = current, time.monotonic()
+            elif time.monotonic() - since >= stable_for:
+                return current
+            time.sleep(0.025)
+        self.fail("clipboard did not settle: " + repr(previous))
 
     def send(self, value):
         os.write(self.master, value.encode("utf-8"))
@@ -236,7 +259,7 @@ class ChatTUIPTYTests(unittest.TestCase):
         self.assertNotEqual(moved[0], before[0], "edge drag should keep scrolling while held")
         self.send("\x1b[<0;12;1m")
         self.wait_for(lambda _rows: self.copy_path.exists(), "clipboard write")
-        copied = self.copy_path.read_text(encoding="utf-8")
+        copied = self.wait_for_stable_copy()
         self.assertGreater(len(copied), 20)
         self.assertIn(copied, _reply_text(), "clipboard must equal the selected reply text")
 
