@@ -298,6 +298,109 @@ class PMLayoutTests(Base):
                 self.assertNotIn("\n", ui.status_text())
 
 
+class RenderCacheTests(unittest.TestCase):
+    """Codex v2 P2: a growing streamed line never fills the render cache."""
+
+    def setUp(self):
+        chat_tui_view._RENDERED.clear()
+        chat_tui_view._rendered_chars[0] = 0
+
+    def test_streaming_one_megabyte_line_keeps_the_cache_within_budget(self):
+        class Renderer:   # the cache is under test, not the renderer: a cheap stand-in
+            @staticmethod
+            def render(text, width):
+                return [[(line, "text")] for line in text.split("\n")]
+        line = ""
+        with patch.object(chat_tui_view, "_tui_markdown", Renderer):
+            while len(line) < 1 << 20:
+                line += "字" * (1 << 14)
+                chat_tui_view.render_markdown("# 標題\n\n" + line, 80)
+                self.assertLessEqual(chat_tui_view.render_cache_chars(), 64)   # finished blocks only
+            chat_tui_view.render_markdown("# 標題\n\n" + line + "\n\nnext", 80)
+            # the finished 1 MB line is over the per-entry share of the budget: not cached
+            self.assertLessEqual(chat_tui_view.render_cache_chars(), chat_tui_view.RENDER_CACHE_CHARS)
+            for number in range(2000):   # many finished blocks: oldest go first
+                chat_tui_view.render_markdown("x" * 4000 + str(number) + "\n\nend", 80)
+            self.assertLessEqual(chat_tui_view.render_cache_chars(), chat_tui_view.RENDER_CACHE_CHARS)
+        self.assertNotIn(line, {source for source, _width in chat_tui_view._RENDERED})
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, "prompt_toolkit not installed")
+class CopySourceTests(Base):
+    """Codex v2 P2: a copy of a rendered reply gives back its source Markdown."""
+
+    SOURCE = ("先看 **檔案** 吧\n\n| 名稱 | 數量 |\n|---|---|\n| 蘋果 | 12 |\n| 香蕉 | 345 |\n\n"
+              "```python\nx = 1\ny = compute(x)\n```\n\n結尾")
+
+    def setUp(self):
+        super().setUp()
+        pipe = create_pipe_input()
+        pipe.__enter__()
+        self.addCleanup(pipe.__exit__, None, None, None)
+        self.ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
+        self.copies = []
+        self.ui.view._copier = lambda text: self.copies.append(text) or True
+        self.ui.pm_turn_seq = 0
+        self.ui.pm_block_raw = self.SOURCE           # a finished PM block, rendered as the TUI does
+        self.ui._pm_open_block()
+        self.ui.pm_block_raw = self.SOURCE
+        self.ui._pm_render(final=True)
+        self.ui.pm_block_raw = None
+
+    def select(self, first, last=None):
+        """Select displayed text from ``first`` through ``last`` (inclusive) and copy it."""
+        text = self.ui.view.text
+        start = text.rindex(first)
+        end = (text.index(last, start) + len(last)) if last else start + len(first)
+        copied = self.ui.view.copy_range(start, end)
+        self.assertTrue(self.ui.view.wait_copy())
+        self.assertEqual(self.copies[-1], copied)
+        return copied
+
+    def test_rendering_changed_the_display(self):
+        shown = self.ui.view.text
+        self.assertIn("  先看 檔案 吧", shown)
+        self.assertIn("│ 蘋果 │", shown)
+        self.assertIn("│ x = 1", shown)
+        self.assertNotIn("**", shown)
+
+    def test_whole_reply_copies_the_exact_source(self):
+        self.assertEqual(self.select("先看", "結尾"), self.SOURCE)
+        view = self.ui.view
+        start = view.text.rindex("\nPM\n") + 1
+        self.assertEqual(view.copy_text(start, len(view.text)), "PM\n" + self.SOURCE)
+
+    def test_bold_whole_and_partial(self):
+        self.assertEqual(self.select("先看", "吧"), "先看 **檔案** 吧")
+        self.assertEqual(self.select("檔案"), "**檔案**")
+        self.assertEqual(self.select("看 檔"), "看 **檔")
+
+    def test_table_whole_and_partial(self):
+        table = "| 名稱 | 數量 |\n|---|---|\n| 蘋果 | 12 |\n| 香蕉 | 345 |"
+        copied = self.select("名稱", "345")
+        self.assertEqual(copied, table[2:-2])
+        self.assertEqual(self.select("12"), "12")
+        self.assertEqual(self.select("蘋果", "12"), "蘋果 | 12")
+        self.assertNotIn("│", self.select("12", "香蕉"))
+        self.assertNotIn("─", copied)
+
+    def test_code_whole_and_partial(self):
+        self.assertEqual(self.select("x = 1", "compute(x)"), "x = 1\ny = compute(x)")
+        self.assertEqual(self.select("compute"), "compute")
+        text = self.ui.view.text
+        start = text.rindex("┌─ python")
+        end = text.index("\n", text.index("└", start))   # through the bottom border
+        self.assertEqual(self.ui.view.copy_text(start, end), "```python\nx = 1\ny = compute(x)\n```")
+
+    def test_soft_wrapped_hanging_indent_is_never_copied(self):
+        ui = self.ui
+        body, sources = ui._body("長" * 200, chat_tui.BODY_INDENT)
+        ui.append("x", segments=body, sources=sources)
+        ui.view.layout(30, 10)
+        start = ui.view.text.rindex("長" * 200)
+        self.assertEqual(ui.view.copy_text(start, start + 200), "長" * 200)
+
+
 @unittest.skipUnless(HAVE_TOOLKIT, "prompt_toolkit not installed")
 class ChatLayoutTests(Base):
     def test_chat_labels_stay_with_a_rule_and_styles(self):

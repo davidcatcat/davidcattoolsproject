@@ -34,7 +34,9 @@ Pure Python apart from ``make_pane`` (the prompt_toolkit control), so it is unit
 without a terminal.
 """
 
+import array
 import bisect
+import collections
 import os
 import shutil
 import subprocess
@@ -58,6 +60,7 @@ HANG_LIMIT = 8            # Most leading spaces repeated before a wrapped line's
 HANG_BULLETS = ("• ", "◦ ", "▪ ")   # tui_markdown bullet glyphs
 FLOW_WIDTH = 1 << 16      # Markdown prose is laid out this wide; the pane soft-wraps it.
 CACHE_LINES = 4096        # Wrapped-line cache entries kept before it is cleared.
+RENDER_CACHE_CHARS = 1 << 20   # Source characters the Markdown render cache may hold.
 COPY_LIMIT_BYTES = 1024 * 1024   # Largest selection handed to the clipboard tool (UTF-8 bytes).
 COPY_SCAN_CHUNK = 65536          # Characters measured at a time while checking that limit.
 WORD_SCAN_LIMIT = COPY_LIMIT_BYTES  # Characters a double-click word may extend in either direction.
@@ -136,26 +139,106 @@ def render_markdown(text, width):
     if _tui_markdown is not None:
         try:
             lines = []
-            for fit, chunk in _markdown_blocks(text):
-                lines.extend(_render_block("\n".join(chunk), max(1, width) if fit else FLOW_WIDTH))
+            blocks = _markdown_blocks(text)
+            for number, (fit, chunk) in enumerate(blocks):
+                # The last block may still be streaming: rendered, never cached.
+                lines.extend(_render_block("\n".join(chunk), max(1, width) if fit else FLOW_WIDTH,
+                                           cache=number < len(blocks) - 1))
             return lines
         except Exception:
             pass   # a renderer bug never hides the reply: show it unformatted
     return [[(line, "text")] for line in text.split("\n")]
 
 
-_RENDERED = {}   # (block source, width) -> rendered lines: a streamed reply re-renders its tail only
+# (block source, width) -> rendered lines of a finished block, so a streamed reply
+# re-renders only its tail. Bounded by the source characters held (RENDER_CACHE_CHARS).
+_RENDERED = collections.OrderedDict()
+_rendered_chars = [0]
 
 
-def _render_block(source, width):
+def _render_block(source, width, cache=True):
     key = (source, width)
     found = _RENDERED.get(key)
-    if found is None:
-        found = _tui_markdown.render(source, width)
-        if len(_RENDERED) >= CACHE_LINES:
-            del _RENDERED[next(iter(_RENDERED))]
+    if found is not None:
+        _RENDERED.move_to_end(key)
+        return found
+    found = _tui_markdown.render(source, width)
+    if cache and len(source) <= RENDER_CACHE_CHARS // 4:
         _RENDERED[key] = found
+        _rendered_chars[0] += len(source)
+        while _rendered_chars[0] > RENDER_CACHE_CHARS or len(_RENDERED) > CACHE_LINES:
+            (old, _width), _lines = _RENDERED.popitem(last=False)
+            _rendered_chars[0] -= len(old)
     return found
+
+
+def render_cache_chars():
+    """Source characters held by the Markdown render cache (tests)."""
+    return _rendered_chars[0]
+
+
+# Copy maps displayed reply text back to its source (Codex v2 P2): characters drawn by
+# the layout (borders, glyphs, indents) are never matched; whitespace matches only at
+# the source cursor or after markup; anything else is looked for a short way ahead.
+DECORATION = frozenset("─│┌┐└┘├┤┬┴┼•◦▪▍↪")
+MARKUP = frozenset("*_`~#>|-+[]()!:=")
+EMPHASIS = frozenset("*_`~")
+MATCH_WINDOW = 256
+
+
+def source_map(shown, source):
+    """(lo, hi): for each displayed character, the source offsets it starts and ends at
+    (lo == hi for a character the layout added)."""
+    lo, hi = array.array("q"), array.array("q")
+    position, size = 0, len(source)
+    for char in shown:
+        found = -1
+        if char.isspace():
+            probe = position
+            while probe < size and probe - position < 8 and source[probe] in MARKUP:
+                probe += 1
+            if probe < size and source[probe] == char:
+                found = probe
+        elif char not in DECORATION:
+            found = source.find(char, position, position + MATCH_WINDOW)
+        if found < 0:
+            lo.append(position)
+            hi.append(position)
+        else:
+            lo.append(found)
+            position = found + 1
+            hi.append(position)
+    return lo, hi
+
+
+class SourceRegion:
+    """Pane text ``[start, end)`` that shows ``source`` rendered; copies go back to it."""
+
+    __slots__ = ("start", "end", "source", "_map")
+
+    def __init__(self, start, end, source):
+        self.start, self.end, self.source, self._map = start, end, source, None
+
+    def moved(self, delta):
+        region = SourceRegion(self.start + delta, self.end + delta, self.source)
+        region._map = self._map
+        return region
+
+    def copy(self, shown, low, high):
+        """Source text for displayed ``[low, high)`` (offsets in the pane)."""
+        if low <= self.start and high >= self.end:
+            return self.source
+        if self._map is None:
+            self._map = source_map(shown, self.source)
+        lo, hi = self._map
+        first, last = max(low, self.start) - self.start, min(high, self.end) - self.start
+        begin, finish = lo[first], hi[last - 1]
+        source = self.source
+        while begin > 0 and source[begin - 1] in EMPHASIS:      # keep emphasis markers
+            begin -= 1
+        while finish < len(source) and source[finish] in EMPHASIS:
+            finish += 1
+        return source[begin:max(begin, finish)]
 
 
 def _markdown_blocks(text):
@@ -361,6 +444,7 @@ class ConversationView:
         self._starts = [0]
         self._line_rows = [1]    # rows each logical line occupies (incremental re-wrap)
         self.spans = []          # sorted, disjoint (start, end, token); gaps are "text"
+        self.sources = []        # sorted, disjoint SourceRegions (rendered reply bodies)
         self._span_starts = []
         self.width = 0
         self.height = 1
@@ -407,6 +491,8 @@ class ConversationView:
             self.unseen = True
 
     def _clip_spans(self, offset):
+        while self.sources and self.sources[-1].end > offset:
+            self.sources.pop()   # a region is kept whole or dropped (its text changed)
         index = bisect.bisect_left(self._span_starts, offset)
         del self.spans[index:], self._span_starts[index:]
         if self.spans and self.spans[-1][1] > offset:
@@ -420,11 +506,14 @@ class ConversationView:
                 self._span_starts.append(offset)
             offset += len(part)
 
-    def set_tail(self, start, segments):
-        """Replace the text from ``start`` on with [(text, token)] segments."""
+    def set_tail(self, start, segments, sources=()):
+        """Replace the text from ``start`` on with [(text, token)] segments; ``sources``
+        are (begin, end, source) regions relative to ``start`` that copy as ``source``."""
         self.set_text(self.text[:start] + "".join(part for part, _token in segments))
         self._clip_spans(start)
         self._add_segments(start, segments)
+        self.sources.extend(SourceRegion(start + low, start + high, source)
+                            for low, high, source in sources if high > low)
 
     def replace(self, start, end, segments):
         """Replace ``text[start:end]`` with styled segments; later spans, the reading
@@ -434,7 +523,10 @@ class ConversationView:
         after = [(s + delta, e + delta, t) for s, e, t in self.spans if s >= end]
         before = [(s, min(e, start), t) for s, e, t in self.spans if s < start]
         anchor, head = self.anchor, self.head
+        regions = [region if region.end <= start else region.moved(delta)
+                   for region in self.sources if region.end <= start or region.start >= end]
         self.set_text(self.text[:start] + new + self.text[end:])
+        self.sources = regions
         self.spans = before
         self._span_starts = [s for s, _e, _t in before]
         self._add_segments(start, segments)
@@ -601,7 +693,24 @@ class ConversationView:
 
     def selected_text(self):
         span = self.selected_range()
-        return self.text[span[0]:span[1]] if span else ""
+        return self.copy_text(*span) if span else ""
+
+    def copy_text(self, start, end):
+        """What a copy of ``text[start:end]`` puts on the clipboard: displayed text, except
+        that a rendered reply copies as its source Markdown (whole, or the part shown)."""
+        parts, position = [], start
+        index = max(0, bisect.bisect_right([r.start for r in self.sources], start) - 1)
+        for region in self.sources[index:]:
+            if region.start >= end:
+                break
+            if region.end <= position:
+                continue
+            if region.start > position:
+                parts.append(self.text[position:region.start])
+            parts.append(region.copy(self.text[region.start:region.end], position, end))
+            position = min(end, region.end)
+        parts.append(self.text[position:end])
+        return "".join(parts)
 
     def clear_selection(self):
         self.anchor = self.head = None
@@ -664,8 +773,9 @@ class ConversationView:
             self.copied, self.copy_failed = (end - start, time.monotonic()), True
             self.copy_error = "選取超過複製上限 %d KB" % (COPY_LIMIT_BYTES // 1024)
             return ""
-        text = self.text[start:end]
-        self.copy(text)
+        text = self.copy_text(start, end)
+        if not self.copy(text):
+            return ""
         return text
 
     def copy(self, text):

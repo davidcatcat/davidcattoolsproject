@@ -987,7 +987,7 @@ class ChatTUI:
         self.input.buffer.set_document(self._Document(fill, len(fill)))
         return True
 
-    def append(self, text, show_working=True, segments=None):
+    def append(self, text, show_working=True, segments=None, sources=()):
         """Add untrusted text; follow new output only if the caret was at the end.
 
         ``segments`` ([(text, token)]) styles the block; without it an owner header gets
@@ -1013,7 +1013,10 @@ class ChatTUI:
             segments = self._notice_segments(terminal_safe_text(text))
         else:
             segments = [(terminal_safe_text(part), token) for part, token in segments]
-        self.view.set_tail(len(old), [("\n\n" if old else "", "text")] + segments)
+        separator = "\n\n" if old else ""
+        self.view.set_tail(len(old), [(separator, "text")] + segments,
+                           [(low + len(separator), high + len(separator), source)
+                            for low, high, source in sources])
         if block is not None:
             self._stream_attach(block)
         if show_working:
@@ -1064,6 +1067,11 @@ class ChatTUI:
                 segments.append((indent, "text"))
             segments.extend(line)
         return segments
+
+    def _body(self, text, indent):
+        """(segments, sources) of a reply body: copies of it give back ``text``."""
+        segments = self._body_segments(text, indent)
+        return segments, [(0, sum(len(part) for part, _token in segments), text)]
 
     def _pm_open_block(self):
         """Open the PM text block: under the 「PM」 label the first time in a turn."""
@@ -1749,7 +1757,7 @@ class ChatTUI:
             self._stream_attach("")
         self.stream_raw += text
         self.stream_seen = True
-        self._block_render(self.stream_start, self._body_segments(terminal_safe_text(self.stream_raw), ""))
+        self._block_render(self.stream_start, *self._body(terminal_safe_text(self.stream_raw), ""))
 
     def _stream_attach(self, raw):
         """Open the chat reply block at the end of the pane with the text so far."""
@@ -1758,7 +1766,7 @@ class ChatTUI:
         self.stream_raw = raw
         self.stream_start = len(self.conversation.text) + 1   # after "\n"
         if raw:
-            self._block_render(self.stream_start, self._body_segments(terminal_safe_text(raw), ""))
+            self._block_render(self.stream_start, *self._body(terminal_safe_text(raw), ""))
 
     def _stream_detach(self):
         """Take an open chat reply block off the pane end; append() puts it back
@@ -1785,8 +1793,10 @@ class ChatTUI:
                 self.append("llmtool: " + (text or ""))
                 return
             if not streamed:
-                self.append("assistant:\n", segments=[("assistant:", "role.pm"), ("\n", "text")]
-                            + self._body_segments(terminal_safe_text(text or ""), ""))
+                body, sources = self._body(terminal_safe_text(text or ""), "")
+                self.append("assistant:\n", segments=[("assistant:", "role.pm"), ("\n", "text")] + body,
+                            sources=[(low + len("assistant:\n"), high + len("assistant:\n"), source)
+                                     for low, high, source in sources])
             if self.session.last_interrupted:
                 self.append("llmtool: reply interrupted"
                             + (" after the text above; it stays in history as shown"
@@ -2250,18 +2260,19 @@ class ChatTUI:
 
     def _pm_render(self, final):
         shown = terminal_safe_text(chat_tui_pm.screen_stream(self.pm_block_raw, final))
-        segments = self._body_segments(shown, BODY_INDENT)
+        segments, sources = self._body(shown, BODY_INDENT)
         for notice in self.pm_tail:   # W55: notices stay below the streaming block
             segments += [("\n\n", "text")] + self._notice_segments(notice)
-        self._block_render(self.pm_block_start, segments)
+        self._block_render(self.pm_block_start, segments, sources)
 
-    def _block_render(self, start, segments):
+    def _block_render(self, start, segments, sources=()):
         """Replace the pane text from a streaming block's start with its current text.
 
         The view keeps its reading position (rows above the block are unchanged) and
         follows only while it is at the bottom.
         """
-        self.view.set_tail(start - 1, [("\n", "text")] + segments)
+        self.view.set_tail(start - 1, [("\n", "text")] + segments,
+                           [(low + 1, high + 1, source) for low, high, source in sources])
         self.app.invalidate()
 
     def _pm_finalize(self):
