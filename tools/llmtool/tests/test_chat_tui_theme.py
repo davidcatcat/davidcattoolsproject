@@ -163,6 +163,27 @@ class LinkTests(unittest.TestCase):
             self.assertEqual(match.group(1) if match else None, slug)
 
 
+    def test_repo_info_is_empty_when_git_fails_or_answers_junk(self):
+        import subprocess
+        from unittest.mock import MagicMock
+
+        class Junk:
+            returncode = 0
+            stdout = MagicMock()
+
+        failures = (FileNotFoundError("git"), subprocess.TimeoutExpired("git", 2.0),
+                    ValueError("not enough values to unpack"), RuntimeError("boom"))
+        for error in failures:
+            with self.subTest(error=type(error).__name__), patch("subprocess.run", side_effect=error):
+                self.assertEqual(chat_tui_theme.repo_info(), (None, None))
+        with patch("subprocess.run", return_value=Junk()):
+            self.assertEqual(chat_tui_theme.repo_info(), (None, None))
+        # A mocked Popen (as provider tests patch it) makes subprocess.run itself fail.
+        with patch("subprocess.Popen") as spawn:
+            spawn.return_value.__enter__.return_value.communicate.return_value = MagicMock()
+            self.assertEqual(chat_tui_theme.repo_info(), (None, None))
+
+
 class Recorder:
     """An output whose calls are recorded as (name, data)."""
 
@@ -411,6 +432,28 @@ class DisplayCommandTests(Base):
             self.drive([lambda ui: self.assertTrue(ui.links_on()), "/links off\r", toggled],
                        {"TERM_PROGRAM": "iTerm.app", "TERM": "xterm-256color"})
         self.assertEqual(chat_tui_theme.load_settings(self.temp_root / "tui-settings.json")["links"], "off")
+
+    def test_startup_never_runs_git_and_links_survive_git_failing(self):
+        environ = {"TERM_PROGRAM": "iTerm.app", "TERM": "xterm-256color"}
+        calls = []
+
+        def broken(args, **kwargs):
+            calls.append(args)
+            raise OSError("git unavailable")
+        with patch("subprocess.run", side_effect=broken), patch.dict(os.environ, environ), \
+                create_pipe_input() as pipe:
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
+            self.assertEqual(calls, [])          # the constructor runs no git
+            linker = ui.linker
+            self.assertEqual((linker.base_dir, linker.repo_slug), (os.getcwd(), None))
+            self.assertIs(ui.linker, linker)     # resolved once
+            self.assertEqual(len(calls), 2)
+        with patch("subprocess.run", side_effect=broken):
+            ui, result = self.drive([lambda ui: self.assertTrue(ui.links_on())], environ)
+        self.assertEqual(result, 0)
+        with patch.object(chat_tui_theme, "repo_info", side_effect=ValueError("junk")):
+            ui, result = self.drive([lambda ui: self.assertIsNone(ui.linker.repo_slug)], environ)
+        self.assertEqual(result, 0)
 
     @staticmethod
     async def until_closed(ui):

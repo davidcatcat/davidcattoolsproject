@@ -132,14 +132,19 @@ def save_settings(settings, path=None):
 
 # -- links -----------------------------------------------------------------------------
 def repo_info(cwd=None):
-    """(git top-level directory or None, "owner/repo" of a GitHub origin or None)."""
+    """(git top-level directory or None, "owner/repo" of a GitHub origin or None).
+
+    Links are an extra: any failure of git (missing, slow, odd output) gives (None, None).
+    """
     def git(*args):
         try:
             done = subprocess.run(("git",) + args, cwd=cwd, capture_output=True, text=True,
                                   timeout=GIT_SECONDS, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
+            if done.returncode != 0 or not isinstance(done.stdout, str):
+                return None
+            return done.stdout.strip() or None
+        except Exception:
             return None
-        return done.stdout.strip() if done.returncode == 0 else None
 
     match = _GITHUB_REMOTE.match(git("config", "--get", "remote.origin.url") or "")
     return git("rev-parse", "--show-toplevel"), match.group(1) if match else None

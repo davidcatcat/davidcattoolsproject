@@ -502,10 +502,7 @@ class ChatTUI:
         self.settings = chat_tui_theme.load_settings()
         self.theme = chat_tui_theme.resolve_theme(self.settings["theme"])
         self.links_supported = chat_tui_theme.osc8_supported()
-        self.linker = None
-        if self.links_supported:
-            top, slug = chat_tui_theme.repo_info()
-            self.linker = chat_tui_theme.Linker(top or os.getcwd(), slug)
+        self._linker = None          # built on first use (the linker property)
         # W56d status line: PM-dispatched work in flight (TaskStore, one read per
         # REFRESH_SECONDS while a PM is connected) and the ↓ panel listing it.
         self.background = []         # chat_tui_status.background_items of the bound PM
@@ -917,6 +914,17 @@ class ChatTUI:
                 "menu": self._style("ui.menu"), "menu.current": self._style("ui.menu.current"),
                 "menu.header": self._style("ui.menu.header")})
         return self._app_styles[key]
+
+    @property
+    def linker(self):
+        """The Linker, made when a link is first drawn: git runs once, not at startup."""
+        if self._linker is None and self.links_supported:
+            try:
+                top, slug = chat_tui_theme.repo_info()
+            except Exception:
+                top, slug = None, None
+            self._linker = chat_tui_theme.Linker(top or os.getcwd(), slug)
+        return self._linker
 
     def links_on(self):
         """OSC 8 links are drawn: a supporting terminal and not turned off with /links."""
