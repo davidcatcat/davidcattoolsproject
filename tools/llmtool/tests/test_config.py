@@ -65,11 +65,11 @@ class ConfigTests(unittest.TestCase):
             "dispatch_issue": 289,
             "dispatch_evidence_pr": 283,
         })
-        self.user.write_text("repository:\n  slug: example.org/repo-name\n"
+        self.user.write_text("repository:\n  slug: example-org/repo.name\n"
                              "  dispatch_issue: 12\n  dispatch_evidence_pr: 34\n",
                              encoding="utf-8")
         self.assertEqual(repository_config(self.home), {
-            "slug": "example.org/repo-name",
+            "slug": "example-org/repo.name",
             "dispatch_issue": 12,
             "dispatch_evidence_pr": 34,
         })
@@ -80,7 +80,8 @@ class ConfigTests(unittest.TestCase):
 
     def test_invalid_repository_identity_is_rejected_with_fixed_message(self):
         for repository in (
-            {"slug": "../bad"}, {"slug": "owner/repo?x"}, {"slug": "owner/.."},
+            {"slug": "../bad"}, {"slug": "owner.name/repo"},
+            {"slug": "owner/repo?x"}, {"slug": "owner/.."},
             {"slug": "owner/repo", "dispatch_issue": True},
             {"slug": "owner/repo", "dispatch_issue": 0},
             {"slug": "owner/repo", "dispatch_issue": 10**9 + 1},

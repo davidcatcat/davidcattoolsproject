@@ -74,22 +74,24 @@ class WorkerDispatchTests(unittest.TestCase):
 
     def test_repository_reference_patterns_follow_validated_identity_and_escape_slug(self):
         owner_ref, evidence_ref = worker_dispatch._build_reference_patterns({
-            'slug': 'example.org/repo-name',
+            'slug': 'example-org/repo.name',
             'dispatch_issue': 12,
             'dispatch_evidence_pr': 34,
         })
         self.assertIsNotNone(owner_ref.fullmatch(
-            'https://github.com/example.org/repo-name/issues/12#issuecomment-7'))
+            'https://github.com/example-org/repo.name/issues/12#issuecomment-7'))
         self.assertIsNotNone(evidence_ref.fullmatch(
-            'https://github.com/example.org/repo-name/issues/12'))
+            'https://github.com/example-org/repo.name/issues/12'))
         self.assertIsNotNone(evidence_ref.fullmatch(
-            'https://github.com/example.org/repo-name/pull/34#issuecomment-8'))
+            'https://github.com/example-org/repo.name/pull/34#issuecomment-8'))
         self.assertIsNone(owner_ref.fullmatch(
-            'https://githubXcom/exampleXorg/repo-name/issues/12#issuecomment-7'))
+            'https://githubXcom/exampleXorg/repoXname/issues/12#issuecomment-7'))
+        self.assertIsNone(owner_ref.fullmatch(
+            'https://github.com/example-org/repoXname/issues/12#issuecomment-7'))
         self.assertIsNone(evidence_ref.fullmatch(
-            'https://github.com/example.org/repo-name/pull/340'))
+            'https://github.com/example-org/repo.name/pull/340'))
         self.assertIsNone(evidence_ref.fullmatch(
-            'https://github.com/example.org/repo-name/issues/289'))
+            'https://github.com/example-org/repo.name/issues/289'))
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self.assertTrue(worker_dispatch.evaluate('codex-developer').allowed)
