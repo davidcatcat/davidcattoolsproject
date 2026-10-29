@@ -127,6 +127,18 @@ class Base(unittest.TestCase):
         self.background_tick.start()
 
 
+class FinishRedrawTests(Base):
+    """_finish invalidates the app so the status row leaves working immediately."""
+
+    def test_finish_invalidates_app(self):
+        with create_pipe_input() as pipe:
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
+            ui.app.invalidate = Mock()
+            ui._finish(lambda: None)
+            ui.app.invalidate.assert_called_once()
+            self.assertFalse(ui.busy)
+
+
 class FallbackTests(Base):
     """Fallback is chosen before any UI object exists; never after a UI failure."""
 
