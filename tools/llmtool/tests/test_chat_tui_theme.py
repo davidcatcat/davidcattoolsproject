@@ -4,6 +4,8 @@ import asyncio
 import os
 import stat
 import sys
+import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -148,19 +150,50 @@ class LinkTests(unittest.TestCase):
                                  [(low, low + len("tools/llmtool/chat_tui_view.py:950"))])
         self.assertEqual(self.linker.links(text, 0, 5), [])
 
-    def test_remote_slug(self):
+    @staticmethod
+    def git_answers(root):
         def run(args, **kwargs):
             class Done:
                 returncode = 0
                 stdout = {"config": "git@github.com:davidcatcat/davidcattoolsproject.git\n",
-                          "rev-parse": "/repo\n"}[args[1]]
+                          "rev-parse": root + "\n"}[args[1]]
             return Done()
-        with patch("subprocess.run", side_effect=run):
-            self.assertEqual(chat_tui_theme.repo_info(), ("/repo", "davidcatcat/davidcattoolsproject"))
+        return run
+
+    def test_remote_slug(self):
+        with tempfile.TemporaryDirectory() as root, \
+                patch("subprocess.run", side_effect=self.git_answers(root)):
+            self.assertEqual(chat_tui_theme.repo_info(),
+                             (os.path.realpath(root), "davidcatcat/davidcattoolsproject"))
         for remote, slug in (("https://github.com/a/b", "a/b"), ("https://github.com/a/b.git", "a/b"),
                              ("https://gitlab.com/a/b.git", None), ("", None)):
             match = chat_tui_theme._GITHUB_REMOTE.match(remote)
             self.assertEqual(match.group(1) if match else None, slug)
+
+
+    def test_repo_info_is_empty_when_git_fails_or_answers_junk(self):
+        import subprocess
+        from unittest.mock import MagicMock
+
+        class Junk:
+            returncode = 0
+            stdout = MagicMock()
+
+        failures = (FileNotFoundError("git"), subprocess.TimeoutExpired("git", 2.0),
+                    ValueError("not enough values to unpack"), RuntimeError("boom"))
+        for error in failures:
+            with self.subTest(error=type(error).__name__), patch("subprocess.run", side_effect=error):
+                self.assertEqual(chat_tui_theme.repo_info(), (None, None))
+        with patch("subprocess.run", return_value=Junk()):
+            self.assertEqual(chat_tui_theme.repo_info(), (None, None))
+        # A root that is not an absolute, existing directory is no repo info at all.
+        for root in ("junk", "relative/dir", "/no/such/llmtool-repo"):
+            with self.subTest(root=root), patch("subprocess.run", side_effect=self.git_answers(root)):
+                self.assertEqual(chat_tui_theme.repo_info(), (None, None))
+        # A mocked Popen (as provider tests patch it) makes subprocess.run itself fail.
+        with patch("subprocess.Popen") as spawn:
+            spawn.return_value.__enter__.return_value.communicate.return_value = MagicMock()
+            self.assertEqual(chat_tui_theme.repo_info(), (None, None))
 
 
 class Recorder:
@@ -411,6 +444,75 @@ class DisplayCommandTests(Base):
             self.drive([lambda ui: self.assertTrue(ui.links_on()), "/links off\r", toggled],
                        {"TERM_PROGRAM": "iTerm.app", "TERM": "xterm-256color"})
         self.assertEqual(chat_tui_theme.load_settings(self.temp_root / "tui-settings.json")["links"], "off")
+
+    def test_startup_never_runs_git_and_links_survive_git_failing(self):
+        environ = {"TERM_PROGRAM": "iTerm.app", "TERM": "xterm-256color"}
+        calls = []
+
+        def broken(args, **kwargs):
+            calls.append(args)
+            raise OSError("git unavailable")
+        with patch("subprocess.run", side_effect=broken), patch.dict(os.environ, environ), \
+                create_pipe_input() as pipe:
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
+            self.assertEqual(calls, [])          # the constructor runs no git
+            self.assertIsNone(ui._linker_lookup)
+            ui.linker                            # first use starts the lookup thread
+            ui._linker_lookup.join(5)
+            linker = ui.linker
+            self.assertEqual((linker.base_dir, linker.repo_slug), (os.getcwd(), None))
+            self.assertIs(ui.linker, linker)     # resolved once
+            self.assertEqual(len(calls), 1)      # no root: the remote is not asked
+        with patch("subprocess.run", side_effect=broken):
+            ui, result = self.drive([lambda ui: self.assertTrue(ui.links_on())], environ)
+        self.assertEqual(result, 0)
+        with patch.object(chat_tui_theme, "repo_info", side_effect=ValueError("junk")):
+            ui, result = self.drive([self.until_linked,
+                                     lambda ui: self.assertIsNone(ui.linker.repo_slug)], environ)
+        self.assertEqual(result, 0)
+
+    @staticmethod
+    async def until_linked(ui):
+        for _ in range(250):
+            if ui._linker is not None:
+                return
+            await asyncio.sleep(0.02)
+
+    def test_hung_git_never_delays_a_draw_and_links_come_after(self):
+        release = threading.Event()
+
+        def hung(cwd=None):
+            release.wait(10)                     # a git that hangs until the test lets it go
+            return "/r", "o/r"
+        drawn = []
+
+        def first_draws(ui):
+            self.assertIsNone(ui.linker)
+            ui.append("見 llmtool/a.py:12 與 #7")
+            for _ in range(3):
+                started = time.monotonic()
+                content = ui.conversation.control.create_content(80, 10)
+                rows = [content.get_line(i) for i in range(content.line_count)]
+                drawn.append(time.monotonic() - started)
+                self.assertFalse(any("[ZeroWidthEscape]" in style
+                                     for row in rows for style, _text in row))
+            release.set()
+
+        def linked(ui):
+            self.assertEqual(ui.linker.repo_slug, "o/r")
+            content = ui.conversation.control.create_content(80, 10)
+            escapes = "".join(text for i in range(content.line_count)
+                              for style, text in content.get_line(i)
+                              if "[ZeroWidthEscape]" in style)
+            self.assertIn("\x1b]8;id=llmtool-", escapes)
+            self.assertIn("https://github.com/o/r/issues/7", escapes)
+        started = time.monotonic()
+        with patch.object(chat_tui_theme, "repo_info", side_effect=hung):
+            ui, result = self.drive([first_draws, self.until_linked, linked],
+                                    {"TERM_PROGRAM": "iTerm.app", "TERM": "xterm-256color"})
+        self.assertEqual(result, 0)
+        self.assertLess(max(drawn), 0.5)
+        self.assertLess(time.monotonic() - started, 8)
 
     @staticmethod
     async def until_closed(ui):
