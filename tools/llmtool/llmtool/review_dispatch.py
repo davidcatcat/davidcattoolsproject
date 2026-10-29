@@ -271,6 +271,10 @@ def _review_return(claim, result):
     """Return a Codex verdict with review text screened at the CLI boundary."""
     output = dict(claim)
     output.pop('review_result', None)
+    if result.get('verdict') == 'BLOCKED' and result.get('review_text') == '':
+        output['verdict'] = 'BLOCKED'
+        output['review_dispatch_code'] = 'REVIEW_TEXT_WITHHELD'
+        return output
     output['verdict'] = result['verdict']
     try:
         from .task_submission_cli import _screen_text
@@ -452,11 +456,19 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                           native_session_id=session_id, updated_at=_now())
         if result_state == 'COMPLETED':
             binding = task.get('task_binding')
+            try:
+                from .task_submission_cli import _screen_text
+                review_text = _screen_text(codex_result['review_text'], 65536)
+                verdict = codex_result['verdict']
+            except LLMToolError:
+                # The claim schema has no separate withheld state. BLOCKED with
+                # empty text is its durable, non-PASS withheld representation.
+                review_text = ''
+                verdict = 'BLOCKED'
             dispatched['review_result'] = {
                 'task_id': task_id, 'run_id': task.get('run_id'),
                 'contract_digest': binding.get('contract_digest'), 'head': head,
-                'verdict': codex_result['verdict'],
-                'review_text': codex_result['review_text'],
+                'verdict': verdict, 'review_text': review_text,
             }
         updated_claims = [dispatched if item is claim else item for item in claims + [claim]]
         store.compare_and_update(task_id, expected={'review_dispatch_claim': claims + [claim]},

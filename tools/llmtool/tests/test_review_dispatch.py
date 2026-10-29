@@ -648,10 +648,15 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         reopened = task_store.TaskStore(Path(self.temp.name).resolve())
         second = invoke(reopened, [preflight])
         for result in (first, second):
-            self.assertEqual(result['verdict'], 'PASS')
+            self.assertEqual(result['verdict'], 'BLOCKED')
             self.assertEqual(result['review_dispatch_code'], 'REVIEW_TEXT_WITHHELD')
             self.assertNotIn('review_text', result)
             self.assertNotIn('review_result', result)
+        stored_result = reopened.get(self.task_id)['review_dispatch_claim'][0]['review_result']
+        self.assertEqual(stored_result['verdict'], 'BLOCKED')
+        self.assertEqual(stored_result['review_text'], '')
+        self.assertNotIn(review_text, json.dumps(reopened.get(self.task_id)))
+        self.assertNotEqual(stored_result['verdict'], 'PASS')
         self.assertEqual(calls, ['called'])
 
 
