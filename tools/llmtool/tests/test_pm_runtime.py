@@ -69,12 +69,35 @@ class FakeProcess:
 
 
 class LiveProcess(FakeProcess):
-    """A child whose stdout lines arrive when the test feeds them, like a real pipe."""
+    """A child whose stdout lines arrive when the test feeds them, like a real pipe.
 
-    def __init__(self):
+    Like Claude Code 2.1.312 it reports `command_lifecycle` frames for a user message
+    sent with a uuid; with auto_accept (an idle CLI) it starts the message at once."""
+
+    def __init__(self, auto_accept=True):
         super().__init__()
         self.feed = queue.Queue()
         self.stdout = iter(self.feed.get, None)
+        self.auto_accept = auto_accept
+        self.stdin = self
+        self.lines = []
+
+    def write(self, data):
+        line = json.loads(data)
+        self.lines.append(line)
+        if line.get('type') == 'user' and self.auto_accept:
+            self.lifecycle(line['uuid'], 'queued', 'started')
+        return len(data)
+
+    def flush(self):
+        pass
+
+    def close(self):
+        self.feed.put(None)
+
+    def lifecycle(self, message_uuid, *states):
+        self.emit(*({'type': 'command_lifecycle', 'command_uuid': message_uuid, 'state': state,
+                     'uuid': 'frame-' + state} for state in states))
 
     def emit(self, *values):
         for line in encoded(*values):
@@ -85,8 +108,7 @@ class LiveProcess(FakeProcess):
         self.feed.put(None)
 
     def users(self):
-        return [json.loads(line) for line in self.stdin.getvalue().splitlines()
-                if json.loads(line).get('type') == 'user']
+        return [line for line in self.lines if line.get('type') == 'user']
 
 
 def _bg_turn(text, tokens):
@@ -927,8 +949,10 @@ class PMRuntimeTests(unittest.TestCase):
         process = LiveProcess()
         runtime = self.runtime(process)
         runtime.open()
+        first = runtime.send('派工')
         process.emit(*_bg_turn('第一輪', 1))
-        first = list(runtime.send('派工'))
+        first = list(first)
+        self.assertEqual(first[0]['type'], 'TURN_ACCEPTED')
         self.assertEqual(first[-1]['usage'], {'output_tokens': 1})
         self.assertIsNone(runtime.background_turn(timeout=0.05))   # idle: nothing to claim
         process.emit({'type': 'system', 'subtype': 'status'},   # not a turn: dropped
@@ -939,8 +963,9 @@ class PMRuntimeTests(unittest.TestCase):
                          ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
         self.assertEqual(background[-1]['result_text'], 'Codex 已回報')
         self.assertEqual(background[-1]['usage'], {'output_tokens': 2})
+        second = runtime.send('回報進度')
         process.emit(*_bg_turn('進度如下', 3))
-        second = list(runtime.send('回報進度'))
+        second = list(second)
         self.assertEqual(second[-1]['result_text'], '進度如下')   # not the background reply
         self.assertEqual(second[-1]['usage'], {'output_tokens': 3})
         turns = pm_runtime.read_history(SESSION, state_root=self.root)['turns']
@@ -969,8 +994,9 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(process.users(), [])
         process.emit({'type': 'result', 'result': '背景', 'usage': {}})
         self.assertEqual(list(events)[-1]['type'], 'TURN_END')
+        owner = runtime.send('繼續推進，回報進度')
         process.emit(*_bg_turn('收到', 1))
-        self.assertEqual(list(runtime.send('繼續推進，回報進度'))[-1]['result_text'], '收到')
+        self.assertEqual(list(owner)[-1]['result_text'], '收到')
         self.assertEqual([u['message']['content'][0]['text'] for u in process.users()],
                          ['繼續推進，回報進度'])
 
@@ -980,6 +1006,7 @@ class PMRuntimeTests(unittest.TestCase):
         runtime.open()
         owner = runtime.send('請問')
         process.emit(_runtime_delta(0, '答'))
+        self.assertEqual(next(owner)['type'], 'TURN_ACCEPTED')
         self.assertEqual(next(owner)['text'], '答')
         # Owner turn lines are never claimed as a background turn.
         self.assertIsNone(runtime.background_turn(timeout=0.05))
@@ -991,6 +1018,92 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(raised.exception.pm_runtime_code, 'PM_PROCESS_EXITED')
         runtime.close(timeout=0)
         self.assertIsNone(runtime.background_turn(timeout=5))
+
+
+    def test_turn_started_upstream_before_the_message_is_read_is_a_separate_background_turn(self):
+        # Codex v1 P1: a notification turn can start in Claude Code before it reads the
+        # Owner line, with its output still in flight. The Owner turn begins only at the
+        # message's own `started` frame; the turn before it is a background turn.
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        owner = runtime.send('回報進度')
+        sent = process.users()
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]['priority'], 'later')
+        message = sent[0]['uuid']
+        start, delta, assistant, result = _bg_turn('Codex 已回報', 2)
+        process.emit(start, delta)                         # in the pipe before `queued`
+        process.lifecycle(message, 'queued')
+        process.emit({'type': 'system', 'subtype': 'task_notification'}, assistant, result)
+        process.lifecycle(message, 'started')
+        process.emit(*_bg_turn('進度如下', 3))
+        process.lifecycle(message, 'completed')
+        events = list(owner)
+        self.assertEqual([event['type'] for event in events],
+                         ['BACKGROUND_TURN_START', 'TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END',
+                          'TURN_ACCEPTED', 'TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
+        background, mine = events[3], events[-1]
+        self.assertEqual((background['origin'], background['result_text'], background['usage']),
+                         ('background', 'Codex 已回報', {'output_tokens': 2}))
+        self.assertNotIn('origin', mine)
+        self.assertEqual((mine['result_text'], mine['usage']), ('進度如下', {'output_tokens': 3}))
+        self.assertEqual(events[0]['turn_id'], background['turn_id'])
+        self.assertEqual(events[4]['turn_id'], mine['turn_id'])
+        turns = pm_runtime.read_history(SESSION, state_root=self.root)['turns']
+        self.assertEqual([(t['owner_text'], t.get('origin'), t['result_text'], t['status'])
+                          for t in sorted(turns, key=lambda t: t['seq'])],
+                         [('回報進度', None, '進度如下', 'COMPLETED'),
+                          ('', 'background', 'Codex 已回報', 'COMPLETED')])
+        self.assertEqual(len(process.users()), 1)            # written once, never again
+        self.assertIsNone(runtime.background_turn(timeout=0.05))   # nothing left over
+
+    def test_message_withdrawn_by_claude_code_ends_not_sent_and_is_not_written_again(self):
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        owner = runtime.send('回報進度')
+        message = process.users()[0]['uuid']
+        process.lifecycle(message, 'queued')
+        start, delta, assistant, result = _bg_turn('背景', 1)
+        process.emit(start, delta)
+        runtime.interrupt()   # Esc while the message waits behind that turn
+        controls = [line['request'] for line in process.lines if line['type'] == 'control_request']
+        self.assertEqual(controls, [{'subtype': 'interrupt'},
+                                    {'subtype': 'cancel_async_message', 'message_uuid': message}])
+        process.emit(assistant, result)
+        process.lifecycle(message, 'cancelled')
+        events = list(owner)
+        self.assertEqual([event['type'] for event in events],
+                         ['BACKGROUND_TURN_START', 'TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END',
+                          'TURN_END'])
+        self.assertEqual(events[3]['status'], 'INTERRUPTED')   # the background turn
+        self.assertEqual(events[-1]['status'], 'NOT_SENT')     # the Owner message, unprocessed
+        self.assertEqual(len(process.users()), 1)
+        self.assertFalse(runtime.turn_active())
+        statuses = {t['owner_text']: t['status'] for t in
+                    pm_runtime.read_history(SESSION, state_root=self.root)['turns']}
+        self.assertEqual(statuses, {'回報進度': 'NOT_SENT', '': 'INTERRUPTED'})
+
+    def test_message_taken_in_by_a_running_turn_ends_absorbed_without_a_second_write(self):
+        # Not seen with priority "later" on Claude Code 2.1.312; if it happens the message
+        # was delivered once, so the turn ends instead of waiting for a turn that never comes.
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        owner = runtime.send('回報進度')
+        message = process.users()[0]['uuid']
+        start, delta, assistant, result = _bg_turn('背景含回覆', 4)
+        process.lifecycle(message, 'queued')
+        process.emit(start, delta)
+        process.lifecycle(message, 'started')
+        process.emit(assistant, result)
+        process.lifecycle(message, 'completed')
+        events = list(owner)
+        self.assertEqual([event.get('status') for event in events if event['type'] == 'TURN_END'],
+                         ['COMPLETED', 'ABSORBED'])
+        self.assertEqual(len(process.users()), 1)
+        self.assertFalse(runtime.turn_active())
 
 
 if __name__ == '__main__':

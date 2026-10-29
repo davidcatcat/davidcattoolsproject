@@ -43,6 +43,11 @@ PM_SESSION_INSTRUCTION = (
 # (system notices, a late control_response) is not the start of a Claude Code turn.
 _TURN_LINE_TYPES = ('stream_event', 'assistant', 'user', 'result')
 _STDOUT_EOF = object()
+# Claude Code 2.1.312 reports the fate of a user message sent with a uuid as
+# `command_lifecycle` frames: queued, started (it drains into a turn), then one of
+# completed / cancelled / discarded / refused.
+_LIFECYCLE_MARK = object()
+_NOT_ACCEPTED = ('cancelled', 'discarded', 'refused')
 _active_runtimes = set()
 _signal_handlers_installed = False
 _previous_signal_handlers = {}
@@ -417,6 +422,7 @@ class PMRuntime:
         self._lines_cond = threading.Condition(self._state_lock)
         self._stdout_thread = None
         self._idempotency = {}
+        self._pending_uuid = None   # Owner message written but not yet started by Claude Code
 
     def __enter__(self):
         return self.open()
@@ -756,18 +762,134 @@ class PMRuntime:
             record = self._start_record(text, idempotency_key)
             if idempotency_key is not None:
                 self._idempotency[idempotency_key] = record
+            message_uuid = str(uuid.UUID(bytes=os.urandom(16), version=4))
             try:
-                self._write_line({'type': 'user', 'message': {'role': 'user', 'content': [
-                    {'type': 'text', 'text': text}]}})
+                # priority "later": Claude Code never folds the message into a turn that is
+                # already running (a background notification turn); it starts it as a turn
+                # of its own after that one ends. The uuid ties the lifecycle frames to it.
+                self._write_line({'type': 'user', 'uuid': message_uuid, 'priority': 'later',
+                                  'message': {'role': 'user', 'content': [
+                                      {'type': 'text', 'text': text}]}})
             except Exception:
                 record['status'] = 'ERROR'
                 record['ended_at'] = _timestamp(self.clock)
                 self._persist_turn(record)
                 self._turn = None
                 raise
-        return self._events(record)
+            self._pending_uuid = message_uuid
+        return self._owner_events(record, message_uuid)
 
-    def _start_record(self, owner_text, idempotency_key, origin=None):
+    @staticmethod
+    def _lifecycle_state(raw, message_uuid):
+        if not isinstance(raw, (bytes, bytearray)) or b'command_lifecycle' not in raw:
+            return None
+        try:
+            line = json.loads(bytes(raw).decode('utf-8'))
+        except (ValueError, UnicodeError):
+            return None
+        if (isinstance(line, dict) and line.get('type') == 'command_lifecycle' and
+                line.get('command_uuid') == message_uuid and isinstance(line.get('state'), str)):
+            return line['state']
+        return None
+
+    @staticmethod
+    def _is_result(raw):
+        try:
+            line = json.loads(bytes(raw).decode('utf-8'))
+        except (TypeError, ValueError, UnicodeError):
+            return False
+        return isinstance(line, dict) and line.get('type') == 'result'
+
+    def _owner_events(self, record, message_uuid):
+        """Events of an Owner turn. The turn is the Owner's only from the moment Claude Code
+        reports the message `started`; a turn it runs before that (a background
+        notification that began before it read the message) is shown and recorded as a
+        background turn of its own. Claude Code withdrawing the message (cancelled,
+        discarded, refused) ends the turn NOT_SENT: the message was never processed and
+        the caller may send it again. Nothing is written a second time here."""
+        fate = []        # lifecycle states of this message, in arrival order
+        pushback = collections.deque()
+        stream = self._read_lines(self._lines)
+
+        def next_line():
+            if pushback:
+                return pushback.popleft()
+            for raw in stream:
+                state = self._lifecycle_state(raw, message_uuid)
+                if state is None:
+                    return raw
+                fate.append(state)
+                return _LIFECYCLE_MARK
+            return None
+
+        def plain():
+            # A turn's own events see stdout lines only; lifecycle frames stay here.
+            while True:
+                raw = next_line()
+                if raw is None:
+                    return
+                if raw is not _LIFECYCLE_MARK:
+                    yield raw
+
+        def end(status):
+            self._finish(record, status)
+            return {'type': 'TURN_END', 'turn_id': record['turn_id'], 'seq': None,
+                    'status': status, 'result_text': '', 'usage': {}}
+
+        pending = []     # lines that arrived before Claude Code acknowledged the message
+        try:
+            while True:
+                if 'started' in fate:
+                    with self._state_lock:
+                        self._pending_uuid = None
+                        record['started_at'] = _timestamp(self.clock)
+                        self._persist_turn(record)
+                    yield {'type': 'TURN_ACCEPTED', 'turn_id': record['turn_id'], 'seq': None}
+                    pushback.extend(pending)
+                    yield from self._events(record, plain())
+                    return
+                if any(state in _NOT_ACCEPTED for state in fate):
+                    yield end('NOT_SENT')
+                    return
+                raw = next_line()
+                if raw is None:
+                    pushback.extend(pending)
+                    yield from self._events(record, plain())   # stdout ended: an error turn
+                    return
+                if raw is _LIFECYCLE_MARK:
+                    if 'queued' in fate and pending:
+                        pushback.extend(pending)
+                        pending = []
+                    continue
+                if 'queued' not in fate:
+                    pending.append(raw)
+                    if self._is_result(raw):
+                        # No lifecycle frames (an older CLI): this turn answered the message.
+                        pushback.extend(pending)
+                        yield from self._events(record, plain())
+                        return
+                    continue
+                if not self._starts_turn(raw):
+                    self._unknown_lines += 1
+                    continue
+                # Acknowledged but not started: Claude Code runs another turn first.
+                with self._state_lock:
+                    background = self._start_record('', None, origin='background', claim=False)
+                yield {'type': 'BACKGROUND_TURN_START', 'turn_id': background['turn_id'],
+                       'seq': None, 'origin': 'background'}
+                pushback.appendleft(raw)
+                yield from self._events(background, plain())
+                if 'started' in fate:
+                    # Taken in by that turn after all (not seen with priority "later"): it
+                    # was delivered once, inside that turn; it is never written again.
+                    yield end('ABSORBED')
+                    return
+        finally:
+            with self._state_lock:
+                if self._pending_uuid == message_uuid:
+                    self._pending_uuid = None
+
+    def _start_record(self, owner_text, idempotency_key, origin=None, claim=True):
         turns = self._history_read()
         record = {'turn_id': uuid.uuid4().hex, 'seq': max(
             (turn.get('seq', 0) for turn in turns if isinstance(turn, dict)), default=0) + 1,
@@ -778,7 +900,8 @@ class PMRuntime:
             record['origin'] = origin
         turns.append(record)
         self._history_write(turns)
-        self._turn = record
+        if claim:
+            self._turn = record
         return record
 
     def background_turn(self, timeout=None):
@@ -840,7 +963,7 @@ class PMRuntime:
                 self._turn = None
                 self._lines_cond.notify_all()   # a waiting background_turn may claim lines now
 
-    def _events(self, record):
+    def _events(self, record, source=None):
         lines = self._lines
         event_seq = 0
         blocks = {}
@@ -850,6 +973,8 @@ class PMRuntime:
         def emit(kind, **fields):
             nonlocal event_seq
             value = {'type': kind, 'turn_id': record['turn_id'], 'seq': event_seq}
+            if record.get('origin'):
+                value['origin'] = record['origin']
             event_seq += 1
             value.update(fields)
             return value
@@ -880,7 +1005,7 @@ class PMRuntime:
                     yield event
 
         try:
-            for raw in self._read_lines(lines):
+            for raw in (self._read_lines(lines) if source is None else source):
                 if self._was_interrupted:
                     yield from flush_all_blocks()
                 if self._closed:
@@ -1023,7 +1148,7 @@ class PMRuntime:
                     return
                 else:
                     self._unknown_lines += 1
-            if self._turn is record:
+            if record.get('status') == 'ACTIVE':   # stdout ended inside the turn
                 if self._stderr_thread is not None:
                     self._stderr_thread.join(timeout=1)
                 stderr = self._stderr_excerpt()
@@ -1036,13 +1161,25 @@ class PMRuntime:
         finally:
             self._was_interrupted = False
 
+    def turn_active(self):
+        """True while an Owner or background turn is running in this driver."""
+        with self._state_lock:
+            return self._turn is not None
+
     def interrupt(self):
         with self._state_lock:
             if self._turn is None or self._closed:
                 return
             self._was_interrupted = True
+            pending = self._pending_uuid
         self._write_line({'type': 'control_request', 'request_id': uuid.uuid4().hex,
                           'request': {'subtype': 'interrupt'}})
+        if pending is not None:
+            # The Owner message is still waiting behind another turn: withdraw it too, so
+            # it is not run after the interrupt (it ends NOT_SENT and stays the caller's).
+            self._write_line({'type': 'control_request', 'request_id': uuid.uuid4().hex,
+                              'request': {'subtype': 'cancel_async_message',
+                                          'message_uuid': pending}})
 
     def _terminate_child(self):
         child = self._child

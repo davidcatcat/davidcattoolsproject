@@ -408,6 +408,8 @@ class ChatTUI:
         # as turns labelled PM_BACKGROUND_LABEL. One that arrives while an Owner turn is still
         # shown waits here (its events buffered) until that turn ends.
         self.pm_label = "PM"
+        self.pm_turn_kind = None         # "owner" or "background" while a turn is active
+        self.pm_background_started = None   # start of a background turn inside an Owner turn
         self._pm_background_waiting = collections.deque()
         self._quit_warned = False    # first Ctrl-C with queued messages only warned
         # W52 F1: the working line at the end of the pane while a turn shows no text yet.
@@ -1953,7 +1955,7 @@ class ChatTUI:
         self._pm_start_turn(text, "owner → PM:\n")
 
     def _pm_start_turn(self, text, header):
-        self._pm_begin("PM")
+        self._pm_begin("PM", "owner")
         self.append(header + chat_tui_pm.safe_text(text))   # also shows the working line
         # One idempotency key per submitted draft: pm_runtime never runs it twice.
         key = uuid.uuid4().hex
@@ -1962,7 +1964,7 @@ class ChatTUI:
                          args=(self.pm_runtime, text, key, self._loop, self._pm_turn_seq),
                          name="llmtool-chat-pm-turn", daemon=True).start()
 
-    def _pm_begin(self, label):
+    def _pm_begin(self, label, kind):
         """Mark a new turn active (Owner or background) and return its token."""
         self.pm_turn_active, self.pm_turn_started = True, time.monotonic()
         self.pm_interrupted, self.pm_deltas, self.pm_tools = False, False, {}
@@ -1970,7 +1972,7 @@ class ChatTUI:
         self.pm_turn_refused = False
         self.pm_block_index = None
         self.pm_state = "working"
-        self.pm_label = label
+        self.pm_label, self.pm_turn_kind = label, kind
         self._pm_turn_seq += 1
         return self._pm_turn_seq
 
@@ -1980,11 +1982,16 @@ class ChatTUI:
             for event in runtime.send(text, idempotency_key=key):
                 if type(event) is dict:
                     self._post(loop, self.pm_event, event, seq)
+                    if (event.get("type") == "TURN_END" and event.get("status") == "NOT_SENT"
+                            and event.get("origin") is None):
+                        # Claude Code withdrew it unprocessed (Esc while it waited behind a
+                        # background turn): it goes back to the queue, never lost.
+                        self._post(loop, self._pm_hold, text, seq, "NOT_SENT")
         except LLMToolError as exc:
             if chat_tui_pm.error_code(exc) == "PM_TURN_ACTIVE":
                 # P0-3: a background turn started first; nothing was sent. The draft goes
                 # back to the front of the queue and is sent when that turn ends.
-                self._post(loop, self._pm_hold, text, seq)
+                self._post(loop, self._pm_hold, text, seq, "HELD")
                 self._post(loop, self.finish_pm_turn, seq)
                 return
             self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
@@ -1994,12 +2001,15 @@ class ChatTUI:
                                              "code": chat_tui_task.UNKNOWN}, seq)
         self._post(loop, self.finish_pm_turn, seq)
 
-    def _pm_hold(self, text, seq):
+    def _pm_hold(self, text, seq, status):
         self.pm_outbox.appendleft(text)
         if not self._pm_stale(seq):
-            self.pm_turn_status = "HELD"
-        self._pm_notice("llmtool: PM 正在處理背景通知；這則訊息沒有送出，保留在佇列第 1 則，"
-                        "背景回合結束後送出")
+            self.pm_turn_status = status
+        if status == "HELD":
+            self._pm_notice("llmtool: PM 正在處理背景通知；這則訊息沒有送出，保留在佇列第 1 則，"
+                            "背景回合結束後送出")
+        else:
+            self._pm_notice("llmtool: Claude Code 沒有處理這則訊息（已撤回），保留在佇列第 1 則")
 
     def _pm_watch(self, runtime, loop):
         """Watcher thread (P0-3): while connected, take each turn Claude Code starts by
@@ -2035,7 +2045,7 @@ class ChatTUI:
             self._pm_background_show(turn)
 
     def _pm_background_show(self, turn):
-        turn["seq"] = self._pm_begin(PM_BACKGROUND_LABEL)
+        turn["seq"] = self._pm_begin(PM_BACKGROUND_LABEL, "background")
         self.append(PM_BACKGROUND_LABEL + "：Claude Code 自行開始一輪（背景工作的通知）")
         for event in turn["events"]:
             self.pm_event(event, turn["seq"])
@@ -2202,6 +2212,27 @@ class ChatTUI:
             self.pm_state = "working"   # Thinking ended: text, a tool or the end follows.
         if kind in ("TEXT_DELTA", "ASSISTANT_TEXT", "TOOL_USE", "TURN_END", "RUNTIME_ERROR"):
             self.pm_warm = False        # The process answered: the cold start is over.
+        if kind == "BACKGROUND_TURN_START":
+            # Claude Code runs a turn of its own before it takes the Owner message.
+            self._pm_finalize()
+            self.pm_label, self.pm_background_started = PM_BACKGROUND_LABEL, time.monotonic()
+            self.pm_block_index, self.pm_deltas = None, False
+            self.append(PM_BACKGROUND_LABEL + "：Claude Code 先處理一則背景通知；"
+                        "這則訊息等它結束後才開始")
+            return
+        if kind == "TURN_ACCEPTED":
+            if self.pm_label != "PM":
+                self._pm_finalize()
+                self.pm_label, self.pm_block_index, self.pm_deltas = "PM", None, False
+                self.pm_turn_started = time.monotonic()   # the Owner turn's own timing
+                self.append("owner → PM：Claude Code 開始處理這則訊息")
+            return
+        if (kind == "TURN_END" and event.get("origin") == "background"
+                and self.pm_turn_kind == "owner"):
+            elapsed = max(0.0, time.monotonic() - (self.pm_background_started or time.monotonic()))
+            self.append(chat_tui_pm.turn_end_text(event, elapsed))
+            self.pm_block_index, self.pm_deltas = None, False
+            return
         if kind == "THINKING":
             # Status only: thinking content never reaches the pane (pm_runtime sends none).
             if self.pm_state == "working":
@@ -2270,10 +2301,15 @@ class ChatTUI:
                 self._pm_pause("上一回合失敗 " + error)
             elif self.pm_turn_refused:
                 self._pm_pause("權限被拒")   # even when the turn still ended COMPLETED
-            elif status == "COMPLETED":
+            elif status in ("COMPLETED", "ABSORBED"):
                 self._pm_send_next()
-            elif status == "HELD":
-                pass   # the background turn that held the draft sends it when it ends
+            elif status in ("HELD", "NOT_SENT"):
+                # The background turn that held the draft sends it when it ends. If that
+                # turn is already over (it ended before the hold was handled), drain now.
+                runtime = self.pm_runtime
+                busy = getattr(runtime, "turn_active", None)
+                if not self._pm_background_waiting and not (callable(busy) and busy()):
+                    self._pm_send_next()
             else:
                 self._pm_pause("上一回合沒有完成（" + (status or "沒有 TURN_END") + "）")
         while self._pm_background_waiting and not self.pm_turn_active:
