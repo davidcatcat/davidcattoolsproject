@@ -919,7 +919,7 @@ def _read_json(path: str, limit: int = 1 << 20):
         with open(path, "rb") as handle:
             raw = handle.read(limit + 1)
         return json.loads(raw) if len(raw) <= limit else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
 
 
@@ -1659,7 +1659,10 @@ class GitHubSource:
                                else f"gh api 失敗（exit {done.returncode}）")
         if len(done.stdout) > GITHUB_LIMIT:
             raise RuntimeError("回應過大")
-        return json.loads(done.stdout)
+        try:
+            return json.loads(done.stdout)
+        except RecursionError:   # nested too deep: a bad answer, like any other non-JSON
+            raise ValueError("JSON nested too deeply") from None
 
     def _get_direct(self, path: str):
         if self._token is None:
@@ -1707,7 +1710,7 @@ class GitHubSource:
             raise self._pause()
         try:
             return json.loads(body)
-        except ValueError:
+        except (ValueError, RecursionError):
             raise self._pause() from None
 
     def _pause(self) -> "_UseGh":
@@ -2180,7 +2183,7 @@ def _registry_record(path: str, task_id: str, file_st) -> tuple | None:
             return None
         with open(path, "rb") as handle:
             record = json.loads(handle.read(64 << 10))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     root = record.get("root_realpath") if type(record) is dict else None
     if (type(root) is not str or not os.path.isabs(root) or os.path.realpath(root) != root
@@ -2399,7 +2402,7 @@ def _read_jsonl_head(path: str):
         return None
     try:
         return json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         pass
     # An oversized first line (long base instructions) is cut off. Codex writes
     # the small identity fields before the instructions, so take the first
@@ -2410,7 +2413,7 @@ def _read_jsonl_head(path: str):
         if found:
             try:
                 payload[field] = json.loads(b'"' + found.group(1) + b'"')
-            except ValueError:
+            except (ValueError, RecursionError):
                 pass
     return {"type": "session_meta", "payload": payload} if "cwd" in payload else None
 
@@ -2437,7 +2440,7 @@ def _read_first_entrypoint(path: str, lines: int = 64):
                     break
                 try:
                     item = json.loads(raw)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if type(item) is dict and type(item.get("entrypoint")) is str:
                     return item["entrypoint"]
@@ -2455,7 +2458,7 @@ def _parse_jsonl(data: bytes, base: int) -> tuple[list, int]:
         if raw.strip():
             try:
                 item = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 item = None
             if type(item) is dict:
                 out.append((offset, item))
@@ -2528,7 +2531,7 @@ def _newest_turn_marker(handle, low: int, high: int):
                 continue
             try:
                 item = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             inner = item.get("payload") if type(item) is dict else None
             if (item.get("type") == "event_msg" and type(inner) is dict
@@ -3026,7 +3029,7 @@ def codex_reviews(path: str, now: float | None = None) -> list[tuple]:
             continue
         try:
             item = json.loads(raw)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         payload = item.get("payload") if type(item) is dict else None
         if type(payload) is not dict or payload.get("type") != "custom_tool_call":
@@ -3046,7 +3049,7 @@ def _forked(path: str) -> str:
     try:
         with open(path, "rb") as handle:
             meta = json.loads(handle.readline(1 << 20))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return ""
     payload = meta.get("payload") if type(meta) is dict else None
     if type(payload) is not dict or not payload.get("forked_from_id"):
@@ -3057,7 +3060,7 @@ def _forked(path: str) -> str:
 def _turn_id(raw: bytes) -> str:
     try:
         payload = json.loads(raw).get("payload")
-    except (ValueError, AttributeError):
+    except (ValueError, RecursionError, AttributeError):
         return ""
     return str(payload.get("turn_id") or "") if type(payload) is dict else ""
 
@@ -3519,7 +3522,7 @@ def claude_rows(now: float, root=None,
                 sub_age = max(0.0, now - os.path.getmtime(log_path))
                 with open(meta_path, "rb") as handle:
                     meta = json.loads(handle.read(64 << 10))
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 continue
             if type(meta) is not dict:
                 continue
@@ -4007,7 +4010,7 @@ def _runner_name(place: str) -> str:
     try:   # the Owner's old runner folder: its own registration names it
         with open(os.path.join(place, ".runner"), encoding="utf-8-sig") as handle:
             name = str(json.load(handle).get("agentName") or "")
-    except (OSError, ValueError, AttributeError):
+    except (OSError, ValueError, RecursionError, AttributeError):
         return ""
     return name if RUNNER_NAME.fullmatch(name) else ""
 
@@ -4764,7 +4767,7 @@ def _claude_registered(sessions, processes: list[Process]) -> dict[int, dict] | 
                 written = os.path.getmtime(path)
                 with open(path, "rb") as handle:
                     entry = json.loads(handle.read(64 << 10))
-            except (OSError, ValueError):
+            except (OSError, ValueError, RecursionError):
                 continue
             if key is not None:
                 _remember(_cli_registry_cache, path, (key, written, entry))
@@ -4789,7 +4792,7 @@ def _job_state(sessions: str, entry: dict) -> str | None:
     try:
         with open(os.path.join(os.path.dirname(sessions), "jobs", job, "state.json"), "rb") as handle:
             record = json.loads(handle.read(64 << 10))
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     state = record.get("state") if type(record) is dict else None
     return state if type(state) is str else None

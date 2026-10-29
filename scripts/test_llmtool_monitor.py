@@ -5010,3 +5010,43 @@ class ProcessTableFidelityTests(_TableFixture, unittest.TestCase):
         with patch.object(mon.subprocess, "run", fake):
             self.assertEqual(mon.ps_rows(mon.run_ps())[0][5], "/bin/x\ufffd")
             self.assertTrue(mon.run_ps_users({450}))
+
+
+DEEP_JSON = b"[" * 10_000 + b"]" * 10_000   # json.loads: RecursionError under Python 3.13
+
+
+class DeepJsonTests(unittest.TestCase):
+    """Codex review v3 (#637): JSON nested too deeply is a bad answer or a
+    bad record like any other, never an exception out of a refresh."""
+
+    def test_the_payload_really_raises_recursion_error(self):
+        with self.assertRaises(RecursionError):
+            json.loads(DEEP_JSON)
+
+    def test_direct_read_falls_back_to_gh_and_pauses(self):
+        tests = DirectGitHubTests()
+        reads, gh_calls, _, _, source = tests._after_success((200, DEEP_JSON))
+        self.assertEqual(reads, [[], ["from gh"], ["gh while paused"], ["direct again"]])
+        self.assertIn(["api", "-X", "GET", "repos/o/r/b"], gh_calls)
+
+    def test_gh_answer_nested_too_deeply_is_a_failed_refresh_not_a_crash(self):
+        source = mon.GitHubSource("o/r", runner=FakeRun((0, DEEP_JSON)), clock=lambda: NOW)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            source.refresh(force=True)
+        self.assertIn("讀取失敗（ValueError）", source.status)
+        self.assertEqual(source.wait, mon.GITHUB_REFRESH * 2)   # the backoff still applies
+
+    def test_local_records_nested_too_deeply_are_skipped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "r.json")
+            with open(path, "wb") as handle:
+                handle.write(DEEP_JSON)
+            os.chmod(path, 0o600)
+            st = os.stat(path)
+            self.assertIsNone(mon._read_json(path))                     # task evidence files
+            self.assertIsNone(mon._llmtool_record(path, st))            # llmtool task records
+            self.assertIsNone(mon._registry_record(path, "r", st))      # D6 registry records
+            tail = os.path.join(tmp, "s.jsonl")
+            with open(tail, "wb") as handle:
+                handle.write(b'{"type": "user"}\n' + DEEP_JSON + b"\n")
+            self.assertEqual(mon._jsonl_tail(tail), [{"type": "user"}])   # session files
