@@ -1421,14 +1421,12 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 
 ## Safety boundary
 
-模型命令唯讀本機資料並向設定的 API provider 發出 HTTPS/HTTP request；`claude-cli` 會以
-固定 argv、無 shell 的方式啟動使用者已安裝的 CLI，並停用 CLI tools、session persistence
-及自訂 hooks/plugins/MCP。llmtool 不執行模型回傳的 shell/Git 指令，也不協調檔案修改。
+`ask`、`analyze-log`、`review-diff`、A9/A10 與一般 chat 的文字 provider 不執行模型回傳的 shell/Git 指令；`claude-cli` 文字 transport 使用固定 argv、無 shell，並要求停用 CLI tools、session persistence 及自訂 hooks/plugins/MCP。PM runtime 與經授權的 direct Developer 是另外的執行路徑；它們有獨立的本機記錄與執行邊界，direct Developer 可在核准的 D6 寫入範圍內修改檔案。
 明確的 config 操作及 A7 feedback capture/review 可寫入指定檔案；A9 orchestration 與 A10 retrieval 不寫檔。
 不自動讀取 SSH、keychain 或任意 secret file；模型命令明確提供的文字、pipe、`--file`
 內容會完整傳給 gateway，請自行移除不應傳送的秘密。離線 `test-excerpts` 只處理
 明確指定的本機 capture，不傳給任何 provider。
-chat 預設會自動保存唯一的本機對話記錄 `~/.local/state/llmtool/chat/history.json`：目錄權限為 `0700`、檔案為 `0600`，內容會經敏感資訊篩查，最多保存 200 組 exchanges 並限制在 256 KiB。使用 `llmtool chat --no-history` 可停用該 session 的磁碟讀寫。除這份 chat history 外，工具不自動寫 prompt／response log、cache 或 benchmark report；使用者明確 capture 的 feedback 是獨立資料。
+一般 chat 預設將 user/assistant turns 保存至 `~/.local/state/llmtool/chat/history.json`；其目錄為 `0700`、檔案為 `0600`，內容經敏感資訊樣式篩查，最多保存 200 組 exchanges，序列化檔案上限為 256 KiB。`llmtool chat --no-history` 只停用一般 `ChatSession` 對這份 history 檔的載入與保存；它不會停用 PM runtime、Task store、task-status cache、測試記錄或外部 CLI 的獨立儲存。本機儲存依子系統分開管理。PM runtime 會在 `~/.local/state/llmtool/pm-runtime/` 保存 `<key>.history.json`、binding 與 runtime metadata；history 保留最近 200 筆 PM turn records，沒有一般 chat 的 256 KiB 檔案上限，也沒有對應的停用旗標。Task 操作會在 `~/.local/state/llmtool/tasks/` 保存 request、response、proposal、evidence、events、receipts 與相關狀態，並可能保存經遮罩的 rejected-output capture；`task status` 可更新相鄰的 `task-status-index.json` cache。Ask diagnostics 另受 `--save-diagnostics`、`--no-save-diagnostics` 與 trusted user 的 `diagnostics.persist_metadata` 控制，預設關閉，只保存其限定的 metadata。測試、High Debug、AGY、review artifact 與 D6 helper 路徑也會建立各自的記錄或暫存檔；部分 raw test/native log 在寫入前不做內容篩查。Config 與 feedback 由明確操作保存；benchmark adapter 本身只輸出結果，不自動保存 benchmark report。外部 CLI 的 session、cache 與 runtime state 依該路徑及 CLI 實作另行管理；llmtool 沒有全域「完全不落盤」開關。
 
 ## 開發與驗證
 
