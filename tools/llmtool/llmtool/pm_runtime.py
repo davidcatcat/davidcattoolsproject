@@ -594,7 +594,7 @@ class PMRuntime:
                             transcript_present else '--session-id')
             argv = [adapter, '-p', '--input-format', 'stream-json', '--output-format',
                     'stream-json', '--verbose', '--include-partial-messages', session_flag,
-                    self.pm_session_id, '--permission-prompts', 'none',
+                    self.pm_session_id, '--permission-prompts', 'none', '--permission-mode', 'auto',
                     '--strict-mcp-config', '--mcp-config', PM_MCP_CONFIG,
                     '--append-system-prompt', PM_SESSION_INSTRUCTION]
             runner = self.runner
