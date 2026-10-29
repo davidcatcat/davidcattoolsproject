@@ -233,13 +233,19 @@ def turn_end_text(event, elapsed):
 def tool_label(event):
     """A screened tool description, or its name; never display a command or tool output."""
     from .tui_markdown import display_width
-    name = safe_name(event.get("name"))
+    from . import pm_runtime
+    raw_name = event.get("name")
+    name = safe_name(raw_name)
+    if (not isinstance(raw_name, str) or '/' in raw_name
+            or not all(char.isprintable() for char in raw_name)):
+        name = "Tool"
     text = event.get("description")
     if type(text) is not str:
         return name
     text = "".join(char for char in " ".join(text.split()) if char.isprintable())
     shown = safe_text(text) if text else WITHHELD
-    if shown == WITHHELD or not shown.strip():
+    if (shown == WITHHELD or not shown.strip()
+            or not pm_runtime._label_is_safe(shown, name)):
         return name
     if display_width(shown) <= TOOL_LABEL_CELLS:
         return shown

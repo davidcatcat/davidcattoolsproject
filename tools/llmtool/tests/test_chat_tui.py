@@ -3733,6 +3733,16 @@ class PMConversationTests(BoundedPMTest):
         self.assertNotIn('SECRET_COMMAND', ui.conversation.text)
         self.assertNotIn('SECRET_OUTPUT', ui.conversation.text)
 
+    def test_pm_tool_label_hides_ambiguous_path_descriptions(self):
+        for description in ('Read file:/Users/alice/private.pem',
+                            'Read /Users/alice/private.pem',
+                            'Read https://x.com/a,/Users/alice/b'):
+            with self.subTest(description=description):
+                self.assertEqual(chat_tui_pm.tool_label({
+                    'name': 'Read', 'description': description}), 'Read')
+        self.assertEqual(chat_tui_pm.tool_label({
+            'name': 'Read', 'description': 'Read docs/a.md'}), 'Read docs/a.md')
+
     def test_status_in_pm_mode_shows_the_pm_in_chinese(self):
         ui, _ = self.drive([self.connect(), self.connected, '/status\r',
                             lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in

@@ -234,56 +234,72 @@ def _display_local_path(value, cwd=None):
                 return '~' if relative == '.' else '~/' + relative
         except ValueError:
             continue
-    return os.path.basename(path) or '/'
+    return os.path.basename(path) or '[root]'
 
 
-_URL_TOKEN = re.compile(r'\b[a-z][a-z0-9+.-]*://[^\s]+', re.IGNORECASE)
-_ABSOLUTE_PATH_TOKEN = re.compile(r'(?<![^\s:=,"\'(])/(?:[^\s]+)')
+def _is_display_path(value):
+    if not isinstance(value, str) or not value:
+        return False
+    if value in ('.', '~', '[root]'):
+        return True
+    tail = value[2:] if value.startswith('~/') else value
+    return all(
+        part
+        and part not in ('.', '..')
+        and part == part.strip()
+        and all(char.isalnum() or char in ' ._-' for char in part)
+        for part in tail.split('/')
+    )
 
 
-def _redact_path_match(match, cwd):
-    token = match.group(0)
-    path = token.rstrip('.,;:)])}')
-    return _display_local_path(path, cwd) + token[len(path):]
+def display_path(value, cwd=None):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if value == '/':
+        return '[root]'
+    raw = value[1:] if value.startswith('/') else value
+    if not _is_display_path(raw):
+        return None
+    shown = _display_local_path(value, cwd)
+    return shown if _is_display_path(shown) else None
 
 
-def _redact_description_paths(text, cwd=None):
-    """Redact absolute paths in prose, leaving URL tokens and relative paths intact."""
-    if not isinstance(text, str):
-        return text
-    urls = []
-
-    def hold_url(match):
-        urls.append(match.group(0))
-        return '\x00URL%d\x00' % (len(urls) - 1)
-
-    protected = _URL_TOKEN.sub(hold_url, text)
-    redacted = _ABSOLUTE_PATH_TOKEN.sub(lambda match: _redact_path_match(match, cwd), protected)
-    return re.sub(r'\x00URL(\d+)\x00', lambda match: urls[int(match.group(1))], redacted)
+def _label_is_safe(label, name):
+    if not isinstance(label, str) or not all(char.isprintable() for char in label):
+        return False
+    if '/' not in label:
+        return True
+    prefix = name + ' '
+    return ('/' not in name and label.startswith(prefix)
+            and _is_display_path(label[len(prefix):]))
 
 
 def _tool_description(name, tool_input, cwd=None):
-    if not isinstance(tool_input, dict):
+    if (not isinstance(tool_input, dict)
+            or not isinstance(name, str)
+            or '/' in name
+            or not name.isprintable()):
         return None
-    text = tool_input.get('description')
-    if not (isinstance(text, str) and text.strip()):
-        target = next((tool_input[key] for key in _TOOL_TARGET_KEYS
-                       if isinstance(tool_input.get(key), str) and tool_input[key].strip()), None)
-        if target is None:
-            return None
-        text = name + ' ' + _display_local_path(target, cwd)
-    else:
-        # Descriptions are model supplied and may contain the same local paths as
-        # the structured target fields. Replace path tokens before they reach the UI.
-        target = next((tool_input[key] for key in _TOOL_TARGET_KEYS
-                       if isinstance(tool_input.get(key), str) and tool_input[key].startswith('/')),
-                      None)
-        if target is not None:
-            text = text.replace(target, _display_local_path(target, cwd))
-        text = _redact_description_paths(text, cwd)
-    text = ' '.join(text.split())[:TOOL_DESCRIPTION_CHARS]
-    screened = _screen_stream_text(text)
-    return None if screened == '[withheld]' else screened
+    raw = tool_input.get('description')
+    text = None
+    if (isinstance(raw, str)
+            and '/' not in raw
+            and all(char.isprintable() or char.isspace() for char in raw)):
+        text = ' '.join(raw.split())
+
+    if not text:
+        for key in _TOOL_TARGET_KEYS:
+            target = display_path(tool_input.get(key), cwd)
+            if target:
+                text = name + ' ' + target
+                break
+
+    if not text:
+        return None
+    screened = _screen_stream_text(text[:TOOL_DESCRIPTION_CHARS])
+    return (screened if screened != '[withheld]'
+            and _label_is_safe(screened, name) else None)
 
 
 _STREAM_SECRET_START = re.compile(

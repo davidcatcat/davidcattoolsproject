@@ -1063,11 +1063,11 @@ class ChatTUI:
                 queue = "沒有"
             lines = ["狀態（PM 模式）",
                      "PM session：" + self.pm_target[0] + "（claude-code，cwd "
-                     + chat_tui_pm.safe_text(pm_runtime._redact_description_paths(
-                         str(self.pm_target[1]), self.pm_target[1])) + "）",
+                     + chat_tui_pm.safe_text(pm_runtime.display_path(
+                         str(self.pm_target[1]), self.pm_target[1]) or "UNKNOWN") + "）",
                      "Claude 帳號目錄：" + chat_tui_pm.safe_text(
-                         pm_runtime._redact_description_paths(
-                             getattr(self.pm_runtime, "claude_config_dir", None))),
+                         pm_runtime.display_path(
+                             getattr(self.pm_runtime, "claude_config_dir", None)) or "UNKNOWN"),
                      "權限模式（本機設定）：" + chat_tui_pm.permission_mode()
                      + "（自動，不跳出確認）",
                      "PM 狀態：" + self.pm_status_fields(lambda value, _width: value)["state"],

@@ -172,6 +172,105 @@ def _bg_turn(text, tokens):
             {'type': 'result', 'result': text, 'usage': {'output_tokens': tokens}})
 
 
+class ToolLabelPathTests(unittest.TestCase):
+    def test_slash_descriptions_are_omitted(self):
+        from llmtool import chat_tui_pm
+        bad_descriptions = [
+            'host:/Users/x/k.pem', 'scp host:/Users/x/k.pem .',
+            'file:/Users/alice/private.pem', 'cat ~/notes/x.md',
+            'fetch https://example.com/a/b', 'PATH=/a:/opt/private/bin',
+            'export PATH=/a:/opt/private/bin', 'PATH=/a:/b',
+            'file:///Users/alice/secret.pem', 'https://x.com/a,/Users/alice/b',
+            'Read /var/private/client.pem', 'keep ./relative/path and docs/a.md',
+            '\x00URL7\x00', 'https://example.com/a/b \x00URL7\x00',
+        ] + [prefix + '/Users/alice/secret.pem' for prefix in '`><[|;']
+        for description in bad_descriptions:
+            with self.subTest(description=description):
+                self.assertIsNone(pm_runtime._tool_description(
+                    'Bash', {'description': description}))
+                if '/' in description:
+                    self.assertEqual(chat_tui_pm.tool_label({
+                        'name': 'Bash', 'description': description}), 'Bash')
+
+    def test_ambiguous_structured_targets_are_omitted(self):
+        from llmtool import chat_tui_pm
+        targets = [
+            'host:/Users/x/k.pem', 'file:/Users/alice/private.pem',
+            'file:///Users/alice/secret.pem', 'https://x.com/a,/Users/alice/b',
+            'PATH=/a:/opt/private/bin', 'PATH=/a:/b',
+        ] + [prefix + '/Users/alice/secret.pem' for prefix in '`><[|;']
+        for key in ('file_path', 'notebook_path', 'path'):
+            for target in targets:
+                with self.subTest(key=key, target=target):
+                    self.assertIsNone(pm_runtime._tool_description('Read', {key: target}))
+                    self.assertEqual(chat_tui_pm.tool_label({
+                        'name': 'Read', 'description': target}), 'Read')
+
+    def test_rejected_description_uses_structured_target(self):
+        self.assertEqual(pm_runtime._tool_description('Read', {
+            'description': '/Users/alice/secret.pem', 'path': '/repo/src/app.py'}, '/repo'),
+            'Read src/app.py')
+
+    def test_structured_path_display(self):
+        cases = [
+            ('/repo/src/app.py', 'Read src/app.py'),
+            ('/Users/alice/private/keys/client.pem', 'Read ~/private/keys/client.pem'),
+            ('/var/private/client.pem', 'Read client.pem'),
+            ('~/notes/x.md', 'Read ~/notes/x.md'),
+            ('docs/a.md', 'Read docs/a.md'),
+            ('/repo', 'Read .'), ('/', 'Read [root]'),
+        ]
+        with patch.object(pm_runtime.Path, 'home', return_value=Path('/Users/alice')):
+            for path, expected in cases:
+                with self.subTest(path=path):
+                    self.assertEqual(pm_runtime._tool_description('Read', {'path': path}, '/repo'),
+                                     expected)
+
+    def test_plain_descriptions_survive(self):
+        self.assertEqual(pm_runtime._tool_description('Bash', {'description': 'List  files\n'}),
+                         'List files')
+        self.assertEqual(pm_runtime._tool_description('Bash', {'description': '列出 PR 狀態'}),
+                         '列出 PR 狀態')
+
+    def test_placeholder_input_cannot_crash_parser(self):
+        class Runtime:
+            cwd = '/repo'
+            pm_session_id = None
+
+        record = {'turn_id': 't', 'tool_names': [], 'result_text': ''}
+        parser = pm_runtime._TurnParser(Runtime(), record, lambda: False)
+        for description in ('\x00URL7\x00', 'https://example.com/a/b \x00URL7\x00'):
+            line = {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'x', 'name': 'Bash',
+                 'input': {'description': description}}]}}
+            events, done = parser.feed(json.dumps(line).encode())
+            self.assertFalse(done)
+            self.assertEqual(events[0]['type'], 'TOOL_USE')
+            self.assertIsNone(events[0]['description'])
+        line = {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'id': 'y', 'name': 'Read', 'input': {'path': 'docs/a.md'}}]}}
+        events, done = parser.feed(json.dumps(line).encode())
+        self.assertFalse(done)
+        self.assertEqual(events[0]['description'], 'Read docs/a.md')
+
+    def test_final_label_guard_rejects_bypasses(self):
+        from llmtool import chat_tui_pm
+        for label in ('Read file:/Users/alice/private.pem',
+                      'Read /Users/alice/private.pem',
+                      'Read https://x.com/a,/Users/alice/b'):
+            with self.subTest(label=label):
+                self.assertFalse(pm_runtime._label_is_safe(label, 'Read'))
+                self.assertEqual(chat_tui_pm.tool_label({'name': 'Read', 'description': label}),
+                                 'Read')
+
+    def test_commands_and_sensitive_text_stay_hidden(self):
+        self.assertIsNone(pm_runtime._tool_description('Bash', {
+            'command': 'rm -rf x'}))
+        secret = 'ghp_' + 'A1b2C3d4E5f6G7h8J9k0' * 2
+        self.assertIsNone(pm_runtime._tool_description('Bash', {
+            'description': 'push with ' + secret}))
+
+
 class PMRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.original_signal_handlers = {
@@ -305,22 +404,8 @@ class PMRuntimeTests(unittest.TestCase):
                                   self.cwd), 'Read ~/private/keys/client.pem')
         self.assertEqual(describe('Read', {'file_path': '/var/private/client.pem'}, self.cwd),
                          'Read client.pem')
-        self.assertEqual(describe('Bash', {'description':
-                                          'Read /var/private/client.pem'}, self.cwd),
-                         'Read client.pem')
-
-    def test_description_path_redaction_protects_urls_and_handles_path_boundaries(self):
-        redact = pm_runtime._redact_description_paths
-        self.assertEqual(redact('scp host:/Users/x/secret.pem .'), 'scp host:secret.pem .')
-        self.assertEqual(redact('file:/Users/alice/private.pem'), 'file:private.pem')
-        home_path = str(Path.home() / 'private' / 'k.pem')
-        self.assertEqual(redact('Read ' + home_path), 'Read ~/private/k.pem')
-        self.assertEqual(redact('cat ~/notes/x.md'), 'cat ~/notes/x.md')
-        self.assertEqual(redact('fetch https://example.com/a/b'),
-                         'fetch https://example.com/a/b')
-        self.assertEqual(redact('export PATH=/a:/opt/private/bin'), 'export PATH=bin')
-        self.assertEqual(redact('keep ./relative/path and docs/a.md'),
-                         'keep ./relative/path and docs/a.md')
+        self.assertIsNone(describe('Bash', {'description':
+                                           'Read /var/private/client.pem'}, self.cwd))
 
     def test_argv_fixes_tool_set_and_adds_pm_instruction_on_every_launch(self):
         # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated
