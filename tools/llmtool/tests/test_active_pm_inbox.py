@@ -19,6 +19,7 @@ from llmtool import active_pm_inbox
 from llmtool import task_store as task_store_module
 from llmtool.cli import main
 from llmtool.errors import LLMToolError
+from llmtool.task_index import TaskStatusIndex
 from llmtool.task_store import TaskStore
 from llmtool.task_submission_cli import (
     _active_pm_handoff, run_task_ack, run_task_complete, run_task_inbox, run_task_record_pm,
@@ -30,6 +31,12 @@ import test_task_completion as completion_fixture
 _RESPONSE = json.dumps({'schema_version': 1, 'summary': 'Active PM plan.',
     'developer_assignment': {'route': 'codex', 'risk': 'LOW',
         'goal': 'Add bounded test.', 'acceptance': ['test passes']}})
+
+
+class _DisabledTaskIndex(TaskStatusIndex):
+    def __init__(self, store):
+        self.store = store
+        self.enabled = False
 
 
 class ActivePMInboxTests(unittest.TestCase):
@@ -233,6 +240,48 @@ class ActivePMInboxTests(unittest.TestCase):
                 self.store, 'pm-' + self.session)
         self.assertEqual(unreadable_peek['unreadable_task_count'], 1)
         self.assertEqual(unreadable_peek['status'], 'ATTENTION')
+
+    def test_inbox_index_matches_full_scan_and_skips_other_sessions(self):
+        task = self._ready_task()
+        self._complete(task)
+        other_session = self._claude_session()
+        other = self._ready_task(session=other_session)
+        unreadable_id = uuid.uuid4().hex
+        (self.store.root / (unreadable_id + '.json')).write_text('{')
+
+        # Warm the disposable index, including its unreadable entry and the
+        # newly written Task for the other PM.
+        indexed = active_pm_inbox.read_inbox(self.store, 'pm-' + self.session)
+        self.assertEqual(indexed['unreadable_task_count'], 1)
+        self.assertEqual(len(indexed['events']), 1)
+        newly_written = self._ready_task()
+
+        calls = []
+        original_get = self.store.get
+
+        def counting_get(task_id):
+            calls.append(task_id)
+            return original_get(task_id)
+
+        with patch.object(self.store, 'get', side_effect=counting_get):
+            active_pm_inbox.read_inbox(self.store, 'pm-' + self.session)
+        self.assertNotIn(other['task_id'], calls)
+        self.assertIn(task['task_id'], calls)
+        self.assertIn(newly_written['task_id'], calls)
+
+        with patch.object(active_pm_inbox, 'TaskStatusIndex',
+                          side_effect=lambda store: _DisabledTaskIndex(store)):
+            full_scan = active_pm_inbox.read_inbox(self.store, 'pm-' + self.session)
+        self.assertEqual(indexed, full_scan)
+
+        event_id = indexed['events'][0]['event_id']
+        active_pm_inbox.ack(self.store, event_id, 'pm-' + self.session)
+        indexed_ack = active_pm_inbox.ack(self.store, event_id, 'pm-' + self.session)
+        with patch.object(active_pm_inbox, 'TaskStatusIndex',
+                          side_effect=lambda store: _DisabledTaskIndex(store)):
+            full_scan_ack = active_pm_inbox.ack(
+                self.store, event_id, 'pm-' + self.session)
+        self.assertEqual(indexed_ack, full_scan_ack)
 
     def test_pm_absent_then_later_read_after_restart(self):
         task = self._ready_task()
