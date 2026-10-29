@@ -159,6 +159,15 @@ def _run_codex(*, prompt, cwd, output_path):
             stderr=subprocess.PIPE, check=False, timeout=1800)
 
 
+def _has_report_section(report, heading):
+    for line in report.splitlines():
+        line = line.strip()
+        if (line == '## ' + heading or line == '**' + heading + '**' or
+                line == '**' + heading + ':**' or line == '**' + heading + '**:'):
+            return True
+    return False
+
+
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
@@ -221,7 +230,8 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     except Exception: _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
-              f'Evidence:\n{evidence_text}\n\nRequired report sections: {", ".join(REPORT_SECTIONS)}. '
+              f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
+              + '\n'.join('## ' + section for section in REPORT_SECTIONS) + '\n'
               'Include exactly one of RCA_CONFIRMED, RCA_UNCONFIRMED, BLOCKED. Diagnose only; do not edit files.')
     report = ''; observed = 'UNKNOWN'; effort = 'UNKNOWN'; usage = 'UNKNOWN'
     try:
@@ -250,7 +260,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     if len(report.encode('utf-8')) > 16384 or _emitted_sensitive(report): _refuse('HIGH_DEBUG_REPORT_INVALID')
     tokens=[x for x in ('RCA_CONFIRMED','RCA_UNCONFIRMED','BLOCKED') if x in report]
     status=tokens[0] if len(tokens)==1 else 'REPORT_INVALID'
-    if any(('## ' + h) not in report for h in REPORT_SECTIONS): status='REPORT_INVALID'
+    if any(not _has_report_section(report, h) for h in REPORT_SECTIONS): status='REPORT_INVALID'
     entry={'family':family, 'failed_corrections':failed_corrections, 'early_reason':early_reason,
        'examined_sha':head,'d6':d6,'model_requested':'gpt-6.1-sol','model_observed':observed,
        'effort_observed':effort,'status':status,'report_sha256':hashlib.sha256(report.encode()).hexdigest(),

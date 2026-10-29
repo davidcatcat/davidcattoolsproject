@@ -85,6 +85,24 @@ class HighDebugTests(unittest.TestCase):
         (result, _invoke, store) = self._run_case('RCA_UNCONFIRMED')
         self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
 
+    def test_heading_report_sections_are_accepted(self):
+        report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED'
+        (result, _invoke, store) = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
+
+    def test_bold_report_sections_are_accepted(self):
+        report = ''.join('**' + heading + '**\nDetails.\n' for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED'
+        (result, _invoke, store) = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
+
+    def test_report_section_only_in_prose_is_invalid(self):
+        report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS if heading != 'Root Cause')
+        report += 'The Root Cause is described in prose.\nRCA_UNCONFIRMED'
+        (result, _invoke, store) = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
+
     def test_dirty_diagnosis_worktree_is_refused(self):
         with self.assertRaises(LLMToolError) as caught:
             self._run_case('RCA_UNCONFIRMED', dirty=True)
