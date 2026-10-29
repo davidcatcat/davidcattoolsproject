@@ -131,15 +131,18 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertIsInstance(worker_dispatch._parse_policy(raw), dict)
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
-        self._set_state('agy', 'OWNER_ASSIGNMENT_ONLY')
+        self._set_state('agy', 'ALLOWED')
         self._set_state('opencode-developer', 'PAUSED')
         self.assertTrue(worker_dispatch.evaluate('codex-developer').allowed)
         self.assertTrue(worker_dispatch.evaluate('company-gw').allowed)
         self.assertTrue(worker_dispatch.evaluate('claude-reviewer').allowed)
         self.assertTrue(worker_dispatch.evaluate('codex-reviewer').allowed)
         self.assertTrue(worker_dispatch.evaluate('claude-developer').allowed)
-        self.assertEqual(worker_dispatch.evaluate('agy').reason_code,
-                         'OWNER_ASSIGNMENT_REQUIRED')
+        agy_decision = worker_dispatch.evaluate('agy')
+        self.assertTrue(agy_decision.allowed)
+        self.assertEqual(agy_decision.reason_code, 'OWNER_POLICY_ALLOWED')
+        self._set_state('agy', 'PAUSED')
+        self.assertEqual(worker_dispatch.evaluate('agy').reason_code, 'OWNER_PAUSED')
         self.assertEqual(worker_dispatch.evaluate('opencode-developer').reason_code,
                          'OWNER_PAUSED')
         self.assertFalse(worker_dispatch.evaluate('unknown-worker').allowed)
@@ -178,8 +181,8 @@ class WorkerDispatchTests(unittest.TestCase):
                          'OWNER_ASSIGNMENT_REQUIRED')
 
 
-    def test_agy_requires_owner_assignment_and_exact_task_binding(self):
-        # Owner 2026-10-27: AGY is not an autonomous fallback.
+    def test_agy_assignment_only_requires_exact_task_binding(self):
+        # OWNER_ASSIGNMENT_ONLY remains exact-task scoped when selected by policy.
         self._set_state('agy', 'OWNER_ASSIGNMENT_ONLY')
         decision = worker_dispatch.evaluate('agy')
         self.assertFalse(decision.allowed)

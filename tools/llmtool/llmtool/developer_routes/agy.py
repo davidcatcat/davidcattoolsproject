@@ -107,6 +107,9 @@ def owner_assignment_gate(task_id, owner_ref):
 
     def evaluate():
         decision = worker_dispatch.evaluate('agy', owner_ref, task_id)
-        return (decision if getattr(decision, 'reason_code', None) ==
-                'OWNER_ASSIGNMENT_MATCHED' else False)
+        if (getattr(decision, 'allowed', False) is True and
+                getattr(decision, 'reason_code', None) in (
+                    'OWNER_POLICY_ALLOWED', 'OWNER_ASSIGNMENT_MATCHED')):
+            return decision
+        return False
     return evaluate
