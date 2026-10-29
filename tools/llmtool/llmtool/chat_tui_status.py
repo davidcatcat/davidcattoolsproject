@@ -8,6 +8,7 @@ are labelled as derived wherever they are shown.
 """
 
 import json
+from datetime import datetime, timezone
 
 from .chat_tui_task import NOT_AVAILABLE, PENDING_DISPATCH, UNKNOWN, retry_condition, value
 
@@ -379,6 +380,51 @@ def load_records(store):
             unreadable += 1
     records.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     return records[:LIST_LIMIT], unreadable
+
+
+# Stages in which PM-dispatched work is running in the background, and who is at work.
+BACKGROUND_ROLES = {"RUNNING": "Developer", "WAITING_EXECUTOR_EVIDENCE": "Developer",
+                    "REPAIRING": "Developer", "WAITING_REVIEW": "Reviewer"}
+
+
+def background_items(records):
+    """In-flight work of a PM's Tasks, oldest update first: role, Task, PR, state, update."""
+    items = []
+    for record in records:
+        derived, _reason = stage(record)
+        role = BACKGROUND_ROLES.get(derived)
+        if role is None:
+            continue
+        numbers = sorted({number for number, _label in _pr_sources(record)})
+        items.append({"role": role, "task": str(value(record, "task_id")),
+                      "pr": " ".join("#%d" % number for number in numbers),
+                      "state": derived, "updated_at": record.get("updated_at")})
+    items.sort(key=lambda item: str(item["updated_at"] or ""))
+    return items
+
+
+def read_background(pm_session, store=None):
+    """background_items of the Tasks bound to a PM session (the PM inbox's TaskStore read)."""
+    from .active_pm_inbox import _session_records, pm_session_key
+    from .task_store import TaskStore
+    store = TaskStore() if store is None else store
+    records, _unreadable = _session_records(store, pm_session_key(pm_session))
+    return background_items(records)
+
+
+def age_text(timestamp, now=None):
+    """Compact age of a Core timestamp ("45s", "12m", "3h", "2d"); "?" when unreadable."""
+    try:
+        when = datetime.fromisoformat(str(timestamp).replace("Z", "+00:00"))
+    except ValueError:
+        return "?"
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = max(0, int(((now or datetime.now(timezone.utc)) - when).total_seconds()))
+    for unit, size in (("d", 86400), ("h", 3600), ("m", 60)):
+        if seconds >= size:
+            return "%d%s" % (seconds // size, unit)
+    return "%ds" % seconds
 
 
 def detail_extra(record):
