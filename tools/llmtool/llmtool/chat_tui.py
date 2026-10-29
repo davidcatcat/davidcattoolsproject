@@ -1953,6 +1953,7 @@ class ChatTUI:
         except Exception:
             self.app.exit(result=1)  # Sanitized FAILED; ChatSession history is already correct.
             return
+        self.app.invalidate()
         if self.quit_pending:
             self.app.exit(result=0)
 
