@@ -2657,7 +2657,7 @@ class OfficeViewTests(unittest.TestCase):
         for sid, title in ((bound, "Bound PM title"), (other, "Ordinary call title")):
             self._write(self.claude / "proj" / f"{sid}.jsonl", [
                 {"type": "user", "cwd": self.canonical, "entrypoint": "sdk-cli"},
-                {"type": "ai-title", "aiTitle": title}], age=60)
+                {"type": "ai-title", "aiTitle": title}], age=mon.OFFICE_BUSY + 60)
         runtime = Path(self.tmp.name) / "pm-runtime"
         runtime.mkdir(mode=0o700)
         binding = runtime / f"{bound}.binding.json"
