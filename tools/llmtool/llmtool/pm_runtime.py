@@ -48,6 +48,14 @@ _STDOUT_EOF = object()
 # completed / cancelled / discarded / refused.
 _LIFECYCLE_MARK = object()
 _NOT_ACCEPTED = ('cancelled', 'discarded', 'refused')
+_TIMED_OUT = object()
+# Bounds for correlating an Owner message (measured on claude 2.1.312 against a local fake
+# Messages API: `queued` arrived 1-20 ms after the write, also while a turn was running;
+# `started` arrived 10-20 ms after `queued` when idle, or 0-20 ms after the result of the
+# turn Claude Code ran first). Past a bound the message's fate is UNKNOWN: it is reported
+# as such and never sent again automatically.
+PM_QUEUED_TIMEOUT = 10.0   # seconds from the write to `queued`
+PM_STARTED_GRACE = 10.0    # seconds without a running turn, after `queued`, to `started`
 _active_runtimes = set()
 _signal_handlers_installed = False
 _previous_signal_handlers = {}
@@ -687,12 +695,24 @@ class PMRuntime:
     def _read_lines(self, lines):
         """Yield stdout lines in order; EOF stays queued so every later reader sees it."""
         while True:
-            with self._lines_cond:
-                self._lines_cond.wait_for(lambda: lines or self._closed)
-                if not lines or lines[0] is _STDOUT_EOF:
-                    return
-                raw = lines.popleft()
+            raw = self._next_raw(lines, None)
+            if raw is None:
+                return
             yield raw
+
+    def _next_raw(self, lines, timeout):
+        """The next stdout line; None at EOF or close; _TIMED_OUT after timeout seconds."""
+        deadline = None if timeout is None else time.monotonic() + timeout
+        with self._lines_cond:
+            while True:
+                if lines and lines[0] is not _STDOUT_EOF:
+                    return lines.popleft()
+                if lines or self._closed:
+                    return None
+                remaining = None if deadline is None else deadline - time.monotonic()
+                if remaining is not None and remaining <= 0:
+                    return _TIMED_OUT
+                self._lines_cond.wait(remaining)
 
     def _starts_turn(self, raw):
         """True when an unclaimed line belongs to a turn (or must surface as an error)."""
@@ -792,35 +812,65 @@ class PMRuntime:
             return line['state']
         return None
 
-    @staticmethod
-    def _is_result(raw):
-        try:
-            line = json.loads(bytes(raw).decode('utf-8'))
-        except (TypeError, ValueError, UnicodeError):
-            return False
-        return isinstance(line, dict) and line.get('type') == 'result'
-
     def _owner_events(self, record, message_uuid):
-        """Events of an Owner turn. The turn is the Owner's only from the moment Claude Code
-        reports the message `started`; a turn it runs before that (a background
-        notification that began before it read the message) is shown and recorded as a
-        background turn of its own. Claude Code withdrawing the message (cancelled,
-        discarded, refused) ends the turn NOT_SENT: the message was never processed and
-        the caller may send it again. Nothing is written a second time here."""
+        """Events of an Owner turn, correlated with Claude Code's lifecycle frames for the
+        message's uuid. The turn is the Owner's only from the moment Claude Code reports
+        the message `started`. Every turn before that is a background turn of its own
+        (Claude Code emits `queued` and `started` before a message's own output, so a turn
+        seen earlier never answers it). Withdrawn (cancelled, discarded, refused) ends
+        NOT_SENT. No `queued` within PM_QUEUED_TIMEOUT, no `started` within
+        PM_STARTED_GRACE of Claude Code being idle, or frames out of order end UNKNOWN.
+        The message is written once; nothing here sends it again."""
         fate = []        # lifecycle states of this message, in arrival order
+        lines = self._lines
         pushback = collections.deque()
-        stream = self._read_lines(self._lines)
+        written = time.monotonic()
+        clock = {'idle_since': None, 'in_background': False, 'lapsed': False,
+                 'background_seen': False}
+
+        def note(state):
+            fate.append(state)
+            if state == 'queued' and clock['idle_since'] is None:
+                clock['idle_since'] = time.monotonic()
+
+        def deadline():
+            if 'started' in fate or clock['lapsed']:
+                return None
+            if 'queued' not in fate:
+                return written + PM_QUEUED_TIMEOUT
+            if clock['in_background']:
+                return None   # Claude Code is running a turn; ours legitimately waits
+            return clock['idle_since'] + PM_STARTED_GRACE
 
         def next_line():
             if pushback:
                 return pushback.popleft()
-            for raw in stream:
+            while True:
+                limit = deadline()
+                raw = self._next_raw(lines, None if limit is None else
+                                     max(0.0, limit - time.monotonic()))
+                if raw is _TIMED_OUT:
+                    if not clock['in_background']:
+                        return _TIMED_OUT
+                    lapse()   # past the bound inside a background turn: recorded now
+                    continue
+                if raw is None:
+                    return None
                 state = self._lifecycle_state(raw, message_uuid)
                 if state is None:
                     return raw
-                fate.append(state)
+                note(state)
                 return _LIFECYCLE_MARK
-            return None
+
+        def lapse():
+            # The record never stays ACTIVE past the bound, even while the turn Claude
+            # Code runs first still streams; the event follows when that turn ends.
+            if not clock['lapsed']:
+                clock['lapsed'] = True
+                with self._state_lock:
+                    record['status'] = 'UNKNOWN'
+                    record['ended_at'] = _timestamp(self.clock)
+                    self._persist_turn(record)
 
         def plain():
             # A turn's own events see stdout lines only; lifecycle frames stay here.
@@ -836,54 +886,57 @@ class PMRuntime:
             return {'type': 'TURN_END', 'turn_id': record['turn_id'], 'seq': None,
                     'status': status, 'result_text': '', 'usage': {}}
 
-        pending = []     # lines that arrived before Claude Code acknowledged the message
         try:
             while True:
-                if 'started' in fate:
-                    with self._state_lock:
-                        self._pending_uuid = None
-                        record['started_at'] = _timestamp(self.clock)
-                        self._persist_turn(record)
-                    yield {'type': 'TURN_ACCEPTED', 'turn_id': record['turn_id'], 'seq': None}
-                    pushback.extend(pending)
-                    yield from self._events(record, plain())
+                if clock['lapsed']:
+                    yield end('UNKNOWN')
                     return
                 if any(state in _NOT_ACCEPTED for state in fate):
                     yield end('NOT_SENT')
                     return
+                if 'completed' in fate and 'started' not in fate:
+                    yield end('UNKNOWN')   # frames out of order: ambiguous
+                    return
+                if 'started' in fate:
+                    with self._state_lock:   # persisted with the turn's end
+                        self._pending_uuid = None
+                        record['started_at'] = _timestamp(self.clock)
+                    if clock['background_seen']:   # tells the caller its own turn begins now
+                        yield {'type': 'TURN_ACCEPTED', 'turn_id': record['turn_id'], 'seq': None}
+                    yield from self._events(record, plain())
+                    return
                 raw = next_line()
+                if raw is _TIMED_OUT:
+                    yield end('UNKNOWN')
+                    return
                 if raw is None:
-                    pushback.extend(pending)
                     yield from self._events(record, plain())   # stdout ended: an error turn
                     return
                 if raw is _LIFECYCLE_MARK:
-                    if 'queued' in fate and pending:
-                        pushback.extend(pending)
-                        pending = []
-                    continue
-                if 'queued' not in fate:
-                    pending.append(raw)
-                    if self._is_result(raw):
-                        # No lifecycle frames (an older CLI): this turn answered the message.
-                        pushback.extend(pending)
-                        yield from self._events(record, plain())
-                        return
                     continue
                 if not self._starts_turn(raw):
                     self._unknown_lines += 1
                     continue
-                # Acknowledged but not started: Claude Code runs another turn first.
+                # Not started yet: whatever turn this is, it is not the Owner's.
                 with self._state_lock:
                     background = self._start_record('', None, origin='background', claim=False)
                 yield {'type': 'BACKGROUND_TURN_START', 'turn_id': background['turn_id'],
                        'seq': None, 'origin': 'background'}
                 pushback.appendleft(raw)
-                yield from self._events(background, plain())
+                clock['in_background'] = clock['background_seen'] = True
+                try:
+                    yield from self._events(background, plain())
+                finally:
+                    clock['in_background'] = False
                 if 'started' in fate:
                     # Taken in by that turn after all (not seen with priority "later"): it
                     # was delivered once, inside that turn; it is never written again.
                     yield end('ABSORBED')
                     return
+                if 'queued' in fate:
+                    clock['idle_since'] = time.monotonic()   # the grace restarts after it
+                elif time.monotonic() >= written + PM_QUEUED_TIMEOUT:
+                    lapse()
         finally:
             with self._state_lock:
                 if self._pending_uuid == message_uuid:

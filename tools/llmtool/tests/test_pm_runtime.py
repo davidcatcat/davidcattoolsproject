@@ -7,6 +7,7 @@ import queue
 import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -42,10 +43,53 @@ def _runtime_delta(index, piece):
     }
 
 
+class _Stdin(io.BytesIO):
+    """Records what the runtime writes and hands each user message to the fake CLI."""
+
+    def __init__(self, users):
+        super().__init__()
+        self.users = users
+
+    def write(self, data):
+        size = super().write(data)
+        line = json.loads(bytes(data))
+        if line.get('type') == 'user':
+            self.users.put(line)
+        return size
+
+
+def _cli_stdout(lines, users):
+    """Claude Code 2.1.312 order: for each user message `queued`, `started`, the turn's
+    lines up to its result, then `completed` (lifecycle frames only when it has a uuid)."""
+    def frame(message, state):
+        return encoded({'type': 'command_lifecycle', 'command_uuid': message['uuid'],
+                        'state': state, 'uuid': 'frame-' + state})[0]
+    remaining = list(lines)
+    while remaining:
+        message = users.get()
+        if message is None:
+            return
+        if message.get('uuid'):
+            yield frame(message, 'queued')
+            yield frame(message, 'started')
+        while remaining:
+            raw = remaining.pop(0)
+            yield raw
+            try:
+                done = json.loads(bytes(raw)).get('type') == 'result'
+            except (TypeError, ValueError, AttributeError):
+                done = False
+            if done:
+                break
+        if message.get('uuid'):
+            yield frame(message, 'completed')
+
+
 class FakeProcess:
     def __init__(self, lines=()):
-        self.stdin = io.BytesIO()
-        self.stdout = iter(lines)
+        self.user_queue = queue.Queue()
+        self.stdin = _Stdin(self.user_queue)
+        self.stdout = _cli_stdout(lines, self.user_queue)
         self.terminated = False
         self.killed = False
         self.wait_calls = 0
@@ -55,9 +99,11 @@ class FakeProcess:
 
     def terminate(self):
         self.terminated = True
+        self.user_queue.put(None)
 
     def kill(self):
         self.killed = True
+        self.user_queue.put(None)
 
     def wait(self, timeout=None):
         self.wait_calls += 1
@@ -952,7 +998,7 @@ class PMRuntimeTests(unittest.TestCase):
         first = runtime.send('派工')
         process.emit(*_bg_turn('第一輪', 1))
         first = list(first)
-        self.assertEqual(first[0]['type'], 'TURN_ACCEPTED')
+        self.assertNotIn('TURN_ACCEPTED', [event['type'] for event in first])
         self.assertEqual(first[-1]['usage'], {'output_tokens': 1})
         self.assertIsNone(runtime.background_turn(timeout=0.05))   # idle: nothing to claim
         process.emit({'type': 'system', 'subtype': 'status'},   # not a turn: dropped
@@ -1006,7 +1052,6 @@ class PMRuntimeTests(unittest.TestCase):
         runtime.open()
         owner = runtime.send('請問')
         process.emit(_runtime_delta(0, '答'))
-        self.assertEqual(next(owner)['type'], 'TURN_ACCEPTED')
         self.assertEqual(next(owner)['text'], '答')
         # Owner turn lines are never claimed as a background turn.
         self.assertIsNone(runtime.background_turn(timeout=0.05))
@@ -1105,6 +1150,110 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(len(process.users()), 1)
         self.assertFalse(runtime.turn_active())
 
+
+    def _statuses(self):
+        return {t['owner_text']: (t['status'], t['result_text']) for t in
+                pm_runtime.read_history(SESSION, state_root=self.root)['turns']}
+
+    def test_missing_started_frame_ends_unknown_after_the_bound_and_is_not_resent(self):
+        # Codex v2 P1: `queued` but never `started` must not leave the turn ACTIVE forever.
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        with patch.object(pm_runtime, 'PM_STARTED_GRACE', 0.3):
+            owner = runtime.send('回報進度')
+            process.lifecycle(process.users()[0]['uuid'], 'queued')
+            began = time.monotonic()
+            events = list(owner)
+        self.assertLess(time.monotonic() - began, 3)
+        self.assertEqual([(e['type'], e['status']) for e in events], [('TURN_END', 'UNKNOWN')])
+        self.assertEqual(self._statuses(), {'回報進度': ('UNKNOWN', '')})
+        self.assertEqual(len(process.users()), 1)
+        self.assertFalse(runtime.turn_active())
+
+    def test_missing_queued_frame_ends_unknown_after_the_bound(self):
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        with patch.object(pm_runtime, 'PM_QUEUED_TIMEOUT', 0.3):
+            events = list(runtime.send('回報進度'))
+        self.assertEqual([(e['type'], e['status']) for e in events], [('TURN_END', 'UNKNOWN')])
+        self.assertEqual(len(process.users()), 1)
+
+    def test_late_queued_after_a_background_result_is_not_misattributed(self):
+        # Codex v2 P1: a result seen before `queued` used to be taken as the Owner reply.
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        owner = runtime.send('回報進度')
+        message = process.users()[0]['uuid']
+        process.emit(*_bg_turn('背景回覆', 2))        # a whole turn before `queued`
+        process.lifecycle(message, 'queued', 'started')
+        process.emit(*_bg_turn('進度如下', 3))
+        process.lifecycle(message, 'completed')
+        events = list(owner)
+        self.assertEqual([e['type'] for e in events],
+                         ['BACKGROUND_TURN_START', 'TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END',
+                          'TURN_ACCEPTED', 'TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
+        self.assertEqual((events[3]['origin'], events[3]['result_text']), ('background', '背景回覆'))
+        self.assertEqual((events[-1]['result_text'], events[-1]['usage']),
+                         ('進度如下', {'output_tokens': 3}))
+        self.assertEqual(self._statuses(), {'回報進度': ('COMPLETED', '進度如下'),
+                                            '': ('COMPLETED', '背景回覆')})
+
+    def test_background_result_without_any_lifecycle_frame_ends_unknown_not_answered(self):
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        with patch.object(pm_runtime, 'PM_QUEUED_TIMEOUT', 0.3):
+            owner = runtime.send('回報進度')
+            process.emit(*_bg_turn('背景回覆', 2))
+            events = list(owner)
+        self.assertEqual([(e['type'], e.get('status'), e.get('origin')) for e in events
+                          if e['type'] == 'TURN_END'],
+                         [('TURN_END', 'COMPLETED', 'background'), ('TURN_END', 'UNKNOWN', None)])
+        self.assertEqual(self._statuses(), {'回報進度': ('UNKNOWN', ''),
+                                            '': ('COMPLETED', '背景回覆')})
+
+    def test_bound_passing_inside_a_background_turn_is_recorded_at_once(self):
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        start, delta, assistant, result = _bg_turn('長背景', 2)
+        with patch.object(pm_runtime, 'PM_QUEUED_TIMEOUT', 0.3):
+            owner = runtime.send('回報進度')
+            process.emit(start, delta)
+            self.assertEqual(next(owner)['type'], 'BACKGROUND_TURN_START')
+            self.assertEqual(next(owner)['type'], 'TEXT_DELTA')
+            rest = []
+            reader = threading.Thread(target=lambda: rest.extend(owner), daemon=True)
+            reader.start()   # like the TUI worker: blocked in the iterator meanwhile
+            deadline = time.monotonic() + 3
+            while self._statuses()['回報進度'][0] == 'ACTIVE' and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertEqual(self._statuses()['回報進度'][0], 'UNKNOWN')   # not ACTIVE
+            process.emit(assistant, result)
+            reader.join(5)
+        self.assertEqual([e.get('status') for e in rest if e['type'] == 'TURN_END'],
+                         ['COMPLETED', 'UNKNOWN'])
+        self.assertFalse(runtime.turn_active())
+
+    def test_completed_before_started_is_ambiguous_and_ends_unknown(self):
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        owner = runtime.send('回報進度')
+        process.lifecycle(process.users()[0]['uuid'], 'queued', 'completed')
+        self.assertEqual([e['status'] for e in owner], ['UNKNOWN'])
+        self.assertEqual(len(process.users()), 1)
+
+    def test_normal_path_events_are_unchanged(self):
+        process = LiveProcess()
+        runtime = self.runtime(process)
+        runtime.open()
+        owner = runtime.send('請問')
+        process.emit(*_bg_turn('答', 1))
+        self.assertEqual([e['type'] for e in owner], ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
 
 if __name__ == '__main__':
     unittest.main()

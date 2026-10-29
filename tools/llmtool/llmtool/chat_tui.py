@@ -1982,11 +1982,13 @@ class ChatTUI:
             for event in runtime.send(text, idempotency_key=key):
                 if type(event) is dict:
                     self._post(loop, self.pm_event, event, seq)
-                    if (event.get("type") == "TURN_END" and event.get("status") == "NOT_SENT"
-                            and event.get("origin") is None):
-                        # Claude Code withdrew it unprocessed (Esc while it waited behind a
-                        # background turn): it goes back to the queue, never lost.
-                        self._post(loop, self._pm_hold, text, seq, "NOT_SENT")
+                    if (event.get("type") == "TURN_END" and event.get("origin") is None
+                            and event.get("status") in ("NOT_SENT", "UNKNOWN")):
+                        # NOT_SENT: Claude Code withdrew it unprocessed (Esc while it waited
+                        # behind a background turn). UNKNOWN: its fate could not be
+                        # confirmed in time. Either way it goes back to the queue, never
+                        # lost; an UNKNOWN one is never sent again without the Owner.
+                        self._post(loop, self._pm_hold, text, seq, event["status"])
         except LLMToolError as exc:
             if chat_tui_pm.error_code(exc) == "PM_TURN_ACTIVE":
                 # P0-3: a background turn started first; nothing was sent. The draft goes
@@ -2008,6 +2010,10 @@ class ChatTUI:
         if status == "HELD":
             self._pm_notice("llmtool: PM 正在處理背景通知；這則訊息沒有送出，保留在佇列第 1 則，"
                             "背景回合結束後送出")
+        elif status == "UNKNOWN":
+            self.pm_outbox_paused = "UNKNOWN"   # only the Owner resends it
+            self._pm_notice("llmtool: 無法確認 PM 是否收到這則訊息（UNKNOWN），未自動重送；"
+                            "可用 /pm queue send 重送")
         else:
             self._pm_notice("llmtool: Claude Code 沒有處理這則訊息（已撤回），保留在佇列第 1 則")
 

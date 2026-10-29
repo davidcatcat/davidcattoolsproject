@@ -2075,6 +2075,7 @@ class FakeClaude:
         self.terminated = self.closed_stdin = False
         self.returncode = None
         self.turn_lock = threading.Lock()   # one Claude Code turn at a time
+        self.withhold = set()               # lifecycle states this fake never reports
 
     # stdin side ------------------------------------------------------------
     def write(self, data):
@@ -2105,7 +2106,7 @@ class FakeClaude:
             pass
 
     def _lifecycle(self, line, state):
-        if line.get('uuid'):
+        if line.get('uuid') and state not in self.withhold:
             self._emit({'type': 'command_lifecycle', 'command_uuid': line['uuid'],
                         'state': state, 'uuid': 'frame'})
 
@@ -3731,6 +3732,34 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('保留在佇列第 1 則', ui.conversation.text)
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['回報進度'])
+        self.assertEqual(list(ui.pm_outbox), [])
+
+    def test_unconfirmed_message_ends_unknown_and_is_resent_only_by_the_owner(self):
+        # Codex v2 P1: `queued` but no `started` within the bound: UNKNOWN, never re-sent
+        # automatically; the draft waits, paused, for /pm queue send.
+        self.turns = [[], [_delta('收到'), _result('收到')]]
+
+        def withhold(ui):
+            self.fakes[0].withhold = {'started', 'completed'}
+
+        async def unknown(ui):
+            await self.until(ui, lambda ui: 'UNKNOWN' in ui.conversation.text
+                             and not ui.pm_turn_active, 'UNKNOWN shown')
+            self.assertIn('無法確認 PM 是否收到這則訊息（UNKNOWN），未自動重送；可用 /pm queue send 重送',
+                          ui.conversation.text)
+            self.assertEqual(list(ui.pm_outbox), ['回報進度'])
+            self.assertEqual(ui.pm_outbox_paused, 'UNKNOWN')
+            await asyncio.sleep(0.3)
+            self.assertEqual(len(self.fakes[0].users()), 1)   # nothing re-sent by itself
+            self.fakes[0].withhold = set()
+
+        with patch.object(self.pm_runtime, 'PM_STARTED_GRACE', 0.3):
+            ui, _ = self.drive([self.connect(), self.connected, withhold, '回報進度\r', unknown,
+                                '/pm queue send\r',
+                                lambda ui: self.until(ui, lambda ui: 'PM:\n收到' in ui.conversation.text
+                                                      and not ui.pm_turn_active, 'resent')])
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['回報進度', '回報進度'])
         self.assertEqual(list(ui.pm_outbox), [])
 
     def test_run_closes_the_pm_runtime_even_when_the_app_fails(self):
