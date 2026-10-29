@@ -8,6 +8,7 @@ import signal
 import stat
 import sys
 import threading
+from pathlib import Path
 
 from .config import api_key, init_config, resolve_config, show_config, user_config_path
 from .configure import run_configure
@@ -129,8 +130,9 @@ def parser_for_cli():
         if command == "context-pack":
             child.add_argument("--json", action="store_true", help="output a validated Context Packet as JSON")
         add_options(child)
-    chat = sub.add_parser("chat", help="Start a memory-only interactive chat")
+    chat = sub.add_parser("chat", help="Start an interactive chat with private local history")
     chat.add_argument("--skill", help="explicit runtime skill name")
+    chat.add_argument("--no-history", action="store_true", help="disable saved history; keep it in memory only")
     chat.add_argument("--tui", action="store_true",
                       help="opt-in full-screen terminal UI (needs llmtool[tui]); falls back to line chat")
     add_options(chat)
@@ -615,7 +617,9 @@ def main(argv=None):
             print(show_config(config), end="")
             return 0
         if args.command == "chat":
-            session = ChatSession(config, selected_skill)
+            history_path = (None if args.no_history else
+                            Path.home() / ".local/state/llmtool/chat/history.json")
+            session = ChatSession(config, selected_skill, history_path=history_path)
             if args.tui:
                 # Lazy import: the default line chat never loads the optional UI.
                 from .chat_tui import run_chat_tui
