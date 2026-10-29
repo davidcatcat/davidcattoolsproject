@@ -564,6 +564,8 @@ def add_task_submission_parsers(actions):
                                help='registered D6 Executor task id')
     claude_result.add_argument('--head', required=True,
                                help='40-character result HEAD SHA')
+    claude_result.add_argument('--pm-session', required=True,
+                               help='original Claude Code PM session ID or stored pm- session ID')
     review_prompt = actions.add_parser(
         'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
     review_prompt.add_argument('task_id', help='existing durable Task ID')
@@ -783,8 +785,11 @@ def run_task_claude_result(args, *, store=None, stdout=None):
     """Persist the one Claude Developer result against its original PM session."""
     store = TaskStore() if store is None else store
     task = store.get(args.task_id)
+    pm_session_id = getattr(args, 'pm_session', None)
+    if type(pm_session_id) is not str or not pm_session_id:
+        raise LLMToolError('original PM session is required')
     result = store.record_claude_result(
-        args.task_id, pm_session_id=task['pm_session_id'],
+        args.task_id, pm_session_id=pm_session_id,
         executor_task_id=args.executor_task, head_sha=args.head)
     _print(_task_view(result), stdout=stdout)
     return 0

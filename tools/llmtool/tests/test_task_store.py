@@ -1,5 +1,6 @@
 import fcntl
 import hashlib
+import io
 import json
 import os
 import errno
@@ -266,6 +267,24 @@ class TaskStoreTests(unittest.TestCase):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
                 executor_task_id='executor-1', head_sha='a' * 40)
+
+    def test_claude_result_cli_requires_invoking_pm_session(self):
+        task = self._claude_result_task()
+        args = SimpleNamespace(task_id=task['task_id'], executor_task='executor-1',
+                               head='a' * 40)
+        with self.assertRaises(LLMToolError):
+            task_submission_cli_module.run_task_claude_result(args, store=self.store)
+        args.pm_session = 'pm-not-the-original'
+        with self.assertRaises(LLMToolError):
+            task_submission_cli_module.run_task_claude_result(args, store=self.store)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                         'DEVELOPER_PENDING')
+        args.pm_session = task['pm_session_id']
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.assertEqual(task_submission_cli_module.run_task_claude_result(
+                args, store=self.store, stdout=io.StringIO()), 0)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                         'DEVELOPER_RESPONDED')
 
     def test_claude_result_rejects_wrong_state(self):
         task = self._codex_dispatch_task()
