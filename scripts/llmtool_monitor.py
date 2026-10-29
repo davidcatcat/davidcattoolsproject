@@ -2533,6 +2533,28 @@ def _claude_activity_time(tail: list) -> float:
     return newest
 
 
+def _claude_last_turn_finished(tail: list) -> bool:
+    """Whether the newest timestamped conversation entry records a finished turn.
+
+    Claude appends a `turn_duration` system entry when an assistant turn ends.
+    Later untimed metadata records must not make that completed turn look busy.
+    """
+    for item in reversed(tail):
+        if item.get("type") not in ("user", "assistant", "system"):
+            continue
+        stamp = item.get("timestamp")
+        if type(stamp) is not str:
+            continue
+        try:
+            parsed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                continue
+        except (ValueError, OverflowError):
+            continue
+        return item.get("type") == "system" and item.get("subtype") == "turn_duration"
+    return False
+
+
 TURN_MARKERS = ("task_started", "task_complete", "turn_aborted")
 OFFICE_TURN_SCAN = 64 << 20   # how far before the tail a Codex turn marker is looked for
 _turn_cache: dict = {}        # {path: (scanned up to, marker)} for the part before the tail
@@ -3372,6 +3394,8 @@ def _claude_state(entry: dict, who: str, task: str, detail: str, age: float | No
     suffix = f"（{task}）" if task else ""
     quiet = float("inf") if age is None else age   # no session file: no activity seen
     state = WORKING if quiet <= OFFICE_BUSY else IDLE
+    if _claude_last_turn_finished(tail):
+        state = IDLE
     if status == "waiting" or job == "blocked":
         # Stopped at a prompt or menu only a person or its driving agent can answer.
         state = ATTENTION
