@@ -1547,6 +1547,21 @@ class TaskStoreTests(unittest.TestCase):
                          'TASK_ABANDONMENT_CONFLICT')
         self.assertEqual(self.store.get(value['task_id']), saved)
 
+    def test_create_rejects_abandonment_without_writing_record(self):
+        value = record()
+        value['abandonment'] = {
+            'reason': 'PM stopped this Task',
+            'abandoned_at': '2026-10-29T00:00:00Z',
+            'pm_session_id': value['pm_session_id'],
+        }
+
+        with self.assertRaises(LLMToolError) as refused:
+            self.store.create(value)
+
+        self.assertEqual(refused.exception.task_store_error_code,
+                         'TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+        self.assertFalse((self.root / (value['task_id'] + '.json')).exists())
+
     def test_abandonment_schema_requires_exact_shape(self):
         value = self._codex_dispatch_task()
         self.store.create(value)

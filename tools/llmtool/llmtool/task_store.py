@@ -1885,6 +1885,8 @@ class TaskStore:
         return record
 
     def create(self, record):
+        if type(record) is dict and 'abandonment' in record:
+            _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
         if (type(record) is not dict or 'dispatch_audit' in record or
                 'completion_events' in record or 'completion_event_tombstones' in record):
             _fail()
