@@ -238,4 +238,7 @@ def history_text(result):
             safe_code(turn.get("status")),
             (" tools: " + ", ".join(safe_name(t) for t in tools)) if tools else "",
             safe_text(turn.get("result_text"), "") or "(no stored reply text)"))
+        if type(turn.get("usage")) is dict and turn["usage"]:
+            # The pane shows a short usage line per turn; the full numbers are here (W56a).
+            lines.append("(history) usage: " + usage_text(turn.get("usage")))
     return "\n".join(lines)
