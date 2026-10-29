@@ -2476,6 +2476,30 @@ class OfficeViewTests(unittest.TestCase):
         # A job id is a name under jobs/, never a path.
         self.assertIsNone(mon._job_state(str(self.claude.parent / "sessions"), {"jobId": "../j1"}))
 
+    def test_d6_developer_binding_preserves_explicit_ui_session_label(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-" + "developer")
+        ui_name = "claude-" + "developer-" + "ui"
+        ui_sid = "aaaa" + "1111-0001"
+        developer_sid = "bbbb" + "2222-0002"
+        # Background sessions need a recent transcript to appear in the office
+        # view; keep both transcripts inside the registered D6 root.
+        for sid in (ui_sid, developer_sid):
+            self._write(self.claude / "proj" / f"{sid}.jsonl", [
+                {"type": "user", "cwd": str(self.task), "entrypoint": "cli"},
+                {"type": "ai-title", "aiTitle": f"title {sid}"}], age=600)
+        ui = self._registry(71, sessionId=ui_sid, kind="bg", status="busy",
+                            name=ui_name, cwd=str(self.task))
+        developer = self._registry(72, sessionId=developer_sid, kind="bg",
+                                   status="busy", name="claude-" + "developer",
+                                   cwd=str(self.task))
+
+        rows = [row for row in self.rows([ui, developer]) if row.kind != "worker"]
+
+        self.assertEqual({row.sid: row.name for row in rows}, {
+            "aaaa1111": "claude ui（背景）",
+            "bbbb2222": "claude developer（背景）",
+        })
+
     def test_background_job_state_decides_like_claude_agents(self):
         for sid in ("w", "b", "s"):
             self._write(self.claude / "proj" / f"{sid}.jsonl", [
