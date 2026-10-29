@@ -59,7 +59,8 @@ import time
 import typing
 
 # Intentionally exclude every raw process command line from rendered output.
-PS_ARGS = ("/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,etime=,stat=,command=")
+PS_COLUMNS = "pid=,ppid=,pgid=,etime=,stat=,command="   # what LINE / ps_rows() parse
+PS_ARGS = ("/bin/ps", "-A", "-o", PS_COLUMNS)
 LINE = re.compile(r"^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(\S+)\s*(.*)$")
 ALLOWED_STATE = re.compile(r"^[A-Za-z0-9+<>?!]{1,12}$")
 MAX_ANCESTRY = 64
@@ -380,7 +381,7 @@ def run_ps_users(uids) -> str:
     instead of ~0.1 s for `ps -A`. Nothing matched or a failed ps is ""."""
     try:
         response = subprocess.run(
-            ("/bin/ps", "-U", ",".join(str(uid) for uid in sorted(uids)), "-o", PS_ARGS[-1]),
+            ("/bin/ps", "-U", ",".join(str(uid) for uid in sorted(uids)), "-o", PS_COLUMNS),
             check=False, capture_output=True, text=True, errors="replace", timeout=4,
             shell=False)
     except (OSError, subprocess.SubprocessError):

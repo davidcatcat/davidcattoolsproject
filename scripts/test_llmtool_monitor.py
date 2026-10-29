@@ -4505,7 +4505,9 @@ class FakeKernel:
         return self.commands.get(pid)
 
 
-def kproc(pid, ppid, start, comm=b"x", uid=501, pstat=2, pgid=None, **kwargs):
+def kproc(pid, ppid, start, comm=b"x", uid=None, pstat=2, pgid=None, **kwargs):
+    # uid None: this account, whatever it is (CI runs as a runner account)
+    uid = os.getuid() if uid is None else uid
     return mon.KProc(pid, ppid, pgid or pid, int(start), 0, pstat, comm, uid, **kwargs)
 
 
@@ -4678,6 +4680,9 @@ class RepaintCostTests(unittest.TestCase):
         self.assertNotIn("mutated", mon._wrap("中文字工作 test，再一次", 6))
 
 
+TOKEN_HEAD = b"gh" + b"o" + b"_"   # a token-shaped fixture, never a literal token
+
+
 class DirectGitHubTests(unittest.TestCase):
     """Issue #625: the running monitor reads GitHub over HTTPS with gh's own
     token (one `gh auth token`), falling back to `gh api`."""
@@ -4708,7 +4713,7 @@ class DirectGitHubTests(unittest.TestCase):
         return source, log
 
     def test_reads_use_one_token_lookup_and_get_only(self):
-        gh = FakeRun((0, b"gho_" + b"a" * 36 + b"\n"))
+        gh = FakeRun((0, TOKEN_HEAD + b"a" * 36 + b"\n"))
         source, log = self._source([(200, [comment(4, NOW - 30, "hello")]), (200, []),
                                     (200, {"runners": []})], gh)
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
@@ -4717,13 +4722,13 @@ class DirectGitHubTests(unittest.TestCase):
         self.assertEqual([(m, p.split("?")[0]) for m, p, _ in log],
                          [("GET", "/repos/o/r/issues/comments"), ("GET", "/repos/o/r/pulls"),
                           ("GET", "/repos/o/r/actions/runners")])
-        self.assertTrue(all(h["Authorization"] == "token gho_" + "a" * 36 for _, _, h in log))
+        self.assertTrue(all(h["Authorization"] == "token " + TOKEN_HEAD.decode() + "a" * 36 for _, _, h in log))
         self.assertEqual(len(source.events), 1)
-        self.assertNotIn("gho_", source.status)
+        self.assertNotIn(TOKEN_HEAD.decode(), source.status)
 
     def _after_success(self, failure, gh_answers=((0, ["from gh"]),)):
         """One good direct read, then `failure`: (reads, gh argv, direct log)."""
-        gh = FakeRun((0, b"gho_" + b"b" * 36), *gh_answers)
+        gh = FakeRun((0, TOKEN_HEAD + b"b" * 36), *gh_answers)
         failures = list(failure) if isinstance(failure, list) else [failure]
         source, log = self._source([(200, []), *failures, (200, ["direct again"])], gh)
         clock = [1000.0]
@@ -4735,7 +4740,7 @@ class DirectGitHubTests(unittest.TestCase):
                 gh.responses.append((0, ["gh while paused"]))
             reads.append(source._get("repos/o/r/c"))   # within the pause (or not paused)
             clock[0] += mon.GITHUB_DIRECT_PAUSE + 1
-            gh.responses.insert(0, (0, b"gho_" + b"e" * 36))   # a dropped token is read again
+            gh.responses.insert(0, (0, TOKEN_HEAD + b"e" * 36))   # a dropped token is read again
             reads.append(source._get("repos/o/r/d"))
         return reads, [argv[1:5] for argv, _ in gh.calls], log, paused, source
 
@@ -4756,7 +4761,7 @@ class DirectGitHubTests(unittest.TestCase):
                 self.assertTrue(source.direct)
 
     def test_gh_failure_during_fallback_still_raises_for_the_refresh_backoff(self):
-        gh = FakeRun((0, b"gho_" + b"b" * 36), (1, b""))
+        gh = FakeRun((0, TOKEN_HEAD + b"b" * 36), (1, b""))
         source, _ = self._source([(200, []), (503, b"")], gh)
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             source._get("repos/o/r/a")
@@ -4764,7 +4769,7 @@ class DirectGitHubTests(unittest.TestCase):
                 source._get("repos/o/r/b")
 
     def test_a_404_answer_is_read_with_gh_once_without_pausing(self):
-        gh = FakeRun((0, b"gho_" + b"f" * 36), (0, ["gh answer"]))
+        gh = FakeRun((0, TOKEN_HEAD + b"f" * 36), (0, ["gh answer"]))
         source, log = self._source([(200, []), (404, b""), (200, ["direct"])], gh)
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             self.assertEqual([source._get(f"repos/o/r/{n}") for n in "abc"],
@@ -4772,7 +4777,7 @@ class DirectGitHubTests(unittest.TestCase):
         self.assertEqual(len(log), 3)
 
     def test_no_connection_before_any_answer_falls_back_to_gh_for_good(self):
-        gh = FakeRun((0, b"gho_" + b"d" * 36), (0, []), (0, []))
+        gh = FakeRun((0, TOKEN_HEAD + b"d" * 36), (0, []), (0, []))
         source, _ = self._source([OSError("proxy only")], gh)
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
             self.assertEqual(source._get("repos/o/r/a"), [])
@@ -4921,7 +4926,7 @@ class ProcessTableFidelityTests(_TableFixture, unittest.TestCase):
     def test_etime_uses_whole_seconds_like_ps(self):
         # ps: time(NULL) - p_starttime.tv_sec. Started at .70, 0.6 s later at
         # x+1.30: ps prints 00:01 (a fractional difference would say 00:00).
-        self.kernel.procs.append(mon.KProc(4200, 1, 4200, int(NOW), 700_000, 2, b"sleep", 501))
+        self.kernel.procs.append(mon.KProc(4200, 1, 4200, int(NOW), 700_000, 2, b"sleep", os.getuid()))
         self.kernel.commands[4200] = "sleep 30"
         table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
         table.rows()
@@ -5050,3 +5055,32 @@ class DeepJsonTests(unittest.TestCase):
             with open(tail, "wb") as handle:
                 handle.write(b'{"type": "user"}\n' + DEEP_JSON + b"\n")
             self.assertEqual(mon._jsonl_tail(tail), [{"type": "user"}])   # session files
+
+
+class PsArgvTests(unittest.TestCase):
+    """Codex review v4 (#637): `ps -U` asks for the same six columns as
+    `ps -A`, so ps_rows() keeps every runner-account row it prints."""
+
+    def test_ps_u_argv_has_all_six_columns_and_rows_parse(self):
+        seen = []
+
+        def fake(argv, **kwargs):
+            seen.append(list(argv))
+            return subprocess.CompletedProcess(
+                argv, 0, stdout="5000 1 5000 00:01 S /Users/ghrunner/actions-runner/bin/Runner.Worker\n")
+        with patch.object(mon.subprocess, "run", fake):
+            rows = mon.ps_rows(mon.run_ps_users({451, 450}))
+            mon.run_ps()
+        self.assertEqual(seen[0], ["/bin/ps", "-U", "450,451", "-o",
+                                   "pid=,ppid=,pgid=,etime=,stat=,command="])
+        self.assertEqual(seen[0][-1], seen[1][-1])   # the same spec as ps -A
+        self.assertEqual(rows, [(5000, 1, 5000, "00:01", "S",
+                                 "/Users/ghrunner/actions-runner/bin/Runner.Worker")])
+
+    def test_real_ps_u_rows_parse_on_this_mac(self):
+        if sys.platform != "darwin":
+            self.skipTest("macOS ps")
+        rows = mon.ps_rows(mon.run_ps_users({os.getuid()}))
+        self.assertIn(os.getpid(), [row[0] for row in rows])
+        mine, = [row for row in rows if row[0] == os.getpid()]
+        self.assertEqual(mine[1:3], (os.getppid(), os.getpgrp()))
