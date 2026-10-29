@@ -230,8 +230,13 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         raw = json.dumps({'type': 'thread.started', 'thread_id': self.THREAD}) + '\n'
         raw += json.dumps({'type': 'item.completed', 'item': {
             'type': 'agent_message', 'text': '```json\n' + json.dumps(final) + '\n```'}})
-        _, result, _ = direct._result_from_events(raw.encode('utf-8'))
+        parsed = direct._result_from_events(raw.encode('utf-8'))
+        _, result, _ = parsed
         self.assertEqual(result['tests'], ['test_one.py: passed; test_two.py: not run'])
+        self.assertEqual(set(result), set(final))
+        self.assertIs(type(result), dict)
+        self.assertEqual(parsed.final_message,
+                         '```json\n' + json.dumps(final) + '\n```')
 
     def test_signal_ended_run_without_final_message_is_interrupted(self):
         # Emit malformed partial output before the signal. The interruption
