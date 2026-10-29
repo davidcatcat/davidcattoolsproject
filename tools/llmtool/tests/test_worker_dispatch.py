@@ -72,6 +72,25 @@ class WorkerDispatchTests(unittest.TestCase):
         self.policy['workers'][worker]['reason'] = 'test policy state'
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
 
+    def test_repository_reference_patterns_follow_validated_identity_and_escape_slug(self):
+        owner_ref, evidence_ref = worker_dispatch._build_reference_patterns({
+            'slug': 'example.org/repo-name',
+            'dispatch_issue': 12,
+            'dispatch_evidence_pr': 34,
+        })
+        self.assertIsNotNone(owner_ref.fullmatch(
+            'https://github.com/example.org/repo-name/issues/12#issuecomment-7'))
+        self.assertIsNotNone(evidence_ref.fullmatch(
+            'https://github.com/example.org/repo-name/issues/12'))
+        self.assertIsNotNone(evidence_ref.fullmatch(
+            'https://github.com/example.org/repo-name/pull/34#issuecomment-8'))
+        self.assertIsNone(owner_ref.fullmatch(
+            'https://githubXcom/exampleXorg/repo-name/issues/12#issuecomment-7'))
+        self.assertIsNone(evidence_ref.fullmatch(
+            'https://github.com/example.org/repo-name/pull/340'))
+        self.assertIsNone(evidence_ref.fullmatch(
+            'https://github.com/example.org/repo-name/issues/289'))
+
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self.assertTrue(worker_dispatch.evaluate('codex-developer').allowed)
         self.assertTrue(worker_dispatch.evaluate('company-gw').allowed)

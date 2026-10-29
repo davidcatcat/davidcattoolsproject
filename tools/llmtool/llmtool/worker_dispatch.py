@@ -14,6 +14,7 @@ import sysconfig
 import uuid
 
 from .errors import LLMToolError
+from .config import repository_config
 
 POLICY_SCHEMA_VERSION = 1
 MAX_POLICY_BYTES = 64 * 1024
@@ -61,13 +62,31 @@ def _policy_path():
 
 _DEFAULT_POLICY_PATH = _policy_path()
 _POLICY_PATH = _DEFAULT_POLICY_PATH
-_OWNER_COMMENT_REF = re.compile(
-    r'https://github\.com/davidcatcat/davidcattoolsproject/issues/289'
-    r'#issuecomment-[1-9][0-9]*\Z')
+
+
+def _build_reference_patterns(repository=None):
+    """Build exact evidence references from validated trusted user config."""
+    if repository is None:
+        repository = repository_config()
+    slug = re.escape(repository['slug'])
+    dispatch_issue = repository['dispatch_issue']
+    evidence_pr = repository['dispatch_evidence_pr']
+    return (
+        re.compile(r'https://github\.com/' + slug + r'/issues/' + str(dispatch_issue)
+                   + r'#issuecomment-[1-9][0-9]*\Z'),
+        re.compile(r'https://github\.com/' + slug + r'/(?:issues/' + str(dispatch_issue)
+                   + r'|pull/' + str(evidence_pr)
+                   + r')(?:#issuecomment-[1-9][0-9]*)?\Z'),
+    )
+
+
+try:
+    _OWNER_COMMENT_REF, _POLICY_EVIDENCE_REF = _build_reference_patterns()
+except LLMToolError:
+    # Invalid trusted config must make every configured reference fail closed.
+    _OWNER_COMMENT_REF = re.compile(r'(?!)')
+    _POLICY_EVIDENCE_REF = re.compile(r'(?!)')
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
-_POLICY_EVIDENCE_REF = re.compile(
-    r'https://github\.com/davidcatcat/davidcattoolsproject/(?:issues/289|pull/283)'
-    r'(?:#issuecomment-[1-9][0-9]*)?\Z')
 
 
 class WorkerDispatchDenied(LLMToolError):

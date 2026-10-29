@@ -29,6 +29,12 @@ DEFAULTS = {
 }
 CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS = 600
 CODEX_DIRECT_MAX_TIMEOUT_SECONDS = 1800
+REPOSITORY_DEFAULTS = {
+    "slug": "davidcatcat/davidcattoolsproject",
+    "dispatch_issue": 289,
+    "dispatch_evidence_pr": 283,
+}
+REPOSITORY_ERROR = "user repository: invalid configuration"
 # Paths beginning with 'provider' apply only to the explicitly selected profile.
 ENV_OPTIONS = {
     "LLMTOOL_BASE_URL": ("provider", "base_url"),
@@ -124,8 +130,32 @@ def _provider_name(name):
         raise LLMToolError("provider name must use 1-64 letters, digits, underscores or hyphens")
 
 
+def _validate_repository(value):
+    if (type(value) is not dict or set(value) - set(REPOSITORY_DEFAULTS)):
+        raise LLMToolError(REPOSITORY_ERROR)
+    result = {**REPOSITORY_DEFAULTS, **value}
+    if (type(result["slug"]) is not str or
+            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}",
+                         result["slug"]) is None or
+            result["slug"].split("/", 1)[1] in (".", "..") or
+            type(result["dispatch_issue"]) is not int or
+            not 1 <= result["dispatch_issue"] <= 10**9 or
+            type(result["dispatch_evidence_pr"]) is not int or
+            not 1 <= result["dispatch_evidence_pr"] <= 10**9):
+        raise LLMToolError(REPOSITORY_ERROR)
+    return result
+
+
+def repository_config(home=None):
+    """Return validated repository identity from trusted user config only."""
+    user = _read_yaml(user_config_path(home), "user config")
+    return _validate_repository(user.get("repository", {}))
+
+
 def _apply_user(config, fragment):
-    _fields(fragment, {"providers", "generation", "active_provider", "diagnostics", "codex_direct"}, "user config")
+    _fields(fragment, {"providers", "generation", "active_provider", "diagnostics", "codex_direct", "repository"}, "user config")
+    if "repository" in fragment:
+        _validate_repository(fragment["repository"])
     if "diagnostics" in fragment:
         from .diagnostics_settings import parse_diagnostics_settings
         parse_diagnostics_settings(fragment["diagnostics"])
