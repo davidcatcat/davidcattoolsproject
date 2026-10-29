@@ -1100,7 +1100,7 @@ def _validate(record):
                      (developer['state'] == 'DEVELOPER_PENDING' and
                       'claude_result' in developer) or
                      (developer['state'] == 'DEVELOPER_RESPONDED' and
-                      ('claude_result' not in developer or artifact is not None or
+                      ('claude_result' not in developer or developer['artifact'] is not None or
                        usage is not None or developer['error_code'] is not None or
                        developer['model'] is not None)))):
                 _fail()
