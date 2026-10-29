@@ -2297,6 +2297,30 @@ class OfficeViewTests(unittest.TestCase):
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
+    def test_claude_metadata_tail_does_not_refresh_conversation_activity(self):
+        project = self.claude / "proj"
+        stamp = lambda age: datetime.fromtimestamp(self.NOW - age, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        real_entries = [
+            {"type": "user", "cwd": self.canonical, "timestamp": stamp(220)},
+            {"type": "assistant", "timestamp": stamp(80),
+             "message": {"content": "finished"}},
+            {"type": "system", "subtype": "turn_duration", "timestamp": stamp(77)},
+        ]
+        metadata = [{"type": kind} for kind in (
+            "last-prompt", "cost-state", "custom-title", "agent-name", "mode",
+            "permission-mode", "atis-latch", "pr-link")]
+        self._write(project / "stale.jsonl", real_entries + metadata, age=5)
+        self._write(project / "fresh.jsonl", real_entries + metadata + [
+            {"type": "assistant", "timestamp": stamp(5),
+             "message": {"content": "new turn"}}], age=5)
+
+        rows = {row.key: row for row in self.rows()}
+        stale = rows["claude:stale.jsonl"]
+        fresh = rows["claude:fresh.jsonl"]
+        self.assertEqual((stale.state, stale.age), (mon.IDLE, 77.0))
+        self.assertEqual((fresh.state, fresh.age), (mon.WORKING, 5.0))
+
     def test_claude_cli_registry_status_beats_the_session_file_guess(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")   # the D6 record names the role
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
