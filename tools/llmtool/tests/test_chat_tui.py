@@ -465,6 +465,7 @@ class WidgetTests(Base):
     @unittest.skipUnless(os.name == "posix", "requires POSIX process signal routing")
     def test_signal_before_cli_lifecycle_registration_prevents_spawn(self):
         from llmtool.providers.codex_cli import CodexCLIProvider
+        import subprocess
 
         entered = threading.Event()
         release = threading.Event()
@@ -495,13 +496,24 @@ class WidgetTests(Base):
             os.kill(os.getpid(), signal.SIGTERM)
             release.set()
 
+        real_popen = subprocess.Popen
+        cli_spawns = []
+
+        def track_cli_spawn(*args, **kwargs):
+            command = args[0] if args else kwargs.get("args")
+            if command and os.fspath(command[0]) == str(executable):
+                cli_spawns.append(command)
+            # repo_info uses subprocess.run for its best-effort git lookup. Let that
+            # unrelated child run normally while observing only this provider's CLI.
+            return real_popen(*args, **kwargs)
+
         with patch.object(CodexCLIProvider, "validate_ready", side_effect=pause_before_lifecycle), \
                 patch("llmtool.providers.codex_cli.shutil.which", return_value=str(executable)), \
-                patch("llmtool.providers.codex_cli.subprocess.Popen") as spawn:
+                patch("llmtool.providers.codex_cli.subprocess.Popen", side_effect=track_cli_spawn):
             ui, result = self.drive(["問題\r", signal_before_registration, self.idle])
         self.assertEqual(result, 0)
         self.assertTrue(ui.quit_pending)
-        spawn.assert_not_called()
+        self.assertEqual(cli_spawns, [])
 
     def test_multiline_ctrl_j_and_bracketed_paste(self):
         ui, _ = self.drive(['line one\nline two\r', self.idle,
