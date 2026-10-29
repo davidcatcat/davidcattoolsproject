@@ -17,10 +17,12 @@ output were tied to the same caret. This module keeps the model in *screen rows*
 * a resize or a re-wrap keeps the text that was at the top of the view at the top;
 * the selection is a pair of text offsets, so the copied text is exactly the selected
   text whatever the wrapping (CJK, long lines, several screens); a drag beyond the
-  pane edge scrolls and extends it. Mouse up copies the selection to the system
-  clipboard (``pbcopy`` on macOS: Terminal.app has no OSC 52 and never passes Cmd+C to
-  the application, so copying at selection time is the only way the clipboard can hold
-  the pane's selection).
+  pane edge scrolls and extends it. The selection is copied to the system clipboard
+  (``pbcopy`` on macOS) while the drag moves and again on mouse up: Terminal.app has no
+  OSC 52, and neither it nor Warp passes Cmd+C to the application (Warp runs its own
+  Copy action), so copying at selection time is the only way the clipboard can hold the
+  pane's selection. Warp also reports no release when the button goes up outside its
+  grid, which is why a moving drag copies too (W52 F3).
 
 Pure Python apart from ``make_pane`` (the prompt_toolkit control), so it is unit-testable
 without a terminal.
@@ -41,6 +43,7 @@ except ImportError:  # older wcwidth: a conservative cluster rule below
 
 WHEEL_ROWS = 1            # Rows per wheel event: Terminal.app sends one event per scrolled line.
 AUTOSCROLL_SECONDS = 0.05  # A drag held at or beyond the pane edge scrolls one row per tick.
+DRAG_COPY_SECONDS = 0.15  # A moving drag copies its selection this long after it changed.
 COPIED_SECONDS = 3.0      # How long the status bar reports a copy.
 DOUBLE_CLICK_SECONDS = 0.35
 TAB_WIDTH = 4

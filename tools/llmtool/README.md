@@ -1681,15 +1681,28 @@ without sticking or jumping. New output never moves a scrolled-back view (the
 status bar shows `捲動 N% ⇣新輸出`); scrolling back to the bottom resumes following
 (`最新`). A resize keeps the text that was at the top of the view. Dragging in the
 pane selects text; dragging past the top or bottom edge keeps scrolling and extends
-the selection; releasing copies exactly the selected text (CJK, wrapped lines,
-several screens) to the system clipboard with `pbcopy` (`wl-copy`/`xclip`/`xsel`
-elsewhere) and the status bar shows `已複製 N 字`, so Cmd+V pastes it. The pane
-has no scrollbar of its own. Terminal.app never passes Cmd+C to the application and
-has no OSC 52, which is why the copy happens on release; Ctrl-C with a selection
-copies it again and clears it instead of exiting. F6 hands the mouse back to the
-terminal (its own select/copy; the wheel then no longer scrolls the pane);
-Terminal.app also selects natively with Fn-drag and Warp with Shift-drag while
-mouse reporting is on.
+the selection. The selected text (CJK, wrapped lines, several screens) is copied to
+the system clipboard with `pbcopy` (`wl-copy`/`xclip`/`xsel` elsewhere) while the
+drag moves and again on release, and the status bar shows `已複製 N 字`, so Cmd+V
+pastes exactly it: in Warp and Terminal.app, drag and then Cmd+V; no Cmd+C is
+needed. Cmd+C never reaches the application in either terminal (Warp runs its own
+Copy action, which with no Warp selection leaves the clipboard unchanged), and Warp
+reports no mouse release when the button goes up outside its grid, which is why the
+copy happens during the drag. Ctrl-C with a selection copies it again and clears it
+instead of exiting. The pane has no scrollbar of its own. Shift-drag in Warp and
+Fn-drag in Terminal.app select natively while mouse reporting is on, and Cmd+C then
+copies that native selection. F6 hands the mouse back to the terminal (its own
+select/copy; the wheel then no longer scrolls the pane).
+
+In PM mode (`/pm connect`), the pane shows a working line (`PM 思考中… 12s`)
+within a second of Enter, redrawn every second while the PM thinks or works and
+replaced by the reply as it streams. Enter during a PM turn queues the draft (FIFO,
+shown at once as `已排入佇列（第 N 則）`, count in the status row); each turn that
+ends COMPLETED, or that Esc interrupted, sends the next queued message, one turn at
+a time. A failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing
+more is sent, the pane lists what is waiting, `/pm queue send` resumes and
+`/pm queue clear` drops it (with the count). Messages still queued at exit are
+printed to stderr.
 
 One request is in flight at a time: Enter while busy keeps the typed input and
 sends nothing; commands such as `/provider` are not run while busy. Esc, or the

@@ -1556,8 +1556,9 @@ def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
         if any(type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
                for line in receipt['final']):
             skipped = True
-            continue
-        if any(type(line) is not str or not line.strip().endswith('OK')
+        if any(type(line) is not str or not (
+                line.endswith('OK') or
+                re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
                for line in receipt['final']):
             continue
         return receipt, None
@@ -3155,6 +3156,7 @@ def run_task_github_events(args, *, store=None, stdout=None, github_get=None):
     store = TaskStore() if store is None else store
     key = active_pm_inbox.pm_session_key(args.pm_session)
     result = poll(store, key, args.issue, since=args.since, github_get=github_get)
+    result['comment_events'] = 'DISABLED_NO_TRUSTED_OWNER_SOURCE'
     _print(result, stdout=stdout)
     return 0
 

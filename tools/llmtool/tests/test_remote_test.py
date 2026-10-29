@@ -152,6 +152,15 @@ class RemoteTestTests(unittest.TestCase):
             json.dumps(invalid_pass, separators=(',', ':')).encode(),
             sha=SHA, modules=('test_remote_test',)))
 
+    def test_receipt_validation_accepts_only_exact_skip_summary(self):
+        accepted = self.receipt(final=('OK (skipped=2)',))
+        rejected = self.receipt(final=('OK (expected failures=1)',))
+
+        self.assertIsNotNone(remote_test._validate_remote_receipt(
+            accepted, sha=SHA, modules=('test_remote_test',)))
+        self.assertIsNone(remote_test._validate_remote_receipt(
+            rejected, sha=SHA, modules=('test_remote_test',)))
+
     def test_failure_excerpt_is_bounded_redacted_and_only_on_failures(self):
         cred_value = ''.join(['sk', '-']) + 'a' * 16
         screened_label = ''.join(('to', 'ken', '='))
@@ -452,6 +461,20 @@ class RemoteTestTests(unittest.TestCase):
                 final = namespace['final_line'](['Ran 3 tests', summary])
                 self.assertEqual(final, summary)
                 self.assertFalse(final.endswith('OK'))
+
+        passing = next(node for node in parsed.body
+                       if isinstance(node, ast.FunctionDef) and
+                       node.name == 'passing_final')
+        namespace = {'re': re}
+        exec(compile(ast.Module(body=[passing], type_ignores=[]),
+                     '<remote-passing-final-helper>', 'exec'), namespace)
+        self.assertTrue(namespace['passing_final']('OK'))
+        self.assertTrue(namespace['passing_final']('OK (skipped=2)'))
+        for summary in ('OK (skipped=0)', 'OK (skipped=1000000)',
+                        'OK (expected failures=1)',
+                        'OK (skipped=2, expected failures=1)'):
+            with self.subTest(passing_summary=summary):
+                self.assertFalse(namespace['passing_final'](summary))
 
     def test_module_admission_is_bounded(self):
         modules = tuple(f'test_module{i}' for i in range(9))

@@ -12,10 +12,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
+_MODULE_HOME = tempfile.TemporaryDirectory()
+_IMPORT_HOME_PATCH = patch.dict(os.environ, {'HOME': _MODULE_HOME.name})
+_IMPORT_HOME_PATCH.start()
 from llmtool import worker_dispatch
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record
+_IMPORT_HOME_PATCH.stop()
+
+
+def setUpModule():
+    global _MODULE_HOME_PATCH
+    _MODULE_HOME_PATCH = patch.dict(os.environ, {'HOME': _MODULE_HOME.name})
+    _MODULE_HOME_PATCH.start()
+    user_config = Path(_MODULE_HOME.name) / '.config' / 'llmtool' / 'config.yaml'
+    user_config.parent.mkdir(parents=True)
+    user_config.write_text('generation: {}\n', encoding='utf-8')
+
+
+def tearDownModule():
+    _MODULE_HOME_PATCH.stop()
+    _MODULE_HOME.cleanup()
 
 
 class WorkerDispatchTests(unittest.TestCase):
@@ -71,6 +89,27 @@ class WorkerDispatchTests(unittest.TestCase):
         self.policy['workers'][worker]['dispatch'] = state
         self.policy['workers'][worker]['reason'] = 'test policy state'
         self.policy_path.write_text(json.dumps(self.policy), encoding='utf-8')
+
+    def test_repository_reference_patterns_follow_validated_identity_and_escape_slug(self):
+        owner_ref, evidence_ref = worker_dispatch._build_reference_patterns({
+            'slug': 'example-org/repo.name',
+            'dispatch_issue': 12,
+            'dispatch_evidence_pr': 34,
+        })
+        self.assertIsNotNone(owner_ref.fullmatch(
+            'https://github.com/example-org/repo.name/issues/12#issuecomment-7'))
+        self.assertIsNotNone(evidence_ref.fullmatch(
+            'https://github.com/example-org/repo.name/issues/12'))
+        self.assertIsNotNone(evidence_ref.fullmatch(
+            'https://github.com/example-org/repo.name/pull/34#issuecomment-8'))
+        self.assertIsNone(owner_ref.fullmatch(
+            'https://githubXcom/exampleXorg/repoXname/issues/12#issuecomment-7'))
+        self.assertIsNone(owner_ref.fullmatch(
+            'https://github.com/example-org/repoXname/issues/12#issuecomment-7'))
+        self.assertIsNone(evidence_ref.fullmatch(
+            'https://github.com/example-org/repo.name/pull/340'))
+        self.assertIsNone(evidence_ref.fullmatch(
+            'https://github.com/example-org/repo.name/issues/289'))
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self.assertTrue(worker_dispatch.evaluate('codex-developer').allowed)
@@ -231,11 +270,17 @@ class WorkerDispatchTests(unittest.TestCase):
                     import setuptools.build_meta  # noqa: F401
                 except ImportError:
                     self.skipTest('run the package-install gate with local setuptools available')
+                lookup_home = output / 'lookup-home'
+                lookup_config = lookup_home / '.config' / 'llmtool' / 'config.yaml'
+                lookup_config.parent.mkdir(parents=True)
+                lookup_config.write_text('[invalid yaml', encoding='utf-8')
+                subprocess_env = {**os.environ, 'HOME': str(lookup_home)}
                 sdist_build = subprocess.run(
                     [sys.executable, '-B', '-c',
                      'import setuptools.build_meta as b, sys; print(b.build_sdist(sys.argv[1]))',
                      str(sdist_dir)],
-                    cwd=project_root, check=False, capture_output=True, text=True, timeout=60)
+                    cwd=project_root, env=subprocess_env, check=False, capture_output=True,
+                    text=True, timeout=60)
                 self.assertEqual(sdist_build.returncode, 0, sdist_build.stderr)
                 sdist_name = sdist_build.stdout.strip().splitlines()[-1]
                 sdist = sdist_dir / sdist_name
@@ -248,7 +293,8 @@ class WorkerDispatchTests(unittest.TestCase):
                 built = subprocess.run(
                     [sys.executable, '-B', '-m', 'pip', 'wheel', '--no-build-isolation',
                      '--no-deps', '--wheel-dir', str(wheel_dir), str(sdist)],
-                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
+                    cwd=isolated_cwd, env=subprocess_env, check=False, capture_output=True,
+                    text=True, timeout=60)
                 self.assertEqual(built.returncode, 0, built.stderr)
                 wheel = next(wheel_dir.glob('*.whl'))
                 with zipfile.ZipFile(wheel) as archive:
@@ -262,7 +308,8 @@ class WorkerDispatchTests(unittest.TestCase):
                 installed = subprocess.run(
                     [str(installed_python), '-B', '-m', 'pip', 'install', '--no-deps',
                      str(wheel)],
-                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=60)
+                    cwd=isolated_cwd, env=subprocess_env, check=False, capture_output=True,
+                    text=True, timeout=60)
                 self.assertEqual(installed.returncode, 0, installed.stderr)
                 installed_policy = install_dir / 'llmtool' / 'worker-dispatch.json'
                 self.assertTrue(installed_policy.is_file())
@@ -274,13 +321,53 @@ class WorkerDispatchTests(unittest.TestCase):
                     "assert json.loads(p.read_text(encoding='utf-8'))['schema_version'] == 1; "
                     "assert w._POLICY_PATH.resolve() == p.resolve(), "
                     "(str(w._POLICY_PATH), sys.prefix, str(p)); "
-                    "assert w.evaluate('codex-developer').allowed")
+                    "assert w.evaluate('codex-developer').reason_code == "
+                    "'WORKER_REPOSITORY_CONFIG_INVALID'")
                 lookup = subprocess.run(
                     [str(installed_python), '-B', '-I', '-c', lookup_script],
-                    cwd=isolated_cwd, check=False, capture_output=True, text=True, timeout=10)
+                    cwd=isolated_cwd, env=subprocess_env, check=False, capture_output=True,
+                    text=True, timeout=10)
                 self.assertEqual(lookup.returncode, 0, lookup.stderr)
         finally:
             os.chdir(previous)
+
+    def test_invalid_user_repository_config_has_a_distinct_dispatch_denial(self):
+        project_root = Path(__file__).resolve().parents[1]
+        home = Path(self.temp.name) / 'invalid-home'
+        user_config = home / '.config' / 'llmtool' / 'config.yaml'
+        user_config.parent.mkdir(parents=True)
+        user_config.write_text('[invalid yaml', encoding='utf-8')
+        script = (
+            "from llmtool.worker_dispatch import evaluate, WORKERS; "
+            "assert all(evaluate(worker).reason_code == "
+            "'WORKER_REPOSITORY_CONFIG_INVALID' for worker in WORKERS)"
+        )
+        result = subprocess.run(
+            [sys.executable, '-B', '-c', script], cwd=project_root,
+            env={**os.environ, 'HOME': str(home)}, check=False,
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_valid_user_repository_config_is_loaded_in_an_isolated_subprocess(self):
+        project_root = Path(__file__).resolve().parents[1]
+        home = Path(self.temp.name) / 'custom-home'
+        user_config = home / '.config' / 'llmtool' / 'config.yaml'
+        user_config.parent.mkdir(parents=True)
+        user_config.write_text(
+            'repository:\n  slug: example-org/custom-repo\n'
+            '  dispatch_issue: 12\n  dispatch_evidence_pr: 34\n', encoding='utf-8')
+        script = (
+            "from llmtool import worker_dispatch as w; "
+            "assert w._OWNER_COMMENT_REF.fullmatch("
+            "'https://github.com/example-org/custom-repo/issues/12#issuecomment-7'); "
+            "assert w._OWNER_COMMENT_REF.fullmatch("
+            "'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7') is None"
+        )
+        result = subprocess.run(
+            [sys.executable, '-B', '-c', script], cwd=project_root,
+            env={**os.environ, 'HOME': str(home)}, check=False,
+            capture_output=True, text=True, timeout=10)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_policy_is_reloaded_after_each_change(self):
         self.assertFalse(worker_dispatch.evaluate('opencode-developer').allowed)
