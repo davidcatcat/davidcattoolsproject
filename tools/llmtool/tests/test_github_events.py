@@ -235,6 +235,50 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                                    '--issue', '79']), 23)
         handler.assert_called_once()
 
+    def test_cli_reports_owner_comments_disabled_and_records_verified_merge(self):
+        task = self._ready_task()
+        task['review_dispatch_claim'] = {
+            'executor_task': 'executor-one', 'pr': 88, 'head_sha': 'a' * 40,
+            'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer-one',
+            'native_session_id': 'session-one', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+            'claimed_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:00:00Z'}
+
+        class ClaimBoundStore:
+            def task_ids(inner):
+                return self.store.task_ids()
+            def get(inner, task_id):
+                value = self.store.get(task_id)
+                if task_id == task['task_id']:
+                    value['review_dispatch_claim'] = task['review_dispatch_claim']
+                return value
+            def record_completion_event(inner, task_id, **kwargs):
+                return self.store.record_completion_event(task_id, **kwargs)
+
+        responses = {
+            ('issues/88/comments', '100'): [
+                {'id': 25,
+                 'body': '<!-- activity: type=decision actor=Owner target=PM status=GO -->',
+                 'user': {'login': 'davidcatcat'}, 'created_at': 'x', 'updated_at': 'x',
+                 'author_association': 'OWNER'}],
+            ('pulls/88', None): {'merged': True, 'merge_commit_sha': 'b' * 40,
+                                'head': {'sha': 'c' * 40}},
+            ('compare/' + 'a' * 40 + '...' + 'c' * 40, None): {'status': 'identical'}}
+        output = StringIO()
+        args = Namespace(pm_session=task['pm_session_id'], issue=[88], since=None)
+        with patch.object(github_events, 'poll', wraps=github_events.poll) as poll:
+            self.assertEqual(task_submission_cli.run_task_github_events(
+                args, store=ClaimBoundStore(), stdout=output,
+                github_get=github_responder(responses)), 0)
+
+        poll.assert_called_once()
+        self.assertNotIn('owner_comment_ids', poll.call_args.kwargs)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['comment_events'], 'DISABLED_NO_TRUSTED_OWNER_SOURCE')
+        self.assertEqual(set(result) - {'comment_events'}, {'pm_session_id', 'events'})
+        self.assertEqual(len(result['events']), 1)
+        self.assertEqual(result['events'][0]['marker_status'], 'MERGED')
+        self.assertIsNone(result['events'][0]['comment_id'])
+
 
 class TaskStoreProxy:
     """Fresh store object over the same durable directory."""
