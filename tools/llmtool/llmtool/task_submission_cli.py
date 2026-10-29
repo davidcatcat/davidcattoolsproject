@@ -1,6 +1,7 @@
 """Direct user submission to one explicitly selected PM provider profile."""
 
 import dataclasses
+import contextlib
 import hashlib
 import io
 import json
@@ -788,10 +789,12 @@ def run_task_review_dispatch(args, *, store=None):
 def run_task_advance(args, *, store=None, **adapters):
     """Thin CLI adapter for one idempotent Task advancement step."""
     from .task_advance import advance
-    result = advance(task_id=args.task_id, store=TaskStore() if store is None else store,
-        pr_number=getattr(args, 'pr', None),
-        integration_pr=getattr(args, 'integration_pr', None),
-        reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
+    captured = io.StringIO()
+    with contextlib.redirect_stdout(captured):
+        result = advance(task_id=args.task_id, store=TaskStore() if store is None else store,
+            pr_number=getattr(args, 'pr', None),
+            integration_pr=getattr(args, 'integration_pr', None),
+            reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
     _print(result)
     return 1 if result.get('codes') else 0
 
