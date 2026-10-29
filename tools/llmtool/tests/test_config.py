@@ -78,6 +78,19 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(LLMToolError, "project config: forbidden or unsupported field"):
             self.resolve()
 
+    def test_repository_identity_without_user_config_does_not_load_yaml(self):
+        with patch("llmtool.config.yaml_module", side_effect=LLMToolError("yaml unavailable")):
+            self.assertEqual(repository_config(self.home), {
+                "slug": "davidcatcat/davidcattoolsproject",
+                "dispatch_issue": 289,
+                "dispatch_evidence_pr": 283,
+            })
+
+        self.user.write_text("repository: {}\n", encoding="utf-8")
+        with patch("llmtool.config.yaml_module", side_effect=LLMToolError("yaml unavailable")):
+            with self.assertRaisesRegex(LLMToolError, "yaml unavailable"):
+                repository_config(self.home)
+
     def test_invalid_repository_identity_is_rejected_with_fixed_message(self):
         for repository in (
             {"slug": "../bad"}, {"slug": "owner.name/repo"},

@@ -148,7 +148,8 @@ def _validate_repository(value):
 
 def repository_config(home=None):
     """Return validated repository identity from trusted user config only."""
-    user = _read_yaml(user_config_path(home), "user config")
+    path = user_config_path(home)
+    user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
     return _validate_repository(user.get("repository", {}))
 
 
