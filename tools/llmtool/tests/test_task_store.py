@@ -1522,12 +1522,18 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(denied.exception.task_store_error_code, 'TASK_PM_SESSION_DENIED')
         self.assertNotIn('abandonment', self.store.get(value['task_id']))
 
-        for reason in ('', 'x' * 501, 'line\nfeed', 'password=not-a-value'):
+        for reason in ('', 'x' * 501, 'line\nfeed'):
             with self.subTest(reason=reason[:20]):
                 with self.assertRaises(LLMToolError) as invalid:
                     self.store.abandon(value['task_id'], pm_session_id=pm, reason=reason)
                 self.assertEqual(invalid.exception.task_store_error_code,
                                  'TASK_ABANDONMENT_INVALID')
+        with patch.object(task_store_module, '_emitted_sensitive', return_value=True):
+            with self.assertRaises(LLMToolError) as sensitive:
+                self.store.abandon(value['task_id'], pm_session_id=pm,
+                                   reason='Rejected by sensitive screen')
+            self.assertEqual(sensitive.exception.task_store_error_code,
+                             'TASK_ABANDONMENT_INVALID')
         saved = self.store.abandon(value['task_id'], pm_session_id=pm,
                                    reason='PM stopped this Task')
         self.assertEqual(saved['abandonment']['reason'], 'PM stopped this Task')

@@ -86,7 +86,7 @@ _V2_REMOTE_RECEIPT_OUTCOME_SHAPES = tuple(shape | frozenset((
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
     'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
-    'review_repair_claims', 'high_debug'))
+    'review_repair_claims', 'high_debug', 'abandonment'))
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
