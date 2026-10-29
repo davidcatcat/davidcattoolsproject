@@ -361,10 +361,10 @@ class TUIUserScenarioTests(TUIScenarioCase):
         terminal.submit("/pm disconnect")
         terminal.wait_text("PM disconnected", "disconnect")
         terminal.submit("/pm connect")
-        terminal.wait_text("PM history (stored by pm_runtime; last 2 of 2 turns)", "restored history")
+        terminal.wait_text("PM 歷史（最近 2 輪，存在本機）", "restored history")
         joined = "\n".join(terminal.wait_stable("history"))
-        self.assertIn("(history) PM [COMPLETED]", joined)
-        self.assertIn("(history) PM [INTERRUPTED]", joined)
+        self.assertNotIn("(history)", joined)          # W57: the live layout, no prefix
+        self.assertIn("已中斷 ·", joined)              # the interrupted turn's usage line
         self.assertIn("PM 回覆：第一題", joined)
         terminal.submit("第三題")
         terminal.wait_text("PM 回覆：第三題", "turn after reconnect")
@@ -391,6 +391,56 @@ class TUIUserScenarioTests(TUIScenarioCase):
         self.assertIn("return '你好'", text)
         self.assertTrue(any("刪除的行" in row for row in terminal.rows()), text)
         self.assertTrue(any("新增的行" in row for row in terminal.rows()), text)
+
+
+    def test_s14_w57_tool_lines_history_status_and_hidden_task_mode(self):
+        """[Mac PTY (fake provider)] S14 tool lines say what they do, /pm history, /status (W57)"""
+        terminal = self.open_terminal(rows=30, columns=100)
+        dumps = []
+
+        def dump(name):
+            dumps.append("=== " + name + " ===\n" + "\n".join(terminal.wait_stable(name)))
+
+        terminal.submit("/status")
+        terminal.wait_text("連線：未檢查", "chat /status")
+        status = terminal.text()
+        self.assertIn("實際模型：尚未呼叫", status)
+        self.assertNotIn("not probed", status)
+        dump("/status in chat mode")
+        terminal.submit("/task mode profile x")
+        terminal.wait_text("Task 模式是開發測試用；要派工請用 /pm connect 和 PM 說", "hidden /task")
+        dump("/task without the dev flag")
+        terminal.connect_pm()
+        terminal.submit("tools:%d 看進度" % (3 * self.slow))
+        terminal.wait_text("▸ 執行中：跑 focused 測試… 1s", "live tool line")
+        terminal.wait_text("▸ 執行中：跑 focused 測試… 2s", "the seconds advance")
+        dump("live tool line")
+        terminal.wait_for(_pm_idle, "tool turn end", 30)
+        terminal.wait_text("PM 回覆：看進度", "reply after the tools")
+        done = terminal.text()
+        self.assertRegex(done, "▸ 使用工具 2 次（1 次失敗）：✗ Read docs/plan.md（[0-9]+s，失敗）")
+        dump("finished tool line")
+        terminal.send("\x1b[18~")   # F7
+        terminal.wait_text("▾ 使用工具 2 次", "F7 expands")
+        expanded = terminal.text()
+        self.assertRegex(expanded, "✓ 跑 focused 測試（[0-9]+s）")
+        self.assertNotIn("SECRET_COMMAND", expanded)
+        self.assertNotIn("SECRET_OUTPUT", expanded)
+        dump("F7 expanded")
+        terminal.submit("/pm history")
+        terminal.wait_for(lambda rows: "PM 歷史（最近 1 輪，存在本機）" in
+                          terminal.text().rsplit("> /pm history", 1)[-1], "/pm history")
+        history = terminal.text()
+        self.assertNotIn("(history)", history)
+        self.assertIn("▸ 用過的工具：Bash、Read", history)
+        dump("/pm history")
+        terminal.submit("/status")
+        terminal.wait_text("狀態（PM 模式）", "PM /status")
+        self.assertIn("權限模式（本機設定）：auto", terminal.text())
+        dump("/status in PM mode")
+        out = os.environ.get("LLMTOOL_PTY_DUMP")
+        if out:
+            Path(out).write_text("\n\n".join(dumps) + "\n", encoding="utf-8")
 
 
 class TUILoadScenarioTests(TUIScenarioCase):

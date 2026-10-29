@@ -125,6 +125,9 @@ class Base(unittest.TestCase):
         self.background_tick = patch.object(chat_tui.ChatTUI, '_background_tick',
                                             lambda ui: None)
         self.background_tick.start()
+        # W57: Task mode is behind the developer flag; these tests exercise it, and
+        # NonDevTaskTests checks the default without the flag.
+        patch.dict(os.environ, {chat_tui.DEV_ENV: '1'}).start()
 
 
 class FinishRedrawTests(Base):
@@ -602,7 +605,7 @@ class WidgetTests(Base):
 
     def test_help_lists_pm_first_and_marks_task_submit_as_dev_test_only(self):
         # Owner decision 022:A (#525): /pm is the product entry; /task submit stays, labelled.
-        help_text = chat_tui.KEY_HELP
+        help_text = chat_tui.key_help(True)
         self.assertLess(help_text.index('Talk to the PM'), help_text.index('/task submit'))
         self.assertLess(help_text.index('/pm new'), help_text.index('/task submit'))
         self.assertIn('開發測試用：只登記，不會派工', help_text.split('/task submit', 1)[1][:200])
@@ -627,9 +630,9 @@ class WidgetTests(Base):
             self.assertEqual(ui.input.text, '/status')
             self.assertNotIn('connectivity', ui.conversation.text)
         ui, _ = self.drive(['/s', '\r', completed_not_run, '\r', self.idle])
-        self.assertIn('connectivity: not probed', ui.conversation.text)
+        self.assertIn('連線：未檢查', ui.conversation.text)
         ui, _ = self.drive(['/status\r', '/zzz\r', 'plain chat\r', self.idle])
-        self.assertIn('connectivity: not probed', ui.conversation.text)
+        self.assertIn('連線：未檢查', ui.conversation.text)
         self.assertIn('unknown chat command', ui.conversation.text.lower())
         self.assertEqual(self.client.complete.call_count, 1)
 
@@ -765,7 +768,7 @@ class WidgetTests(Base):
                             lambda ui: self.assertEqual(ui.menu_items, []),
                             lambda ui: self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)])
         # Only the three typed /status, /history and /help ran; the recalled one did not.
-        self.assertEqual(ui.conversation.text.count('connectivity: not probed'), 1)
+        self.assertEqual(ui.conversation.text.count('連線：未檢查'), 1)
         self.factory.assert_not_called()
 
     def test_ctrl_r_escape_cancels_and_keeps_draft(self):
@@ -802,7 +805,7 @@ class WidgetTests(Base):
                             '\x12', 'st', '\x1b\r',
                             lambda ui: self.assertFalse(ui.searching),
                             lambda ui: self.assertEqual(ui.input.text, 'a\n')])
-        self.assertEqual(ui.conversation.text.count('connectivity: not probed'), 1)
+        self.assertEqual(ui.conversation.text.count('連線：未檢查'), 1)
         self.factory.assert_not_called()
 
     def test_ctrl_r_entry_display_is_terminal_safe(self):
@@ -850,7 +853,7 @@ class WidgetTests(Base):
             self.assertFalse(ui.searching)
             self.assertEqual(ui.input.text, 'x')
         ui, _ = self.drive(['/status\r', 'x', '\x12', shrink_then_enter], size=size)
-        self.assertEqual(ui.conversation.text.count('connectivity: not probed'), 1)
+        self.assertEqual(ui.conversation.text.count('連線：未檢查'), 1)
         self.assertNotIn('> x', ui.conversation.text)
         self.factory.assert_not_called()
 
@@ -1068,7 +1071,7 @@ class WidgetTests(Base):
         self.assertTrue(self.session.last_interrupted)
         self.assertTrue(fake.closed)
         self.assertEqual(fake.yielded, ['Hello', ' world'])
-        self.assertIn('state: interrupted', ui.conversation.text)
+        self.assertIn('狀態：已中斷', ui.conversation.text)
         fake.complete.assert_not_called()
 
     def test_escape_interrupts_a_chat_reply_with_focus_in_the_conversation_pane(self):
@@ -1390,7 +1393,7 @@ class TaskModeTests(Base):
 
         ui, _ = self.drive(['hello\r', self.idle,
                             lambda ui: self.assertNotIn('TASK→PM:', ui.status_text()),
-                            '/task mode first\r', task_mode_on,
+                            '/task mode profile first\r', task_mode_on,
                             '/task mode off\r', 'again\r', self.idle])
         self.assertEqual([t['content'] for t in self.session.history],
                          ['hello', 'reply', 'again', 'reply'])
@@ -1400,7 +1403,7 @@ class TaskModeTests(Base):
 
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
-        ui, _ = self.drive(['/task mode first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
+        ui, _ = self.drive(['/task mode profile first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
                             self.idle])
         records = self.store_records()
         self.assertEqual(len(records), 1)
@@ -1437,7 +1440,7 @@ class TaskModeTests(Base):
             return code
 
         with patch('llmtool.task_submission_cli.run_task_submit', side_effect=noisy_submit):
-            ui, _ = self.drive(['/task mode first\r', 'noisy\r', self.idle])
+            ui, _ = self.drive(['/task mode profile first\r', 'noisy\r', self.idle])
         record, = self.store_records()
         self.assertIn('Task submit result: CREATED', ui.conversation.text)
         self.assertIn('Task ID: ' + record['task_id'], ui.conversation.text)
@@ -1447,14 +1450,14 @@ class TaskModeTests(Base):
     def test_large_paste_is_one_task_request(self):
         request = '\n'.join('第%d行 large paste 內容' % i for i in range(1500))
         self.assertGreater(len(request.encode('utf-8')), 40000)
-        ui, _ = self.drive(['/task mode first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
+        ui, _ = self.drive(['/task mode profile first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
                             self.idle])
         records = self.store_records()
         self.assertEqual([r['request'] for r in records], [request])
         self.assertEqual(self.pm.complete.call_count, 1)
 
     def test_provider_unavailable_shows_core_error_and_retry_condition(self):
-        ui, _ = self.drive(['/task mode missing\r', 'do work\r', self.idle])
+        ui, _ = self.drive(['/task mode profile missing\r', 'do work\r', self.idle])
         record, = self.store_records()
         self.assertEqual((record['state'], record['error_code']),
                          ('PM_UNAVAILABLE', 'PM_PROVIDER_NOT_CONFIGURED'))
@@ -1471,7 +1474,7 @@ class TaskModeTests(Base):
     def test_provider_failure_is_recorded_not_faked(self):
         from llmtool.errors import LLMToolError
         self.pm.complete.side_effect = LLMToolError('PRIVATE provider detail')
-        ui, _ = self.drive(['/task mode first\r', 'do work\r', self.idle])
+        ui, _ = self.drive(['/task mode profile first\r', 'do work\r', self.idle])
         record, = self.store_records()
         self.assertEqual(record['error_code'], 'PM_PROVIDER_UNAVAILABLE')
         self.assertIn('PM profile first must be reachable', ui.conversation.text)
@@ -1479,7 +1482,7 @@ class TaskModeTests(Base):
         self.assertNotIn('CREATED', ui.conversation.text)
 
     def test_invalid_profile_creates_no_task_and_shows_core_error(self):
-        ui, _ = self.drive(['/task mode bad!name\r', 'do work\r', self.idle])
+        ui, _ = self.drive(['/task mode profile bad!name\r', 'do work\r', self.idle])
         self.assertEqual(self.store_records(), [])
         self.assertIn('FAILED (no Task view returned by Core)', ui.conversation.text)
         self.assertIn('select one valid configured PM provider profile', ui.conversation.text)
@@ -1507,7 +1510,7 @@ class TaskModeTests(Base):
             ui.app.invalidate()
             ui.app.renderer.render(ui.app, ui.app.layout)
 
-        ui, _ = self.drive(['/task mode first\r', 'one task\r', '\r\r\r', wait_started,
+        ui, _ = self.drive(['/task mode profile first\r', 'one task\r', '\r\r\r', wait_started,
                             resize_and_redraw, '\r', lambda ui: self.assertTrue(ui.busy),
                             lambda ui: release.set(), self.idle, '\r\r',
                             lambda ui: self.assertTrue(ui.show_detail),
@@ -1550,7 +1553,7 @@ class TaskModeTests(Base):
                 processor.process_keys()
             self.assertFalse(ui.show_detail)
 
-        ui, _ = self.drive(['/task mode first\r', 'first task\r', self.idle,
+        ui, _ = self.drive(['/task mode profile first\r', 'first task\r', self.idle,
                             lambda ui: self.assertTrue(ui.show_detail), lone_escape,
                             '\x1bOQ', lambda ui: self.assertTrue(ui.show_detail),
                             '\x1bOQ', lambda ui: self.assertFalse(ui.show_detail)])
@@ -1561,7 +1564,7 @@ class TaskModeTests(Base):
         self.assertIn('Run ID: ' + self.store_records()[0]['run_id'], ui.detail.text)
 
     def test_esc_enter_still_inserts_newline_in_task_mode_with_detail_open(self):
-        ui, _ = self.drive(['/task mode first\r', 'first\r', self.idle, 'a', '\x1b\r', 'b',
+        ui, _ = self.drive(['/task mode profile first\r', 'first\r', self.idle, 'a', '\x1b\r', 'b',
                             lambda ui: self.assertEqual(ui.input.text, 'a\nb'),
                             lambda ui: self.assertTrue(ui.show_detail)])
         self.assertEqual(len(self.store_records()), 1)
@@ -1585,6 +1588,90 @@ def _developer(**fields):
             'execution': {'status': 'SUCCEEDED'}}
     base.update(fields)
     return base
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class W57ChatTests(Base):
+    """W57: /status in chat mode, and Task mode behind the developer flag."""
+
+    drive = WidgetTests.drive
+    idle = staticmethod(WidgetTests.idle)
+
+    def status(self, ui):
+        return ui.conversation.text.rsplit('> /status', 1)[1]
+
+    def test_chat_status_is_chinese_and_says_what_is_not_known_yet(self):
+        ui, _ = self.drive(['/status\r'])
+        status = self.status(ui)
+        self.assertIn('狀態（聊天模式，不是 PM）', status)
+        self.assertIn('供應商（本機設定）：first（openai-compatible）', status)
+        self.assertIn('設定的模型（本機設定）：test', status)
+        self.assertIn('實際模型：尚未呼叫', status)
+        self.assertIn('連線：未檢查', status)
+        self.assertIn('狀態：待命', status)
+        self.assertNotIn('not probed', status)
+        self.assertNotIn('connectivity', status)
+
+    def test_chat_status_shows_the_served_model_of_the_last_reply(self):
+        self.client.complete.return_value = Reply('reply', {'served_model': 'qwen3-coder-480b'})
+        ui, _ = self.drive(['hi\r', self.idle, '/status\r'])
+        status = self.status(ui)
+        self.assertIn('實際模型：qwen3-coder-480b', status)
+        self.assertIn('對話：1 輪', status)
+        self.assertEqual(self.session.last_served_model, 'qwen3-coder-480b')
+        self.client.complete.return_value = Reply('reply', {'served_model': 'bad model!'})
+        ui, _ = self.drive(['hi\r', self.idle, '/status\r'])
+        self.assertIn('實際模型：上次回覆沒有回報', self.status(ui))
+
+    def test_without_the_dev_flag_task_mode_is_hidden(self):
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        with patch('llmtool.task_submission_cli.run_task_submit') as submit:
+            ui, _ = self.drive(['/task mode profile first\r', '/task submit --provider x y\r',
+                                '/task\r', 'plain\r', self.idle,
+                                '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
+                                '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                                '/tas', lambda ui: self.assertEqual(ui.menu_items, [])])
+        submit.assert_not_called()
+        self.assertFalse(ui.dev)
+        self.assertIsNone(ui.task_profile)
+        self.assertEqual(ui.conversation.text.count('llmtool: ' + chat_tui.TASK_HIDDEN), 3)
+        self.assertEqual([t['content'] for t in self.session.history], ['plain', 'reply'])
+        help_text = ui.help_text()
+        self.assertNotIn('/task', help_text)
+        self.assertNotIn('F3', help_text)
+        self.assertNotIn('Task mode', help_text)
+        self.assertIn('/pm connect', help_text)
+        self.assertNotIn('/task submit is for development testing', ui.conversation.text)
+        self.assertEqual([c for c in chat_tui.slash_matches('/', dev=False)
+                          if c[0].startswith('/task')], [])
+
+    def test_dev_flag_from_env_or_option(self):
+        self.assertTrue(chat_tui.dev_enabled({chat_tui.DEV_ENV: '1'}))
+        self.assertFalse(chat_tui.dev_enabled({chat_tui.DEV_ENV: '0'}))
+        self.assertFalse(chat_tui.dev_enabled({}))
+        self.assertIn('/task mode profile PROFILE', chat_tui.key_help(True))
+        self.assertNotIn('/task', chat_tui.key_help(False))
+        with patch('llmtool.chat_tui.run_chat_tui', return_value=0) as run:
+            from llmtool import cli
+            home = self.temp_root
+            with patch.dict(os.environ, {'HOME': str(home)}), \
+                    patch('llmtool.cli.Path.home', return_value=home):
+                self.assertEqual(cli.main(['chat', '--tui', '--dev', '--no-history']), 0)
+        self.assertTrue(run.call_args.kwargs['dev'])
+
+    def test_task_mode_needs_the_word_profile_and_a_name(self):
+        with patch('llmtool.task_submission_cli.run_task_submit') as submit:
+            ui, _ = self.drive(['/task mode profile\r',
+                                lambda ui: self.assertIsNone(ui.task_profile),
+                                '/task mode first\r',
+                                lambda ui: self.assertIsNone(ui.task_profile),
+                                '/task mode profile first\r',
+                                lambda ui: self.assertEqual(ui.task_profile, 'first'),
+                                '/task mode off\r',
+                                lambda ui: self.assertIsNone(ui.task_profile)])
+        submit.assert_not_called()
+        self.assertEqual(ui.conversation.text.count('       /task mode profile PROFILE\n'), 2)
+        self.assertNotIn('profile profile', ui.conversation.text)
 
 
 class StatusProjectionTests(unittest.TestCase):
@@ -1808,8 +1895,8 @@ class TaskListTests(Base):
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
 
         calls = self.pm.complete.call_count
-        ui, _ = self.drive(['/task mode first\r', 'first task\r', self.idle,
-                            '/task mode missing\r', 'second task\r', self.idle,
+        ui, _ = self.drive(['/task mode profile first\r', 'first task\r', self.idle,
+                            '/task mode profile missing\r', 'second task\r', self.idle,
                             lambda ui: setattr(self, 'calls', self.pm.complete.call_count),
                             '/task list\r', self.listed, list_open,
                             '\x1b[B', lambda ui: self.assertEqual(ui.list_index, 1),
@@ -1841,7 +1928,7 @@ class TaskListTests(Base):
             await asyncio.sleep(0.8)
 
         with patch('llmtool.chat_tui_status.load_records', side_effect=counting):
-            ui, _ = self.drive(['/task mode first\r', 'a task\r', self.idle,
+            ui, _ = self.drive(['/task mode profile first\r', 'a task\r', self.idle,
                                 '/task list\r', self.listed, redraw,
                                 lambda ui: self.assertEqual(len(reads), 1),
                                 'r', self.listed, lambda ui: self.assertEqual(len(reads), 2),
@@ -1873,7 +1960,7 @@ class TaskListTests(Base):
             self.assertFalse(ui.list_visible())
 
         with patch('llmtool.chat_tui_status.load_records', side_effect=counting):
-            ui, _ = self.drive(['/task mode first\r', 'a task\r', self.idle,
+            ui, _ = self.drive(['/task mode profile first\r', 'a task\r', self.idle,
                                 '/task list\r', self.listed,
                                 lambda ui: self.assertEqual(len(reads), 1),
                                 '\r', self.idle, hidden, stale_wait,
@@ -2062,7 +2149,7 @@ class TaskEventsPaneTests(Base):
                 patch('llmtool.active_pm_inbox.record_ready_event', side_effect=boom), \
                 patch('llmtool.active_pm_inbox.ack', side_effect=boom), \
                 patch('llmtool.chat_tui_status.load_records', side_effect=counting):
-            ui, _ = self.drive(['/task mode first\r', 'event task\r', self.idle,
+            ui, _ = self.drive(['/task mode profile first\r', 'event task\r', self.idle,
                                 lambda ui: self.assertIn('Events (newest first', ui.detail.text),
                                 lambda ui: self.assertIn('[TASK] Task recorded', ui.detail.text),
                                 '/task events\r', self.listed, shown, unseen,
@@ -2238,7 +2325,7 @@ def _full_turn(hold=False):
     return ([_delta('Hello ')] + (['HOLD'] if hold else []) +
             [_delta('老闆'),
              _assistant({'type': 'text', 'text': 'Hello 老闆'},
-                        {'type': 'tool_use', 'id': 't1', 'name': 'Read', 'input': {'path': 'SECRET_PATH'}}),
+                        {'type': 'tool_use', 'id': 't1', 'name': 'Read', 'input': {'file_path': 'docs/plan.md', 'command': 'SECRET_COMMAND'}}),
              {'type': 'user', 'message': {'content': [
                  {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'SECRET_OUTPUT',
                   'is_error': True}]}},
@@ -2314,14 +2401,18 @@ class PMDisplayScreeningTests(unittest.TestCase):
         turn = _crafted_turn(tool_names=['Read', 'tool ' + self.key, 7],
                              owner_text='mine ' + self.key, result_text='theirs ' + self.key,
                              status='done ' + self.key, started_at='at ' + self.key)
-        text = self.pm.history_text({'turns': [turn]})
-        self.assertNotIn(self.key[3:9], text)
-        self.assertIn('tools: Read, [withheld], UNKNOWN', text)
-        self.assertIn('PM [UNKNOWN]', text)
-        self.assertIn('mine [REDACTED]', text)
-        self.assertIn('theirs [REDACTED]', text)
-        clean = self.pm.history_text({'turns': [_crafted_turn()]})
-        self.assertIn('(history) PM [COMPLETED] tools: Read:\nok', clean)
+        turns, total = self.pm.history_turns({'turns': [turn, 'not a turn']})
+        self.assertEqual(total, 1)
+        self.assertNotIn(self.key[3:9], repr(turns))
+        self.assertEqual(turns[0]['tools'], ['Read', '[withheld]', 'UNKNOWN'])
+        self.assertEqual(turns[0]['status'], 'UNKNOWN')
+        self.assertEqual(turns[0]['time'], '時間不明')
+        self.assertIn('mine [REDACTED]', turns[0]['owner'])
+        self.assertIn('theirs [REDACTED]', turns[0]['reply'])
+        clean, _total = self.pm.history_turns({'turns': [_crafted_turn()]})
+        self.assertEqual((clean[0]['status'], clean[0]['tools'], clean[0]['reply']),
+                         ('COMPLETED', ['Read'], 'ok'))
+        self.assertEqual(self.pm.history_turns({'turns': None}), ([], 0))
 
     def test_codes_ids_and_reasons_are_shape_checked(self):
         self.assertEqual(self.pm.safe_code('PM_PROCESS_EXITED'), 'PM_PROCESS_EXITED')
@@ -2698,7 +2789,7 @@ class PMTypewriterTests(Base):
         self.assertEqual(ui.conversation.text.count('\nPM\n'), 1)   # one label per turn
         self.assertEqual(ui.pm_queue, 'second')
         ui.pm_event({'type': 'TOOL_USE', 'tool_use_id': 't', 'name': 'Read'})
-        self.assertIn('\n  second\n\n  ▸ 使用工具 1 次（Read ×1；執行中）', ui.conversation.text)
+        self.assertIn('\n  second\n\n  ▸ 執行中：Read… 0s', ui.conversation.text)
         self.assertEqual(ui.pm_queue, '')
 
     def test_split_secret_is_screened_at_every_tick(self):
@@ -2785,20 +2876,21 @@ class PMConversationTests(BoundedPMTest):
 
             async def main():
                 task = asyncio.ensure_future(ui.app.run_async(handle_sigint=False))
-                await asyncio.sleep(0.05)
-                for step in steps:
-                    if isinstance(step, str):
-                        pipe.send_text(step)
-                        await asyncio.sleep(0.05)
-                    else:
-                        result = step(ui)
-                        if asyncio.iscoroutine(result):
-                            await result
-                if not task.done() and not ui.app.is_done:
-                    ui.app.exit(result=0)
-                result = await asyncio.wait_for(task, 5)
-                ui.close_pm()
-                return result
+                try:
+                    await asyncio.sleep(0.05)
+                    for step in steps:
+                        if isinstance(step, str):
+                            pipe.send_text(step)
+                            await asyncio.sleep(0.05)
+                        else:
+                            result = step(ui)
+                            if asyncio.iscoroutine(result):
+                                await result
+                    if not task.done() and not ui.app.is_done:
+                        ui.app.exit(result=0)
+                    return await asyncio.wait_for(task, 5)
+                finally:
+                    ui.close_pm()
 
             with tui_cli_signal_scope(ui._handle_signal):
                 return ui, self.run_ui(main)
@@ -2831,7 +2923,7 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
-            self.assertIn('PM history: no stored turns', ui.conversation.text)
+            self.assertIn('PM 歷史（最近 0 輪，存在本機）\n  還沒有存下的對話', ui.conversation.text)
             argv = self.fakes[0].argv
             self.assertEqual(argv[argv.index('--session-id') + 1], self.session_id)
             self.assertIn('--include-partial-messages', argv)
@@ -2852,7 +2944,9 @@ class PMConversationTests(BoundedPMTest):
         text = ui.conversation.text
         self.assertRegex(text, '── [0-9]{2}:[0-9]{2}\n你\n  請問進度？')   # rule, label, body
         self.assertEqual(text.count('Hello 老闆'), 1)                # assistant text not doubled
-        self.assertIn('  ▸ 使用工具 1 次（Read ×1；1 次失敗）', text)   # one line for the tools
+        self.assertRegex(text, '  ▸ ✗ Read docs/plan.md（[0-9]+s，失敗）')   # what it did, one line
+        self.assertNotIn('SECRET_COMMAND', text)                    # never another input field
+        self.assertNotIn('SECRET_OUTPUT', text)                     # never the tool output
         self.assertNotIn('· tool', text)
         self.assertNotIn('自動拒絕', text)
         self.assertIn('\n  after tool', text)                       # new block after the tool
@@ -3009,7 +3103,7 @@ class PMConversationTests(BoundedPMTest):
             await self.turn_done(ui)
             await asyncio.sleep(0.1)
             text = ui.conversation.text
-            self.assertIn('▸ 使用工具 1 次（Bash ×1；1 次失敗）', text)
+            self.assertRegex(text, '▸ ✗ Bash（[0-9]+s，自動拒絕）')
             self.assertRegex(text, '\n[0-9]+\\.[0-9] 秒')
             self.assertEqual(len(self.fakes[0].users()), 1)     # nothing more was sent
             self.assertEqual(list(ui.pm_outbox), ['next one'])
@@ -3390,10 +3484,10 @@ class PMConversationTests(BoundedPMTest):
                 status='s ' + key)]}))
         ui, _ = self.drive([self.connect(), self.connected, '/pm history\r',
                             lambda ui: self.until(ui, lambda ui: ui.conversation.text.count(
-                                'PM history (stored') == 2)])
+                                'PM 歷史（最近 1 輪，存在本機）') == 2)])
         text = ui.conversation.text
         self.assertNotIn(key[3:9], text)
-        self.assertIn('tools: [withheld]', text)
+        self.assertIn('▸ 用過的工具：[withheld]', text)
 
     def test_runtime_error_code_from_events_is_shape_checked(self):
         key = _fake_key()
@@ -3526,11 +3620,11 @@ class PMConversationTests(BoundedPMTest):
                        _result('done')]]
         ui, _ = self.drive([self.connect(), self.connected, 'run it\r', self.turn_done])
         text = ui.conversation.text
-        self.assertIn('  ▸ 使用工具 2 次（Bash ×1、Read ×1；1 次失敗）', text)
+        self.assertRegex(text, '  ▸ 使用工具 2 次（1 次失敗）：✗ Bash（[0-9]+s，自動拒絕）')
         ui.toggle_tools()                                  # F7: one line per tool
         text = ui.conversation.text
-        self.assertIn('  ▾ 使用工具 2 次（Bash ×1、Read ×1；1 次失敗）\n'
-                      '      Bash  ✗ 自動拒絕 (PERMISSION_DENIED)\n      Read  ✓', text)
+        self.assertRegex(text, '  ▾ 使用工具 2 次（1 次失敗）\n'
+                               '      ✗ Bash（[0-9]+s，自動拒絕）\n      ✓ Read（[0-9]+s）')
         self.assertNotIn('file content', text)
 
     def test_fresh_binding_connects_without_transcript(self):
@@ -3602,7 +3696,7 @@ class PMConversationTests(BoundedPMTest):
 
     def test_history_disconnect_and_chat_is_never_the_pm(self):
         def history_shown(ui):
-            return self.until(ui, lambda ui: '(history)' in ui.conversation.text)
+            return self.until(ui, lambda ui: 'PM 歷史（最近 1 輪' in ui.conversation.text)
 
         ui, _ = self.drive([self.connect(), self.connected, 'first\r', self.turn_done,
                             '/pm history\r', history_shown,
@@ -3610,14 +3704,98 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: self.assertFalse(ui.pm_mode),
                             'chat now\r', self.idle])
         text = ui.conversation.text
-        self.assertIn('(history) ', text)
-        self.assertIn('你\n  first', text)
-        self.assertIn('[COMPLETED] tools: Read', text)
+        history = text[text.index('PM 歷史（最近 1 輪，存在本機）'):]
+        self.assertNotIn('(history)', text)
+        self.assertRegex(history, '── [0-9]{2}:[0-9]{2}\n你\n  first\n\nPM\n'
+                                  '  ▸ 用過的工具：Read\n')
+        self.assertRegex(history, '\n\n[0-9]+\\.[0-9] 秒 · [0-9.k]+ tokens\n')
         self.assertIn('PM disconnected; chat mode', text)
         self.assertIn('assistant:\nreply', text)            # chat goes to the chat provider
         self.assertEqual([t['content'] for t in self.session.history], ['chat now', 'reply'])
         self.assertEqual(len(self.fakes[0].users()), 1)       # nothing more reached the PM
         self.assertTrue(self.fakes[0].closed_stdin)
+
+    def test_bash_line_says_what_it_does_never_the_command(self):
+        # W57 (Owner 2026-10-30): 「Bash ✓ … 也看不出是在跑什麼」.
+        self.turns = [[_assistant({'type': 'tool_use', 'id': 'b1', 'name': 'Bash', 'input': {
+                           'command': 'SECRET_COMMAND --token x', 'description': '列出 PR 狀態'}}),
+                       _tool_result('b1', 'SECRET_OUTPUT', False),
+                       _assistant({'type': 'tool_use', 'id': 'b2', 'name': 'Bash',
+                                   'input': {'command': 'SECRET_COMMAND'}}),
+                       _tool_result('b2', 'boom', True),
+                       _result('done')]]
+        ui, _ = self.drive([self.connect(), self.connected, 'go\r', self.turn_done])
+        text = ui.conversation.text
+        self.assertRegex(text, '  ▸ 使用工具 2 次（1 次失敗）：✗ Bash（[0-9]+s，失敗）')
+        ui.toggle_tools()
+        self.assertRegex(ui.conversation.text, '      ✓ 列出 PR 狀態（[0-9]+s）\n'
+                                               '      ✗ Bash（[0-9]+s，失敗）')
+        self.assertNotIn('SECRET_COMMAND', ui.conversation.text)
+        self.assertNotIn('SECRET_OUTPUT', ui.conversation.text)
+
+    def test_pm_tool_label_preserves_descriptions_with_paths(self):
+        for description in ('scp host:/Users/x/k.pem .',
+                            'fetch https://example.com/a/b',
+                            'export PATH=/a:/b', 'cat ~/notes/x.md'):
+            with self.subTest(description=description):
+                self.assertEqual(chat_tui_pm.tool_label({
+                    'name': 'Bash', 'description': description}), description)
+        self.assertEqual(chat_tui_pm.tool_label({
+            'name': 'Read', 'description': 'Read docs/a.md'}), 'Read docs/a.md')
+
+    def test_status_in_pm_mode_shows_the_pm_in_chinese(self):
+        ui, _ = self.drive([self.connect(), self.connected, '/status\r',
+                            lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
+                                                  ui.conversation.text)])
+        status = ui.conversation.text.split('> /status', 1)[1]
+        self.assertIn('PM session：' + self.session_id + '（claude-code，cwd .）', status)
+        # Owner #683: TUI shows paths like Claude Code (repo-relative, ~/, else full path).
+        self.assertRegex(status, r'Claude 帳號目錄：/\S*\.claude\n')
+        self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
+        self.assertIn('PM 狀態：暖機中…', status)
+        self.assertIn('佇列（本機設定）：沒有', status)
+        self.assertRegex(status, '背景：(讀取中|UNKNOWN（TaskStore：.*）|[0-9]+ 件進行中)')
+        self.assertIn('主題（本機設定）：', status)
+        self.assertNotIn('供應商', status)
+        self.assertNotIn('provider:', status)
+
+    def test_status_background_read_failure_shows_unknown_source_and_reason(self):
+        reason = 'TaskStore read denied'
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: (setattr(ui, 'background_key', self.session_id),
+                                        setattr(ui, 'background_error', reason)),
+                            '/status\r',
+                            lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
+                                                  ui.conversation.text)])
+        status = ui.conversation.text.split('> /status', 1)[1]
+        self.assertIn('背景：UNKNOWN（TaskStore：' + reason + '）', status)
+        self.assertNotIn('背景：讀取失敗', status)
+
+    def test_history_turns_use_the_live_layout(self):
+        import json
+        root = self.state
+        root.mkdir(parents=True, exist_ok=True)
+        turns = [_crafted_turn(owner_text='看 **進度**', result_text='## 結論\n- 一\n- 二',
+                               ended_at='2026-10-28T00:00:03+00:00',
+                               usage={'input_tokens': 1000, 'output_tokens': 200}),
+                 _crafted_turn(turn_id='b' * 32, seq=2, origin='background', result_text='背景完成',
+                               tool_names=[], status='INTERRUPTED')]
+        (root / ('pm-' + self.session_id + '.history.json')).write_text(json.dumps(
+            {'pm_session_id': self.session_id, 'turns': turns}))
+        ui, _ = self.drive([self.connect(), self.connected])
+        text = ui.conversation.text
+        history = text[text.index('PM 歷史（最近 2 輪，存在本機）'):]
+        self.assertNotIn('(history)', history)
+        self.assertRegex(history, '\n\n── (10-2[78] )?[0-9]{2}:[0-9]{2}\n你\n  看 \\*\\*進度\\*\\*\n\nPM\n'
+                                  '  ▸ 用過的工具：Read\n\n  ▍ 結論\n  • 一\n  • 二\n\n'
+                                  '3.0 秒 · 1.2k tokens\n\n── ')
+        self.assertIn('PM（背景通知）\n  背景完成\n\n已中斷', history)
+        view = ui.view
+        rule = text.index('── ', text.index('PM 歷史'))
+        self.assertEqual(view.token_at(rule), 'rule')
+        self.assertEqual(view.token_at(text.index('\n你\n', rule) + 1), 'role.owner')
+        self.assertEqual(view.token_at(text.index('3.0 秒')), 'meta.usage')
+        self.assertEqual(view.token_at(text.index('▸ 用過的工具')), 'tool.summary')
 
     def test_background_turn_between_owner_sends_is_shown_live_as_its_own_turn(self):
         # P0-3 (Owner TUI run 2026-10-29): task-notification turns were not shown until the
@@ -3642,7 +3820,7 @@ class PMConversationTests(BoundedPMTest):
             self.fakes[0].gate.set()
             await self.turn_done(ui)
             text = ui.conversation.text
-            self.assertIn('  ▸ 使用工具 1 次（Bash ×1）', text)
+            self.assertRegex(text, '  ▸ ✓ Bash（[0-9]+s）')
             self.assertIn('秒 · 2 tokens', text)
             self.assertNotIn('SECRET', text)
 
@@ -3660,9 +3838,12 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('秒 · 3 tokens', text[owner:])
         self.assertNotIn('Codex 回報', text[owner:])   # the background reply stays its own turn
         turns = self.api.read_history(self.session_id)['turns']
-        shown = chat_tui_pm.history_text({'turns': turns})
-        self.assertIn('  PM（背景通知）\n(history) PM [COMPLETED] tools: Bash:\nCodex 回報', shown)
-        self.assertIn('  owner → PM:\n回報進度', shown)
+        shown, total = chat_tui_pm.history_turns({'turns': turns})
+        self.assertEqual(total, 3)
+        self.assertTrue(shown[1]['background'])
+        self.assertEqual(shown[1]['reply'], 'Codex 回報')
+        self.assertFalse(shown[2]['background'])
+        self.assertEqual(shown[2]['owner'], '回報進度')
         self.assertEqual([(t['owner_text'], t.get('origin'), t['usage']) for t in turns],
                          [('派工', None, {'output_tokens': 1}),
                           ('', 'background', {'output_tokens': 2}),

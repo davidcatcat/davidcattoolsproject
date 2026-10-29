@@ -209,6 +209,87 @@ def _screen_stream_text(value):
     return screened
 
 
+# W57: what a tool call does, for the TUI line. Bash's own description, else the tool name
+# with its path or pattern; never a command or any other input field.
+_TOOL_TARGET_KEYS = ('pattern', 'file_path', 'notebook_path', 'path', 'url')
+TOOL_DESCRIPTION_CHARS = 240
+
+
+def _display_local_path(value, cwd=None):
+    """Shorten paths inside the repository or home; keep other paths intact."""
+    if not isinstance(value, str) or not value.startswith('/'):
+        return value
+    path = os.path.normpath(value)
+    roots = []
+    if isinstance(cwd, str) and cwd:
+        roots.append((os.path.normpath(os.path.abspath(cwd)), 'repo'))
+    home = os.path.normpath(str(Path.home()))
+    roots.append((home, 'home'))
+    for root, kind in roots:
+        try:
+            if os.path.commonpath((root, path)) == root:
+                relative = os.path.relpath(path, root)
+                if kind == 'repo':
+                    return '.' if relative == '.' else relative
+                return '~' if relative == '.' else '~/' + relative
+        except ValueError:
+            continue
+    return path
+
+
+def _is_display_path(value):
+    if not isinstance(value, str) or not value:
+        return False
+    if value in ('.', '~', '[root]'):
+        return True
+    tail = value[2:] if value.startswith('~/') else value[1:] if value.startswith('/') else value
+    return all(
+        part
+        and part not in ('.', '..')
+        and part == part.strip()
+        and all(char.isprintable() for char in part)
+        for part in tail.split('/')
+    )
+
+
+def display_path(value, cwd=None):
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if value == '/':
+        return '[root]'
+    raw = value[1:] if value.startswith('/') else value
+    if not _is_display_path(raw):
+        return None
+    shown = _display_local_path(value, cwd)
+    return shown if _is_display_path(shown) else None
+
+
+def _tool_description(name, tool_input, cwd=None):
+    if (not isinstance(tool_input, dict)
+            or not isinstance(name, str)
+            or '/' in name
+            or not name.isprintable()):
+        return None
+    raw = tool_input.get('description')
+    text = None
+    if isinstance(raw, str):
+        text = ' '.join(''.join(char for char in raw
+                                if char.isprintable() or char.isspace()).split())
+
+    if not text:
+        for key in _TOOL_TARGET_KEYS:
+            target = display_path(tool_input.get(key), cwd)
+            if target:
+                text = name + ' ' + target
+                break
+
+    if not text:
+        return None
+    screened = _screen_stream_text(text[:TOOL_DESCRIPTION_CHARS])
+    return screened if screened != '[withheld]' else None
+
+
 _STREAM_SECRET_START = re.compile(
     r'-----BEGIN(?: [A-Z]+)* PRIVATE KEY-----|'
     r'\b(?:AKIA|ASIA)[A-Z0-9]*|\bsk-[A-Za-z0-9_-]*|'
@@ -595,7 +676,9 @@ class _TurnParser:
                     if isinstance(name, str):
                         if name not in record['tool_names']:
                             record['tool_names'].append(name)
-                        out.append(self.emit('TOOL_USE', tool_use_id=tool_id, name=name))
+                        out.append(self.emit('TOOL_USE', tool_use_id=tool_id, name=name,
+                                             description=_tool_description(
+                                                 name, item.get('input'), self.runtime.cwd)))
         elif kind == 'user':
             for item in _iter_content((line.get('message') or {}).get('content')):
                 if isinstance(item, dict) and item.get('type') == 'tool_result':
