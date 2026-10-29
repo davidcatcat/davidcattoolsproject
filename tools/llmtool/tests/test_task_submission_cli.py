@@ -652,6 +652,41 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(main(['task', 'show', saved['task_id']]), 0)
         self.assertEqual(json.loads(output.getvalue())['pm_provenance'], saved['pm_provenance'])
 
+    def test_record_pm_reports_safe_assignment_limit_diagnostics(self):
+        cases = (
+            ({'route': 'codex', 'risk': 'LOW', 'goal': 'g' * 515,
+              'acceptance': ['A test passes.']},
+             'PM_RESPONSE_GOAL_TOO_LONG: goal is 515 bytes (max 512)'),
+            ({'route': 'codex', 'risk': 'LOW', 'goal': 'Do one task.',
+              'acceptance': ['x' * 539]},
+             'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[0] is 539 bytes (max 512)'),
+            ({'route': 'codex', 'risk': 'LOW', 'goal': 'Do one task.',
+              'acceptance': ['ok'] * 22},
+             'PM_RESPONSE_ACCEPTANCE_COUNT: 22 items (allowed 1-16)'),
+        )
+        for assignment, expected in cases:
+            with self.subTest(expected=expected):
+                response = json.dumps({
+                    'schema_version': 1, 'summary': 'Bounded.',
+                    'developer_assignment': assignment,
+                })
+                envelope = json.dumps({'request': 'Build feature', 'response': response})
+                store = TaskStore(Path(self.temp.name).resolve() / 'over-limit')
+                with self.assertRaisesRegex(LLMToolError, expected):
+                    run_task_record_pm(Namespace(stdin_json=True), store=store,
+                                       input_stream=io.StringIO(envelope))
+                self.assertFalse(store.root.exists())
+
+    def test_task_delegate_reports_acceptance_item_size_without_echoing_text(self):
+        secretish = 'x' * 513
+        args = Namespace(acceptance=[secretish])
+        with self.assertRaises(LLMToolError) as raised:
+            run_task_delegate(args, store=object())
+        self.assertEqual(str(raised.exception),
+                         'PM_RESPONSE_ACCEPTANCE_ITEM_TOO_LONG: acceptance[0] is '
+                         '513 bytes (max 512)')
+        self.assertNotIn(secretish, str(raised.exception))
+
     def test_record_pm_rejects_malformed_or_sensitive_input_without_task(self):
         good_response = json.dumps({
             'schema_version': 1, 'summary': 'Bounded.',
