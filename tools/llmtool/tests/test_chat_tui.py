@@ -1022,6 +1022,51 @@ class WidgetTests(Base):
         self.assertIn('state: interrupted', ui.conversation.text)
         fake.complete.assert_not_called()
 
+    def test_escape_interrupts_a_chat_reply_with_focus_in_the_conversation_pane(self):
+        # W52 B2: Tab to read the reply, then Esc: it interrupts and keeps a selection.
+        copies = []
+        patch('llmtool.chat_tui_view.copy_to_clipboard', side_effect=copies.append).start()
+        gate = threading.Event()
+        fake = FakeStream(['Hello', ' world', ' never shown'], gate)
+        self.factory.return_value = fake
+
+        async def streaming(ui):
+            await self.until(ui, lambda ui: ui.stream_raw is not None)
+
+        def reading(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.conversation))
+            ui.view.anchor, ui.view.head = 0, 6     # a selection W42 keeps
+
+        async def escaped(ui):
+            self.assertTrue(ui.send_interrupted)
+            self.assertEqual(ui.view.selected_range(), (0, 6))
+            gate.set()
+            await self.idle(ui)
+
+        ui, result = self.drive(['question\r', streaming, '\t', reading, lone_escape, escaped,
+                                 lambda ui: ui.view.clear_selection()])
+        self.assertEqual(copies, [])
+        self.assertEqual(result, 0)
+        self.assertNotIn('never shown', ui.conversation.text)
+        self.assertEqual(self.session.state, 'interrupted')
+
+    def test_escape_in_the_conversation_pane_without_a_reply_keeps_the_selection(self):
+        copies = []
+        patch('llmtool.chat_tui_view.copy_to_clipboard', side_effect=copies.append).start()
+        def reading(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.conversation))
+            ui.view.anchor, ui.view.head = 0, 6
+
+        def kept(ui):
+            self.assertEqual(ui.view.selected_range(), (0, 6))
+            self.assertFalse(ui.send_interrupted)
+
+        ui, result = self.drive(['\t', reading, lone_escape, kept,
+                                 lambda ui: ui.view.clear_selection()])
+        self.assertEqual(result, 0)
+        self.assertEqual(copies, [])
+        self.factory.assert_not_called()
+
     def test_ctrl_c_interrupts_a_streaming_reply_and_a_second_ctrl_c_exits(self):
         gates = [threading.Event(), threading.Event()]
         fakes = [FakeStream(['one', ' two', ' three'], gates[0]),
@@ -2773,6 +2818,66 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(len(self.fakes[0].users()), 1)
         self.assertIn('  1. wait', ui.unsent_queue_text())
 
+    def test_mode_switch_never_starts_a_chat_or_task_request_during_a_pm_turn(self):
+        # W52 B1 (Owner QA probe, ported): /task mode off, then Enter during a PM turn
+        # started a chat request beside it. Now the draft is kept and nothing is sent.
+        self.turns = [_full_turn(hold=True)]
+
+        async def active(ui):
+            await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_raw is not None)
+
+        async def refused(ui):
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.pm_turn_active)
+            self.assertEqual(self.factory.call_count, 0)
+            self.assertEqual(ui.input.text, 'chat while PM active')     # draft kept
+            self.assertIn('a PM turn is in progress; this draft was not sent (input kept)',
+                          ui.conversation.text)
+            self.assertFalse(ui.busy)
+            self.assertEqual(list(ui.pm_outbox), [])                    # not queued for the PM
+
+        async def task_refused(ui):
+            await asyncio.sleep(0.1)
+            self.assertIn('a PM turn is in progress; /task submit was not sent',
+                          ui.conversation.text)
+            self.assertFalse(ui.busy)
+            ui.input.buffer.reset()
+            ui.input.buffer.insert_text('chat while PM active')
+            self.fakes[0].gate.set()
+
+        ui, _ = self.drive([self.connect(), self.connected, 'PM request\r', active,
+                            '/task mode off\r', 'chat while PM active\r', refused,
+                            lambda ui: ui.input.buffer.reset(),
+                            '/task submit --provider second hello\r', task_refused,
+                            self.turn_done, '\r', self.idle])
+        self.assertEqual(self.factory.call_count, 1)        # sent once the PM turn ended
+        self.assertEqual(len(self.fakes[0].users()), 1)
+
+    def test_escape_interrupts_the_pm_turn_with_focus_in_the_conversation_pane(self):
+        # W52 B2 (Owner QA probe, ported): Tab into the conversation, then a lone Esc.
+        patch('llmtool.chat_tui_view.copy_to_clipboard', side_effect=AssertionError).start()
+        self.turns = [[_delta('one'), 'HOLD', _result('stopped')],
+                      [_delta('two'), _result('two')]]
+
+        async def active(ui):
+            await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_raw is not None)
+
+        def reading(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.conversation))
+            ui.view.anchor, ui.view.head = 0, 6
+
+        def interrupted(ui):
+            self.assertTrue(ui.pm_interrupted)
+            self.assertEqual(ui.view.selected_range(), (0, 6))   # the selection stays
+
+        ui, _ = self.drive([self.connect(), self.connected, 'PM request\r', active, 'queued\r',
+                            '\t', reading, lone_escape, interrupted,
+                            lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active
+                                                  and not ui.pm_outbox, 'queue continued')])
+        self.assertIn('— PM turn INTERRUPTED', ui.conversation.text)
+        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
+                         ['PM request', 'queued'])                # Esc continued the queue
+
     def test_working_line_shows_at_once_ticks_each_second_and_gives_way_to_text(self):
         # W52 F1: a long think showed only "owner → PM:"; now the pane says so, every second.
         self.turns = [_thinking() + ['HOLD', _delta('答案', index=1), 'HOLD',
@@ -2995,6 +3100,26 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(argv[argv.index('--session-id') + 1], created)
         ui, _ = self.drive(['/pm connect ' + created + ' ' + cwd + '\r', self.connected])
         self.assertEqual(ui.pm_target, (created, cwd))
+
+    def test_pm_paths_with_spaces_are_quoted_or_escaped_and_bad_quotes_are_explained(self):
+        # W52 B3: text.split() broke "/private/tmp/tui qa" into two words.
+        spaced = self.temp_root / 'tui qa'
+        spaced.mkdir()
+        calls = []
+        real = self.api.create_dedicated
+        self.api.create_dedicated = lambda cwd: calls.append(cwd) or real(cwd)
+        ui, _ = self.drive(['/pm new "%s"\r' % spaced, self.pending_done,
+                            '/pm new %s\r' % str(spaced).replace(' ', '\\ '), self.pending_done,
+                            '/pm new "%s\r' % spaced, self.pending_done])
+        self.assertEqual(calls, [str(spaced), str(spaced)])
+        text = ui.conversation.text
+        self.assertEqual(text.count('dedicated binding created (cwd ' + str(spaced)), 2)
+        self.assertIn('llmtool: /pm: unbalanced quote or trailing backslash', text)
+        self.assertIn('usage: /pm new [CWD]', text)
+        self.assertNotIn('Traceback', text)
+        created = self.api.current_binding()['native_session_id']
+        ui, _ = self.drive(['/pm connect %s "%s"\r' % (created, spaced), self.connected])
+        self.assertEqual(ui.pm_target, (created, str(spaced)))
 
     def test_not_dedicated_and_live_elsewhere_are_refused(self):
         import uuid as _uuid

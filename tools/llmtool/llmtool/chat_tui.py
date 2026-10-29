@@ -11,6 +11,7 @@ any UI starts. A UI failure never drops into, or replays input through, the REPL
 import asyncio
 import collections
 import os
+import shlex
 import signal
 import sys
 import threading
@@ -66,7 +67,8 @@ KEY_HELP = """Keys
   Esc (during a reply)  Interrupt the chat reply: a streamed reply stops at its next chunk
                         and the text shown so far stays, marked interrupted; a provider
                         that answers in one piece returns first, then that reply is shown
-                        marked interrupted. Ctrl-C interrupts first, a second Ctrl-C exits
+                        marked interrupted. Ctrl-C interrupts first, a second Ctrl-C exits.
+                        Esc works with focus in the input or in the conversation pane
   Ctrl-C, Ctrl-D        Exit (Ctrl-D only with empty input)
 A Task submit in progress cannot be cancelled; exit waits for it to finish or time out.
 
@@ -82,8 +84,12 @@ Talk to the PM: the dedicated Claude Code PM (/pm …) is the product entry
                         at a time, in order, each after the previous turn COMPLETED
   /pm queue             List the queued messages; /pm queue clear drops them,
                         /pm queue send resumes a paused queue
-  Esc (during a turn)   Interrupt the PM turn; the queue then continues. Ctrl-C interrupts
-                        and pauses the queue; a second Ctrl-C exits
+  Esc (during a turn)   Interrupt the PM turn (focus in the input or the conversation pane);
+                        the queue then continues. Ctrl-C interrupts and pauses the queue;
+                        a second Ctrl-C exits
+A PM turn and a chat or Task request never run together: after /task mode, Enter during a
+PM turn keeps the draft and sends nothing (nor does a Task submit) until the turn ends.
+A CWD with spaces: /pm new "/path/with space" or /pm new /path/with\\ space.
 A failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing more is sent
 until /pm queue send, and the pane lists what is waiting.
 PM replies stream in as pm_runtime reports them; tool use is one line per tool and never
@@ -143,6 +149,9 @@ ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Es
 PM_TICK_SECONDS = 0.03
 PM_CHARS_PER_TICK = 2
 PM_MAX_LAG_TICKS = 33
+PM_USAGE = ("usage: /pm new [CWD]\n       /pm connect [SESSION [CWD]]\n"
+            "       /pm disconnect\n       /pm history\n       /pm queue [clear|send]\n"
+            "       /pm\n(a CWD with spaces: quote it or escape the spaces)")
 # The pane's PM working line (W52 F1): redrawn this often while a turn has no text showing.
 PM_WORKING_SECONDS = 1.0
 QUEUE_PREVIEW_COLUMNS = 60   # Columns of each queued message shown by /pm queue and a pause.
@@ -484,12 +493,16 @@ class ChatTUI:
 
         pm_turn = Condition(lambda: self.pm_turn_active)
         chat_request = Condition(lambda: self.busy and self.worker_kind == "chat")
+        conversation_focused = has_focus(self.conversation)
+        # Esc interrupts from the input or while reading in the conversation pane (W52 B2);
+        # there it touches nothing else, so a kept selection stays.
+        reading_or_typing = input_focused | conversation_focused
 
-        @keys.add("escape", filter=input_focused & pm_turn & ~picker_shown)
+        @keys.add("escape", filter=reading_or_typing & pm_turn & ~picker_shown)
         def _pm_interrupt(event):
             self.interrupt_pm()
 
-        @keys.add("escape", filter=input_focused & chat_request & ~picker_shown)
+        @keys.add("escape", filter=reading_or_typing & chat_request & ~picker_shown)
         def _send_interrupt(event):
             self.interrupt_send()
 
@@ -537,8 +550,6 @@ class ChatTUI:
         @keys.add("pagedown")
         def _page_down(event):
             self.scroll(1)
-
-        conversation_focused = has_focus(self.conversation)
 
         @keys.add("up", filter=conversation_focused)
         def _row_up(event):
@@ -1231,11 +1242,22 @@ class ChatTUI:
             self.run_command(text)
         elif self.pm_mode:
             self.submit_pm(text)
+        elif self._pm_turn_refuses("this draft"):
+            return   # W52 B1: never a chat or Task request beside a PM turn; draft kept.
         elif self.task_profile is not None:
             self.submit_task_draft(text)
         else:
             self.input.buffer.reset(append_to_history=True)
             self.start_send(text)
+
+    def _pm_turn_refuses(self, what):
+        """A PM turn and a chat/Task request never overlap, whatever the route (W52 B1)."""
+        if not self.pm_turn_active:
+            return False
+        self.append("llmtool: a PM turn is in progress; " + what + " was not sent (input "
+                    "kept) and is not queued for the PM. Send it when the turn ends, /pm "
+                    "connect returns to PM mode (Enter queues there), Esc interrupts the turn.")
+        return True
 
     def submit_task_draft(self, text):
         """Task mode Enter: one formal Core submit per distinct draft.
@@ -1300,7 +1322,8 @@ class ChatTUI:
             if not provider or not request.strip():
                 self.append("usage: /task submit --provider PROFILE REQUEST")
                 return
-            self.start_task("submit", provider, request.strip())
+            if not self._pm_turn_refuses("/task submit"):
+                self.start_task("submit", provider, request.strip())
             return
         if len(parts) == 3 and parts[1] == "show":
             self.start_task("show", parts[2], None)
@@ -1562,7 +1585,14 @@ class ChatTUI:
         return "PM:" + compact(session_id, 8) + " " + compact(state, 18) + queued
 
     def run_pm_command(self, text):
-        parts = text.split()
+        # Shell-style words, so a CWD with spaces can be quoted or escaped (W52 B3).
+        try:
+            parts = shlex.split(text)
+        except ValueError:
+            self.append("llmtool: /pm: unbalanced quote or trailing backslash; quote a path "
+                        "with spaces as \"/path/with space\" or escape it as /path/with\\ space\n"
+                        + PM_USAGE)
+            return
         if parts == ["/pm"]:
             if self.pm_runtime is None:
                 self.append("PM: not connected. /pm connect uses the saved dedicated PM binding; "
@@ -1613,9 +1643,7 @@ class ChatTUI:
                 return
             self._pm_worker(self._pm_history, self.pm_target[0], self.pm_runtime)
             return
-        self.append("usage: /pm new [CWD]\n       /pm connect [SESSION [CWD]]\n"
-                    "       /pm disconnect\n       /pm history\n       /pm queue [clear|send]\n"
-                    "       /pm")
+        self.append(PM_USAGE)
 
     # -- PM queue (W52 F2) ---------------------------------------------------------------
     def run_queue_command(self, action):
