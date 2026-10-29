@@ -1601,6 +1601,116 @@ class TaskStoreTests(unittest.TestCase):
             self.store.record_completion_event(value['task_id'],
                 **{**args, 'session_id': '../other'})
 
+    def test_abandonment_is_pm_bound_validated_and_idempotent(self):
+        value = self._codex_dispatch_task()
+        self.store.create(value)
+        pm = value['pm_session_id']
+        with self.assertRaises(LLMToolError) as denied:
+            self.store.abandon(value['task_id'], pm_session_id='pm-wrong', reason='Stopped')
+        self.assertEqual(denied.exception.task_store_error_code, 'TASK_PM_SESSION_DENIED')
+        self.assertNotIn('abandonment', self.store.get(value['task_id']))
+
+        for reason in ('', 'x' * 501, 'line\nfeed'):
+            with self.subTest(reason=reason[:20]):
+                with self.assertRaises(LLMToolError) as invalid:
+                    self.store.abandon(value['task_id'], pm_session_id=pm, reason=reason)
+                self.assertEqual(invalid.exception.task_store_error_code,
+                                 'TASK_ABANDONMENT_INVALID')
+        with patch.object(task_store_module, '_emitted_sensitive', return_value=True):
+            with self.assertRaises(LLMToolError) as sensitive:
+                self.store.abandon(value['task_id'], pm_session_id=pm,
+                                   reason='Rejected by sensitive screen')
+            self.assertEqual(sensitive.exception.task_store_error_code,
+                             'TASK_ABANDONMENT_INVALID')
+        saved = self.store.abandon(value['task_id'], pm_session_id=pm,
+                                   reason='PM stopped this Task')
+        self.assertEqual(saved['abandonment']['reason'], 'PM stopped this Task')
+        self.assertTrue(saved['abandonment']['abandoned_at'].endswith('Z'))
+        self.assertEqual(self.store.abandon(value['task_id'], pm_session_id=pm,
+                                            reason='PM stopped this Task'), saved)
+        with self.assertRaises(LLMToolError) as conflict:
+            self.store.abandon(value['task_id'], pm_session_id=pm,
+                               reason='Different reason')
+        self.assertEqual(conflict.exception.task_store_error_code,
+                         'TASK_ABANDONMENT_CONFLICT')
+        self.assertEqual(self.store.get(value['task_id']), saved)
+
+    def test_abandonment_schema_requires_exact_shape(self):
+        value = self._codex_dispatch_task()
+        self.store.create(value)
+        with self.assertRaises(LLMToolError) as invalid:
+            self.store.update(value['task_id'], abandonment={
+                'reason': 'Stopped', 'abandoned_at': '2026-10-29T00:00:00Z',
+                'pm_session_id': value['pm_session_id'], 'extra': True,
+            })
+        self.assertEqual(invalid.exception.task_store_error_code,
+                         'TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+
+    def test_abandonment_changes_are_restricted_to_pm_bound_path(self):
+        value = self._codex_dispatch_task()
+        self.store.create(value)
+        original = self.store.get(value['task_id'])
+        stamped = {
+            'reason': 'PM stopped this Task',
+            'abandoned_at': '2026-10-29T00:00:00Z',
+            'pm_session_id': value['pm_session_id'],
+        }
+        for mutate in (
+                lambda: self.store.update(value['task_id'], abandonment=stamped),
+                lambda: self.store.compare_and_update(value['task_id'],
+                    expected={'record_sha256': original['record_sha256']},
+                    abandonment=stamped)):
+            with self.assertRaises(LLMToolError) as refused:
+                mutate()
+            self.assertEqual(refused.exception.task_store_error_code,
+                             'TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+            self.assertEqual(self.store.get(value['task_id']), original)
+
+        saved = self.store.abandon(value['task_id'],
+                                   pm_session_id=value['pm_session_id'],
+                                   reason=stamped['reason'])
+        changed = dict(saved['abandonment'], reason='Changed outside abandon')
+        for mutate in (
+                lambda: self.store.update(value['task_id'], abandonment=changed),
+                lambda: self.store.compare_and_update(value['task_id'],
+                    expected={'record_sha256': saved['record_sha256']},
+                    abandonment=changed),
+                lambda: self.store.update(value['task_id'], abandonment=None),
+                lambda: self.store.compare_and_update(value['task_id'],
+                    expected={'record_sha256': saved['record_sha256']},
+                    abandonment=None)):
+            with self.assertRaises(LLMToolError) as refused:
+                mutate()
+            self.assertEqual(refused.exception.task_store_error_code,
+                             'TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+            self.assertEqual(self.store.get(value['task_id']), saved)
+
+    def test_abandonment_pm_session_must_match_task_session(self):
+        value = self._codex_dispatch_task()
+        self.store.create(value)
+        saved = self.store.abandon(value['task_id'],
+                                   pm_session_id=value['pm_session_id'],
+                                   reason='PM stopped this Task')
+        mismatched = dict(saved)
+        mismatched['abandonment'] = dict(saved['abandonment'],
+                                         pm_session_id='pm-' + new_id())
+        with self.assertRaises(LLMToolError) as invalid:
+            task_store_module._validate(mismatched)
+        self.assertEqual(invalid.exception.task_store_error_code,
+                         'TASK_ABANDONMENT_INVALID')
+
+    def test_abandonment_supports_v1_record_shape(self):
+        value = record()
+        self.assertEqual(value['schema_version'], 1)
+        self.store.create(value)
+
+        saved = self.store.abandon(value['task_id'],
+                                   pm_session_id=value['pm_session_id'],
+                                   reason='PM stopped this Task')
+
+        self.assertEqual(saved['abandonment']['reason'], 'PM stopped this Task')
+        self.assertEqual(saved['schema_version'], 1)
+
 
 if __name__ == '__main__':
     unittest.main()
