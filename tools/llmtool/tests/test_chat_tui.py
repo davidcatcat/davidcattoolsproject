@@ -2461,16 +2461,150 @@ class PMTypewriterTests(Base):
         self.delta('partial answer')
         ui.interrupt_pm()
         ui.pm_runtime.interrupt.assert_called_once_with()
-        self.assertIn('PM\n  partial answer\n\nllmtool: interrupt sent to the PM',
-                      ui.conversation.text)
+        # The notice shows below the still-open block (W55); an unfinished word waits.
+        self.assertIn('PM\n  partial\n\nllmtool: 已中斷，等待 PM 結束本輪…', ui.conversation.text)
         self.assertEqual(ui.pm_queue, '')
         ui.pm_turn_active, ui.pm_interrupted = True, False
         self.delta('tail', index=1)
+        self.assertTrue(ui.conversation.text.endswith(   # same turn: a new block, no new label
+            'PM\n  partial answer\n\nllmtool: 已中斷，等待 PM 結束本輪…\n\n'))
         ui.finish_pm_turn()                           # a turn that ends without TURN_END
         self.assertIn('\n  tail', ui.conversation.text)   # same turn: no second label
         self.assertEqual(ui.pm_queue, '')
         self.assertIsNone(ui.pm_block_raw)
         self.assertEqual(ui.pm_state, 'idle')
+
+    def test_queue_notice_during_streaming_never_splits_the_reply(self):
+        # W55 F2-b (Owner Warp): "…不同的" | queued notice | "是我們如何運用…" split the reply.
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        self.delta('這是不同的')
+        ui._pm_tick()
+        ui.input.buffer.text = 'test'
+        ui.submit()
+        self.assertEqual(list(ui.pm_outbox), ['test'])
+        self.delta('，是我們如何運用')
+        while ui.pm_queue:
+            ui._pm_tick()
+        notice = '你（已排入佇列（第 1 則））\n  test'   # W56a: the owner note as 「你」
+        self.assertTrue(ui.conversation.text.endswith(
+            'PM\n  這是不同的，是我們如何運用\n\n' + notice))
+        ui.pm_event({'type': 'TURN_END', 'status': 'COMPLETED', 'usage': {}})
+        text = ui.conversation.text
+        self.assertIn('PM\n  這是不同的，是我們如何運用\n\n' + notice + '\n\n0.0 秒', text)
+        self.assertEqual(text.count(notice), 1)
+        self.assertEqual(ui.pm_tail, [])
+
+    def _command_during_streaming(self, command):
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        ui.pm_outbox.extend(['q1', 'q2'])
+        self.delta('這是不同的')
+        ui._pm_tick()
+        ui.input.buffer.text = command
+        ui.submit()
+        self.assertIsNotNone(ui.pm_block_raw)             # the reply block is still open
+        self.delta('，是我們如何運用')
+        while ui.pm_queue:
+            ui._pm_tick()
+        ui.pm_event({'type': 'TURN_END', 'status': 'COMPLETED', 'usage': {}})
+        text = ui.conversation.text
+        self.assertIn('PM\n  這是不同的，是我們如何運用\n\n> ' + command + '\n\n', text)
+        self.assertEqual(text.count('\nPM\n'), 1)
+        return text
+
+    def test_queue_list_during_streaming_never_splits_the_reply(self):
+        # #652 Codex v1 P2: /pm queue appended mid-reply and split it.
+        text = self._command_during_streaming('/pm queue')
+        self.assertIn('> /pm queue\n\nPM 佇列：2 則\n  1. q1\n  2. q2', text)
+
+    def test_queue_clear_during_streaming_never_splits_the_reply(self):
+        text = self._command_during_streaming('/pm queue clear')
+        self.assertIn('llmtool: PM 佇列已清除 2 則（未送出）', text)
+        self.assertEqual(list(self.ui.pm_outbox), [])
+
+    def test_queue_send_during_streaming_never_splits_the_reply(self):
+        self.ui.pm_outbox_paused = 'Esc 中斷'
+        text = self._command_during_streaming('/pm queue send')
+        self.assertIn('llmtool: PM 佇列繼續：目前回合結束後送出下一則（共 2 則）', text)
+        self.assertIsNone(self.ui.pm_outbox_paused)
+
+    def test_other_commands_and_ctrl_c_during_streaming_never_split_the_reply(self):
+        self.ui.pm_target = ('pm-session', '/tmp/pm')
+        text = self._command_during_streaming('/pm')
+        self.assertIn('> /pm\n\nPM: claude-code session pm-session', text)
+        ui = self.ui
+        ui.pm_turn_active, ui.pm_interrupted = True, False
+        self.delta('第二段', index=1)
+        ui._pm_tick()
+        ui.request_quit()                                 # Ctrl-C: interrupt + "again exits"
+        self.delta('結尾', index=1)
+        while ui.pm_queue:
+            ui._pm_tick()
+        self.assertTrue(ui.conversation.text.endswith(
+            '\n  第二段結尾\n\nllmtool: 已中斷，等待 PM 結束本輪…\n\n'
+            'llmtool: Ctrl-C again exits (the PM connection is closed on exit)'))
+
+    def test_escape_with_two_queued_pauses_at_once_and_the_reply_stays_whole(self):
+        # W55 F2-a: Esc interrupts and pauses the queue; feedback shows before the turn ends.
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        ui.pm_outbox.extend(['q1', 'q2'])
+        self.delta('前半')
+        ui.interrupt_pm()
+        ui.pm_runtime.interrupt.assert_called_once_with()
+        self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
+        self.assertEqual(ui.pm_state, 'interrupting')
+        self.assertTrue(ui.pm_turn_active)                # the turn has not ended yet
+        self.delta('後半')                                 # text the CLI sent before stopping
+        while ui.pm_queue:
+            ui._pm_tick()
+        self.assertTrue(ui.conversation.text.endswith(
+            'PM\n  前半後半\n\nllmtool: 已中斷，等待 PM 結束本輪…\n\n'
+            'llmtool: 已中斷；佇列已暫停（剩 2 則）：Enter 送下一則，/pm queue send 全部送出，'
+            '/pm queue clear 清空'))
+        ui.pm_turn_status = 'INTERRUPTED'
+        with patch.object(ui, '_pm_start_turn') as start:
+            ui.finish_pm_turn()
+            start.assert_not_called()                     # nothing is sent after Esc
+            self.assertEqual(list(ui.pm_outbox), ['q1', 'q2'])
+            self.assertEqual(ui.conversation.text.count('佇列已暫停'), 1)
+            ui.input.buffer.text = 'q3'                   # typed while paused: queued last
+            ui.submit()
+            start.assert_not_called()
+            self.assertEqual(list(ui.pm_outbox), ['q1', 'q2', 'q3'])
+            ui.submit()                                   # Enter on an empty draft
+            start.assert_called_once()
+            self.assertEqual(start.call_args[0][0], 'q1')
+            self.assertEqual(list(ui.pm_outbox), ['q2', 'q3'])
+            self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')   # the rest stays paused
+
+    def test_escape_with_an_empty_queue_pauses_drafts_queued_while_interrupting(self):
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        ui.interrupt_pm()
+        self.assertIn('llmtool: 已中斷，等待 PM 結束本輪…', ui.conversation.text)
+        self.assertIsNone(ui.pm_outbox_paused)            # nothing to pause yet
+        ui.input.buffer.text = 'later'
+        ui.submit()
+        ui.pm_turn_status = 'INTERRUPTED'
+        with patch.object(ui, '_pm_start_turn') as start:
+            ui.finish_pm_turn()
+            start.assert_not_called()
+        self.assertEqual(list(ui.pm_outbox), ['later'])
+        self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
+        self.assertIn('佇列已暫停（剩 1 則）', ui.conversation.text)
+
+    def test_enter_on_an_empty_draft_during_the_interrupted_turn_sends_nothing(self):
+        ui = self.ui
+        ui.pm_runtime = Mock()
+        ui.pm_outbox.append('q1')
+        ui.interrupt_pm()
+        with patch.object(ui, '_pm_start_turn') as start:
+            ui.submit()
+            start.assert_not_called()
+        self.assertIn('PM 本輪尚未結束；結束後按 Enter 送下一則', ui.conversation.text)
+        self.assertEqual(list(ui.pm_outbox), ['q1'])
 
     def test_new_block_tool_and_other_output_flush_the_previous_block(self):
         ui = self.ui
@@ -2834,11 +2968,12 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(list(ui.pm_outbox), ['next one'])
         self.assertIn('暫停（Ctrl-C 中斷）', ui.conversation.text)
 
-    def test_escape_then_a_completed_turn_end_continues_the_queue(self):
+    def test_escape_then_a_completed_turn_end_still_pauses_the_queue(self):
+        # W55 (Owner decision A): after Esc nothing is sent, even if the turn COMPLETED.
         ui = self._race(lambda ui: ui.interrupt_pm())
-        self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
-                         ['go', 'next one'])
-        self.assertIsNone(ui.pm_outbox_paused)
+        self.assertEqual(len(self.fakes[0].users()), 1)
+        self.assertEqual(list(ui.pm_outbox), ['next one'])
+        self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
 
     def test_disconnect_mid_turn_leaves_no_working_timer_and_ignores_the_old_worker(self):
         # #636 Codex review v2 finding 2: after a disconnect mid-turn, append() redrew the
@@ -2905,27 +3040,42 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive([self.connect(), self.connected, 'go\r', 'wait\r', paused])
         self.assertEqual(len(self.fakes[0].users()), 1)
 
-    def test_escape_continues_the_queue_ctrl_c_pauses_it_and_clear_counts(self):
+    def test_escape_pauses_the_queue_enter_sends_one_ctrl_c_pauses_and_clear_counts(self):
+        # W55 (Owner decision A): Esc with two queued drafts pauses the queue at once.
         self.turns = [[_delta('one'), 'HOLD', _result('stopped')],
                       [_delta('two'), 'HOLD', _result('stopped')]]
 
         async def streaming(ui):
             await self.until(ui, lambda ui: ui.pm_turn_active and ui.pm_block_raw is not None)
 
+        def at_escape(ui):
+            # Feedback at once, before the turn ends; the reply above it stays whole.
+            self.assertTrue(ui.pm_turn_active)
+            self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
+            self.assertIn('llmtool: 已中斷，等待 PM 結束本輪…', ui.conversation.text)
+            self.assertIn('佇列已暫停（剩 2 則）：Enter 送下一則', ui.conversation.text)
+
         async def after_escape(ui):
-            # Esc interrupted only the first turn; the queued draft went next.
-            await self.until(ui, lambda ui: len(self.fakes[0].users()) == 2, 'queue continued')
+            await self.turn_done(ui)
+            await asyncio.sleep(0.2)
+            self.assertEqual(len(self.fakes[0].users()), 1)   # nothing was auto-sent
+            self.assertEqual(list(ui.pm_outbox), ['q1', 'q2'])
+            self.assertIn('佇列2暫停', ui.status_text())
+
+        async def after_enter(ui):
+            await self.until(ui, lambda ui: len(self.fakes[0].users()) == 2, 'Enter sent one')
             self.assertEqual(list(ui.pm_outbox), ['q2'])
+            self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷')
 
         async def after_ctrl_c(ui):
             await self.turn_done(ui)
             await asyncio.sleep(0.1)
             self.assertEqual(len(self.fakes[0].users()), 2)
-            self.assertIn('暫停（Ctrl-C 中斷）', ui.conversation.text)
+            self.assertEqual(list(ui.pm_outbox), ['q2'])
             self.assertFalse(ui.app.is_done)
 
         ui, _ = self.drive([self.connect(), self.connected, 'start\r', streaming, 'q1\r', 'q2\r',
-                            lone_escape, after_escape, streaming,
+                            lone_escape, at_escape, after_escape, '\r', after_enter, streaming,
                             lambda ui: ui.request_quit(), after_ctrl_c,
                             '/pm queue clear\r',
                             lambda ui: self.assertIn('PM 佇列已清除 1 則（未送出）',
@@ -3010,12 +3160,14 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(ui.view.selected_range(), (0, 6))   # the selection stays
 
         ui, _ = self.drive([self.connect(), self.connected, 'PM request\r', active, 'queued\r',
-                            '\t', reading, lone_escape, interrupted,
+                            '\t', reading, lone_escape, interrupted, self.turn_done,
+                            lambda ui: self.assertEqual(ui.pm_outbox_paused, 'Esc 中斷'),
+                            lambda ui: ui.run_queue_command('send'),
                             lambda ui: self.until(ui, lambda ui: not ui.pm_turn_active
-                                                  and not ui.pm_outbox, 'queue continued')])
+                                                  and not ui.pm_outbox, 'queue resumed')])
         self.assertIn('\n已中斷 · ', ui.conversation.text)
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
-                         ['PM request', 'queued'])                # Esc continued the queue
+                         ['PM request', 'queued'])     # Esc paused the queue; send resumed it
 
     def test_working_line_shows_at_once_ticks_each_second_and_gives_way_to_text(self):
         # W52 F1: a long think showed only "owner → PM:"; now the pane says so, every second.
@@ -3066,7 +3218,7 @@ class PMConversationTests(BoundedPMTest):
 
         def interrupted(ui):
             self.assertEqual(ui.pm_state, 'idle')
-            self.assertIn('interrupt sent to the PM', ui.conversation.text)
+            self.assertIn('已中斷，等待 PM 結束本輪…', ui.conversation.text)
             self.assertIn('\n已中斷 · ', ui.conversation.text)
             controls = [l for l in self.fakes[0].written if l.get('type') == 'control_request']
             self.assertEqual([c['request']['subtype'] for c in controls], ['interrupt'])

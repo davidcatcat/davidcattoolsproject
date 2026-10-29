@@ -57,15 +57,37 @@ class StyleTokenTests(unittest.TestCase):
             def render(text, width):
                 return [[("a", "md.bold")], [("w=%d" % width, "text")]]
         with patch.object(chat_tui_view, "_tui_markdown", Renderer):
-            self.assertEqual(chat_tui_view.render_markdown("**a**", 40),
-                             [[("a", "md.bold")], [("w=40", "text")]])
+            with patch.object(chat_tui_view, "_markdown_blocks", lambda text: [(True, [text])]):
+                self.assertEqual(chat_tui_view.render_markdown("**a**", 40),
+                                 [[("a", "md.bold")], [("w=40", "text")]])
 
         class Broken:
             @staticmethod
             def render(text, width):
                 raise ValueError("bug")
-        with patch.object(chat_tui_view, "_tui_markdown", Broken):
+        with patch.object(chat_tui_view, "_tui_markdown", Broken), \
+                patch.object(chat_tui_view, "_markdown_blocks", lambda text: [(False, [text])]):
             self.assertEqual(chat_tui_view.render_markdown("x", 40), [[("x", "text")]])
+
+
+class RealMarkdownTests(unittest.TestCase):
+    """The merged W56b+c renderer: blocks at the pane width, prose left to the pane."""
+
+    def test_prose_is_never_hard_wrapped_but_tables_and_code_fit(self):
+        self.assertIsNotNone(chat_tui_view._tui_markdown)
+        prose = "第一段 " + "中文 wrapped words " * 20 + "END"
+        text = prose + "\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```py\nx = 1\n```\n---"
+        lines = ["".join(part for part, _token in line)
+                 for line in chat_tui_view.render_markdown(text, 30)]
+        self.assertEqual(lines[0], prose)                  # one line: the pane soft-wraps it
+        self.assertIn("│ a │ b │", lines)
+        self.assertTrue(any(line.startswith("┌─ py") and len(line) <= 30 for line in lines))
+        self.assertEqual(lines[-1], "─" * 30)
+        self.assertEqual([fit for fit, _chunk in chat_tui_view._markdown_blocks(text)],
+                         [False, False, True, False, True, True])
+        whole = chat_tui_view._tui_markdown.render(text.split("\n\n|")[0] + "\n\n- a\n> b", 99999)
+        self.assertEqual(chat_tui_view.render_markdown(text.split("\n\n|")[0] + "\n\n- a\n> b", 30),
+                         whole)                            # per-line prose == whole-document prose
 
 
 class SpanTests(unittest.TestCase):
@@ -83,6 +105,21 @@ class SpanTests(unittest.TestCase):
         self.assertEqual(view.spans, [(0, 1, "role.owner"), (6, 8, "role.pm")])
         view.set_text("")
         self.assertEqual(view.spans, [])
+
+    def test_wrapped_rows_of_an_indented_line_hang_and_copy_without_breaks(self):
+        view = self.view()
+        view.set_text("PM\n  " + "abcdefghij" * 3)
+        view.layout(12, 10)
+        self.assertEqual([view.text[s:e] for _l, s, e in view.rows],
+                         ["PM", "  abcdefghij", "abcdefghij", "abcdefghij"])
+        self.assertEqual([view.row_indent(i) for i in range(4)], [0, 0, 2, 2])
+        bullet = self.view()
+        bullet.set_text("  • " + "x" * 20)
+        bullet.layout(12, 10)
+        self.assertEqual([bullet.row_indent(i) for i in range(len(bullet.rows))], [0, 4, 4])
+        self.assertEqual(view.offset_at(2, 2), view.rows[2][1])     # column after the hang
+        view.anchor, view.head = 5, len(view.text)
+        self.assertEqual(view.selected_text(), "abcdefghij" * 3)   # no soft break copied
 
     def test_replace_moves_later_spans_selection_and_reading_anchor(self):
         view = self.view()
@@ -198,10 +235,11 @@ class PMLayoutTests(Base):
         ui.finish_pm_turn()
         text = ui.conversation.text
         body = text[text.rindex("── "):]
-        self.assertRegex(body, "^── [0-9]{2}:[0-9]{2}\n你\n  請問\n\nPM\n  先看 \\*\\*檔案\\*\\*\n\n"
+        self.assertRegex(body, "^── [0-9]{2}:[0-9]{2}\n你\n  請問\n\nPM\n  先看 檔案\n\n"
                                "  ▸ 使用工具 2 次（Read ×1、Bash ×1；1 次失敗）\n\n  結論\n\n"
                                "[0-9]+\\.[0-9] 秒 · 1.2k tokens$")
         self.assertEqual(self.tokens("你"), {"role.owner"})
+        self.assertEqual(self.tokens("檔案"), {"md.bold"})      # tui_markdown rendered the body
         self.assertEqual(ui.view.token_at(text.rindex("\nPM\n") + 1), "role.pm")
         self.assertEqual(self.tokens("▸ 使用工具"), {"tool.error"})
         self.assertEqual(self.tokens(" 秒 · 1.2k tokens"), {"meta.usage"})
@@ -269,7 +307,8 @@ class ChatLayoutTests(Base):
             ui.append("assistant:\n", segments=[("assistant:", "role.pm"), ("\n", "text")]
                       + ui._body_segments("**粗體**", ""))
             text = ui.conversation.text
-            self.assertRegex(text, "── [0-9]{2}:[0-9]{2}\nyou:\nq\n\nassistant:\n\\*\\*粗體\\*\\*$")
+            self.assertRegex(text, "── [0-9]{2}:[0-9]{2}\nyou:\nq\n\nassistant:\n粗體$")
+            self.assertEqual(ui.view.token_at(len(text) - 1), "md.bold")
             start = text.index("assistant:")
             self.assertEqual(ui.view.token_at(start), "role.pm")
             self.assertEqual(ui.view.token_at(text.index("you:")), "role.owner")

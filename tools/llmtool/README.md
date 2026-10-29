@@ -1698,11 +1698,15 @@ In PM mode (`/pm connect`), the pane shows a working line (`PM 思考中… 12s`
 within a second of Enter, redrawn every second while the PM thinks or works and
 replaced by the reply as it streams. Enter during a PM turn queues the draft (FIFO,
 shown at once as `已排入佇列（第 N 則）`, count in the status row); each turn that
-ends COMPLETED, or that Esc interrupted, sends the next queued message, one turn at
-a time. A failed or refused turn, Ctrl-C or a disconnect pauses the queue: nothing
-more is sent, the pane lists what is waiting, `/pm queue send` resumes and
-`/pm queue clear` drops it (with the count). Messages still queued at exit are
-printed to stderr.
+ends COMPLETED sends the next queued message, one turn at a time. A notice that
+arrives while a PM reply streams is shown below that reply, never inside it. Esc
+shows `已中斷，等待 PM 結束本輪…` at once and pauses the queue
+(`已中斷；佇列已暫停（剩 N 則）…`): nothing more is sent, Enter on an empty draft
+sends the next queued message (the rest stays paused), and a draft typed while
+paused joins the end of the queue. A failed or refused turn, Ctrl-C or a disconnect
+also pauses the queue: the pane lists what is waiting, `/pm queue send` resumes all
+of it and `/pm queue clear` drops it (with the count). Messages still queued at exit
+are printed to stderr.
 
 One request is in flight at a time: Enter while busy keeps the typed input and
 sends nothing; commands such as `/provider` are not run while busy. Esc, or the

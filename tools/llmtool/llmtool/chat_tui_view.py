@@ -54,6 +54,9 @@ DRAG_COPY_SECONDS = 0.15  # A moving drag copies its selection this long after i
 COPIED_SECONDS = 3.0      # How long the status bar reports a copy.
 DOUBLE_CLICK_SECONDS = 0.35
 TAB_WIDTH = 4
+HANG_LIMIT = 8            # Most leading spaces repeated before a wrapped line's later rows.
+HANG_BULLETS = ("• ", "◦ ", "▪ ")   # tui_markdown bullet glyphs
+FLOW_WIDTH = 1 << 16      # Markdown prose is laid out this wide; the pane soft-wraps it.
 CACHE_LINES = 4096        # Wrapped-line cache entries kept before it is cleared.
 COPY_LIMIT_BYTES = 1024 * 1024   # Largest selection handed to the clipboard tool (UTF-8 bytes).
 COPY_SCAN_CHUNK = 65536          # Characters measured at a time while checking that limit.
@@ -124,13 +127,79 @@ def token_style(token, colour=True):
 
 
 def render_markdown(text, width):
-    """Lines of (text, token) segments: ``tui_markdown.render`` when present, else plain lines."""
+    """Lines of (text, token) segments: ``tui_markdown.render`` when present, else plain lines.
+
+    Tables, fenced code, diffs and rules are laid out at ``width``; prose is laid out at
+    FLOW_WIDTH and soft-wrapped by the pane, so a copied paragraph has no line breaks the
+    reply did not have and a resize reflows it.
+    """
     if _tui_markdown is not None:
         try:
-            return _tui_markdown.render(text, max(1, width))
+            lines = []
+            for fit, chunk in _markdown_blocks(text):
+                lines.extend(_render_block("\n".join(chunk), max(1, width) if fit else FLOW_WIDTH))
+            return lines
         except Exception:
             pass   # a renderer bug never hides the reply: show it unformatted
     return [[(line, "text")] for line in text.split("\n")]
+
+
+_RENDERED = {}   # (block source, width) -> rendered lines: a streamed reply re-renders its tail only
+
+
+def _render_block(source, width):
+    key = (source, width)
+    found = _RENDERED.get(key)
+    if found is None:
+        found = _tui_markdown.render(source, width)
+        if len(_RENDERED) >= CACHE_LINES:
+            del _RENDERED[next(iter(_RENDERED))]
+        _RENDERED[key] = found
+    return found
+
+
+def _markdown_blocks(text):
+    """[(fit, source lines)]: fit blocks (table, fence, diff, rule) need the pane width.
+
+    Mirrors the block scan of ``tui_markdown`` so each block is rendered whole; a prose
+    line is its own block (the renderer lays out each prose line on its own).
+    """
+    md = _tui_markdown
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    if first is not None and md._is_diff_start(lines, first):
+        return [(True, lines)]
+    blocks, index = [], 0
+
+    def add(fit, chunk):
+        blocks.append((fit, list(chunk)))
+
+    while index < len(lines):
+        line = lines[index]
+        end = index + 1
+        fence = md._FENCE.match(line)
+        if fence and not (fence.group(2)[0] == "`" and "`" in fence.group(4)):
+            marker = fence.group(2)
+            while end < len(lines):
+                stripped = lines[end].strip()
+                end += 1
+                if stripped.startswith(marker[0] * len(marker)) and not stripped.strip(marker[0]):
+                    break
+        elif md._is_diff_start(lines, index):
+            while end < len(lines) and md._diff_like(lines[end]):
+                end += 1
+        elif "|" in line and end < len(lines) and "|" in lines[end] \
+                and md._is_table_separator(lines[end]):
+            end += 1
+            while end < len(lines) and "|" in lines[end] and lines[end].strip():
+                end += 1
+        elif not md._RULE.match(line):
+            add(False, [line])
+            index = end
+            continue
+        add(True, lines[index:end])
+        index = end
+    return blocks
 
 
 def utf8_size(text, start, end, limit, measure=None):
@@ -241,6 +310,15 @@ class Wrapper:
         self._clusters[line] = found
         return found
 
+    @staticmethod
+    def hang(line, width):
+        """Indent drawn before a line's wrapped rows: its leading spaces (W56a), so an
+        indented reply paragraph stays indented without hard line breaks in the text."""
+        spaces = len(line) - len(line.lstrip(" "))
+        if line[spaces:spaces + 2] in HANG_BULLETS:
+            spaces += 2   # a rendered bullet item: later rows line up with its text
+        return spaces if 0 < spaces <= min(HANG_LIMIT, width // 2) and spaces < len(line) else 0
+
     def line_rows(self, line, width):
         """[(start, end)] offsets into ``line`` of each row; a cluster never splits."""
         key = (line, width)
@@ -249,8 +327,9 @@ class Wrapper:
             return rows
         rows = []
         start = column = 0
+        hang = self.hang(line, width)
         for begin, _end, span in self.clusters(line):
-            if column + span > width and column > 0:
+            if column + span > (width - hang if rows else width) and column > 0:
                 rows.append((start, begin))
                 start, column = begin, 0
             column += span
@@ -488,6 +567,8 @@ class ConversationView:
         line_start = self.text.rfind("\n", 0, start) + 1
         line_end = self.text.find("\n", start)
         line_text = self.text[line_start:None if line_end < 0 else line_end]
+        if start > line_start:
+            column -= self._wrapper.hang(line_text, self.width)
         used = 0
         for begin, _finish, span in self._wrapper.clusters(line_text):
             offset = line_start + begin
@@ -499,6 +580,15 @@ class ConversationView:
                 return offset
             used += span
         return end
+
+    def row_indent(self, index):
+        """Columns of hanging indent drawn before row ``index`` (0 on a line's first row)."""
+        _line, start, _end = self.rows[index]
+        line_start = self.text.rfind("\n", 0, start) + 1
+        if start == line_start:
+            return 0
+        line_end = self.text.find("\n", start)
+        return self._wrapper.hang(self.text[line_start:None if line_end < 0 else line_end], self.width)
 
     def visible_rows(self):
         return range(self.top, min(len(self.rows), self.top + self.height))
@@ -743,6 +833,9 @@ def make_pane(view, style="class:conversation.selected", colour=None):
                         inside = selected and span[0] <= cut_low and cut_high <= span[1]
                         fragments.append(((klass + " " + style).strip() if inside else klass,
                                           text[cut_low:cut_high].replace("\t", " " * TAB_WIDTH)))
+                indent = view.row_indent(index)
+                if indent:
+                    fragments.insert(0, ("", " " * indent))
                 return [fragment for fragment in fragments if fragment[1]]
 
             # The cursor is hidden; its row is the view's top, so the Window keeps that row.
