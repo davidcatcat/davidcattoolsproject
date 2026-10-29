@@ -9,11 +9,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
     },
     "claude-developer": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-28",
-      "reason": "Owner: dispatch the Claude UI Agent like the other Developer Workers to push TUI progress",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6449248781",
+      "decided_at": "2026-10-30",
+      "reason": "Owner paused Claude Developer (including the Claude UI Agent) because the Claude token budget is short; Developer work goes to Codex gpt-6-luna high until the Owner re-enables",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6505985427",
       "owner_assignments": [
         {
           "task_id": "5fd1be3ee96e42678fe1dac75a9b697a",
@@ -30,18 +30,18 @@
       ]
     },
     "opencode-developer": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-27",
-      "reason": "Owner paused OpenCode: free model quota exhausted (provider.free-limit) and llmtool route unreliable; work reassigned to Codex until the Owner re-enables",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6441947023"
+      "decided_at": "2026-10-30",
+      "reason": "Owner re-enabled PM-selected OpenCode dispatch with model opencode/deepseek-v4.1-flash-free (variant high); PM pauses again on free-limit or 2 consecutive route failures",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6506233668"
     },
     "agy": {
       "dispatch": "OWNER_ASSIGNMENT_ONLY",
       "decided_by": "Owner",
-      "decided_at": "2026-10-27",
-      "reason": "Owner-only per-Task AGY direct CLI candidate; validate auth, quota, session, D6 and scoped safety; no automatic dispatch or fallback",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6433940134",
+      "decided_at": "2026-10-30",
+      "reason": "Owner option B (PM-selected AGY with claude-sonnet-5-5-medium, Codex review) is pending a code change: the AGY execution gate accepts only OWNER_ASSIGNMENT_MATCHED and AGENTS.md requires an exact Owner assignment; until that lands AGY stays per-Task Owner assignment only",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6506062108",
       "owner_assignments": [
         {
           "task_id": "d3b1e153cf934e7f81542b17d8e37bf2",
