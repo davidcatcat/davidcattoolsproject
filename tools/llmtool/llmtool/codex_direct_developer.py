@@ -59,6 +59,7 @@ class DirectResult:
     elapsed_ms: int
     cleanup_status: str
     usage: dict | None
+    final_message: str = ''
 
 
 def _fail(code):
@@ -222,6 +223,7 @@ def _result_from_events(raw):
             _fail('CODEX_FINAL_JSON_INVALID')
         normalized_tests.append(normalized)
     obj['tests'] = normalized_tests
+    obj['_agent_message'] = final
     return thread_id, obj, usage
 
 
@@ -473,7 +475,7 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                             result['self_review'], result['blocked_reason'], process.returncode,
                             thread_id, hashlib.sha256(output).hexdigest(),
                             max(0, int((time.monotonic() - started) * 1000)),
-                            cleanup_status, usage)
+                            cleanup_status, usage, result['_agent_message'])
     except Exception as exc:
         try:
             close_lifecycle(type(exc), exc, exc.__traceback__)

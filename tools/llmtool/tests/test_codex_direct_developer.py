@@ -122,6 +122,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertEqual(result.usage, {'prompt_tokens': 13, 'completion_tokens': 8,
                                         'total_tokens': 21,
                                         'cached_prompt_tokens': 2})
+        self.assertEqual(result.final_message, json.dumps(self.final))
         self.assertTrue(self.invoked.exists())
         argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
                             pycache_prefix='/tmp/codex-direct-cache')
