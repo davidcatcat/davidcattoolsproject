@@ -72,6 +72,27 @@ class TaskAdvanceTests(unittest.TestCase):
             self.assertEqual(main(['task', 'advance', '1' * 32, '--pr', '17']), 0)
         handler.assert_called_once()
 
+    def test_claude_result_route_and_advance(self):
+        parsed = parser_for_cli().parse_args([
+            'task', 'claude-result', '1' * 32, '--executor-task', 'executor-1',
+            '--head', HEAD, '--pm-session', 'pm-session'])
+        self.assertEqual(parsed.action, 'claude-result')
+        with patch('llmtool.task_submission_cli.run_task_claude_result', return_value=0) as handler:
+            self.assertEqual(main([
+                'task', 'claude-result', '1' * 32, '--executor-task', 'executor-1',
+                '--head', HEAD, '--pm-session', 'pm-session']), 0)
+        handler.assert_called_once()
+        with self.assertRaises(SystemExit):
+            parser_for_cli().parse_args([
+                'task', 'claude-result', '1' * 32, '--executor-task', 'executor-1',
+                '--head', HEAD])
+        record = base_record(developer={
+            'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'claude',
+            'claude_result': {'executor_task_id': 'executor-1', 'head_sha': HEAD,
+                              'recorded_at': '2026-10-29T00:00:00Z'},
+        })
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'DISPATCH_REVIEW')
+
     def test_developer_attention_and_publish_gates(self):
         blocked = base_record(developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN'})
         self.assertEqual(task_advance.decide(blocked, d6(), PR, {}), 'DEVELOPER_ATTENTION')
