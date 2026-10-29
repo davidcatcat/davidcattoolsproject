@@ -30,11 +30,11 @@
       ]
     },
     "opencode-developer": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-27",
-      "reason": "Owner paused OpenCode: free model quota exhausted (provider.free-limit) and llmtool route unreliable; work reassigned to Codex until the Owner re-enables",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6441947023"
+      "decided_at": "2026-10-30",
+      "reason": "Owner re-enabled PM-selected OpenCode dispatch with model opencode/deepseek-v4.1-flash-free (variant high); PM pauses again on free-limit or 2 consecutive route failures",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6506233668"
     },
     "agy": {
       "dispatch": "ALLOWED",
