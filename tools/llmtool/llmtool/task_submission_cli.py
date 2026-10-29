@@ -1556,8 +1556,9 @@ def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
         if any(type(line) is str and re.search(r'\bskipp(?:ed|ing)?\b', line, re.I)
                for line in receipt['final']):
             skipped = True
-            continue
-        if any(type(line) is not str or not line.strip().endswith('OK')
+        if any(type(line) is not str or not (
+                line.endswith('OK') or
+                re.fullmatch(r'OK \(skipped=[1-9][0-9]{0,5}\)', line))
                for line in receipt['final']):
             continue
         return receipt, None
