@@ -27,7 +27,7 @@ from .opencode_worker import _observe_exit_without_reap, _path
 from .providers.cli_lifecycle import CLIProcessLifecycle
 from .test_output_excerpts import _emitted_sensitive
 
-MODEL = 'opencode/deepseek-v4.1-flash-free'
+MODEL = 'opencode/deepseek-v4.1-flash-free#high'
 AGENT = 'llmtool-direct-developer'
 MAX_WALL_CLOCK_SECONDS = 600
 MAX_OUTPUT_BYTES = 1024 * 1024
@@ -47,7 +47,8 @@ _SESSION = re.compile(r'ses_[A-Za-z0-9]{1,100}\Z')
 _VERSION = re.compile(r'opencode v[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}'
                       r'(?:-[0-9A-Za-z.-]{1,64})?(?:\+[0-9A-Za-z.-]{1,64})?\Z')
 # Only OpenCode-hosted free models; a paid model is never selected or a fallback.
-_FREE_MODEL = re.compile(r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free\Z')
+_FREE_MODEL = re.compile(
+    r'opencode/[A-Za-z0-9][A-Za-z0-9._-]{0,94}-free(?:#[a-z]{1,16})?\Z')
 
 
 class DirectOpenCodeError(LLMToolError):
@@ -329,6 +330,7 @@ def configuration(*, read_paths, write_paths, model=MODEL,
     rules.extend({'action': 'edit', 'resource': path, 'effect': 'allow'}
                  for path in write_paths)
     provider, model = selected.split('/', 1)
+    model = model.split('#', 1)[0]
     return {
         'model': selected,
         'default_agent': AGENT,

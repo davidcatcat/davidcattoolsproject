@@ -2297,6 +2297,30 @@ class OfficeViewTests(unittest.TestCase):
         subs = {row.detail: row.state for row in rows if row.name == "claude subagent"}
         self.assertEqual(subs, {"Fix PR 273 review": mon.WORKING, "Old audit": mon.DONE})
 
+    def test_claude_metadata_tail_does_not_refresh_conversation_activity(self):
+        project = self.claude / "proj"
+        stamp = lambda age: datetime.fromtimestamp(self.NOW - age, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        real_entries = [
+            {"type": "user", "cwd": self.canonical, "timestamp": stamp(220)},
+            {"type": "assistant", "timestamp": stamp(80),
+             "message": {"content": "finished"}},
+            {"type": "system", "subtype": "turn_duration", "timestamp": stamp(77)},
+        ]
+        metadata = [{"type": kind} for kind in (
+            "last-prompt", "cost-state", "custom-title", "agent-name", "mode",
+            "permission-mode", "atis-latch", "pr-link")]
+        self._write(project / "stale.jsonl", real_entries + metadata, age=5)
+        self._write(project / "fresh.jsonl", real_entries + metadata + [
+            {"type": "assistant", "timestamp": stamp(5),
+             "message": {"content": "new turn"}}], age=5)
+
+        rows = {row.key: row for row in self.rows()}
+        stale = rows["claude:stale.jsonl"]
+        fresh = rows["claude:fresh.jsonl"]
+        self.assertEqual((stale.state, stale.age), (mon.IDLE, 77.0))
+        self.assertEqual((fresh.state, fresh.age), (mon.WORKING, 5.0))
+
     def test_claude_cli_registry_status_beats_the_session_file_guess(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")   # the D6 record names the role
         result = {"type": "user", "cwd": str(self.task), "message": {"content": [
@@ -4128,12 +4152,15 @@ class GitHubRunnerTests(unittest.TestCase):
         self.assertEqual([(row.name, row.state) for row in rows], [
             ("linux ci runner ec2-llmtool-01", mon.WORKING),
             ("linux ci runner ec2-llmtool-02", mon.IDLE),
-            ("linux ci runner ec2-llmtool-03", mon.STOPPED)])
-        busy, idle, offline = rows
+            ("linux ci runner ec2-llmtool-03", mon.STOPPED),
+            ("linux ci 3 台共用", "")])
+        busy, idle, offline = rows[:3]
         self.assertEqual(busy.detail, "執行中：llmtool CI（PR #350 @aaaaaaa）：Linux Python Test"
-                                      "（已執行 3 分鐘）；Linux；標籤 ec2-llmtool；排隊中、它可以接 1 個："
-                                      "llmtool CI（PR #351 @bbbbbbb）：Linux Python Test")
+                                      "（已執行 3 分鐘）；Linux；標籤 ec2-llmtool")
         self.assertEqual((busy.age, busy.alert, busy.evidence), (180.0, "", "GitHub"))
+        shared, = [row for row in rows if row.kind == "shared"]
+        self.assertEqual((shared.name, shared.detail),
+                         ("linux ci 3 台共用", "排隊 1 個：llmtool CI（PR #351 @bbbbbbb）：Linux Python Test"))
         self.assertTrue(idle.detail.startswith(
             "閒置，等工作；Linux；標籤 ec2-llmtool；上一個工作：llmtool CI（PR #349 @ccccccc）："
             "Linux Python Test 失敗（20 分鐘前）"), idle.detail)
@@ -4159,10 +4186,11 @@ class GitHubRunnerTests(unittest.TestCase):
              "labels": ["self-hosted", "Linux", "ec2-llmtool"]}]}
         source, _ = self.source([("actions/runners", (0, {"runners": [self.linux("ec2-llmtool-01", busy=True)]})),
                                  ("runs/5/jobs", (0, jobs)), ("actions/runs?", (0, runs))])
-        row, = mon.github_runner_rows(source.ci_view, NOW, (), source.ci_runs)
+        row, queue = mon.github_runner_rows(source.ci_view, NOW, (), source.ci_runs)
         self.assertEqual(row.detail, "執行中：llmtool Linux CI（PR #346 @eeeeeee）：check (Linux 3.14)"
-                                     "（已執行 2 分鐘）；Linux；標籤 ec2-llmtool；排隊中、它可以接 1 個："
-                                     "llmtool Linux CI（PR #346 @eeeeeee）：check (Linux 3.9)")
+                                     "（已執行 2 分鐘）；Linux；標籤 ec2-llmtool")
+        self.assertEqual((queue.name, queue.detail),
+                         ("linux ci 排隊", "排隊 1 個：llmtool Linux CI（PR #346 @eeeeeee）：check (Linux 3.9)"))
         # The run still counts once as waiting, for the Mac row's queue line.
         self.assertEqual([(run[0], run[3]) for run in source.ci_runs],
                          [("in_progress", "ec2-llmtool-01"), ("queued", None)])
@@ -4175,12 +4203,49 @@ class GitHubRunnerTests(unittest.TestCase):
 
     def test_queued_work_is_attributed_only_by_labels_and_unregistered_shows_nothing(self):
         source, _ = self.source(self.ci([self.MAC, self.linux("ec2-llmtool-01", label="other")]))
-        row, = mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"}, source.ci_runs)
-        self.assertNotIn("排隊", row.detail)   # it lacks the ec2-llmtool label the job asks for
+        rows = mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"}, source.ci_runs)
+        self.assertEqual([row.name for row in rows], [
+            "linux ci runner ec2-llmtool-01", "ci 未分配 排隊"])
+        self.assertNotIn("排隊", rows[0].detail)   # it lacks the ec2-llmtool label the job asks for
         source, _ = self.source(self.ci([self.MAC]))   # the EC2 runner is not registered yet
         self.assertEqual(mon.github_runner_rows(source.ci_view, NOW, {"davidproject-self-action"},
                                                 source.ci_runs), [])
         self.assertEqual(mon.github_runner_rows(None, NOW), [])   # --no-github: nothing claimed
+
+    def test_queued_jobs_are_shown_once_in_platform_rows_or_unassigned(self):
+        mac = ("davidproject-self-action", "macOS", "online", False,
+               ("self-hosted", "macOS", "x64"))
+        # CiView stores normalized runner tuples, not the raw API dictionaries
+        # returned by self.linux() for source fixtures.
+        linux = ("ec2-self-runner-1", "Linux", "online", False,
+                 ("self-hosted", "Linux", "X64", "ec2-llmtool"))
+        linux2 = ("ec2-self-runner-2", "Linux", "online", False,
+                  ("self-hosted", "Linux", "X64", "ec2-llmtool"))
+        mac_job = (frozenset({"self-hosted", "macos"}), "Mac workflow: check")
+        linux_job = (frozenset({"self-hosted", "linux", "ec2-llmtool"}), "Linux workflow: test")
+        nowhere = (frozenset({"self-hosted", "special"}), "Unmatched workflow: test")
+        view = mon.CiView([mac, linux, linux2], NOW - 10,
+                          queued=(mac_job, linux_job, nowhere))
+        mac_jobs, linux_jobs, unassigned = mon._ci_queue_groups(view, {mac[0]})
+        self.assertEqual((mac_jobs, linux_jobs, unassigned),
+                         ([mac_job[1]], [linux_job[1]], [nowhere[1]]))
+        with tempfile.TemporaryDirectory() as root:
+            with open(os.path.join(root, ".runner"), "w") as handle:
+                json.dump({"agentName": mac[0]}, handle)
+            mac_rows = mon.runner_rows([], NOW, root, ci=[], waiting_jobs=mac_jobs)
+        mac_queue, = [row for row in mac_rows if row.kind == "shared"]
+        self.assertEqual((mac_queue.name, mac_queue.detail),
+                         ("mac ci 排隊", "排隊 1 個：Mac workflow: check"))
+        rows = mon.github_runner_rows(view, NOW, {mac[0]})
+        shared = [row for row in rows if row.kind == "shared"]
+        self.assertEqual([(row.name, row.detail) for row in shared], [
+            ("linux ci 兩台共用", "排隊 1 個：Linux workflow: test"),
+            ("ci 未分配 排隊", "排隊 1 個：Unmatched workflow: test")])
+        rendered = "\n".join(row.detail for row in rows) + "\n".join(
+            row.detail for row in [mon.ci_queue_row(mac_jobs, 2)])
+        self.assertEqual(rendered.count("Linux workflow: test"), 1)
+        self.assertEqual(rendered.count("Mac workflow: check"), 1)
+        self.assertEqual(rendered.count("Unmatched workflow: test"), 1)
 
     def test_api_failures_and_old_data_say_unconfirmed_never_offline(self):
         for answer, words in (((1, b"gh: Must have admin rights (HTTP 403)"), "沒有權限（HTTP 403）"),
@@ -4222,7 +4287,8 @@ class GitHubRunnerTests(unittest.TestCase):
             gate.set()
             source._thread.join(5)
         self.assertEqual([row.name for row in mon.github_runner_rows(source.ci_view, NOW)],
-                         ["linux ci runner ec2-llmtool-01"])
+                         ["linux ci runner ec2-llmtool-01",
+                          "linux ci 排隊", "ci 未分配 排隊"])
 
 
 if __name__ == "__main__":
