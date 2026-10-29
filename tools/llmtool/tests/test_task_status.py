@@ -10,6 +10,7 @@ from llmtool import task_status
 from llmtool.cli import main, parser_for_cli
 from llmtool.task_index import TaskStatusIndex
 from llmtool.task_store import TaskStore
+from llmtool.task_submission_cli import run_task_abandon
 from test_task_store import record as valid_record
 
 
@@ -114,6 +115,19 @@ class TaskStatusTests(unittest.TestCase):
             'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED'}]
         self.assertEqual(task_status.derive_state(base), 'COMPLETED')
 
+    def test_abandonment_overrides_merge_and_is_listed(self):
+        with tempfile.TemporaryDirectory() as root:
+            saved = record(root)
+            store = TaskStore(Path(root).resolve() / 'tasks')
+            store.abandon(saved['task_id'], pm_session_id=saved['pm_session_id'],
+                          reason='PM closed the work')
+            current = store.get(saved['task_id'])
+            current['completion_events'] = [{
+                'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED'}]
+            self.assertEqual(task_status.derive_state(current), 'ABANDONED')
+            listed = task_status.task_status(store=store)
+            self.assertEqual(listed['tasks'][0]['state'], 'ABANDONED')
+
     def test_responded_developer_uses_completion_state(self):
         with tempfile.TemporaryDirectory() as root:
             base = record(root)
@@ -182,6 +196,19 @@ class TaskStatusTests(unittest.TestCase):
             with patch('sys.stdout', output):
                 self.assertEqual(main(['task', 'status', '--json']), 0)
         self.assertIn('"tasks":[]', output.getvalue())
+
+    def test_task_abandon_cli_handler_uses_temp_store(self):
+        with tempfile.TemporaryDirectory() as root:
+            saved = record(root)
+            store = TaskStore(Path(root).resolve() / 'tasks')
+            args = parser_for_cli().parse_args([
+                'task', 'abandon', saved['task_id'], '--pm-session',
+                saved['pm_session_id'], '--reason', 'No longer needed'])
+            output = io.StringIO()
+            self.assertEqual(run_task_abandon(args, store=store, stdout=output), 0)
+            self.assertIn('"state":"ABANDONED"', output.getvalue())
+            self.assertEqual(task_status.task_status(store=store)['tasks'][0]['state'],
+                             'ABANDONED')
 
     def test_index_matches_full_scan_and_skips_unprinted_reads(self):
         with tempfile.TemporaryDirectory() as root:

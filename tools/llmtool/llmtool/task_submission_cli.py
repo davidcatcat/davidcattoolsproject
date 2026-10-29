@@ -496,6 +496,11 @@ def add_task_submission_parsers(actions):
     status.add_argument('--pm-session', help='filter by stored PM session ID')
     status.add_argument('--limit', type=int, default=20, help='maximum Tasks to list (1-200)')
     status.add_argument('--json', action='store_true', help='output JSON')
+    abandon = actions.add_parser('abandon', help='Mark a Task abandoned by its bound PM session')
+    abandon.add_argument('task_id', help='existing durable Task ID')
+    abandon.add_argument('--pm-session', required=True,
+                         help='Claude Code session UUID (or stored pm- session ID)')
+    abandon.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
     submit = actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
     submit.add_argument('--provider', required=True, help='configured PM provider profile; no implicit default')
     submit.add_argument('request', nargs='+', help='development request text')
@@ -627,6 +632,16 @@ def run_task_status(args, *, store=None, stdout=None):
     stream = sys.stdout if stdout is None else stdout
     stream.write(format_status(result, as_json=args.json) + '\n')
     stream.flush()
+    return 0
+
+
+def run_task_abandon(args, *, store=None, stdout=None):
+    """Abandon a Task only when invoked by its stored PM session."""
+    store = TaskStore() if store is None else store
+    key = active_pm_inbox.pm_session_key(args.pm_session)
+    saved = store.abandon(args.task_id, pm_session_id=key, reason=args.reason)
+    _print({'task_id': saved['task_id'], 'state': 'ABANDONED',
+            'abandonment': saved['abandonment']}, stdout=stdout)
     return 0
 
 
