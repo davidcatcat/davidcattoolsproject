@@ -411,6 +411,7 @@ class ChatTUI:
         self.pm_turn_kind = None         # "owner" or "background" while a turn is active
         self.pm_background_started = None   # start of a background turn inside an Owner turn
         self._pm_background_waiting = collections.deque()
+        self._pm_held_attempts = set()   # turn ids whose draft went back to the queue
         self._quit_warned = False    # first Ctrl-C with queued messages only warned
         # W52 F1: the working line at the end of the pane while a turn shows no text yet.
         self.pm_working_at = None    # offset where it starts (its leading blank line included)
@@ -1721,7 +1722,7 @@ class ChatTUI:
                             % len(self.pm_outbox))
         elif everything:
             self.pm_outbox_paused = None
-            self._pm_send_next()
+            self._pm_send_next(explicit=True)
         else:
             text = self.pm_outbox.popleft()   # still paused: the rest waits for the next Enter
             self._pm_start_turn(text, "owner → PM（自佇列送出，佇列暫停，剩 %d 則）:\n"
@@ -1761,12 +1762,18 @@ class ChatTUI:
         self.pm_tail.append(terminal_safe_text(text))
         self._pm_render(final=False)
 
-    def _pm_send_next(self):
+    def _pm_send_next(self, explicit=False):
         if (not self.pm_outbox or self.pm_outbox_paused or self.pm_turn_active
                 or self._pm_background_waiting):
             return   # a waiting background turn goes first; its end sends the next draft
         if self.pm_runtime is None or self.pm_pending or self.pm_state == "closing":
             self._pm_pause("PM 未連線")
+            return
+        blocked = getattr(self.pm_runtime, "automatic_sends_blocked", None)
+        if not explicit and callable(blocked) and blocked():
+            # A lifecycle frame contradicted a receipt pm_runtime had already latched.
+            self._pm_pause("PM 協定異常", "llmtool: PM 回報的訊息狀態前後矛盾，自動送出已停止；"
+                           "/pm queue send 由你決定是否送出")
             return
         text = self.pm_outbox.popleft()
         self._pm_start_turn(text, "owner → PM（自佇列送出，剩 %d 則）:\n" % len(self.pm_outbox))
@@ -1978,19 +1985,31 @@ class ChatTUI:
 
     def _pm_turn(self, runtime, text, key, loop, seq):
         """Worker thread: forward each pm_runtime event to the event loop as it arrives."""
+        # written: send() returned, so the message may have gone out; receipt: pm_runtime
+        # reported the attempt's outcome (its Owner TURN_END, or a replay of an earlier one).
+        written = receipt = False
         try:
-            for event in runtime.send(text, idempotency_key=key):
+            events = runtime.send(text, idempotency_key=key)
+            written = True
+            for event in events:
                 if type(event) is dict:
                     self._post(loop, self.pm_event, event, seq)
-                    if (event.get("type") == "TURN_END" and event.get("origin") is None
-                            and event.get("status") in ("NOT_SENT", "UNKNOWN")):
-                        # NOT_SENT: Claude Code withdrew it unprocessed (Esc while it waited
-                        # behind a background turn). UNKNOWN: its fate could not be
-                        # confirmed in time. Either way it goes back to the queue, never
-                        # lost; an UNKNOWN one is never sent again without the Owner.
-                        self._post(loop, self._pm_hold, text, seq, event["status"])
+                    owner_end = event.get("type") == "TURN_END" and event.get("origin") is None
+                    if event.get("type") == "TURN_REPLAY" or (owner_end and receipt):
+                        receipt = True
+                        continue
+                    if not owner_end:
+                        continue
+                    receipt = True
+                    if event.get("status") in ("NOT_SENT", "UNKNOWN"):
+                        # NOT_SENT: Claude Code withdrew it unprocessed (or it was never
+                        # written). UNKNOWN: its fate is unconfirmed. Either way it goes back
+                        # to the queue once, never lost; an UNKNOWN one is never sent again
+                        # without the Owner.
+                        self._post(loop, self._pm_hold, text, seq, event["status"],
+                                   event.get("reason"), event.get("turn_id"))
         except LLMToolError as exc:
-            if chat_tui_pm.error_code(exc) == "PM_TURN_ACTIVE":
+            if chat_tui_pm.error_code(exc) == "PM_TURN_ACTIVE" and not written:
                 # P0-3: a background turn started first; nothing was sent. The draft goes
                 # back to the front of the queue and is sent when that turn ends.
                 self._post(loop, self._pm_hold, text, seq, "HELD")
@@ -2001,9 +2020,19 @@ class ChatTUI:
         except BaseException:
             self._post(loop, self.pm_event, {"type": "RUNTIME_ERROR",
                                              "code": chat_tui_task.UNKNOWN}, seq)
+        if written and not receipt:
+            # The turn ended without a receipt (a forked session, a broken iterator): the
+            # message may have been delivered, so it is held as UNKNOWN.
+            self._post(loop, self._pm_hold, text, seq, "UNKNOWN")
         self._post(loop, self.finish_pm_turn, seq)
 
-    def _pm_hold(self, text, seq, status):
+    def _pm_hold(self, text, seq, status, reason=None, turn_id=None):
+        """Put a draft back at the queue head, once per attempt; a late hold never changes
+        the status of a newer turn."""
+        if turn_id is not None:
+            if turn_id in self._pm_held_attempts:
+                return
+            self._pm_held_attempts.add(turn_id)
         self.pm_outbox.appendleft(text)
         if not self._pm_stale(seq):
             self.pm_turn_status = status
@@ -2014,6 +2043,11 @@ class ChatTUI:
             self.pm_outbox_paused = "UNKNOWN"   # only the Owner resends it
             self._pm_notice("llmtool: 無法確認 PM 是否收到這則訊息（UNKNOWN），未自動重送；"
                             "可用 /pm queue send 重送")
+        elif reason in ("refused", "discarded"):
+            # Claude Code turned it down: sending it again by itself would just repeat that.
+            self.pm_outbox_paused = "Claude Code " + reason
+            self._pm_notice("llmtool: Claude Code 沒有處理這則訊息（" + reason + "），保留在佇列"
+                            "第 1 則並暫停；/pm queue send 重送")
         else:
             self._pm_notice("llmtool: Claude Code 沒有處理這則訊息（已撤回），保留在佇列第 1 則")
 

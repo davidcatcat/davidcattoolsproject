@@ -118,13 +118,16 @@ class LiveProcess(FakeProcess):
     """A child whose stdout lines arrive when the test feeds them, like a real pipe.
 
     Like Claude Code 2.1.312 it reports `command_lifecycle` frames for a user message
-    sent with a uuid; with auto_accept (an idle CLI) it starts the message at once."""
+    sent with a uuid; with auto_accept (an idle CLI) it starts the message at once and
+    reports `completed` right after that turn's result, unless withhold_completed."""
 
-    def __init__(self, auto_accept=True):
+    def __init__(self, auto_accept=True, withhold_completed=False):
         super().__init__()
         self.feed = queue.Queue()
         self.stdout = iter(self.feed.get, None)
         self.auto_accept = auto_accept
+        self.withhold_completed = withhold_completed
+        self.running = None   # uuid of the auto-accepted message whose turn is running
         self.stdin = self
         self.lines = []
 
@@ -133,6 +136,7 @@ class LiveProcess(FakeProcess):
         self.lines.append(line)
         if line.get('type') == 'user' and self.auto_accept:
             self.lifecycle(line['uuid'], 'queued', 'started')
+            self.running = line['uuid']
         return len(data)
 
     def flush(self):
@@ -146,8 +150,12 @@ class LiveProcess(FakeProcess):
                      'uuid': 'frame-' + state} for state in states))
 
     def emit(self, *values):
-        for line in encoded(*values):
+        for value, line in zip(values, encoded(*values)):
             self.feed.put(line)
+            if value.get('type') == 'result' and self.running is not None:
+                running, self.running = self.running, None
+                if not self.withhold_completed:
+                    self.lifecycle(running, 'completed')
 
     def terminate(self):
         super().terminate()
@@ -397,6 +405,8 @@ class PMRuntimeTests(unittest.TestCase):
         runtime.close()
 
     def test_invalid_line_and_early_exit_emit_runtime_error(self):
+        # hd665: after the write, an invalid line or the child's exit leaves the message's
+        # fate unconfirmed: the error is still surfaced, and the turn ends UNKNOWN (held).
         for lines, code in (([b'not-json\n'], 'PM_STREAM_INVALID'), ([], 'PM_PROCESS_EXITED')):
             runtime = self.runtime(FakeProcess(lines))
             runtime.open()
@@ -404,8 +414,8 @@ class PMRuntimeTests(unittest.TestCase):
             self.assertEqual(events[0]['type'], 'RUNTIME_ERROR')
             self.assertEqual(events[0]['code'], code)
             self.assertTrue(events[0]['turn_id'])
-            self.assertEqual(events[0]['seq'], 0)
-            self.assertEqual(events[-1]['status'], 'ERROR')
+            self.assertEqual((events[-1]['status'], events[-1]['delivery']),
+                             ('UNKNOWN', 'UNKNOWN'))
             runtime.close()
 
     def test_close_escalates_to_kill(self):
@@ -1234,8 +1244,9 @@ class PMRuntimeTests(unittest.TestCase):
             self.assertEqual(self._statuses()['回報進度'][0], 'UNKNOWN')   # not ACTIVE
             process.emit(assistant, result)
             reader.join(5)
+        # hd665: UNKNOWN is published at the deadline, before that background turn ends.
         self.assertEqual([e.get('status') for e in rest if e['type'] == 'TURN_END'],
-                         ['COMPLETED', 'UNKNOWN'])
+                         ['UNKNOWN', 'COMPLETED'])
         self.assertFalse(runtime.turn_active())
 
     def test_completed_before_started_is_ambiguous_and_ends_unknown(self):
@@ -1254,6 +1265,453 @@ class PMRuntimeTests(unittest.TestCase):
         owner = runtime.send('請問')
         process.emit(*_bg_turn('答', 1))
         self.assertEqual([e['type'] for e in owner], ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
+
+    # -- hd665 (High Debug, RCA_CONFIRMED): Owner-message lifecycle as one ordered machine --
+    OTHER = '0f0f0f0f-0000-4000-8000-000000000000'
+    SHORT = {'PM_QUEUED_TIMEOUT': 0.3, 'PM_STARTED_GRACE': 0.3, 'PM_TERMINAL_GRACE': 0.3,
+             'PM_CANCEL_GRACE': 0.3}
+    # Independently written from hd665's tables (not derived from pm_runtime._TRANSITIONS):
+    # the phase each live phase moves to on each normalized event.
+    EXPECTED_NEXT = {
+        'W': dict(queued='Q', started='X', completed='X', cancelled='X', discarded='X',
+                  refused='X', output='W', result='W', other_started='W', notice='W',
+                  timeout='X', esc='W', exit='X', invalid='X'),
+        'Q': dict(queued='X', started='O', completed='X', cancelled='N', discarded='N',
+                  refused='N', output='Q', result='Q', other_started='Q', notice='Q',
+                  timeout='X', esc='Q', exit='X', invalid='X'),
+        'O': dict(queued='X', started='X', completed='X', cancelled='X', discarded='X',
+                  refused='X', output='O', result='RO', other_started='X', notice='O',
+                  timeout='O', esc='O', exit='X', invalid='X'),
+        'A': dict(queued='X', started='X', completed='X', cancelled='X', discarded='X',
+                  refused='X', output='A', result='RA', other_started='X', notice='A',
+                  timeout='A', esc='A', exit='X', invalid='X'),
+        'RO': dict(queued='X', started='X', completed='C', cancelled='X', discarded='X',
+                   refused='X', output='X', result='X', other_started='X', notice='RO',
+                   timeout='X', esc='RO', exit='X', invalid='X'),
+        'RA': dict(queued='X', started='X', completed='B', cancelled='X', discarded='X',
+                   refused='X', output='X', result='X', other_started='X', notice='RA',
+                   timeout='X', esc='RA', exit='X', invalid='X'),
+    }
+    PREFIX = {'W': [], 'Q': ['queued'], 'O': ['queued', 'started'],
+              'A': ['queued', 'output', 'started'],
+              'RO': ['queued', 'started', 'output', 'result'],
+              'RA': ['queued', 'output', 'started', 'result']}
+    # A legal way on from each phase; the final delivery it must reach.
+    SUFFIX = {'W': ['queued', 'started', 'output', 'result', 'completed'],
+              'Q': ['started', 'output', 'result', 'completed'],
+              'O': ['output', 'result', 'completed'], 'A': ['result', 'completed'],
+              'RO': ['completed'], 'RA': ['completed']}
+    REACHES = {'W': 'COMPLETED', 'Q': 'COMPLETED', 'O': 'COMPLETED', 'RO': 'COMPLETED',
+               'A': 'ABSORBED', 'RA': 'ABSORBED', 'C': 'COMPLETED', 'B': 'ABSORBED',
+               'N': 'NOT_SENT', 'X': 'UNKNOWN'}
+
+    def _attempt(self, bounds=None, process=None):
+        """An Owner send consumed by a thread, as the TUI worker does."""
+        if bounds:
+            patcher = patch.multiple(pm_runtime, **bounds)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        process = process or LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        run = {'runtime': runtime, 'process': process, 'events': [], 'error': None}
+        stream = runtime.send('回報進度')
+        run['attempt'] = runtime._attempt
+        run['uuid'] = process.users()[0]['uuid'] if process.users() else None
+
+        def consume():
+            try:
+                for event in stream:
+                    run['events'].append(event)
+            except LLMToolError as exc:
+                run['error'] = exc
+
+        run['reader'] = threading.Thread(target=consume, daemon=True)
+        run['reader'].start()
+        return run
+
+    def _token(self, run, token):
+        process, message = run['process'], run['uuid']
+        if token in pm_runtime._LIFECYCLE_STATES:
+            process.lifecycle(message, token)
+        elif token == 'output':
+            process.emit(_runtime_delta(0, 'TEXT'))
+        elif token == 'result':
+            process.emit({'type': 'result', 'result': 'R', 'usage': {'output_tokens': 7}})
+        elif token == 'other_started':
+            process.lifecycle(self.OTHER, 'started')
+        elif token == 'other_completed':
+            process.lifecycle(self.OTHER, 'completed')
+        elif token == 'notice':
+            process.emit({'type': 'system', 'subtype': 'status'})
+        elif token == 'timeout':
+            time.sleep(0.7)
+        elif token == 'esc':
+            run['runtime'].interrupt()
+        elif token == 'exit':
+            process.feed.put(None)
+        elif token == 'close':
+            run['runtime'].close(timeout=0)
+        elif token == 'invalid':
+            process.emit({'type': 'command_lifecycle', 'command_uuid': message, 'state': 'future'})
+        else:
+            raise AssertionError(token)
+
+    def _phase(self, run, expected):
+        deadline = time.monotonic() + 3
+        while run['attempt']['phase'] != expected and time.monotonic() < deadline:
+            time.sleep(0.005)
+        self.assertEqual(run['attempt']['phase'], expected)
+
+    def _finish(self, run):
+        run['reader'].join(5)
+        self.assertFalse(run['reader'].is_alive(), 'the Owner iterator never ended')
+        owner = [e for e in run['events'] if e['type'] == 'TURN_END' and e.get('origin') is None]
+        self.assertEqual(len(owner), 1, run['events'])   # exactly one receipt
+        self.assertEqual(len(run['process'].users()), 1)   # written once, never again
+        self.assertFalse(run['runtime'].turn_active())
+        run['runtime'].close(timeout=0)   # the next case opens its own driver
+        return owner[0]
+
+    def _trace(self, tokens, bounds=None, process=None):
+        run = self._attempt(bounds, process)
+        for token in tokens:
+            if isinstance(token, tuple):   # ('phase', P): wait until the reducer is there
+                self._phase(run, token[1])
+            else:
+                self._token(run, token)
+        return run
+
+    def _owner_end(self, tokens, bounds=None, close_with_result=True):
+        run = self._trace(tokens, bounds)
+        if close_with_result:
+            self._token(run, 'result')   # lets a turn still in flight end as background
+        return self._finish(run), run
+
+    def _assert_unknown(self, end):
+        self.assertEqual((end['status'], end['delivery']), ('UNKNOWN', 'UNKNOWN'))
+        self.assertEqual((end['result_text'], end['usage']), ('', {}))   # nothing attributed
+
+    def test_owner_lifecycle_transition_matrix(self):
+        events = pm_runtime._OWNER_EVENTS
+        self.assertEqual(set(self.EXPECTED_NEXT), set(pm_runtime._LIVE))
+        for phase, row in self.EXPECTED_NEXT.items():
+            self.assertEqual(set(row), set(events))
+            for event in events:
+                with self.subTest(phase=phase, event=event):
+                    bounds = self.SHORT if event == 'timeout' else None
+                    run = self._trace([*self.PREFIX[phase], ('phase', phase), event], bounds)
+                    expected = row[event]
+                    if expected in pm_runtime._LIVE:
+                        self._phase(run, expected)
+                        suffix = list(self.SUFFIX[expected])
+                        if expected in ('W', 'Q') and event in ('output', 'other_started'):
+                            suffix.insert(0, 'result')   # that background turn ends first
+                        for token in suffix:
+                            self._token(run, token)
+                    else:
+                        self._phase(run, expected)
+                        self._token(run, 'result')
+                    end = self._finish(run)
+                    self.assertEqual(end['delivery'], self.REACHES[expected])
+                    if expected in ('X', 'N'):
+                        self.assertEqual((end['result_text'], end['usage']), ('', {}))
+
+    def test_started_without_queued_is_unknown(self):
+        end, _ = self._owner_end(['started', 'output', 'result', 'completed'])
+        self._assert_unknown(end)
+
+    def test_started_before_queued_is_unknown(self):
+        # The hd665 reproducer: started -> queued -> result used to end COMPLETED.
+        end, _ = self._owner_end(['started', 'queued', 'result'])
+        self._assert_unknown(end)
+
+    def test_duplicate_and_regressive_lifecycle_frames_are_unknown(self):
+        for trace in (['queued', 'queued'], ['queued', 'started', 'queued'],
+                      ['queued', 'started', 'started']):
+            with self.subTest(trace=trace):
+                end, _ = self._owner_end(trace + ['output', 'result', 'completed'])
+                self._assert_unknown(end)
+
+    def test_completed_requires_started_and_result_in_order(self):
+        for phase in ('W', 'Q', 'O', 'A'):
+            with self.subTest(phase=phase):
+                end, _ = self._owner_end([*self.PREFIX[phase], ('phase', phase), 'completed'])
+                self._assert_unknown(end)
+
+    def test_result_waits_for_matching_completed(self):
+        run = self._trace(['queued', 'started', 'output', 'result', ('phase', 'RO')])
+        time.sleep(0.3)
+        self.assertFalse([e for e in run['events'] if e['type'] == 'TURN_END'])   # not yet
+        self._token(run, 'completed')
+        end = self._finish(run)
+        self.assertEqual((end['status'], end['delivery'], end['usage']),
+                         ('COMPLETED', 'COMPLETED', {'output_tokens': 7}))
+        end, _ = self._owner_end(['queued', 'started', 'output', 'result', ('phase', 'RO'),
+                                  'timeout'], self.SHORT, close_with_result=False)
+        self._assert_unknown(end)   # no `completed` within the terminal grace
+
+    def test_negative_frames_are_phase_sensitive(self):
+        for state in pm_runtime._NOT_ACCEPTED:
+            for phase in pm_runtime._LIVE:
+                with self.subTest(state=state, phase=phase):
+                    end, _ = self._owner_end([*self.PREFIX[phase], ('phase', phase), state])
+                    if phase == 'Q':
+                        self.assertEqual((end['status'], end['reason']), ('NOT_SENT', state))
+                    else:
+                        self._assert_unknown(end)
+
+    def test_invalid_transition_inside_background_is_unknown(self):
+        for trace in (['output', 'started'], ['output', 'completed'],
+                      ['queued', 'output', 'queued'], ['queued', 'output', 'completed'],
+                      ['queued', 'output', 'started', 'queued'],
+                      ['queued', 'output', 'started', 'started'],
+                      ['queued', 'output', 'started', 'cancelled']):
+            with self.subTest(trace=trace):
+                end, run = self._owner_end(trace)
+                self._assert_unknown(end)
+                self.assertNotIn('ABSORBED', [e.get('status') for e in run['events']])
+
+    def test_unknown_cannot_become_absorbed_or_completed(self):
+        run = self._trace(['queued', ('phase', 'Q'), 'timeout', ('phase', 'X')], self.SHORT)
+        for token in ('started', 'output', 'result', 'completed'):
+            self._token(run, token)
+        run['reader'].join(5)
+        late = list(run['runtime'].background_turn(timeout=2))   # the late run: background
+        end = self._finish(run)
+        self._assert_unknown(end)
+        self.assertTrue(late)
+        self.assertTrue(all(e.get('origin') == 'background' for e in late))
+        statuses = {t['owner_text']: t['status'] for t in
+                    pm_runtime.read_history(SESSION, state_root=self.root)['turns']}
+        self.assertEqual(statuses['回報進度'], 'UNKNOWN')
+        self.assertFalse(run['runtime'].automatic_sends_blocked())   # plausible after X
+
+    def test_other_uuid_started_tracks_background_before_owner_start(self):
+        run = self._trace(['queued', ('phase', 'Q'), 'other_started'], self.SHORT)
+        time.sleep(0.7)   # past PM_STARTED_GRACE: suspended while that command runs
+        self.assertEqual(run['attempt']['phase'], 'Q')
+        for token in ('output', 'result', 'started', 'output', 'result', 'completed'):
+            self._token(run, token)
+        end = self._finish(run)
+        self.assertEqual((end['delivery'], end['usage']), ('COMPLETED', {'output_tokens': 7}))
+        self.assertIn('BACKGROUND_TURN_START', [e['type'] for e in run['events']])
+        # and the foreign command's own end lifts the suspension again
+        run = self._trace(['queued', ('phase', 'Q'), 'other_started', 'other_completed'],
+                          self.SHORT)
+        self._phase(run, 'X')
+        self._assert_unknown(self._finish(run))
+
+    def test_other_uuid_started_after_owner_start_is_unknown(self):
+        end, run = self._owner_end(['queued', 'started', 'output', 'other_started', 'output'])
+        self._assert_unknown(end)
+        background = [e for e in run['events'] if e['type'] == 'TURN_END'
+                      and e.get('origin') == 'background']
+        self.assertEqual([e['usage'] for e in background], [{'output_tokens': 7}])
+
+    def _stamped(self, run, value, arrived):
+        line = pm_runtime._Line(encoded(value)[0])
+        line.arrived = arrived
+        with run['runtime']._lines_cond:
+            run['runtime']._lines.append(line)
+            run['runtime']._lines_cond.notify_all()
+
+    def test_deadlines_use_write_and_arrival_times(self):
+        # Delayed consumption: frames that arrived in time count, however late they are read.
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        with patch.multiple(pm_runtime, **self.SHORT):
+            stream = runtime.send('回報進度')
+            message = process.users()[0]['uuid']
+            process.lifecycle(message, 'queued', 'started')
+            process.emit(_runtime_delta(0, 'TEXT'), {'type': 'result', 'result': 'R', 'usage': {}})
+            process.lifecycle(message, 'completed')
+            time.sleep(0.8)   # well past every bound before the first read
+            events = list(stream)
+        self.assertEqual(events[-1]['delivery'], 'COMPLETED')
+        runtime.close(timeout=0)
+        # Boundary on `queued`: just before the deadline counts; at or after it does not.
+        for offset, delivery in ((-0.01, 'COMPLETED'), (0.0, 'UNKNOWN'), (0.01, 'UNKNOWN')):
+            with self.subTest(offset=offset):
+                run = self._attempt({'PM_QUEUED_TIMEOUT': 5.0})
+                arrived = run['attempt']['written_at'] + 5.0 + offset
+                frame = {'type': 'command_lifecycle', 'command_uuid': run['uuid']}
+                for state in ('queued', 'started'):
+                    self._stamped(run, dict(frame, state=state), arrived)
+                self._stamped(run, {'type': 'result', 'result': 'R', 'usage': {}}, arrived)
+                self._stamped(run, dict(frame, state='completed'), arrived)
+                self.assertEqual(self._finish(run)['delivery'], delivery)
+
+    def test_deadlines_expire_under_continuous_output(self):
+        run = self._attempt({'PM_QUEUED_TIMEOUT': 0.4})
+        stop = threading.Event()
+
+        def noise():
+            while not stop.is_set():
+                self._token(run, 'notice')
+                run['process'].lifecycle(self.OTHER, 'queued')
+                self._token(run, 'output')   # a background turn streaming meanwhile
+                time.sleep(0.02)
+
+        began = time.monotonic()
+        threading.Thread(target=noise, daemon=True).start()
+        self._phase(run, 'X')
+        took = time.monotonic() - began
+        stop.set()
+        self._token(run, 'result')
+        self._assert_unknown(self._finish(run))
+        self.assertLess(took, 1.5)
+
+    def test_queued_owner_waits_through_background_turn(self):
+        run = self._trace(['queued', ('phase', 'Q'), 'output'], self.SHORT)
+        time.sleep(0.8)   # a long background turn: only the idle start grace is suspended
+        self.assertEqual(run['attempt']['phase'], 'Q')
+        for token in ('result', 'started', 'output', 'result', 'completed'):
+            self._token(run, token)
+        self.assertEqual(self._finish(run)['delivery'], 'COMPLETED')
+
+    def test_owner_exit_and_close_preserve_unknown_draft(self):
+        for how in ('exit', 'close'):
+            for phase in pm_runtime._LIVE:
+                with self.subTest(how=how, phase=phase):
+                    run = self._trace([*self.PREFIX[phase], ('phase', phase), how])
+                    end = self._finish(run)
+                    self._assert_unknown(end)
+                    record = [t for t in pm_runtime.read_history(SESSION, state_root=self.root)
+                              ['turns'] if t['turn_id'] == end['turn_id']][0]
+                    self.assertEqual((record['status'], record['delivery']), ('UNKNOWN', 'UNKNOWN'))
+                    codes = [e['code'] for e in run['events'] if e['type'] == 'RUNTIME_ERROR'
+                             and e.get('origin') is None]
+                    self.assertEqual(codes, ['PM_PROCESS_EXITED'] if how == 'exit' else [])
+
+    def test_write_failure_distinguishes_unsent_from_uncertain(self):
+        class Closed(io.BytesIO):
+            closed = True
+
+        class Broken(io.BytesIO):
+            def write(self, data):
+                raise BrokenPipeError()
+
+        for stdin, status in ((Closed(), 'NOT_SENT'), (Broken(), 'UNKNOWN')):
+            with self.subTest(status=status):
+                process = FakeProcess()
+                runtime = self.runtime(process)
+                runtime.open()
+                process.stdin = stdin
+                events = list(runtime.send('回報進度'))
+                self.assertEqual([e['type'] for e in events], ['RUNTIME_ERROR', 'TURN_END'])
+                self.assertEqual((events[-1]['status'], events[-1]['delivery']), (status, status))
+                self.assertEqual(events[-1]['reason'],
+                                 'not_written' if status == 'NOT_SENT' else 'uncertain')
+                self.assertFalse(runtime.turn_active())
+                runtime.close()
+
+    def test_lifecycle_envelope_validation(self):
+        base = {'type': 'command_lifecycle', 'state': 'started'}
+        for name in ('oversize', 'malformed_uuid', 'malformed_state', 'unknown_state'):
+            with self.subTest(name=name):
+                run = self._trace(['queued', ('phase', 'Q')])
+                frame = dict(base, command_uuid=run['uuid'])
+                if name == 'oversize':
+                    frame['pad'] = 'x' * pm_runtime.MAX_STREAM_LINE_BYTES
+                elif name == 'wrong_session':
+                    frame['session_id'] = 'ffffffff-89ab-cdef-0123-456789abcdef'
+                elif name == 'malformed_uuid':
+                    frame['command_uuid'] = run['uuid'].upper() + 'x'
+                elif name == 'malformed_state':
+                    frame['state'] = 5
+                else:
+                    frame['state'] = 'future'
+                run['process'].emit(frame)
+                for token in ('output', 'result', 'completed'):
+                    self._token(run, token)
+                end = self._finish(run)
+                self._assert_unknown(end)
+                self.assertIn('PM_STREAM_INVALID', [e.get('code') for e in run['events']])
+        # A matching frame from another session: the session check still closes the driver
+        # (consumed on the main thread, which may restore signal handlers on close).
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        stream = runtime.send('回報進度')
+        message = process.users()[0]['uuid']
+        process.lifecycle(message, 'queued')
+        process.emit(dict(base, command_uuid=message,
+                          session_id='ffffffff-89ab-cdef-0123-456789abcdef'))
+        events = []
+        with self.assertRaises(LLMToolError) as raised:
+            for event in stream:
+                events.append(event)
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_SESSION_FORKED')
+        self._assert_unknown(events[-1])
+        self.assertFalse(runtime.is_alive())
+
+    def test_terminal_attempt_frames_cannot_acknowledge_next_attempt(self):
+        process = LiveProcess(auto_accept=False)
+        runtime = self.runtime(process)
+        runtime.open()
+        first = runtime.send('第一則')
+        old = process.users()[0]['uuid']
+        process.lifecycle(old, 'queued', 'started')
+        process.emit(*_bg_turn('一', 1))
+        process.lifecycle(old, 'completed')
+        self.assertEqual(list(first)[-1]['delivery'], 'COMPLETED')
+        self.assertFalse(runtime.automatic_sends_blocked())
+        events = []
+        second = runtime.send('第二則')
+        attempt = runtime._attempt
+        reader = threading.Thread(target=lambda: events.extend(second), daemon=True)
+        reader.start()
+        process.lifecycle(old, 'queued')            # late frames of the finished attempt
+        process.lifecycle(old, 'completed')
+        time.sleep(0.2)
+        self.assertEqual(attempt['phase'], 'W')    # never acknowledged by them
+        self.assertTrue(runtime.automatic_sends_blocked())   # latched C contradicted
+        new = process.users()[1]['uuid']
+        process.lifecycle(new, 'queued', 'started')
+        process.emit(*_bg_turn('二', 2))
+        process.lifecycle(new, 'completed')
+        reader.join(5)
+        self.assertEqual((events[-1]['delivery'], events[-1]['result_text']), ('COMPLETED', '二'))
+        self.assertEqual(len(process.users()), 2)
+
+    def test_esc_resolution_in_every_live_phase(self):
+        cases = (
+            ('W', ['esc', 'queued', 'cancelled'], 'NOT_SENT', True),      # confirmed pre-start
+            ('Q', ['esc', 'cancelled'], 'NOT_SENT', True),
+            ('Q', ['esc', 'timeout'], 'UNKNOWN', True),                   # cancellation missing
+            ('O', ['esc', 'output', 'result', 'cancelled'], 'UNKNOWN', False),   # after start
+            ('O', ['esc', 'output', 'result', 'completed'], 'COMPLETED', False),  # race
+            ('A', ['esc', 'result', 'completed'], 'ABSORBED', False),
+            ('RO', ['esc', 'completed'], 'COMPLETED', False),
+            ('RA', ['esc', 'completed'], 'ABSORBED', False),
+        )
+        for phase, tokens, delivery, cancels in cases:
+            with self.subTest(phase=phase, tokens=tokens):
+                run = self._trace([*self.PREFIX[phase], ('phase', phase), *tokens],
+                                  self.SHORT if 'timeout' in tokens else None)
+                self._token(run, 'result')
+                end = self._finish(run)
+                self.assertEqual(end['delivery'], delivery)
+                controls = [line['request']['subtype'] for line in run['process'].lines
+                            if line['type'] == 'control_request']
+                self.assertEqual(controls, ['interrupt', 'cancel_async_message'] if cancels
+                                 else ['interrupt'])
+                if delivery == 'COMPLETED' and 'result' in tokens:
+                    self.assertEqual(end['status'], 'INTERRUPTED')   # the execution fact stays
+
+    def test_absorbed_requires_ordered_terminal_receipt(self):
+        end, run = self._owner_end(['queued', 'output', 'started', 'result', 'completed'],
+                                   close_with_result=False)
+        self.assertEqual((end['status'], end['delivery']), ('ABSORBED', 'ABSORBED'))
+        self.assertEqual(sum(e.get('status') == 'ABSORBED' for e in run['events']), 1)
+        for trace, bounds in ((['queued', 'output', 'started', 'result', ('phase', 'RA'),
+                                'timeout'], self.SHORT),
+                              (['queued', 'output', 'started', 'completed', 'result'], None)):
+            with self.subTest(trace=trace):
+                end, _ = self._owner_end(trace, bounds)
+                self._assert_unknown(end)
 
 if __name__ == '__main__':
     unittest.main()

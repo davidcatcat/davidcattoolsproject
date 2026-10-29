@@ -46,16 +46,65 @@ _STDOUT_EOF = object()
 # Claude Code 2.1.312 reports the fate of a user message sent with a uuid as
 # `command_lifecycle` frames: queued, started (it drains into a turn), then one of
 # completed / cancelled / discarded / refused.
-_LIFECYCLE_MARK = object()
 _NOT_ACCEPTED = ('cancelled', 'discarded', 'refused')
 _TIMED_OUT = object()
+_LIFECYCLE_STATES = ('queued', 'started', 'completed') + _NOT_ACCEPTED
+_UUID = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
+_now = time.monotonic
 # Bounds for correlating an Owner message (measured on claude 2.1.312 against a local fake
 # Messages API: `queued` arrived 1-20 ms after the write, also while a turn was running;
 # `started` arrived 10-20 ms after `queued` when idle, or 0-20 ms after the result of the
-# turn Claude Code ran first). Past a bound the message's fate is UNKNOWN: it is reported
-# as such and never sent again automatically.
-PM_QUEUED_TIMEOUT = 10.0   # seconds from the write to `queued`
-PM_STARTED_GRACE = 10.0    # seconds without a running turn, after `queued`, to `started`
+# turn Claude Code ran first; `completed` 0-10 ms after the turn's result). Past a bound the
+# message's fate is UNKNOWN: it is reported as such and never sent again automatically.
+PM_QUEUED_TIMEOUT = 10.0   # write -> `queued`, absolute (a running turn does not extend it)
+PM_STARTED_GRACE = 10.0    # `queued` -> `started`, counted only while no turn is running
+PM_TERMINAL_GRACE = 10.0   # the turn's result -> `completed` (not a measured guarantee)
+PM_CANCEL_GRACE = 10.0     # Esc before `started` -> `cancelled` or `started`
+
+# Owner-message lifecycle (High Debug hd665, RCA_CONFIRMED). Live phases: W written,
+# awaiting `queued`; Q queued, awaiting `started`; O started as its own turn; A started
+# inside a turn already streaming (absorption candidate); RO / RA that turn's result seen,
+# awaiting `completed`. Terminal: C completed, B absorbed, N not sent (withdrawn), X
+# unknown. Every frame of the turn goes through _owner_transition; every transition not
+# listed is illegal and ends X (held for the Owner, never replayed).
+_LIVE = ('W', 'Q', 'O', 'A', 'RO', 'RA')
+_TERMINAL = ('C', 'B', 'N', 'X')
+_OWNER_EVENTS = ('queued', 'started', 'completed') + _NOT_ACCEPTED + (
+    'output', 'result', 'other_started', 'notice', 'timeout', 'esc', 'exit', 'invalid')
+_TRANSITIONS = {(phase, event): ('X', 'hold_unknown')
+                for phase in _LIVE for event in _OWNER_EVENTS}
+for _phase in _LIVE:
+    _TRANSITIONS[_phase, 'notice'] = (_phase, 'ignore')
+    _TRANSITIONS[_phase, 'esc'] = (_phase, 'pause_and_interrupt')
+_TRANSITIONS['W', 'queued'] = ('Q', 'acknowledge')
+_TRANSITIONS['Q', 'started'] = ('START', 'accept')
+for _event in _NOT_ACCEPTED:
+    _TRANSITIONS['Q', _event] = ('N', 'retain_rejection_reason')
+for _phase in ('W', 'Q'):
+    _TRANSITIONS[_phase, 'output'] = (_phase, 'background_output')
+    _TRANSITIONS[_phase, 'result'] = (_phase, 'background_result')
+    _TRANSITIONS[_phase, 'other_started'] = (_phase, 'background_start')
+for _phase in ('O', 'A'):
+    _TRANSITIONS[_phase, 'output'] = (_phase, 'render_output')
+_TRANSITIONS['O', 'result'] = ('RO', 'save_result')
+_TRANSITIONS['A', 'result'] = ('RA', 'save_result')
+_TRANSITIONS['RO', 'completed'] = ('C', 'finish_owner')
+_TRANSITIONS['RA', 'completed'] = ('B', 'finish_absorbed')
+del _phase, _event
+_DELIVERY = {'C': 'COMPLETED', 'B': 'ABSORBED', 'N': 'NOT_SENT', 'X': 'UNKNOWN'}
+
+
+def _owner_transition(phase, event, background_active):
+    if phase in _TERMINAL:
+        return phase, 'route_late_without_replay'
+    next_phase, action = _TRANSITIONS[phase, event]
+    if next_phase == 'START':
+        next_phase = 'A' if background_active else 'O'
+    return next_phase, action
+
+
+class _Line(bytes):
+    """A stdout line stamped with its arrival time when the reader took it."""
 _active_runtimes = set()
 _signal_handlers_installed = False
 _previous_signal_handlers = {}
@@ -399,6 +448,217 @@ def _register_lifecycle(runtime):
         _atexit_registered = True
 
 
+class _TurnParser:
+    """One turn's stream-json lines -> runtime events, pushed one line at a time. With
+    defer, the turn's result is kept as `outcome` instead of finishing the record: the
+    Owner-message reducer finishes it only on a legal terminal lifecycle frame."""
+
+    def __init__(self, runtime, record, interrupted, defer=False):
+        self.runtime, self.record, self.interrupted, self.defer = runtime, record, interrupted, defer
+        self.seq = 0
+        self.blocks = {}
+        self.withheld = set()
+        self.emitted = {}
+        self.outcome = None   # (status, result_text, usage) of a deferred result
+
+    def emit(self, kind, **fields):
+        value = {'type': kind, 'turn_id': self.record['turn_id'], 'seq': self.seq}
+        if self.record.get('origin'):
+            value['origin'] = self.record['origin']
+        self.seq += 1
+        value.update(fields)
+        return value
+
+    def _flush_block(self, index, force=False):
+        if index in self.withheld:
+            return None
+        buffered = self.blocks.get(index, '')
+        screened = _screen_stream_text(buffered)
+        if screened == '[withheld]':
+            self.withheld.add(index)
+            return None
+        previous = self.emitted.get(index, 0)
+        safe_end = len(screened) if force else _stream_safe_end(screened)
+        safe_end = max(previous, safe_end)
+        if safe_end <= previous:
+            return None
+        piece = screened[previous:safe_end]
+        self.emitted[index] = safe_end
+        self.record['result_text'] = _bounded_stream_append(
+            self.record.get('result_text', ''), piece)
+        return self.emit('TEXT_DELTA', text=piece, block_index=index)
+
+    def flush_all(self):
+        out = []
+        for block_index in self.blocks:
+            event = self._flush_block(block_index, force=True)
+            if event is not None:
+                out.append(event)
+        return out
+
+    def _invalid(self, out):
+        out.append(self.emit('RUNTIME_ERROR', code='PM_STREAM_INVALID'))
+        self.runtime._terminate_child()
+        self.runtime._finish(self.record, 'ERROR')
+        out.append(self.emit('TURN_END', status='ERROR', result_text='', usage={}))
+        return out, True
+
+    def feed(self, raw):
+        """(events, done) for one stdout line; done once the turn's result was read."""
+        runtime, record = self.runtime, self.record
+        out = self.flush_all() if self.interrupted() else []
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_STREAM_LINE_BYTES:
+            return self._invalid(out)
+        try:
+            line = json.loads(bytes(raw).decode('utf-8'))
+        except (ValueError, UnicodeError):
+            line = None
+        if not isinstance(line, dict):
+            return self._invalid(out)
+        if _contains_different_session(line, runtime.pm_session_id):
+            fork_error = _error('PM_SESSION_FORKED', 'Claude Code started a different PM session')
+            try:
+                runtime._finish(record, 'ERROR')
+            except Exception:
+                with runtime._state_lock:
+                    if runtime._turn is record:
+                        runtime._turn = None
+            try:
+                runtime.close()
+            except Exception:
+                pass
+            raise fork_error
+        kind = line.get('type')
+        if kind == 'stream_event':
+            event = line.get('event') or {}
+            delta = event.get('delta') or {}
+            if event.get('type') == 'message_start':
+                self.blocks.clear()
+                self.withheld.clear()
+                self.emitted.clear()
+            elif event.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta':
+                text = delta.get('text')
+                if isinstance(text, str):
+                    index = event.get('index', 0)
+                    if index in self.withheld:
+                        return out, False
+                    self.blocks[index] = self.blocks.get(index, '') + text
+                    buffered = self.blocks[index]
+                    if len(buffered.encode('utf-8', 'ignore')) > MAX_MESSAGE_BYTES:
+                        self.withheld.add(index)
+                    else:
+                        screened = _screen_stream_text(buffered)
+                        if screened == '[withheld]':
+                            self.withheld.add(index)
+                        else:
+                            flushed = self._flush_block(index)
+                            if flushed is not None:
+                                out.append(flushed)
+            elif event.get('type') == 'content_block_stop':
+                flushed = self._flush_block(event.get('index', 0), force=True)
+                if flushed is not None:
+                    out.append(flushed)
+            elif event.get('type') == 'content_block_start':
+                # Thinking never becomes answer text (only text_delta and text items
+                # do); the UI may show a status while the PM thinks.
+                block = event.get('content_block') or {}
+                if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
+                    out.append(self.emit('THINKING'))
+        elif kind == 'assistant':
+            for position, item in enumerate(
+                    _iter_content((line.get('message') or {}).get('content'))):
+                if not isinstance(item, dict):
+                    continue
+                if item.get('type') == 'text' and isinstance(item.get('text'), str):
+                    index = item.get('index', position)
+                    if index in self.withheld:
+                        continue
+                    final_text = _screen_stream_text(item['text'])
+                    if final_text == '[withheld]':
+                        self.withheld.add(index)
+                        continue
+                    flushed = self._flush_block(index, force=True)
+                    if flushed is not None:
+                        out.append(flushed)
+                    previous = self.emitted.get(index, 0)
+                    remainder = final_text[min(previous, len(final_text)):]
+                    record['result_text'] = _bounded_stream_append(
+                        record.get('result_text', ''), remainder)
+                    self.blocks[index] = final_text
+                    self.emitted[index] = len(final_text)
+                    out.append(self.emit('ASSISTANT_TEXT', text=final_text, final=True))
+                elif item.get('type') == 'tool_use':
+                    tool_id, name = item.get('id'), item.get('name')
+                    if isinstance(name, str):
+                        if name not in record['tool_names']:
+                            record['tool_names'].append(name)
+                        out.append(self.emit('TOOL_USE', tool_use_id=tool_id, name=name))
+        elif kind == 'user':
+            for item in _iter_content((line.get('message') or {}).get('content')):
+                if isinstance(item, dict) and item.get('type') == 'tool_result':
+                    is_error = bool(item.get('is_error', False))
+                    permission = (item.get('permission_denial') or item.get('permission') or
+                                  item.get('permission_denied'))
+                    content = item.get('content', '')
+                    permission_text = content.lower() if isinstance(content, str) else ''
+                    denied = bool(permission) or (is_error and any(
+                        word in permission_text for word in ('permission denied',
+                                                             "doesn't want to proceed",
+                                                             'denied by user')))
+                    reason = ('PERMISSION_DENIED' if denied else
+                              'TOOL_ERROR' if is_error else 'OK')
+                    out.append(self.emit('TOOL_RESULT', tool_use_id=item.get('tool_use_id'),
+                                         reason=reason, is_error=is_error))
+        elif kind == 'result':
+            status = 'INTERRUPTED' if self.interrupted() else (
+                'ERROR' if line.get('is_error') or line.get('subtype') in
+                ('error', 'error_during_execution') else 'COMPLETED')
+            result = line.get('result', '')
+            result_text = _screen_stream_text(result) if isinstance(result, str) else ''
+            if result_text == '[withheld]':
+                result_text = ''
+            # The turn result closes any remaining text blocks.
+            out.extend(self.flush_all())
+            if not result_text:
+                result_text = record.get('result_text', '')
+            usage = line.get('usage') if isinstance(line.get('usage'), dict) else {}
+            if status == 'ERROR':
+                lower = result_text.lower()
+                code = ('PM_QUOTA_EXHAUSTED' if any(word in lower for word in
+                        ('quota exceeded', 'usage limit', 'rate limit', 'hit your limit'))
+                        else 'PM_PROCESS_EXITED')
+                out.append(self.emit('RUNTIME_ERROR', code=code, stderr=runtime._stderr_excerpt()))
+            if self.defer:
+                self.outcome = (status, result_text, usage)
+                return out, True
+            runtime._finish(record, status, result_text, usage)
+            out.append(self.emit('TURN_END', status=status,
+                                 result_text=_safe_result_text(result_text), usage=usage))
+            return out, True
+        else:
+            runtime._unknown_lines += 1
+        return out, False
+
+    def exit_error(self):
+        """The RUNTIME_ERROR for a child whose stdout ended inside a turn."""
+        runtime = self.runtime
+        if runtime._stderr_thread is not None:
+            runtime._stderr_thread.join(timeout=1)
+        stderr = runtime._stderr_excerpt()
+        lower = stderr.lower()
+        code = ('PM_QUOTA_EXHAUSTED' if any(word in lower for word in
+                ('quota exceeded', 'usage limit', 'rate limit')) else 'PM_PROCESS_EXITED')
+        return self.emit('RUNTIME_ERROR', code=code, stderr=stderr)
+
+    def eof(self):
+        if self.record.get('status') != 'ACTIVE':   # stdout ended inside the turn
+            return []
+        out = [self.exit_error()]
+        self.runtime._finish(self.record, 'ERROR')
+        out.append(self.emit('TURN_END', status='ERROR', result_text='', usage={}))
+        return out
+
+
 class PMRuntime:
     """Drive exactly one bound Claude PM session at a time."""
 
@@ -430,7 +690,9 @@ class PMRuntime:
         self._lines_cond = threading.Condition(self._state_lock)
         self._stdout_thread = None
         self._idempotency = {}
-        self._pending_uuid = None   # Owner message written but not yet started by Claude Code
+        self._attempt = None              # the live Owner-message attempt, if any
+        self._finished_attempts = collections.OrderedDict()   # uuid -> terminal phase
+        self._protocol_alerts = 0         # lifecycle frames after a latched receipt
 
     def __enter__(self):
         return self.open()
@@ -682,6 +944,9 @@ class PMRuntime:
     def _pump_stdout(self, child, lines):
         try:
             for raw in child.stdout:
+                if isinstance(raw, (bytes, bytearray)) and len(raw) <= MAX_STREAM_LINE_BYTES:
+                    raw = _Line(raw)
+                    raw.arrived = _now()   # stamped before waiting for the lock
                 with self._lines_cond:
                     lines.append(raw)
                     self._lines_cond.notify_all()
@@ -695,21 +960,22 @@ class PMRuntime:
     def _read_lines(self, lines):
         """Yield stdout lines in order; EOF stays queued so every later reader sees it."""
         while True:
-            raw = self._next_raw(lines, None)
+            raw = self._next_raw(lines)
             if raw is None:
                 return
             yield raw
 
-    def _next_raw(self, lines, timeout):
-        """The next stdout line; None at EOF or close; _TIMED_OUT after timeout seconds."""
-        deadline = None if timeout is None else time.monotonic() + timeout
+    def _next_raw(self, lines, deadline=None):
+        """The next stdout line; None at EOF or close; _TIMED_OUT once deadline() (an
+        absolute _now() time, re-read on every wake) has passed with no line buffered."""
         with self._lines_cond:
             while True:
                 if lines and lines[0] is not _STDOUT_EOF:
                     return lines.popleft()
                 if lines or self._closed:
                     return None
-                remaining = None if deadline is None else deadline - time.monotonic()
+                limit = None if deadline is None else deadline()
+                remaining = None if limit is None else limit - _now()
                 if remaining is not None and remaining <= 0:
                     return _TIMED_OUT
                 self._lines_cond.wait(remaining)
@@ -724,6 +990,25 @@ class PMRuntime:
             return True
         return (not isinstance(line, dict) or line.get('type') in _TURN_LINE_TYPES or
                 _contains_different_session(line, self.pm_session_id))
+
+    def _idle_line_starts_turn(self, raw):
+        """Between turns: lifecycle frames are routed to their attempt first (a late
+        frame never acknowledges a new draft); a `started` frame for any uuid begins a turn
+        (a late start of an UNKNOWN message, or another client's command)."""
+        if isinstance(raw, (bytes, bytearray)) and len(raw) <= MAX_STREAM_LINE_BYTES and \
+                b'command_lifecycle' in raw:
+            try:
+                line = json.loads(bytes(raw).decode('utf-8'))
+            except (ValueError, UnicodeError):
+                return True
+            if isinstance(line, dict) and not _contains_different_session(line, self.pm_session_id):
+                frame = self._lifecycle_frame(line)
+                if frame == 'invalid':
+                    return False   # malformed and attached to no attempt: dropped
+                if frame is not None:
+                    self._late_frame(*frame)
+                    return frame[1] == 'started'
+        return self._starts_turn(raw)
 
     def _capture_stderr(self):
         stream = getattr(self._child, 'stderr', None)
@@ -783,164 +1068,326 @@ class PMRuntime:
             if idempotency_key is not None:
                 self._idempotency[idempotency_key] = record
             message_uuid = str(uuid.UUID(bytes=os.urandom(16), version=4))
-            try:
-                # priority "later": Claude Code never folds the message into a turn that is
-                # already running (a background notification turn); it starts it as a turn
-                # of its own after that one ends. The uuid ties the lifecycle frames to it.
-                self._write_line({'type': 'user', 'uuid': message_uuid, 'priority': 'later',
-                                  'message': {'role': 'user', 'content': [
-                                      {'type': 'text', 'text': text}]}})
-            except Exception:
-                record['status'] = 'ERROR'
-                record['ended_at'] = _timestamp(self.clock)
-                self._persist_turn(record)
-                self._turn = None
-                raise
-            self._pending_uuid = message_uuid
-        return self._owner_events(record, message_uuid)
+            # Registered before the write: every frame for this uuid meets this attempt.
+            attempt = {'uuid': message_uuid, 'record': record, 'phase': 'W',
+                       'written_at': _now(), 'idle_since': None, 'result_at': None,
+                       'interrupted': False, 'esc_at': None, 'bg_record': None}
+            self._attempt = attempt
+            # priority "later": Claude Code never folds the message into a turn that is
+            # already running (a background notification turn); it starts it as a turn of
+            # its own after that one ends. The uuid ties the lifecycle frames to it.
+            failed = self._write_message({'type': 'user', 'uuid': message_uuid,
+                                          'priority': 'later', 'message': {
+                                              'role': 'user', 'content': [
+                                                  {'type': 'text', 'text': text}]}})
+            if failed is not None:
+                # Never written (stdin already gone): NOT_SENT. Failed while writing:
+                # possibly delivered, so UNKNOWN. Either way the caller holds the draft.
+                letter = 'N' if failed == 'not_written' else 'X'
+                status = _DELIVERY[letter]
+                attempt['phase'] = letter
+                self._attempt = None
+                self._remember_attempt(message_uuid, letter)
+                self._finish(record, status, delivery=status, reason=failed)
+                return iter(({'type': 'RUNTIME_ERROR', 'turn_id': record['turn_id'], 'seq': None,
+                              'code': 'PM_PROCESS_EXITED', 'stderr': self._stderr_excerpt()},
+                             {'type': 'TURN_END', 'turn_id': record['turn_id'], 'seq': None,
+                              'status': status, 'delivery': status, 'reason': failed,
+                              'result_text': '', 'usage': {}}))
+        return self._owner_events(record, attempt)
 
-    @staticmethod
-    def _lifecycle_state(raw, message_uuid):
-        if not isinstance(raw, (bytes, bytearray)) or b'command_lifecycle' not in raw:
+    def _write_message(self, obj):
+        """Write an Owner message: None when written, 'not_written' when stdin was already
+        unusable, 'uncertain' when the write or flush itself failed."""
+        data = (json.dumps(obj, ensure_ascii=False, separators=(',', ':')) + '\n').encode('utf-8')
+        with self._write_lock:
+            stdin = getattr(self._child, 'stdin', None)
+            if stdin is None or getattr(stdin, 'closed', False) is True:
+                return 'not_written'
+            try:
+                stdin.write(data)
+                stdin.flush()
+            except ValueError:
+                return 'not_written'   # I/O on a closed file is refused before writing
+            except (OSError, AttributeError):
+                return 'uncertain'
+        return None
+
+    def _remember_attempt(self, message_uuid, letter):
+        self._finished_attempts[message_uuid] = letter
+        while len(self._finished_attempts) > 64:
+            self._finished_attempts.popitem(last=False)
+
+    def _late_frame(self, message_uuid, state):
+        """A lifecycle frame for an attempt already resolved. After C, B or N no frame
+        is expected: it is a protocol alert that stops automatic sends. After X a late
+        frame is plausible (the message ran after all) and is only tracked."""
+        letter = self._finished_attempts.get(message_uuid)
+        if letter in ('C', 'B', 'N'):
+            self._protocol_alerts += 1
+        return letter
+
+    def automatic_sends_blocked(self):
+        """True after a lifecycle frame contradicted a latched receipt."""
+        return self._protocol_alerts > 0
+
+    def _lifecycle_frame(self, line):
+        """(uuid, state) of a well-formed lifecycle frame, 'invalid' for a malformed one,
+        None when the line is not a lifecycle frame."""
+        if line.get('type') != 'command_lifecycle':
             return None
+        message_uuid, state = line.get('command_uuid'), line.get('state')
+        if (type(message_uuid) is not str or not _UUID.fullmatch(message_uuid) or
+                state not in _LIFECYCLE_STATES):
+            return 'invalid'
+        return message_uuid, state
+
+    def _owner_event(self, raw, attempt):
+        """Normalize one stdout line for the Owner reducer: (event, foreign uuid)."""
+        if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_STREAM_LINE_BYTES:
+            return 'invalid', None
         try:
             line = json.loads(bytes(raw).decode('utf-8'))
         except (ValueError, UnicodeError):
-            return None
-        if (isinstance(line, dict) and line.get('type') == 'command_lifecycle' and
-                line.get('command_uuid') == message_uuid and isinstance(line.get('state'), str)):
-            return line['state']
-        return None
+            return 'invalid', None
+        if not isinstance(line, dict):
+            return 'invalid', None
+        if _contains_different_session(line, self.pm_session_id):
+            return 'fork', None
+        frame = self._lifecycle_frame(line)
+        if frame == 'invalid':
+            return 'invalid', None
+        if frame is not None:
+            message_uuid, state = frame
+            if message_uuid == attempt['uuid']:
+                return state, None
+            self._late_frame(message_uuid, state)
+            return ('other_started' if state == 'started' else 'notice'), message_uuid
+        kind = line.get('type')
+        if kind == 'result':
+            return 'result', None
+        if kind in ('stream_event', 'assistant', 'user'):
+            return 'output', None
+        return 'notice', None
 
-    def _owner_events(self, record, message_uuid):
-        """Events of an Owner turn, correlated with Claude Code's lifecycle frames for the
-        message's uuid. The turn is the Owner's only from the moment Claude Code reports
-        the message `started`. Every turn before that is a background turn of its own
-        (Claude Code emits `queued` and `started` before a message's own output, so a turn
-        seen earlier never answers it). Withdrawn (cancelled, discarded, refused) ends
-        NOT_SENT. No `queued` within PM_QUEUED_TIMEOUT, no `started` within
-        PM_STARTED_GRACE of Claude Code being idle, or frames out of order end UNKNOWN.
-        The message is written once; nothing here sends it again."""
-        fate = []        # lifecycle states of this message, in arrival order
+    def _owner_events(self, record, attempt):
+        """Events of an Owner turn. One reducer (_owner_transition) sees every frame of the
+        turn, from the write to the matching terminal lifecycle frame, including while a
+        background turn or the Owner's own turn streams. Output becomes the Owner's only
+        after a legal queued -> started; its result becomes delivery only at the matching
+        `completed`. Every illegal transition, an expired deadline or the child's exit
+        ends UNKNOWN; withdrawal before `started` ends NOT_SENT. The message is written
+        once; nothing here writes it again."""
         lines = self._lines
         pushback = collections.deque()
-        written = time.monotonic()
-        clock = {'idle_since': None, 'in_background': False, 'lapsed': False,
-                 'background_seen': False}
-
-        def note(state):
-            fate.append(state)
-            if state == 'queued' and clock['idle_since'] is None:
-                clock['idle_since'] = time.monotonic()
+        out = []
+        flow = {'bg': None, 'bg_active': False, 'bg_seen': False, 'foreign': None,
+                'owner': None, 'ended': False}
 
         def deadline():
-            if 'started' in fate or clock['lapsed']:
-                return None
-            if 'queued' not in fate:
-                return written + PM_QUEUED_TIMEOUT
-            if clock['in_background']:
-                return None   # Claude Code is running a turn; ours legitimately waits
-            return clock['idle_since'] + PM_STARTED_GRACE
+            phase = attempt['phase']
+            if phase == 'W':
+                limit = attempt['written_at'] + PM_QUEUED_TIMEOUT
+            elif phase == 'Q':
+                limit = (None if flow['bg_active'] or attempt['idle_since'] is None
+                         else attempt['idle_since'] + PM_STARTED_GRACE)
+            elif phase in ('RO', 'RA'):
+                limit = attempt['result_at'] + PM_TERMINAL_GRACE
+            else:
+                return None   # O / A: the turn itself may legitimately run long
+            if attempt['esc_at'] is not None and phase in ('W', 'Q'):
+                cancel = attempt['esc_at'] + PM_CANCEL_GRACE
+                limit = cancel if limit is None else min(limit, cancel)
+            return limit
 
-        def next_line():
-            if pushback:
-                return pushback.popleft()
-            while True:
-                limit = deadline()
-                raw = self._next_raw(lines, None if limit is None else
-                                     max(0.0, limit - time.monotonic()))
-                if raw is _TIMED_OUT:
-                    if not clock['in_background']:
-                        return _TIMED_OUT
-                    lapse()   # past the bound inside a background turn: recorded now
-                    continue
-                if raw is None:
-                    return None
-                state = self._lifecycle_state(raw, message_uuid)
-                if state is None:
-                    return raw
-                note(state)
-                return _LIFECYCLE_MARK
-
-        def lapse():
-            # The record never stays ACTIVE past the bound, even while the turn Claude
-            # Code runs first still streams; the event follows when that turn ends.
-            if not clock['lapsed']:
-                clock['lapsed'] = True
-                with self._state_lock:
-                    record['status'] = 'UNKNOWN'
-                    record['ended_at'] = _timestamp(self.clock)
-                    self._persist_turn(record)
-
-        def plain():
-            # A turn's own events see stdout lines only; lifecycle frames stay here.
-            while True:
-                raw = next_line()
-                if raw is None:
-                    return
-                if raw is not _LIFECYCLE_MARK:
-                    yield raw
-
-        def end(status):
-            self._finish(record, status)
-            return {'type': 'TURN_END', 'turn_id': record['turn_id'], 'seq': None,
-                    'status': status, 'result_text': '', 'usage': {}}
-
-        try:
-            while True:
-                if clock['lapsed']:
-                    yield end('UNKNOWN')
-                    return
-                if any(state in _NOT_ACCEPTED for state in fate):
-                    yield end('NOT_SENT')
-                    return
-                if 'completed' in fate and 'started' not in fate:
-                    yield end('UNKNOWN')   # frames out of order: ambiguous
-                    return
-                if 'started' in fate:
-                    with self._state_lock:   # persisted with the turn's end
-                        self._pending_uuid = None
-                        record['started_at'] = _timestamp(self.clock)
-                    if clock['background_seen']:   # tells the caller its own turn begins now
-                        yield {'type': 'TURN_ACCEPTED', 'turn_id': record['turn_id'], 'seq': None}
-                    yield from self._events(record, plain())
-                    return
-                raw = next_line()
-                if raw is _TIMED_OUT:
-                    yield end('UNKNOWN')
-                    return
-                if raw is None:
-                    yield from self._events(record, plain())   # stdout ended: an error turn
-                    return
-                if raw is _LIFECYCLE_MARK:
-                    continue
-                if not self._starts_turn(raw):
-                    self._unknown_lines += 1
-                    continue
-                # Not started yet: whatever turn this is, it is not the Owner's.
+        def bg_feed(raw):
+            if flow['bg'] is None:
                 with self._state_lock:
                     background = self._start_record('', None, origin='background', claim=False)
-                yield {'type': 'BACKGROUND_TURN_START', 'turn_id': background['turn_id'],
-                       'seq': None, 'origin': 'background'}
-                pushback.appendleft(raw)
-                clock['in_background'] = clock['background_seen'] = True
-                try:
-                    yield from self._events(background, plain())
-                finally:
-                    clock['in_background'] = False
-                if 'started' in fate:
-                    # Taken in by that turn after all (not seen with priority "later"): it
-                    # was delivered once, inside that turn; it is never written again.
-                    yield end('ABSORBED')
+                    attempt['bg_record'] = background
+                flow['bg'] = _TurnParser(self, background, lambda: self._was_interrupted)
+                out.append({'type': 'BACKGROUND_TURN_START', 'turn_id': background['turn_id'],
+                            'seq': None, 'origin': 'background'})
+            flow['bg_active'] = flow['bg_seen'] = True
+            events, done = flow['bg'].feed(raw)
+            out.extend(events)
+            if done:
+                flow['bg'], flow['bg_active'], flow['foreign'] = None, False, None
+                attempt['bg_record'] = None
+                self._was_interrupted = False   # spent on that turn; the attempt keeps its own
+            return done
+
+        def finalize(letter, reason=None, error=None):
+            if flow['ended']:
+                return
+            flow['ended'] = True
+            with self._state_lock:
+                attempt['phase'] = letter
+                resolved = record.get('delivery') is not None   # close() resolved it first
+                if not resolved:
+                    if letter == 'C':
+                        status, text, usage = flow['owner'].outcome
+                        self._finish(record, status, text, usage, delivery='COMPLETED',
+                                     release=False)
+                    else:
+                        self._finish(record, _DELIVERY[letter], delivery=_DELIVERY[letter],
+                                     reason=reason, release=False)
+            if error is not None and not resolved:
+                out.append(error)
+            if letter == 'C' and not resolved:
+                status, text, usage = flow['owner'].outcome
+                out.append(flow['owner'].emit('TURN_END', status=status,
+                                              result_text=_safe_result_text(text), usage=usage,
+                                              delivery='COMPLETED'))
+                return
+            fields = {'reason': record['reason']} if record.get('reason') else {}
+            out.append({'type': 'TURN_END', 'turn_id': record['turn_id'], 'seq': None,
+                        'status': record['status'], 'delivery': record['delivery'],
+                        'result_text': '', 'usage': {}, **fields})
+
+        def runtime_error(code, stderr=None):
+            value = {'type': 'RUNTIME_ERROR', 'turn_id': record['turn_id'], 'seq': None,
+                     'code': code}
+            if stderr is not None:
+                value['stderr'] = stderr
+            return value
+
+        def apply(event, raw, arrived, foreign):
+            phase = attempt['phase']
+            if event == 'notice' and foreign is not None and foreign == flow['foreign'] \
+                    and flow['bg'] is None:
+                flow['bg_active'], flow['foreign'] = False, None   # that command ended unseen
+                if phase == 'Q':
+                    attempt['idle_since'] = arrived
+                return
+            next_phase, action = _owner_transition(phase, event, flow['bg_active'])
+            if action == 'hold_unknown':
+                error = None
+                if event == 'exit':
+                    if flow['bg'] is not None:
+                        out.extend(flow['bg'].eof())
+                        flow['bg'], flow['bg_active'] = None, False
+                    if not self._closed:
+                        error = (flow['owner'] or _TurnParser(self, record, lambda: False)).exit_error()
+                elif event == 'invalid':
+                    error = runtime_error('PM_STREAM_INVALID')
+                    self._terminate_child()
+                elif event in ('output', 'result'):
+                    pushback.appendleft(raw)   # not the Owner's: shown as background output
+                elif event == 'other_started':
+                    flow['bg_active'], flow['foreign'] = True, foreign
+                finalize('X', error=error)
+                return
+            with self._state_lock:
+                attempt['phase'] = next_phase
+            if action == 'acknowledge':
+                if not flow['bg_active']:
+                    attempt['idle_since'] = arrived
+            elif action == 'accept':
+                if next_phase == 'O':
+                    flow['owner'] = _TurnParser(self, record, lambda: attempt['interrupted'],
+                                                defer=True)
+                    with self._state_lock:   # persisted with the turn's end
+                        record['started_at'] = _timestamp(self.clock)
+                    if flow['bg_seen']:   # tells the caller its own turn begins now
+                        out.append({'type': 'TURN_ACCEPTED', 'turn_id': record['turn_id'],
+                                    'seq': None})
+            elif action == 'retain_rejection_reason':
+                finalize('N', reason=event)
+            elif action in ('background_output', 'background_result'):
+                if bg_feed(raw) and next_phase == 'Q':
+                    attempt['idle_since'] = arrived   # the start grace restarts after it
+            elif action == 'background_start':
+                flow['bg_active'], flow['foreign'] = True, foreign
+            elif action in ('render_output', 'save_result'):
+                if phase == 'O':
+                    events, _ = flow['owner'].feed(raw)
+                    out.extend(events)
+                else:
+                    bg_feed(raw)   # A: the turn that took the message in
+                if action == 'save_result':
+                    attempt['result_at'] = arrived
+            elif action == 'finish_owner':
+                finalize('C')
+            elif action == 'finish_absorbed':
+                finalize('B')
+
+        def drain_after_terminal():
+            # The Owner's fate is latched. A turn still in flight is shown as background
+            # until its result; later lines are left for background_turn().
+            while flow['bg'] is not None or flow['bg_active'] or pushback:
+                raw = pushback.popleft() if pushback else self._next_raw(lines)
+                if raw is None:
+                    if flow['bg'] is not None:
+                        out.extend(flow['bg'].eof())
                     return
-                if 'queued' in fate:
-                    clock['idle_since'] = time.monotonic()   # the grace restarts after it
-                elif time.monotonic() >= written + PM_QUEUED_TIMEOUT:
-                    lapse()
+                event, foreign = self._owner_event(raw, attempt)
+                if event in _LIFECYCLE_STATES:
+                    self._late_frame(attempt['uuid'], event)
+                elif event in ('output', 'result', 'invalid', 'fork'):
+                    if bg_feed(raw):
+                        return
+                elif event == 'other_started':
+                    flow['bg_active'] = True
+                elif event == 'notice' and foreign is not None and foreign == flow['foreign'] \
+                        and flow['bg'] is None:
+                    flow['bg_active'] = False
+                yield from out
+                out.clear()
+
+        try:
+            while attempt['phase'] in _LIVE:
+                raw = pushback.popleft() if pushback else self._next_raw(lines, deadline)
+                if raw is _TIMED_OUT:
+                    apply('timeout', None, _now(), None)
+                elif raw is None:
+                    apply('exit', None, _now(), None)
+                else:
+                    arrived = getattr(raw, 'arrived', None)
+                    arrived = _now() if arrived is None else arrived
+                    limit = deadline()
+                    if limit is not None and arrived >= limit:
+                        pushback.appendleft(raw)   # it came after the deadline had passed
+                        apply('timeout', None, arrived, None)
+                    else:
+                        event, foreign = self._owner_event(raw, attempt)
+                        if event == 'fork':
+                            if flow['bg'] is not None:
+                                try:
+                                    self._finish(flow['bg'].record, 'ERROR')
+                                except Exception:
+                                    pass
+                            finalize('X')
+                            yield from out
+                            out.clear()
+                            try:
+                                self.close()
+                            except Exception:
+                                pass
+                            raise _error('PM_SESSION_FORKED',
+                                         'Claude Code started a different PM session')
+                        apply(event, raw, arrived, foreign)
+                yield from out
+                out.clear()
+            yield from out
+            out.clear()
+            yield from drain_after_terminal()
+            yield from out
         finally:
             with self._state_lock:
-                if self._pending_uuid == message_uuid:
-                    self._pending_uuid = None
+                if not flow['ended'] and record.get('delivery') is None:
+                    try:   # abandoned mid-attempt: never left ACTIVE
+                        self._finish(record, 'UNKNOWN', delivery='UNKNOWN', release=False)
+                    except Exception:
+                        pass
+                    attempt['phase'] = 'X'
+                if self._attempt is attempt:
+                    self._attempt = None
+                self._remember_attempt(attempt['uuid'], attempt['phase'] if
+                                       attempt['phase'] in _TERMINAL else 'X')
+                if self._turn is record:
+                    self._turn = None
+                self._lines_cond.notify_all()
 
     def _start_record(self, owner_text, idempotency_key, origin=None, claim=True):
         turns = self._history_read()
@@ -973,7 +1420,8 @@ class PMRuntime:
                 if self._closed or self._child is None or lines is None:
                     return None
                 if self._turn is None:
-                    while lines and lines[0] is not _STDOUT_EOF and not self._starts_turn(lines[0]):
+                    while (lines and lines[0] is not _STDOUT_EOF and
+                           not self._idle_line_starts_turn(lines[0])):
                         lines.popleft()
                         self._unknown_lines += 1
                     if lines and lines[0] is _STDOUT_EOF:
@@ -997,9 +1445,14 @@ class PMRuntime:
             turns.append(dict(record))
         self._history_write(turns)
 
-    def _finish(self, record, status, result_text='', usage=None):
+    def _finish(self, record, status, result_text='', usage=None, *, delivery=None,
+                reason=None, release=True):
         with self._state_lock:
             record['status'] = status
+            if delivery is not None:
+                record['delivery'] = delivery
+            if reason is not None:
+                record['reason'] = reason
             record['ended_at'] = _timestamp(self.clock)
             if not result_text and record.get('result_text'):
                 result_text = record['result_text']
@@ -1012,205 +1465,22 @@ class PMRuntime:
                     _write_json_atomic(self._root,
                                        _binding_path(self._root, self.pm_session_id), binding)
             self._persist_turn(record)
-            if self._turn is record:
+            if release and self._turn is record:
                 self._turn = None
                 self._lines_cond.notify_all()   # a waiting background_turn may claim lines now
 
     def _events(self, record, source=None):
-        lines = self._lines
-        event_seq = 0
-        blocks = {}
-        withheld_blocks = set()
-        emitted_lengths = {}
-
-        def emit(kind, **fields):
-            nonlocal event_seq
-            value = {'type': kind, 'turn_id': record['turn_id'], 'seq': event_seq}
-            if record.get('origin'):
-                value['origin'] = record['origin']
-            event_seq += 1
-            value.update(fields)
-            return value
-
-        def flush_block(index, force=False):
-            if index in withheld_blocks:
-                return None
-            buffered = blocks.get(index, '')
-            screened = _screen_stream_text(buffered)
-            if screened == '[withheld]':
-                withheld_blocks.add(index)
-                return None
-            previous = emitted_lengths.get(index, 0)
-            safe_end = len(screened) if force else _stream_safe_end(screened)
-            safe_end = max(previous, safe_end)
-            if safe_end <= previous:
-                return None
-            piece = screened[previous:safe_end]
-            emitted_lengths[index] = safe_end
-            record['result_text'] = _bounded_stream_append(
-                record.get('result_text', ''), piece)
-            return emit('TEXT_DELTA', text=piece, block_index=index)
-
-        def flush_all_blocks():
-            for block_index in blocks:
-                event = flush_block(block_index, force=True)
-                if event is not None:
-                    yield event
-
+        """Events of one turn read from stdout (or source) until its result."""
+        parser = _TurnParser(self, record, lambda: self._was_interrupted)
         try:
-            for raw in (self._read_lines(lines) if source is None else source):
-                if self._was_interrupted:
-                    yield from flush_all_blocks()
+            for raw in (self._read_lines(self._lines) if source is None else source):
                 if self._closed:
                     return
-                if not isinstance(raw, (bytes, bytearray)) or len(raw) > MAX_STREAM_LINE_BYTES:
-                    yield emit('RUNTIME_ERROR', code='PM_STREAM_INVALID')
-                    self._terminate_child()
-                    self._finish(record, 'ERROR')
-                    yield emit('TURN_END', status='ERROR', result_text='', usage={})
+                events, done = parser.feed(raw)
+                yield from events
+                if done:
                     return
-                try:
-                    line = json.loads(bytes(raw).decode('utf-8'))
-                except (ValueError, UnicodeError):
-                    line = None
-                if not isinstance(line, dict):
-                    yield emit('RUNTIME_ERROR', code='PM_STREAM_INVALID')
-                    self._terminate_child()
-                    self._finish(record, 'ERROR')
-                    yield emit('TURN_END', status='ERROR', result_text='', usage={})
-                    return
-                if _contains_different_session(line, self.pm_session_id):
-                    fork_error = _error(
-                        'PM_SESSION_FORKED', 'Claude Code started a different PM session')
-                    try:
-                        self._finish(record, 'ERROR')
-                    except Exception:
-                        with self._state_lock:
-                            if self._turn is record:
-                                self._turn = None
-                    try:
-                        self.close()
-                    except Exception:
-                        pass
-                    raise fork_error
-                kind = line.get('type')
-                if kind == 'stream_event':
-                    event = line.get('event') or {}
-                    delta = event.get('delta') or {}
-                    if event.get('type') == 'message_start':
-                        blocks.clear()
-                        withheld_blocks.clear()
-                        emitted_lengths.clear()
-                    elif event.get('type') == 'content_block_delta' and delta.get('type') == 'text_delta':
-                        text = delta.get('text')
-                        if isinstance(text, str):
-                            index = event.get('index', 0)
-                            if index in withheld_blocks:
-                                continue
-                            blocks[index] = blocks.get(index, '') + text
-                            buffered = blocks[index]
-                            if len(buffered.encode('utf-8', 'ignore')) > MAX_MESSAGE_BYTES:
-                                withheld_blocks.add(index)
-                            else:
-                                screened = _screen_stream_text(buffered)
-                                if screened == '[withheld]':
-                                    withheld_blocks.add(index)
-                                else:
-                                    event = flush_block(index)
-                                    if event is not None:
-                                        yield event
-                    elif event.get('type') == 'content_block_stop':
-                        index = event.get('index', 0)
-                        flushed = flush_block(index, force=True)
-                        if flushed is not None:
-                            yield flushed
-                    elif event.get('type') == 'content_block_start':
-                        # Thinking never becomes answer text (only text_delta and text
-                        # items do); the UI may show a status while the PM thinks.
-                        block = event.get('content_block') or {}
-                        if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
-                            yield emit('THINKING')
-                elif kind == 'assistant':
-                    for position, item in enumerate(
-                            _iter_content((line.get('message') or {}).get('content'))):
-                        if not isinstance(item, dict):
-                            continue
-                        if item.get('type') == 'text' and isinstance(item.get('text'), str):
-                            index = item.get('index', position)
-                            if index in withheld_blocks:
-                                continue
-                            final_text = _screen_stream_text(item['text'])
-                            if final_text == '[withheld]':
-                                withheld_blocks.add(index)
-                                continue
-                            elif index not in withheld_blocks:
-                                flushed = flush_block(index, force=True)
-                                if flushed is not None:
-                                    yield flushed
-                                previous = emitted_lengths.get(index, 0)
-                                remainder = final_text[min(previous, len(final_text)):]
-                                record['result_text'] = _bounded_stream_append(
-                                    record.get('result_text', ''), remainder)
-                                blocks[index] = final_text
-                                emitted_lengths[index] = len(final_text)
-                            yield emit('ASSISTANT_TEXT', text=final_text, final=True)
-                        elif item.get('type') == 'tool_use':
-                            tool_id, name = item.get('id'), item.get('name')
-                            if isinstance(name, str):
-                                if name not in record['tool_names']:
-                                    record['tool_names'].append(name)
-                                yield emit('TOOL_USE', tool_use_id=tool_id, name=name)
-                elif kind == 'user':
-                    for item in _iter_content((line.get('message') or {}).get('content')):
-                        if isinstance(item, dict) and item.get('type') == 'tool_result':
-                            is_error = bool(item.get('is_error', False))
-                            permission = (item.get('permission_denial') or item.get('permission') or
-                                          item.get('permission_denied'))
-                            content = item.get('content', '')
-                            permission_text = content.lower() if isinstance(content, str) else ''
-                            denied = bool(permission) or (is_error and any(
-                                word in permission_text for word in ('permission denied',
-                                                                     "doesn't want to proceed",
-                                                                     'denied by user')))
-                            reason = ('PERMISSION_DENIED' if denied else
-                                      'TOOL_ERROR' if is_error else 'OK')
-                            yield emit('TOOL_RESULT', tool_use_id=item.get('tool_use_id'),
-                                       reason=reason, is_error=is_error)
-                elif kind == 'result':
-                    status = 'INTERRUPTED' if self._was_interrupted else (
-                        'ERROR' if line.get('is_error') or line.get('subtype') in
-                        ('error', 'error_during_execution') else 'COMPLETED')
-                    result = line.get('result', '')
-                    result_text = _screen_stream_text(result) if isinstance(result, str) else ''
-                    if result_text == '[withheld]':
-                        result_text = ''
-                    # The turn result closes any remaining text blocks.
-                    yield from flush_all_blocks()
-                    if not result_text:
-                        result_text = record.get('result_text', '')
-                    usage = line.get('usage') if isinstance(line.get('usage'), dict) else {}
-                    if status == 'ERROR':
-                        lower = result_text.lower()
-                        code = ('PM_QUOTA_EXHAUSTED' if any(word in lower for word in
-                                ('quota exceeded', 'usage limit', 'rate limit', 'hit your limit'))
-                                else 'PM_PROCESS_EXITED')
-                        yield emit('RUNTIME_ERROR', code=code, stderr=self._stderr_excerpt())
-                    self._finish(record, status, result_text, usage)
-                    yield emit('TURN_END', status=status,
-                               result_text=_safe_result_text(result_text), usage=usage)
-                    return
-                else:
-                    self._unknown_lines += 1
-            if record.get('status') == 'ACTIVE':   # stdout ended inside the turn
-                if self._stderr_thread is not None:
-                    self._stderr_thread.join(timeout=1)
-                stderr = self._stderr_excerpt()
-                lower = stderr.lower()
-                code = ('PM_QUOTA_EXHAUSTED' if any(word in lower for word in
-                        ('quota exceeded', 'usage limit', 'rate limit')) else 'PM_PROCESS_EXITED')
-                yield emit('RUNTIME_ERROR', code=code, stderr=stderr)
-                self._finish(record, 'ERROR')
-                yield emit('TURN_END', status='ERROR', result_text='', usage={})
+            yield from parser.eof()
         finally:
             self._was_interrupted = False
 
@@ -1224,12 +1494,19 @@ class PMRuntime:
             if self._turn is None or self._closed:
                 return
             self._was_interrupted = True
-            pending = self._pending_uuid
+            attempt, pending = self._attempt, None
+            if attempt is not None and attempt['phase'] in _LIVE:
+                attempt['phase'], _ = _owner_transition(attempt['phase'], 'esc', False)
+                attempt['interrupted'] = True
+                attempt['esc_at'] = _now()
+                if attempt['phase'] in ('W', 'Q'):
+                    pending = attempt['uuid']
+            self._lines_cond.notify_all()   # the reducer re-reads its deadline
         self._write_line({'type': 'control_request', 'request_id': uuid.uuid4().hex,
                           'request': {'subtype': 'interrupt'}})
         if pending is not None:
-            # The Owner message is still waiting behind another turn: withdraw it too, so
-            # it is not run after the interrupt (it ends NOT_SENT and stays the caller's).
+            # The Owner message has not started: withdraw it too. Esc is a request, not
+            # proof: only a `cancelled` frame makes it NOT_SENT; no answer ends UNKNOWN.
             self._write_line({'type': 'control_request', 'request_id': uuid.uuid4().hex,
                               'request': {'subtype': 'cancel_async_message',
                                           'message_uuid': pending}})
@@ -1254,12 +1531,25 @@ class PMRuntime:
             self._closed = True
             child = self._child
             active_turn = self._turn
+            attempt = self._attempt
             self._lines_cond.notify_all()
         error = None
         had_child = child is not None
         if active_turn is not None:
             try:
-                self._finish(active_turn, 'INTERRUPTED')
+                with self._state_lock:
+                    if active_turn.get('delivery') is not None:
+                        if self._turn is active_turn:   # resolved already; just release it
+                            self._turn = None
+                    elif attempt is not None and attempt['record'] is active_turn:
+                        # A written message whose fate is unconfirmed: UNKNOWN, held by the
+                        # caller (its iterator reports it once), never INTERRUPTED.
+                        background = attempt.get('bg_record')
+                        if background is not None and background.get('status') == 'ACTIVE':
+                            self._finish(background, 'INTERRUPTED')
+                        self._finish(active_turn, 'UNKNOWN', delivery='UNKNOWN')
+                    else:
+                        self._finish(active_turn, 'INTERRUPTED')
             except Exception as exc:
                 error = exc
         try:
