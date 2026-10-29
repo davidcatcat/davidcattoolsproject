@@ -3738,8 +3738,9 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
                                                   ui.conversation.text)])
         status = ui.conversation.text.split('> /status', 1)[1]
-        self.assertIn('PM session：' + self.session_id + '（claude-code，cwd ', status)
-        self.assertIn('Claude 帳號目錄：' + str(self.temp_root), status)
+        self.assertIn('PM session：' + self.session_id + '（claude-code，cwd .）', status)
+        self.assertIn('Claude 帳號目錄：' + self.temp_root.name, status)
+        self.assertNotIn(str(self.temp_root), status)
         self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
         self.assertIn('PM 狀態：暖機中…', status)
         self.assertIn('佇列（本機設定）：沒有', status)
@@ -3757,7 +3758,7 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
                                                   ui.conversation.text)])
         status = ui.conversation.text.split('> /status', 1)[1]
-        self.assertIn('背景：UNKNOWN（TaskStore：' + reason + ')', status)
+        self.assertIn('背景：UNKNOWN（TaskStore：' + reason + '）', status)
         self.assertNotIn('背景：讀取失敗', status)
 
     def test_history_turns_use_the_live_layout(self):

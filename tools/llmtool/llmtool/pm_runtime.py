@@ -237,13 +237,29 @@ def _display_local_path(value, cwd=None):
     return os.path.basename(path) or '/'
 
 
-_ABSOLUTE_PATH = re.compile(r'(?<![A-Za-z0-9_:])/(?:[^\s]+)')
+_URL_TOKEN = re.compile(r'\b[a-z][a-z0-9+.-]*://[^\s]+', re.IGNORECASE)
+_ABSOLUTE_PATH_TOKEN = re.compile(r'(?<![^\s:=,"\'(])/(?:[^\s]+)')
 
 
 def _redact_path_match(match, cwd):
     token = match.group(0)
     path = token.rstrip('.,;:)])}')
     return _display_local_path(path, cwd) + token[len(path):]
+
+
+def _redact_description_paths(text, cwd=None):
+    """Redact absolute paths in prose, leaving URL tokens and relative paths intact."""
+    if not isinstance(text, str):
+        return text
+    urls = []
+
+    def hold_url(match):
+        urls.append(match.group(0))
+        return '\x00URL%d\x00' % (len(urls) - 1)
+
+    protected = _URL_TOKEN.sub(hold_url, text)
+    redacted = _ABSOLUTE_PATH_TOKEN.sub(lambda match: _redact_path_match(match, cwd), protected)
+    return re.sub(r'\x00URL(\d+)\x00', lambda match: urls[int(match.group(1))], redacted)
 
 
 def _tool_description(name, tool_input, cwd=None):
@@ -264,7 +280,7 @@ def _tool_description(name, tool_input, cwd=None):
                       None)
         if target is not None:
             text = text.replace(target, _display_local_path(target, cwd))
-        text = _ABSOLUTE_PATH.sub(lambda match: _redact_path_match(match, cwd), text)
+        text = _redact_description_paths(text, cwd)
     text = ' '.join(text.split())[:TOOL_DESCRIPTION_CHARS]
     screened = _screen_stream_text(text)
     return None if screened == '[withheld]' else screened

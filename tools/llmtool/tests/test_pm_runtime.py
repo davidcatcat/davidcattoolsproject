@@ -309,6 +309,19 @@ class PMRuntimeTests(unittest.TestCase):
                                           'Read /var/private/client.pem'}, self.cwd),
                          'Read client.pem')
 
+    def test_description_path_redaction_protects_urls_and_handles_path_boundaries(self):
+        redact = pm_runtime._redact_description_paths
+        self.assertEqual(redact('scp host:/Users/x/secret.pem .'), 'scp host:secret.pem .')
+        self.assertEqual(redact('file:/Users/alice/private.pem'), 'file:private.pem')
+        home_path = str(Path.home() / 'private' / 'k.pem')
+        self.assertEqual(redact('Read ' + home_path), 'Read ~/private/k.pem')
+        self.assertEqual(redact('cat ~/notes/x.md'), 'cat ~/notes/x.md')
+        self.assertEqual(redact('fetch https://example.com/a/b'),
+                         'fetch https://example.com/a/b')
+        self.assertEqual(redact('export PATH=/a:/opt/private/bin'), 'export PATH=bin')
+        self.assertEqual(redact('keep ./relative/path and docs/a.md'),
+                         'keep ./relative/path and docs/a.md')
+
     def test_argv_fixes_tool_set_and_adds_pm_instruction_on_every_launch(self):
         # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated
         # the prompt cache, so the PM process runs with a fixed, empty MCP set (claude CLI
