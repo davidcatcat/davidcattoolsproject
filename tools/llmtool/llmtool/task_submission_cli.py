@@ -3155,6 +3155,7 @@ def run_task_github_events(args, *, store=None, stdout=None, github_get=None):
     store = TaskStore() if store is None else store
     key = active_pm_inbox.pm_session_key(args.pm_session)
     result = poll(store, key, args.issue, since=args.since, github_get=github_get)
+    result['comment_events'] = 'DISABLED_NO_TRUSTED_OWNER_SOURCE'
     _print(result, stdout=stdout)
     return 0
 
