@@ -3446,8 +3446,8 @@ def _pm_runtime_bindings() -> dict[str, dict]:
 
     The directory is listed only when its mtime changes. Binding contents are
     read through the monitor's no-follow regular-file helper and only the
-    session id, creation time, cwd, and optional Claude account directory are
-    retained. Conversation history is never opened.
+    session id, creation time, and cwd are retained. Conversation history is
+    never opened.
     """
     directory = PM_RUNTIME_DIR
     try:
@@ -3491,15 +3491,13 @@ def _pm_runtime_bindings() -> dict[str, dict]:
                 if opened is not None and opened[0] == opened_key and opened[1] not in (None, False):
                     record = _remote_test_json(opened[1])
                     if type(record) is dict:
-                        sid = record.get("session_id", record.get("sessionId"))
-                        if type(sid) is str and re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
+                        sid = record.get("native_session_id")
+                        filename_sid = name[:-len(".binding.json")]
+                        if (record.get("runtime") == "claude-code" and
+                                type(sid) is str and sid == filename_sid and
+                                re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", sid)):
                             binding = {"session_id": sid, "created_at": record.get("created_at"),
                                        "cwd": record.get("cwd")}
-                            account = next((record.get(field) for field in
-                                            ("claude_account_dir", "account_dir", "claude_config_dir")
-                                            if type(record.get(field)) is str), None)
-                            if account is not None:
-                                binding["account_dir"] = account
             cached = (key, binding)
             _remember(_pm_binding_cache, path, cached)
         binding = cached[1]
@@ -3573,10 +3571,6 @@ def claude_rows(now: float, root=None,
         key = f"claude:{os.path.basename(path)}"
         sid = os.path.basename(path)[:-len(".jsonl")]
         binding = bindings.get(sid)
-        if binding and binding.get("account_dir"):
-            account_dir = os.path.realpath(os.path.dirname(os.path.dirname(top)))
-            if os.path.realpath(binding["account_dir"]) != account_dir:
-                binding = None
         # An interactive session another agent pings with `claude --resume -p`
         # gains sdk-cli entries but is still the interactive member.
         first = _first_entrypoint(path)

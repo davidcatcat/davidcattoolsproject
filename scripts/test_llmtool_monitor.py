@@ -2661,8 +2661,10 @@ class OfficeViewTests(unittest.TestCase):
         runtime = Path(self.tmp.name) / "pm-runtime"
         runtime.mkdir(mode=0o700)
         binding = runtime / f"{bound}.binding.json"
-        binding.write_text(json.dumps({"session_id": bound, "created_at": "2026-10-29T00:00:00Z",
-                                       "cwd": self.canonical}), encoding="utf-8")
+        binding.write_text(json.dumps({"runtime": "claude-code", "native_session_id": bound,
+                                       "cwd": self.canonical, "dedicated": True,
+                                       "created_at": "2026-10-29T00:00:00Z",
+                                       "session_started": False}), encoding="utf-8")
         os.chmod(binding, 0o600)
         with patch.object(mon, "PM_RUNTIME_DIR", str(runtime)):
             rows = [row for row in self.rows() if row.detail in
