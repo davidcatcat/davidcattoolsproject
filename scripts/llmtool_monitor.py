@@ -3436,6 +3436,81 @@ def claude_sessions(root=None) -> list[str]:
 _listing_cache: dict = {}   # project folder -> (folder mtime_ns, its *.jsonl names)
 
 
+PM_RUNTIME_DIR = os.path.expanduser("~/.local/state/llmtool/pm-runtime")
+_pm_binding_listing: dict = {}   # directory -> (directory key, binding names)
+_pm_binding_cache: dict = {}     # path -> (file key, minimal binding fields or None)
+
+
+def _pm_runtime_bindings() -> dict[str, dict]:
+    """Minimal pm_runtime bindings keyed by Claude session id.
+
+    The directory is listed only when its mtime changes. Binding contents are
+    read through the monitor's no-follow regular-file helper and only the
+    session id, creation time, cwd, and optional Claude account directory are
+    retained. Conversation history is never opened.
+    """
+    directory = PM_RUNTIME_DIR
+    try:
+        info = os.lstat(directory)
+    except OSError:
+        _pm_binding_listing.pop(directory, None)
+        return {}
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o022:
+        _pm_binding_listing.pop(directory, None)
+        return {}
+    stamp = (info.st_ino, info.st_mtime_ns)
+    listed = _pm_binding_listing.get(directory)
+    if listed is None or listed[0] != stamp:
+        try:
+            names = sorted(name for name in os.listdir(directory)
+                           if re.fullmatch(r"[0-9a-fA-F-]{36}\.binding\.json", name))
+        except OSError:
+            names = []
+        listed = (stamp, names)
+        _remember(_pm_binding_listing, directory, listed)
+
+    found = {}
+    keep = set()
+    for name in listed[1]:
+        path = os.path.join(directory, name)
+        keep.add(path)
+        try:
+            file_info = os.lstat(path)
+        except OSError:
+            _pm_binding_cache.pop(path, None)
+            continue
+        key = (file_info.st_dev, file_info.st_ino, file_info.st_size, file_info.st_mtime_ns,
+               file_info.st_ctime_ns, file_info.st_mode, file_info.st_uid)
+        cached = _pm_binding_cache.get(path)
+        if cached is None or cached[0] != key:
+            binding = None
+            if (stat.S_ISREG(file_info.st_mode) and file_info.st_uid == os.getuid()
+                    and not file_info.st_mode & 0o077 and file_info.st_size <= 16 << 10):
+                opened = _remote_test_open(path, 16 << 10)
+                opened_key = (file_info.st_ino, file_info.st_mtime_ns, file_info.st_size)
+                if opened is not None and opened[0] == opened_key and opened[1] not in (None, False):
+                    record = _remote_test_json(opened[1])
+                    if type(record) is dict:
+                        sid = record.get("session_id", record.get("sessionId"))
+                        if type(sid) is str and re.fullmatch(r"[0-9a-fA-F-]{36}", sid):
+                            binding = {"session_id": sid, "created_at": record.get("created_at"),
+                                       "cwd": record.get("cwd")}
+                            account = next((record.get(field) for field in
+                                            ("claude_account_dir", "account_dir", "claude_config_dir")
+                                            if type(record.get(field)) is str), None)
+                            if account is not None:
+                                binding["account_dir"] = account
+            cached = (key, binding)
+            _remember(_pm_binding_cache, path, cached)
+        binding = cached[1]
+        if binding is not None:
+            found[binding["session_id"]] = binding
+    for path in list(_pm_binding_cache):
+        if path.startswith(directory + os.sep) and path not in keep:
+            _pm_binding_cache.pop(path, None)
+    return found
+
+
 def _session_files(top: str) -> list[str]:
     """<top>/*/*.jsonl as glob lists it; a project folder whose mtime did not
     change keeps its last listing (a new session file changes that mtime,
@@ -3473,7 +3548,9 @@ def claude_rows(now: float, root=None,
     written a session file."""
     canonical = canonical or canonical_root()
     rows, seen = [], set()
-    for path in sorted(path for top in claude_roots(root) for path in _session_files(top)):
+    bindings = _pm_runtime_bindings()
+    sessions = sorted((top, path) for top in claude_roots(root) for path in _session_files(top))
+    for top, path in sessions:
         try:
             age = max(0.0, now - os.path.getmtime(path))
         except OSError:
@@ -3494,6 +3571,12 @@ def claude_rows(now: float, root=None,
         if action:
             detail = action   # what it is doing right now beats the session title
         key = f"claude:{os.path.basename(path)}"
+        sid = os.path.basename(path)[:-len(".jsonl")]
+        binding = bindings.get(sid)
+        if binding and binding.get("account_dir"):
+            account_dir = os.path.realpath(os.path.dirname(os.path.dirname(top)))
+            if os.path.realpath(binding["account_dir"]) != account_dir:
+                binding = None
         # An interactive session another agent pings with `claude --resume -p`
         # gains sdk-cli entries but is still the interactive member.
         first = _first_entrypoint(path)
@@ -3505,10 +3588,11 @@ def claude_rows(now: float, root=None,
             state = WORKING if age <= OFFICE_BUSY else DONE
             if state == DONE and age > OFFICE_DONE_WINDOW:
                 continue
-            rows.append(OfficeRow("claude 單次呼叫", state, detail, age, 30, key=key,
-                                  kind="subagent", task=task, evidence="claude 紀錄"))
+            label = "PM（TUI）" if binding else "claude 單次呼叫"
+            rows.append(OfficeRow(label, state, detail, age, 30, key=key,
+                                  kind="agent" if binding else "subagent", task=task,
+                                  evidence="claude 紀錄"))
             continue
-        sid = os.path.basename(path)[:-len(".jsonl")]
         seen.add(sid)
         entry, who = (live or {}).get(sid, ({}, ""))
         state, detail, age = _claude_state(entry, who, task, detail, age, now, tail)
@@ -3518,8 +3602,9 @@ def claude_rows(now: float, root=None,
             # session file still holds the name its launcher gave it.
             entry = {"name": next((item.get("agentName") for item in reversed(tail)
                                    if item.get("type") == "agent-name"), None)}
-        rows.append(_claude_row(entry, state, detail, age, place, task, key, sid, canonical,
-                                cli=first == "cli"))
+        row = _claude_row(entry, state, detail, age, place, task, key, sid, canonical,
+                          cli=first == "cli")
+        rows.append(replace(row, name="PM（TUI）", role="") if binding else row)
         session_dir = path[:-len(".jsonl")]
         for meta_path in sorted(glob.glob(os.path.join(session_dir, "subagents",
                                                        "agent-*.meta.json"))):
