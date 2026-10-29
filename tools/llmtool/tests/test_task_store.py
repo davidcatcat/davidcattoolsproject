@@ -1556,6 +1556,59 @@ class TaskStoreTests(unittest.TestCase):
                 'pm_session_id': value['pm_session_id'], 'extra': True,
             })
         self.assertEqual(invalid.exception.task_store_error_code,
+                         'TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+
+    def test_abandonment_changes_are_restricted_to_pm_bound_path(self):
+        value = self._codex_dispatch_task()
+        self.store.create(value)
+        original = self.store.get(value['task_id'])
+        stamped = {
+            'reason': 'PM stopped this Task',
+            'abandoned_at': '2026-10-29T00:00:00Z',
+            'pm_session_id': value['pm_session_id'],
+        }
+        for mutate in (
+                lambda: self.store.update(value['task_id'], abandonment=stamped),
+                lambda: self.store.compare_and_update(value['task_id'],
+                    expected={'record_sha256': original['record_sha256']},
+                    abandonment=stamped)):
+            with self.assertRaises(LLMToolError) as refused:
+                mutate()
+            self.assertEqual(refused.exception.task_store_error_code,
+                             'TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+            self.assertEqual(self.store.get(value['task_id']), original)
+
+        saved = self.store.abandon(value['task_id'],
+                                   pm_session_id=value['pm_session_id'],
+                                   reason=stamped['reason'])
+        changed = dict(saved['abandonment'], reason='Changed outside abandon')
+        for mutate in (
+                lambda: self.store.update(value['task_id'], abandonment=changed),
+                lambda: self.store.compare_and_update(value['task_id'],
+                    expected={'record_sha256': saved['record_sha256']},
+                    abandonment=changed),
+                lambda: self.store.update(value['task_id'], abandonment=None),
+                lambda: self.store.compare_and_update(value['task_id'],
+                    expected={'record_sha256': saved['record_sha256']},
+                    abandonment=None)):
+            with self.assertRaises(LLMToolError) as refused:
+                mutate()
+            self.assertEqual(refused.exception.task_store_error_code,
+                             'TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+            self.assertEqual(self.store.get(value['task_id']), saved)
+
+    def test_abandonment_pm_session_must_match_task_session(self):
+        value = self._codex_dispatch_task()
+        self.store.create(value)
+        saved = self.store.abandon(value['task_id'],
+                                   pm_session_id=value['pm_session_id'],
+                                   reason='PM stopped this Task')
+        mismatched = dict(saved)
+        mismatched['abandonment'] = dict(saved['abandonment'],
+                                         pm_session_id='pm-' + new_id())
+        with self.assertRaises(LLMToolError) as invalid:
+            task_store_module._validate(mismatched)
+        self.assertEqual(invalid.exception.task_store_error_code,
                          'TASK_ABANDONMENT_INVALID')
 
     def test_abandonment_supports_v1_record_shape(self):

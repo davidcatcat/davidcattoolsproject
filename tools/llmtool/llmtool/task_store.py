@@ -643,7 +643,8 @@ def _validate(record):
         if (type(reason) is not str or not 1 <= len(reason) <= 500 or
                 not reason.strip() or not all(char.isprintable() for char in reason) or
                 _emitted_sensitive(reason) or parsed_time is None or
-                not _safe_identifier(item['pm_session_id'], SESSION_ID)):
+                not _safe_identifier(item['pm_session_id'], SESSION_ID) or
+                item['pm_session_id'] != record['pm_session_id']):
             _fail('TASK_ABANDONMENT_INVALID')
     if 'completion_events' in record:
         _validate_completion_events(record)
@@ -1955,9 +1956,10 @@ class TaskStore:
             stamped = dict(reason=reason, abandoned_at=self._completion_now(),
                            pm_session_id=pm_session_id)
             try:
-                return self.compare_and_update(
+                return self._update(
                     task_id, expected={'record_sha256': current['record_sha256']},
-                    abandonment=stamped)
+                    changes={'abandonment': stamped}, trusted_abandonment=True,
+                    abandonment_pm_session_id=pm_session_id)
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')
@@ -2507,12 +2509,18 @@ class TaskStore:
         _fail('TASK_STORE_BUSY')
 
     def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False,
-                trusted_completion_events=False):
+                trusted_completion_events=False, trusted_abandonment=False,
+                abandonment_pm_session_id=None):
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
         if (('completion_events' in changes or 'completion_event_tombstones' in changes)
                 and not trusted_completion_events):
             _fail('COMPLETION_EVENT_MUTATION_FORBIDDEN')
+        if 'abandonment' in changes and not trusted_abandonment:
+            _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+        if trusted_abandonment and (set(changes) != {'abandonment'} or
+                not _safe_identifier(abandonment_pm_session_id, SESSION_ID)):
+            _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
         lock_fd = None
@@ -2572,6 +2580,13 @@ class TaskStore:
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
                 raise TaskStoreConflict() from None
+            if trusted_abandonment:
+                item = changes['abandonment']
+                if (current.get('pm_session_id') != abandonment_pm_session_id or
+                        current.get('abandonment') is not None or
+                        type(item) is not dict or
+                        item.get('pm_session_id') != abandonment_pm_session_id):
+                    _fail('TASK_PM_SESSION_DENIED')
             if 'review_dispatch_claim' in changes:
                 old_claim = current.get('review_dispatch_claim')
                 new_claim = changes['review_dispatch_claim']
