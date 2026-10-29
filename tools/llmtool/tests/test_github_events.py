@@ -52,7 +52,10 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                 return value
             def record_completion_event(inner, task_id, **kwargs):
                 return self.store.record_completion_event(task_id, **kwargs)
-        responses = {('issues/84/comments', '100'): [],
+        responses = {('issues/84/comments', '100'): [
+                         {'id': 8, 'body': '<!-- activity: type=decision actor=Owner target=PM status=GO -->',
+                          'user': {'login': 'Owner'}, 'created_at': 'x', 'updated_at': 'x',
+                          'author_association': 'OWNER'}],
                      ('pulls/84', None): {'merged': True, 'merge_commit_sha': 'b' * 40,
                                           'head': {'sha': 'c' * 40}},
                      ('compare/' + 'a' * 40 + '...' + 'c' * 40, None):
@@ -75,8 +78,10 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                  'updated_at': '2026-01-01T00:00:00Z', 'author_association': 'OWNER'}],
             ('pulls/77', None): {'merged': False}}
         get = github_responder(responses)
-        first = github_events.poll(self.store, task['pm_session_id'], [77], github_get=get)
-        again = github_events.poll(TaskStoreProxy(self.store), task['pm_session_id'], [77], github_get=get)
+        first = github_events.poll(self.store, task['pm_session_id'], [77],
+                                   owner_comment_ids=[9], github_get=get)
+        again = github_events.poll(TaskStoreProxy(self.store), task['pm_session_id'], [77],
+                                   owner_comment_ids=[9], github_get=get)
         self.assertEqual(len(first['events']), 1)
         self.assertEqual(first['events'][0]['event_id'], again['events'][0]['event_id'])
         inbox = self._inbox()['events']
@@ -98,6 +103,7 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
              'author_association': 'OWNER'}],
             ('pulls/78', None): {'merged': False}}
         self.assertEqual(github_events.poll(self.store, task['pm_session_id'], [78],
+            owner_comment_ids=[1, 2],
             github_get=github_responder(responses))['events'], [])
 
     def test_multiple_events_in_one_poll_have_unique_sequences(self):
@@ -117,6 +123,7 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
         responses = {('issues/81/comments', '100'): comments,
                      ('pulls/81', None): {'merged': True, 'merge_commit_sha': 'b' * 40}}
         out = github_events.poll(self.store, task['pm_session_id'], [81],
+                                 owner_comment_ids=[11, 12],
                                  github_get=github_responder(responses))
         self.assertEqual(len(out['events']), 2)
         saved = self.store.get(task['task_id'])['completion_events']
@@ -134,8 +141,64 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
              'author_association': 'CONTRIBUTOR'}],
             ('pulls/82', None): {'merged': False}}
         result = github_events.poll(self.store, task['pm_session_id'], [82],
+                                    owner_comment_ids=[21],
                                     github_get=github_responder(responses))
         self.assertEqual(result['events'], [])
+
+    def test_unallowlisted_owner_marker_is_not_recorded(self):
+        task = self._ready_task()
+        task['completion']['evidence']['review_pr_ci'] = {
+            'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
+            'ci_state': 'NOT_STARTED', 'pr_number': 85}
+        self.store.update(task['task_id'], completion=task['completion'])
+        responses = {('issues/85/comments', '100'): [
+            {'id': 22, 'body': '<!-- activity: type=owner_request actor=Owner target=PM status=ANSWERED -->',
+             'user': {'login': 'davidcatcat'}, 'created_at': 'x', 'updated_at': 'x',
+             'author_association': 'OWNER'}],
+            ('pulls/85', None): {'merged': False}}
+        result = github_events.poll(self.store, task['pm_session_id'], [85],
+                                    owner_comment_ids=[23],
+                                    github_get=github_responder(responses))
+        self.assertEqual(result['events'], [])
+
+    def test_default_allowlist_suppresses_comments_but_keeps_merge_events(self):
+        task = self._ready_task()
+        task['review_dispatch_claim'] = {
+            'executor_task': 'executor-one', 'pr': 86, 'head_sha': 'a' * 40,
+            'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer-one',
+            'native_session_id': 'session-one', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+            'claimed_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:00:00Z'}
+        class ClaimBoundStore:
+            def task_ids(inner):
+                return self.store.task_ids()
+            def get(inner, task_id):
+                value = self.store.get(task_id)
+                if task_id == task['task_id']:
+                    value['review_dispatch_claim'] = task['review_dispatch_claim']
+                return value
+            def record_completion_event(inner, task_id, **kwargs):
+                return self.store.record_completion_event(task_id, **kwargs)
+        responses = {
+            ('issues/86/comments', '100'): [
+                {'id': 24, 'body': '<!-- activity: type=owner_request actor=Owner target=PM status=ANSWERED -->',
+                 'user': {'login': 'davidcatcat'}, 'created_at': 'x', 'updated_at': 'x',
+                 'author_association': 'OWNER'}],
+            ('pulls/86', None): {'merged': True, 'merge_commit_sha': 'b' * 40,
+                                'head': {'sha': 'c' * 40}},
+            ('compare/' + 'a' * 40 + '...' + 'c' * 40, None): {'status': 'identical'}}
+        result = github_events.poll(ClaimBoundStore(), task['pm_session_id'], [86],
+                                    github_get=github_responder(responses))
+        self.assertEqual(len(result['events']), 1)
+        self.assertEqual(result['events'][0]['marker_status'], 'MERGED')
+
+    def test_invalid_owner_comment_allowlists_raise(self):
+        task = self._ready_task()
+        for allowlist in ('9', [True], [0], [2**63], list(range(1, 502))):
+            with self.subTest(allowlist=type(allowlist).__name__):
+                with self.assertRaises(github_events.LLMToolError):
+                    github_events.poll(self.store, task['pm_session_id'], [87],
+                                       owner_comment_ids=allowlist,
+                                       github_get=lambda _url: [])
 
     def test_first_poll_paginates_past_old_comments(self):
         task = self._ready_task()
@@ -152,6 +215,7 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
                      ('issues/83/comments', '100', '2'): recent,
                      ('pulls/83', None): {'merged': False}}
         result = github_events.poll(self.store, task['pm_session_id'], [83],
+                                    owner_comment_ids=[121],
                                     github_get=github_responder(responses))
         self.assertEqual([event['comment_id'] for event in result['events']], [121])
 
@@ -170,6 +234,50 @@ class GitHubEventsTests(inbox_fixture.ActivePMInboxTests):
             self.assertEqual(main(['task', 'github-events', '--pm-session', self.session,
                                    '--issue', '79']), 23)
         handler.assert_called_once()
+
+    def test_cli_reports_owner_comments_disabled_and_records_verified_merge(self):
+        task = self._ready_task()
+        task['review_dispatch_claim'] = {
+            'executor_task': 'executor-one', 'pr': 88, 'head_sha': 'a' * 40,
+            'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'reviewer-one',
+            'native_session_id': 'session-one', 'account_mode': 'DEFAULT_SECOND_ACCOUNT',
+            'claimed_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:00:00Z'}
+
+        class ClaimBoundStore:
+            def task_ids(inner):
+                return self.store.task_ids()
+            def get(inner, task_id):
+                value = self.store.get(task_id)
+                if task_id == task['task_id']:
+                    value['review_dispatch_claim'] = task['review_dispatch_claim']
+                return value
+            def record_completion_event(inner, task_id, **kwargs):
+                return self.store.record_completion_event(task_id, **kwargs)
+
+        responses = {
+            ('issues/88/comments', '100'): [
+                {'id': 25,
+                 'body': '<!-- activity: type=decision actor=Owner target=PM status=GO -->',
+                 'user': {'login': 'davidcatcat'}, 'created_at': 'x', 'updated_at': 'x',
+                 'author_association': 'OWNER'}],
+            ('pulls/88', None): {'merged': True, 'merge_commit_sha': 'b' * 40,
+                                'head': {'sha': 'c' * 40}},
+            ('compare/' + 'a' * 40 + '...' + 'c' * 40, None): {'status': 'identical'}}
+        output = StringIO()
+        args = Namespace(pm_session=task['pm_session_id'], issue=[88], since=None)
+        with patch.object(github_events, 'poll', wraps=github_events.poll) as poll:
+            self.assertEqual(task_submission_cli.run_task_github_events(
+                args, store=ClaimBoundStore(), stdout=output,
+                github_get=github_responder(responses)), 0)
+
+        poll.assert_called_once()
+        self.assertNotIn('owner_comment_ids', poll.call_args.kwargs)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result['comment_events'], 'DISABLED_NO_TRUSTED_OWNER_SOURCE')
+        self.assertEqual(set(result) - {'comment_events'}, {'pm_session_id', 'events'})
+        self.assertEqual(len(result['events']), 1)
+        self.assertEqual(result['events'][0]['marker_status'], 'MERGED')
+        self.assertIsNone(result['events'][0]['comment_id'])
 
 
 class TaskStoreProxy:

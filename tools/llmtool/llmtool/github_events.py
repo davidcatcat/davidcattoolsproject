@@ -11,11 +11,20 @@ MARKER = re.compile(r'<!-- activity: type=([a-z][a-z0-9_]{0,63}) actor=([A-Za-z0
 MAX_COMMENT_PAGES = 100
 
 
-def poll(store, pm_session, issues, *, since=None, github_get=None):
+def poll(store, pm_session, issues, *, since=None, github_get=None,
+         owner_comment_ids=None):
     """Poll explicit issues and PRs, storing metadata only as idempotent events."""
     if (type(issues) is not list or not issues or len(issues) > 50 or
             any(type(n) is not int or not 1 <= n <= 9999999 for n in issues)):
         raise LLMToolError('one or more tracked issue numbers are invalid')
+    if owner_comment_ids is not None:
+        if (type(owner_comment_ids) not in (list, tuple, set, frozenset) or
+                len(owner_comment_ids) > 500 or
+                any(type(comment_id) is not int or
+                    not 1 <= comment_id <= 2**63 - 1
+                    for comment_id in owner_comment_ids)):
+            raise LLMToolError('Owner-confirmed comment ids are invalid')
+        owner_comment_ids = frozenset(owner_comment_ids)
     if since is not None and (type(since) is not str or
             not re.fullmatch(r'\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ', since)):
         raise LLMToolError('--since must be an ISO UTC timestamp')
@@ -68,7 +77,8 @@ def poll(store, pm_session, issues, *, since=None, github_get=None):
             lines = body.splitlines()
             marker = next((MARKER.fullmatch(line) for line in lines
                            if MARKER.fullmatch(line)), None)
-            if (marker is None or marker.group(2) != 'Owner' or
+            if (owner_comment_ids is None or comment['id'] not in owner_comment_ids or
+                    marker is None or marker.group(2) != 'Owner' or
                     comment.get('author_association') != 'OWNER'):
                 continue
             edited = comment.get('updated_at') != comment.get('created_at')
