@@ -199,7 +199,7 @@ class ProviderIntegrationTests(unittest.TestCase):
                 self.assertEqual(reply.content, "FINAL")
                 self.assertIsInstance(reply.metadata["elapsed_seconds"], (float, int))
                 self.assertGreaterEqual(reply.metadata["elapsed_seconds"], 0)
-                self.assertLessEqual(set(reply.metadata), {"elapsed_seconds", "model", "input_tokens",
+                self.assertLessEqual(set(reply.metadata), {"elapsed_seconds", "model", "served_model", "input_tokens",
                     "output_tokens", "prompt_tokens", "completion_tokens", "total_tokens"})
                 for secret in ("PRIVATE_REASONING", "PRIVATE_EVENT", "FAKE_KEY"):
                     self.assertNotIn(secret, repr(reply))

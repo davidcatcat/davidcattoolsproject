@@ -86,7 +86,8 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(reply.metadata["completion_tokens"], 5)
         self.assertEqual(reply.metadata["total_tokens"], 25)
         self.assertEqual(list(reply.metadata),
-                         ['elapsed_seconds', 'model', 'prompt_tokens', 'completion_tokens', 'total_tokens'])
+                         ['elapsed_seconds', 'model', 'served_model', 'prompt_tokens',
+                          'completion_tokens', 'total_tokens'])
         self.assertNotIn("private-reasoning-marker", repr(reply))
         self.assertNotIn("also-private", repr(reply))
 
