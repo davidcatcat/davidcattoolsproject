@@ -1428,7 +1428,7 @@ A1/A2.1 信任相容 endpoint 將 reasoning 放在獨立欄位；不會修改／
 不自動讀取 SSH、keychain 或任意 secret file；模型命令明確提供的文字、pipe、`--file`
 內容會完整傳給 gateway，請自行移除不應傳送的秘密。離線 `test-excerpts` 只處理
 明確指定的本機 capture，不傳給任何 provider。
-工具不自動寫 prompt／response log、cache 或 benchmark report；使用者明確 capture 的 feedback 是獨立資料。
+chat 預設會自動保存唯一的本機對話記錄 `~/.local/state/llmtool/chat/history.json`：目錄權限為 `0700`、檔案為 `0600`，內容會經敏感資訊篩查，最多保存 200 組 exchanges 並限制在 256 KiB。使用 `llmtool chat --no-history` 可停用該 session 的磁碟讀寫。除這份 chat history 外，工具不自動寫 prompt／response log、cache 或 benchmark report；使用者明確 capture 的 feedback 是獨立資料。
 
 ## 開發與驗證
 
