@@ -366,8 +366,10 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
 
 
 def run_ps() -> str:
+    # errors="replace": in a UTF-8 locale ps passes invalid UTF-8 bytes of a
+    # command through, which a strict decode turned into a crash of the poll.
     response = subprocess.run(PS_ARGS, check=False, capture_output=True, text=True,
-                              timeout=4, shell=False)
+                              errors="replace", timeout=4, shell=False)
     if response.returncode:
         raise RuntimeError(f"ps exited with status {response.returncode}")
     return response.stdout
@@ -379,7 +381,8 @@ def run_ps_users(uids) -> str:
     try:
         response = subprocess.run(
             ("/bin/ps", "-U", ",".join(str(uid) for uid in sorted(uids)), "-o", PS_ARGS[-1]),
-            check=False, capture_output=True, text=True, timeout=4, shell=False)
+            check=False, capture_output=True, text=True, errors="replace", timeout=4,
+            shell=False)
     except (OSError, subprocess.SubprocessError):
         return ""
     return response.stdout if response.returncode == 0 else ""
@@ -388,11 +391,12 @@ def run_ps_users(uids) -> str:
 # `ps -A` costs ~0.1 s CPU per call on the Owner's Mac (it is setuid root and
 # walks every thread of every process), which alone is >10% of a core at the
 # 1 s refresh (Issue #625). Between real ps runs the same lines are rebuilt
-# from one sysctl(KERN_PROC_ALL) call: pid, ppid, pgid and start time are
-# exact, the command is read once per new process (KERN_PROCARGS2), and the
-# STAT column is the one ps last printed for that process. A new process of
-# another account (an Actions runner job) is read with `ps -U` for that
-# account only; root and system daemons wait for the next `ps -A`.
+# from one sysctl(KERN_PROC_ALL) call: pid, ppid, pgid, etime and every STAT
+# flag follow ps's own rules exactly, the command is read once per new process
+# (KERN_PROCARGS2), and only STAT's R/S/U letter is the one ps last printed.
+# A command ps would print differently (another account's, which only root
+# may read, or one with bytes ps escapes) is taken from `ps -U` for that real
+# uid, once per process; root and system daemons wait for the next `ps -A`.
 PS_FULL_EVERY = 15.0   # seconds: `ps -A` at least this often (STAT, root processes' commands)
 PS_MIN_GAP = 4.0       # seconds: `ps -U` no more often than this for another account's newcomer
 KINFO_SIZE = 648       # sizeof(struct kinfo_proc) on 64-bit macOS
@@ -402,7 +406,8 @@ KINFO_MAX_PROCS = 32768                          # kern.maxproc is a few thousan
 KINFO_MAX_BYTES = KINFO_SIZE * KINFO_MAX_PROCS   # ~21 MB
 PROCARGS_MAX = 1 << 18                           # bytes of one process's KERN_PROCARGS2
 SZOMB, SSTOP = 5, 4    # extern_proc.p_stat values
-P_CONTROLT, EPROC_SLEADER = 0x2, 0x2
+P_CONTROLT, P_PPWAIT, P_SYSTEM, P_TRACED, P_WEXIT = 0x2, 0x10, 0x200, 0x800, 0x2000
+EPROC_SLEADER = 0x2
 
 
 class KProc(typing.NamedTuple):
@@ -418,11 +423,12 @@ class KProc(typing.NamedTuple):
     eflag: int = 0
     tpgid: int = 0
     nice: int = 0
+    ruid: int | None = None   # real uid, as `ps -U` selects; None = same as uid
 
 
 # struct kinfo_proc fields read, by offset: p_starttime, p_flag, p_stat, p_pid,
-# p_nice, p_comm, e_ucred.cr_uid, e_ppid, e_pgid, e_tpgid, e_flag.
-_KINFO = struct.Struct("<qi20xib3xi198xb17s160xI136xii8xi32xi32x")
+# p_nice, p_comm, e_pcred.p_ruid, e_ucred.cr_uid, e_ppid, e_pgid, e_tpgid, e_flag.
+_KINFO = struct.Struct("<qi20xib3xi198xb17s132xI24xI136xii8xi32xi32x")
 
 
 class _Sysctl:
@@ -452,8 +458,9 @@ class _Sysctl:
         size = self._call((1, 14, 0), buf, len(buf))
         if not size or size > len(buf) or size % KINFO_SIZE:
             return None
-        return [KProc(pid, ppid, pgid, start, start_us, pstat, comm, uid, flag, eflag, tpgid, nice)
-                for start, start_us, flag, pstat, pid, nice, comm, uid, ppid, pgid, tpgid, eflag
+        return [KProc(pid, ppid, pgid, start, start_us, pstat, comm, uid, flag, eflag, tpgid, nice,
+                      ruid)
+                for start, start_us, flag, pstat, pid, nice, comm, ruid, uid, ppid, pgid, tpgid, eflag
                 in _KINFO.iter_unpack(memoryview(buf)[:size])]
 
     def command(self, pid: int) -> str | None:
@@ -471,12 +478,21 @@ class _Sysctl:
         rest = rest[rest.find(b"\0"):].lstrip(b"\0")   # skip the executable path
         argv = rest.split(b"\0")[:argc]
         if argc < 1 or not argv:
-            return None
-        return b" ".join(argv).decode("utf-8", "replace").replace("\n", " ").replace("\r", " ")
+            return None   # ps prints "(name)": take its line
+        command = b" ".join(argv)
+        if not PS_PLAIN.fullmatch(command):
+            return None   # ps escapes these bytes (vis(3), per locale): take its line
+        return command.decode("ascii")
+
+
+PS_PLAIN = re.compile(rb"[\x20-\x7e]*")   # a command ps prints byte for byte
 
 
 def _ps_elapsed(seconds: int) -> str:
-    """ps's etime format: [[dd-]hh:]mm:ss."""
+    """ps's etime format: [[dd-]hh:]mm:ss. ps on macOS takes
+    time(NULL) - p_starttime.tv_sec, both whole seconds (checked on the
+    Owner's Mac: a process 0.6 s old that started at .70 shows 00:01), so the
+    caller passes int(now) - start, never a fractional difference."""
     days, seconds = divmod(max(0, seconds), 86400)
     hours, seconds = divmod(seconds, 3600)
     minutes, seconds = divmod(seconds, 60)
@@ -487,11 +503,23 @@ def _ps_elapsed(seconds: int) -> str:
     return f"{minutes:02d}:{seconds:02d}"
 
 
-def _guess_state(k: KProc) -> str:
-    """ps's STAT from kernel flags, for a process ps has not printed yet. The
-    first letter (R/S from Mach thread states) is a guess until the next ps."""
-    state = {SZOMB: "Z", SSTOP: "T"}.get(k.pstat, "S")
+def _ps_state(k: KProc, letter: str | None) -> str:
+    """ps's STAT for k. Everything after the first letter is ps's own rule over
+    kernel flags (print.c state(); equal to ps for all ~490 processes on the
+    Owner's Mac); Z and T come from p_stat. Only R/S/U/I comes from Mach
+    thread states that ps (root) reads: letter, the one ps last printed, or
+    S (most processes) for one it has not printed yet."""
+    if k.pstat == SZOMB:
+        state = "Z"
+    elif k.pstat == SSTOP:
+        state = "T"
+    else:
+        state = letter if letter and letter not in "ZT" else "S"
     state += "<" if k.nice < 0 else "N" if k.nice > 0 else ""
+    state += "X" if k.flag & P_TRACED else ""
+    state += "E" if k.flag & P_WEXIT and k.pstat != SZOMB else ""
+    state += "V" if k.flag & P_PPWAIT else ""
+    state += "L" if k.flag & P_SYSTEM else ""
     state += "s" if k.eflag & EPROC_SLEADER else ""
     state += "+" if k.flag & P_CONTROLT and k.pgid == k.tpgid else ""
     return state
@@ -499,8 +527,8 @@ def _guess_state(k: KProc) -> str:
 
 def _watched_uids() -> frozenset:
     """Other accounts whose new processes are worth an early `ps -U`: people
-    (uid 500+) and the Actions runner accounts. System daemons, and this
-    account's few unreadable processes, wait for the next `ps -A`."""
+    (uid 500+) and the Actions runner accounts (this account is always
+    included by the caller). System daemons wait for the next `ps -A`."""
     try:
         import pwd
         found = {p.pw_uid for p in pwd.getpwall()
@@ -519,7 +547,10 @@ class ProcessTable:
         self.kernel = kernel
         self.watched = watched
         self.last_ps = self.last_users = -math.inf
-        self.known: dict = {}   # (pid, start, start_us, comm) -> (stat, command), None = unreadable
+        # (pid, start, start_us, comm) -> (STAT letter ps printed or None, command);
+        # None = not readable here, shown once a ps prints it
+        self.known: dict = {}
+        self.asked: set = set()   # keys a `ps -U` was already run for since the last `ps -A`
         self.ps_runs = self.user_runs = 0
 
     def _processes(self) -> list[KProc] | None:
@@ -544,13 +575,13 @@ class ProcessTable:
     def _adopt(known: dict, procs: list[KProc], rows: list[tuple]) -> None:
         """Remember what ps printed for each process it shares with procs."""
         keys = {k.pid: (k.pid, k.start, k.start_us, k.comm) for k in procs}
-        known.update((keys[row[0]], (row[4], row[5])) for row in rows if row[0] in keys)
+        known.update((keys[row[0]], (row[4][:1], row[5])) for row in rows if row[0] in keys)
 
     def _real(self, now: float, procs: list[KProc] | None) -> list[tuple]:
         rows = ps_rows(self.ps())
         self.last_ps, self.ps_runs = now, self.ps_runs + 1
         if procs is not None:
-            self.known = {}
+            self.known, self.asked = {}, set()
             self._adopt(self.known, procs, rows)
         return rows
 
@@ -566,6 +597,7 @@ class ProcessTable:
         rows, known, others = self._rebuild(procs)
         if others and now - self.last_users >= PS_MIN_GAP:
             self.last_users, self.user_runs = now, self.user_runs + 1
+            self.asked.update(key for key, entry in known.items() if entry is None)
             self._adopt(known, procs, ps_rows(self.ps_users(others)))
             self.known = known
             rows, known, _ = self._rebuild(procs)
@@ -573,24 +605,27 @@ class ProcessTable:
         return rows
 
     def _rebuild(self, procs: list[KProc]) -> tuple:
-        """(rows, what is known per process, accounts with an unreadable newcomer)."""
-        wall, rows, known, others = int(self.wall()), [], {}, set()
+        """(rows, what is known per process, real uids worth a `ps -U` now)."""
+        wall, rows, known, others, me = int(self.wall()), [], {}, set(), os.getuid()
         for k in procs:
+            if k.pid == 0:
+                continue   # the kernel task: ps -A never lists it
             key = (k.pid, k.start, k.start_us, k.comm)
             entry = self.known.get(key, False)
             if entry is False:
                 command = "<defunct>" if k.pstat == SZOMB else self.kernel.command(k.pid)
-                entry = None if command is None else (_guess_state(k), command)
+                entry = None if command is None else (None, command)
             known[key] = entry
-            if entry is None:   # shown from the next ps
-                if k.uid in self.watched:
-                    others.add(k.uid)
+            if entry is None:   # shown once a ps prints it
+                ruid = k.uid if k.ruid is None else k.ruid
+                if (ruid in self.watched or ruid == me) and key not in self.asked:
+                    others.add(ruid)
                 continue
-            state, command = entry
-            if k.pstat == SZOMB and not state.startswith("Z"):
-                state, command = _guess_state(k), "<defunct>"
+            letter, command = entry
+            if k.pstat == SZOMB:
+                command = "<defunct>"
             rows.append((k.pid, k.ppid, k.pgid, functools.partial(_ps_elapsed, wall - k.start),
-                         state, command))
+                         _ps_state(k, letter), command))
         return rows, known, others
 
 
@@ -1561,6 +1596,7 @@ def _gh_error(exc: Exception) -> str:
 
 
 GITHUB_API_HOST = "api.github.com"
+GITHUB_DIRECT_PAUSE = 300.0   # seconds of gh-only reads after a failed direct read
 GITHUB_TOKEN = re.compile(r"[A-Za-z0-9_]{20,255}")
 
 
@@ -1579,13 +1615,17 @@ class GitHubSource:
         self.runner = runner or subprocess.run
         self.clock = clock
         # direct: GET api.github.com with gh's own token instead of forking gh
-        # for every read (~0.15 s CPU each, ~10 per refresh; Issue #625). Any
-        # trouble before the first direct answer, or a rejected token, falls
-        # back to gh. The token stays in this object, never in a message.
+        # for every read (~0.15 s CPU each, ~10 per refresh; Issue #625). No
+        # token, or no connection before the first direct answer, means gh for
+        # good; any later failed direct read (no connection, 401, 5xx, too
+        # large, not JSON) is read again with gh and pauses direct reads for
+        # GITHUB_DIRECT_PAUSE; another non-200 answer is read with gh once.
+        # The token stays in this object, never in a message.
         self.direct = direct
         self._token: str | None = None
         self._conn = None
         self._direct_ok = False
+        self._direct_paused = -math.inf   # monotonic time until which reads use gh (_pause)
         self.connect = lambda: http.client.HTTPSConnection(GITHUB_API_HOST, timeout=GITHUB_TIMEOUT)
         self.events: list[ActivityEvent] = []
         self.pending: list[OwnerPending] = []
@@ -1603,7 +1643,7 @@ class GitHubSource:
         self.wait = GITHUB_REFRESH   # seconds between attempts; grows while gh keeps failing
 
     def _get(self, path: str):
-        if self.direct:
+        if self.direct and time.monotonic() >= self._direct_paused:
             try:
                 return self._get_direct(path)
             except _UseGh:
@@ -1646,23 +1686,36 @@ class GitHubSource:
                 if response.getheader("Connection", "").lower() == "close":
                     self._close()
                 break
-            except Exception as exc:
+            except Exception:
                 self._close()
                 if not fresh and attempt == 1:
                     continue   # a kept-alive connection the server had closed
                 if not self._direct_ok:   # e.g. only a proxy reaches GitHub: gh knows how
                     self.direct = False
-                    raise _UseGh from None
-                raise OSError(type(exc).__name__) from None
+                raise self._pause() from None
+        self._direct_ok = True
         if response.status == 401:   # gh may hold a renewed token
             self._token = None
-            raise _UseGh
-        self._direct_ok = True
+            raise self._pause()
+        if response.status >= 500:
+            raise self._pause()
         if response.status != 200:
-            raise RuntimeError(f"gh api 失敗（HTTP {response.status}）")
+            # A real GitHub answer (a redirect, 403, 404...): gh follows the
+            # redirect or words the error as before; the next read is direct.
+            raise _UseGh
         if len(body) > GITHUB_LIMIT:
-            raise RuntimeError("回應過大")
-        return json.loads(body)
+            raise self._pause()
+        try:
+            return json.loads(body)
+        except ValueError:
+            raise self._pause() from None
+
+    def _pause(self) -> "_UseGh":
+        """Every read goes through gh for GITHUB_DIRECT_PAUSE seconds: a broken
+        direct path costs one failed request per pause, not one per read. gh's
+        own failures still raise, so the refresh backoff is unchanged."""
+        self._direct_paused = time.monotonic() + GITHUB_DIRECT_PAUSE
+        return _UseGh()
 
     def _close(self) -> None:
         conn, self._conn = self._conn, None

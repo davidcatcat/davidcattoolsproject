@@ -4509,15 +4509,17 @@ def kproc(pid, ppid, start, comm=b"x", uid=501, pstat=2, pgid=None, **kwargs):
     return mon.KProc(pid, ppid, pgid or pid, int(start), 0, pstat, comm, uid, **kwargs)
 
 
-class ProcessTableTests(unittest.TestCase):
-    """Issue #625: `ps -A` runs at most every PS_FULL_EVERY seconds; between
-    runs the same rows come from the kernel's process list."""
+class _TableFixture:
+    """A ProcessTable over FakeKernel with a fake ps, ps -U and clocks."""
 
     def setUp(self):
         self.clock, self.wall, self.full, self.users = [100.0], [NOW], [], []
-        self.me = kproc(os.getpid(), os.getppid(), NOW - 50, b"Python")
-        self.agent = kproc(4000, 1, NOW - 3725, b"claude")
-        self.kernel = FakeKernel([self.me, self.agent], {4000: "claude --resume"})
+        self.me = kproc(os.getpid(), os.getppid(), NOW - 50, b"Python", flag=mon.P_CONTROLT,
+                        tpgid=os.getpid())
+        self.agent = kproc(4000, 1, NOW - 3725, b"claude", flag=mon.P_CONTROLT, tpgid=4000,
+                           eflag=mon.EPROC_SLEADER)
+        self.kernel = FakeKernel([self.me, self.agent], {os.getpid(): "python monitor",
+                                                         4000: "claude --resume"})
 
     def _table(self, ps_text):
         def ps():
@@ -4535,6 +4537,11 @@ class ProcessTableTests(unittest.TestCase):
     def _rows(self, table):
         return [(pid, ppid, pgid, etime() if callable(etime) else etime, stat, command)
                 for pid, ppid, pgid, etime, stat, command in table.rows()]
+
+
+class ProcessTableTests(_TableFixture, unittest.TestCase):
+    """Issue #625: `ps -A` runs at most every PS_FULL_EVERY seconds; between
+    runs the same rows come from the kernel's process list."""
 
     def test_rows_between_ps_runs_equal_what_ps_would_print(self):
         table = self._table(f"{os.getpid()} {os.getppid()} {os.getpid()} 00:50 S+ python monitor\n"
@@ -4606,9 +4613,10 @@ class ProcessTableTests(unittest.TestCase):
     def test_a_process_that_becomes_a_zombie_is_shown_as_ps_shows_it(self):
         table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
         table.rows()
-        self.kernel.procs[1] = kproc(4000, 1, NOW - 3725, b"claude", pstat=mon.SZOMB)
+        self.kernel.procs[1] = kproc(4000, 1, NOW - 3725, b"claude", pstat=mon.SZOMB,
+                                     eflag=mon.EPROC_SLEADER)
         self.clock[0] += 1
-        self.assertEqual([row[4:] for row in self._rows(table) if row[0] == 4000], [("Z", "<defunct>")])
+        self.assertEqual([row[4:] for row in self._rows(table) if row[0] == 4000], [("Zs", "<defunct>")])
 
     def test_kernel_list_that_does_not_show_this_process_falls_back_to_ps(self):
         self.kernel.procs = [self.agent]   # wrong layout: our own pid is not there
@@ -4713,17 +4721,55 @@ class DirectGitHubTests(unittest.TestCase):
         self.assertEqual(len(source.events), 1)
         self.assertNotIn("gho_", source.status)
 
-    def test_http_error_reads_like_gh_and_401_asks_gh(self):
-        gh = FakeRun((0, b"gho_" + b"b" * 36), (0, []), (0, []))
-        source, log = self._source([(200, []), (401, b""), (502, b""), (502, b"")], gh)
+    def _after_success(self, failure, gh_answers=((0, ["from gh"]),)):
+        """One good direct read, then `failure`: (reads, gh argv, direct log)."""
+        gh = FakeRun((0, b"gho_" + b"b" * 36), *gh_answers)
+        failures = list(failure) if isinstance(failure, list) else [failure]
+        source, log = self._source([(200, []), *failures, (200, ["direct again"])], gh)
+        clock = [1000.0]
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"), \
+             patch.object(mon.time, "monotonic", lambda: clock[0]):
+            reads = [source._get("repos/o/r/a"), source._get("repos/o/r/b")]
+            paused = len(log)
+            if len(gh.responses) == 0:
+                gh.responses.append((0, ["gh while paused"]))
+            reads.append(source._get("repos/o/r/c"))   # within the pause (or not paused)
+            clock[0] += mon.GITHUB_DIRECT_PAUSE + 1
+            gh.responses.insert(0, (0, b"gho_" + b"e" * 36))   # a dropped token is read again
+            reads.append(source._get("repos/o/r/d"))
+        return reads, [argv[1:5] for argv, _ in gh.calls], log, paused, source
+
+    def test_failed_direct_reads_after_a_success_ask_gh_and_pause_direct(self):
+        for failure in ((502, b""), (401, b""), (200, b"x" * (mon.GITHUB_LIMIT + 1)),
+                        (200, b"not json"),
+                        # the kept-alive connection is retried once, then a fresh one fails too
+                        [ConnectionResetError("reset"), OSError("unreachable")]):
+            with self.subTest(failure=str(failure)[:30]):
+                reads, gh_calls, log, paused, source = self._after_success(failure)
+                self.assertEqual(reads[:2], [[], ["from gh"]])
+                self.assertIn(["api", "-X", "GET", "repos/o/r/b"], gh_calls)
+                # Paused: the next read is gh's, with no direct request at all.
+                self.assertEqual(reads[2], ["gh while paused"])
+                self.assertIn(["api", "-X", "GET", "repos/o/r/c"], gh_calls)
+                # After GITHUB_DIRECT_PAUSE the direct path is tried again.
+                self.assertEqual(reads[3], ["direct again"])
+                self.assertTrue(source.direct)
+
+    def test_gh_failure_during_fallback_still_raises_for_the_refresh_backoff(self):
+        gh = FakeRun((0, b"gho_" + b"b" * 36), (1, b""))
+        source, _ = self._source([(200, []), (503, b"")], gh)
         with patch.object(mon.shutil, "which", return_value="/opt/gh"):
-            self.assertEqual(source._get("repos/o/r/a"), [])
-            self.assertEqual(source._get("repos/o/r/b"), [])   # token refused: gh answered
-            self.assertEqual(gh.calls[1][0][1:5], ["api", "-X", "GET", "repos/o/r/b"])
-            gh.responses.insert(0, (0, b"gho_" + b"c" * 36))   # the token is looked up again
-            with self.assertRaisesRegex(RuntimeError, r"gh api 失敗（HTTP 502）"):
-                source._get("repos/o/r/c")
-        self.assertTrue(source.direct)
+            source._get("repos/o/r/a")
+            with self.assertRaisesRegex(RuntimeError, r"gh api 失敗（exit 1）"):
+                source._get("repos/o/r/b")
+
+    def test_a_404_answer_is_read_with_gh_once_without_pausing(self):
+        gh = FakeRun((0, b"gho_" + b"f" * 36), (0, ["gh answer"]))
+        source, log = self._source([(200, []), (404, b""), (200, ["direct"])], gh)
+        with patch.object(mon.shutil, "which", return_value="/opt/gh"):
+            self.assertEqual([source._get(f"repos/o/r/{n}") for n in "abc"],
+                             [[], ["gh answer"], ["direct"]])
+        self.assertEqual(len(log), 3)
 
     def test_no_connection_before_any_answer_falls_back_to_gh_for_good(self):
         gh = FakeRun((0, b"gho_" + b"d" * 36), (0, []), (0, []))
@@ -4867,3 +4913,100 @@ class SysctlBoundsTests(unittest.TestCase):
             buf[:len(argv)] = argv
             return len(argv)
         self.assertEqual(self._kernel([lambda b, s: len(argv), fill]).command(4000), "zsh")
+
+
+class ProcessTableFidelityTests(_TableFixture, unittest.TestCase):
+    """Codex review v2 (#637): fields rebuilt between ps runs follow ps's rules."""
+
+    def test_etime_uses_whole_seconds_like_ps(self):
+        # ps: time(NULL) - p_starttime.tv_sec. Started at .70, 0.6 s later at
+        # x+1.30: ps prints 00:01 (a fractional difference would say 00:00).
+        self.kernel.procs.append(mon.KProc(4200, 1, 4200, int(NOW), 700_000, 2, b"sleep", 501))
+        self.kernel.commands[4200] = "sleep 30"
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        self.wall[0] = NOW + 1.3
+        row, = [r for r in self._rows(table) if r[0] == 4200]
+        self.assertEqual(row[3], "00:01")
+        self.wall[0] = NOW + 1.99
+        self.assertEqual([r[3] for r in self._rows(table) if r[0] == 4200], ["00:01"])
+
+    def test_stat_flags_follow_the_kernel_between_ps_runs(self):
+        table = self._table("4000 1 4000 01:02:05 Rs+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Rs+")   # ps's letter, kernel flags
+        # The terminal's foreground group moves away and the process is reniced.
+        self.kernel.procs[1] = self.agent._replace(tpgid=999, nice=5)
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "RNs")
+        self.kernel.procs[1] = self.agent._replace(pstat=mon.SSTOP)   # SIGSTOP
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Ts+")
+        self.kernel.procs[1] = self.agent   # SIGCONT: back to the letter ps printed
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Rs+")
+        # A T that ps printed is never kept once the kernel says it runs again.
+        table.known[(4000, self.agent.start, 0, b"claude")] = ("T", "claude --resume")
+        self.clock[0] += 1
+        self.assertEqual(self._rows(table)[1][4], "Ss+")
+
+    def test_each_ps_flag_rule(self):
+        k = kproc(1, 0, NOW)
+        cases = {"<": k._replace(nice=-5), "X": k._replace(flag=mon.P_TRACED),
+                 "E": k._replace(flag=mon.P_WEXIT), "V": k._replace(flag=mon.P_PPWAIT),
+                 "L": k._replace(flag=mon.P_SYSTEM), "": k._replace(flag=mon.P_CONTROLT, tpgid=9)}
+        self.assertEqual({flags: mon._ps_state(proc, "S")[1:] for flags, proc in cases.items()},
+                         {flags: flags for flags in cases})
+        self.assertEqual(mon._ps_state(k._replace(pstat=mon.SZOMB, flag=mon.P_WEXIT), "S"), "Z")
+
+    def test_command_ps_would_escape_is_taken_from_ps_u_once(self):
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.kernel.procs.append(kproc(4300, 4000, NOW - 1, b"zsh", pgid=4000))
+        self.kernel.commands[4300] = None   # what command() answers for "a\nb" or "中"
+        self.user_text = "4300 4000 4000 00:01 S /bin/zsh -c echo a\\012b\n"
+        self.clock[0] += 1
+        rows = self._rows(table)
+        self.assertEqual(self.users, [{os.getuid()}])
+        self.assertIn((4300, 4000, 4000, "00:01", "S", "/bin/zsh -c echo a\\012b"), rows)
+        # One that ps -U did not list either is not asked for again before ps -A.
+        self.kernel.procs.append(kproc(4301, 4000, NOW, b"zsh", pgid=4000))
+        self.clock[0] += mon.PS_MIN_GAP + 1
+        self._rows(table)
+        self.clock[0] += mon.PS_MIN_GAP + 1
+        self._rows(table)
+        self.assertEqual(len(self.users), 2)
+
+    def test_kernel_task_is_not_listed_as_ps_does_not(self):
+        self.kernel.procs.append(kproc(0, 0, NOW - 999, b"kernel_task", uid=0))
+        self.kernel.commands[0] = "kernel_task"
+        table = self._table("4000 1 4000 01:02:05 Ss+ claude --resume\n")
+        table.rows()
+        self.clock[0] += 1
+        self.assertNotIn(0, [row[0] for row in self._rows(table)])
+
+    def test_sysctl_command_refuses_bytes_ps_would_escape(self):
+        import ctypes
+        kernel = mon._Sysctl.__new__(mon._Sysctl)
+        kernel.args_buf = ctypes.create_string_buffer(mon.PROCARGS_MAX)
+        for argv, expected in ((b"zsh\0-c\0ls", "zsh -c ls"), (b"zsh\0a\nb", None),
+                               (b"zsh\0\xe4\xb8\xad", None), (b"zsh\0tab\tx", None),
+                               (b"zsh\0del\x7f", None)):
+            raw = (argv.count(b"\0") + 1).to_bytes(4, sys.byteorder) + b"/bin/zsh\0\0" + argv + b"\0"
+
+            def answer(mib, buf, size, raw=raw):
+                if buf is not None:
+                    buf[:len(raw)] = raw
+                return len(raw)
+            kernel._call = answer
+            self.assertEqual(kernel.command(1), expected, argv)
+
+    def test_ps_output_with_invalid_utf8_does_not_break_the_poll(self):
+        def fake(argv, **kwargs):
+            self.assertEqual(kwargs.get("errors"), "replace")
+            return subprocess.CompletedProcess(argv, 0, stdout="1 0 1 00:01 Ss /bin/x\ufffd\n")
+        with patch.object(mon.subprocess, "run", fake):
+            self.assertEqual(mon.ps_rows(mon.run_ps())[0][5], "/bin/x\ufffd")
+            self.assertTrue(mon.run_ps_users({450}))
