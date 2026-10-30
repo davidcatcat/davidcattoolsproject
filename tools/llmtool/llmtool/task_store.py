@@ -184,6 +184,7 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
 ))
 _DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
 _DEVELOPER_EXECUTOR_TASK_FIELDS = frozenset(('executor_task_id',))
+_DEVELOPER_INVALID_FINAL_FIELDS = frozenset(('result_status', 'final_answer'))
 _CLAUDE_RESULT_FIELDS = frozenset(('claude_result',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
 _DEVELOPER_SHAPES = (
@@ -215,6 +216,12 @@ _DEVELOPER_CLAUDE_RESULT_SHAPES = tuple(
     shape | _CLAUDE_RESULT_FIELDS for shape in
     (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
      *_DEVELOPER_BLOCKED_REASON_SHAPES, *_DEVELOPER_PROGRESS_SHAPES)
+)
+_DEVELOPER_INVALID_FINAL_SHAPES = tuple(
+    shape | _DEVELOPER_INVALID_FINAL_FIELDS for shape in (
+        *_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+        *_DEVELOPER_BLOCKED_REASON_SHAPES, *_DEVELOPER_PROGRESS_SHAPES,
+        *_DEVELOPER_CLAUDE_RESULT_SHAPES)
 )
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
@@ -1041,7 +1048,8 @@ def _validate(record):
                                  *_DEVELOPER_EXTENSION_SHAPES,
                                  *_DEVELOPER_BLOCKED_REASON_SHAPES,
                                  *_DEVELOPER_PROGRESS_SHAPES,
-                                 *_DEVELOPER_CLAUDE_RESULT_SHAPES)
+                                 *_DEVELOPER_CLAUDE_RESULT_SHAPES,
+                                 *_DEVELOPER_INVALID_FINAL_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if ('executor_task_id' in developer and
@@ -1096,13 +1104,29 @@ def _validate(record):
                     _fail()
             if 'rejected_output_capture' in developer:
                 capture = developer['rejected_output_capture']
-                if (developer['state'] != 'DEVELOPER_OUTPUT_REJECTED' or
+                invalid_final_capture = (
+                    developer.get('result_status') == 'UNVERIFIED' and
+                    developer.get('final_answer') == 'INVALID')
+                if ((developer['state'] != 'DEVELOPER_OUTPUT_REJECTED' and
+                     not invalid_final_capture) or
                         type(capture) is not dict or set(capture) != {'ref', 'sha256'} or
                         type(capture['ref']) is not str or
                         re.fullmatch(r'rejected-developer-output/[0-9a-f]{32}-[0-9a-f]{16}\.txt',
                                      capture['ref']) is None or
                         type(capture['sha256']) is not str or
                         re.fullmatch(r'[0-9a-f]{64}', capture['sha256']) is None):
+                    _fail()
+            if 'result_status' in developer or 'final_answer' in developer:
+                execution = developer.get('execution')
+                if (developer['provider_profile'] != 'codex' or
+                        developer['state'] != 'DEVELOPER_RESPONDED' or
+                        developer.get('result_status') != 'UNVERIFIED' or
+                        developer.get('final_answer') != 'INVALID' or
+                        developer.get('error_code') is not None or
+                        'rejected_output_capture' not in developer or
+                        type(execution) is not dict or execution.get('status') != 'DONE' or
+                        execution.get('process_exit_code') != 0 or
+                        execution.get('cleanup_status') != 'CONFIRMED'):
                     _fail()
             if (developer['provider_profile'] == 'company-gw' and
                     (developer['provider_type'] not in (None, 'openai-compatible') or
