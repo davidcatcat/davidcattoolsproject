@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from contextlib import redirect_stdout
 import io
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -59,6 +60,96 @@ class MacModuleSelectionTests(unittest.TestCase):
         selected = ci_mac_modules.select_modules(["tools/llmtool/scripts/ci_mac_modules.py"], REPO_ROOT)
         self.assertEqual(selected, ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules())
 
+    def test_pr_712_agy_paths_select_l2_baseline_and_real_tests(self):
+        report = ci_mac_modules.selection_report(
+            [
+                "tools/llmtool/llmtool/developer_routes/agy.py",
+                "tools/llmtool/llmtool/task_submission_cli.py",
+            ], REPO_ROOT
+        )
+        self.assertEqual(report["level"], "L2")
+        self.assertIn("test_developer_route_agy", report["modules"])
+        self.assertIn("test_task_submission_cli", report["modules"])
+        self.assertTrue(
+            ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules()
+            <= set(report["modules"])
+        )
+
+    def test_pr_713_route_json_selects_l1_parser_default_test(self):
+        report = ci_mac_modules.selection_report(
+            ["tools/llmtool/developer-routes.json"], REPO_ROOT
+        )
+        self.assertEqual(report["level"], "L1")
+        self.assertIn("test_developer_route_agy", report["modules"])
+        self.assertIn("test_task_submission_cli", report["modules"])
+
+    def test_selection_report_records_level_paths_modules_and_fallback(self):
+        report = ci_mac_modules.selection_report(
+            ["tools/llmtool/developer-routes.json"], REPO_ROOT
+        )
+        self.assertEqual(report["changed_paths"], ["tools/llmtool/developer-routes.json"])
+        self.assertEqual(report["level"], "L1")
+        self.assertIn("test_developer_route_agy", report["modules"])
+        self.assertEqual(report["module_count"], len(report["modules"]))
+        self.assertFalse(report["fallback_reasons"])
+
+    def test_unknown_config_dependency_and_high_risk_paths_stay_full(self):
+        for path in (
+            "tools/llmtool/llmtool/unknown_config.py",
+            "tools/llmtool/unknown_config.json",
+            "tools/llmtool/llmtool/nested/unknown.py",
+            "tools/llmtool/llmtool/nested/unknown.json",
+            "tools/llmtool/requirements-ci.txt",
+            "tools/llmtool/llmtool/providers/agy.py",
+        ):
+            with self.subTest(path=path):
+                self.assertIsNone(ci_mac_modules.select_modules([path], REPO_ROOT))
+                self.assertEqual(
+                    ci_mac_modules.selection_report([path], REPO_ROOT)["level"], "L3"
+                )
+
+    def test_missing_mapped_test_keeps_selection_full(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "tools/llmtool/llmtool/developer_routes/agy.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("# source fixture\n")
+            self.assertIsNone(ci_mac_modules.select_modules(
+                ["tools/llmtool/llmtool/developer_routes/agy.py"], root
+            ))
+            report = ci_mac_modules.selection_report(
+                ["tools/llmtool/llmtool/developer_routes/agy.py"], root
+            )
+            self.assertEqual(report["level"], "L3")
+            self.assertEqual(report["modules"], ["FULL"])
+            self.assertEqual(
+                report["selection_reason"], "deleted_mapped_test_requires_full"
+            )
+
+    def test_existing_unmapped_flat_python_and_json_sources_keep_selection_full(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_dir = root / "tools/llmtool/llmtool"
+            source_dir.mkdir(parents=True)
+            paths = (
+                "tools/llmtool/llmtool/unmapped_fixture.py",
+                "tools/llmtool/llmtool/unmapped_fixture.json",
+            )
+            (source_dir / "unmapped_fixture.py").write_text("VALUE = 1\n")
+            (source_dir / "unmapped_fixture.json").write_text("{}\n")
+
+            for path in paths:
+                with self.subTest(path=path):
+                    self.assertTrue((root / path).is_file())
+                    self.assertIsNone(ci_mac_modules.select_modules([path], root))
+                    report = ci_mac_modules.selection_report([path], root)
+                    self.assertEqual(report["level"], "L3")
+                    self.assertEqual(report["modules"], ["FULL"])
+                    self.assertEqual(
+                        report["selection_reason"],
+                        "unmapped_or_nested_source_requires_full",
+                    )
+
     def test_test_only_change_adds_changed_module(self):
         selected = ci_mac_modules.select_modules(["tools/llmtool/tests/test_ci_mac_modules.py"], REPO_ROOT)
         self.assertEqual(selected, ci_mac_modules.scanned_test_modules(REPO_ROOT) | ci_mac_modules.extra_modules() | {"test_ci_mac_modules"})
@@ -103,7 +194,7 @@ class MacModuleSelectionTests(unittest.TestCase):
                 patch.object(ci_mac_modules, "extra_modules", return_value={"test_extra"}):
             self.assertEqual(
                 ci_mac_modules.select_modules(["tools/llmtool/llmtool/task_store.py"], REPO_ROOT),
-                {"test_mac", "test_extra"},
+                {"test_mac", "test_extra", "test_task_store"},
             )
 
     def test_empty_selection_prints_full(self):
@@ -114,6 +205,44 @@ class MacModuleSelectionTests(unittest.TestCase):
             with redirect_stdout(output):
                 self.assertEqual(ci_mac_modules.main(["--changed-paths", str(changed_paths)]), 0)
             self.assertEqual(output.getvalue(), "FULL\n")
+
+    def test_json_report_cli_emits_selection_metadata(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            changed_paths = Path(temporary) / "changed-paths"
+            changed_paths.write_text("tools/llmtool/llmtool/developer_routes/agy.py\n")
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(
+                    ci_mac_modules.main(
+                        ["--changed-paths", str(changed_paths), "--json-report"]
+                    ),
+                    0,
+                )
+            self.assertIn('"level": "L2"', output.getvalue())
+            self.assertIn('"module_count"', output.getvalue())
+
+    def test_full_fallback_report_is_conservative_and_observable(self):
+        report = ci_mac_modules.full_fallback_report(
+            ["tools/llmtool/developer-routes.json"], "selector_execution_failed"
+        )
+        self.assertEqual(report["level"], "L3")
+        self.assertEqual(report["modules"], ["FULL"])
+        self.assertEqual(report["fallback_reasons"], ["selector_execution_failed"])
+
+    def test_selector_internal_failure_emits_full_json_telemetry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            changed_paths = Path(temporary) / "changed-paths"
+            changed_paths.write_text("tools/llmtool/developer-routes.json\n")
+            output = io.StringIO()
+            with patch.object(ci_mac_modules, "selection_report", side_effect=RuntimeError):
+                with redirect_stdout(output):
+                    self.assertEqual(ci_mac_modules.main([
+                        "--changed-paths", str(changed_paths), "--json-report"
+                    ]), 0)
+            report = json.loads(output.getvalue())
+            self.assertEqual(report["level"], "L3")
+            self.assertEqual(report["modules"], ["FULL"])
+            self.assertEqual(report["fallback_reasons"], ["selector_internal_error"])
 
     def test_workflow_and_makefile_require_full(self):
         for path in (".github/workflows/other.yml", "tools/llmtool/Makefile"):
@@ -148,8 +277,10 @@ class MacModuleSelectionTests(unittest.TestCase):
         self.assertNotIn("cron:", trigger)
         self.assertNotIn("push:", trigger)
         self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
-        self.assertIn('elif [ "$selection" = NONE ]; then', workflow)
-        self.assertIn('elif [ -z "$selection" ]; then\n                    mode=full', workflow)
+        self.assertIn("--json-report", workflow)
+        self.assertIn("selector_execution_failed", workflow)
+        self.assertIn("selector_report_invalid", workflow)
+        self.assertIn("selection level: L3", workflow)
         self.assertIn("mode=docs-only", workflow)
         self.assertIn("verify=true", workflow)
         self.assertIn("steps.coverage.outputs.verify == 'true'", workflow)
@@ -160,7 +291,7 @@ class MacModuleSelectionTests(unittest.TestCase):
             'done < "$RUNNER_TEMP/mac-modules"', 1
         )[0]
         invocation = next(line for line in loop.splitlines() if "-m unittest discover" in line)
-        self.assertTrue(invocation.rstrip().endswith("< /dev/null"), invocation)
+        self.assertIn("< /dev/null", invocation)
 
 
 if __name__ == "__main__":

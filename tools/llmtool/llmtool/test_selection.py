@@ -16,12 +16,31 @@ REQUIRED_GATES = ("exact_head_ci", "security", "mac_native")
 # Keep this explicit and conservative. A changed source file without an exact
 # entry falls back to the full check rather than guessing at test coverage.
 IMPACT_TEST_MAP = {
+    # Keep Mac selection and TEST-1 aligned on the real AGY implementation
+    # paths and the existing focused tests.
+    "tools/llmtool/llmtool/developer_routes/agy.py": (
+        "tools/llmtool/tests/test_developer_route_agy.py",
+        "tools/llmtool/tests/test_task_submission_cli.py",
+    ),
+    "tools/llmtool/llmtool/task_submission_cli.py": (
+        "tools/llmtool/tests/test_developer_route_agy.py",
+        "tools/llmtool/tests/test_task_submission_cli.py",
+    ),
+    "tools/llmtool/developer-routes.json": (
+        "tools/llmtool/tests/test_developer_route_agy.py",
+    ),
+    "tools/llmtool/scripts/ci_mac_modules.py": (
+        "tools/llmtool/tests/test_ci_mac_modules.py",
+    ),
     "tools/llmtool/llmtool/review_exchange.py": (
         "tools/llmtool/tests/test_review_exchange.py",
     ),
     "tools/llmtool/llmtool/task_lifecycle.py": (
         "tools/llmtool/tests/test_task_lifecycle.py",
         "tools/llmtool/tests/test_task_lifecycle_cli.py",
+    ),
+    "tools/llmtool/llmtool/task_store.py": (
+        "tools/llmtool/tests/test_task_store.py",
     ),
     "tools/llmtool/llmtool/test_output_excerpts.py": (
         "tools/llmtool/tests/test_test_output_excerpts.py",
