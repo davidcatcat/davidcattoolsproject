@@ -50,9 +50,11 @@ class ActivePMInboxTests(unittest.TestCase):
     def setUp(self):
         self.setUp_fixture()
         self.claude_home = self.base / 'claude-config'
+        self.codex_home = self.base / 'codex-config'
         self.pm_cwd = self.base / 'pm-root'
         self.pm_cwd.mkdir()
         env = patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.claude_home),
+                                      'CODEX_HOME': str(self.codex_home),
                                       'HOME': str(self.base / 'home')})
         env.start()
         self.addCleanup(env.stop)
@@ -65,6 +67,18 @@ class ActivePMInboxTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text('{}\n')
         return native
+
+    def _codex_session(self, cwd=None, *, metadata=None, name_id=None):
+        native = str(uuid.uuid4())
+        session_cwd = str(cwd or self.pm_cwd)
+        path = (self.codex_home / 'sessions' / '2026' / '10' / '30' /
+                ('rollout-20261030-120000-' + (name_id or native) + '.jsonl'))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if metadata is None:
+            metadata = {'timestamp': '2026-10-30T12:00:00Z', 'type': 'session_meta',
+                        'payload': {'id': native, 'cwd': session_cwd}}
+        path.write_text(json.dumps(metadata) + '\n')
+        return native, path
 
     def _record_pm(self, session=None, store=None, cwd=None):
         out = StringIO()
@@ -157,10 +171,47 @@ class ActivePMInboxTests(unittest.TestCase):
                 input_stream=StringIO('{}'))
         self.assertEqual(self.store.task_ids(), [])
 
+    def test_codex_session_is_verified_against_transcript_metadata_and_cwd(self):
+        native, _ = self._codex_session()
+        output = StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(run_task_record_pm(Namespace(
+                stdin_json=True, pm_session_id=native, pm_runtime='codex',
+                pm_cwd=str(self.pm_cwd)), store=self.store,
+                input_stream=StringIO(json.dumps({'request': 'Add a bounded test.',
+                                                  'response': _RESPONSE}))), 0)
+        view = json.loads(output.getvalue())
+        self.assertEqual(view['pm_provenance']['pm_runtime'], 'codex')
+        self.assertEqual(view['pm_provenance']['pm_native_session_id'], native)
+        self.assertEqual(view['pm_provenance']['pm_cwd'], str(self.pm_cwd))
+        self.assertEqual(view['pm_recovery'], {
+            'runtime': 'codex', 'cwd': str(self.pm_cwd),
+            'resume_argv': ['codex', 'resume', native]})
+
+    def test_codex_session_refuses_missing_malformed_wrong_cwd_and_unsafe_path(self):
+        missing = str(uuid.uuid4())
+        with self.assertRaises(LLMToolError):
+            active_pm_inbox.observe_codex_session(missing, str(self.pm_cwd))
+
+        wrong, _ = self._codex_session(cwd=self.base)
+        malformed, malformed_path = self._codex_session()
+        malformed_path.write_text('{bad json}\n')
+        symlinked, _ = self._codex_session()
+        target = self.codex_home / 'sessions' / '2026' / '10' / '30'
+        unsafe = target / ('rollout-20261030-120000-' + symlinked + '.jsonl')
+        unsafe.unlink()
+        unsafe.symlink_to(self.pm_cwd / 'transcript.jsonl')
+        (self.pm_cwd / 'transcript.jsonl').write_text('{}\n')
+        for native, cwd in ((wrong, self.pm_cwd), (malformed, self.pm_cwd),
+                            (symlinked, self.pm_cwd)):
+            with self.subTest(native=native), self.assertRaises(LLMToolError):
+                active_pm_inbox.observe_codex_session(native, str(cwd))
+        self.assertEqual(self.store.task_ids(), [])
+
     def test_task_store_rejects_inconsistent_session_binding(self):
         record = self.store.get(self._record_pm()['task_id'])
         for field, value in (('pm_native_session_id', str(uuid.uuid4())),
-                             ('pm_runtime', 'codex'), ('pm_cwd', 'relative/dir'),
+                             ('pm_runtime', 'unknown-runtime'), ('pm_cwd', 'relative/dir'),
                              ('native_session_id_status', 'UNAVAILABLE')):
             changed = {**record, 'task_id': uuid.uuid4().hex,
                        'pm_provenance': {**record['pm_provenance'], field: value}}
