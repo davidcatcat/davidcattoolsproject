@@ -370,6 +370,7 @@ class RemoteTestTests(unittest.TestCase):
                       remote_test._REMOTE_SCRIPT)
         self.assertIn('"HOME":work+"/.home","TMPDIR":work+"/.tmp"',
                       remote_test._REMOTE_SCRIPT)
+        self.assertIn('"GIT_OPTIONAL_LOCKS":"0"', remote_test._REMOTE_SCRIPT)
         self.assertIn('["mkdir","-m","700","--",work+"/.home",work+"/.tmp"]',
                       remote_test._REMOTE_SCRIPT)
         self.assertNotIn('cwd=work', remote_test._REMOTE_SCRIPT)

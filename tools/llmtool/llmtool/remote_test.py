@@ -52,7 +52,15 @@ def failure_excerpt(outputs,work,home):
     blocks=[]
     def safe_line(line):
         line=line.replace(work,"<REMOTE_WORKDIR>").replace(home,"<REMOTE_HOME>")
-        return None if SENSITIVE.search(line) else line
+        if not SENSITIVE.search(line): return line
+        # A fully-qualified unittest test id has three dot-separated parts,
+        # which can resemble the broad JWT detector. Ignore only that shape
+        # inside a conventional FAIL/ERROR header, while still screening any
+        # credential marker elsewhere on the header.
+        if re.fullmatch(r"(?:FAIL|ERROR): [A-Za-z0-9_.-]+ \([A-Za-z0-9_.]+\)",line):
+            without_test_id=re.sub(r"\([A-Za-z0-9_.]+\)","()",line)
+            if not SENSITIVE.search(without_test_id): return line
+        return None
     for output in outputs:
         lines=output.decode("utf8","replace").splitlines()
         index=0
@@ -88,7 +96,7 @@ def run(argv,limit=None,cleanup=False,**kw):
         stderr=subprocess.PIPE if capture_stderr else subprocess.STDOUT,
         check=False,timeout=max(.1,seconds),**kw)
 def nobody(work,argv,env=None):
-    values={"PATH":"/usr/bin:/bin","HOME":work+"/.home","TMPDIR":work+"/.tmp","PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1"}
+    values={"PATH":"/usr/bin:/bin","HOME":work+"/.home","TMPDIR":work+"/.tmp","GIT_OPTIONAL_LOCKS":"0","PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1"}
     values.update(env or {})
     return ["sudo","-n","-u","nobody","env","-i","-C",work]+[k+"="+v for k,v in values.items()]+argv
 def nobody_run(work,argv,limit=None,env=None,cleanup=False,**kw):
