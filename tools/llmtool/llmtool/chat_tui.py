@@ -196,7 +196,7 @@ BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its he
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
                  "scroll", "mouse", "help", "hint")
-STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse", "hint")
+STATUS_DROP_ORDER = ("hint", "help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
 PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "keys")
@@ -265,7 +265,8 @@ def slash_matches(text, dev=True):
     commands = [c for c in SLASH_COMMANDS if dev or not c[0].startswith("/task")]
     prefix = [c for c in commands if c[0].startswith(query)]
     inside = [c for c in commands if c not in prefix and len(query) > 2 and query[1:] in c[0]]
-    return prefix + inside
+    order = {"PM": 0, "對話": 1, "設定": 2, "說明": 3, "開發測試": 4}
+    return sorted(prefix + inside, key=lambda command: order[_command_group(command[0])])
 
 
 def history_matches(entries, query):
@@ -643,10 +644,13 @@ class ChatTUI:
         self.conversation = chat_tui_view.make_pane(
             self.view, colour=self.colour, styler=self._style,
             linker=lambda: self.linker if self.links_on() else None)
-        self.conversation.set_text(terminal_safe_text(
-            self.version_line
-            + "\n輸入 /help 查看指令與操作方式。"
-            + "\n第一次使用 PM：輸入 /pm new 建立工作階段，再用 /pm connect 連線。"))
+        opening = (self.version_line
+                   + "\n輸入 /help 查看指令與操作方式。"
+                   + "\n第一次使用 PM：輸入 /pm new 建立工作階段，再用 /pm connect 連線。")
+        if session.history_notice:
+            opening += "\n歷史記錄提示：" + terminal_safe_text(session.history_notice)
+            session.history_notice = None
+        self.conversation.set_text(terminal_safe_text(opening))
         self.input = TextArea(multiline=True, wrap_lines=True, focus_on_click=True,
                               prompt=lambda: ("pm> " if self.pm_mode else
                                               "task> " if self.task_profile else "> "),
@@ -1056,10 +1060,10 @@ class ChatTUI:
 
     def help_text(self):
         groups = [
-            "對話：/status 狀態 · /provider [profile] 供應商 · /skill [name|none] 技能",
-            "      /clear 清除對話 · /history 對話紀錄 · /exit、/quit 離開",
             "PM：/pm new [CWD] 建立 · /pm connect [SESSION [CWD]] 連線",
             "    /pm disconnect 中斷 · /pm history 歷史 · /pm queue [clear|send] 佇列",
+            "對話：/status 狀態 · /provider [profile] 供應商 · /skill [name|none] 技能",
+            "      /clear 清除對話 · /history 對話紀錄 · /exit、/quit 離開",
             "設定：/theme [dark|light|auto] 主題 · /links [on|off] 連結",
             "說明：/help 顯示本頁 · F1 切換說明 · / 開啟指令選擇器",
             "操作：Enter 送出或執行 · Ctrl-J 換行 · ↑/↓ 移動或查詢輸入紀錄 · Tab 切換焦點",

@@ -263,13 +263,12 @@ class WidgetTests(Base):
         ui, _ = self.drive(['/status\r'])
         self.assertIn('歷史記錄：儲存在本機', ui.status_report())
 
-    def test_history_notice_is_shown_in_status_not_on_the_start_screen(self):
+    def test_history_notice_is_shown_once_on_the_start_screen(self):
         self.session.history_notice = 'chat history was unavailable; continuing without saved history'
         ui, result = self.drive(['/status\r'])
         self.assertEqual(result, 0)
-        self.assertNotIn('llmtool: chat history was unavailable', ui.conversation.text)
-        self.assertIn('歷史記錄提示：chat history was unavailable; continuing without saved history',
-                      ui.status_report())
+        self.assertEqual(ui.conversation.text.count(
+            '歷史記錄提示：chat history was unavailable; continuing without saved history'), 1)
 
     def test_fixed_bottom_layout_fills_80x24_and_99x36(self):
         for rows, columns in ((24, 80), (36, 99)):
@@ -1409,7 +1408,7 @@ class TaskModeTests(Base):
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
         ui, _ = self.drive(['/task mode profile first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
-                            self.idle])
+                            self.idle, '/status\r'])
         records = self.store_records()
         self.assertEqual(len(records), 1)
         record = records[0]
@@ -1421,7 +1420,7 @@ class TaskModeTests(Base):
         self.assertIn('Task ID: ' + record['task_id'], text)
         self.assertIn('Run ID: ' + record['run_id'], text)
         self.assertIn('PM session: ' + record['pm_session_id'] + ' (backend NO_NATIVE_SESSION_ID_EXPOSED)', text)
-        self.assertIn('it is not a PM', text)
+        self.assertIn('不是 PM', self.status(ui))
         self.assertIn('Dispatch: 已建立／待派工', text)
         self.assertNotIn('development is running', text.lower())
         self.assertTrue(ui.show_detail)
@@ -1610,10 +1609,11 @@ class W57ChatTests(Base):
         help_text = ui.help_text()
         self.assertIn('對話：', help_text)
         self.assertIn('PM：', help_text)
+        self.assertLess(help_text.index('PM：'), help_text.index('對話：'))
         self.assertIn('設定：', help_text)
         self.assertIn('說明：', help_text)
         self.assertIn('第一次使用 PM：', ui.conversation.text)
-        self.assertIn('輸入 / 可搜尋指令', ui.conversation.text)
+        self.assertIn('輸入 /help 查看指令與操作方式。', ui.conversation.text)
         self.assertIn('輸入訊息', ui.status_text())
         ui._set_menu(chat_tui.slash_matches('/', dev=False))
         rows = ui.picker_entries()
@@ -1621,6 +1621,8 @@ class W57ChatTests(Base):
         self.assertTrue(any(row.startswith('【PM】') for row in rows))
         self.assertTrue(any(row.startswith('【設定】') for row in rows))
         self.assertFalse(any('/task' in row for row in rows))
+        self.assertLess(rows.index(next(row for row in rows if row.startswith('【PM】'))),
+                        rows.index(next(row for row in rows if row.startswith('【對話】'))))
         ui._set_menu(chat_tui.slash_matches('/', dev=True))
         self.assertTrue(any('/task' in row for row in ui.picker_entries()))
 
@@ -1641,7 +1643,7 @@ class W57ChatTests(Base):
         async def append_before_lookup_finishes(ui):
             ui.conversation.set_text(ui.conversation.text + '\n使用者訊息：保留這段')
             release_lookup.set()
-            await self.until(ui, lambda current: current.version_line.startswith(
+            await WidgetTests.until(ui, lambda current: current.version_line.startswith(
                 'LLMTool 0.1.0 ·'), 'version lookup')
 
         with patch('llmtool.chat_tui_theme.version_line', side_effect=delayed_version_line):
