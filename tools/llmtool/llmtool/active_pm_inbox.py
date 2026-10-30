@@ -45,12 +45,12 @@ _REMOTE_TEST_OUTCOME_EVENT_DOMAIN = b'llmtool-active-pm-remote-test-outcome-even
 
 
 def pm_session_key(value):
-    """Map a Claude Code session UUID (or a stored pm-* ID) to the Task binding."""
+    """Map a supported PM native session UUID (or stored pm-* ID) to its Task binding."""
     if type(value) is str and PM_NATIVE_SESSION_ID.fullmatch(value):
         return 'pm-' + value
     if type(value) is str and SESSION_ID.fullmatch(value):
         return value
-    raise LLMToolError('PM session must be a Claude Code session UUID or a pm- session ID')
+    raise LLMToolError('PM session must be a native session UUID or a pm- session ID')
 
 
 def claude_session_file(native_session_id, cwd, environ=None):
@@ -98,6 +98,77 @@ def claude_session_present(native_session_id, cwd, environ=None):
                                allow_missing=True)
 
 
+def observe_codex_session(native_session_id, cwd, environ=None):
+    """Find a real Codex transcript whose session metadata binds ID to cwd."""
+    if type(native_session_id) is not str or not PM_NATIVE_SESSION_ID.fullmatch(
+            native_session_id):
+        raise LLMToolError('PM session ID must be a lowercase Codex session UUID')
+    if type(cwd) is not str or not cwd:
+        raise LLMToolError('PM working directory is required')
+    cwd = os.path.normpath(os.path.abspath(cwd))
+    if (len(cwd) > 1024 or any(ord(char) < 0x20 or ord(char) == 0x7f for char in cwd) or
+            not os.path.isdir(cwd)):
+        raise LLMToolError('PM working directory is invalid')
+    env = os.environ if environ is None else environ
+    base = env.get('CODEX_HOME') or (os.path.join(env['HOME'], '.codex')
+                                     if env.get('HOME') else None)
+    if base is None or not os.path.isabs(base):
+        raise LLMToolError('Codex configuration directory is unavailable')
+    root = Path(base) / 'sessions'
+    _check_directory_path(root)
+    matches = []
+    visited = 0
+    for directory, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        current = Path(directory)
+        _check_plain_user_directory(current)
+        for name in dirs:
+            _check_plain_user_directory(current / name)
+        for name in files:
+            visited += 1
+            if visited > 100000:
+                raise LLMToolError('Codex session store exceeds the supported size')
+            candidate = current / name
+            if not name.endswith('-' + native_session_id + '.jsonl'):
+                continue
+            info = candidate.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+                raise LLMToolError('Codex PM session path is not a plain user file')
+            if info.st_size > 16 * 1024 * 1024:
+                raise LLMToolError('Codex PM session file exceeds the supported size')
+            try:
+                with candidate.open('r', encoding='utf-8') as stream:
+                    first_line = stream.readline(65537)
+                if len(first_line.encode('utf-8')) > 65536:
+                    raise ValueError('metadata line too large')
+                metadata = json.loads(first_line)
+                payload = metadata.get('payload')
+                if (type(metadata) is not dict or metadata.get('type') != 'session_meta' or
+                        type(payload) is not dict or payload.get('id') != native_session_id or
+                        payload.get('cwd') != cwd):
+                    raise ValueError('session metadata does not match')
+            except Exception:
+                raise LLMToolError(
+                    'Codex PM session is malformed or bound to another directory') from None
+            matches.append(candidate)
+    if len(matches) != 1:
+        raise LLMToolError('Codex PM session was not found uniquely for this directory')
+    return cwd
+
+
+def _check_plain_user_directory(path):
+    try:
+        info = path.lstat()
+    except OSError:
+        raise LLMToolError('Codex PM session store is unavailable') from None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise LLMToolError('Codex PM session path is not a plain user directory')
+
+
+def _check_directory_path(path):
+    _check_plain_user_directory(path.parent)
+    _check_plain_user_directory(path)
+
+
 def _check_session_path(path, *, allow_missing):
     # Every component from the configuration directory down must be this
     # user's real directory or file; a symlink anywhere is refused.  Each
@@ -128,8 +199,14 @@ def recovery(record):
     provenance = record.get('pm_provenance')
     if type(provenance) is not dict or 'pm_native_session_id' not in provenance:
         return None
+    if provenance['pm_runtime'] == 'claude-code':
+        argv = ['claude', '--resume', provenance['pm_native_session_id']]
+    elif provenance['pm_runtime'] == 'codex':
+        argv = ['codex', 'resume', provenance['pm_native_session_id']]
+    else:
+        return None
     return {'runtime': provenance['pm_runtime'], 'cwd': provenance['pm_cwd'],
-            'resume_argv': ['claude', '--resume', provenance['pm_native_session_id']]}
+            'resume_argv': argv}
 
 
 def _handoff_event(record, handoff):
