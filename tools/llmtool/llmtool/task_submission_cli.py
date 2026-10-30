@@ -556,7 +556,7 @@ def add_task_submission_parsers(actions):
     abandon = actions.add_parser('abandon', help='Mark a Task abandoned by its bound PM session')
     abandon.add_argument('task_id', help='existing durable Task ID')
     abandon.add_argument('--pm-session', required=True,
-                         help='Claude Code session UUID (or stored pm- session ID)')
+                         help='native PM session UUID (or stored pm- session ID)')
     abandon.add_argument('--reason', required=True, help='printable reason (1-500 characters)')
     submit = actions.add_parser('submit', help='Submit a development request to an explicit PM provider profile')
     submit.add_argument('--provider', required=True, help='configured PM provider profile; no implicit default')
@@ -566,15 +566,15 @@ def add_task_submission_parsers(actions):
     record_pm.add_argument('--stdin-json', action='store_true', required=True,
                            help='read one bounded JSON object with request and response from stdin')
     record_pm.add_argument('--pm-session-id',
-                           help='Claude Code session UUID of this PM; its local transcript must exist')
-    record_pm.add_argument('--pm-runtime', choices=('claude-code',),
+                           help='native session UUID of this PM; its local transcript must exist')
+    record_pm.add_argument('--pm-runtime', choices=('claude-code', 'codex'),
                            help='PM runtime that owns --pm-session-id (default claude-code)')
     record_pm.add_argument('--pm-cwd',
                            help='working directory of the PM session (default: current directory)')
     inbox = actions.add_parser(
         'inbox', help='Read unacknowledged completion events for one active PM session')
     inbox.add_argument('--pm-session', required=True,
-                       help='Claude Code session UUID (or stored pm- session ID)')
+                       help='native PM session UUID (or stored pm- session ID)')
     inbox.add_argument('--wait', action='store_true',
                        help='block until an event exists or the timeout passes')
     inbox.add_argument('--timeout', type=int, default=540,
@@ -587,7 +587,7 @@ def add_task_submission_parsers(actions):
     ack = actions.add_parser('ack', help='Acknowledge one completion event; repeating is inert')
     ack.add_argument('event_id', help='32-character event ID from task inbox')
     ack.add_argument('--pm-session', required=True,
-                     help='Claude Code session UUID (or stored pm- session ID)')
+                     help='native PM session UUID (or stored pm- session ID)')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
@@ -3249,11 +3249,16 @@ def run_task_record_pm(args, *, store=None, input_stream=None, return_record=Fal
         if runtime is not None or cwd is not None:
             raise LLMToolError('--pm-runtime/--pm-cwd require --pm-session-id')
     else:
-        # The transcript must exist before anything is read or stored.
-        session = {'pm_runtime': runtime or 'claude-code',
+        # Verify the native transcript and its working directory before reading
+        # or persisting the PM's decision. This records evidence, not caller identity.
+        runtime = runtime or 'claude-code'
+        if runtime not in ('claude-code', 'codex'):
+            raise LLMToolError('unsupported PM runtime')
+        observer = (active_pm_inbox.observe_claude_session if runtime == 'claude-code'
+                    else active_pm_inbox.observe_codex_session)
+        session = {'pm_runtime': runtime,
                    'pm_native_session_id': native_session,
-                   'pm_cwd': active_pm_inbox.observe_claude_session(
-                       native_session, os.getcwd() if cwd is None else cwd)}
+                   'pm_cwd': observer(native_session, os.getcwd() if cwd is None else cwd)}
     prompt, response, assignment = _read_pm_record_input(input_stream)
     task_id, run_id = (new_id() if task_id is None else task_id), new_id()
     digest = hashlib.sha256(prompt.encode('utf-8', 'strict')).hexdigest()

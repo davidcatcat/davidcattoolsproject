@@ -248,12 +248,13 @@ PM_NATIVE_SESSION_ID = re.compile(
 
 
 def _valid_pm_session_binding(record, provenance):
-    """A declared PM session must be a well-formed, observed Claude Code session."""
+    """A declared PM session must be a well-formed observed supported session."""
     if not _PM_SESSION_FIELDS.issubset(provenance):
         return provenance['native_session_id_status'] == 'UNAVAILABLE'
     native = provenance['pm_native_session_id']
     cwd = provenance['pm_cwd']
-    return (provenance['pm_runtime'] == 'claude-code' and
+    runtime = provenance['pm_runtime']
+    return (runtime in ('claude-code', 'codex') and
             provenance['native_session_id_status'] == 'LOCAL_SESSION_FILE_OBSERVED' and
             type(native) is str and PM_NATIVE_SESSION_ID.fullmatch(native) is not None and
             record['pm_session_id'] == 'pm-' + native and

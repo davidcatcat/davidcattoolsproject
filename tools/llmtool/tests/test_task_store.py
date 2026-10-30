@@ -1472,6 +1472,26 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(created['backend_session_semantics'],
                          'ACTIVE_PM_RUNTIME_NO_PROVIDER_CALL')
 
+    def test_active_codex_pm_session_binding_is_validated_and_round_trips(self):
+        value = self._active_pm_record()
+        native = str(uuid.uuid4())
+        value['pm_session_id'] = 'pm-' + native
+        value['pm_provenance'].update(
+            pm_runtime='codex', pm_native_session_id=native,
+            pm_cwd='/tmp/codex-pm-task',
+            native_session_id_status='LOCAL_SESSION_FILE_OBSERVED')
+        created = self.store.create(value)
+        self.assertEqual(self.store.get(value['task_id']), created)
+        self.assertEqual(created['pm_provenance']['pm_runtime'], 'codex')
+        invalid = self._active_pm_record()
+        invalid['pm_session_id'] = 'pm-' + native
+        invalid['pm_provenance'].update(
+            pm_runtime='codex', pm_native_session_id=native,
+            pm_cwd='relative/path',
+            native_session_id_status='LOCAL_SESSION_FILE_OBSERVED')
+        with self.assertRaises(LLMToolError):
+            TaskStore(self.root / 'invalid-codex-binding').create(invalid)
+
     def test_active_pm_company_gateway_assignment_is_validated_and_round_trips(self):
         value = self._active_pm_record(route='company-gw')
         created = self.store.create(value)

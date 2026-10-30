@@ -578,6 +578,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
         args = parser.parse_args(['task', 'submit', '--provider', 'company-gw', 'build something'])
         self.assertEqual((args.action, args.provider, args.request),
                          ('submit', 'company-gw', ['build something']))
+        recorded_pm = parser.parse_args([
+            'task', 'record-pm', '--stdin-json', '--pm-runtime', 'codex',
+            '--pm-session-id', '12345678-1234-4234-8234-123456789abc',
+            '--pm-cwd', '/tmp/pm-task'])
+        self.assertEqual((recorded_pm.action, recorded_pm.pm_runtime,
+                          recorded_pm.pm_session_id, recorded_pm.pm_cwd),
+                         ('record-pm', 'codex',
+                          '12345678-1234-4234-8234-123456789abc', '/tmp/pm-task'))
         delegated = parser.parse_args([
             'task', 'delegate', 'a' * 32, '--provider', 'codex',
             '--selection-source', 'PM', '--executor-task', 'executor-task-1',
