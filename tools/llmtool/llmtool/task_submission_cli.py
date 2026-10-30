@@ -2782,7 +2782,17 @@ def run_task_codex_delegate(args, *, store):
                                       'CODEX_FINAL_MESSAGE_INVALID',
                                       'CODEX_FINAL_MESSAGE_MISSING') and
                 exc.attempted and exc.process_exit_code == 0):
-            execution = {'status': 'DONE', 'native_session_id': exc.native_session_id,
+            completion_evidence = (
+                type(exc.native_session_id) is str and
+                codex_direct_developer._THREAD_ID.fullmatch(
+                    exc.native_session_id) is not None and
+                type(exc.stdout_sha256) is str and
+                re.fullmatch(r'[0-9a-f]{64}', exc.stdout_sha256) is not None and
+                exc.cleanup_status == 'CONFIRMED')
+            # Keep a rejected output recordable even when the process evidence
+            # is incomplete. TaskStore reserves DONE for fully observed runs.
+            execution = {'status': 'DONE' if completion_evidence else 'FAILED',
+                'native_session_id': exc.native_session_id,
                 'process_exit_code': exc.process_exit_code, 'stdout_sha256': exc.stdout_sha256,
                 'elapsed_ms': exc.elapsed_ms, 'cleanup_status': exc.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if exc.usage is not None else 'UNKNOWN',
@@ -2802,20 +2812,27 @@ def run_task_codex_delegate(args, *, store):
                     registration.root, task_source_sha, write_paths)
                 if ignored_rejection is not None or rejection is not None:
                     rejection = ignored_rejection if ignored_rejection is not None else rejection
-                    developer.update(execution=execution)
+                    rejection_developer = dict(developer, execution=execution)
                     saved = _persist_developer_output_rejection(
-                        store, task['task_id'], developer, rejection, exc.usage,
+                        store, task['task_id'], rejection_developer, rejection, exc.usage,
                         exc.final_message or artifact)
                     _print(_task_view(saved))
                     return 1
+                if not completion_evidence:
+                    # A scoped diff is not a recoverable response without the
+                    # complete native execution receipt. Fall through to the
+                    # ordinary outcome-unknown record, which carries only the
+                    # observed execution fields.
+                    raise LLMToolError('Codex completion evidence is incomplete')
                 capture = _capture_rejected_output(
                     store, task['task_id'], exc.final_message)
-                developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
+                recovery_developer = dict(developer)
+                recovery_developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                     artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
                     error_code=None, result_status='UNVERIFIED',
                     final_answer='INVALID', rejected_output_capture=capture,
                     execution=execution, usage=exc.usage)
-                store.update(task['task_id'], developer=developer)
+                store.update(task['task_id'], developer=recovery_developer)
                 recovered = True
             except Exception:
                 # Failure to revalidate or persist this exceptional recovery
