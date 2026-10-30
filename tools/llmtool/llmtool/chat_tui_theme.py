@@ -39,6 +39,7 @@ OSC8_CLOSE = "\x1b]8;;\x1b\\"
 LINK_IDS = 4096          # Link ids kept before the table starts again.
 LINK_CONTEXT = 256       # Characters around a row searched for a link that crosses it.
 GIT_SECONDS = 2.0
+VERSION_RE = re.compile(r'^version\s*=\s*["\']([^"\']+)["\']', re.M)
 # A source path with a line number: "dir/file.py:12" or "file.md:3:7". A bare name needs
 # a known extension, so "example.com:443" or "1.5:30" stay plain text.
 FILE_LINK = re.compile(r"(?<![\w./~-])((?:~/|/|\.\.?/)?(?:[\w.-]+/)*[\w-][\w.-]*"
@@ -153,6 +154,43 @@ def repo_info(cwd=None):
         return None, None
     match = _GITHUB_REMOTE.match(git("config", "--get", "remote.origin.url") or "")
     return os.path.realpath(top), match.group(1) if match else None
+
+
+def version_line(cwd=None):
+    """Return the display version and exact local Git revision, without raising.
+
+    Call from a background thread: construction of the TUI must never invoke Git.
+    """
+    package_dir = Path(__file__).resolve().parents[1]
+    try:
+        project = (package_dir / "pyproject.toml").read_text(encoding="utf-8")
+        match = VERSION_RE.search(project)
+        version = match.group(1) if match else "UNKNOWN（pyproject 版本欄位缺失）"
+    except Exception:
+        version = "UNKNOWN（pyproject 無法讀取）"
+
+    cwd = str(package_dir if cwd is None else cwd)
+    try:
+        revision = subprocess.run(
+            ("git", "log", "-1", "--format=%h%x09%cs"), cwd=cwd,
+            capture_output=True, text=True, timeout=GIT_SECONDS, stdin=subprocess.DEVNULL)
+        if revision.returncode != 0 or not isinstance(revision.stdout, str):
+            return "LLMTool %s · UNKNOWN（git log 失敗）" % version
+        fields = revision.stdout.strip().split("\t")
+        if len(fields) != 2 or not all(fields):
+            return "LLMTool %s · UNKNOWN（git revision 無效）" % version
+        changed = subprocess.run(
+            ("git", "status", "--porcelain", "--untracked-files=normal"), cwd=cwd,
+            capture_output=True, text=True, timeout=GIT_SECONDS, stdin=subprocess.DEVNULL)
+        if changed.returncode != 0 or not isinstance(changed.stdout, str):
+            return "LLMTool %s · UNKNOWN（git status 失敗）" % version
+        short, date = fields
+        if changed.stdout.strip():
+            short += "+dirty"
+        return "LLMTool %s · %s（%s）" % (version, short, date)
+    except Exception as exc:
+        reason = "逾時" if isinstance(exc, subprocess.TimeoutExpired) else "git 無法使用"
+        return "LLMTool %s · UNKNOWN（%s）" % (version, reason)
 
 
 class Linker:

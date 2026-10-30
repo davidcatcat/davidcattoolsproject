@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmtool import chat_tui, chat_tui_pm, chat_tui_status, chat_tui_view
+from llmtool import chat_tui, chat_tui_pm, chat_tui_status, chat_tui_theme, chat_tui_view
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
 from llmtool.providers.base import ProviderCapabilities, Reply
@@ -1599,6 +1599,41 @@ class W57ChatTests(Base):
 
     def status(self, ui):
         return ui.conversation.text.rsplit('> /status', 1)[1]
+
+    def test_w58_help_picker_onboarding_and_idle_hint(self):
+        ui, _ = self.drive([])
+        help_text = ui.help_text()
+        self.assertIn('對話：', help_text)
+        self.assertIn('PM：', help_text)
+        self.assertIn('設定：', help_text)
+        self.assertIn('說明：', help_text)
+        self.assertIn('第一次使用 PM：', ui.conversation.text)
+        self.assertIn('輸入 / 可搜尋指令', ui.conversation.text)
+        self.assertIn('輸入訊息', ui.status_text())
+        ui._set_menu(chat_tui.slash_matches('/', dev=False))
+        rows = ui.picker_entries()
+        self.assertTrue(any(row.startswith('【對話】') for row in rows))
+        self.assertTrue(any(row.startswith('【PM】') for row in rows))
+        self.assertTrue(any(row.startswith('【設定】') for row in rows))
+
+    def test_version_lookup_is_not_started_by_construction(self):
+        with create_pipe_input() as pipe, \
+                patch('llmtool.chat_tui_theme.version_line') as version_line:
+            chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
+        version_line.assert_not_called()
+
+    def test_version_display_reports_git_failure_as_unknown_with_reason(self):
+        failed = Mock(returncode=1, stdout='', stderr='')
+        with patch('llmtool.chat_tui_theme.subprocess.run', return_value=failed):
+            line = chat_tui_theme.version_line()
+        self.assertRegex(line, r'^LLMTool 0\.1\.0 · UNKNOWN（git log 失敗）$')
+
+    def test_version_display_includes_short_commit_date_and_dirty_marker(self):
+        revision = Mock(returncode=0, stdout='abc1234\t2026-10-30\n')
+        dirty = Mock(returncode=0, stdout=' M tools/llmtool/llmtool/chat_tui.py\n')
+        with patch('llmtool.chat_tui_theme.subprocess.run', side_effect=(revision, dirty)):
+            line = chat_tui_theme.version_line()
+        self.assertEqual(line, 'LLMTool 0.1.0 · abc1234+dirty（2026-10-30）')
 
     def test_chat_status_is_chinese_and_says_what_is_not_known_yet(self):
         ui, _ = self.drive(['/status\r'])

@@ -140,6 +140,8 @@ class TUIScenarioCase(unittest.TestCase):
         terminal = driver.Terminal(self.pyte, temp.name, REPLIES, rows, columns, self.slow)
         self.terminals.append(terminal)
         terminal.wait_text("full-screen", "TUI startup")
+        terminal.wait_text("LLMTool 0.1.0 ·", "version banner")
+        terminal.wait_text("第一次使用 PM：", "first-run PM guide")
         return terminal
 
     def ask(self, terminal, question, marker="END MARKER"):
@@ -198,6 +200,24 @@ class TUIScenarioCase(unittest.TestCase):
 
 class TUIUserScenarioTests(TUIScenarioCase):
     """Mac PTY (fake provider) user scenarios S1–S13 (W56 Owner work package C)."""
+
+    def test_s16_w58_grouped_help_picker_and_idle_hint(self):
+        """[Mac PTY (fake provider)] W58 onboarding, grouped commands and build banner"""
+        terminal = self.open_terminal(rows=30, columns=100)
+        startup = terminal.text()
+        self.assertIn("LLMTool 0.1.0 ·", startup)
+        self.assertIn("輸入訊息", startup)
+        self.assertEqual(startup.count("第一次使用 PM："), 1)
+        terminal.submit("/help")
+        help_text = terminal.wait_text("對話：", "grouped /help")
+        self.assertIn("PM：", help_text)
+        self.assertIn("設定：", help_text)
+        self.assertIn("說明：", help_text)
+        terminal.send("/")
+        picker = terminal.wait_text("【對話】", "grouped slash picker")
+        terminal.send("pm")
+        picker = terminal.wait_text("【PM】", "PM picker group")
+        terminal.send("\x1b")
 
     def test_s01_long_chinese_markdown_answer(self):
         """[Mac PTY (fake provider)] S1 long Chinese answer with Markdown wraps and loses no text"""

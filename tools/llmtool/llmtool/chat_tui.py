@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 
 from . import (chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
                chat_tui_view, pm_runtime)
-from .chat import HELP, run_chat
+from .chat import run_chat
 from .config import selected_provider
 from .errors import LLMToolError
 from .providers.cli_lifecycle import CLIHostTermination, background_cli_invocation, tui_cli_signal_scope
@@ -169,34 +169,34 @@ def key_help(dev):
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
 # Picking one edits the input draft; it never runs the command.
 SLASH_COMMANDS = (
-    ("/help", "/help", "Show commands"),
+    ("/help", "/help", "說明：查看分組指令與操作方式"),
     ("/status", "/status", "狀態：PM 模式看 PM，聊天模式看供應商與模型"),
-    ("/provider", "/provider ", "List profiles or switch provider"),
-    ("/skill", "/skill ", "List skills, select one, or clear"),
-    ("/clear", "/clear", "Clear conversation"),
-    ("/history", "/history", "Show user/assistant turns"),
-    ("/exit", "/exit", "Exit"),
-    ("/quit", "/quit", "Exit"),
-    ("/pm connect", "/pm connect", "Talk to the PM: connect to the dedicated PM session"),
-    ("/pm new", "/pm new", "Create a dedicated PM session (pm_runtime binding)"),
-    ("/pm disconnect", "/pm disconnect", "End the PM connection"),
-    ("/pm history", "/pm history", "Turns pm_runtime stored for this PM"),
-    ("/pm queue", "/pm queue", "Queued PM messages: list, clear, or send (resume)"),
+    ("/provider", "/provider ", "對話：列出設定檔或切換供應商"),
+    ("/skill", "/skill ", "對話：列出、選取或清除技能"),
+    ("/clear", "/clear", "對話：清除對話內容"),
+    ("/history", "/history", "對話：查看使用者與助理訊息"),
+    ("/exit", "/exit", "對話：離開 llmtool"),
+    ("/quit", "/quit", "對話：離開 llmtool"),
+    ("/pm connect", "/pm connect", "PM：連線到專用 PM 工作階段"),
+    ("/pm new", "/pm new", "PM：建立專用 PM 工作階段"),
+    ("/pm disconnect", "/pm disconnect", "PM：結束 PM 連線"),
+    ("/pm history", "/pm history", "PM：查看已儲存的對話回合"),
+    ("/pm queue", "/pm queue", "PM：列出、清除或繼續佇列"),
     ("/task submit", "/task submit --provider ",
      "開發測試用：只登記，不會派工 (--provider PROFILE REQUEST)"),
-    ("/task show", "/task show ", "Show a task by TASK_ID"),
-    ("/task mode", "/task mode ", "Task mode for drafts: profile PROFILE, or off"),
-    ("/task list", "/task list", "Task list with status from TaskStore"),
-    ("/task events", "/task events", "Recent Task events from TaskStore"),
-    ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
-    ("/links", "/links ", "Clickable file and #PR links: on or off (saved)"),
+    ("/task show", "/task show ", "開發測試：查看 Task 詳情"),
+    ("/task mode", "/task mode ", "開發測試：設定 Task 模式"),
+    ("/task list", "/task list", "開發測試：查看 Task 清單"),
+    ("/task events", "/task events", "開發測試：查看近期 Task 事件"),
+    ("/theme", "/theme ", "設定：切換深色、淺色或自動主題"),
+    ("/links", "/links ", "設定：開啟或關閉可點選連結"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
-                 "scroll", "mouse", "help")
-STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
+                 "scroll", "mouse", "help", "hint")
+STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse", "hint")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
 PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "keys")
@@ -280,6 +280,18 @@ def history_matches(entries, query):
         if needle in entry.lower():
             result.append(entry)
     return result
+
+
+def _command_group(label):
+    if label.startswith("/pm"):
+        return "PM"
+    if label.startswith("/task"):
+        return "開發測試"
+    if label in ("/theme", "/links"):
+        return "設定"
+    if label == "/help":
+        return "說明"
+    return "對話"
 
 
 def fit_width(text, width, get_cwidth):
@@ -623,6 +635,7 @@ class ChatTUI:
         # clipboard is right even when the terminal never reports the release (Warp).
         self._drag_copy_handle = None
         self._loop = None
+        self.version_line = "LLMTool UNKNOWN（版本資訊讀取中）"
         self._received_signal = None
         # The conversation pane keeps its own rows, reading position, selection and
         # follow state (chat_tui_view); no scrollbar: the terminal's own is the only one.
@@ -632,13 +645,15 @@ class ChatTUI:
             linker=lambda: self.linker if self.links_on() else None)
         history_text = ("History is stored locally." if session.history_saved
                         else "History stays in memory.")
-        opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
-                   + "\n" + history_text + " F1 or /help for help; Ctrl-C exits.")
+        opening = (self.version_line + "\nLLMTool interactive chat (full-screen) · /help for commands\n"
+                   + session.status() + "\n" + history_text)
         if session.history_notice:
             opening += "\nllmtool: " + session.history_notice
             session.history_notice = None
         self.conversation.set_text(
             terminal_safe_text(opening
+                               + "\n第一次使用 PM：輸入 /pm new 建立工作階段，再用 /pm connect 連線。"
+                               + "輸入訊息即可對話；輸入 / 可搜尋指令。"
                                + "\nChat mode talks to the chat provider directly; it is not a PM."
                                + " /pm connect (or /pm new) talks to the dedicated PM."
                                + (" /task submit is for development testing only: it records"
@@ -906,6 +921,7 @@ class ChatTUI:
         self.app.before_render += lambda _app: self._list_tick()
         # The connected PM's background work: at most one TaskStore read per interval.
         self.app.before_render += lambda _app: self._background_tick()
+        self.app.pre_run_callables.append(self._start_version_lookup)
         self._default_mouse_binding = load_mouse_bindings().bindings[0]
         _enable_mouse_drag_reporting(self.app.output)
         if self.links_supported:
@@ -949,6 +965,8 @@ class ChatTUI:
             "scroll": self.view.status(),
             "mouse": "F6 滑鼠:" + ("開" if self.mouse_enabled else "關"),
             "help": "F1",
+            "hint": ("輸入訊息 · / 指令 · F1 說明"
+                     if not self.busy and not self.input.text else ""),
         }
         width = max(1, self.app.output.get_size().columns)
         # The mode field appears only in Task mode, so the chat footer is unchanged.
@@ -1048,7 +1066,39 @@ class ChatTUI:
         return ""
 
     def help_text(self):
-        return key_help(self.dev) + "\n\n" + HELP
+        groups = [
+            "對話：/status 狀態 · /provider [profile] 供應商 · /skill [name|none] 技能",
+            "      /clear 清除對話 · /history 對話紀錄 · /exit、/quit 離開",
+            "PM：/pm new [CWD] 建立 · /pm connect [SESSION [CWD]] 連線",
+            "    /pm disconnect 中斷 · /pm history 歷史 · /pm queue [clear|send] 佇列",
+            "設定：/theme [dark|light|auto] 主題 · /links [on|off] 連結",
+            "說明：/help 顯示本頁 · F1 切換說明 · / 開啟指令選擇器",
+            "操作：Enter 送出或執行 · Ctrl-J 換行 · ↑/↓ 移動或查詢輸入紀錄 · Tab 切換焦點",
+            "      PageUp/PageDown 捲動 · Esc 中斷回覆 · Ctrl-C 中斷後再按一次離開 · Ctrl-D 離開",
+        ]
+        if self.dev:
+            groups.insert(2, "開發測試用：只登記，不會派工。/task submit --provider PROFILE REQUEST；"
+                              "/task show、/task list、/task events 查看資訊。")
+            groups.append("      F2 Task 詳情 · F3 Task 清單 · F4 Task 事件 · F5 重新整理 · F7 PM 工具摘要")
+        return "LLMTool TUI 說明\n" + "\n".join(groups)
+
+    def _start_version_lookup(self):
+        """Resolve Git display metadata away from construction and the UI thread."""
+        loop = asyncio.get_running_loop()
+
+        def lookup():
+            line = chat_tui_theme.version_line()
+            self._post(loop, self._finish_version_lookup, line)
+
+        threading.Thread(target=lookup, name="llmtool-chat-version", daemon=True).start()
+
+    def _finish_version_lookup(self, line):
+        old_line = self.version_line
+        self.version_line = line
+        text = self.conversation.text
+        if text.startswith(old_line + "\n"):
+            self.conversation.text = text.replace(old_line, line, 1)
+        self.app.invalidate()
 
     def status_report(self):
         """/status (W57): what the current mode is talking to, in the status bar's words."""
@@ -1061,7 +1111,7 @@ class ChatTUI:
                     "（暫停：" + self.pm_outbox_paused + "）" if self.pm_outbox_paused else "")
             else:
                 queue = "沒有"
-            lines = ["狀態（PM 模式）",
+            lines = ["狀態（PM 模式）", self.version_line,
                      "PM session：" + self.pm_target[0] + "（claude-code，cwd "
                      + chat_tui_pm.safe_text(pm_runtime.display_path(
                          str(self.pm_target[1]), self.pm_target[1]) or "UNKNOWN") + "）",
@@ -1086,7 +1136,7 @@ class ChatTUI:
             session.state, session.state)
         if session.state == "error":
             state = "錯誤（" + (session.last_error_code or "未分類") + "）"
-        lines = ["狀態（聊天模式，不是 PM）",
+        lines = ["狀態（聊天模式，不是 PM）", self.version_line,
                  "供應商（本機設定）：" + session.provider + "（" + selected_provider(session.config)["type"]
                  + "）",
                  "設定的模型（本機設定）：" + (model or "供應商預設"),
@@ -1139,7 +1189,8 @@ class ChatTUI:
             # Earlier input is shown, never executed; one row each, escaped for the terminal.
             return [" " + terminal_safe_text(entry).replace("\n", " ↵ ").replace("\t", " ") + " "
                     for entry in self.search_matches]
-        return [" %-14s %s " % (label, summary) for label, _fill, summary in self.menu_items]
+        return ["【%s】 %-14s %s " % (_command_group(label), label, summary)
+                for label, _fill, summary in self.menu_items]
 
     def picker_layout(self):
         """(header, entry, "more") rows that fit beside the minimum chat layout.
