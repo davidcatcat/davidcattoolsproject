@@ -33,7 +33,7 @@ MAX_WALL_CLOCK_SECONDS = 600
 MAX_OUTPUT_BYTES = 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
-MAX_OUTPUT_TOKENS = 2048
+MAX_OUTPUT_TOKENS = 32768
 DEFAULT_AGENT_STEPS = 12
 MIN_AGENT_STEPS = 3
 MAX_AGENT_STEPS = 50
@@ -160,6 +160,31 @@ def _has_provider_auth_error(raw):
                     type(error) is dict and error.get('type') == 'provider.auth'):
                 return True
     except (UnicodeError, ValueError, RecursionError):
+        return False
+    return False
+
+
+def _has_output_truncation(raw, *, stderr=False):
+    """Recognize bounded truncation markers without retaining provider output."""
+    try:
+        decoded = raw.decode('utf-8', 'replace')
+        if stderr:
+            return ('StepFailedError' in decoded or
+                    'Response still truncated' in decoded)
+        for line in decoded.splitlines():
+            if not line:
+                continue
+            event = json.loads(line)
+            if type(event) is not dict or event.get('type') != 'error':
+                continue
+            error = event.get('error')
+            if type(error) is not dict:
+                continue
+            encoded_error = json.dumps(error, ensure_ascii=True)
+            if ('StepFailedError' in encoded_error or
+                    'Response still truncated' in encoded_error):
+                return True
+    except (ValueError, RecursionError):
         return False
     return False
 
@@ -437,7 +462,10 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
         if event.get('type') == 'error':
             error = event.get('error')
             _reject('OPENCODE_AUTH_REQUIRED' if type(error) is dict and
-                    error.get('type') == 'provider.auth' else 'OPENCODE_PROVIDER_FAILED')
+                    error.get('type') == 'provider.auth' else
+                    'OPENCODE_OUTPUT_TRUNCATED' if _has_output_truncation(
+                        json.dumps(event).encode('utf-8')) else
+                    'OPENCODE_PROVIDER_FAILED')
         event_type = event.get('type')
         event_sid = event.get('sessionID')
         if (event_type not in ('step_start', 'step_finish', 'text', 'tool_use') or
@@ -737,9 +765,12 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
     if process.returncode != 0:
         denied = _has_structured_tool_denial(raw)
         auth_required = _has_provider_auth_error(raw)
+        output_truncated = (_has_output_truncation(raw) or
+                            _has_output_truncation(bytes(stderr), stderr=True))
         raise DirectOpenCodeError(
                                   'TOOL_DENIED' if denied else
                                   'OPENCODE_AUTH_REQUIRED' if auth_required else
+                                  'OPENCODE_OUTPUT_TRUNCATED' if output_truncated else
                                   'OPENCODE_PROVIDER_FAILED', attempted=True,
                                   cleanup_status=cleanup, process_exit_code=process.returncode,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),

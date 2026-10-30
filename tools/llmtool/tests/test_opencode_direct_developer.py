@@ -118,6 +118,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
     def test_config_denies_tools_except_exact_read_and_edit_scope(self):
         value = configuration(read_paths=['source.py'], write_paths=['source.py'])
+        self.assertEqual(value['providers']['opencode']['models'][
+            'deepseek-v4.1-flash-free']['limit']['output'], 32768)
         self.assertEqual(value['model'], MODEL)
         self.assertEqual(value['default_agent'], AGENT)
         self.assertEqual(value['permissions'][0], {
@@ -250,6 +252,16 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertNotIn(marker, repr(error.args))
         self.assertNotIn(marker, repr(vars(error)))
 
+    def test_output_truncation_error_event_has_distinct_code(self):
+        event = self.event('error', error={
+            'name': 'StepFailedError',
+            'message': 'Response still truncated after two output token limit continuations',
+        })
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events((event + '\n').encode())
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
+
     def test_nonzero_structured_denial_has_bound_timing_and_no_secret_leak(self):
         task_id, run_id = 'a' * 32, 'b' * 32
 
@@ -290,7 +302,7 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(caught.exception.cleanup_status, 'CONFIRMED')
         self.assertLess(time.monotonic() - began, 3)
 
-    def fake_cli(self, body, *, exit_code=0, delay=0, invocation_marker=None,
+    def fake_cli(self, body, *, exit_code=0, delay=0, stderr_body='', invocation_marker=None,
                  version_output='opencode v2.0.32\n',
                  version_descendant_marker=None, run_descendant_marker=None,
                  version_mutate_path=None, run_invocation_marker=None,
@@ -357,6 +369,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
             f'time.sleep({delay!r})\n'
             f'sys.stdout.write({body!r})\n'
             'sys.stdout.flush()\n'
+            f'sys.stderr.write({stderr_body!r})\n'
+            'sys.stderr.flush()\n'
             f'time.sleep({post_output_delay!r})\n'
             f'raise SystemExit({exit_code})\n'
         )
@@ -632,6 +646,16 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(error.native_session_id, 'ses_Abc123')
         self.assertIsNotNone(error.started_at)
         self.assertIsNotNone(error.ended_at)
+
+    def test_nonzero_stderr_truncation_has_distinct_code(self):
+        cli = self.fake_cli(self.event('step_start') + '\n', exit_code=7,
+                            stderr_body='Session.StepFailedError: Response still truncated')
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
 
     def test_deeply_nested_json_line_keeps_typed_outcome_and_facts(self):
         # Regression: a nesting depth that makes json.loads raise RecursionError
