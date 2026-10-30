@@ -626,6 +626,63 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(captured, raw)
         self.assertNotIn(raw, output.getvalue())
 
+    def test_invalid_final_with_scoped_changes_is_recoverable(self):
+        task = self._task()
+
+        def invalid_final(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_FINAL_INVALID_WITH_CHANGES', attempted=True,
+                process_exit_code=0, stdout_sha256='a' * 64,
+                native_session_id='12345678-1234-4234-8234-123456789abc',
+                cleanup_status='CONFIRMED', final_message='not JSON')
+
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, codex_error=invalid_final)
+        developer = saved['developer']
+        self.assertEqual(result, 0)
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['result_status'], 'UNVERIFIED')
+        self.assertEqual(developer['final_answer'], 'INVALID')
+        self.assertIn('VALUE = 2', developer['artifact'])
+        capture = developer['rejected_output_capture']
+        self.assertEqual((self.store.root / capture['ref']).read_text(encoding='utf-8'),
+                         'not JSON')
+        callback.assert_called_once()
+
+    def test_invalid_final_without_changes_remains_rejected(self):
+        task = self._task()
+
+        def invalid_final(**_kwargs):
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_FINAL_JSON_INVALID', attempted=True, process_exit_code=0,
+                stdout_sha256='a' * 64, final_message='not JSON')
+
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, codex_error=invalid_final)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'],
+                         'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
+        callback.assert_not_called()
+
+    def test_invalid_final_with_out_of_scope_changes_remains_rejected(self):
+        task = self._task()
+
+        def invalid_final(**_kwargs):
+            (self.root / 'private.py').write_text('VALUE = 2\n')
+            raise task_submission_cli.codex_direct_developer.DirectCodexError(
+                'CODEX_FINAL_INVALID_WITH_CHANGES', attempted=True,
+                process_exit_code=0, stdout_sha256='a' * 64,
+                final_message='not JSON')
+
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, codex_error=invalid_final)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'], 'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+        callback.assert_not_called()
+
     def test_direct_codex_persists_diff_with_sensitive_removed_line(self):
         task = self._task()
         raw = ('diff --git a/src.py b/src.py\n'

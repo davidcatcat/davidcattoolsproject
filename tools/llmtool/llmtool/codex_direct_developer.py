@@ -34,7 +34,7 @@ _JSON_CODE_FENCE = re.compile(r'\A```(?:json)?[ \t]*\r?\n(.*?)\r?\n?```\Z', re.D
 class DirectCodexError(LLMToolError):
     def __init__(self, code, *, attempted=False, process_exit_code=None,
                  stdout_sha256=None, elapsed_ms=None, cleanup_status='UNKNOWN',
-                 native_session_id=None, usage=None):
+                 native_session_id=None, usage=None, final_message=''):
         super().__init__('Codex Developer execution unavailable; details omitted')
         self.direct_codex_code = code
         self.attempted = attempted
@@ -44,6 +44,7 @@ class DirectCodexError(LLMToolError):
         self.cleanup_status = cleanup_status
         self.native_session_id = native_session_id
         self.usage = usage
+        self.final_message = final_message
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,10 @@ class _CodexEventResult(tuple):
 
 def _fail(code):
     raise DirectCodexError(code)
+
+
+def _invalid_final(code, final_message=''):
+    raise DirectCodexError(code, final_message=final_message)
 
 
 def adapter_error_code(exc, prefix='CODEX_ADAPTER_'):
@@ -163,7 +168,7 @@ def _result_from_events(raw):
                 item = event.get('item')
                 if type(item) is dict and item.get('type') == 'agent_message':
                     if type(item.get('text')) is not str:
-                        _fail('CODEX_FINAL_MESSAGE_INVALID')
+                        _invalid_final('CODEX_FINAL_MESSAGE_INVALID')
                     final = item['text']
             elif event.get('type') == 'turn.completed':
                 candidate = event.get('usage')
@@ -190,7 +195,7 @@ def _result_from_events(raw):
     if thread_id is None:
         _fail('CODEX_THREAD_ID_MISSING')
     if final is None:
-        _fail('CODEX_FINAL_MESSAGE_MISSING')
+        _invalid_final('CODEX_FINAL_MESSAGE_MISSING')
     candidate = final
     fenced = _JSON_CODE_FENCE.fullmatch(final)
     if fenced is not None:
@@ -199,7 +204,7 @@ def _result_from_events(raw):
         obj = json.loads(candidate, object_pairs_hook=_unique_keys,
                          parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     except (ValueError, TypeError, RecursionError):
-        _fail('CODEX_FINAL_JSON_INVALID')
+        _invalid_final('CODEX_FINAL_JSON_INVALID', final)
     fields = {'status', 'summary', 'tests', 'self_review', 'blocked_reason'}
     try:
         invalid = (type(obj) is not dict or set(obj) != fields or
@@ -213,9 +218,9 @@ def _result_from_events(raw):
     except (UnicodeError, TypeError, KeyError):
         invalid = True
     if invalid:
-        _fail('CODEX_FINAL_JSON_INVALID')
+        _invalid_final('CODEX_FINAL_JSON_INVALID', final)
     if (obj['status'] == 'BLOCKED') != (obj['blocked_reason'] is not None):
-        _fail('CODEX_FINAL_JSON_INVALID')
+        _invalid_final('CODEX_FINAL_JSON_INVALID', final)
     normalized_tests = []
     for item in obj['tests']:
         if type(item) is str:
@@ -499,9 +504,12 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
         # with the observed process facts, never a bare adapter UNKNOWN.
         error = (exc if isinstance(exc, DirectCodexError) else
                  DirectCodexError(adapter_error_code(exc)))
-        if (error.direct_codex_code == 'CODEX_FINAL_JSON_INVALID' and
+        if (error.direct_codex_code in ('CODEX_FINAL_JSON_INVALID',
+                                        'CODEX_FINAL_MESSAGE_INVALID',
+                                        'CODEX_FINAL_MESSAGE_MISSING') and
+                process is not None and process.returncode == 0 and
                 _d6_has_changes(root)):
-            error.direct_codex_code = 'CODEX_FINAL_JSON_INVALID_WITH_CHANGES'
+            error.direct_codex_code = 'CODEX_FINAL_INVALID_WITH_CHANGES'
         if (process is not None and process.returncode is not None and
                 process.returncode < 0 and
                 error.direct_codex_code != 'CODEX_TIMEOUT' and

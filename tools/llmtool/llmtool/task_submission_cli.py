@@ -2777,6 +2777,53 @@ def run_task_codex_delegate(args, *, store):
         _print(_task_view(saved))
         return 1
     except codex_direct_developer.DirectCodexError as exc:
+        if (exc.direct_codex_code in ('CODEX_FINAL_INVALID_WITH_CHANGES',
+                                      'CODEX_FINAL_JSON_INVALID',
+                                      'CODEX_FINAL_MESSAGE_INVALID',
+                                      'CODEX_FINAL_MESSAGE_MISSING') and
+                exc.attempted and exc.process_exit_code == 0):
+            execution = {'status': 'DONE', 'native_session_id': exc.native_session_id,
+                'process_exit_code': exc.process_exit_code, 'stdout_sha256': exc.stdout_sha256,
+                'elapsed_ms': exc.elapsed_ms, 'cleanup_status': exc.cleanup_status,
+                'usage_source': 'CLI_REPORTED' if exc.usage is not None else 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None}
+            recovered = False
+            try:
+                after_registration = task_completion.read_d6_registration(
+                    registration.task_id, registration.common_dir)
+                after = task_completion.collect_git_snapshot(registration.root)
+                if (after_registration != registration or after.root != registration.root or
+                        after.common_dir != registration.common_dir or
+                        after.branch != registration.branch or after.head != snapshot.head):
+                    raise LLMToolError('Codex D6 identity changed during execution')
+                ignored_rejection = _ignored_output_rejection(registration.root, ignored_before)
+                rejection, artifact = _codex_cumulative_diff_rejection(
+                    registration.root, task_source_sha, write_paths)
+                if ignored_rejection is not None or rejection is not None:
+                    rejection = ignored_rejection if ignored_rejection is not None else rejection
+                    developer.update(execution=execution)
+                    saved = _persist_developer_output_rejection(
+                        store, task['task_id'], developer, rejection, exc.usage,
+                        exc.final_message or artifact)
+                    _print(_task_view(saved))
+                    return 1
+                capture = _capture_rejected_output(
+                    store, task['task_id'], exc.final_message)
+                developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
+                    artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+                    error_code='CODEX_FINAL_INVALID', result_status='UNVERIFIED',
+                    final_answer='INVALID', rejected_output_capture=capture,
+                    execution=execution, usage=exc.usage)
+                store.update(task['task_id'], developer=developer)
+                recovered = True
+            except Exception:
+                # Failure to revalidate or persist this exceptional recovery
+                # remains an ambiguous outcome and follows the normal path below.
+                pass
+            if recovered:
+                return run_task_direct_result_event(task['task_id'], registration.task_id,
+                                                    store=store)
         # FAILED needs an observed exit; a launched process with no exit
         # (unowned, or an adapter exception) has an UNKNOWN outcome.
         execution_status = ('TIMEOUT' if exc.direct_codex_code == 'CODEX_TIMEOUT' else

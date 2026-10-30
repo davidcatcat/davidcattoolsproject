@@ -216,7 +216,8 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                 self.assertRaises(direct.DirectCodexError) as caught:
             self.run_fake()
         self.assertEqual(caught.exception.direct_codex_code,
-                         'CODEX_FINAL_JSON_INVALID_WITH_CHANGES')
+                         'CODEX_FINAL_INVALID_WITH_CHANGES')
+        self.assertEqual(caught.exception.final_message, '{broken}')
 
     def test_final_json_rejects_extra_keys(self):
         final = dict(self.final, extra='not allowed')
