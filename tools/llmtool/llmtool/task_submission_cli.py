@@ -912,8 +912,8 @@ _DIFF_HEADER = re.compile(r'^diff --git a/([^\r\n]+) b/([^\r\n]+)$')
 _HUNK_HEADER = re.compile(r'^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$')
 # Only an ordinary index line may precede the file headers; its trailing mode
 # is informational. Permission/mode metadata is rejected outright: a text
-# Developer route must never change executable bits, and new/deleted-file modes
-# are unsupported shapes (#290).
+# Developer route must never change executable bits. New and deleted files are
+# supported only in the exact 100644 shapes below (#290, #517).
 _INDEX_METADATA = 'index '
 _MODE_METADATA = ('old mode ', 'new mode ', 'new file mode ', 'deleted file mode ')
 
@@ -1021,8 +1021,15 @@ def _patch_paths(patch):
         if index + 2 >= len(lines):
             raise ValueError
         expected_old = '--- /dev/null' if new_file else '--- a/' + path
+        if lines[index] != expected_old:
+            raise ValueError
+        # Git marks a deletion with ``deleted file mode 100644``, but a plain
+        # unified diff may use only the ``/dev/null`` new-side header. Both
+        # describe the same deletion; any mode line was still checked above.
+        if not new_file and lines[index + 1] == '+++ /dev/null':
+            deleted_file = True
         expected_new = '+++ /dev/null' if deleted_file else '+++ b/' + path
-        if lines[index] != expected_old or lines[index + 1] != expected_new:
+        if lines[index + 1] != expected_new:
             raise ValueError
         paths[path] = 'new' if new_file else 'deleted' if deleted_file else 'modified'
         index += 2

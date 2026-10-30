@@ -2,7 +2,8 @@ import unittest
 
 from llmtool.developer_output_normalize import normalize_developer_output
 from llmtool.developer_output_normalize import reanchor_developer_output
-from llmtool.task_submission_cli import (_developer_normalized_output,
+from llmtool.task_submission_cli import (_DeveloperSourceFiles,
+                                         _developer_normalized_output,
                                          _developer_output_rejection)
 
 
@@ -10,6 +11,14 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
     PATH = 'tools/llmtool/example.py'
     HEADER = (f'diff --git a/{PATH} b/{PATH}\n'
               f'--- a/{PATH}\n+++ b/{PATH}\n')
+    DELETION = (f'diff --git a/{PATH} b/{PATH}\n'
+                'deleted file mode 100644\n'
+                'index 1234567..0000000\n'
+                f'--- a/{PATH}\n+++ /dev/null\n'
+                '@@ -1,2 +0,0 @@\n-old\n-gone\n')
+    HEADER_ONLY_DELETION = (f'diff --git a/{PATH} b/{PATH}\n'
+                            f'--- a/{PATH}\n+++ /dev/null\n'
+                            '@@ -1 +0,0 @@\n-old\n')
 
     def test_salvages_only_the_four_documented_shapes(self):
         cases = (
