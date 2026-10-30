@@ -4,9 +4,9 @@
     "codex-developer": {
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-22",
-      "reason": "normal Developer route",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "decided_at": "2026-10-31",
+      "reason": "Owner resumed Codex Developer as the primary strong Developer route; existing task-scope, privacy, budget, D6, review and CI gates remain required",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "claude-developer": {
       "dispatch": "PAUSED",
@@ -30,18 +30,18 @@
       ]
     },
     "opencode-developer": {
-      "dispatch": "ALLOWED",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-30",
-      "reason": "Owner re-enabled PM-selected OpenCode dispatch with model opencode/deepseek-v4.1-flash-free (variant high); PM pauses again on free-limit or 2 consecutive route failures",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6506233668"
+      "decided_at": "2026-10-31",
+      "reason": "Owner paused OpenCode because the free token allowance is exhausted; do not dispatch, retry, buy tokens or use a paid fallback until the Owner re-enables it",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "agy": {
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-30",
-      "reason": "Owner option B: PM-selected AGY Developer dispatch with claude-sonnet-5-5-medium, formally reviewed by Codex; validate auth, quota, session, D6 and scoped safety; no automatic retry or fallback",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6506062108",
+      "decided_at": "2026-10-31",
+      "reason": "PM-selected AGY Developer route uses gemini-4-argon-medium and formal Codex review; validate auth, quota, session, D6 and scoped safety; no automatic retry or fallback",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665",
       "owner_assignments": [
         {
           "task_id": "d3b1e153cf934e7f81542b17d8e37bf2",
@@ -64,16 +64,16 @@
     "company-gw": {
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-22",
-      "reason": "low-risk bounded tasks via llmtool only",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+      "decided_at": "2026-10-31",
+      "reason": "PM should prefer company gw for eligible small, low-risk, bounded tasks via llmtool only; deterministic checks, authorized patch application and independent review remain required",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "claude-reviewer": {
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-23",
-      "reason": "fixed formal Reviewer; use a separate read-only context",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6351999848"
+      "decided_at": "2026-10-31",
+      "reason": "fixed formal Reviewer using the configured default Claude CLI account claude; use a separate read-only context",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "codex-reviewer": {
       "dispatch": "ALLOWED",
