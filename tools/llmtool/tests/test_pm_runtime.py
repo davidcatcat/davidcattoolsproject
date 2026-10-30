@@ -172,6 +172,73 @@ def _bg_turn(text, tokens):
             {'type': 'result', 'result': text, 'usage': {'output_tokens': tokens}})
 
 
+class ToolLabelPathTests(unittest.TestCase):
+    def test_descriptions_with_paths_are_preserved(self):
+        from llmtool import chat_tui_pm
+        descriptions = [
+            'scp host:/Users/x/k.pem .', 'fetch https://example.com/a/b',
+            'export PATH=/a:/b', 'cat ~/notes/x.md',
+        ]
+        for description in descriptions:
+            with self.subTest(description=description):
+                self.assertEqual(pm_runtime._tool_description(
+                    'Bash', {'description': description}), description)
+                self.assertEqual(chat_tui_pm.tool_label({
+                    'name': 'Bash', 'description': description}), description)
+
+    def test_structured_path_display(self):
+        cases = [
+            ('/repo/src/app.py', 'Read src/app.py'),
+            ('/Users/alice/private/keys/client.pem', 'Read ~/private/keys/client.pem'),
+            ('/var/x.pem', 'Read /var/x.pem'),
+            ('~/notes/x.md', 'Read ~/notes/x.md'),
+            ('docs/a.md', 'Read docs/a.md'),
+            ('/repo', 'Read .'), ('/', 'Read [root]'),
+        ]
+        with patch.object(pm_runtime.Path, 'home', return_value=Path('/Users/alice')):
+            for path, expected in cases:
+                with self.subTest(path=path):
+                    self.assertEqual(pm_runtime._tool_description('Read', {'path': path}, '/repo'),
+                                     expected)
+
+    def test_plain_descriptions_survive(self):
+        self.assertEqual(pm_runtime._tool_description('Bash', {'description': 'List  files\n'}),
+                         'List files')
+        self.assertEqual(pm_runtime._tool_description('Bash', {'description': '列出 PR 狀態'}),
+                         '列出 PR 狀態')
+
+    def test_control_characters_are_stripped_and_cannot_crash_parser(self):
+        class Runtime:
+            cwd = '/repo'
+            pm_session_id = None
+
+        record = {'turn_id': 't', 'tool_names': [], 'result_text': ''}
+        parser = pm_runtime._TurnParser(Runtime(), record, lambda: False)
+        for description, shown in (('\x00URL7\x00', 'URL7'),
+                                    ('https://example.com/a/b \x00URL7\x00',
+                                     'https://example.com/a/b URL7')):
+            line = {'type': 'assistant', 'message': {'content': [
+                {'type': 'tool_use', 'id': 'x', 'name': 'Bash',
+                 'input': {'description': description}}]}}
+            events, done = parser.feed(json.dumps(line).encode())
+            self.assertFalse(done)
+            self.assertEqual(events[0]['type'], 'TOOL_USE')
+            self.assertEqual(events[0]['description'], shown)
+        line = {'type': 'assistant', 'message': {'content': [
+            {'type': 'tool_use', 'id': 'y', 'name': 'Read', 'input': {'path': 'docs/a.md'}}]}}
+        events, done = parser.feed(json.dumps(line).encode())
+        self.assertFalse(done)
+        self.assertEqual(events[0]['description'], 'Read docs/a.md')
+
+    def test_commands_and_sensitive_text_stay_hidden(self):
+        self.assertIsNone(pm_runtime._tool_description('Bash', {
+            'command': 'rm -rf x'}))
+        secret = 'ghp_' + 'A1b2C3d4E5f6G7h8J9k0' * 2
+        label = pm_runtime._tool_description('Bash', {'description': 'push with ' + secret})
+        self.assertNotIn(secret, label or '')
+        self.assertIn('[REDACTED]', label)
+
+
 class PMRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.original_signal_handlers = {
@@ -254,7 +321,8 @@ class PMRuntimeTests(unittest.TestCase):
              'delta': {'type': 'text_delta', 'text': 'Hi'}}},
             {'type': 'assistant', 'message': {'content': [
                 {'type': 'text', 'text': 'Hello'},
-                {'type': 'tool_use', 'id': 'tool-1', 'name': 'Read', 'input': {'path': 'hidden'}}]}},
+                {'type': 'tool_use', 'id': 'tool-1', 'name': 'Read',
+                 'input': {'path': 'docs/a.md', 'content': 'hidden'}}]}},
             {'type': 'user', 'message': {'content': [
                 {'type': 'tool_result', 'tool_use_id': 'tool-1', 'content': 'hidden output'}]}},
             {'type': 'result', 'result': 'Done', 'usage': {'input_tokens': 1}}))
@@ -273,12 +341,41 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual([event['type'] for event in events],
                          ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TOOL_USE', 'TOOL_RESULT', 'TURN_END'])
         self.assertNotIn('hidden', repr(events))
+        self.assertEqual(events[2]['description'], 'Read docs/a.md')   # W57: what it does
         sent = json.loads(process.stdin.getvalue().decode().splitlines()[0])
         self.assertEqual(sent['type'], 'user')
         runtime.close()
         page = pm_runtime.read_history(SESSION, state_root=self.root)
         self.assertEqual(page['turns'][0]['status'], 'COMPLETED')
         self.assertEqual(page['turns'][0]['owner_text'], 'Owner request')
+
+    def test_tool_description_is_the_description_or_a_target_never_the_command(self):
+        describe = pm_runtime._tool_description
+        self.assertEqual(describe('Bash', {'command': 'rm -rf x', 'description': 'List  files\n'}),
+                         'List files')
+        self.assertIsNone(describe('Bash', {'command': 'cat ~/.netrc'}))   # no description
+        self.assertEqual(describe('Grep', {'pattern': 'def main', 'path': 'src'}), 'Grep def main')
+        self.assertEqual(describe('Edit', {'file_path': '/r/a.py', 'old_string': 'x'}),
+                         'Edit /r/a.py')
+        self.assertIsNone(describe('Read', 'not a dict'))
+        self.assertIsNone(describe('Read', {'file_path': '  '}))
+        self.assertEqual(len(describe('Bash', {'description': 'x' * 999})),
+                         pm_runtime.TOOL_DESCRIPTION_CHARS)
+        key = 'gh' + 'p_' + 'A1b2C3d4E5f6G7h8J9k0' * 2
+        self.assertNotIn(key, describe('Bash', {'description': 'push with ' + key}) or '')
+
+    def test_tool_descriptions_display_paths_by_location(self):
+        describe = pm_runtime._tool_description
+        home = str(Path.home())
+        self.assertEqual(describe('Read', {'file_path': self.cwd + '/src/app.py'}, self.cwd),
+                         'Read src/app.py')
+        self.assertEqual(describe('Read', {'file_path': home + '/private/keys/client.pem'},
+                                  self.cwd), 'Read ~/private/keys/client.pem')
+        self.assertEqual(describe('Read', {'file_path': '/var/private/client.pem'}, self.cwd),
+                         'Read /var/private/client.pem')
+        self.assertEqual(describe('Bash', {'description':
+                                           'Read /var/private/client.pem'}, self.cwd),
+                         'Read /var/private/client.pem')
 
     def test_argv_fixes_tool_set_and_adds_pm_instruction_on_every_launch(self):
         # Owner W40/W41 (TUI latency): claude.ai connectors joined mid-session and invalidated
