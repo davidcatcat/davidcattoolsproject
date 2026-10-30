@@ -10,7 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
-    AGENT, MAX_OUTPUT_TOKENS, MODEL, DirectOpenCodeError, configuration,
+    AGENT, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL, DirectOpenCodeError, configuration,
     parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
@@ -431,7 +431,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertFalse(run_marker.exists())
 
     def test_source_byte_limit_blocks_cli_launch(self):
-        (self.root / 'source.py').write_text('x' * (256 * 1024 + 1))
+        self.assertEqual(MAX_SOURCE_FILE_BYTES, 512 * 1024)
+        (self.root / 'source.py').write_text('x' * (MAX_SOURCE_FILE_BYTES + 1))
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
         with self.assertRaises(DirectOpenCodeError) as caught:
