@@ -11,6 +11,8 @@ from .base import DeveloperRoute, RouteError
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _EFFORT = re.compile(r'(?:minimal|low|medium|high)\Z')
 _CONVERSATION = re.compile(r'[A-Za-z0-9_-]{8,128}\Z')
+# The prompt carries every source file; macOS argv (ARG_MAX 1 MiB) still fits it.
+MAX_PROMPT_BYTES = 512 * 1024
 
 
 def _unique_pairs(pairs):
@@ -53,7 +55,7 @@ class AgyRoute(DeveloperRoute):
         value = super().validate_request(request)
         prompt = value.get('prompt')
         log_path = value.get('log_path')
-        if (type(prompt) is not str or len(prompt.encode('utf-8')) > 65536 or
+        if (type(prompt) is not str or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES or
                 type(log_path) is not str or not log_path or os.path.isabs(log_path) or
                 '\\' in log_path or any(part in ('', '.', '..') for part in log_path.split('/')) or
                 any(ord(char) < 32 or ord(char) == 127 for char in log_path)):

@@ -1,7 +1,7 @@
 """Provider-neutral execution contracts for direct CLI Developer routes."""
 
 from .base import DeveloperRoute, RouteError, RouteResult, capture_snapshot, run_route
-from .agy import AgyRoute, owner_assignment_gate
+from .agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES, AgyRoute, owner_assignment_gate
 from .write_boundary import (
     SandboxExecBoundary,
     UnsupportedBoundary,
@@ -11,7 +11,7 @@ from .write_boundary import (
 
 __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
-    'AgyRoute', 'owner_assignment_gate', 'load_route_config',
+    'AGY_MAX_PROMPT_BYTES', 'AgyRoute', 'owner_assignment_gate', 'load_route_config',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
