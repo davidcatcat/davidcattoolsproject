@@ -197,6 +197,9 @@ BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its he
 STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
                  "scroll", "mouse", "help", "hint")
 STATUS_DROP_ORDER = ("hint", "help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
+# While idle with an empty draft, the footer's onboarding hint is more useful than the
+# provider detail. Keep it until the other compact fields have been considered.
+IDLE_HINT_DROP_ORDER = ("provider", "model", "usage", "help", "keys", "scroll", "mouse", "session")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
 PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "keys")
@@ -970,7 +973,10 @@ class ChatTUI:
             fields.update(self.pm_status_fields(compact))
             shown = ["mode", "session", "state", "keys", "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
-        for name in PM_STATUS_DROP_ORDER if self.pm_mode else STATUS_DROP_ORDER:
+        drop_order = (PM_STATUS_DROP_ORDER if self.pm_mode else
+                      IDLE_HINT_DROP_ORDER if fields.get("hint") and state == "idle" else
+                      STATUS_DROP_ORDER)
+        for name in drop_order:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
             if name in shown:

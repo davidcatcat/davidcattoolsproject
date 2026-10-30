@@ -129,6 +129,11 @@ class Base(unittest.TestCase):
         # NonDevTaskTests checks the default without the flag.
         patch.dict(os.environ, {chat_tui.DEV_ENV: '1'}).start()
 
+    @staticmethod
+    def status(ui):
+        """The report body after a /status command, shared by chat and Task tests."""
+        return ui.conversation.text.rsplit('> /status', 1)[1]
+
 
 class FinishRedrawTests(Base):
     """_finish invalidates the app so the status row leaves working immediately."""
@@ -575,7 +580,7 @@ class WidgetTests(Base):
                 processor.feed(KeyPress(Keys.Escape, '\x1b'))
                 processor.process_keys()
                 # Esc may still start Esc Enter (newline), so the picker waits.
-                self.assertEqual([c[0] for c in ui.menu_items], ['/help', '/theme'])
+                self.assertEqual([c[0] for c in ui.menu_items], ['/theme', '/help'])
                 processor.feed(timeout_flush)
                 processor.process_keys()
             self.assertEqual(ui.menu_items, [])
@@ -711,24 +716,24 @@ class WidgetTests(Base):
             self.assertEqual(len(ui.menu_items), 20)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
-            self.assertIn('/help', rows[0])
+            self.assertIn('/pm connect', rows[0])
             self.assertIn('15 more (0 above, 15 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
-            self.assertNotIn('/help', ''.join(rows))
-            self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertNotIn('/pm connect', ''.join(rows))
+            self.assertIn('/status', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('15 more (2 above, 13 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 19)
-            self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('/task events', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('(15 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
-                            lambda ui: self.assertEqual(ui.input.text, '/exit'),
-                            '\x7f' * 5, '/', '\x1b[A', wrapped],
+                            lambda ui: self.assertEqual(ui.input.text, '/status'),
+                            '\x7f' * 7, '/', '\x1b[A', wrapped],
                            size=[Size(rows=24, columns=80)])
         self.assertTrue(ui.session.active)
         self.factory.assert_not_called()
@@ -1600,9 +1605,6 @@ class W57ChatTests(Base):
 
     drive = WidgetTests.drive
     idle = staticmethod(WidgetTests.idle)
-
-    def status(self, ui):
-        return ui.conversation.text.rsplit('> /status', 1)[1]
 
     def test_w58_help_picker_onboarding_and_idle_hint(self):
         ui, _ = self.drive([])
