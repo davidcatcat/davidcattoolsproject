@@ -3750,7 +3750,8 @@ class PMConversationTests(BoundedPMTest):
         status = ui.conversation.text.split('> /status', 1)[1]
         self.assertIn('PM session：' + self.session_id + '（claude-code，cwd .）', status)
         # Owner #683: TUI shows paths like Claude Code (repo-relative, ~/, else full path).
-        self.assertRegex(status, r'Claude 帳號目錄：/\S*\.claude\n')
+        # Full path, or ~/... when the temp dir sits under home (CI runners).
+        self.assertRegex(status, r'Claude 帳號目錄：(/|~/)\S*\.claude\n')
         self.assertIn('權限模式（本機設定）：auto（自動，不跳出確認）', status)
         self.assertIn('PM 狀態：暖機中…', status)
         self.assertIn('佇列（本機設定）：沒有', status)
