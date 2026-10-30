@@ -635,7 +635,7 @@ class CodexDelegateTests(unittest.TestCase):
                 'CODEX_FINAL_INVALID_WITH_CHANGES', attempted=True,
                 process_exit_code=0, stdout_sha256='a' * 64,
                 native_session_id='12345678-1234-4234-8234-123456789abc',
-                cleanup_status='CONFIRMED', final_message='not JSON')
+                cleanup_status='CONFIRMED', final_message='{malformed final}')
 
         with redirect_stdout(io.StringIO()):
             result, saved, callback = self._dispatch(task, codex_error=invalid_final)
@@ -647,7 +647,7 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertIn('VALUE = 2', developer['artifact'])
         capture = developer['rejected_output_capture']
         self.assertEqual((self.store.root / capture['ref']).read_text(encoding='utf-8'),
-                         'not JSON')
+                         '{malformed final}')
         callback.assert_called_once()
 
     def test_invalid_final_without_changes_remains_rejected(self):
