@@ -50,13 +50,17 @@ if not R.fullmatch(sha) or not F.fullmatch(ref) or not mods or len(mods)>8 or an
 started=datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z"); begin=time.monotonic(); work_deadline=begin+480; deadline=begin+540; log=b""; result="FAIL"; code=1; tree=None; fetch=None; finals=[]; failures=[]; ran=0; uid=None; log_path=None; work=None
 def failure_excerpt(outputs,work,home):
     blocks=[]
+    def safe_line(line):
+        line=line.replace(work,"<REMOTE_WORKDIR>").replace(home,"<REMOTE_HOME>")
+        return None if SENSITIVE.search(line) else line
     for output in outputs:
         lines=output.decode("utf8","replace").splitlines()
         index=0
         while index<len(lines):
             if not re.match(r"^(?:FAIL|ERROR): ",lines[index]): index+=1; continue
             block=[]
-            block.append(lines[index])
+            header=safe_line(lines[index])
+            if header is not None: block.append(header)
             index+=1
             # unittest places a dashed separator between the failure header
             # and its traceback. Skip it, then retain the traceback up to the
@@ -64,8 +68,8 @@ def failure_excerpt(outputs,work,home):
             if index<len(lines) and re.match(r"^(?:={10,}|-{10,})$",lines[index]):
                 index+=1
             while index<len(lines) and not re.match(r"^(?:={10,}|-{10,})$",lines[index]):
-                line=lines[index].replace(work,"<REMOTE_WORKDIR>").replace(home,"<REMOTE_HOME>")
-                if not SENSITIVE.search(line): block.append(line)
+                line=safe_line(lines[index])
+                if line is not None: block.append(line)
                 index+=1
             blocks.extend(block)
     kept=[]; size=0
@@ -84,7 +88,7 @@ def run(argv,limit=None,cleanup=False,**kw):
         stderr=subprocess.PIPE if capture_stderr else subprocess.STDOUT,
         check=False,timeout=max(.1,seconds),**kw)
 def nobody(work,argv,env=None):
-    values={"PATH":"/usr/bin:/bin","HOME":work,"TMPDIR":work,"PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1"}
+    values={"PATH":"/usr/bin:/bin","HOME":work+"/.home","TMPDIR":work+"/.tmp","PYTHONNOUSERSITE":"1","PIP_DISABLE_PIP_VERSION_CHECK":"1","PIP_NO_INPUT":"1"}
     values.update(env or {})
     return ["sudo","-n","-u","nobody","env","-i","-C",work]+[k+"="+v for k,v in values.items()]+argv
 def nobody_run(work,argv,limit=None,env=None,cleanup=False,**kw):
@@ -157,6 +161,9 @@ try:
         if info.st_uid!=uid or info.st_mode&0o777!=0o700: raise RuntimeError("workspace")
         try:
             stage="archive"
+            dirs=nobody_cli(["mkdir","-m","700","--",work+"/.home",work+"/.tmp"])
+            log+=dirs.stdout
+            if dirs.returncode: raise RuntimeError("environment")
             archive=run(["git","-C",repo,"archive",sha],limit=30)
             log+=archive.stdout[:0]
             extracted=nobody_run(work,["tar","-xf","-","-C",work],limit=30,input=archive.stdout)
