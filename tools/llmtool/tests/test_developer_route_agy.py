@@ -8,6 +8,7 @@ import unittest
 from unittest import mock
 
 from llmtool.developer_routes import AgyRoute, RouteError, load_route_config
+from llmtool.developer_routes.agy import MAX_PROMPT_BYTES
 from llmtool.developer_routes.base import capture_snapshot, run_route
 
 
@@ -87,6 +88,15 @@ class AgyRouteTests(unittest.TestCase):
         self.assertEqual(result.model, 'gemini-4-argon-medium')
         self.assertEqual(result.usage, {'input_tokens': 3, 'output_tokens': 2})
         self.assertEqual(result.changed_files, ('source.py',))
+
+    def test_prompt_byte_limit_boundary(self):
+        request = self.request()
+        request['prompt'] = 'x' * MAX_PROMPT_BYTES
+        self.route.validate_request(request)
+        request['prompt'] = 'x' * (MAX_PROMPT_BYTES + 1)
+        with self.assertRaises(RouteError) as ctx:
+            self.route.validate_request(request)
+        self.assertEqual(ctx.exception.code, 'AGY_REQUEST_INVALID')
 
     def test_owner_gate_and_unverified_boundary_start_nothing(self):
         for boundary, gate in ((Boundary(), False), (Boundary(False), True)):
