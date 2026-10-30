@@ -2,7 +2,8 @@ import unittest
 
 from llmtool.developer_output_normalize import normalize_developer_output
 from llmtool.developer_output_normalize import reanchor_developer_output
-from llmtool.task_submission_cli import (_developer_normalized_output,
+from llmtool.task_submission_cli import (_DeveloperSourceFiles,
+                                         _developer_normalized_output,
                                          _developer_output_rejection)
 
 
@@ -10,6 +11,14 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
     PATH = 'tools/llmtool/example.py'
     HEADER = (f'diff --git a/{PATH} b/{PATH}\n'
               f'--- a/{PATH}\n+++ b/{PATH}\n')
+    DELETION = (f'diff --git a/{PATH} b/{PATH}\n'
+                'deleted file mode 100644\n'
+                'index 1234567..0000000\n'
+                f'--- a/{PATH}\n+++ /dev/null\n'
+                '@@ -1,2 +0,0 @@\n-old\n-gone\n')
+    HEADER_ONLY_DELETION = (f'diff --git a/{PATH} b/{PATH}\n'
+                            f'--- a/{PATH}\n+++ /dev/null\n'
+                            '@@ -1 +0,0 @@\n-old\n')
 
     def test_salvages_only_the_four_documented_shapes(self):
         cases = (
@@ -121,6 +130,42 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
                 normalized, tokens = normalize_developer_output(raw, [self.PATH])
                 self.assertEqual(normalized, raw)
                 self.assertEqual(tokens, ())
+
+    def test_header_only_deletion_accepts_in_scope_and_rejects_unsafe_shapes(self):
+        accepted, tokens, rejection = _developer_normalized_output(
+            self.HEADER_ONLY_DELETION, [self.PATH])
+        self.assertIsNone(rejection)
+        self.assertEqual(accepted, self.HEADER_ONLY_DELETION)
+        self.assertEqual(tokens, ())
+
+        source_files = _DeveloperSourceFiles()
+        source_files[self.PATH] = ''
+        source_files.existing_paths.add(self.PATH)
+        source_files.regular_paths.add(self.PATH)
+        pinned, pinned_tokens, pinned_rejection = _developer_normalized_output(
+            self.HEADER_ONLY_DELETION, [self.PATH], source_files=source_files)
+        self.assertIsNone(pinned_rejection)
+        self.assertEqual(pinned, self.HEADER_ONLY_DELETION)
+        self.assertEqual(pinned_tokens, ())
+
+        self.assertEqual(
+            _developer_output_rejection(self.HEADER_ONLY_DELETION, ['other.py']),
+            'DEVELOPER_OUTPUT_OUT_OF_SCOPE')
+
+        executable_deletion = self.HEADER_ONLY_DELETION.replace(
+            f'--- a/{self.PATH}\n',
+            f'deleted file mode 100755\n--- a/{self.PATH}\n', 1)
+        self.assertEqual(
+            _developer_output_rejection(executable_deletion, [self.PATH]),
+            'DEVELOPER_OUTPUT_DELETE_UNSUPPORTED')
+
+        renamed_deletion = (f'diff --git a/{self.PATH} b/renamed.py\n'
+                            f'rename from {self.PATH}\nrename to renamed.py\n'
+                            f'--- a/{self.PATH}\n+++ /dev/null\n'
+                            '@@ -1 +0,0 @@\n-old\n')
+        self.assertEqual(
+            _developer_output_rejection(renamed_deletion, [self.PATH, 'renamed.py']),
+            'DEVELOPER_OUTPUT_INVALID_DIFF')
 
     def test_source_anchor_repairs_pm_observed_context_shape(self):
         source = '\n'.join(f'line {number}' for number in range(1, 45)) + '\n'
