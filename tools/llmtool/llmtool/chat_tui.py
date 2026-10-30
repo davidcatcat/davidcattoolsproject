@@ -643,21 +643,10 @@ class ChatTUI:
         self.conversation = chat_tui_view.make_pane(
             self.view, colour=self.colour, styler=self._style,
             linker=lambda: self.linker if self.links_on() else None)
-        history_text = ("History is stored locally." if session.history_saved
-                        else "History stays in memory.")
-        opening = (self.version_line + "\nLLMTool interactive chat (full-screen) · /help for commands\n"
-                   + session.status() + "\n" + history_text)
-        if session.history_notice:
-            opening += "\nllmtool: " + session.history_notice
-            session.history_notice = None
-        self.conversation.set_text(
-            terminal_safe_text(opening
-                               + "\n第一次使用 PM：輸入 /pm new 建立工作階段，再用 /pm connect 連線。"
-                               + "輸入訊息即可對話；輸入 / 可搜尋指令。"
-                               + "\nChat mode talks to the chat provider directly; it is not a PM."
-                               + " /pm connect (or /pm new) talks to the dedicated PM."
-                               + (" /task submit is for development testing only: it records"
-                                  " a Task and dispatches nothing." if self.dev else "")))
+        self.conversation.set_text(terminal_safe_text(
+            self.version_line
+            + "\n輸入 /help 查看指令與操作方式。"
+            + "\n第一次使用 PM：輸入 /pm new 建立工作階段，再用 /pm connect 連線。"))
         self.input = TextArea(multiline=True, wrap_lines=True, focus_on_click=True,
                               prompt=lambda: ("pm> " if self.pm_mode else
                                               "task> " if self.task_profile else "> "),
@@ -1097,7 +1086,7 @@ class ChatTUI:
         self.version_line = line
         text = self.conversation.text
         if text.startswith(old_line + "\n"):
-            self.conversation.text = text.replace(old_line, line, 1)
+            self.conversation.set_text(line + text[len(old_line):])
         self.app.invalidate()
 
     def status_report(self):
@@ -1137,11 +1126,13 @@ class ChatTUI:
         if session.state == "error":
             state = "錯誤（" + (session.last_error_code or "未分類") + "）"
         lines = ["狀態（聊天模式，不是 PM）", self.version_line,
+                 "模式：直接連線聊天供應商；不是 PM",
                  "供應商（本機設定）：" + session.provider + "（" + selected_provider(session.config)["type"]
                  + "）",
                  "設定的模型（本機設定）：" + (model or "供應商預設"),
                  "實際模型：" + served,
                  "技能：" + (session.skill.name if session.skill else "無"),
+                 "歷史記錄：" + ("儲存在本機" if session.history_saved else "只保留在記憶體"),
                  "對話：%d 輪" % (len(session.history) // 2),
                  "狀態：" + state
                  + ("（上次 %.1f 秒）" % session.last_elapsed
@@ -1150,6 +1141,8 @@ class ChatTUI:
                            else _tokens(session.last_usage) + " tokens（供應商回報）"),
                  "連線：未檢查",
                  theme]
+        if session.history_notice:
+            lines.insert(2, "歷史記錄提示：" + terminal_safe_text(session.history_notice))
         return "\n  ".join(lines)
 
     def run_display_command(self, text):

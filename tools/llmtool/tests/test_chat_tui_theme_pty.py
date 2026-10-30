@@ -64,7 +64,7 @@ class ThemePTYTests(unittest.TestCase):
         terminal = driver.Terminal(self.pyte, root, {"*": {"text": REPLY}}, 24, 80, self.slow,
                                    environ=environ, child_prefix=FAKE_BACKGROUND)
         self.addCleanup(terminal.stop)
-        terminal.wait_text("full-screen", "TUI startup")
+        terminal.wait_text("輸入 /help", "TUI startup")
         return terminal
 
     def dump(self, terminal, name):

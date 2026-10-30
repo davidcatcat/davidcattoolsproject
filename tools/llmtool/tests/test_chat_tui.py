@@ -246,9 +246,12 @@ class WidgetTests(Base):
     def test_starts_without_provider_call_and_exits_cleanly(self):
         ui, result = self.drive([])
         self.assertEqual(result, 0)
-        self.assertIn('LLMTool interactive chat (full-screen)', ui.conversation.text)
-        self.assertIn('History stays in memory.', ui.conversation.text)
-        self.assertIn('provider: first', ui.conversation.text)
+        self.assertIn('LLMTool UNKNOWN（版本資訊讀取中）', ui.conversation.text)
+        self.assertIn('輸入 /help 查看指令與操作方式。', ui.conversation.text)
+        self.assertIn('第一次使用 PM：', ui.conversation.text)
+        self.assertNotIn('provider:', ui.conversation.text)
+        self.assertNotIn('History stays in memory.', ui.conversation.text)
+        self.assertNotIn('Chat mode talks', ui.conversation.text)
         self.factory.assert_not_called()
 
     def test_saved_history_is_identified_in_opening_text(self):
@@ -256,15 +259,17 @@ class WidgetTests(Base):
         self.session = ChatSession(self.session.config, history_path=history_path)
         ui, result = self.drive([])
         self.assertEqual(result, 0)
-        self.assertIn('History is stored locally.', ui.conversation.text)
-        self.assertNotIn('History stays in memory.', ui.conversation.text)
+        self.assertNotIn('History is stored locally.', ui.conversation.text)
+        ui, _ = self.drive(['/status\r'])
+        self.assertIn('歷史記錄：儲存在本機', ui.status_report())
 
-    def test_history_notice_is_shown_once_as_llmtool_line(self):
+    def test_history_notice_is_shown_in_status_not_on_the_start_screen(self):
         self.session.history_notice = 'chat history was unavailable; continuing without saved history'
-        ui, result = self.drive([])
+        ui, result = self.drive(['/status\r'])
         self.assertEqual(result, 0)
-        self.assertEqual(ui.conversation.text.count('llmtool: chat history was unavailable; continuing without saved history'), 1)
-        self.assertIsNone(self.session.history_notice)
+        self.assertNotIn('llmtool: chat history was unavailable', ui.conversation.text)
+        self.assertIn('歷史記錄提示：chat history was unavailable; continuing without saved history',
+                      ui.status_report())
 
     def test_fixed_bottom_layout_fills_80x24_and_99x36(self):
         for rows, columns in ((24, 80), (36, 99)):
@@ -1615,12 +1620,34 @@ class W57ChatTests(Base):
         self.assertTrue(any(row.startswith('【對話】') for row in rows))
         self.assertTrue(any(row.startswith('【PM】') for row in rows))
         self.assertTrue(any(row.startswith('【設定】') for row in rows))
+        self.assertFalse(any('/task' in row for row in rows))
+        ui._set_menu(chat_tui.slash_matches('/', dev=True))
+        self.assertTrue(any('/task' in row for row in ui.picker_entries()))
 
     def test_version_lookup_is_not_started_by_construction(self):
         with create_pipe_input() as pipe, \
                 patch('llmtool.chat_tui_theme.version_line') as version_line:
             chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput())
         version_line.assert_not_called()
+
+    def test_version_lookup_finishes_on_real_app_loop_without_losing_new_text(self):
+        release_lookup = threading.Event()
+
+        def delayed_version_line():
+            if not release_lookup.wait(2):
+                return 'LLMTool UNKNOWN（git log 失敗）'
+            return 'LLMTool 0.1.0 · abc1234（2026-10-30）'
+
+        async def append_before_lookup_finishes(ui):
+            ui.conversation.set_text(ui.conversation.text + '\n使用者訊息：保留這段')
+            release_lookup.set()
+            await self.until(ui, lambda current: current.version_line.startswith(
+                'LLMTool 0.1.0 ·'), 'version lookup')
+
+        with patch('llmtool.chat_tui_theme.version_line', side_effect=delayed_version_line):
+            ui, _ = self.drive([append_before_lookup_finishes])
+        self.assertIn('LLMTool 0.1.0 · abc1234（2026-10-30）', ui.conversation.text)
+        self.assertIn('使用者訊息：保留這段', ui.conversation.text)
 
     def test_version_display_reports_git_failure_as_unknown_with_reason(self):
         failed = Mock(returncode=1, stdout='', stderr='')

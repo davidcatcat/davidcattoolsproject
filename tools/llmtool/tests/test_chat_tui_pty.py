@@ -96,7 +96,7 @@ class ChatTUIPTYTests(unittest.TestCase):
         self.copy_path = self.root / "clipboard.txt"
         delay = 0.4 if self._testMethodName == "test_streaming_keeps_scrolled_view_fixed_then_follows_from_bottom" else 0.0
         self._spawn(delay)
-        self.wait_for(lambda rows: any("full-screen" in row for row in rows), "TUI startup")
+        self.wait_for(lambda rows: any("輸入 /help" in row for row in rows), "TUI startup")
 
     def tearDown(self):
         self._stop_child()

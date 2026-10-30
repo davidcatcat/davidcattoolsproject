@@ -139,7 +139,7 @@ class TUIScenarioCase(unittest.TestCase):
         self.addCleanup(temp.cleanup)
         terminal = driver.Terminal(self.pyte, temp.name, REPLIES, rows, columns, self.slow)
         self.terminals.append(terminal)
-        terminal.wait_text("full-screen", "TUI startup")
+        terminal.wait_text("輸入 /help", "TUI startup")
         terminal.wait_text("LLMTool 0.1.0 ·", "version banner")
         terminal.wait_text("第一次使用 PM：", "first-run PM guide")
         return terminal
