@@ -34,6 +34,7 @@ from . import codex_direct_developer
 from . import worker_dispatch
 from .developer_routes import (AgyRoute, RouteError, capture_snapshot,
                                for_platform, load_route_config, run_route)
+from .developer_routes.agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
 from .developer_output_normalize import (normalize_developer_output,
@@ -2450,7 +2451,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
                          separators=(',', ':')) + '\nSOURCE_FILES_JSON=' +
               json.dumps(dict(source_files), ensure_ascii=True, sort_keys=True,
                          separators=(',', ':')))
-    _screen_text(prompt, 64 * 1024)
+    _screen_text(prompt, AGY_MAX_PROMPT_BYTES)
     provider_input_bytes = len(prompt.encode('utf-8'))
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
     developer = {
