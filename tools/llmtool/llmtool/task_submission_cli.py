@@ -2812,7 +2812,7 @@ def run_task_codex_delegate(args, *, store):
                     store, task['task_id'], exc.final_message)
                 developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
                     artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
-                    error_code='CODEX_FINAL_INVALID', result_status='UNVERIFIED',
+                    error_code=None, result_status='UNVERIFIED',
                     final_answer='INVALID', rejected_output_capture=capture,
                     execution=execution, usage=exc.usage)
                 store.update(task['task_id'], developer=developer)
