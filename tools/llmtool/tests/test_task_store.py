@@ -75,6 +75,23 @@ class TaskStoreTests(unittest.TestCase):
             self.store.update(task['task_id'], high_debug=[changed])
         self.assertEqual(self.store.get(task['task_id'])['high_debug'], [entry])
 
+    def test_run_failed_high_debug_entry_is_valid(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        code = 'HIGH_DEBUG_RUN_FAILED'
+        entry = {
+            'family': 'test-family', 'failed_corrections': 2, 'early_reason': None,
+            'examined_sha': 'a' * 40, 'd6': 'executor-hd1-aaaaaaa',
+            'model_requested': 'gpt-6.1-sol', 'model_observed': 'UNKNOWN',
+            'effort_observed': 'UNKNOWN', 'status': 'RUN_FAILED',
+            'report_sha256': hashlib.sha256(code.encode()).hexdigest(), 'report': code,
+            'usage': 'UNKNOWN', 'recorded_at': '2026-10-27T00:00:00Z',
+        }
+        self.store.append_high_debug(task['task_id'], entry)
+        self.assertEqual(self.store.get(task['task_id'])['high_debug'], [entry])
+        with self.assertRaises(LLMToolError):
+            self.store.append_high_debug(task['task_id'], dict(entry, status='FAILED'))
+
     def test_review_repair_claim_can_fail_only_after_dispatch(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

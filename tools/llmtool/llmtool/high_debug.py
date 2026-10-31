@@ -130,6 +130,12 @@ def _session_observed(thread_id, sessions_dir=None):
             next(iter(efforts)) if len(efforts) == 1 else 'UNKNOWN')
 
 
+class _AttemptFailed(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
 def _refuse(code):
     error = LLMToolError('High-debug diagnosis refused; details omitted')
     error.high_debug_code = code
@@ -150,13 +156,43 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task):
     _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
 
+# The prompt carries untrusted evidence (for example CI logs) and live web
+# search is on, so the child gets the same isolation as the Codex Developer
+# route: an environment allowlist, no user config or rules, no inherited shell
+# environment and no extra features. Session rollouts stay on (no
+# --ephemeral) because the observed model and effort are read from them.
+_CODEX_SETTINGS = (
+    'model_reasoning_effort=high', 'web_search="live"',
+    'features.multi_agent=false', 'features.hooks=false', 'features.apps=false',
+    'features.memories=false', 'features.remote_plugin=false',
+    'features.code_mode.enabled=false', 'shell_environment_policy.inherit="none"',
+    'shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"',
+    'allow_login_shell=false',
+)
+
+
 def _run_codex(*, prompt, cwd, output_path):
-    with open(output_path, 'wb') as output:
-        return subprocess.run(['codex', 'exec', '-m', 'gpt-6.1-sol', '-c',
-            'model_reasoning_effort=high', '-c', 'web_search="live"',
-            '-s', 'read-only', '--json', '-o', output_path, '-'],
-            input=prompt.encode('utf-8'), cwd=cwd, stdout=subprocess.PIPE,
+    from . import codex_direct_developer
+    argv = ['codex', 'exec', '--ignore-user-config', '--ignore-rules',
+            '-m', 'gpt-6.1-sol']
+    for setting in _CODEX_SETTINGS + (
+            'shell_environment_policy.set.PATH=' +
+            json.dumps(codex_direct_developer._command_path(cwd)),):
+        argv.extend(('-c', setting))
+    argv.extend(('-s', 'read-only', '--json', '-o', output_path, '-'))
+    with tempfile.TemporaryDirectory(prefix='llmtool-high-debug-tmp-') as tmpdir:
+        return subprocess.run(argv, input=prompt.encode('utf-8'), cwd=cwd,
+            env=codex_direct_developer._environment(tmpdir), stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=False, timeout=1800)
+
+
+def _d6_name(executor_task, attempt, head):
+    """A D6 id unique per attempt that fits the lifecycle's 96-character id."""
+    prefix = executor_task
+    if len(prefix) > 72:
+        digest = hashlib.sha256(executor_task.encode('utf-8')).hexdigest()[:8]
+        prefix = executor_task[:63].rstrip('-') + '-' + digest
+    return f'{prefix}-hd{attempt}-{head[:7]}'
 
 
 def _has_report_section(report, heading):
@@ -224,24 +260,44 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     root = str(registration.root)
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
-    d6 = f'{executor_task}-hd{len(entries)+1}-{head[:7]}'
+    d6 = _d6_name(executor_task, len(entries) + 1, head)
+
+    def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN'):
+        # Every attempt that may have created a D6 is recorded, so the next
+        # attempt gets a new D6 id and the old one stays traceable. Recording
+        # is best effort: the original refusal code is what the caller sees.
+        try:
+            store.append_high_debug(task_id, {
+                'family': family, 'failed_corrections': failed_corrections,
+                'early_reason': early_reason, 'examined_sha': head, 'd6': d6,
+                'model_requested': 'gpt-6.1-sol', 'model_observed': observed,
+                'effort_observed': effort, 'status': 'RUN_FAILED',
+                'report_sha256': hashlib.sha256(code.encode()).hexdigest(),
+                'report': code, 'usage': usage,
+                'recorded_at': store._completion_now()})
+        except Exception:
+            pass
+        _refuse(code)
+
     create = create_d6 or _create_d6
     try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root or str(Path(registration.common_dir).parent), executor_task=executor_task)
-    except Exception: _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
+    except Exception: failed('HIGH_DEBUG_D6_CREATE_FAILED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
               + '\n'.join('## ' + section for section in REPORT_SECTIONS) + '\n'
               'Include exactly one of RCA_CONFIRMED, RCA_UNCONFIRMED, BLOCKED. Diagnose only; do not edit files.')
     report = ''; observed = 'UNKNOWN'; effort = 'UNKNOWN'; usage = 'UNKNOWN'
+    failure = None
+    output_path = None
     try:
         with tempfile.NamedTemporaryFile(prefix='llmtool-high-debug-', delete=False) as stream:
             output_path = stream.name
         result = (runner or _run_codex)(prompt=prompt, cwd=diagnosis_root or d6, output_path=output_path)
-        if result.returncode != 0: _refuse('HIGH_DEBUG_RUN_FAILED')
+        if result.returncode != 0: raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
         events_raw = result.stdout
         if len(events_raw) > 1024 * 1024 or len(result.stderr) > 65536:
-            _refuse('HIGH_DEBUG_RUN_FAILED')
+            raise _AttemptFailed('HIGH_DEBUG_RUN_FAILED')
         raw = Path(output_path).read_bytes()
         thread_id = _thread_id_from_events(events_raw)
         observed, effort = _session_observed(thread_id, sessions_dir)
@@ -251,13 +307,15 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             check=False, timeout=60)
         if status_result.returncode != 0 or status_result.stdout:
-            _refuse('HIGH_DEBUG_WROTE_FILES')
-    except LLMToolError: raise
-    except Exception: _refuse('HIGH_DEBUG_RUN_FAILED')
+            raise _AttemptFailed('HIGH_DEBUG_WROTE_FILES')
+    except _AttemptFailed as error: failure = error.code
+    except Exception: failure = 'HIGH_DEBUG_RUN_FAILED'
     finally:
         try: os.unlink(output_path)
         except Exception: pass
-    if len(report.encode('utf-8')) > 16384 or _emitted_sensitive(report): _refuse('HIGH_DEBUG_REPORT_INVALID')
+    if failure is not None: failed(failure, observed, effort, usage)
+    if len(report.encode('utf-8')) > 16384 or _emitted_sensitive(report):
+        failed('HIGH_DEBUG_REPORT_INVALID', observed, effort, usage)
     tokens=[x for x in ('RCA_CONFIRMED','RCA_UNCONFIRMED','BLOCKED') if x in report]
     status=tokens[0] if len(tokens)==1 else 'REPORT_INVALID'
     if any(not _has_report_section(report, h) for h in REPORT_SECTIONS): status='REPORT_INVALID'
