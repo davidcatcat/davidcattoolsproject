@@ -215,7 +215,8 @@ def first_action_since(session_id, since_ms, offsets=None):
             at = _entry_ms(entry)
             if at is None or at < since_ms:
                 continue
-            content = (entry.get("message") or {}).get("content")
+            message = entry.get("message")
+            content = message.get("content") if type(message) is dict else None
             if type(content) is not list:
                 continue
             for item in content:

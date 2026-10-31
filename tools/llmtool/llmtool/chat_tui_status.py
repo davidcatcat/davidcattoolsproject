@@ -8,6 +8,7 @@ are labelled as derived wherever they are shown.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 
 from .chat_tui_task import NOT_AVAILABLE, PENDING_DISPATCH, UNKNOWN, retry_condition, value
@@ -180,6 +181,12 @@ def blocked_reason(record):
     high_debug = _latest(record.get("high_debug"))
     if high_debug is not None and high_debug.get("status") == "BLOCKED":
         return "High Debug BLOCKED (family " + str(high_debug.get("family")) + ")"
+    if high_debug is not None and high_debug.get("status") == "RUN_FAILED":
+        # A failed attempt stores its refusal code as the report.
+        code = high_debug.get("report")
+        shown = (" " + code) if type(code) is str and re.fullmatch(r"[A-Z0-9_]{1,64}", code) else ""
+        return ("High Debug RUN_FAILED" + shown + " (family "
+                + str(high_debug.get("family")) + ")")
     return None
 
 

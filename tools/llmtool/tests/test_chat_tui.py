@@ -1715,6 +1715,20 @@ class StatusProjectionTests(unittest.TestCase):
         self.assertIn('Recovery: Core missing_gates must pass: tests, review',
                       self.status.summary_text(gated))
 
+    def test_failed_high_debug_attempt_is_shown_as_blocked(self):
+        def attempt(status, report):
+            return {'status': status, 'report': report, 'family': 'pr-17'}
+        failed = _record(high_debug=[attempt('RCA_CONFIRMED', 'r'),
+                                     attempt('RUN_FAILED', 'HIGH_DEBUG_RUN_FAILED')])
+        self.assertEqual(self.status.blocked_reason(failed),
+                         'High Debug RUN_FAILED HIGH_DEBUG_RUN_FAILED (family pr-17)')
+        odd = _record(high_debug=[attempt('RUN_FAILED', 'free text\nfrom a report')])
+        self.assertEqual(self.status.blocked_reason(odd),
+                         'High Debug RUN_FAILED (family pr-17)')
+        done = _record(high_debug=[attempt('RUN_FAILED', 'HIGH_DEBUG_RUN_FAILED'),
+                                   attempt('RCA_CONFIRMED', 'r')])
+        self.assertIsNone(self.status.blocked_reason(done))
+
     def callback(self, **handoff):
         return {'state': 'PM_RETURNED', 'missing_gates': [], 'pm_usage': None,
                 'review_handoff': handoff}
