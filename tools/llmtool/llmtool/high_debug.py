@@ -186,6 +186,39 @@ def _run_codex(*, prompt, cwd, output_path):
             stderr=subprocess.PIPE, check=False, timeout=1800)
 
 
+def _d6_taken(repo_root, common_dir, d6):
+    """True when a D6 id is already used (its branch or registry record exists).
+
+    A failed create can leave either behind, so the next attempt skips that
+    id. An unanswerable probe counts as taken.
+    """
+    try:
+        branch = subprocess.run(['git', '-C', str(repo_root), 'show-ref', '--verify',
+                                 '--quiet', 'refs/heads/llmtool/high-debug-' + d6],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, check=False, timeout=60)
+        if branch.returncode != 1:
+            return True
+        record = Path(common_dir) / 'llmtool-worktrees' / (d6 + '.json')
+        return record.exists() or record.is_symlink()
+    except Exception:
+        return True
+
+
+_D6_NAME_PROBES = 16
+
+
+def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
+                  observed, effort, usage, recorded_at):
+    """The high_debug entry recording one Codex attempt that did not finish."""
+    return {'family': family, 'failed_corrections': failed_corrections,
+            'early_reason': early_reason, 'examined_sha': head, 'd6': d6,
+            'model_requested': 'gpt-6.1-sol', 'model_observed': observed,
+            'effort_observed': effort, 'status': 'RUN_FAILED',
+            'report_sha256': hashlib.sha256(code.encode()).hexdigest(),
+            'report': code, 'usage': usage, 'recorded_at': recorded_at}
+
+
 def _d6_name(executor_task, attempt, head):
     """A D6 id unique per attempt that fits the lifecycle's 96-character id."""
     prefix = executor_task
@@ -260,28 +293,33 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     root = str(registration.root)
     entries = task.get('high_debug', [])
     if type(entries) is not list or len(entries) >= 8: _refuse('HIGH_DEBUG_LIMIT')
-    d6 = _d6_name(executor_task, len(entries) + 1, head)
+    repo_root = repo_root or str(Path(registration.common_dir).parent)
+    # Attempts are numbered by recorded entries; ids left behind by an earlier
+    # failed create are skipped, so a broken create costs no entry.
+    for attempt in range(len(entries) + 1, len(entries) + 1 + _D6_NAME_PROBES):
+        d6 = _d6_name(executor_task, attempt, head)
+        if not _d6_taken(repo_root, registration.common_dir, d6):
+            break
+    else:
+        _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
     def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN'):
-        # Every attempt that may have created a D6 is recorded, so the next
-        # attempt gets a new D6 id and the old one stays traceable. Recording
+        # A Codex attempt that started but did not finish is recorded: it
+        # counts toward the entry limit and keeps its D6 traceable. Recording
         # is best effort: the original refusal code is what the caller sees.
         try:
-            store.append_high_debug(task_id, {
-                'family': family, 'failed_corrections': failed_corrections,
-                'early_reason': early_reason, 'examined_sha': head, 'd6': d6,
-                'model_requested': 'gpt-6.1-sol', 'model_observed': observed,
-                'effort_observed': effort, 'status': 'RUN_FAILED',
-                'report_sha256': hashlib.sha256(code.encode()).hexdigest(),
-                'report': code, 'usage': usage,
-                'recorded_at': store._completion_now()})
+            store.append_high_debug(task_id, _failed_entry(
+                family=family, failed_corrections=failed_corrections,
+                early_reason=early_reason, head=head, d6=d6, code=code,
+                observed=observed, effort=effort, usage=usage,
+                recorded_at=store._completion_now()))
         except Exception:
             pass
         _refuse(code)
 
     create = create_d6 or _create_d6
-    try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root or str(Path(registration.common_dir).parent), executor_task=executor_task)
-    except Exception: failed('HIGH_DEBUG_D6_CREATE_FAILED')
+    try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root, executor_task=executor_task)
+    except Exception: _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
     reason = f'failed corrections: {failed_corrections}' if failed_corrections is not None else f'early reason: {early_reason}'
     prompt = (f'Task: {task_id}\nPR: {pr_number}\nFamily: {family}\n{reason}\nExamined SHA: {head}\n'
               f'Evidence:\n{evidence_text}\n\nRequired report sections, each exactly as its own line:\n'
