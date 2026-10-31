@@ -1,6 +1,8 @@
 import importlib.util
 import json
+import os
 import pathlib
+import signal
 import shutil
 import subprocess
 import sys
@@ -145,3 +147,31 @@ class GwLadderTests(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 20)
         self.assertEqual(result[0], "ERROR")
         self.assertEqual(result[3], "test process exceeded 60 seconds")
+
+    def test_descendant_in_its_own_session_is_a_bounded_error(self):
+        # killpg cannot reach a descendant that started its own session, so
+        # the pipes stay open: one shared drain deadline bounds the wait.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        pid_file = pathlib.Path(directory.name) / "pid"
+        root = self._level(
+            "import subprocess, unittest\n"
+            "child = subprocess.Popen(['sleep', '300'], start_new_session=True)\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_ok(self): pass\n")
+        def kill_leftover():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+        self.addCleanup(kill_leftover)
+        scorer = load_scorer()
+        level_dir = root / "tools" / "llmtool" / "eval" / "gw_ladder" / "L1"
+        result_path = str(pathlib.Path(directory.name) / "result.json")
+        command = [sys.executable, "-I", "-B", "-c", scorer._HARNESS,
+                   str(level_dir), result_path]
+        started = time.monotonic()
+        result = scorer._run_tests(command, root, result_path)
+        self.assertLess(time.monotonic() - started, scorer.DRAIN_SECONDS + 3)
+        self.assertEqual(result, ("ERROR", 0, 0, "test output did not close"))

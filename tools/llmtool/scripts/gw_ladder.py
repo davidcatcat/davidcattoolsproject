@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 OUTPUT_LIMIT = 65_536
@@ -37,7 +38,8 @@ _HARNESS = """
 import json, sys, unittest
 level_dir, result_path = sys.argv[1], sys.argv[2]
 suite = unittest.defaultTestLoader.discover(level_dir, pattern="hidden_test.py")
-result = unittest.TextTestRunner(stream=sys.stderr, verbosity=1).run(suite)
+result = unittest.TextTestRunner(stream=sys.stderr, verbosity=1,
+                                warnings="default").run(suite)
 with open(result_path, "x", encoding="utf-8") as stream:
     json.dump({"ran": result.testsRun, "failures": len(result.failures),
                "errors": len(result.errors), "ok": result.wasSuccessful()}, stream)
@@ -95,15 +97,16 @@ def _run_tests(command, root, result_path, timeout=TIMEOUT_SECONDS):
         return_code = process.wait()
     # Descendants left behind by the tested code must not keep the pipes open.
     _kill_group(process)
+    deadline = time.monotonic() + DRAIN_SECONDS
     for reader in readers:
-        reader.join(DRAIN_SECONDS)
+        reader.join(max(0.0, deadline - time.monotonic()))
+    if timed_out:
+        return "ERROR", 0, 0, "test process exceeded 60 seconds"
     if any(reader.is_alive() for reader in readers):
+        # A descendant in its own session can still hold the pipes.
         return "ERROR", 0, 0, "test output did not close"
     process.stdout.close()
     process.stderr.close()
-
-    if timed_out:
-        return "ERROR", 0, 0, "test process exceeded 60 seconds"
     data = _read_result(result_path)
     if data is None:
         return "ERROR", 0, 0, "test harness did not report a result"
