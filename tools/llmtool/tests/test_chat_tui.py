@@ -732,7 +732,7 @@ class WidgetTests(Base):
             self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('(16 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
-                            lambda ui: self.assertEqual(ui.input.text, '/exit'),
+                            lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
                            size=[Size(rows=24, columns=80)])
         self.assertTrue(ui.session.active)
