@@ -81,6 +81,19 @@ class FakeServer:
                 item = server.script.pop(0) if server.script else reply(tool_call('finish', summary='auto'))
                 if callable(item):
                     item = item(body)
+                if isinstance(item, tuple) and item[0] == 'drip':
+                    _, delay, count = item
+                    self.send_response(200)
+                    self.send_header('Content-Length', str(count))
+                    self.end_headers()
+                    try:
+                        for _ in range(count):
+                            self.wfile.write(b' ')
+                            self.wfile.flush()
+                            time.sleep(delay)
+                    except OSError:
+                        pass
+                    return
                 if isinstance(item, int):
                     self.send_response(item)
                     self.send_header('Content-Length', '0')

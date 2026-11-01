@@ -25,7 +25,7 @@ def canonical(obj: Any) -> bytes:
 
 def sha256_hex(data: bytes | str) -> str:
     if isinstance(data, str):
-        data = data.encode('utf-8')
+        data = data.encode('utf-8', 'surrogatepass')
     return hashlib.sha256(data).hexdigest()
 
 

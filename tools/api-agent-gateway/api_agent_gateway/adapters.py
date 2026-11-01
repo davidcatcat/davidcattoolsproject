@@ -8,6 +8,7 @@ from __future__ import annotations
 import http.client
 import json
 import ssl
+import time
 from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlsplit
@@ -89,10 +90,26 @@ class OpenAIChatTools:
         if self._api_key:
             headers['Authorization'] = 'Bearer ' + self._api_key
         try:
+            deadline = time.monotonic() + timeout
             conn.request('POST', self._path, body=body_bytes, headers=headers)
             resp = conn.getresponse()
-            data = resp.read(MAX_RESPONSE_BYTES + 1)
             status = resp.status
+            # Total deadline: a server dripping bytes cannot stretch the wall budget.
+            chunks, total = [], 0
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise ModelError('TIMEOUT')
+                if conn.sock is not None:
+                    conn.sock.settimeout(remaining)
+                chunk = resp.read1(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > MAX_RESPONSE_BYTES:
+                    break
+            data = b''.join(chunks)
         except (OSError, http.client.HTTPException) as exc:
             raise ModelError('TIMEOUT' if 'timed out' in str(exc) else 'TRANSPORT_ERROR') from exc
         finally:

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import time
@@ -120,6 +121,16 @@ def _check_authorization(path: str, sid: str, meta: dict, task: Task, now: float
     return sha256_hex(raw)
 
 
+def _check_private_file(path: str) -> None:
+    """The profiles file chooses base_url: it must be ours and not writable by others."""
+    try:
+        st = os.lstat(path)
+    except OSError as exc:
+        raise Refusal(POLICY_REFUSED, 'PROFILES_UNREADABLE') from exc
+    if not stat.S_ISREG(st.st_mode) or st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) & 0o022:
+        raise Refusal(POLICY_REFUSED, 'PROFILES_UNSAFE')
+
+
 class Invocation:
     """One run or resume: everything before the first provider call is a check."""
 
@@ -189,6 +200,9 @@ class Invocation:
             except Refusal as exc:
                 self._record('refusal', code=exc.code)
                 return self._result(exc.status, exc.code)
+            except Exception as exc:  # contract: always a result and an end record
+                self._record('refusal', code='INTERNAL_ERROR', error=type(exc).__name__)
+                return self._result(POLICY_REFUSED, 'INTERNAL_ERROR')
         finally:
             if self._lock is not None:
                 self._lock.release()
@@ -210,6 +224,10 @@ class Invocation:
             self._lock = store.lock(sid)
             meta = store.load_meta(sid)
             self.session_id = sid
+            if store.expired(meta):
+                # sweep() skips sessions whose lock was busy; re-check under our lock.
+                store.delete(sid, 'expired', meta)
+                raise Refusal(POLICY_REFUSED, 'SESSION_ENDED')
         task_obj, raw = read_json_file(args.task_file, 'TASK')
         self.header['task_sha256'] = sha256_hex(raw)
         task = parse_task(task_obj, raw)
@@ -217,6 +235,7 @@ class Invocation:
         self.header.update(task_id=task.task_id, source_sha=task.source_sha, budgets=task.budgets,
                            scope_digest=task.scope_digest())
         profiles_path = args.profiles_file or self.env.get('GW_AGENT_PROFILES') or os.path.join(state_dir, 'profiles.json')
+        _check_private_file(profiles_path)
         profiles, _ = read_json_file(profiles_path, 'PROFILES')
         profile = parse_profile(profiles, args.profile)
         self.header.update(profile=profile.name, profile_sha256=profile.sha256)

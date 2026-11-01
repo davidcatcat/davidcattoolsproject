@@ -49,6 +49,10 @@ def normalize(path: object, *, allow_root: bool = False) -> str:
         raise ConfinementError('PATH_ABSOLUTE', 'absolute paths are refused')
     if any(ord(c) < 0x20 or c in '\\\x7f' for c in path):
         raise ConfinementError('PATH_INVALID', 'control characters or backslashes are refused')
+    try:
+        path.encode('utf-8')
+    except UnicodeEncodeError as exc:
+        raise ConfinementError('PATH_INVALID', 'path is not valid UTF-8') from exc
     if path.endswith('/'):
         path = path[:-1]
     parts = path.split('/')
@@ -103,6 +107,14 @@ class Scope:
         return self.can_read(rel) or self.can_list(rel)
 
 
+def _encodable(name: str) -> bool:
+    try:
+        name.encode('utf-8')
+        return True
+    except UnicodeEncodeError:
+        return False
+
+
 def _oserror(exc: OSError) -> ConfinementError:
     code = {
         errno.ELOOP: 'SYMLINK_REFUSED', errno.ENOTDIR: 'NOT_A_DIRECTORY',
@@ -133,6 +145,21 @@ class Workspace:
             self.root_fd = -1
 
     # -- walking -------------------------------------------------------------
+    @staticmethod
+    def _exact(parent_fd: int, name: str) -> None:
+        """Refuse case or Unicode-normalization variants of the on-disk name.
+
+        Scope matching is by exact string; case-insensitive or
+        normalization-insensitive filesystems (APFS) would otherwise open an
+        entry the scope never named.
+        """
+        try:
+            names = os.listdir(parent_fd)
+        except OSError as exc:
+            raise _oserror(exc) from exc
+        if name not in names:
+            raise ConfinementError('NAME_MISMATCH', 'path does not match the on-disk name exactly')
+
     def _open_dir(self, parent_fd: int, name: str) -> int:
         if name.lower() == '.git':
             raise ConfinementError('PATH_GIT', '.git is refused')
@@ -147,6 +174,11 @@ class Workspace:
                     pass
             raise _oserror(exc) from exc
         st = os.fstat(fd)
+        try:
+            self._exact(parent_fd, name)
+        except ConfinementError:
+            os.close(fd)
+            raise
         if not stat.S_ISDIR(st.st_mode) or st.st_dev != self.identity[0]:
             os.close(fd)
             raise ConfinementError('MOUNT_REFUSED' if stat.S_ISDIR(st.st_mode) else 'NOT_A_DIRECTORY')
@@ -183,6 +215,11 @@ class Workspace:
         except OSError as exc:
             raise _oserror(exc) from exc
         st = os.fstat(fd)
+        try:
+            self._exact(parent_fd, name)
+        except ConfinementError:
+            os.close(fd)
+            raise
         if not stat.S_ISREG(st.st_mode):
             os.close(fd)
             raise ConfinementError('IS_A_DIRECTORY' if stat.S_ISDIR(st.st_mode) else 'SPECIAL_FILE',
@@ -251,7 +288,7 @@ class Workspace:
             names = sorted(os.listdir(fd))
             entries, truncated = [], False
             for name in names:
-                if name.lower() == '.git' or name.startswith(TEMP_PREFIX):
+                if name.lower() == '.git' or name.startswith(TEMP_PREFIX) or not _encodable(name):
                     continue
                 child = f'{rel}/{name}' if rel else name
                 if not self.scope.visible(child):
@@ -322,7 +359,7 @@ class Workspace:
             for name in sorted(os.listdir(dir_fd)):
                 if state['truncated']:
                     return
-                if name.lower() == '.git' or name.startswith(TEMP_PREFIX):
+                if name.lower() == '.git' or name.startswith(TEMP_PREFIX) or not _encodable(name):
                     continue
                 child = f'{drel}/{name}' if drel else name
                 if not self.scope.visible(child):

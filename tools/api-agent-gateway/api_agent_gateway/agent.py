@@ -101,6 +101,13 @@ def _describe(group: list[dict]) -> str:
     return ', '.join(acts) or 'assistant text'
 
 
+def _reason(value: Optional[str]) -> Optional[str]:
+    """Provider text never enters the audit log: allow-list finish reasons."""
+    if value is None:
+        return None
+    return value if value in ('stop', 'length', 'tool_calls', 'content_filter', 'function_call') else 'other'
+
+
 class BudgetExceeded(Exception):
     def __init__(self, code: str):
         super().__init__(code)
@@ -217,6 +224,9 @@ class AgentLoop:
             self.audit.append('refusal', turn=self.turns, code=exc.code)
         except Refusal as exc:
             status, code, summary = exc.status, exc.code, ''
+        except Exception as exc:  # never leave the run without a result
+            status, code, summary = POLICY_REFUSED, 'INTERNAL_ERROR', ''
+            self.audit.append('refusal', turn=self.turns, code='INTERNAL_ERROR', error=type(exc).__name__)
         answer_pending(self.hist, code or 'run ended')
         self.persist(self.hist)
         if self.unreported_calls == 0 and self.turns:
@@ -277,7 +287,7 @@ class AgentLoop:
             self.audit.append('model_call', turn=self.turns, request_bytes=len(data),
                               request_sha256=sha256_hex(data), redactions=redactions,
                               served_model=reply.served_model, usage=reply.usage or 'UNKNOWN',
-                              finish_reason=reply.finish_reason, tool_calls=len(calls),
+                              finish_reason=_reason(reply.finish_reason), tool_calls=len(calls),
                               response_sha256=sha256_hex(canonical(msg)))
             group = [msg]
             self.hist['groups'].append(group)

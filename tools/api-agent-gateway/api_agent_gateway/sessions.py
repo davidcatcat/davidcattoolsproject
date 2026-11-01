@@ -242,6 +242,8 @@ class Store:
                 reason = 'expired' if isinstance(meta, dict) else 'corrupt'
                 self.delete(sid, reason, meta if isinstance(meta, dict) else {})
                 removed.append(sid)
+            except OSError:
+                continue  # leave it for the next sweep; the tombstone already blocks resume
             finally:
                 lock.release()
         return removed

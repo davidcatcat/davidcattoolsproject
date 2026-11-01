@@ -117,6 +117,9 @@ class ToolExecutor:
             raise
         except ConfinementError as exc:
             return _error(name, exc.code, exc.message, path if isinstance(path, str) else None)
+        except (OSError, ValueError) as exc:  # includes UnicodeError
+            code = 'OS_ERROR' if isinstance(exc, OSError) else 'INVALID_INPUT'
+            return _error(name, code, code.lower().replace('_', ' '), None)
 
     def _list_dir(self, args: dict) -> ToolOutcome:
         rel, entries, truncated = self.ws.list_dir(args['path'])

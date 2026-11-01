@@ -65,6 +65,10 @@ Unknown keys are refused (`TASK_INVALID`).
   on/off, until phase 0 decides them. It cannot override `model`, `messages`,
   `tools`, `tool_choice`, `max_tokens` or `stream`.
 - **`adapter`:** `text-tools` is refused with `ADAPTER_NOT_IMPLEMENTED` in phase 1.
+- **File safety:** the profiles file must be a regular file owned by the
+  current user and not writable by group or others (`PROFILES_UNSAFE`).
+- **Timeout:** `timeout_seconds` is a total deadline per call, including a
+  slowly dripping response.
 
 ## result.json and exit codes
 
@@ -141,7 +145,9 @@ Each budget has its own `code`. No retry or fallback model is ever used.
   - FIFOs, sockets and devices;
   - files with `st_nlink > 1`;
   - cross-device directories;
-  - anything outside the declared sets.
+  - anything outside the declared sets;
+  - case or Unicode-normalization variants of an on-disk name
+    (`NAME_MISMATCH`), because scope matching is exact while APFS is not.
 - **Listings.** `list_dir` and `grep` show only entries that are in scope or
   lead to in-scope entries.
 - **Writes.**
@@ -197,4 +203,11 @@ Each budget has its own `code`. No retry or fallback model is ever used.
   - compaction uses no model-written summary;
   - the gateway does not create directories.
 - **Budgets:** apply to each invocation. They are not cumulative across a
-  session's rounds.
+  session's rounds. `scope_digest` stops any change to the ceilings, but total
+  spend over many repair rounds is bounded only by how many rounds llmtool
+  starts. Whether to make them per session is an open decision.
+- **Concurrent same-UID attacker:** if another local process moves a parent
+  directory out of the workdir during an edit, the write can land in the moved
+  directory. The re-verification detects this and ends the run with
+  `CONFINEMENT_VIOLATION`, but does not undo it. The model itself cannot cause
+  this; it has no rename tool.
