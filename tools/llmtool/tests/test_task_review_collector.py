@@ -139,4 +139,63 @@ class NativeGitDataTests(unittest.TestCase):
         head=self.run_git('rev-parse','HEAD').decode().strip()
         with self.assertRaises(LLMToolError): c.collect_source_data(self.root,self.base,head,('src',))
 
+
+class LocalFactsOriginTests(unittest.TestCase):
+    def _collect(self, origin):
+        with tempfile.TemporaryDirectory(prefix='review-origin-') as folder:
+            root=Path(folder)
+            branch='feat/review-origin';head='1'*40
+            common=str(root/'.git');gitdir=str(root/'.git/worktrees/task')
+            registration=(f'worktree {root}\nbranch refs/heads/{branch}\nlocked\n').encode()
+
+            class Reader:
+                def __init__(self): self.root=root
+                def read(self,args):
+                    if args==c.git_intel.ROOT:return (str(root)+'\n').encode()
+                    if args==c.git_intel.BRANCH:return (branch+'\n').encode()
+                    if args==c.git_intel.HEAD:return (head+'\n').encode()
+                    if args==('rev-parse','--path-format=absolute','--git-common-dir'):
+                        return (common+'\n').encode()
+                    if args==('rev-parse','--absolute-git-dir'):return (gitdir+'\n').encode()
+                    if args==('config','--get','remote.origin.url'):return (origin+'\n').encode()
+                    if args==('worktree','list','--porcelain'):return registration
+                    if args==c.git_intel.STATUS:return b''
+                    if args in (('ls-files','--stage','-z'),
+                                ('ls-files','--others','--exclude-standard','-z'),
+                                ('ls-files','--others','--ignored','--exclude-standard','-z')):
+                        return b''
+                    if len(args)>2 and args[:2]==('config','--local'):
+                        return b''
+                    raise AssertionError(args)
+
+            reader=Reader()
+            with patch.object(c,'physical_directory',return_value=root.stat()), \
+                 patch('llmtool.task_lifecycle_cli.read_task_file',return_value=('fixture',None)), \
+                 patch.object(sys,'prefix',str(root/'tools/llmtool/.venv')), \
+                 patch.object(sys,'executable',str(root/'tools/llmtool/.venv/bin/python')), \
+                 patch('llmtool.__file__',str(root/'tools/llmtool/llmtool/__init__.py')):
+                return c.collect_local_facts(root,reader=reader)
+
+    def test_accepts_only_exact_d6_origins_and_preserves_repository(self):
+        for origin in (
+            'git@github.com:davidcatcat/davidcattoolsproject.git',
+            'https://github.com/davidcatcat/davidcattoolsproject.git',
+        ):
+            with self.subTest(origin=origin):
+                facts=self._collect(origin)
+                self.assertEqual(facts.repository,'davidcatcat/davidcattoolsproject')
+        for origin in (
+            'git@github.com:davidcatcat/davidcattoolsproject.git/',
+            'git@github.com:davidcatcat/davidcattoolsproject',
+            'Git@github.com:davidcatcat/davidcattoolsproject.git',
+            'git@github.com:someoneelse/davidcattoolsproject.git',
+            'ssh://git@github.com/davidcatcat/davidcattoolsproject.git',
+            'https://github.com/davidcatcat/davidcattoolsproject.git/',
+            'https://github.com/davidcatcat/davidcattoolsproject',
+            'HTTPS://github.com/davidcatcat/davidcattoolsproject.git',
+            'https://github.com/someoneelse/davidcattoolsproject.git',
+        ):
+            with self.subTest(origin=origin), self.assertRaises(LLMToolError):
+                self._collect(origin)
+
 if __name__=='__main__': unittest.main()
