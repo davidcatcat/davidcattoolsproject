@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -380,28 +381,37 @@ def _bootstrap(root, task_id):
             "GIT_ATTR_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0",
             "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
         }
-        process = subprocess.Popen(
-            [sys.executable, "-B", "-I", "-c", helper_code,
-             "--task-id", task_id, "--worktree-root", str(root)],
-            cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-        )
+        stderr_read_fd, stderr_write_fd = os.pipe()
         captured_stderr = bytearray()
-        stderr_oversized = False
-        while True:
-            chunk = process.stderr.read(1024)
-            if not chunk:
-                break
-            available = BOOTSTRAP_STDERR_LIMIT + 1 - len(captured_stderr)
-            if available > 0:
-                captured_stderr.extend(chunk[:available])
-            if len(chunk) > available or len(captured_stderr) > BOOTSTRAP_STDERR_LIMIT:
-                stderr_oversized = True
-        process.stderr.close()
-        returncode = process.wait()
+        stderr_oversized = []
+
+        def drain_stderr():
+            with os.fdopen(stderr_read_fd, "rb") as stream:
+                while True:
+                    chunk = stream.read(1024)
+                    if not chunk:
+                        break
+                    available = BOOTSTRAP_STDERR_LIMIT + 1 - len(captured_stderr)
+                    if available > 0:
+                        captured_stderr.extend(chunk[:available])
+                    if len(chunk) > available or len(captured_stderr) > BOOTSTRAP_STDERR_LIMIT:
+                        stderr_oversized.append(True)
+
+        stderr_reader = threading.Thread(target=drain_stderr)
+        stderr_reader.start()
+        try:
+            result = subprocess.run(
+                [sys.executable, "-B", "-I", "-c", helper_code,
+                 "--task-id", task_id, "--worktree-root", str(root)],
+                cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=stderr_write_fd, check=False,
+            )
+        finally:
+            os.close(stderr_write_fd)
+            stderr_reader.join()
     except (OSError, UnicodeDecodeError):
         _stop("ENV_BOOTSTRAP_UNAVAILABLE")
-    if returncode:
+    if result.returncode:
         lines = bytes(captured_stderr).splitlines()
         match = (BOOTSTRAP_STOP_RE.fullmatch(lines[0])
                  if not stderr_oversized and len(lines) == 1 else None)

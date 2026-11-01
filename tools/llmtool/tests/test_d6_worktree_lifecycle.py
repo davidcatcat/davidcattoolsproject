@@ -772,6 +772,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             with self.subTest(stderr=label):
                 helper_source = (
                     "import sys\nsys.stderr.buffer.write(" + repr(stderr) + ")\n"
+                    "sys.exit(1)\n"
                 ).encode("utf-8")
                 error_output = io.StringIO()
                 with patch.object(lifecycle, "_trusted_dispatcher_git",
