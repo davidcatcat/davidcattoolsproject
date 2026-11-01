@@ -273,6 +273,32 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(saved['developer']['execution']['status'], 'BLOCKED')
         callback.assert_not_called()
 
+    def test_done_result_persists_bounded_developer_report_separately(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='DONE', summary='updated it', tests=('checked one', 'checked two'),
+            self_review='reviewed the diff', blocked_reason=None, exit_code=0,
+            thread_id='12345678-1234-4234-8234-123456789abc', stdout_sha256='a' * 64,
+            elapsed_ms=1, cleanup_status='CONFIRMED', usage=None)
+        with redirect_stdout(io.StringIO()):
+            _result, saved, callback = self._dispatch(task, codex_result=result)
+        self.assertEqual(saved['developer']['reported'], {
+            'summary': 'updated it', 'tests': ['checked one', 'checked two'],
+            'self_review': 'reviewed the diff'})
+        callback.assert_called_once()
+
+    def test_oversized_and_unscreenable_report_fields_are_dropped(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='BLOCKED', summary='x' * (8 * 1024 + 1), tests=('safe test', 'api_key=secret'),
+            self_review='credential AKIA' + 'A' * 16, blocked_reason=None, exit_code=0,
+            thread_id='12345678-1234-4234-8234-123456789abc', stdout_sha256='a' * 64,
+            elapsed_ms=1, cleanup_status='CONFIRMED', usage=None)
+        with redirect_stdout(io.StringIO()):
+            _result, saved, callback = self._dispatch(task, codex_result=result)
+        self.assertNotIn('reported', saved['developer'])
+        callback.assert_not_called()
+
     def test_empty_diff_captures_final_message_with_sensitive_screen_and_bound(self):
         task = self._task()
         credential_like = 'AKIA' + 'A' * 16

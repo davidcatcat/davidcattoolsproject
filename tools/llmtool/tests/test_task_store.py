@@ -418,6 +418,29 @@ class TaskStoreTests(unittest.TestCase):
                 self.assertEqual(saved['developer'].get('execution'),
                                  developer.get('execution'))
 
+    def test_developer_reported_claims_are_bounded_and_strict(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        self.store.compare_and_update(task['task_id'], expected={'developer': None},
+                                      developer=pending)
+        valid_report = {'tests': ['claimed test'], 'summary': 'claimed summary',
+                        'self_review': 'claimed review'}
+        valid = {**pending, 'reported': valid_report}
+        saved = self.store.update(task['task_id'], developer=valid)
+        self.assertEqual(saved['developer']['reported'], valid_report)
+        self.assertIsNone(saved.get('completion'))
+
+        for reported in (
+                {'other': 'field'}, {'summary': 4},
+                {'summary': 'x' * (8 * 1024 + 1)},
+                {'tests': ['x' * 1025]}, {'tests': ['api_key=secret']},
+                {'tests': ['ok'] * 33}, {}):
+            with self.subTest(reported=repr(reported)[:32]):
+                with self.assertRaises(LLMToolError):
+                    self.store.update(task['task_id'],
+                                      developer={**valid, 'reported': reported})
+
     def test_codex_cli_dispatch_and_response_allow_unknown_token_cap(self):
         self._allow_codex_dispatch()
         task = self._codex_dispatch_task()

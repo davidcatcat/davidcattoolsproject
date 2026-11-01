@@ -412,12 +412,14 @@ def _pm_assignment_packet(task):
 
 def _completion_packet(task, evidence):
     """Bounded completion summary for the original PM; never code/diff/output."""
+    developer_packet = {key: value for key, value in evidence['developer'].items()
+                        if key != 'reported'}
     packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'task_contract_digest': task['task_binding']['contract_digest'],
         'task_request_sha256': task['request_sha256'],
         'pm_assignment': _pm_assignment_packet(task),
-        'developer': evidence['developer'], 'executor': evidence['executor'],
+        'developer': developer_packet, 'executor': evidence['executor'],
         'source_sha': evidence['result']['source_sha'],
         'result_head': evidence['result']['result_head'],
         'changed_paths': evidence['result']['changed_paths'],
@@ -425,6 +427,9 @@ def _completion_packet(task, evidence):
         'tests': [_test_packet(item) for item in evidence['tests']],
         'review_pr_ci': evidence['review_pr_ci'],
     }
+    if 'reported' in evidence['developer']:
+        packet['developer_reported'] = _developer_reported_packet(
+            evidence['developer']['reported'])
     if evidence.get('execution_mode') == 'HOST_WORKER':
         packet['host_worker_receipt'] = evidence['host_worker_receipt']
     return packet
@@ -433,7 +438,7 @@ def _completion_packet(task, evidence):
 def _direct_result_packet(task, developer, executor_task_id, evidence):
     """Bounded direct-D6 result summary for the original PM."""
     result = evidence['result']
-    return {
+    packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'task_contract_digest': task['task_binding']['contract_digest'],
         'original_request': task['request'],
@@ -452,6 +457,14 @@ def _direct_result_packet(task, developer, executor_task_id, evidence):
         'tests': [_test_packet(item) for item in evidence['tests']],
         'review_pr_ci': evidence['review_pr_ci'],
     }
+    if 'reported' in developer:
+        packet['developer_reported'] = _developer_reported_packet(developer['reported'])
+    return packet
+
+
+def _developer_reported_packet(reported):
+    """Clearly separate unverified Developer claims from run evidence."""
+    return {'label': 'Developer-reported, unverified', **reported}
 
 
 def _test_packet(item):
@@ -2636,6 +2649,24 @@ def _normalize_agy_usage(value):
     return dict(value)
 
 
+def _codex_developer_report(result):
+    """Keep only bounded, screened, explicitly unverified result claims."""
+    reported = {}
+    for field in ('summary', 'self_review'):
+        try:
+            reported[field] = _screen_text(getattr(result, field), 8 * 1024)
+        except (LLMToolError, AttributeError):
+            pass
+    try:
+        tests = result.tests
+        if type(tests) not in (tuple, list) or len(tests) > 32:
+            raise LLMToolError('reported tests are invalid')
+        reported['tests'] = [_screen_text(item, 1024) for item in tests]
+    except (LLMToolError, AttributeError):
+        pass
+    return reported
+
+
 def run_task_codex_delegate(args, *, store):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
@@ -2940,6 +2971,10 @@ def run_task_codex_delegate(args, *, store):
         'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
         'source_bytes': None, 'source_file_count': None,
         'source_manifest_sha256': None}
+    if result.status in ('DONE', 'BLOCKED'):
+        developer['reported'] = _codex_developer_report(result)
+        if not developer['reported']:
+            developer.pop('reported')
     output_rejection = None
     rejection_persisted = False
     try:
