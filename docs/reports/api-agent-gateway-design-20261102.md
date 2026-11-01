@@ -116,8 +116,13 @@ Owner, verbatim: 「公司llm還可以透過這個gateway建立session,llmtool�
   - `gw-agent end <session_id>` closes the session and deletes its conversation state (see Retention). Closed sessions cannot be resumed.
 - **Binding:** a session is bound to one workdir identity (device and inode of the D6 root), `source_sha` at start, the profile, the `task_id`, and a `scope_digest`. The digest is a SHA-256 over the canonical JSON of the authorization and scope fields: `read_paths`, `write_paths`, `egress_basis`, `data_class` and budget ceilings.
   - A resume task file may change only `goal`, `acceptance` and the repair findings. Any change to the scope fields under the same `task_id` is refused with `SESSION_SCOPE_CHANGED`.
-  - Permission is re-validated on every resume: the dispatch policy via llmtool, and the egress basis is still present.
-  - A test must show that widened reads, writes or egress under the same task ID are rejected. Resume refuses a different workdir, profile or task, or a HEAD that is not a descendant of the recorded HEAD. This is the same rule llmtool applies to Codex repair rounds in one D6.
+  - **Re-validation before any provider call on resume.** llmtool, not the model or the gateway alone, re-runs the same authorization checks as at start:
+    - the dispatch policy for the route;
+    - that the recorded `egress_basis` still authorizes this task, `data_class` and profile (it has not been withdrawn, expired or superseded per `skills/company-llm-delegation/SKILL.md`);
+    - that the Task is not terminal.
+
+    llmtool passes a fresh authorization record (`authorization_ref`, checked-at time, `scope_digest`). The gateway refuses a resume without a record that matches the session's `scope_digest`, with `SESSION_AUTHORIZATION_INVALID`.
+  - **Tests must show refusal** for each of these under the same task ID: widened `read_paths`; widened `write_paths`; a changed `egress_basis`; a changed `data_class`; any increased budget ceiling; and a missing, expired or mismatched authorization record. None of these may reach a provider call. Resume refuses a different workdir, profile or task, or a HEAD that is not a descendant of the recorded HEAD. This is the same rule llmtool applies to Codex repair rounds in one D6.
 - **Storage:**
   - A per-user state directory outside any Git worktree, mode 0700, one directory per session, files 0600.
   - The conversation state holds model-visible messages, so it is sensitive.
