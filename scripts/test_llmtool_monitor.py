@@ -4041,6 +4041,34 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(mon._wrap(text, 30)[0], "可派工；本機 llmtool")   # at the space
         self.assertEqual(mon._wrap("短", 10), ["短"])
 
+    def test_wrap_always_makes_progress_at_narrow_widths(self):
+        import signal
+
+        def timeout(*_):
+            raise TimeoutError("_wrap hung on narrow width")
+
+        previous = signal.signal(signal.SIGALRM, timeout)
+        self.addCleanup(signal.signal, signal.SIGALRM, previous)
+        cases = (
+            ("ascii", "abcdefg hello world; a, b"),
+            ("CJK", "可派工；本機紀錄（不分）中文字工作測試"),
+            ("mixed", "a中b文c（測試）test, x；y"),
+            ("combining", "e\u0301a\u0300o\u0308中\u0301文\u0302"),
+            ("zero-width", "a\u200bb\u200dc\ufeff中\u200b文"),
+        )
+        signal.alarm(2)
+        try:
+            self.assertEqual(mon._wrap("中", 1), ["中"])
+            self.assertEqual(mon._wrap("中文", 1), ["中", "文"])
+            for kind, text in cases:
+                for cols in range(1, 9):
+                    with self.subTest(kind=kind, cols=cols):
+                        pieces = mon._wrap(text, cols)
+                        self.assertEqual("".join(pieces).replace(" ", ""), text.replace(" ", ""))
+                        self.assertTrue(all(mon._width(piece) <= max(cols, 2) for piece in pieces))
+        finally:
+            signal.alarm(0)
+
     def test_stopped_opencode_keeps_its_alert_unless_dispatch_is_paused(self):
         stopped = (mon.STOPPED, "最近一次：免費額度用完（429）", 60.0)
         with patch.object(mon, "opencode_outcome", return_value=stopped):
