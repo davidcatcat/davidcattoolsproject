@@ -5361,14 +5361,14 @@ def _wrap(text: str, cols: int) -> list[str]:
 @functools.lru_cache(maxsize=1024)   # repainted once a second with the same rows
 def _wrapped(text: str, cols: int) -> tuple:
     pieces = []
-    while _width(text) > cols:
+    while len(text) > 1 and _width(text) > cols:
         fit, used = 0, 0
         while used + _char_width(text[fit]) <= cols:
             used += _char_width(text[fit])
             fit += 1
         cut = max((i + 1 for i in range(fit) if text[i] in BREAK_AFTER), default=0)
-        if cut < fit // 2:   # no good break point in the second half: break anywhere
-            cut = fit
+        if cut < max(1, fit // 2):   # no good break point in the second half: break anywhere
+            cut = max(1, fit)
             while 1 < cut and text[cut] in NO_LINE_START:
                 cut -= 1
         pieces.append(text[:cut].rstrip())
