@@ -174,17 +174,9 @@ class D6RetireTests(unittest.TestCase):
 
     def test_lsof_unavailable_keeps_retire_liveness_unknown(self):
         self._task("lsof-none")
-        real_lstat = os.lstat
-
-        def lstat(path):
-            if path in ("/usr/sbin/lsof", "/usr/bin/lsof"):
-                raise FileNotFoundError(path)
-            return real_lstat(path)
-
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(os, "getuid", return_value=1000), \
-                patch.object(os, "lstat", side_effect=lstat), \
+                patch.object(lifecycle, "_resolve_lsof", return_value=None), \
                 contextlib.redirect_stdout(output):
             self.assertIsNone(lifecycle._process_cwds())
             ok = lifecycle.retire_worktrees(
