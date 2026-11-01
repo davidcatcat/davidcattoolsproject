@@ -227,16 +227,19 @@ def capture_snapshot(root):
                     files[rel] = ('unsupported', stat.S_IFMT(info.st_mode))
             except OSError:
                 files[rel] = ('unavailable',)
+    branch = task_completion._git(root, ('branch', '--show-current'), limit=4096).decode().strip()
+    branch_ref = (task_completion._git(
+        root, ('rev-parse', '--verify', f'refs/heads/{branch}'), limit=4096).strip()
+                  if branch else b'')
     git = {
         'head': task_completion._git(root, ('rev-parse', '--verify', 'HEAD'), limit=4096).decode().strip(),
-        'branch': task_completion._git(root, ('branch', '--show-current'), limit=4096).decode().strip(),
+        'branch': branch,
+        'branch_ref': branch_ref,
         'git_dir': task_completion._git(root, ('rev-parse', '--path-format=absolute', '--git-dir'),
                                         limit=4096).decode().strip(),
-        'common_dir': task_completion._git(root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
-                                           limit=4096).decode().strip(),
         'index': task_completion._git(root, ('ls-files', '--stage', '-z'), limit=1024 * 1024),
-        'refs': task_completion._git(root, ('for-each-ref', '--format=%(refname) %(objectname)',
-                                            'refs'), limit=1024 * 1024),
+        'stash': task_completion._git(root, ('for-each-ref', '--format=%(objectname)',
+                                             'refs/stash'), limit=4096).strip(),
     }
     pointer = root / '.git'
     if pointer.is_symlink():
