@@ -851,6 +851,62 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(path.stat().st_nlink, 1)
         self.assertEqual(loaded['task_binding']['task_id'], loaded['task_id'])
 
+    def test_get_keeps_record_descriptor_open_for_path_stat(self):
+        value = record()
+        self.store.create(value)
+        name = value['task_id'] + '.json'
+        original_open, original_stat, original_fstat = os.open, os.stat, os.fstat
+        record_fds = []
+        checked = []
+
+        def remember_open(path, flags, *args, **kwargs):
+            fd = original_open(path, flags, *args, **kwargs)
+            if path == name:
+                record_fds.append(fd)
+            return fd
+
+        def check_open_during_stat(path, *args, **kwargs):
+            if path == name:
+                self.assertTrue(record_fds)
+                original_fstat(record_fds[-1])
+                checked.append(True)
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(task_store_module.os, 'open', side_effect=remember_open), \
+                patch.object(task_store_module.os, 'stat', side_effect=check_open_during_stat):
+            self.assertEqual(self.store.get(value['task_id']), value)
+
+        self.assertEqual(checked, [True])
+
+    def test_get_survives_inode_reuse_during_path_stat(self):
+        value = record()
+        self.store.create(value)
+        other_store = TaskStore(self.root)
+        name = value['task_id'] + '.json'
+        original_stat = os.stat
+        updating = [False]
+        updates = []
+
+        def replace_twice_before_path_stat(path, *args, **kwargs):
+            if path == name and not updating[0]:
+                updating[0] = True
+                try:
+                    updates.append(other_store.update(
+                        value['task_id'], state='PM_UNAVAILABLE',
+                        error_code='PROVIDER_TIMEOUT'))
+                    updates.append(other_store.update(
+                        value['task_id'], error_code='PROVIDER_TIMEOUT'))
+                finally:
+                    updating[0] = False
+            return original_stat(path, *args, **kwargs)
+
+        with patch.object(task_store_module.os, 'stat',
+                          side_effect=replace_twice_before_path_stat):
+            loaded = self.store.get(value['task_id'])
+
+        self.assertEqual(len(updates), 2)
+        self.assertEqual(loaded, updates[-1])
+
     def test_get_retries_when_atomic_replace_lands_after_open(self):
         value = record()
         self.store.create(value)
