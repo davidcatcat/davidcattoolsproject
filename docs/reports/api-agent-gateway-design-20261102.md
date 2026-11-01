@@ -11,10 +11,15 @@ Evidence labels: **FACT** (with file or issue reference), **UNKNOWN** (not verif
   - Replies containing `tool_calls` are rejected (`tools/llmtool/llmtool/providers/openai_compatible.py:454-456`).
   - Policy says gw has no shell, filesystem, Git or approval authority (`AGENTS.md`, Company LLM Developer; `skills/company-llm-delegation/SKILL.md`).
 - **FACT.** Results so far:
-  - Issue #290 recorded 11/11 rejected gw runs (`INVALID_DIFF` / `INVALID_ENVELOPE`).
-  - On 2026-11-02, #396 SF-1 produced a correct code change. It misplaced its test methods because it saw only part of the test file, and needed a repair plus a Codex finish.
+  - Historical: issue #290's 10-22 headline was 11/11 rejected runs (`INVALID_DIFF` / `INVALID_ENVELOPE`).
+  - Later, after #319, #363, #428, #334 and #671 merged, 8 of 11 real tasks were accepted, with 3 distinct failure classes and 1 fully delivered task (#290, Cloud audit 2026-11-01).
+  - No real task has run since #671, so its effect on delivery is **UNKNOWN**.
+  - 2026-11-02, #396 SF-1: gw proposal Tasks `556897e1…` and `f3395959…` in D6 `sf1-lsof-path-gw-20261102`. The first diff put new test methods inside an existing method (IndentationError). The second, given full test-file context, passed 20/21. A Codex Task finished the last test. The PM recorded this in the run; there is no PR yet.
 - **FACT.** Codex and Claude Developers instead run as agents inside a registered D6 worktree. They read and edit files themselves, and llmtool checks the result afterwards (changed paths ⊆ write paths, D6 binding).
-- **FACT** (#290 probes). gw accepts very long prompts (a 200,087-token prompt returned HTTP 200). It returned one structured `tool_calls` response with `tool_choice: auto`. Thinking mode can use up a 4,096-token output budget.
+- **FACT** (#290 probes, [c6450627600](https://github.com/davidcatcat/davidcattoolsproject/issues/290#issuecomment-6450627600) and [c6451338332](https://github.com/davidcatcat/davidcattoolsproject/issues/290#issuecomment-6451338332)):
+  - gw accepted a 200,087-token prompt with HTTP 200.
+  - It returned one structured `tool_calls` response with `tool_choice: auto`. That is a single sample; whether it is reliable is **UNKNOWN**.
+  - Thinking mode used up a 4,096-token output budget on real tasks.
 
 The gap: no runtime turns an API-only model into a confined, auditable D6 agent.
 
@@ -59,18 +64,29 @@ Components:
    - `list_dir`, `read_file` (ranged), `grep` (bounded results).
    - `apply_edit`: exact `old`→`new` replace, or create a file within write paths.
    - `finish(summary)`.
-   - Paths are resolved against the workdir. Symlinks, `..`, absolute paths, `.git/` and anything outside the declared read/write sets are refused.
-3. **Egress screen.** Every message sent to the model is screened before sending: the task prompt, every tool result and every file excerpt.
-   - It uses the same credential patterns as llmtool. Matching content is replaced by a fixed placeholder, never sent.
-   - This keeps the company rule that content is screened before it leaves (`skills/company-llm-delegation/SKILL.md`). The rule is enforced inside the gateway rather than by llmtool packing the context.
-   - **OPINION:** the screen applies to egress, not to the model's own edits. Security-test fixtures in the repo therefore no longer block whole tasks, the problem that blocked AGY and gw on 2026-11-02. The fixture lines are redacted from what the model sees.
+   - **Confinement must be race-safe.**
+     - Open the workdir once as a directory descriptor and walk every path component with `openat`-style `O_NOFOLLOW` opens relative to that descriptor.
+     - Refuse symlinks, `..`, absolute paths, `.git/`, special files, hard-linked files (`st_nlink > 1`) and anything outside the declared read/write sets.
+     - Write through a temp file plus `renameat` in the same directory descriptor, and re-verify identity after the write.
+     - Before the tool may be called "confined", adversarial tests are required for traversal, symlink swaps between check and use, parent-directory replacement, hard links, FIFOs and out-of-scope writes.
+3. **Egress authorization first, then screening.**
+   - **Authorization.** Each run needs an existing per-task data-permission basis, the `egress_basis` from llmtool. The read scope must be the minimum needed: only listed files, never the whole repository (`skills/company-llm-delegation/SKILL.md:30-43`).
+   - **Screening supplements authorization and never replaces it.** Before each send, the gateway screens every outgoing message: the task prompt, each tool result and each file excerpt. Credential-pattern matches are replaced by a fixed placeholder. Other content outside the authorized data class is discarded with a refusal code.
+   - Redacting a fixture line does not make arbitrary repository content sendable. It only stops known secret shapes in files that are already authorized from leaving.
+   - **OPINION:** this placement lets a task whose authorized files contain synthetic credential fixtures run with those lines redacted, instead of being refused entirely, as happened to AGY and gw on 2026-11-02. Whether that is acceptable is a company data-policy decision for the Owner.
 4. **Budgets.** Maximum turns, total input/output tokens, wall time, bytes per tool result and total bytes sent. Exceeding any budget ends the run with a distinct code. There is no automatic retry or fallback model.
-5. **Audit log.** An append-only JSONL file outside the workdir. Each turn records:
-   - turn number, tool name, path, byte counts and SHA-256 of what was sent;
-   - redaction counts and the served model;
-   - usage, or UNKNOWN when the API omits it.
-
-   It never stores raw file contents or secrets.
+5. **Audit log.** A JSONL file outside the workdir.
+   - **Creation:** created with `O_CREAT|O_EXCL|O_NOFOLLOW`, mode 0600.
+   - **Header record:** binds `run_id`, `task_id`, `source_sha`, the workdir identity, profile, budgets and the SHA-256 of `task.json`.
+   - **Each turn records:**
+     - turn number and tool name;
+     - path digest (not the raw path, when the path itself is sensitive);
+     - byte counts, the SHA-256 of what was sent, and redaction counts;
+     - the served model, and usage or UNKNOWN when the API omits it;
+     - `prev_sha256`, chaining it to the previous record.
+   - It never stores raw prompts, tool arguments, file contents, model text or secrets.
+   - `audit_sha256` in the result is the digest of the final record of the chain.
+   - **OPINION:** this detects tampering only after the fact by the same UID. It is not protection against that UID.
 
 ## 5. Interface contract with llmtool
 
@@ -105,7 +121,11 @@ gw-agent run --workdir <D6 root> --profile <name> --task-file <task.json> \
 **New attack surface:**
 - The tool executor's path handling.
 - The JSON action parser in `text-tools` mode.
-- Prompt injection from repository content (mitigation: tools are capability-limited, so injected instructions can only read or edit inside the allowed paths).
+- Prompt injection from repository content. Capability limits do not stop an injected instruction from making the model read, and so send, any file inside the allowed read scope, or from making damaging edits inside the write paths. Mitigations:
+  - least-privilege read scopes per task;
+  - edit validation after the run: llmtool's write-scope check, the diff size cap and tests;
+  - formal review of every diff;
+  - adversarial tests with malicious repository content that tries to exfiltrate data or make unauthorized changes.
 
 **Required gates:**
 - Formal Security review of the gateway and of the llmtool route.
@@ -116,7 +136,7 @@ gw-agent run --workdir <D6 root> --profile <name> --task-file <task.json> \
 
 | Phase | Deliverable | Gate |
 |---|---|---|
-| 0 | Live probes on the Mac with VPN, on synthetic code in a scratch directory (never a repo D6): multi-turn native tool calls (about 10 turns, 3+ tools, `tool_choice` auto and required); `tool_call_id` round-trip; tool calls while streaming; thinking plus tools within a 16K output budget; the `text-tools` fallback on the same scenarios | Probe report; decides the default adapter |
+| 0 | Live probes, only after the gates required by `skills/company-llm-delegation/SKILL.md:64-69,130-145,211-213`: an existing data-permission basis; the Owner's own grant record for the probe (the C1B/Phase 0 rules: Owner-only grant, non-author verification of the per-invocation evidence afterwards); the `validate-runtime` gate; and the VPN step. Synthetic code in a scratch directory only, never a repo D6: multi-turn native tool calls (about 10 turns, 3+ tools, `tool_choice` auto and required); `tool_call_id` round-trip; tool calls while streaming; thinking plus tools within a 16K output budget; the `text-tools` fallback on the same scenarios | Probe report; decides the default adapter |
 | 1 | `tools/api-agent-gateway/` MVP: one adapter, the five tools, path policy, egress screen, budgets, audit log, CLI contract, offline tests with a fake model server | Cross-family review + Security review + CI |
 | 2 | Quality check: replay `tools/llmtool/eval/gw_ladder` L1–L6 in agent mode, compared with the proposal-mode baseline | Report with numbers |
 | 3 | llmtool `api-agent` route plus `worker-dispatch.json` key plus the AGENTS/SKILL update | Owner decision + Security review + CI |
@@ -135,6 +155,7 @@ gw-agent run --workdir <D6 root> --profile <name> --task-file <task.json> \
 ## 9. Recommendation
 
 **OPINION.**
-- Approve phase 0 now; it needs only the Owner's VPN session. Then build phase 1 as a standalone tool.
+- Approve the direction and phase 1 (offline MVP with a fake model server), which needs no live call.
+- Phase 0 live probes need the Owner's own grant record, the data-permission basis, VPN and non-author verification, as listed in section 7.
 - Optionally run the interim proposal-mode fix in parallel.
 - Keep llmtool's integration (phase 3) a separate decision after phases 0–2 produce evidence.
