@@ -854,6 +854,7 @@ class TaskStoreTests(unittest.TestCase):
     def test_get_keeps_record_descriptor_open_for_path_stat(self):
         value = record()
         self.store.create(value)
+        expected = self.store.get(value['task_id'])
         name = value['task_id'] + '.json'
         original_open, original_stat, original_fstat = os.open, os.stat, os.fstat
         record_fds = []
@@ -874,7 +875,7 @@ class TaskStoreTests(unittest.TestCase):
 
         with patch.object(task_store_module.os, 'open', side_effect=remember_open), \
                 patch.object(task_store_module.os, 'stat', side_effect=check_open_during_stat):
-            self.assertEqual(self.store.get(value['task_id']), value)
+            self.assertEqual(self.store.get(value['task_id']), expected)
 
         self.assertEqual(checked, [True])
         with self.assertRaises(OSError):
@@ -886,20 +887,17 @@ class TaskStoreTests(unittest.TestCase):
         other_store = TaskStore(self.root)
         name = value['task_id'] + '.json'
         original_stat = os.stat
-        updating = [False]
+        injected = [False]
         updates = []
 
         def replace_twice_before_path_stat(path, *args, **kwargs):
-            if path == name and not updating[0]:
-                updating[0] = True
-                try:
-                    updates.append(other_store.update(
-                        value['task_id'], state='PM_UNAVAILABLE',
-                        error_code='PROVIDER_TIMEOUT'))
-                    updates.append(other_store.update(
-                        value['task_id'], error_code='PROVIDER_TIMEOUT'))
-                finally:
-                    updating[0] = False
+            if path == name and not injected[0]:
+                injected[0] = True
+                updates.append(other_store.update(
+                    value['task_id'], state='PM_UNAVAILABLE',
+                    error_code='PROVIDER_TIMEOUT'))
+                updates.append(other_store.update(
+                    value['task_id'], error_code='PROVIDER_TIMEOUT'))
             return original_stat(path, *args, **kwargs)
 
         with patch.object(task_store_module.os, 'stat',
