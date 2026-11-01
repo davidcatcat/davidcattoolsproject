@@ -83,7 +83,15 @@ jobs:
           mode=full
           verify=true
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            selection_started=$SECONDS
             paths="$RUNNER_TEMP/changed-paths"
+            report_full_fallback() {
+              fallback_reason="$1"
+              printf 'selection exact HEAD: %s\nselection changed paths:\n' "$EXPECTED_SHA"
+              git diff --no-ext-diff --no-renames --name-only "$BASE_SHA" "$EXPECTED_SHA" --
+              printf 'selection level: L3\nselection modules: FULL\nselection module count: full-suite\nselection reason: selector_failure_requires_full\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' \
+                "$fallback_reason" "$((SECONDS - selection_started))"
+            }
             if git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"; then
               count=0
               mode=monitor-only
@@ -102,16 +110,33 @@ jobs:
                 mode=full
               fi
               if [ "$mode" = mac-subset ]; then
-                selection=$(python3 -I -B tools/llmtool/scripts/ci_mac_modules.py --changed-paths "$paths") || mode=full
+                selection=$(python3 -I -B tools/llmtool/scripts/ci_mac_modules.py --changed-paths "$paths" --json-report) || {
+                  report_full_fallback selector_execution_failed
+                  mode=full
+                }
                 if [ "$mode" = mac-subset ]; then
-                  if [ "$selection" = FULL ]; then
-                    mode=full
-                  elif [ "$selection" = NONE ]; then
-                    mode=docs-only
-                  elif [ -z "$selection" ]; then
+                  if ! printf '%s' "$selection" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null; then
+                    report_full_fallback selector_report_invalid
                     mode=full
                   else
-                    printf '%s\n' "$selection" > "$RUNNER_TEMP/mac-modules"
+                    if ! printf '%s\n' "$selection" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["level"] in ("L0", "L1", "L2", "L3"); assert isinstance(r["changed_paths"], list); assert isinstance(r["modules"], list) and all(isinstance(m, str) and m for m in r["modules"]); assert isinstance(r["selection_reason"], str); assert isinstance(r["fallback_reasons"], list); assert (type(r["module_count"]) is int and r["module_count"] >= 0) or r["module_count"] == "full-suite"; print("\n".join(r["modules"]))' > "$RUNNER_TEMP/mac-modules"; then
+                      report_full_fallback selector_report_invalid
+                      mode=full
+                    fi
+                  fi
+                  if [ "$mode" = mac-subset ]; then
+                    level=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["level"])')
+                    count=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["module_count"])')
+                    reason=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["selection_reason"])')
+                    fallback=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["fallback_reasons"]) or "none")')
+                    printf 'selection exact HEAD: %s\nselection changed paths:\n' "$EXPECTED_SHA"
+                    git diff --no-ext-diff --no-renames --name-only "$BASE_SHA" "$EXPECTED_SHA" --
+                    printf 'selection level: %s\nselection modules: %s\nselection module count: %s\nselection reason: %s\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' "$level" "$(tr '\n' ' ' < "$RUNNER_TEMP/mac-modules")" "$count" "$reason" "$fallback" "$((SECONDS - selection_started))"
+                    if [ "$level" = L3 ]; then
+                      mode=full
+                    elif [ "$count" -eq 0 ]; then
+                      mode=docs-only
+                    fi
                   fi
                 fi
               fi
@@ -251,13 +276,35 @@ jobs:
       - name: Offline canonical checks
         if: steps.full-due.outputs.run != 'false' && steps.coverage.outputs.mode != 'monitor-only' && steps.coverage.outputs.mode != 'docs-only'
         run: |
+          started=$SECONDS
+          result=PASS
+          test_count=0
+          report_result() { status=$?; if [ "$status" -ne 0 ]; then result=FAIL; fi; printf 'canonical exact HEAD: %s\ncanonical unittest test-case count: %s\ncanonical elapsed seconds: %s\ncanonical result: %s\n' "$(git rev-parse HEAD)" "$test_count" "$((SECONDS - started))" "$result"; return "$status"; }
+          collect_count() { observed=$(awk '/^Ran [0-9]+ tests?/ { total += $2 } END { print total + 0 }' "$1"); test_count=$((test_count + observed)); }
+          trap report_result EXIT
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
             make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
             while IFS= read -r module; do
-              "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module.py" -v < /dev/null
+              output="$RUNNER_TEMP/mac-test-output"
+              if "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module.py" -v < /dev/null > "$output" 2>&1; then
+                status=0
+              else
+                status=$?
+              fi
+              cat "$output"
+              collect_count "$output"
+              test "$status" -eq 0 || exit "$status"
             done < "$RUNNER_TEMP/mac-modules"
           else
-            make -C tools/llmtool check PYTHON="$JOB_PYTHON"
+            output="$RUNNER_TEMP/mac-test-output"
+            if make -C tools/llmtool check PYTHON="$JOB_PYTHON" > "$output" 2>&1; then
+              status=0
+            else
+              status=$?
+            fi
+            cat "$output"
+            collect_count "$output"
+            test "$status" -eq 0 || exit "$status"
           fi
       - name: Monitor script checks
         if: steps.full-due.outputs.run != 'false'
