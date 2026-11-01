@@ -712,6 +712,8 @@ def run_task_brief(args, *, store=None, stdout=None):
     from .task_status import task_status
     try:
         limit = args.limit
+        # Validate the user-facing limit before opening or scanning the store.
+        task_brief({}, limit=limit)
         result = task_status(pm_session=args.pm_session, limit=200, store=store)
         brief = task_brief(result, limit=limit)
     except ValueError as exc:

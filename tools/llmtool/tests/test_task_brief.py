@@ -1,12 +1,16 @@
 import argparse
 import io
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from llmtool.task_brief import format_task_brief, task_brief
 from llmtool.task_submission_cli import add_task_submission_parsers, run_task_brief
 from llmtool.cli import main
+from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore
 
 
 def row(task_id, state, **extra):
@@ -29,9 +33,21 @@ class TaskBriefTests(unittest.TestCase):
         result = task_brief({'tasks': [row('b', 'RUNNING'), row('a', 'FAILED')],
                              'unreadable': 3}, limit=1)
         self.assertEqual(result['counts'], {
-            'attention': 1, 'running': 1, 'terminal': 0, 'unreadable': 3})
+            'RUNNING': 1, 'BLOCKED': 0, 'UNAVAILABLE': 0, 'FAILED': 1,
+            'COMPLETED': 0, 'ABANDONED': 0, 'UNKNOWN': 0, 'unreadable': 3})
         self.assertTrue(result['partial'])
         self.assertEqual([item['task_id'] for item in result['tasks']], ['a'])
+        self.assertEqual(result['view'], {'scanned': 2, 'selected': 1, 'truncated': 1})
+
+    def test_counts_each_status_and_unreadable(self):
+        states = ('RUNNING', 'BLOCKED', 'UNAVAILABLE', 'FAILED', 'COMPLETED',
+                  'ABANDONED', 'UNKNOWN')
+        result = task_brief({'tasks': [row(str(index), state)
+                                       for index, state in enumerate(states)],
+                             'unreadable': 4})
+        self.assertEqual({state: result['counts'][state] for state in states},
+                         {state: 1 for state in states})
+        self.assertEqual(result['counts']['unreadable'], 4)
 
     def test_missing_values_are_unknown_and_projection_omits_other_fields(self):
         result = task_brief({'tasks': [{
@@ -42,11 +58,25 @@ class TaskBriefTests(unittest.TestCase):
         self.assertEqual(result['tasks'], [{
             'task_id': 'UNKNOWN', 'state': 'UNKNOWN',
             'state_label': 'derived from persisted Task status',
+            'last_event': {'state': 'UNKNOWN'},
+            'review_claim_state': 'UNKNOWN',
+            'review_claim_label': 'stored claim state; not a formal verdict',
+            'pending_inbox_count': 'UNKNOWN',
         }])
         rendered = format_task_brief(result, as_json=True)
         for secret in ('private request', 'private response', 'secret prompt',
                        '/private/path', 'private log', 'REVIEW_PASS'):
             self.assertNotIn(secret, rendered)
+
+    def test_summary_fields_are_projected_and_claim_is_labeled(self):
+        result = task_brief({'tasks': [row(
+            't1', 'COMPLETED', last_event={'state': 'CLOSED'},
+            review_claim_state='REVIEW_PASS', pending_inbox_count=2)], 'unreadable': 0})
+        item = result['tasks'][0]
+        self.assertEqual(item['last_event']['state'], 'CLOSED')
+        self.assertEqual(item['review_claim_state'], 'REVIEW_PASS')
+        self.assertIn('not a formal verdict', item['review_claim_label'])
+        self.assertEqual(item['pending_inbox_count'], 2)
 
     def test_empty_human_output(self):
         result = task_brief({'tasks': [], 'unreadable': 0})
@@ -89,6 +119,56 @@ class TaskBriefTests(unittest.TestCase):
         result = json.loads(output.getvalue())
         self.assertTrue(result['partial'])
         self.assertEqual(result['tasks'][0]['task_id'], 'blocked')
+
+    def test_cli_rejects_invalid_limit_before_status_call(self):
+        parser = argparse.ArgumentParser()
+        root = parser.add_subparsers(dest='command', required=True)
+        task = root.add_parser('task')
+        actions = task.add_subparsers(dest='action', required=True)
+        add_task_submission_parsers(actions)
+        for limit in ('0', '201'):
+            args = parser.parse_args(['task', 'brief', '--limit', limit])
+            with self.subTest(limit=limit), patch(
+                    'llmtool.task_status.task_status') as status:
+                with self.assertRaises(LLMToolError):
+                    run_task_brief(args, stdout=io.StringIO())
+                status.assert_not_called()
+
+    def test_cli_rejects_invalid_pm_session(self):
+        parser = argparse.ArgumentParser()
+        root = parser.add_subparsers(dest='command', required=True)
+        task = root.add_parser('task')
+        actions = task.add_subparsers(dest='action', required=True)
+        add_task_submission_parsers(actions)
+        args = parser.parse_args(['task', 'brief', '--pm-session', 'invalid'])
+        with tempfile.TemporaryDirectory() as root:
+            store = TaskStore(Path(root) / 'tasks')
+            with self.assertRaises(LLMToolError):
+                run_task_brief(args, store=store, stdout=io.StringIO())
+
+    def test_corrupt_record_is_reported_without_changing_records_or_inbox(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = TaskStore(Path(root) / 'tasks')
+            task_id = 'a' * 32
+            record_path = store.root / f'{task_id}.json'
+            record_path.write_text('{broken', encoding='utf-8')
+            inbox_path = store.root / 'inbox'
+            inbox_path.mkdir()
+            inbox_file = inbox_path / 'pending.json'
+            inbox_file.write_text('{"pending":true}', encoding='utf-8')
+            before_record = record_path.read_bytes()
+            before_inbox = inbox_file.read_bytes()
+            parser = argparse.ArgumentParser()
+            root_parser = parser.add_subparsers(dest='command', required=True)
+            task = root_parser.add_parser('task')
+            actions = task.add_subparsers(dest='action', required=True)
+            add_task_submission_parsers(actions)
+            args = parser.parse_args(['task', 'brief', '--json'])
+            output = io.StringIO()
+            self.assertEqual(run_task_brief(args, store=store, stdout=output), 0)
+            self.assertEqual(json.loads(output.getvalue())['counts']['unreadable'], 1)
+            self.assertEqual(record_path.read_bytes(), before_record)
+            self.assertEqual(inbox_file.read_bytes(), before_inbox)
 
 
 if __name__ == '__main__':
