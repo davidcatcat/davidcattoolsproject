@@ -1869,7 +1869,7 @@ class TaskStore:
                     stream.seek(0)
                     repeated = stream.read(MAX_RECORD_BYTES + 1)
                     after = os.fstat(stream.fileno())
-                current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+                    current = os.stat(name, dir_fd=directory, follow_symlinks=False)
                 if (len(raw) > MAX_RECORD_BYTES or raw != repeated or
                         _identity(before) != _identity(after)):
                     _fail()
