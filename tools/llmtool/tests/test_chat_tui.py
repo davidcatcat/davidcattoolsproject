@@ -549,6 +549,8 @@ class WidgetTests(Base):
                                   '/pm queue', '/task submit', '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
+        history = [c[0] for c in chat_tui.slash_matches('/history')]
+        self.assertLess(history.index('/history'), history.index('/pm history'))
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
         self.assertEqual(chat_tui.slash_matches('/nope'), [])
@@ -723,7 +725,7 @@ class WidgetTests(Base):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
-            self.assertIn('/status', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('/provider', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('15 more (2 above, 13 below)', rows[-1])
 
         def wrapped(ui):
@@ -732,8 +734,8 @@ class WidgetTests(Base):
             self.assertIn('/task events', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('(15 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
-                            lambda ui: self.assertEqual(ui.input.text, '/status'),
-                            '\x7f' * 7, '/', '\x1b[A', wrapped],
+                            lambda ui: self.assertEqual(ui.input.text, '/provider '),
+                            '\x7f' * 10, '/', '\x1b[A', wrapped],
                            size=[Size(rows=24, columns=80)])
         self.assertTrue(ui.session.active)
         self.factory.assert_not_called()
@@ -1413,7 +1415,7 @@ class TaskModeTests(Base):
     def test_task_submit_shows_core_receipt_and_opens_core_detail(self):
         request = '請新增測試\n第二行：多行需求'
         ui, _ = self.drive(['/task mode profile first\r', '\x1b[200~' + request + '\x1b[201~', '\r',
-                            self.idle, '/status\r'])
+                            self.idle])
         records = self.store_records()
         self.assertEqual(len(records), 1)
         record = records[0]
@@ -1425,7 +1427,7 @@ class TaskModeTests(Base):
         self.assertIn('Task ID: ' + record['task_id'], text)
         self.assertIn('Run ID: ' + record['run_id'], text)
         self.assertIn('PM session: ' + record['pm_session_id'] + ' (backend NO_NATIVE_SESSION_ID_EXPOSED)', text)
-        self.assertIn('不是 PM', self.status(ui))
+        self.assertIn('不是 PM', ui.status_report())
         self.assertIn('Dispatch: 已建立／待派工', text)
         self.assertNotIn('development is running', text.lower())
         self.assertTrue(ui.show_detail)
@@ -1628,6 +1630,18 @@ class W57ChatTests(Base):
         ui._set_menu(chat_tui.slash_matches('/', dev=True))
         self.assertTrue(any('/task' in row for row in ui.picker_entries()))
 
+    def test_idle_hint_drops_before_copy_selection_and_scroll_feedback(self):
+        ui, _ = self.drive([])
+        ui.app.output.get_size = lambda: Size(rows=24, columns=55)
+        ui.view.anchor, ui.view.head = 0, 1
+        self.assertIn('已選', ui.status_text())
+        self.assertNotIn('輸入訊息', ui.status_text())
+        ui.view.clear_selection()
+        ui.view.following = False
+        self.assertIn('捲動', ui.status_text())
+        ui.view.copied = (3, time.monotonic())
+        self.assertIn('已複製', ui.status_text())
+
     def test_version_lookup_is_not_started_by_construction(self):
         with create_pipe_input() as pipe, \
                 patch('llmtool.chat_tui_theme.version_line') as version_line:
@@ -1643,7 +1657,17 @@ class W57ChatTests(Base):
             return 'LLMTool 0.1.0 · abc1234（2026-10-30）'
 
         async def append_before_lookup_finishes(ui):
+            tail = len(ui.conversation.text) + 1
             ui.conversation.set_text(ui.conversation.text + '\n使用者訊息：保留這段')
+            ui.view._add_segments(tail, [('使用者訊息：保留這段', 'md.bold')])
+            ui.view.sources.append(chat_tui_view.SourceRegion(
+                tail, len(ui.conversation.text), '使用者訊息：保留這段', 80, ''))
+            ui.view.following = False
+            ui.view.top_offset = tail + 3
+            ui.view.anchor, ui.view.head = tail + 2, tail + 8
+            ui.pm_block_start, ui.pm_working_at = tail + 1, tail + 2
+            ui.stream_head, ui.stream_start = tail + 3, tail + 4
+            ui.pm_tool_block = [tail + 5, tail + 10, [], 0, 'tools']
             release_lookup.set()
             await WidgetTests.until(ui, lambda current: current.version_line.startswith(
                 'LLMTool 0.1.0 ·'), 'version lookup')
@@ -1652,6 +1676,17 @@ class W57ChatTests(Base):
             ui, _ = self.drive([append_before_lookup_finishes])
         self.assertIn('LLMTool 0.1.0 · abc1234（2026-10-30）', ui.conversation.text)
         self.assertIn('使用者訊息：保留這段', ui.conversation.text)
+        new_banner = 'LLMTool 0.1.0 · abc1234（2026-10-30）'
+        tail = len(new_banner) + 1
+        self.assertFalse(ui.view.following)
+        self.assertEqual(ui.view.top_offset, tail + 3)
+        self.assertEqual((ui.view.anchor, ui.view.head), (tail + 2, tail + 8))
+        self.assertIn((tail, len(ui.conversation.text), 'md.bold'), ui.view.spans)
+        self.assertEqual((ui.view.sources[0].start, ui.view.sources[0].end),
+                         (tail, len(ui.conversation.text)))
+        self.assertEqual((ui.pm_block_start, ui.pm_working_at, ui.stream_head, ui.stream_start),
+                         (tail + 1, tail + 2, tail + 3, tail + 4))
+        self.assertEqual(ui.pm_tool_block[:2], [tail + 5, tail + 10])
 
     def test_version_display_reports_git_failure_as_unknown_with_reason(self):
         failed = Mock(returncode=1, stdout='', stderr='')

@@ -269,7 +269,8 @@ def slash_matches(text, dev=True):
     prefix = [c for c in commands if c[0].startswith(query)]
     inside = [c for c in commands if c not in prefix and len(query) > 2 and query[1:] in c[0]]
     order = {"PM": 0, "對話": 1, "設定": 2, "說明": 3, "開發測試": 4}
-    return sorted(prefix + inside, key=lambda command: order[_command_group(command[0])])
+    return (sorted(prefix, key=lambda command: order[_command_group(command[0])])
+            + sorted(inside, key=lambda command: order[_command_group(command[0])]))
 
 
 def history_matches(entries, query):
@@ -973,9 +974,10 @@ class ChatTUI:
             fields.update(self.pm_status_fields(compact))
             shown = ["mode", "session", "state", "keys", "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
+        reading_feedback = self.view.status() != "最新"
         drop_order = (PM_STATUS_DROP_ORDER if self.pm_mode else
-                      IDLE_HINT_DROP_ORDER if fields.get("hint") and state == "idle" else
-                      STATUS_DROP_ORDER)
+                      IDLE_HINT_DROP_ORDER if fields.get("hint") and state == "idle"
+                      and not reading_feedback else STATUS_DROP_ORDER)
         for name in drop_order:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
@@ -1096,7 +1098,18 @@ class ChatTUI:
         self.version_line = line
         text = self.conversation.text
         if text.startswith(old_line + "\n"):
-            self.conversation.set_text(line + text[len(old_line):])
+            end = len(old_line)
+            delta = len(line) - end
+            self.conversation.replace(0, end, [(line, "text")])
+
+            for name in ("pm_block_start", "pm_working_at", "stream_head", "stream_start"):
+                offset = getattr(self, name)
+                if offset is not None and offset >= end:
+                    setattr(self, name, offset + delta)
+            if self.pm_tool_block is not None:
+                for index in (0, 1):
+                    if self.pm_tool_block[index] >= end:
+                        self.pm_tool_block[index] += delta
         self.app.invalidate()
 
     def status_report(self):

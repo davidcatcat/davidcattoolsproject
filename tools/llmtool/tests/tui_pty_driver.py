@@ -299,6 +299,7 @@ class Terminal:
             fcntl.ioctl(0, termios.TIOCSWINSZ, struct.pack("HHHH", rows, columns, 0, 0))
             environment = os.environ.copy()
             environment.pop("TERM_PROGRAM", None)
+            environment.pop("NO_COLOR", None)
             environment.update({
                 "HOME": str(self.root),
                 "CLAUDE_CONFIG_DIR": str(self.root / "claude-config"),

@@ -380,7 +380,10 @@ class DisplayCommandTests(Base):
     def drive(self, steps, environ=None):
         output = DummyOutput()
         output.get_size = lambda: Size(rows=24, columns=100)
-        with patch.dict(os.environ, environ or {}), create_pipe_input() as pipe:
+        test_environ = os.environ.copy()
+        test_environ.pop("NO_COLOR", None)
+        test_environ.update(environ or {})
+        with patch.dict(os.environ, test_environ, clear=True), create_pipe_input() as pipe:
             ui = chat_tui.ChatTUI(self.session, input=pipe, output=output)
             self.ui = ui
 

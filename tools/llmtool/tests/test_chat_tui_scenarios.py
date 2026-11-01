@@ -220,6 +220,11 @@ class TUIUserScenarioTests(TUIScenarioCase):
         terminal.send("pm")
         picker = terminal.wait_text("【PM】", "PM picker group")
         terminal.send("\x1b")
+        terminal.send("/")
+        terminal.send("\x1b[B" * 6)
+        picker = terminal.wait_text("/provider", "conversation picker entry")
+        self.assertIn("【對話】", "\n".join(picker))
+        terminal.send("\x1b")
 
     def test_s01_long_chinese_markdown_answer(self):
         """[Mac PTY (fake provider)] S1 long Chinese answer with Markdown wraps and loses no text"""
