@@ -35,8 +35,20 @@ def doctor_output():
              'persist_metadata=' + str(settings.persist_metadata).lower()]
     lines.extend(key + '=' + str(getattr(settings, key)) for key in
                  ('max_runs', 'max_total_bytes', 'max_age_days', 'max_run_bytes'))
-    lines.append('provider_type=' + kind + ' readiness=' + view['readiness'] +
-                 ' executable=' + executable + ' credential=' + view['credential'])
+    readiness = view['readiness']
+    credential = view['credential']
+    credential_required = (kind == 'openai' or
+                           (kind == 'openai-compatible' and
+                            (credential != 'not-configured' or readiness != 'ready')))
+    if kind in ('claude-cli', 'codex-cli'):
+        credential = 'not-applicable'
+    credential_ready = (not credential_required or
+                        credential not in ('not-configured', 'env-configured-absent'))
+    overall = ('ready' if readiness == 'ready' and executable != 'missing' and
+               credential_ready else 'not-ready')
+    lines.append('provider_type=' + kind + ' readiness=' + readiness +
+                 ' executable=' + executable + ' credential=' + credential)
+    lines.append('overall=' + overall)
     lines.append('store=' + store['state'] + ' run_count=' + str(store['run_count']) +
                  ' active_count=' + str(store['active_count']) +
                  ' unknown_count=' + str(store['unknown_count']))
@@ -45,16 +57,16 @@ def doctor_output():
     lines.append('Damaged diagnostics metadata reported; nothing repaired, '
                  'displayed or traced.' if degraded else
                  'Metadata validated read-only; trace evidence and write access unverified.')
-    return '\n'.join(lines) + '\n', degraded
+    return '\n'.join(lines) + '\n', degraded, overall
 
 
-def run_doctor():
+def run_doctor(strict=False):
     try:
-        output, degraded = doctor_output()
+        output, degraded, overall = doctor_output()
         sys.stdout.write(output)
         sys.stdout.flush()
         # A damaged-metadata finding is a real nonzero result, never a silent pass.
-        return 1 if degraded else 0
+        return 1 if degraded or (strict and overall == 'not-ready') else 0
     except ReaderError as exc:
         print(exc.line(), file=sys.stderr)
         return 1

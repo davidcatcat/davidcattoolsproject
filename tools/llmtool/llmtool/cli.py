@@ -160,6 +160,8 @@ def parser_for_cli():
     add_orchestration_parser(sub)
     add_retrieval_parser(sub)
     add_diagnostics_parser(sub)
+    sub.choices['doctor'].add_argument('--strict', action='store_true',
+                                      help='exit 1 when overall readiness is not ready')
     add_action_contract_parsers(sub)
     add_task_parser(sub)
     task_actions = sub.choices['task']._subparsers._group_actions[0]
@@ -549,7 +551,7 @@ def main(argv=None):
             return _run_ask(args)
         if args.command == 'doctor':
             from .doctor import run_doctor
-            return run_doctor()
+            return run_doctor(strict=args.strict)
         if args.command in ('runs', 'trace'):
             return run_diagnostics(args)
         if args.command == "retrieve-context":
