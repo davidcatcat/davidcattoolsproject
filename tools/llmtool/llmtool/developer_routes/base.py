@@ -238,17 +238,14 @@ def capture_snapshot(root):
         root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
         limit=4096).decode().strip())
     refs_raw = task_completion._git(
-        root, ('for-each-ref', '--format=%(refname) %(objectname)'), limit=1024 * 1024)
+        root, ('for-each-ref',
+              '--format=%(refname) %(objectname) %(*objectname) %(objecttype)'),
+        limit=1024 * 1024)
     refs = {}
     for line in refs_raw.decode().splitlines():
-        name, object_id = line.split(' ', 1)
-        refs[name] = object_id
-    # Keep an object inventory so newly-created tag and notes objects are
-    # distinguishable from refs moved to objects that already existed.
-    objects_raw = task_completion._git(
-        root, ('cat-file', '--batch-all-objects', '--batch-check=%(objectname)'),
-        limit=1024 * 1024)
-    objects = frozenset(objects_raw.decode().splitlines())
+        name, object_id, peeled_id, object_type = line.split(' ', 3)
+        commit_id = peeled_id or (object_id if object_type == 'commit' else '')
+        refs[name] = (object_id, commit_id)
     head = task_completion._git(root, ('rev-parse', '--verify', 'HEAD'), limit=4096).decode().strip()
     head_commits = frozenset(task_completion._git(
         root, ('rev-list', '--topo-order', 'HEAD'), limit=1024 * 1024).decode().splitlines())
@@ -268,7 +265,6 @@ def capture_snapshot(root):
         'stash': task_completion._git(root, ('for-each-ref', '--format=%(objectname)',
                                              'refs/stash'), limit=4096).strip(),
         'refs': refs,
-        'objects': objects,
         'head_commits': head_commits,
         'config_worktree': file_digest(git_dir / 'config.worktree'),
         'config_common': file_digest(common_dir / 'config'),
@@ -320,15 +316,16 @@ def _git_state_changed(before, after):
         if a.get(key) != b.get(key):
             return True
     before_refs, after_refs = a.get('refs', {}), b.get('refs', {})
-    before_objects = a.get('objects', frozenset())
     before_head_commits = a.get('head_commits', frozenset())
-    after_head_commits = b.get('head_commits', frozenset())
-    d6_tip = {a.get('head'), a.get('branch_ref'), b.get('head'), b.get('branch_ref')}
-    for name, object_id in after_refs.items():
-        if before_refs.get(name) == object_id:
+    d6_new_commits = b.get('head_commits', frozenset()) - before_head_commits
+    for name in set(before_refs) | set(after_refs):
+        before_ref, after_ref = before_refs.get(name), after_refs.get(name)
+        if before_ref == after_ref:
             continue
-        if (object_id in d6_tip or object_id not in before_objects or
-                (object_id in after_head_commits and object_id not in before_head_commits)):
+        if name == 'refs/stash' or name.startswith('refs/notes/'):
+            return True
+        if after_ref and (after_ref[1] == b.get('head') or
+                          after_ref[1] in d6_new_commits):
             return True
     return False
 

@@ -217,6 +217,33 @@ class DeveloperRouteContractTests(unittest.TestCase):
                                        boundary=FakeBoundary(), snapshot=capture_snapshot)
                     self.assertEqual(result.changed_files, ('out.txt',))
 
+    def test_other_worktree_commit_and_branch_do_not_change_git_state(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            other = Path(temp) / 'other-worktree'
+            root.mkdir()
+            request = self._real_git_request(root)
+
+            def runner(*args):
+                subprocess.run(['/usr/bin/git', '-C', str(root), 'worktree', 'add',
+                                '--detach', str(other), request['expected_head']],
+                               check=True, stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL)
+                (other / 'external.txt').write_text('external commit\n')
+                subprocess.run(['/usr/bin/git', '-C', str(other), 'add', 'external.txt'],
+                               check=True)
+                subprocess.run(['/usr/bin/git', '-C', str(other), 'commit', '-m',
+                                'other worktree commit'], check=True,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                subprocess.run(['/usr/bin/git', '-C', str(other), 'branch',
+                                'other-worktree-tip'], check=True)
+                (root / 'out.txt').write_text('after\n')
+                return 0, b'output', b''
+
+            result = run_route(self.route, request, gate=lambda: True, runner=runner,
+                               boundary=FakeBoundary(), snapshot=capture_snapshot)
+            self.assertEqual(result.changed_files, ('out.txt',))
+
     def test_owned_git_state_changes_are_detected(self):
         for mutation in ('branch', 'commit', 'index', 'stash'):
             with self.subTest(mutation=mutation):
@@ -296,6 +323,25 @@ class DeveloperRouteContractTests(unittest.TestCase):
                 (root / 'out.txt').write_text('after\n')
                 subprocess.run(['/usr/bin/git', '-C', str(root), 'config', 'user.name',
                                 'Changed during D6'], check=True)
+                return 0, b'output', b''
+
+            with self.assertRaises(RouteError) as caught:
+                run_route(self.route, request, gate=lambda: True, runner=runner,
+                          boundary=FakeBoundary(), snapshot=capture_snapshot)
+            self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+
+    def test_worktree_git_config_changes_are_detected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            request = self._real_git_request(root)
+            subprocess.run(['/usr/bin/git', '-C', str(root), 'config',
+                            'extensions.worktreeConfig', 'true'], check=True)
+
+            def runner(*args):
+                (root / 'out.txt').write_text('after\n')
+                subprocess.run(['/usr/bin/git', '-C', str(root), 'config', '--worktree',
+                                'user.name', 'Changed during D6'], check=True)
                 return 0, b'output', b''
 
             with self.assertRaises(RouteError) as caught:
