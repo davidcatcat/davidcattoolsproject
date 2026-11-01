@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
@@ -138,6 +138,68 @@ class D6RetireTests(unittest.TestCase):
         self.assertIn("D6_RETIRE_DIRTY_TRACKED", line["reasons"])
         self.assertTrue((root / "tools" / "llmtool" / ".venv").is_dir())
         self.assertEqual(self._record("dirty-task")["state"], "ACTIVE")
+
+    def test_lsof_resolver_uses_first_safe_candidate(self):
+        real_lstat = os.lstat
+
+        def lstat(path):
+            if path == "/usr/sbin/lsof":
+                raise FileNotFoundError(path)
+            if path == "/usr/bin/lsof":
+                return Mock(st_mode=0o100755, st_uid=0)
+            return real_lstat(path)
+
+        with patch.object(os, "getuid", return_value=1000), \
+                patch.object(os, "lstat", side_effect=lstat):
+            self.assertEqual(lifecycle._resolve_lsof(), "/usr/bin/lsof")
+
+    def test_lsof_resolver_rejects_unsafe_candidates(self):
+        real_lstat = os.lstat
+        cases = (
+            Mock(st_mode=0o100775, st_uid=0),
+            Mock(st_mode=0o100755, st_uid=1234),
+            Mock(st_mode=0o120755, st_uid=0),
+        )
+        for first in cases:
+            def lstat(path, first=first):
+                if path == "/usr/sbin/lsof":
+                    return first
+                if path == "/usr/bin/lsof":
+                    raise FileNotFoundError(path)
+                return real_lstat(path)
+
+            with patch.object(os, "getuid", return_value=1000), \
+                    patch.object(os, "lstat", side_effect=lstat):
+                self.assertIsNone(lifecycle._resolve_lsof())
+
+    def test_lsof_unavailable_keeps_retire_liveness_unknown(self):
+        self._task("lsof-none")
+        real_lstat = os.lstat
+
+        def lstat(path):
+            if path in ("/usr/sbin/lsof", "/usr/bin/lsof"):
+                raise FileNotFoundError(path)
+            return real_lstat(path)
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(os, "getuid", return_value=1000), \
+                patch.object(os, "lstat", side_effect=lstat), \
+                contextlib.redirect_stdout(output):
+            self.assertIsNone(lifecycle._process_cwds())
+            ok = lifecycle.retire_worktrees(
+                canonical_root=self.source, task_ids=["lsof-none"], execute=True,
+                squash_evidence=None, discard_uncommitted=(),
+                unknown_evidence=None, workspace_root=self.tasks)
+        lines = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertEqual([line["task_id"] for line in lines], ["lsof-none"])
+        self.assertFalse(ok)
+        self.assertEqual(lines[0]["result"], "BLOCKED")
+        self.assertTrue(
+            lines[0].get("liveness") == "LIVENESS_UNKNOWN"
+            or any("LIVENESS_UNKNOWN" in reason
+                   for reason in lines[0].get("reasons", [])))
+        self.assertEqual(self._record("lsof-none")["state"], "ACTIVE")
 
     def _dirty_task(self, task_id):
         root, head = self._task(task_id)

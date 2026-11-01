@@ -803,7 +803,7 @@ CONTENT_REASONS = frozenset((
     "D6_RETIRE_RETENTION_PATH_UNAVAILABLE"))
 WORKTREE_GIT_LOCKS = ("index.lock", "HEAD.lock", "ORIG_HEAD.lock")
 COMMON_GIT_LOCKS = ("packed-refs.lock", "config.lock", "shallow.lock")
-LSOF = "/usr/sbin/lsof"
+LSOF_CANDIDATES = ("/usr/sbin/lsof", "/usr/bin/lsof")
 SHA40_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 
@@ -818,11 +818,37 @@ def _task_git(cwd, *args, check=True, timeout=GIT_TIMEOUT_SECONDS):
                     "-c", "gc.auto=0", *args, check=check, timeout=timeout)
 
 
+def _resolve_lsof():
+    """First fixed lsof path that is a safe regular file, or None."""
+    import os
+    import stat
+    try:
+        uid = os.getuid()
+    except AttributeError:
+        return None
+    for path in LSOF_CANDIDATES:
+        try:
+            st = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(st.st_mode):
+            continue
+        if st.st_uid not in (0, uid):
+            continue
+        if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+            continue
+        return path
+    return None
+
+
 def _process_cwds():
     """(pid, cwd) for every visible process, or None when lsof gives no answer."""
+    lsof = _resolve_lsof()
+    if lsof is None:
+        return None
     try:
         result = subprocess.run(
-            [LSOF, "-n", "-P", "-w", "-d", "cwd", "-Fpn"],
+            [lsof, "-n", "-P", "-w", "-d", "cwd", "-Fpn"],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, timeout=60, check=False)
     except (OSError, subprocess.TimeoutExpired):
