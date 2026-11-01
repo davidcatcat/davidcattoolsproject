@@ -227,16 +227,47 @@ def capture_snapshot(root):
                     files[rel] = ('unsupported', stat.S_IFMT(info.st_mode))
             except OSError:
                 files[rel] = ('unavailable',)
+    branch = task_completion._git(root, ('branch', '--show-current'), limit=4096).decode().strip()
+    branch_ref = (task_completion._git(
+        root, ('rev-parse', '--verify', f'refs/heads/{branch}'), limit=4096).decode().strip()
+                  if branch else '')
+    git_dir = Path(task_completion._git(
+        root, ('rev-parse', '--path-format=absolute', '--git-dir'),
+        limit=4096).decode().strip())
+    common_dir = Path(task_completion._git(
+        root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
+        limit=4096).decode().strip())
+    refs_raw = task_completion._git(
+        root, ('for-each-ref',
+              '--format=%(refname) %(objectname) %(*objectname) %(objecttype)'),
+        limit=1024 * 1024)
+    refs = {}
+    for line in refs_raw.decode().splitlines():
+        name, object_id, peeled_id, object_type = line.split(' ', 3)
+        commit_id = peeled_id or (object_id if object_type == 'commit' else '')
+        refs[name] = (object_id, commit_id)
+    head = task_completion._git(root, ('rev-parse', '--verify', 'HEAD'), limit=4096).decode().strip()
+    head_commits = frozenset(task_completion._git(
+        root, ('rev-list', '--topo-order', 'HEAD'), limit=1024 * 1024).decode().splitlines())
+
+    def file_digest(path):
+        try:
+            return hashlib.sha256(path.read_bytes()).hexdigest()
+        except FileNotFoundError:
+            return None
+
     git = {
-        'head': task_completion._git(root, ('rev-parse', '--verify', 'HEAD'), limit=4096).decode().strip(),
-        'branch': task_completion._git(root, ('branch', '--show-current'), limit=4096).decode().strip(),
-        'git_dir': task_completion._git(root, ('rev-parse', '--path-format=absolute', '--git-dir'),
-                                        limit=4096).decode().strip(),
-        'common_dir': task_completion._git(root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
-                                           limit=4096).decode().strip(),
+        'head': head,
+        'branch': branch,
+        'branch_ref': branch_ref,
+        'git_dir': str(git_dir),
         'index': task_completion._git(root, ('ls-files', '--stage', '-z'), limit=1024 * 1024),
-        'refs': task_completion._git(root, ('for-each-ref', '--format=%(refname) %(objectname)',
-                                            'refs'), limit=1024 * 1024),
+        'stash': task_completion._git(root, ('for-each-ref', '--format=%(objectname)',
+                                             'refs/stash'), limit=4096).strip(),
+        'refs': refs,
+        'head_commits': head_commits,
+        'config_worktree': file_digest(git_dir / 'config.worktree'),
+        'config_common': file_digest(common_dir / 'config'),
     }
     pointer = root / '.git'
     if pointer.is_symlink():
@@ -272,6 +303,31 @@ def _git_signature(snapshot):
         return json.dumps(git_state, sort_keys=True, default=lambda item: item.hex()
                           if isinstance(item, bytes) else str(item))
     return tuple(state.get(key) for key in ('root', 'common_dir', 'branch', 'head'))
+
+
+def _git_state_changed(before, after):
+    """Detect owned Git changes while tolerating unrelated shared refs."""
+    left, right = _snapshot_value(before), _snapshot_value(after)
+    a, b = left.get('git_state'), right.get('git_state')
+    if not isinstance(a, Mapping) or not isinstance(b, Mapping):
+        return _git_signature(before) != _git_signature(after)
+    for key in ('head', 'branch', 'branch_ref', 'git_dir', 'index', 'stash',
+                'pointer', 'config_worktree', 'config_common'):
+        if a.get(key) != b.get(key):
+            return True
+    before_refs, after_refs = a.get('refs', {}), b.get('refs', {})
+    before_head_commits = a.get('head_commits', frozenset())
+    d6_new_commits = b.get('head_commits', frozenset()) - before_head_commits
+    for name in set(before_refs) | set(after_refs):
+        before_ref, after_ref = before_refs.get(name), after_refs.get(name)
+        if before_ref == after_ref:
+            continue
+        if name == 'refs/stash' or name.startswith('refs/notes/'):
+            return True
+        if after_ref and (after_ref[1] == b.get('head') or
+                          after_ref[1] in d6_new_commits):
+            return True
+    return False
 
 
 def _git_status_paths(root):
@@ -423,7 +479,7 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     # Git identity/state changes must be classified before cleanliness so a
     # newly-created commit is not mislabeled as ordinary D6 dirtiness.
     if (_git_signature(before_git) != _git_signature(after_git) or
-            _git_signature(before) != _git_signature(after)):
+            _git_state_changed(before, after)):
         raise RouteError(_route_code(route, 'GIT_STATE_CHANGED'), facts={'changed_files': changed})
     allowed = set(value['write_paths'])
     try:

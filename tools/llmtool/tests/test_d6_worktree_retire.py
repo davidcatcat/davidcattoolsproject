@@ -7,6 +7,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,10 @@ from unittest.mock import Mock, patch
 SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 import d6_worktree_lifecycle as lifecycle  # noqa: E402
+
+OWNER_APPROVED_RETAIN_URL = (
+    "https://github.com/davidcatcat/davidcattoolsproject/issues/529"
+    "#issuecomment-1234567890")
 
 
 def _git(cwd, *args):
@@ -48,9 +53,9 @@ class D6RetireTests(unittest.TestCase):
         self.outside_file.write_text("keep\n", encoding="utf-8")
         self.cwds = [("1", "/")]
 
-    def _task(self, task_id, *, parent=None, publish=True):
+    def _task(self, task_id, *, parent=None, publish=True, reviewer=False):
         root = (parent or self.tasks) / task_id
-        branch = "task/" + task_id
+        branch = ("review/" if reviewer else "task/") + task_id
         _git(self.source, "worktree", "add", "-b", branch, str(root), self.base)
         os.chmod(root, 0o700)
         (root / "tools" / "llmtool" / "app.py").write_text("x = 2\n", encoding="utf-8")
@@ -58,6 +63,8 @@ class D6RetireTests(unittest.TestCase):
         head = _git(root, "rev-parse", "HEAD")
         if publish:
             _git(self.source, "update-ref", "refs/remotes/origin/main", head)
+            if reviewer:
+                _git(self.source, "update-ref", "refs/remotes/origin/" + branch, head)
         venv = root / "tools" / "llmtool" / ".venv"
         (venv / "lib").mkdir(parents=True)
         (venv / "lib" / "site.py").write_text("generated\n", encoding="utf-8")
@@ -65,12 +72,13 @@ class D6RetireTests(unittest.TestCase):
         (root / "tools" / "llmtool" / ".worktree-env.lock").write_text("ok\n", encoding="utf-8")
         info = root.lstat()
         record = {
-            "schema_version": 1, "task_id": task_id, "trusted_agent_id": "test",
+            "schema_version": 1, "task_id": task_id,
+            "trusted_agent_id": "codex-reviewer" if reviewer else "test",
             "session_ref": "s", "lease_ref": "l", "root_realpath": str(root),
             "physical_identity": {"device": info.st_dev, "inode": info.st_ino,
                                   "uid": info.st_uid, "mode": "0o700"},
             "git_common_dir": str(self.source / ".git"), "branch": branch,
-            "base_sha": self.base, "head_sha": self.base, "state": "ACTIVE",
+            "base_sha": self.base, "head_sha": head, "state": "ACTIVE",
             "last_verified_at": "2026-10-26T00:00:00Z", "evidence_refs": [],
             "retention_paths": ["tools/llmtool/.venv/", "tools/llmtool/.worktree-env.lock"],
             "lock_state": "LOCKED", "disposition": "ACTIVE_TASK",
@@ -88,7 +96,8 @@ class D6RetireTests(unittest.TestCase):
     def _record(self, task_id):
         return json.loads((self.registry / (task_id + ".json")).read_text())
 
-    def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None):
+    def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None,
+                reviewed_pr=None):
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
                 patch.object(lifecycle, "_process_cwds", side_effect=self._cwds), \
@@ -97,6 +106,7 @@ class D6RetireTests(unittest.TestCase):
                 canonical_root=self.source, task_ids=task_ids, execute=execute,
                 squash_evidence=squash, discard_uncommitted=discard,
                 unknown_evidence=evidence,
+                reviewed_pr_evidence=reviewed_pr,
                 workspace_root=self.tasks)
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([line["task_id"] for line in lines], task_ids)
@@ -116,6 +126,42 @@ class D6RetireTests(unittest.TestCase):
         self.assertEqual((record["state"], record["lock_state"], record["head_sha"]),
                          ("REMOVED", "UNLOCKED", head))
         self.assertIn("removed_at", record)
+
+    def test_closed_pr_reviewer_is_retired_with_bound_review_evidence(self):
+        root, head = self._task("review-clean", reviewer=True)
+        ok, (line,) = self._retire(
+            ["review-clean"], execute=True,
+            reviewed_pr={"review-clean": ("529", head)})
+        self.assertTrue(ok, line)
+        self.assertEqual(line["result"], "REMOVED")
+        self.assertEqual(line["publication"], "reviewed_pr_head")
+        self.assertEqual(line["reviewed_pr_number"], "529")
+        self.assertFalse(os.path.lexists(root))
+
+    def test_dirty_reviewer_is_refused_even_with_discard_authorization(self):
+        root, head = self._task("review-dirty", reviewer=True)
+        (root / "tools" / "llmtool" / "app.py").write_text("dirty\n", encoding="utf-8")
+        ok, (line,) = self._retire(
+            ["review-dirty"], execute=True, discard=["review-dirty"],
+            reviewed_pr={"review-dirty": ("530", head)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_DIRTY_TRACKED", line["reasons"])
+        self.assertTrue(root.is_dir())
+
+    def test_executor_cannot_use_reviewer_pr_evidence(self):
+        _root, head = self._task("executor-evidence")
+        ok, (line,) = self._retire(
+            ["executor-evidence"], reviewed_pr={"executor-evidence": ("531", head)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_REVIEW_EVIDENCE_NOT_APPLICABLE", line["reasons"])
+
+    def test_reviewer_pr_head_must_match_registry_and_worktree(self):
+        root, _head = self._task("review-mismatch", reviewer=True)
+        ok, (line,) = self._retire(
+            ["review-mismatch"], reviewed_pr={"review-mismatch": ("532", "0" * 40)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_REVIEW_HEAD_MISMATCH", line["reasons"])
+        self.assertTrue(root.is_dir())
 
     def test_dry_run_removes_nothing(self):
         root, _head = self._task("dry-task")
@@ -439,6 +485,128 @@ class D6RetireTests(unittest.TestCase):
         self.assertTrue(line["discarded_uncommitted"])
         self.assertFalse(line["registry_updated"])
         self.assertTrue(root.is_dir())
+
+    def _mark_retain_blocked(self, task_id):
+        record = self._record(task_id)
+        record["state"] = "RETAIN_BLOCKED"
+        lifecycle._replace_record(self.registry / (task_id + ".json"), record)
+
+    def _retain_blocked_absent(self, task_id):
+        root, _head = self._task(task_id)
+        self._mark_retain_blocked(task_id)
+        shutil.rmtree(root)
+        self.assertFalse(os.path.lexists(root))
+        return root
+
+    def _release_retain(self, approvals, *, execute=False):
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                contextlib.redirect_stdout(output):
+            ok = lifecycle.owner_approved_retain_release(
+                canonical_root=self.source, approvals=approvals, execute=execute,
+                workspace_root=self.tasks)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["mode"], "owner-approved-retain-release")
+        return ok, payload["records"]
+
+    def test_owner_approved_retain_release_marks_absent_retain_blocked(self):
+        root = self._retain_blocked_absent("owner-release-task")
+        ok, (line,) = self._release_retain(
+            {"owner-release-task": OWNER_APPROVED_RETAIN_URL}, execute=True)
+        self.assertTrue(ok, line)
+        self.assertEqual(line["result"], "RETIRED_EXTERNALLY")
+        self.assertEqual(line["approval_ref"], OWNER_APPROVED_RETAIN_URL)
+        self.assertFalse(os.path.lexists(root))
+        record = self._record("owner-release-task")
+        self.assertEqual(record["state"], "RETIRED_EXTERNALLY")
+        self.assertEqual(record["owner_approval_ref"], OWNER_APPROVED_RETAIN_URL)
+        self.assertIn("retired_externally_at", record)
+
+    def test_owner_approved_retain_release_refuses_present_directory(self):
+        root, _head = self._task("owner-present-task")
+        self._mark_retain_blocked("owner-present-task")
+        before = self._record("owner-present-task")
+        ok, (line,) = self._release_retain(
+            {"owner-present-task": OWNER_APPROVED_RETAIN_URL}, execute=True)
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertEqual(line["reason"], "D6_RELEASE_RETAIN_WORKTREE_PRESENT")
+        self.assertTrue(root.is_dir())
+        self.assertEqual(self._record("owner-present-task"), before)
+
+    def test_owner_approved_retain_release_refuses_symlinked_path(self):
+        root = self._retain_blocked_absent("owner-symlink-task")
+        os.symlink(self.outside_file, root)
+        before = self._record("owner-symlink-task")
+        ok, (line,) = self._release_retain(
+            {"owner-symlink-task": OWNER_APPROVED_RETAIN_URL}, execute=True)
+        self.assertFalse(ok)
+        self.assertEqual(line["reason"], "D6_RELEASE_RETAIN_WORKTREE_PRESENT")
+        self.assertTrue(root.is_symlink())
+        self.assertEqual(self._record("owner-symlink-task"), before)
+
+    def test_owner_approved_retain_release_refuses_non_retain_blocked(self):
+        _root, _head = self._task("owner-active-task")
+        before = self._record("owner-active-task")
+        ok, (line,) = self._release_retain(
+            {"owner-active-task": OWNER_APPROVED_RETAIN_URL}, execute=True)
+        self.assertFalse(ok)
+        self.assertEqual(line["result"], "BLOCKED")
+        self.assertEqual(line["reason"], "D6_RELEASE_RETAIN_RECORD_INVALID")
+        self.assertEqual(self._record("owner-active-task"), before)
+
+    def test_owner_approved_retain_release_refuses_bad_url(self):
+        self._retain_blocked_absent("owner-bad-url-task")
+        before = self._record("owner-bad-url-task")
+        bad_urls = (
+            "https://github.com/davidcatcat/davidcattoolsproject/issues/352"
+            "#issuecomment-1234567890",
+            "https://github.com/davidcatcat/davidcattoolsproject/pull/529"
+            "#issuecomment-1234567890",
+            "https://github.com/other/repo/issues/529#issuecomment-1234567890",
+            "not-a-url",
+        )
+        for url in bad_urls:
+            with self.assertRaises(lifecycle.LifecycleError) as caught:
+                lifecycle._parse_owner_approved_retain_release(
+                    ["owner-bad-url-task=" + url])
+            self.assertEqual(caught.exception.code, "D6_TASK_INPUT_INVALID")
+            with self.assertRaises(lifecycle.LifecycleError) as caught:
+                lifecycle.owner_approved_retain_release(
+                    canonical_root=self.source,
+                    approvals={"owner-bad-url-task": url}, execute=True,
+                    workspace_root=self.tasks)
+            self.assertEqual(caught.exception.code, "D6_TASK_INPUT_INVALID")
+        self.assertEqual(self._record("owner-bad-url-task"), before)
+
+    def test_owner_approved_retain_release_dry_run_changes_nothing(self):
+        self._retain_blocked_absent("owner-dry-task")
+        before = self._record("owner-dry-task")
+        ok, (line,) = self._release_retain(
+            {"owner-dry-task": OWNER_APPROVED_RETAIN_URL})
+        self.assertTrue(ok, line)
+        self.assertEqual(line["mode"], "dry-run")
+        self.assertEqual(line["result"], "RELEASE_READY")
+        self.assertEqual(line["approval_ref"], OWNER_APPROVED_RETAIN_URL)
+        self.assertEqual(self._record("owner-dry-task"), before)
+
+    def test_owner_approved_retain_release_cli_dry_run_is_wired(self):
+        self._retain_blocked_absent("owner-cli-task")
+        before = self._record("owner-cli-task")
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "TASKS_ROOT", self.tasks), \
+                contextlib.redirect_stdout(output):
+            code = lifecycle._main([
+                "--owner-approved-retain-release",
+                "owner-cli-task=" + OWNER_APPROVED_RETAIN_URL,
+                "--repo-root", str(self.source)])
+        self.assertEqual(code, 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["mode"], "owner-approved-retain-release")
+        self.assertFalse(payload["execute"])
+        self.assertEqual(payload["records"][0]["result"], "RELEASE_READY")
+        self.assertEqual(self._record("owner-cli-task"), before)
 
 
 if __name__ == "__main__":
