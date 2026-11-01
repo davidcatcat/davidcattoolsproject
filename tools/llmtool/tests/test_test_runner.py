@@ -15,6 +15,18 @@ from llmtool.test_runner import (
 )
 
 
+def _base_sha():
+    """A base commit that exists in every checkout, including shallow clones.
+
+    run_plan only needs base to be a real commit here; the changed paths are
+    patched, so the current HEAD serves instead of a pinned historical SHA.
+    """
+    return subprocess.run(
+        ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "HEAD"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=120,
+    ).stdout.decode("ascii").strip()
+
+
 _PASS_LOG = b"Ran 2 tests in 0.01s\n\nOK\n"
 _FAIL_LOG = (b"FAIL: test_bad (tests.test_task_lifecycle.SampleTests)\n"
              b"Ran 2 tests in 0.01s\n\nFAILED (failures=1)\n")
@@ -106,7 +118,7 @@ class TestRunnerTests(unittest.TestCase):
 
             with patch("llmtool.test_runner.collect_changed_paths", return_value=[
                     "tools/llmtool/llmtool/task_lifecycle.py"]):
-                result = run_plan("b0f3b3536490ef604a57702b6efa4153ca71bf11",
+                result = run_plan(_base_sha(),
                                   cwd=root, log_dir=log_dir, runner=fake_run)
 
         self.assertEqual(result["plan"]["levels"][-1]["level"], "L1")
@@ -130,12 +142,22 @@ class TestRunnerTests(unittest.TestCase):
 
             with patch("llmtool.test_runner.collect_changed_paths", return_value=[
                     "tools/llmtool/llmtool/new_unknown.py"]):
-                result = run_plan("b0f3b3536490ef604a57702b6efa4153ca71bf11",
+                result = run_plan(_base_sha(),
                                   cwd=root, log_dir=Path(temp) / "logs", runner=fake_run)
 
         self.assertEqual(result["plan"]["levels"][-1]["level"], "L3")
         self.assertEqual(calls[-1][0], ["make", "check"])
         self.assertFalse(result["summary"]["execution_verified"])
+
+
+class GitTimeoutTests(unittest.TestCase):
+    def test_stuck_git_is_a_runner_error_not_a_hang(self):
+        from llmtool import test_runner
+        with patch("llmtool.test_runner.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("git", 120)) as run:
+            with self.assertRaises(test_runner.RunnerError):
+                test_runner._git(Path("."), "rev-parse", "HEAD")
+        self.assertEqual(run.call_args.kwargs["timeout"], test_runner.GIT_TIMEOUT_SECONDS)
 
 
 class ZeroTestsExitStatusTests(unittest.TestCase):
@@ -147,7 +169,7 @@ class ZeroTestsExitStatusTests(unittest.TestCase):
             with patch("llmtool.test_runner.collect_changed_paths",
                        return_value=list(changed)):
                 return run_plan(
-                    "b0f3b3536490ef604a57702b6efa4153ca71bf11",
+                    _base_sha(),
                     cwd=root, dependency_tests=dependency_tests,
                     log_dir=Path(temp) / "logs", runner=_fake_runner(outputs),
                 )
@@ -218,7 +240,7 @@ class ZeroTestsExitStatusTests(unittest.TestCase):
                     patch("llmtool.test_runner.select_test_plan",
                           return_value=l0_only):
                 result = run_plan(
-                    "b0f3b3536490ef604a57702b6efa4153ca71bf11",
+                    _base_sha(),
                     cwd=root, log_dir=Path(temp) / "logs",
                     runner=_fake_runner({}),
                 )

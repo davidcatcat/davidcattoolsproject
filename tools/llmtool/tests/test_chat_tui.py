@@ -1725,6 +1725,24 @@ class StatusProjectionTests(unittest.TestCase):
         self.assertIn('Recovery: Core missing_gates must pass: tests, review',
                       self.status.summary_text(gated))
 
+    def test_latest_high_debug_attempt_is_shown_without_changing_the_stage(self):
+        def attempt(status, report):
+            return {'status': status, 'report': report, 'family': 'pr-17'}
+        plain = _record(developer=_developer(state='DEVELOPER_DISPATCHING'))
+        failed = dict(plain, high_debug=[attempt('RCA_CONFIRMED', 'r'),
+                                         attempt('RUN_FAILED', 'HIGH_DEBUG_RUN_FAILED')])
+        self.assertEqual(self.status.stage(failed), self.status.stage(plain))
+        self.assertIsNone(self.status.blocked_reason(failed))
+        self.assertIn('High Debug (latest): RUN_FAILED HIGH_DEBUG_RUN_FAILED (family pr-17)',
+                      self.status.summary_text(failed))
+        odd = dict(plain, high_debug=[attempt('RUN_FAILED', 'free text\nfrom a report')])
+        self.assertEqual(self.status.high_debug_text(odd), 'RUN_FAILED (family pr-17)')
+        done = dict(plain, high_debug=[attempt('RUN_FAILED', 'HIGH_DEBUG_RUN_FAILED'),
+                                       attempt('RCA_CONFIRMED', 'r')])
+        self.assertEqual(self.status.high_debug_text(done), 'RCA_CONFIRMED (family pr-17)')
+        self.assertIsNone(self.status.high_debug_text(plain))
+        self.assertNotIn('High Debug', self.status.summary_text(plain))
+
     def callback(self, **handoff):
         return {'state': 'PM_RETURNED', 'missing_gates': [], 'pm_usage': None,
                 'review_handoff': handoff}

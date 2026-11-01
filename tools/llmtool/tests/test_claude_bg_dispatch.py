@@ -512,6 +512,20 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(dispatch_tool.first_action_since(TARGET, since, offsets),
                          {'tool': 'Read', 'timestamp': '2026-10-26T00:00:00.000Z'})
 
+    def test_non_dict_message_in_transcript_is_skipped(self):
+        folder = self.config / 'projects' / 'p'
+        folder.mkdir(parents=True)
+        path = folder / (TARGET + '.jsonl')
+        stamp = '2026-10-26T00:00:00.000Z'
+        odd = [{'type': 'assistant', 'timestamp': stamp, 'message': value}
+               for value in ('text', ['list'], 7, True)]
+        good = {'type': 'assistant', 'timestamp': stamp,
+                'message': {'content': [{'type': 'tool_use', 'name': 'Read'}]}}
+        path.write_text(''.join(json.dumps(entry) + '\n' for entry in odd + [good]))
+        since = 1792972800000  # 2026-10-26T00:00:00Z
+        self.assertEqual(dispatch_tool.first_action_since(TARGET, since, {}),
+                         {'tool': 'Read', 'timestamp': stamp})
+
     def test_prompt_the_cli_did_not_receive_is_not_a_receipt(self):
         # The real #364 case: `backgrounded ... (idle — send a prompt to start)`, exit 0.
         self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],

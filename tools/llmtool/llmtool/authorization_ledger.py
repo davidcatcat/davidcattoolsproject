@@ -80,6 +80,20 @@ _PROVIDER_SCHEMA = (
     "(status IN ('ISSUED','DENIED','EXPIRED') AND consumed_at IS NULL AND consumed_day IS NULL)))",
 )
 
+# Provider layout 2 (#192-A): explicit separate new-file layout. Layout 1 is
+# never migrated. object_key is unique only among rows that hold it (ISSUED or
+# an effect status); DENIED and EXPIRED rows stay as evidence but release it.
+_PROVIDER_SCHEMA_V2 = (
+    _SCHEMA[0],
+    "CREATE TABLE ledger_meta (kind TEXT NOT NULL CHECK (kind = 'PROVIDER_REVIEW'), "
+    "layout_version INTEGER NOT NULL CHECK (layout_version = 2), creation_nonce TEXT NOT NULL)",
+    _PROVIDER_SCHEMA[2].replace('object_key TEXT NOT NULL UNIQUE', 'object_key TEXT NOT NULL'),
+)
+_PROVIDER_V2_INDEXES = (
+    'CREATE UNIQUE INDEX receipts_live_object_key ON receipts(object_key) '
+    "WHERE status IN ('ISSUED','CONSUMED','EFFECT_DONE','EFFECT_UNKNOWN')",
+)
+
 
 NOTIFICATION_SCHEMA_VERSION = 1
 _NOTIFICATION_SCHEMA = (
@@ -212,13 +226,29 @@ def _sqlite_failure(error):
     return LedgerCode.LEDGER_CORRUPT
 
 
+def _check_provider_layout(kind, provider_layout):
+    if (type(provider_layout) is not int or provider_layout not in (1, 2) or
+            (kind != 'PROVIDER_REVIEW' and provider_layout != 1)):
+        _fail(LedgerCode.NOT_ALLOWED)
+
+
+def _layout_schema(kind, notification_layout, provider_layout):
+    """(tables in name order, explicit indexes) for exactly one layout."""
+    if kind == 'D1':
+        return _SCHEMA, ()
+    if kind == 'PROVIDER_REVIEW':
+        return (_PROVIDER_SCHEMA, ()) if provider_layout == 1 else (_PROVIDER_SCHEMA_V2, _PROVIDER_V2_INDEXES)
+    return (_NOTIFICATION_SCHEMA if notification_layout == 1 else _NOTIFICATION_SCHEMA_V2), ()
+
+
 class ReceiptLedger:
     """Use create() once, then open(); there is no default path."""
 
     @classmethod
-    def create(cls, path, *, clock, kind='D1', notification_layout=1):
+    def create(cls, path, *, clock, kind='D1', notification_layout=1, provider_layout=1):
         if kind not in ('D1','PROVIDER_REVIEW','NOTIFICATION'): _fail(LedgerCode.NOT_ALLOWED)
         if type(notification_layout) is not int or notification_layout not in (1,2) or (kind != 'NOTIFICATION' and notification_layout != 1): _fail(LedgerCode.NOT_ALLOWED)
+        _check_provider_layout(kind, provider_layout)
         creation_nonce = secrets.token_hex(32) if kind != 'D1' else None
         path = os.path.abspath(path)
         _secure_directory(os.path.dirname(path))
@@ -233,11 +263,14 @@ class ReceiptLedger:
             try:
                 cls._configure(db)
                 db.execute('BEGIN IMMEDIATE')
-                for statement in (_SCHEMA if kind == 'D1' else _PROVIDER_SCHEMA if kind == 'PROVIDER_REVIEW' else (_NOTIFICATION_SCHEMA if notification_layout == 1 else _NOTIFICATION_SCHEMA_V2)):
+                tables, indexes = _layout_schema(kind, notification_layout, provider_layout)
+                for statement in tables + indexes:
                     db.execute(statement)
                 if creation_nonce is not None:
                     if kind == 'NOTIFICATION':
                         db.execute('INSERT INTO ledger_meta VALUES (?, ?, ?)',(kind,notification_layout,creation_nonce))
+                    elif provider_layout == 2:
+                        db.execute('INSERT INTO ledger_meta VALUES (?, ?, ?)',(kind,provider_layout,creation_nonce))
                     else:
                         db.execute('INSERT INTO ledger_meta VALUES (?, ?)',(kind,creation_nonce))
                 db.execute('INSERT INTO clock VALUES (1, 0)')
@@ -256,10 +289,11 @@ class ReceiptLedger:
             _fail(LedgerCode.LEDGER_UNAVAILABLE)
         finally:
             os.close(fd)
-        return cls.open(path,clock=clock,kind=kind,creation_nonce=creation_nonce,notification_layout=notification_layout)
+        return cls.open(path,clock=clock,kind=kind,creation_nonce=creation_nonce,
+                        notification_layout=notification_layout,provider_layout=provider_layout)
 
     @classmethod
-    def open(cls, path, *, clock, kind='D1', creation_nonce=None, notification_layout=1):
+    def open(cls, path, *, clock, kind='D1', creation_nonce=None, notification_layout=1, provider_layout=1):
         """clock is the host's time source; callers never pass request times."""
         if not callable(clock):
             _fail(LedgerCode.CLOCK_INVALID)
@@ -268,11 +302,13 @@ class ReceiptLedger:
             try: _hex(creation_nonce)
             except LLMToolError: _fail(LedgerCode.LEDGER_CORRUPT)
         if type(notification_layout) is not int or notification_layout not in (1,2) or (kind != "NOTIFICATION" and notification_layout != 1): _fail(LedgerCode.NOT_ALLOWED)
-        return cls(os.path.abspath(path),clock,kind,creation_nonce,notification_layout)
+        _check_provider_layout(kind, provider_layout)
+        return cls(os.path.abspath(path),clock,kind,creation_nonce,notification_layout,provider_layout)
 
-    def __init__(self, path, clock, kind='D1', creation_nonce=None, notification_layout=1):
+    def __init__(self, path, clock, kind='D1', creation_nonce=None, notification_layout=1, provider_layout=1):
         self.kind,self.creation_nonce = kind,creation_nonce
         self.notification_layout = notification_layout
+        self.provider_layout = provider_layout
         self._path, self._clock, self._db, self._fd = path, clock, None, None
         self._directory = _secure_directory(os.path.dirname(path))
         try:
@@ -322,15 +358,21 @@ class ReceiptLedger:
             tables = self._db.execute(
                 "SELECT sql FROM sqlite_master WHERE type = 'table' ORDER BY name").fetchall()
             others = self._db.execute(
-                "SELECT count(*) FROM sqlite_master WHERE type NOT IN ('table', 'index') "
-                "OR (type = 'index' AND sql IS NOT NULL)").fetchone()[0]
+                "SELECT count(*) FROM sqlite_master WHERE type NOT IN ('table', 'index')").fetchone()[0]
+            explicit = self._db.execute(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND sql IS NOT NULL "
+                "ORDER BY name").fetchall()
             version = self._db.execute('PRAGMA user_version').fetchone()[0]
             # A schema-less (e.g. half-created) store is corrupt, not unavailable.
-            schema = _SCHEMA if self.kind == 'D1' else _PROVIDER_SCHEMA if self.kind == 'PROVIDER_REVIEW' else (_NOTIFICATION_SCHEMA if self.notification_layout == 1 else _NOTIFICATION_SCHEMA_V2)
-            if tables != [(s,) for s in schema] or others or version != SCHEMA_VERSION:
+            schema, indexes = _layout_schema(self.kind, self.notification_layout, self.provider_layout)
+            if (tables != [(s,) for s in schema] or others or version != SCHEMA_VERSION or
+                    explicit != [(s,) for s in indexes]):
                 _fail(LedgerCode.LEDGER_CORRUPT)
-            if self.kind == 'PROVIDER_REVIEW' and self._db.execute(
+            if self.kind == 'PROVIDER_REVIEW' and self.provider_layout == 1 and self._db.execute(
                     'SELECT kind,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,self.creation_nonce)]:
+                _fail(LedgerCode.LEDGER_CORRUPT)
+            if self.kind == 'PROVIDER_REVIEW' and self.provider_layout == 2 and self._db.execute(
+                    'SELECT kind,layout_version,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,2,self.creation_nonce)]:
                 _fail(LedgerCode.LEDGER_CORRUPT)
             if self.kind == 'NOTIFICATION' and self._db.execute(
                     'SELECT kind,layout_version,creation_nonce FROM ledger_meta').fetchall() != [(self.kind,self.notification_layout,self.creation_nonce)]:
@@ -522,7 +564,11 @@ class ReceiptLedger:
         return None if row is None else row[0]
 
     def issue_provider(self, decision, *, ttl_seconds):
-        """Provider-only issuance, no launch; one object forever per route."""
+        """Provider-only issuance, no launch.
+
+        Layout 1: one object forever per route. Layout 2: an object is held by
+        an unexpired ISSUED row or any effect row; DENIED/EXPIRED rows release it.
+        """
         if (self.kind != 'PROVIDER_REVIEW' or type(decision) is not ProviderPolicyDecision or
                 decision.decision is not Decision.ALLOW_WITH_TRUSTED_RECEIPT or
                 type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_APPROVAL_SECONDS):
@@ -534,6 +580,10 @@ class ReceiptLedger:
         with self._transaction() as now:
             expires=min(now+ttl_seconds,deadline)
             if not now < expires <= MAX_EPOCH: _fail(LedgerCode.NOT_ALLOWED)
+            if self.provider_layout == 2:
+                # Zero effect: an ISSUED row past expires_at was never consumed.
+                self._db.execute("UPDATE receipts SET status='EXPIRED' WHERE object_key=? "
+                                 "AND status='ISSUED' AND expires_at <= ?",(b.object_key,now))
             try:
                 self._db.execute('INSERT INTO receipts VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)',
                     (nonce,b.to_json(),now,expires,'ISSUED',b.call.route_digest,b.object_key))

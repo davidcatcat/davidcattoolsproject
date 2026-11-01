@@ -8,6 +8,7 @@ are labelled as derived wherever they are shown.
 """
 
 import json
+import re
 from datetime import datetime, timezone
 
 from .chat_tui_task import NOT_AVAILABLE, PENDING_DISPATCH, UNKNOWN, retry_condition, value
@@ -181,6 +182,25 @@ def blocked_reason(record):
     if high_debug is not None and high_debug.get("status") == "BLOCKED":
         return "High Debug BLOCKED (family " + str(high_debug.get("family")) + ")"
     return None
+
+
+def high_debug_text(record):
+    """The latest High Debug attempt, or None when the Task has none.
+
+    Informational only: a failed attempt (RUN_FAILED) is a tool failure the
+    PM may retry or move past, so it does not change the derived stage.
+    """
+    latest = _latest(record.get("high_debug"))
+    if latest is None:
+        return None
+    status = str(latest.get("status"))
+    text = status
+    if status == "RUN_FAILED":
+        # A failed attempt stores its refusal code as the report.
+        code = latest.get("report")
+        if type(code) is str and re.fullmatch(r"[A-Z0-9_]{1,64}", code):
+            text += " " + code
+    return text + " (family " + str(latest.get("family")) + ")"
 
 
 def recovery(record):
@@ -364,6 +384,9 @@ def _summary_text(record):
         "Next responsible (derived): " + _NEXT.get(current, UNKNOWN),
         "Last inbox event: " + last_event(record),
     ]
+    high_debug = high_debug_text(record)
+    if high_debug is not None:
+        lines.append("High Debug (latest): " + high_debug)
     if current in ("BLOCKED", "UNAVAILABLE", "FAILED"):
         lines.append("Blocked/failed reason: " + (blocked or reason))
         lines.append("Recovery: " + recovery(record))
