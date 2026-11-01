@@ -4403,18 +4403,82 @@ class PMConversationTests(BoundedPMTest):
     def test_w59_enter_opens_the_highlighted_row_after_a_refresh_shifted_it(self):
         async def opened(ui):
             await self.until(ui, lambda ui: self.W59_TASK_B in self.w59_text(ui), 'detail read')
+            self.assertNotIn(self.W59_TASK_A, self.w59_text(ui))
 
         def shifted(ui):
             ui.background_text()                              # row 1 (Task B) drawn highlighted
-            ui.finish_background(self.session_id, (self.w59_items()[1:], None))   # A is gone
+            ui.finish_background(self.session_id, (            # B moves to row 0, A to row 1
+                self.w59_items()[1:] + self.w59_items()[:1], None))
 
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
             ui, _ = self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B',
-                                '\x1b[B', shifted, lambda ui: setattr(ui, 'background_index', 1),
-                                lambda ui: ui.finish_background(self.session_id, (
-                                    self.w59_items()[1:] + self.w59_items()[:1], None)),
-                                '\r', opened])
+                                '\x1b[B', shifted, self.w59_redraw, '\r', opened])
+
+    W59_TASK_C = 'c' * 32
+
+    def w59_redraw(self, ui):
+        """Force panel draws (the real app's and a direct one) after a refresh."""
+        ui.app.invalidate()
+        ui.background_text()
+        return asyncio.sleep(0.1)
+
+    @staticmethod
+    def w59_highlighted(ui):
+        return [text for style, text in ui.background_text() if style == 'class:menu.current']
+
+    def w59_gone_case(self, refreshes):
+        reads = []
+
+        def read(task_id):
+            reads.append(task_id)
+            return self.w59_record(task_id)
+
+        steps = [self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                 lambda ui: self.assertEqual(ui.background_selected, ('Reviewer', self.W59_TASK_B))]
+        for items in refreshes:
+            steps += [lambda ui, items=items: ui.finish_background(self.session_id, (items, None)),
+                      self.w59_redraw, self.w59_redraw]
+
+        def before(ui):
+            self.assertEqual(ui.background_selected, ('Reviewer', self.W59_TASK_B))   # kept
+            self.assertEqual(self.w59_highlighted(ui), [])        # nothing else highlighted
+            self.assertIn('已不在清單', ''.join(t for _s, t in ui.background_text()))
+
+        async def shown(ui):
+            await self.until(ui, lambda ui: ui.show_task_view, 'detail view')
+            await asyncio.sleep(0.1)
+            self.assertIn('Core 狀態：UNKNOWN（選中的 Task ' + self.W59_TASK_B[:8]
+                          + ' 已不在背景清單', ui.task_view.text)
+            self.assertEqual(reads, [])                           # no other Task was opened
+            self.assertEqual(ui.input.text, '')
+        steps += [before, '\r', shown]
+        with patch.object(chat_tui_status, 'read_task_detail', side_effect=read):
+            self.drive(steps)
+
+    def test_w59_selected_task_removed_then_redrawn_never_opens_another(self):
+        self.w59_gone_case([self.w59_items()[:1]])
+
+    def test_w59_selected_task_removed_across_two_refreshes_never_opens_another(self):
+        task_c = {'role': 'Developer', 'task': self.W59_TASK_C, 'pr': '', 'state': 'RUNNING',
+                  'updated_at': '2026-11-01T00:02:00+00:00'}
+        self.w59_gone_case([self.w59_items()[:1], self.w59_items()[:1] + [task_c]])
+
+    def test_w59_down_after_the_selected_task_left_moves_to_a_real_row(self):
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+
+        def gone(ui):
+            ui.finish_background(self.session_id, (self.w59_items()[:1], None))   # B is gone
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                        gone, self.w59_redraw, '\x1b[B',
+                        lambda ui: self.assertEqual(ui.background_selected,
+                                                    ('Developer', self.W59_TASK_A)),
+                        lambda ui: self.assertEqual(len(self.w59_highlighted(ui)), 1),
+                        '\r', opened])
 
     def test_w59_enter_never_opens_another_task_when_the_highlighted_one_left_the_list(self):
         reads = []

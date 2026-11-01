@@ -482,6 +482,11 @@ def _tokens(usage):
     return "%d+%d=%d" % (usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
 
 
+def _row_identity(item):
+    """W59: what identifies a ↓ panel row across refreshes (role and Task/turn)."""
+    return (item.get("role"), item.get("task"))
+
+
 class _TaskViewLinker:
     """W59: OSC 8 links on the detail's full PR URLs only (Core binds PRs to PR_URL's repo;
     a bare #N would follow the cwd's git remote and could point at another repo)."""
@@ -630,8 +635,11 @@ class ChatTUI:
         self.background_loaded = None    # monotonic time of the last finished read
         self.background_reader = None
         self.show_background = False
-        self.background_index = 0    # W59: the panel row Enter opens
-        self.background_drawn = None     # (role, task) of the row last drawn highlighted
+        # W59: the selected panel row is an identity, (role, task), changed only by the
+        # Owner's navigation (opening the panel, Up/Down) and never by a draw or a refresh;
+        # background_index is where it last was, used only when Up/Down leave a vanished row.
+        self.background_selected = None
+        self.background_index = 0
         # W59: read-only Task detail opened from the panel; read once on a reader thread
         # (never busy), dropped when a newer open or Esc replaced it (task_view_seq).
         self.show_task_view = False
@@ -800,7 +808,7 @@ class ChatTUI:
                   & ~showing_background & ~showing_task_view, eager=True)
         def _background_open(event):
             self.background_index = 0
-            self.background_drawn = None
+            self.background_selected = _row_identity(self.background_all()[0])
             self.show_background = True
 
         # W59: Up/Down choose a panel row; Enter opens its read-only Task detail.
@@ -2386,9 +2394,15 @@ class ChatTUI:
         if self.background_error is not None:
             header += " — 讀取失敗：" + self.background_error
         result = [("class:menu.header", cut(header))]
+        selected = self._selected_index(items)   # drawing never changes the selection
         shown = max(0, rows - 1)
-        selected = min(self.background_index, max(0, len(items) - 1))
-        first = max(0, selected - shown + 1)   # the selected row always stays in view
+        if selected is None and self.background_selected is not None and shown:
+            # Its own row, so a narrow header never cuts it; nothing else is highlighted.
+            result += [("", "\n"), ("class:menu.header", cut(
+                "  選中的 Task %s 已不在清單 — Enter 不會開其他列；↑↓ 重新選擇" % str(
+                    self.background_selected[1] or chat_tui_task.UNKNOWN)[:8]))]
+            shown -= 1
+        first = 0 if selected is None else max(0, selected - shown + 1)   # selected in view
         for index in range(first, min(len(items), first + shown)):
             item = items[index]
             task = item.get("task") or chat_tui_task.UNKNOWN
@@ -2396,19 +2410,31 @@ class ChatTUI:
                 item.get("role", ""), task[:8], item.get("pr", ""), item.get("state", ""),
                 chat_tui_status.age_text(item.get("updated_at")))
             style = "class:menu.current" if index == selected else "class:menu"
-            if index == selected:
-                self.background_drawn = (item.get("role"), item.get("task"))
             result += [("", "\n"), (style, cut(line))]
         return result
 
     # -- W59: read-only Task detail from the ↓ panel (TaskStore read, never busy) ------
+    def _selected_index(self, items):
+        """Row of the selected identity in ``items``, or None when it is not listed."""
+        for index, item in enumerate(items):
+            if _row_identity(item) == self.background_selected:
+                return index
+        return None
+
     def move_background(self, direction):
+        """Up/Down: the only change of the selection after the panel opened."""
         items = self.background_all()
-        if items:
-            self.background_index = max(0, min(len(items) - 1, self.background_index + direction))
-            # The chosen row is remembered at once: Enter may arrive before the next draw.
-            item = items[self.background_index]
-            self.background_drawn = (item.get("role"), item.get("task"))
+        if not items:
+            return
+        current = self._selected_index(items)
+        if current is None:
+            # The selected row left the list: Down takes the row now at its place, Up the
+            # one above it.
+            target = self.background_index + (0 if direction > 0 else -1)
+        else:
+            target = current + direction
+        self.background_index = max(0, min(len(items) - 1, target))
+        self.background_selected = _row_identity(items[self.background_index])
 
     def task_view_visible(self):
         """The Task detail is on screen (help and the developer panes cover it)."""
@@ -2435,20 +2461,18 @@ class ChatTUI:
         items = self.background_all()
         if not items:
             return
-        index = min(self.background_index, len(items) - 1)
-        # A refresh between the draw and Enter may shift or drop rows: open only the row the
-        # Owner saw; when it left the list, say so and never open a neighbouring row.
-        selected = self.background_drawn
-        if selected is not None:
-            drawn = [n for n, item in enumerate(items)
-                     if (item.get("role"), item.get("task")) == selected]
-            if not drawn:
-                self._show_task_view(chat_tui_status.task_detail_text(
-                    None, time.strftime("%H:%M:%S"),
-                    "選中的 Task " + str(selected[1] or chat_tui_task.UNKNOWN)[:8]
-                    + " 已不在背景清單（清單剛更新）；沒有開啟其他列，按 Esc 返回再選一次"))
-                return
-            index = self.background_index = drawn[0]
+        selected = self.background_selected
+        if selected is None:
+            return
+        # Refreshes may shift or drop rows: open only the selected row; when it left the
+        # list, say so and never open a neighbouring row.
+        index = self._selected_index(items)
+        if index is None:
+            self._show_task_view(chat_tui_status.task_detail_text(
+                None, time.strftime("%H:%M:%S"),
+                "選中的 Task " + str(selected[1] or chat_tui_task.UNKNOWN)[:8]
+                + " 已不在背景清單（清單剛更新）；沒有開啟其他列，按 Esc 返回再選一次"))
+            return
         tasks = (len(self.background) if self.pm_target and
                  self.background_key == self.pm_target[0] else 0)
         task_id = str(items[index].get("task") or "")
