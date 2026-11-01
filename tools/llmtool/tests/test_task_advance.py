@@ -910,5 +910,89 @@ class TaskAdvanceTests(unittest.TestCase):
                 self.assertIn('codes', result)
 
 
+class RetiredD6MergeClosureTests(unittest.TestCase):
+    """#547: a merged Task closes after its D6 is retired, via the real _d6_snapshot."""
+
+    MERGED_PR = {'number': 17, 'merged': True, 'head': {'sha': HEAD}, 'merge_commit_sha': 'd' * 40}
+    TRAIN = {'number': 541, 'merged': True, 'head': {'sha': 'c' * 40}, 'merge_commit_sha': 'e' * 40}
+
+    def setUp(self):
+        import os
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        # A git common dir with no llmtool-worktrees registry: the D6 is retired.
+        self.common = os.path.realpath(self.tmp.name) + '/.git'
+        os.makedirs(self.common)
+
+    def ready(self, outcome='REVIEW_PASS'):
+        record = base_record(
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED'}],
+            completion={'executor_task_id': 'executor-1', 'state': 'PM_EVIDENCE_READY',
+                        'evidence': {'common_dir': self.common, 'result': {'result_head': HEAD},
+                                     'review_pr_ci': {'stage': 'READY'}}})
+        record['completion_events'] = [
+            {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1, 'outcome': outcome}]
+        return record
+
+    def advance(self, record, prs, *, compare='ahead', integration_pr=None, registry_code=None):
+        from llmtool import task_completion
+        saved = []
+
+        def get(path):
+            if path.startswith('pulls/'):
+                return prs.get(int(path.split('/')[1]))
+            if path.startswith('compare/'):
+                return {'status': compare}
+            return []
+
+        store = type('S', (), {'get': lambda self, _id: record})()
+        if registry_code is None:
+            snapshot = task_advance._d6_snapshot(record, 'executor-1')
+            result = task_advance.advance(
+                task_id=record['task_id'], store=store, pr_number=17, integration_pr=integration_pr,
+                github_get=get, record_github_event_call=lambda *a: saved.append(a))
+        else:
+            with patch.object(task_completion, 'read_d6_registration',
+                              side_effect=lambda *a, **k: task_completion._stop(registry_code)):
+                snapshot = task_advance._d6_snapshot(record, 'executor-1')
+                result = task_advance.advance(
+                    task_id=record['task_id'], store=store, pr_number=17,
+                    integration_pr=integration_pr, github_get=get,
+                    record_github_event_call=lambda *a: saved.append(a))
+        return snapshot, result, saved
+
+    def test_merged_pr_closes_with_missing_registry(self):
+        snapshot, result, saved = self.advance(self.ready(), {17: self.MERGED_PR})
+        self.assertEqual(snapshot['state'], 'D6_BINDING_UNAVAILABLE')
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(saved[0][4], 17)
+        self.assertEqual(saved[0][-2:], ('MERGED', 'd' * 40))
+
+    def test_train_merge_closes_with_invalid_registry(self):
+        snapshot, result, saved = self.advance(
+            self.ready(), {17: PR, 541: self.TRAIN}, integration_pr=541,
+            registry_code='D6_REGISTRY_INVALID')
+        self.assertEqual(snapshot['code'], 'D6_REGISTRY_INVALID')
+        self.assertEqual(result['step'], 'CLOSED')
+        self.assertEqual(saved[0][4], 541)
+        self.assertEqual(saved[0][-2:], ('MERGED', 'e' * 40))
+
+    def test_without_merge_proof_the_retired_d6_still_refuses(self):
+        other_head = dict(self.MERGED_PR, head={'sha': 'f' * 40})
+        cases = (
+            ('not merged', self.ready(), {17: PR}, 'ahead', None),
+            ('train diverged', self.ready(), {17: PR, 541: self.TRAIN}, 'diverged', 541),
+            ('merged at another head', self.ready(), {17: other_head}, 'ahead', None),
+            ('review failed', self.ready('REVIEW_FAIL'), {17: self.MERGED_PR}, 'ahead', None),
+        )
+        for name, record, prs, compare, train in cases:
+            with self.subTest(name):
+                _, result, saved = self.advance(record, prs, compare=compare, integration_pr=train,
+                                                registry_code='D6_REGISTRY_INVALID')
+                self.assertEqual(result['step'], 'D6_BINDING_UNAVAILABLE')
+                self.assertEqual(saved, [])
+
+
 if __name__ == '__main__':
     unittest.main()
