@@ -723,14 +723,14 @@ class WidgetTests(Base):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
-            self.assertIn('/status', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('16 more (2 above, 14 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 19)
+            self.assertEqual(ui.menu_index, 20)
             self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(15 above, 0 below)', rows[-1])
+            self.assertIn('(16 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/exit'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
