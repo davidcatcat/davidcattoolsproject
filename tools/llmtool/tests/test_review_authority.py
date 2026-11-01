@@ -141,13 +141,15 @@ class Harness:
 class AuthorityTests(unittest.TestCase):
     def setUp(self): self.h=Harness();self.addCleanup(self.h.close)
     def test_registered_agent_accepts_only_exact_review_origins(self):
-        agent=self.h.expect.agents[0]
         for origin in (
             'git@github.com:davidcatcat/davidcattoolsproject.git',
             'https://github.com/davidcatcat/davidcattoolsproject.git',
         ):
             with self.subTest(origin=origin):
-                replace(agent,origin=origin)
+                hostdata=copy.deepcopy(self.h.hostdata)
+                hostdata['agents'][0]['origin']=origin
+                registration=a._decode_host(r.canonical(hostdata))
+                self.assertEqual(registration.agents[0].origin,origin)
         for origin in (
             'git@github.com:davidcatcat/davidcattoolsproject.git/',
             'git@github.com:davidcatcat/davidcattoolsproject',
@@ -160,7 +162,9 @@ class AuthorityTests(unittest.TestCase):
             'https://github.com/someoneelse/davidcattoolsproject.git',
         ):
             with self.subTest(origin=origin), self.assertRaises(Exception):
-                replace(agent,origin=origin)
+                hostdata=copy.deepcopy(self.h.hostdata)
+                hostdata['agents'][0]['origin']=origin
+                a._decode_host(r.canonical(hostdata))
     def zero(self,result,code=None):
         self.assertEqual(result['provider_calls'],0);self.assertFalse(result['authorized'])
         self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
