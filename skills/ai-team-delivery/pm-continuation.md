@@ -24,7 +24,7 @@ A Reviewer or Developer session is done once its result is recorded (a verdict o
 A Developer result is not ready for review until the PM has validated it on EC2. Codex direct, AGY, OpenCode and company `gw` Developers do not run the Task's tests themselves. "Remote testing is handled by PM" in their reply means this step; it does not mean the PM runs the tests locally.
 
 1. **Commit the result in its D6** without running tests inside it first. Local runs leave `__pycache__`, and ENV-2 then refuses the D6 (`D6_UNREGISTERED_LOCAL_STATE`, shown as `ENV_BOOTSTRAP_REJECTED`, #725). If anything stray appears, move it out; never delete Developer work.
-2. **Record the result head:** `d6_worktree_lifecycle.py --record-result-task-id <d6>`. Without this, remote-test refuses with `RECEIPT_HEAD_MISMATCH`.
+2. **Record the result head:** `d6_worktree_lifecycle.py --record-result-task-id <d6>`. Without this, remote-test refuses with `RECEIPT_HEAD_UNRECORDED` (or `RECEIPT_HEAD_MISMATCH` when the recorded head differs from `--sha`).
 3. **Run the Task's tests on EC2:** `llmtool task remote-test <task> --executor-task <d6> --sha <head> --ref refs/heads/<branch> --pr <N>`. Omit `--module` to use the admitted modules. Post the receipt on the PR: result, module, test count, head and receipt digest.
 4. **Then request the formal review** of that exact head.
 
@@ -35,7 +35,7 @@ Run tests locally on the Mac only for what EC2 cannot run: interactive TUI/PTY t
 These checks prevent refusals that cost a dispatch round (2026-11-02):
 
 - **One Task ID per work package.** A Task ID names exactly one D6. Once a D6 is retired, its Task ID cannot be reused (`D6_TASK_ALREADY_EXISTS`). A standing Owner assignment that covers several slices, such as the TUI slices, needs one registered Task ID per slice in `worker-dispatch.json`.
-- **PM-written Task text is screened.** Each acceptance item must be ≤ 512 bytes. Request, response and acceptance text must not contain credential-shaped text such as `token = …` or `api_key=…`, even when quoting a finding; describe it in words instead. Every write path must also be listed as a read path.
+- **PM-written Task text is screened.** Each acceptance item must be ≤ 512 bytes. Request, response and acceptance text must not contain credential-shaped text (a credential keyword followed by an assignment or a value), even when quoting a finding; describe it in words instead. Every write path must also be listed as a read path.
 - **Sync the canonical checkout before dispatch.** Run `git merge --ff-only origin/main` in the canonical root first; a stale install refuses with `LLMTOOL_SOURCE_STALE`.
 - **A branch update needs a new review.** After `gh pr update-branch`, or any merge of main into a PR, the verdict no longer covers the head. Request a merge-delta re-review of the new head before merging, unless the new head equals the reviewed head.
 
