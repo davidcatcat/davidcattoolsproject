@@ -554,6 +554,10 @@ def add_task_submission_parsers(actions):
     status.add_argument('--pm-session', help='filter by stored PM session ID')
     status.add_argument('--limit', type=int, default=20, help='maximum Tasks to list (1-200)')
     status.add_argument('--json', action='store_true', help='output JSON')
+    brief = actions.add_parser('brief', help='Read an owner-readable summary of durable Tasks')
+    brief.add_argument('--pm-session', help='filter by stored PM session ID')
+    brief.add_argument('--limit', type=int, default=20, help='maximum Tasks to list (1-200)')
+    brief.add_argument('--json', action='store_true', help='output JSON')
     abandon = actions.add_parser('abandon', help='Mark a Task abandoned by its bound PM session')
     abandon.add_argument('task_id', help='existing durable Task ID')
     abandon.add_argument('--pm-session', required=True,
@@ -698,6 +702,22 @@ def run_task_status(args, *, store=None, stdout=None):
         raise LLMToolError(str(exc)) from None
     stream = sys.stdout if stdout is None else stdout
     stream.write(format_status(result, as_json=args.json) + '\n')
+    stream.flush()
+    return 0
+
+
+def run_task_brief(args, *, store=None, stdout=None):
+    """Thin CLI adapter over the read-only task_status projection."""
+    from .task_brief import format_task_brief, task_brief
+    from .task_status import task_status
+    try:
+        limit = args.limit
+        result = task_status(pm_session=args.pm_session, limit=200, store=store)
+        brief = task_brief(result, limit=limit)
+    except ValueError as exc:
+        raise LLMToolError(str(exc)) from None
+    stream = sys.stdout if stdout is None else stdout
+    stream.write(format_task_brief(brief, as_json=args.json) + '\n')
     stream.flush()
     return 0
 
