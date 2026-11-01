@@ -258,6 +258,51 @@ class DeveloperRouteContractTests(unittest.TestCase):
                                   boundary=FakeBoundary(), snapshot=capture_snapshot)
                     self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
 
+    def test_refs_created_from_d6_are_detected(self):
+        for mutation in ('branch', 'lightweight_tag', 'annotated_tag', 'notes'):
+            with self.subTest(mutation=mutation):
+                with tempfile.TemporaryDirectory() as temp:
+                    root = Path(temp) / 'repo'
+                    root.mkdir()
+                    request = self._real_git_request(root)
+
+                    def runner(*args):
+                        (root / 'out.txt').write_text('after\n')
+                        if mutation == 'branch':
+                            command = ['branch', 'd6-created']
+                        elif mutation == 'lightweight_tag':
+                            command = ['tag', 'd6-lightweight']
+                        elif mutation == 'annotated_tag':
+                            command = ['tag', '-a', 'd6-annotated', '-m', 'D6 tag']
+                        else:
+                            command = ['notes', 'add', '-m', 'D6 note']
+                        subprocess.run(['/usr/bin/git', '-C', str(root), *command],
+                                       check=True, stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL)
+                        return 0, b'output', b''
+
+                    with self.assertRaises(RouteError) as caught:
+                        run_route(self.route, request, gate=lambda: True, runner=runner,
+                                  boundary=FakeBoundary(), snapshot=capture_snapshot)
+                    self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+
+    def test_git_config_changes_are_detected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            request = self._real_git_request(root)
+
+            def runner(*args):
+                (root / 'out.txt').write_text('after\n')
+                subprocess.run(['/usr/bin/git', '-C', str(root), 'config', 'user.name',
+                                'Changed during D6'], check=True)
+                return 0, b'output', b''
+
+            with self.assertRaises(RouteError) as caught:
+                run_route(self.route, request, gate=lambda: True, runner=runner,
+                          boundary=FakeBoundary(), snapshot=capture_snapshot)
+            self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+
     def test_preexisting_ignored_directory_and_in_scope_edit_succeed(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'repo'
