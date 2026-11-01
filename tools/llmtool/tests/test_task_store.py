@@ -877,6 +877,8 @@ class TaskStoreTests(unittest.TestCase):
             self.assertEqual(self.store.get(value['task_id']), value)
 
         self.assertEqual(checked, [True])
+        with self.assertRaises(OSError):
+            original_fstat(record_fds[-1])
 
     def test_get_survives_inode_reuse_during_path_stat(self):
         value = record()
