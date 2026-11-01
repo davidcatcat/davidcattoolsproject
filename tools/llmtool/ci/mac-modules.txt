@@ -1,1 +1,3 @@
-# Additional test modules to always run on Mac, one module name per line.
+# Explicit Mac-required unittest IDs; module IDs run the complete test module.
+test_chat_tui_pty.ChatTUIPTYTests
+test_review_authority_native.NativeProviderTests

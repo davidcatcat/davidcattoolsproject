@@ -71,7 +71,7 @@ jobs:
               fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
             fi
           fi
-      # PRs use the committed Mac baseline plus Mac-relevant changed tests.
+      # PRs use the validated Mac-required IDs plus changed/mapped test IDs.
       # Monitor-only and documentation-only changes skip canonical Mac tests;
       # unknown, failed, and non-PR comparisons use full checks.
       - name: Coverage mode
@@ -89,7 +89,7 @@ jobs:
               fallback_reason="$1"
               printf 'selection exact HEAD: %s\nselection changed paths:\n' "$EXPECTED_SHA"
               git diff --no-ext-diff --no-renames --name-only "$BASE_SHA" "$EXPECTED_SHA" --
-              printf 'selection level: L3\nselection modules: FULL\nselection module count: full-suite\nselection reason: selector_failure_requires_full\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' \
+              printf 'selection level: L3\nselection test IDs: FULL\nselection test ID count: full-suite\nselection reason: selector_failure_requires_full\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' \
                 "$fallback_reason" "$((SECONDS - selection_started))"
             }
             if git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"; then
@@ -115,23 +115,23 @@ jobs:
                   mode=full
                 }
                 if [ "$mode" = mac-subset ]; then
-                  if ! printf '%s' "$selection" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null; then
+                  if ! printf '%s' "$selection" | python3 -I -B -c 'import json,sys; json.load(sys.stdin)' >/dev/null; then
                     report_full_fallback selector_report_invalid
                     mode=full
                   else
-                    if ! printf '%s\n' "$selection" | python3 -c 'import json,sys; r=json.load(sys.stdin); assert r["level"] in ("L0", "L1", "L2", "L3"); assert isinstance(r["changed_paths"], list); assert isinstance(r["modules"], list) and all(isinstance(m, str) and m for m in r["modules"]); assert isinstance(r["selection_reason"], str); assert isinstance(r["fallback_reasons"], list); assert (type(r["module_count"]) is int and r["module_count"] >= 0) or r["module_count"] == "full-suite"; print("\n".join(r["modules"]))' > "$RUNNER_TEMP/mac-modules"; then
+                    if ! printf '%s\n' "$selection" | python3 -I -B -c 'import json,sys; r=json.load(sys.stdin); ids=r["test_ids"]; level=r["level"]; count=r["test_id_count"]; valid=lambda i: i=="FULL" or (isinstance(i,str) and len(i.split(".")) in (1,2) and i.split(".")[0].startswith("test_") and all(p.isidentifier() for p in i.split("."))); assert level in ("L0","L1","L2","L3"); assert isinstance(r["changed_paths"],list) and all(isinstance(p,str) for p in r["changed_paths"]); assert isinstance(ids,list) and all(valid(i) for i in ids); assert isinstance(r["selection_reason"],str); assert isinstance(r["fallback_reasons"],list) and all(isinstance(x,str) for x in r["fallback_reasons"]); assert (level=="L3" and ids==["FULL"] and count=="full-suite") or (level=="L0" and ids==[] and type(count) is int and count==0) or (level in ("L1","L2") and bool(ids) and "FULL" not in ids and type(count) is int and count==len(ids)); print("\n".join(ids))' > "$RUNNER_TEMP/mac-test-ids"; then
                       report_full_fallback selector_report_invalid
                       mode=full
                     fi
                   fi
                   if [ "$mode" = mac-subset ]; then
-                    level=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["level"])')
-                    count=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["module_count"])')
-                    reason=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(json.load(sys.stdin)["selection_reason"])')
-                    fallback=$(printf '%s' "$selection" | python3 -c 'import json,sys; print(",".join(json.load(sys.stdin)["fallback_reasons"]) or "none")')
+                    level=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["level"])')
+                    count=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["test_id_count"])')
+                    reason=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(json.load(sys.stdin)["selection_reason"])')
+                    fallback=$(printf '%s' "$selection" | python3 -I -B -c 'import json,sys; print(",".join(json.load(sys.stdin)["fallback_reasons"]) or "none")')
                     printf 'selection exact HEAD: %s\nselection changed paths:\n' "$EXPECTED_SHA"
                     git diff --no-ext-diff --no-renames --name-only "$BASE_SHA" "$EXPECTED_SHA" --
-                    printf 'selection level: %s\nselection modules: %s\nselection module count: %s\nselection reason: %s\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' "$level" "$(tr '\n' ' ' < "$RUNNER_TEMP/mac-modules")" "$count" "$reason" "$fallback" "$((SECONDS - selection_started))"
+                    printf 'selection level: %s\nselection test IDs: %s\nselection test ID count: %s\nselection reason: %s\nselection fallback reasons: %s\nselection elapsed seconds: %s\n' "$level" "$(tr '\n' ' ' < "$RUNNER_TEMP/mac-test-ids")" "$count" "$reason" "$fallback" "$((SECONDS - selection_started))"
                     if [ "$level" = L3 ]; then
                       mode=full
                     elif [ "$count" -eq 0 ]; then
@@ -284,25 +284,23 @@ jobs:
           trap report_result EXIT
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
             make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
-            while IFS= read -r module; do
+            while IFS= read -r test_id; do
               output="$RUNNER_TEMP/mac-test-output"
-              if "$JOB_PYTHON" -m unittest discover -s tools/llmtool/tests -p "$module.py" -v < /dev/null > "$output" 2>&1; then
-                status=0
-              else
-                status=$?
-              fi
-              cat "$output"
+              test_started=$SECONDS
+              set +e
+              "$JOB_PYTHON" -I -B -c 'import sys,unittest; sys.path[:0]=["tools/llmtool/tests","tools/llmtool"]; suite=unittest.defaultTestLoader.loadTestsFromName(sys.argv[1]); result=unittest.TextTestRunner(verbosity=2).run(suite); raise SystemExit(not result.wasSuccessful())' "$test_id" 2>&1 | tee "$output"
+              status=${PIPESTATUS[0]}
+              set -e
               collect_count "$output"
+              printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
               test "$status" -eq 0 || exit "$status"
-            done < "$RUNNER_TEMP/mac-modules"
+            done < "$RUNNER_TEMP/mac-test-ids"
           else
             output="$RUNNER_TEMP/mac-test-output"
-            if make -C tools/llmtool check PYTHON="$JOB_PYTHON" > "$output" 2>&1; then
-              status=0
-            else
-              status=$?
-            fi
-            cat "$output"
+            set +e
+            make -C tools/llmtool check PYTHON="$JOB_PYTHON" 2>&1 | tee "$output"
+            status=${PIPESTATUS[0]}
+            set -e
             collect_count "$output"
             test "$status" -eq 0 || exit "$status"
           fi
