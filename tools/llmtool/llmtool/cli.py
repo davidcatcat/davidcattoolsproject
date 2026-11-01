@@ -41,6 +41,7 @@ TASK_ACTIONS = {
     'abandon': ('run_task_abandon', False),
     'ack': ('run_task_ack', False),
     'advance': ('run_task_advance', False),
+    'brief': ('run_task_brief', False),
     'claude-result': ('run_task_claude_result', False),
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate', True),
@@ -55,7 +56,6 @@ TASK_ACTIONS = {
     'review-result': ('run_task_review_result', False),
     'show': ('run_task_show', False),
     'status': ('run_task_status', False),
-    'brief': ('run_task_brief', False),
     'submit': ('run_task_submit', False),
 }
 
