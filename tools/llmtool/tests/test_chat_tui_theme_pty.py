@@ -58,7 +58,7 @@ class ThemePTYTests(unittest.TestCase):
         self.evidence = os.environ.get("LLMTOOL_TUI_EVIDENCE_DIR")
 
     def open_terminal(self, environ, git_remote=None, items=None, details=None, rows=24,
-                      refresh=None):
+                      refresh=None, columns=80):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(os.path.realpath(temp.name))
@@ -70,7 +70,7 @@ class ThemePTYTests(unittest.TestCase):
         detail = root / "task-detail.json"
         detail.write_text(json.dumps(details or {}), encoding="utf-8")
         environ = dict(environ, FAKE_BACKGROUND=str(background), FAKE_TASK_DETAIL=str(detail))
-        terminal = driver.Terminal(self.pyte, root, {"*": {"text": REPLY}}, rows, 80, self.slow,
+        terminal = driver.Terminal(self.pyte, root, {"*": {"text": REPLY}}, rows, columns, self.slow,
                                    environ=environ, child_prefix=FAKE_BACKGROUND + (
                                        "" if refresh is None else
                                        "\n_status.REFRESH_SECONDS = %d\n" % refresh))
@@ -229,12 +229,12 @@ class ThemePTYTests(unittest.TestCase):
         terminal.wait_text("草稿 W59", "draft typed while the detail is open")
         # The PM turn keeps going and ends while the detail is shown.
         rows = terminal.wait_for(lambda rows: "待命" in rows[-1], "turn end with detail open", 30)
-        self.assertIn("最近事件", "\n".join(rows))                     # still the detail
+        self.assertIn("證據與出處", "\n".join(rows))                   # still the detail (W60 rows)
         self.assertIn("Esc 返回", rows[-1])
         self.assertNotIn("PM 回覆：第一則", "\n".join(rows))
         self.dump(terminal, "w59-task-detail")
         terminal.esc()
-        terminal.wait_for(lambda rows: "最近事件" not in "\n".join(rows), "Esc closed it")
+        terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed it")
         self.assertEqual(terminal.wait_stable("back in the chat") and terminal.pane()[:4], top)
         self.assertTrue(any(row.startswith("pm> 草稿 W59") for row in terminal.rows()),
                         terminal.rows())
@@ -294,6 +294,82 @@ class ThemePTYTests(unittest.TestCase):
         self.assertEqual(terminal.claude_messages(), [slow])               # nothing else sent
         terminal.wait_text("PM 回覆：第一則", "the turn completed", 40)
         self.assertNotIn("已中斷", terminal.text())
+
+    def test_w60_detail_evidence_and_copy_task_id_at_80_and_50_columns(self):
+        """[Mac PTY (fake provider)] W60: the detail's evidence rows (PR CONFLICT as stored, CI head,
+        Reviewer source, read time) align in display columns at 80 and 50 columns; c copies the
+        opened Task ID; an ABANDONED Task listed as RUNNING by the panel never shows RUNNING"""
+        now = datetime.now(timezone.utc)
+        task_a, task_b = "a" * 32, "b" * 32
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        items = [{"role": "Developer", "task": task_a, "pr": "", "state": "RUNNING",
+                  "updated_at": (now - timedelta(minutes=12)).isoformat()},
+                 {"role": "Reviewer", "task": task_b, "pr": "#661 #662", "state": "WAITING_CI",
+                  "updated_at": (now - timedelta(minutes=3)).isoformat()}]
+        base = {"state": "PM_RESPONDED", "created_at": now.isoformat(),
+                "updated_at": "2026-11-02T01:02:03Z", "pm_session_id": "pm-test"}
+        details = {
+            task_a: dict(base, task_id=task_a, request="W60 已放棄的工作",
+                         developer={"state": "DEVELOPER_PENDING"},
+                         abandonment={"reason": "需求取消", "pm_session_id": "pm-test",
+                                      "abandoned_at": "2026-11-02T01:05:00Z"}),
+            task_b: dict(base, task_id=task_b, request="W60 證據詳情",
+                         developer={"state": "DEVELOPER_PENDING"},
+                         review_dispatch_claim={"pr": 661, "state": "CLAIMED", "version": 1},
+                         completion={"state": "WAITING_CI", "evidence": {"review_pr_ci": {
+                             "stage": "REVIEW_PR_CI", "pr_number": 662, "pr_state": "OPEN",
+                             "ci_head_sha": sha, "review_source": "PR_COMMENT",
+                             "review_actor": "reviewer-bot"}}})}
+        labels = ("PR", "PR 狀態", "CI head SHA", "Reviewer 來源", "讀取時間")
+        for columns in (80, 50):
+            with self.subTest(columns=columns):
+                terminal = self.open_terminal({"COLORFGBG": "15;0"}, items=items,
+                                              details=details, rows=60, columns=columns)
+                terminal.connect_pm()
+                terminal.wait_text("背景 2", "status line background count")
+                terminal.send("\x1b[B")
+                terminal.wait_text("背景工作 2 項", "↓ panel")
+                terminal.send("\x1b[B")
+                terminal.send("\r")
+                terminal.wait_text("證據與出處", "evidence block of the selected Task")
+                rows = self.dump(terminal, "w60-evidence-%d" % columns)
+                self.assertIn("W60證據詳情", "".join(rows).replace(" ", ""))
+                start = next(y for y, row in enumerate(rows) if row.startswith("證據與出處"))
+                found, colons = {}, set()
+                for y in range(start + 1, len(rows)):
+                    for label in labels:
+                        if (rows[y].startswith("  " + label) and label not in found
+                                and rows[y][len(label) + 2] in " ："):
+                            found[label] = y
+                            colons.add(next(x for x in range(columns)
+                                            if terminal.cell(y, x).data == "："))
+                self.assertEqual(sorted(found), sorted(labels), rows)
+                self.assertEqual(len(colons), 1, rows)              # values in one column
+                block = "".join(rows[found["PR"]:found["讀取時間"] + 2]).replace(" ", "")
+                for needle in ("CONFLICT", "#661（來源reviewclaim）",
+                               "#662（來源completionreview_pr_ci.pr_number）", sha,
+                               "PR_COMMENT", "reviewer-bot", "2026-11-02T01:02:03Z"):
+                    self.assertIn(needle, block)
+                self.assertIn("c複製TaskID", "".join(rows[:3]).replace(" ", ""))   # header hint
+                if columns == 80:                     # at 50 the PM status bar drops its keys
+                    self.assertIn("c 複製 Task ID", rows[-1])
+                terminal.send("c")
+                self.assertEqual(terminal.wait_clipboard(), task_b)
+                if columns == 80:
+                    terminal.wait_text("Task ID 已複製 32 字", "copy result in the status bar")
+                self.assertFalse(any(row.startswith("pm> c") for row in terminal.rows()))
+                terminal.esc()
+                terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed")
+                terminal.send("\x1b[B")
+                terminal.wait_text("背景工作 2 項", "↓ panel again")
+                terminal.send("\r")                                  # opens on the first row: A
+                terminal.wait_text("Core 狀態：ABANDONED", "abandoned Task detail")
+                rows = self.dump(terminal, "w60-abandoned-%d" % columns)
+                self.assertIn("W60已放棄的工作", "".join(rows).replace(" ", ""))
+                self.assertNotIn("RUNNING", "\n".join(rows))
+                terminal.esc()
+                terminal.stop()
+
 
 if __name__ == "__main__":
     unittest.main()

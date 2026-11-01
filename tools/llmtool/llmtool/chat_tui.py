@@ -118,6 +118,10 @@ this PM session with a Developer or Reviewer at work, read from TaskStore every 
 age); Esc closes it. In that list Up/Down choose a row and Enter opens its read-only Task
 detail (Core state, PR link, recent events, read once from TaskStore); PM replies keep
 arriving meanwhile, and Esc returns to the chat at the same place with the draft kept.
+The detail lists its evidence and where each value comes from (PR, CONFLICT when TaskStore
+names different PRs, PR state, CI head SHA, Reviewer source, read time; UNKNOWN with the
+reason when Core has none). With an empty draft, c copies the Task ID it shows (so a
+draft typed in the detail cannot start with c; type it after Esc, or after another letter).
 
 A chat reply is never a Task: to dispatch work, /pm connect and tell the PM.%s"""
 
@@ -645,6 +649,10 @@ class ChatTUI:
         self.show_task_view = False
         self.task_view_seq = 0
         self._task_view_linker = (None, None)   # (base Linker, wrapper) last handed out
+        # W60: the Task ID the open detail shows (c copies it; None when the detail has no
+        # Task record), fixed when the detail opens, and when c was last pressed.
+        self.task_view_task_id = None
+        self.task_copy_at = None
         # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
         # a COMPLETED turn. Esc (W55), a failed/refused turn, Ctrl-C or a disconnect pauses
         # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
@@ -858,6 +866,13 @@ class ChatTUI:
             if menu_shown():
                 self.accept_menu()
 
+        # W60: c copies the detail's Task ID; with a draft it types into the draft as before.
+        @keys.add("c", filter=showing_task_view & ~picker_shown & ~searching
+                  & ((input_focused & Condition(lambda: not self.input.text))
+                     | task_view_focused))
+        def _task_view_copy(event):
+            self.copy_task_id()
+
         @keys.add("up", filter=(input_focused | task_view_focused) & showing_task_view
                   & ~menu_shown & ~searching, eager=True)
         def _task_view_up(event):
@@ -1014,6 +1029,7 @@ class ChatTUI:
         if self.links_supported:
             chat_tui_theme.install_osc8_guard(self.app.output)
         self.view.on_copied = self.app.invalidate   # thread-safe: shows 已複製 when pbcopy is done
+        self.task_view.on_copied = self.app.invalidate   # W60: the Task ID copy result
 
     # -- rendering -----------------------------------------------------------------
     def status_fragments(self):
@@ -1087,6 +1103,11 @@ class ChatTUI:
         keys = []
         if self.task_view_visible():
             keys.append("Esc 返回")   # W59: Esc closes the detail; it never interrupts here
+            copied = self._task_copy_status()
+            if copied:
+                keys.append(copied)
+            elif self.task_view_task_id and not self.input.text:
+                keys.append("c 複製 Task ID")
         elif self.pm_turn_active:
             keys.append("Esc 中斷")
         elif self.busy and self.worker_kind == "chat" and not self.send_interrupted:
@@ -2505,15 +2526,21 @@ class ChatTUI:
             self._show_task_view(chat_tui_status.task_detail_text(
                 None, now, "背景清單的 Task ID 無法辨識"))
         else:
-            self._show_task_view("Task 詳情（唯讀）— Esc 返回對話\n讀取中…（TaskStore，本機）Task "
-                                 + task_id)
+            self._show_task_view("Task 詳情（唯讀）— Esc 返回對話" + chat_tui_status.COPY_HINT
+                                 + "\n讀取中…（TaskStore，本機）Task " + task_id, task_id)
             self._loop = asyncio.get_running_loop()
             threading.Thread(target=self._read_task_view,
                              args=(self._loop, self.task_view_seq, task_id),
                              name="llmtool-chat-task-detail", daemon=True).start()
 
-    def _show_task_view(self, text):
-        """Replace the conversation by the detail; its reading position and the draft stay."""
+    def _show_task_view(self, text, task_id=None):
+        """Replace the conversation by the detail; its reading position and the draft stay.
+
+        ``task_id`` is the validated Task the detail reads (what c copies); a refresh of the
+        ↓ panel never changes it.
+        """
+        self.task_view_task_id = task_id
+        self.task_copy_at = None
         self.show_background = False
         self._leave_conversation()
         self.task_view_seq += 1
@@ -2526,10 +2553,12 @@ class ChatTUI:
     def _read_task_view(self, loop, seq, task_id):
         try:
             record = chat_tui_status.read_task_detail(task_id)
-            text = chat_tui_status.task_detail_text(record, time.strftime("%H:%M:%S"))
+            text = chat_tui_status.task_detail_text(record, time.strftime("%H:%M:%S"),
+                                                    copy_hint=True)
         except Exception:
             text = chat_tui_status.task_detail_text(
-                None, time.strftime("%H:%M:%S"), "TaskStore 讀取失敗（找不到或無法讀取）；細節省略")
+                None, time.strftime("%H:%M:%S"), "TaskStore 讀取失敗（找不到或無法讀取）；細節省略",
+                copy_hint=True)
         self._post(loop, self.finish_task_view, seq, text)
 
     def finish_task_view(self, seq, text):
@@ -2538,8 +2567,33 @@ class ChatTUI:
         self._set_task_view(text)
         self.app.invalidate()
 
+    def copy_task_id(self):
+        """W60 c: the open detail's Task ID to the clipboard (the pane's clipboard worker)."""
+        self.task_copy_at = time.monotonic()
+        if self.task_view_task_id:
+            self.task_view.copy(self.task_view_task_id)
+        self.app.invalidate()
+
+    def _task_copy_status(self):
+        """Status text of the last c while it is recent (copying, copied, failed), else None."""
+        if self.task_copy_at is None:
+            return None
+        view = self.task_view
+        now = time.monotonic()
+        recent = now - self.task_copy_at < chat_tui_view.COPIED_SECONDS
+        if not self.task_view_task_id:
+            return "沒有 Task ID 可複製" if recent else None
+        # The worker stamps ``copied`` when pbcopy returns, so a slow copy still reports.
+        finished = (view.copied is not None
+                    and now - view.copied[1] < chat_tui_view.COPIED_SECONDS)
+        if not (recent or finished or view.copy_pending()):
+            return None
+        return "Task ID " + view.status()
+
     def close_task_view(self):
         """Esc: back to the chat; its reading position and the draft were never touched."""
+        self.task_view_task_id = None
+        self.task_copy_at = None
         self.show_task_view = False
         self.task_view_seq += 1
         self.app.layout.focus(self.input)

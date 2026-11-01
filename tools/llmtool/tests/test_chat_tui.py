@@ -4778,6 +4778,117 @@ class PMConversationTests(BoundedPMTest):
                         self.w59_refresh(self.w59_items()), same, stale, same,
                         streamed, same, self.w59_esc, closed_stale])
 
+    # -- W60: evidence and provenance in the Task detail; c copies the Task ID --------------
+    def w60_copies(self, ui):
+        copies = []
+        ui.task_view._copier = lambda text: copies.append(text) or True
+        return copies
+
+    def test_w60_c_copies_the_opened_task_id_even_after_a_refresh(self):
+        a, _b = self.w59_items()
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_B in self.w59_text(ui), 'detail read')
+            self.assertIn('c 複製 Task ID', ui.status_text())
+            self.assertIn('c 複製 Task ID', self.w59_text(ui).splitlines()[0])
+            seen['copies'] = self.w60_copies(ui)
+
+        async def copied(ui):
+            await self.until(ui, lambda ui: seen['copies'], 'Task ID copied')
+            ui.task_view.wait_copy()
+            self.assertEqual(seen['copies'], [self.W59_TASK_B])   # the opened Task, not A
+            self.assertEqual(ui.input.text, '')                    # c never typed
+            self.assertTrue(ui.show_task_view)
+            self.assertIn('已複製 32 字', ui.status_keys())
+            self.assertIn('Task ID', ui.status_keys())
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                        '\r', opened, self.w59_refresh([a]), 'c', copied])
+        self.assertEqual(self.w59_sent(), 0)
+
+    def test_w60_c_types_into_a_draft_and_after_the_detail_closes(self):
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            seen['copies'] = self.w60_copies(ui)
+
+        def drafted(ui):
+            self.assertEqual(ui.input.text, '草c')                  # a draft keeps typing
+            self.assertNotIn('c 複製 Task ID', ui.status_text())
+            ui.input.text = ''
+
+        async def closed(ui):
+            await self.until(ui, lambda ui: not ui.show_task_view, 'Esc closed the detail')
+
+        def typed(ui):
+            self.assertEqual(ui.input.text, 'c')                    # chat typing as before
+            self.assertEqual(seen['copies'], [])
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened,
+                        '草', 'c', drafted, self.w59_esc, closed, 'c', typed])
+
+    def test_w60_c_first_in_an_empty_draft_copies_and_the_rest_types(self):
+        """Documented trade-off: with an empty draft c is the copy key, never typed."""
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            seen['copies'] = self.w60_copies(ui)
+
+        async def typed(ui):
+            await self.until(ui, lambda ui: seen['copies'], 'Task ID copied')
+            ui.task_view.wait_copy()
+            self.assertEqual(seen['copies'], [self.W59_TASK_A])
+            self.assertEqual(ui.input.text, 'heck')
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened,
+                        'c', 'heck', typed])
+        self.assertEqual(self.w59_sent(), 0)
+
+    def test_w60_slow_copy_still_reports_its_result(self):
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            seen['copies'] = self.w60_copies(ui)
+            ui.copy_task_id()
+            ui.task_view.wait_copy()
+            ui.task_copy_at -= 10                 # the key press was long ago (slow pbcopy)
+            self.assertIn('Task ID 已複製 32 字', ui.status_keys())
+            ui.task_view.copied = (32, time.monotonic() - 10)
+            self.assertNotIn('已複製', ui.status_keys())
+            self.assertIn('c 複製 Task ID', ui.status_keys())
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened])
+
+    def test_w60_c_without_a_task_id_copies_nothing_and_says_why(self):
+        seen = {}
+
+        async def unknown(ui):
+            await self.until(ui, lambda ui: 'Core 狀態：UNKNOWN' in self.w59_text(ui), 'UNKNOWN')
+            self.assertNotIn('c 複製 Task ID', ui.status_text())
+            self.assertNotIn('c 複製 Task ID', self.w59_text(ui))
+            seen['copies'] = self.w60_copies(ui)
+
+        def refused(ui):
+            self.assertEqual(seen['copies'], [])
+            self.assertEqual(ui.input.text, '')
+            self.assertIn('沒有 Task ID 可複製', ui.status_keys())
+
+        self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                    self.w59_refresh([]), '\r', unknown, 'c', refused])
+
+
 class W59DetailTextTests(unittest.TestCase):
     """chat_tui_status.task_detail_text: Core state, source/time, at most 10 events."""
 
@@ -4798,6 +4909,132 @@ class W59DetailTextTests(unittest.TestCase):
         text = chat_tui_status.task_detail_text(None, '12:34:56', reason='TaskStore 讀取失敗')
         self.assertIn('Core 狀態：UNKNOWN（TaskStore 讀取失敗）', text)
         self.assertNotIn('最近事件', text)
+
+
+class W60EvidenceTextTests(unittest.TestCase):
+    """chat_tui_status.task_detail_text: the W60 evidence and provenance rows."""
+
+    SHA = '0123456789abcdef0123456789abcdef01234567'
+
+    def record(self, **changes):
+        record = {'task_id': 'd' * 32, 'request': '證據測試', 'state': 'PM_RESPONDED',
+                  'created_at': '2026-11-02T01:00:00Z', 'updated_at': '2026-11-02T01:02:03Z',
+                  'pm_session_id': 'pm-test', 'developer': {'state': 'DEVELOPER_PENDING'}}
+        record.update(changes)
+        return record
+
+    def completion(self, **review_ci):
+        evidence = {'stage': 'REVIEW_PR_CI', 'pr_number': 661, 'pr_state': 'OPEN',
+                    'ci_head_sha': self.SHA, 'review_source': 'PR_COMMENT',
+                    'review_actor': 'reviewer-bot', 'formal_review_state': 'ACCEPTED',
+                    'required_checks': ['ci'], 'successful_checks': ['ci']}
+        evidence.update(review_ci)
+        return {'state': 'WAITING_CI', 'evidence': {'review_pr_ci': evidence}}
+
+    @staticmethod
+    def rows(text):
+        block = text.split('證據與出處', 1)[1].split('\n\n', 1)[0].splitlines()[1:]
+        return {row.split('：', 1)[0].strip(): row for row in block}
+
+    def test_evidence_rows_name_their_source_and_align_in_display_columns(self):
+        text = chat_tui_status.task_detail_text(
+            self.record(completion=self.completion(pr_state='MERGED')), '12:34:56')
+        rows = self.rows(text)
+        self.assertEqual(list(rows), ['PR', 'PR 狀態', 'CI head SHA', 'Reviewer 來源', '讀取時間'])
+        self.assertIn('#661', rows['PR'])
+        self.assertIn('completion review_pr_ci.pr_number', rows['PR'])
+        self.assertIn('MERGED', rows['PR 狀態'])
+        self.assertIn('review_pr_ci.pr_state', rows['PR 狀態'])
+        self.assertIn(self.SHA, rows['CI head SHA'])              # the full head, not cut
+        self.assertIn('review_pr_ci.ci_head_sha', rows['CI head SHA'])
+        self.assertIn('PR_COMMENT', rows['Reviewer 來源'])
+        self.assertIn('reviewer-bot', rows['Reviewer 來源'])
+        self.assertIn('12:34:56', rows['讀取時間'])
+        self.assertIn('2026-11-02T01:02:03Z', rows['讀取時間'])
+        columns = {get_cwidth(row.split('：', 1)[0]) for row in rows.values()}
+        self.assertEqual(len(columns), 1, rows)                   # values start in one column
+
+    def test_disagreeing_pr_numbers_are_shown_as_conflict(self):
+        record = self.record(completion=self.completion(),
+                             review_dispatch_claim={'pr': 654, 'state': 'CLAIMED', 'version': 1})
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertIn('CONFLICT', rows['PR'])
+        self.assertIn('#654', rows['PR'])
+        self.assertIn('#661', rows['PR'])
+        self.assertIn('review claim', rows['PR'])
+        self.assertIn('CONFLICT', rows['PR 狀態'])               # no single PR state is chosen
+        self.assertIn('#661', rows['PR 狀態'])                   # what review_pr_ci did store
+
+    def test_missing_evidence_is_unknown_with_a_reason(self):
+        rows = self.rows(chat_tui_status.task_detail_text(self.record(), '12:34:56'))
+        for label in ('PR', 'PR 狀態', 'CI head SHA', 'Reviewer 來源'):
+            self.assertRegex(rows[label], '：UNKNOWN（.+）$', label)
+        self.assertNotIn('NOT_AVAILABLE', '\n'.join(rows.values()))
+
+    def test_evidence_rows_use_no_east_asian_ambiguous_characters(self):
+        import unicodedata
+        record = self.record(completion=self.completion(),
+                             review_dispatch_claim={'pr': 654, 'state': 'CLAIMED', 'version': 1})
+        evidence = chat_tui_status.evidence_text(record, '12:34:56')
+        self.assertEqual([char for char in evidence
+                          if unicodedata.east_asian_width(char) == 'A'], [])
+
+    def test_ci_not_started_and_claim_only_reviewer_stay_unknown(self):
+        record = self.record(
+            completion={'state': 'WAITING_REVIEW', 'evidence': {'review_pr_ci': {
+                'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
+                'ci_state': 'NOT_STARTED'}}},
+            review_dispatch_claim={'pr': 654, 'state': 'CLAIMED', 'version': 1,
+                                   'reviewer_task': 'e' * 32})
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertRegex(rows['CI head SHA'], 'UNKNOWN（.*NOT_STARTED.*）')
+        self.assertRegex(rows['Reviewer 來源'], 'UNKNOWN（.*claim.*）')
+        self.assertNotIn('：PASS', rows['Reviewer 來源'])          # a claim is not a PASS
+        self.assertRegex(rows['PR 狀態'], 'UNKNOWN（.+）')
+
+    def test_review_receipt_is_the_reviewer_source(self):
+        record = self.record(developer={'state': 'DEVELOPER_RESPONDED', 'direct_result_callback': {
+            'state': 'PM_RETURNED', 'review_handoff': {'dispatch_state': 'DISPATCHED', 'receipt': {
+                'reviewer_identity': 'codex-reviewer', 'reviewer_task_id': 'f' * 32,
+                'execution_status': 'COMPLETED', 'verdict': 'PASS',
+                'provenance': 'TRUSTED_REVIEW_ADAPTER'}}}})
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertIn('review receipt', rows['Reviewer 來源'])
+        self.assertIn('TRUSTED_REVIEW_ADAPTER', rows['Reviewer 來源'])
+        self.assertIn('codex-reviewer', rows['Reviewer 來源'])
+
+    def test_a_merge_event_outranks_pr_state_collected_while_open(self):
+        record = self.record(completion=self.completion(), completion_events=[{
+            'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED',
+            'state': 'MERGED', 'received_at': '2026-11-02T01:03:00Z'}])
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertRegex(rows['PR 狀態'], '：MERGED（GitHub merge')
+        self.assertIn('#661 為 OPEN', rows['PR 狀態'])            # the older evidence, named
+
+    def test_out_of_range_pr_number_has_no_pr_state(self):
+        record = self.record(completion=self.completion(pr_number=0))
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertRegex(rows['PR'], '：UNKNOWN（')
+        self.assertRegex(rows['PR 狀態'], '：UNKNOWN（')
+
+    def test_a_github_merge_event_is_a_stored_pr_state(self):
+        record = self.record(completion_events=[{
+            'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED',
+            'state': 'MERGED', 'received_at': '2026-11-02T01:03:00Z'}])
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertIn('MERGED', rows['PR 狀態'])
+        self.assertIn('GitHub', rows['PR 狀態'])
+
+    def test_abandoned_task_is_never_shown_as_running(self):
+        record = self.record(abandonment={'reason': '需求取消', 'pm_session_id': 'pm-test',
+                                          'abandoned_at': '2026-11-02T01:05:00Z'})
+        text = chat_tui_status.task_detail_text(record, '12:34:56')
+        self.assertIn('Core 狀態：ABANDONED', text)
+        self.assertIn('Stage: ABANDONED', text)
+        self.assertIn('需求取消', text)
+        self.assertNotIn('RUNNING', text)
+        self.assertEqual(chat_tui_status.stage(record)[0], 'ABANDONED')
+        self.assertEqual(chat_tui_status.background_items([record]), [])   # not in-flight work
 
 
 def pane_rows(ui):
