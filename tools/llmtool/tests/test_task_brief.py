@@ -59,14 +59,16 @@ class TaskBriefTests(unittest.TestCase):
             'task_id': 'UNKNOWN', 'state': 'UNKNOWN',
             'state_label': 'derived from persisted Task status',
             'last_event': {'state': 'UNKNOWN'},
-            'review_claim_state': 'UNKNOWN',
+            'review_claim_state': 'REVIEW_PASS',
             'review_claim_label': 'stored claim state; not a formal verdict',
             'pending_inbox_count': 'UNKNOWN',
         }])
         rendered = format_task_brief(result, as_json=True)
         for secret in ('private request', 'private response', 'secret prompt',
-                       '/private/path', 'private log', 'REVIEW_PASS'):
+                       '/private/path', 'private log'):
             self.assertNotIn(secret, rendered)
+        self.assertIn('REVIEW_PASS', rendered)
+        self.assertIn('not a formal verdict', rendered)
 
     def test_summary_fields_are_projected_and_claim_is_labeled(self):
         result = task_brief({'tasks': [row(
@@ -150,6 +152,7 @@ class TaskBriefTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             store = TaskStore(Path(root) / 'tasks')
             task_id = 'a' * 32
+            store.root.mkdir(mode=0o700, parents=True)
             record_path = store.root / f'{task_id}.json'
             record_path.write_text('{broken', encoding='utf-8')
             inbox_path = store.root / 'inbox'
