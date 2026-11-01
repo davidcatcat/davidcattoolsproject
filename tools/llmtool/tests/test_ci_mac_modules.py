@@ -25,7 +25,11 @@ MAC_REQUIRED = {
 class MacTestIdSelectionTests(unittest.TestCase):
     def test_explicit_manifest_selects_both_darwin_only_classes(self):
         self.assertEqual(ci_mac_modules.required_test_ids(REPO_ROOT), MAC_REQUIRED)
-        self.assertEqual(ci_mac_modules.select_test_ids([], REPO_ROOT), MAC_REQUIRED)
+        self.assertIsNone(ci_mac_modules.select_test_ids([], REPO_ROOT))
+        report = ci_mac_modules.selection_report([], REPO_ROOT)
+        self.assertEqual(report["level"], "L3")
+        self.assertEqual(report["test_ids"], ["FULL"])
+        self.assertEqual(report["selection_reason"], "no_changed_paths_requires_full")
 
     def test_manifest_rejects_malformed_duplicate_and_missing_ids(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -84,6 +88,17 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertEqual(report["level"], "L3")
                 self.assertEqual(report["test_ids"], ["FULL"])
+
+    def test_selector_changes_require_full(self):
+        for path in (
+            "tools/llmtool/scripts/ci_mac_modules.py",
+            "tools/llmtool/llmtool/test_selection.py",
+        ):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertEqual(report["selection_reason"], "selector_change_requires_full")
 
     def test_monitor_and_documentation_changes_select_no_subset(self):
         for path in ("scripts/llmtool_monitor.py", "tools/llmtool/docs/guide.md"):
@@ -150,6 +165,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn("python3 -I -B tools/llmtool/scripts/ci_mac_modules.py", workflow)
         self.assertIn('"test_ids"', workflow)
         self.assertIn('"$test_id" 2>&1 | tee "$output"', workflow)
+        self.assertIn("while IFS= read -r test_id <&3; do", workflow)
+        self.assertIn('done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null', workflow)
         self.assertIn("status=${PIPESTATUS[0]}", workflow)
         self.assertIn("canonical exact HEAD:", workflow)
         self.assertIn("canonical test ID elapsed seconds:", workflow)

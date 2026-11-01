@@ -284,7 +284,7 @@ jobs:
           trap report_result EXIT
           if [ "${{ steps.coverage.outputs.mode }}" = mac-subset ]; then
             make -C tools/llmtool syntax PYTHON="$JOB_PYTHON"
-            while IFS= read -r test_id; do
+            while IFS= read -r test_id <&3; do
               output="$RUNNER_TEMP/mac-test-output"
               test_started=$SECONDS
               set +e
@@ -294,7 +294,7 @@ jobs:
               collect_count "$output"
               printf 'canonical test ID: %s\ncanonical test ID elapsed seconds: %s\n' "$test_id" "$((SECONDS - test_started))"
               test "$status" -eq 0 || exit "$status"
-            done < "$RUNNER_TEMP/mac-test-ids"
+            done 3< "$RUNNER_TEMP/mac-test-ids" < /dev/null
           else
             output="$RUNNER_TEMP/mac-test-output"
             set +e

@@ -128,7 +128,7 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
     except InvalidManifest:
         return None
     if not changed_paths:
-        return selected
+        return None
     has_relevant_change = False
     for raw_path in changed_paths:
         path = raw_path.strip().replace("\\", "/").removeprefix("./")
