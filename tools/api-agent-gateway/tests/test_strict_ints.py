@@ -60,12 +60,16 @@ class StrictIntTests(GatewayCase):
         self.assertEqual((code, result['code']), (5, 'PROFILE_INVALID'))
 
     def test_boolean_fields_in_session_meta(self):
-        sid = self._start()
-        meta = os.path.join(self.state, 'sessions', sid, 'meta.json')
-        self._rewrite(meta, lambda m: m.update(schema_version=True))
-        code, result, _ = self.resume(sid, self.task())
-        self.assertEqual((code, result['code']), (5, 'SESSION_STATE_INVALID'))
-        self.assertEqual(len(self.server.requests), self.before)
+        for field in ('schema_version', 'turns', 'runs'):
+            with self.subTest(field=field):
+                sid = self._start()
+                meta = os.path.join(self.state, 'sessions', sid, 'meta.json')
+                with open(meta) as fh:
+                    self.assertIs(type(json.load(fh)[field]), int)
+                self._rewrite(meta, lambda m: m.update({field: True}))
+                code, result, _ = self.resume(sid, self.task())
+                self.assertEqual((code, result['code']), (5, 'SESSION_STATE_INVALID'))
+                self.assertEqual(len(self.server.requests), self.before)
 
     def test_boolean_expiry_hours_treated_as_expired(self):
         sid = self._start()
