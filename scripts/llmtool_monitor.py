@@ -2084,6 +2084,7 @@ class OfficeRow:
     alert: str = ""       # a problem worth the Owner's eye even when the state cannot say it
     sid: str = ""         # short session id shown after the name, to match a window's /status
     codex_exec_started: bool = False  # non-subagent `codex exec` whose latest marker is task_started
+    exec_result: str = ""   # a D6 `codex exec` run's last turn: completed | failed | "" (other/unknown)
 
 
 def _shown(row: "OfficeRow") -> str:
@@ -2874,7 +2875,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
     else:
         state = WORKING if age <= OFFICE_BUSY else IDLE
     turn = codex_turn(history or {}, payload.get("id"))
-    since, failed, interrupted = "", False, False
+    since, failed, interrupted, completed = "", False, False, False
     if turn is not None:
         status, began, ended = turn
         # Codex's own turn record beats the session-file markers, except when
@@ -2891,6 +2892,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
             since = f"（這輪 {_clock(began)} 起）" if began else ""
         else:
             failed, interrupted = status == "failed", status == "interrupted"
+            completed = status == "completed"
             # A failed turn needs a look even in a subagent; an interrupted
             # one was stopped on purpose.
             state = ATTENTION if failed else DONE if finishes else IDLE
@@ -2950,12 +2952,17 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
         # A registered D6 root belongs to the one agent its record binds: the
         # Codex Reviewer in a -crv- review worktree, else the Codex Developer.
         role = _d6_role(canonical, place[1], "developer")
+        result = ""
+        if payload.get("originator") == "codex_exec":
+            result = ("failed" if failed else "completed" if completed or
+                      (turn is None and last == "task_complete") else "")
         return ("main", payload.get("id"),
                 OfficeRow(f"codex {role}", state, action or title or _place_label(place), age, 10,
                           key=key, tui=tui, role=role, task=f"task {place[1]}",
                           evidence="codex 紀錄", sid=sid,
                           codex_exec_started=(payload.get("originator") == "codex_exec" and
-                                              last == "task_started")))
+                                              last == "task_started"),
+                          exec_result=result))
     if payload.get("originator") == "codex_exec":
         # A `codex exec` run, like a `claude -p` run: one call that exits when
         # its task is done, wherever it runs. Nothing says who started it.
@@ -3380,6 +3387,10 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
              if id(sub) in ended else sub) for parent, sub in subs]
     subs = [(parent, sub) for parent, sub in subs if sub.key != "review"
             or (sub.age or 0.0) <= (OFFICE_STALL if sub.state == WORKING else OFFICE_DONE_WINDOW)]
+    for key, newer in _superseded_failures(mains).items():
+        row = mains[key]
+        mains[key] = replace(row, state=DONE,
+                             detail=row.detail + f"（上一輪失敗，已由 {newer or '較新的單次呼叫'} 完成）")
     rows = []
     for key, row in mains.items():
         if row.main:
@@ -3391,6 +3402,29 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
             row = replace(row, state=WORKING if busy else row.state, detail=detail)
         rows.append(row)
     return rows + [row for _, row in subs]
+
+
+def _superseded_failures(mains: dict) -> dict:
+    """{key: newer sid} of failed one-shot `codex exec` rows in a registered D6
+    whose newest Codex session of the same task and role is a completed
+    one-shot run that ended after them. Only the displayed state changes;
+    session files and turn records are never touched. A newer failure,
+    running, stalled, interrupted or unknown session, or a tie, keeps every
+    alert."""
+    groups: dict = {}
+    for key, row in mains.items():
+        if row.task.startswith("task ") and row.role and row.age is not None:
+            groups.setdefault((row.task, row.role), []).append((key, row))
+    found = {}
+    for items in groups.values():
+        newest = min(row.age for _, row in items)
+        top = [row for _, row in items if row.age == newest]
+        if len(top) != 1 or top[0].exec_result != "completed" or top[0].state != DONE:
+            continue
+        for key, row in items:
+            if row.state == ATTENTION and row.exec_result == "failed" and row.age > newest:
+                found[key] = top[0].sid
+    return found
 
 
 def _claude_state(entry: dict, who: str, task: str, detail: str, age: float | None, now: float,

@@ -4079,6 +4079,62 @@ class OfficeViewTests(unittest.TestCase):
         (self.task / ".git").write_text(f"gitdir: {common}\n", encoding="utf-8")
         self.assertEqual(mon.canonical_root(str(self.task)), self.canonical)
 
+    # #708: a newer completed one-shot run in the same D6 task and role demotes
+    # an older failed run from ATTENTION to DONE; nothing else does.
+    EXEC_FAILED = "01a18aef-b21c-73f0-a5b9-0000000a0001"
+    EXEC_NEWER = "01a18bdd-19b2-7a21-8b5e-0000000b0002"
+
+    def _exec_708(self, sid, age, cwd=None, events=("task_started", "task_complete")):
+        self._codex(sid[-8:], {"id": sid, "cwd": str(cwd or self.task),
+                               "thread_source": "user", "originator": "codex_exec"},
+                    list(events), age=age)
+
+    def _run_708(self, newer_status, newer_events=("task_started", "task_complete"),
+                 cwd=None, newer_age=600):
+        now = int(self.NOW)
+        turns = [(self.EXEC_FAILED, "u", 0, "failed", now - 2400, now - 1800)]
+        if newer_status:
+            turns.append((self.EXEC_NEWER, "u", 0, newer_status, now - 1200, now - 600))
+        db = self._turn_db(turns)
+        self._exec_708(self.EXEC_FAILED, 1800)
+        self._exec_708(self.EXEC_NEWER, newer_age, cwd, newer_events)
+        rows = self._office(db)
+        alerts = [line for line in mon.office_lines(rows) if line.startswith("⚠")]
+        old = next(row for row in rows if row.sid == self.EXEC_FAILED[-8:])
+        return old, alerts
+
+    def test_708_completed_recovery_clears_alert_and_keeps_row(self):
+        old, alerts = self._run_708("completed")
+        self.assertEqual(old.state, mon.DONE)
+        self.assertIn("上一輪失敗", old.detail)
+        self.assertFalse(any(self.EXEC_FAILED[-8:] in line for line in alerts))
+        self.assertTrue(next(self.codex.rglob(f"rollout-{self.EXEC_FAILED[-8:]}.jsonl")).exists())
+
+    def test_708_newer_failure_keeps_alert(self):
+        old, _ = self._run_708("failed")
+        self.assertEqual(old.state, mon.ATTENTION)
+
+    def test_708_newer_interrupted_keeps_alert(self):
+        old, _ = self._run_708("interrupted")
+        self.assertEqual(old.state, mon.ATTENTION)
+
+    def test_708_newer_running_keeps_alert(self):
+        old, _ = self._run_708("inProgress", ("task_started",), newer_age=5)
+        self.assertEqual(old.state, mon.ATTENTION)
+
+    def test_708_completion_in_other_d6_does_not_clear(self):
+        other = self.task.parent / "wp-2"
+        os.makedirs(other)
+        self._register("wp-2", str(other))
+        old, _ = self._run_708("completed", cwd=other)
+        self.assertEqual(old.state, mon.ATTENTION)
+
+    def test_708_completion_in_unregistered_folder_does_not_clear(self):
+        other = self.task.parent / "loose"
+        os.makedirs(other)
+        old, _ = self._run_708("completed", cwd=other)
+        self.assertEqual(old.state, mon.ATTENTION)
+
 
 class GitHubRunnerTests(unittest.TestCase):
     """Self-hosted runners off this Mac, from GitHub alone (mock gh api)."""
