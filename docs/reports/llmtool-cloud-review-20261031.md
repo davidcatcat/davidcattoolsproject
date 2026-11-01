@@ -26,7 +26,7 @@
 
 | # | 嚴重度 | 位置 | 問題 | 失敗情境 |
 |---|---|---|---|---|
-| R1 | Medium（已核對） | `llmtool/high_debug.py:227-268` | D6 名稱是 `{task}-hd{len(entries)+1}-{sha7}`，但只有成功時才會執行 `store.append_high_debug` | Codex 回傳非 0、逾時、`HIGH_DEBUG_WROTE_FILES` 或 `REPORT_INVALID` 之後，`entries` 不變，重試會算出同名的 D6 和 branch，結果永遠回報 `HIGH_DEBUG_D6_CREATE_FAILED`，並留下一個沒人清的 worktree。`_create_d6` 的 `timeout=180` 若撐不過 ENV-2 bootstrap，也會撞名。名稱很長的 `executor_task` 加上後綴後，可能超過 lifecycle 規定的 96 字元上限 |
+| R1 | Medium（已核對） | `llmtool/high_debug.py:227-268` | D6 名稱是 `{task}-hd{len(entries)+1}-{sha7}`，但只有成功時才會執行 `store.append_high_debug` | Codex 回傳非 0（`HIGH_DEBUG_RUN_FAILED`）、逾時、`HIGH_DEBUG_WROTE_FILES`，或報告過大／含敏感內容而被拒（`HIGH_DEBUG_REPORT_INVALID`）之後，不會寫入 entry，`entries` 不變，重試會算出同名的 D6 和 branch，結果永遠回報 `HIGH_DEBUG_D6_CREATE_FAILED`，並留下一個沒人清的 worktree。`_create_d6` 的 `timeout=180` 若撐不過 ENV-2 bootstrap，也會撞名。名稱很長的 `executor_task` 加上後綴後，可能超過 lifecycle 規定的 96 字元上限。結構不合格的報告（狀態標記不是唯一值，或缺少必要段落）不在此列：它們會以 `REPORT_INVALID` 狀態寫入 entry，計入 8 筆上限，重試時名稱也會遞增 |
 | R2 | Low/Medium（已核對） | `high_debug.py:153-159` | `codex exec` 沒有帶 `env=`，也沒有 `--ignore-user-config`、`--ignore-rules` 或 `shell_environment_policy.inherit="none"`；`codex_direct_developer.py` 則都有 | prompt 會帶進 `--evidence` 的不可信文字（例如 CI log），又開了 live web search。agent 執行的指令看得到父 process 的所有環境變數，也會套用使用者的 `~/.codex` 設定 |
 | R3 | Low | `scripts/gw_ladder.py:31-66` | 逾時時只 kill 直接的子 process，之後 `reader.join()` 沒有時間上限；PASS 只看 exit code 和 stdout 裡的 `Ran N tests` | 被測程式開出的子孫 process 會讓評測永遠卡住。被測程式只要印出 `Ran 3 tests` 再 `os._exit(0)`，就會被判定 PASS |
 | R4 | Low | `llmtool/developer_routes/write_boundary.py:184` | sandbox 自我檢查把任何非 0 結束都當成「寫入被擋下」 | 目錄不存在或 Python 啟動失敗也會算通過；只有第一個目標有做「可以寫入」的正向檢查 |
