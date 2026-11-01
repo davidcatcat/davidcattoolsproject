@@ -5,6 +5,7 @@ It neither authenticates the capture nor establishes that the tests passed.
 """
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -96,6 +97,15 @@ def _emitted_sensitive(text):
     # character can add a word boundary that the Unicode-aware string lacks.
     # Escape only non-ASCII here: escaping LF/TAB would merge separate tokens.
     return _sensitive(text) or _sensitive(text.encode('ascii', 'backslashreplace').decode('ascii'))
+
+
+def _emitted_json_sensitive(text):
+    # Final gate only: also screen the exact JSON payload the CLI prints. Its
+    # TAB escape turns TAB + "oken = value" into a token assignment. Apply only
+    # the keyword/credential patterns here: the URL and JWT heuristics would
+    # treat escaped LF/TAB as joining separate tokens.
+    return (_emitted_sensitive(text)
+            or _SENSITIVE.search(json.dumps(text, ensure_ascii=True)[1:-1]) is not None)
 
 
 def _error(category):
@@ -445,7 +455,7 @@ def select_test_excerpts(filename, test_exit_code, *, max_excerpt_bytes=MAX_EXCE
     # Byte, UTF-8 and aggregate cuts can add a word boundary the full source
     # lacked (e.g. AKIA + 16 characters cut out of a longer word). Re-check the
     # exact emitted strings and fail closed instead of dropping or redacting them.
-    if any(_emitted_sensitive(value) for value in
+    if any(_emitted_json_sensitive(value) for value in
            selected_ids + [item['text'] for item in excerpts]):
         raise _error('emitted excerpt contains sensitive-content indicators')
     incomplete = bool(reasons)

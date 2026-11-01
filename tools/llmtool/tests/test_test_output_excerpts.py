@@ -594,6 +594,52 @@ class TestOutputExcerptsTests(unittest.TestCase):
             self.assertEqual(result, {'error': 'test-excerpts: source contains '
                                      'sensitive-content indicators; details omitted'})
 
+    def tab_escape_cases(self):
+        # Fragments only: the CLI's JSON escape of TAB yields a "t" before "oken".
+        value = 'SYNTHETIC_' + 'PRIVATE_VALUE'
+        return value, [(separator, '\t' + 'oken' + separator + value)
+                       for separator in (' = ', ': ')]
+
+    def test_json_escaped_tab_cannot_print_a_credential_shaped_excerpt(self):
+        value, cases = self.tab_escape_cases()
+        for separator, tail in cases:
+            with self.subTest(separator=separator):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
+                self.assert_emitted_excerpt_rejected(raw)
+                # A unittest description parenthetical may carry TAB into an emitted ID.
+                hidden = 'test_k (sample.Case.test_k) (x' + tail + ')'
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY), ('FAIL', hidden, FAIL_BODY)])
+                self.assert_emitted_excerpt_rejected(raw, max_excerpts=1)
+
+    def test_json_escaped_tab_cli_prints_no_credential_shaped_text(self):
+        value, cases = self.tab_escape_cases()
+        for separator, tail in cases:
+            with self.subTest(separator=separator):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + tail)])
+                self.path.write_bytes(raw)
+                done = subprocess.run([sys.executable, '-B', '-I', '-m', 'llmtool',
+                    'test-excerpts', '--file', str(self.path), '--exit-code', '1', '--json'],
+                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5,
+                    cwd=self.root, env={'PATH': os.defpath})
+                self.assertEqual((done.returncode, done.stdout), (1, b''))
+                self.assertEqual(done.stderr, ('llmtool: ' + EMITTED_SENSITIVE_ERROR
+                                               + '\n').encode())
+                for output in (done.stdout, done.stderr):
+                    self.assertNotIn(value.encode(), output)
+                    self.assertNotIn(b'oken', output)
+                self.assertEqual(self.path.read_bytes(), raw)
+
+    def test_harmless_tab_and_unicode_excerpts_still_complete(self):
+        for text in ('harmless\tTAB text', 'expected\tvalue differs', 'tokenizer = ok',
+                     'x\t期望值不同', '期望\t值不同', 'ok\ttokenizer'):
+            with self.subTest(text=text):
+                raw = unittest_capture([('FAIL', FAIL_ID, FAIL_BODY + '\n' + text)])
+                result = self.select(raw)
+                self.assertEqual(result['status'], 'COMPLETE')
+                self.assertEqual(result['test_status'], 'FAILED')
+                self.assertEqual(result['failure_ids'], [FAIL_ID])
+                self.assertIn(text, result['excerpts'][0]['text'])
+
     def test_urls_without_credentials_preserve_supported_report_coverage(self):
         for url in ('https://example.invalid:443/path',
                     'https://example.invalid/path:user@host',
