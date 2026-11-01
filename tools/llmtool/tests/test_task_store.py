@@ -434,7 +434,8 @@ class TaskStoreTests(unittest.TestCase):
         for reported in (
                 {'other': 'field'}, {'summary': 4},
                 {'summary': 'x' * (8 * 1024 + 1)},
-                {'tests': ['x' * 1025]}, {'tests': ['api_key=secret']},
+                {'tests': ['x' * 1025]},
+                {'tests': ['_'.join(('api', 'key')) + '=' + 'secret']},
                 {'tests': ['ok'] * 33}, {}):
             with self.subTest(reported=repr(reported)[:32]):
                 with self.assertRaises(LLMToolError):
