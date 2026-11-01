@@ -759,6 +759,31 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
         self.assertFalse(marker_path.exists())
 
+    def test_bootstrap_rejection_reports_only_one_bounded_stop_code(self):
+        valid_stop = b"STOP: D6 lifecycle rejected (D6_UNREGISTERED_LOCAL_STATE)\n"
+        cases = (
+            ("valid stop", valid_stop, "ENV_BOOTSTRAP_REJECTED:D6_UNREGISTERED_LOCAL_STATE"),
+            ("junk", b"helper failed without a code\n", "ENV_BOOTSTRAP_REJECTED"),
+            ("extra output", valid_stop + b"private path\n", "ENV_BOOTSTRAP_REJECTED"),
+            ("oversized", b"x" * (lifecycle.BOOTSTRAP_STDERR_LIMIT + 1) + valid_stop,
+             "ENV_BOOTSTRAP_REJECTED"),
+        )
+        for label, stderr, expected in cases:
+            with self.subTest(stderr=label):
+                helper_source = (
+                    "import sys\nsys.stderr.buffer.write(" + repr(stderr) + ")\n"
+                ).encode("utf-8")
+                error_output = io.StringIO()
+                with patch.object(lifecycle, "_trusted_dispatcher_git",
+                                  return_value=(self.source, self.base, lambda *_: "",
+                                                helper_source)), \
+                        patch.object(lifecycle, "_approved_task_source", return_value=None), \
+                        contextlib.redirect_stderr(error_output):
+                    with self.assertRaises(lifecycle.LifecycleError) as raised:
+                        lifecycle._bootstrap(self.source, "test-task")
+                self.assertEqual(raised.exception.code, expected)
+                self.assertEqual(error_output.getvalue(), "")
+
     def test_integrator_approval_bootstraps_exact_helper_blob_from_shared_store(self):
         task_id = "d6-approved-source-test"
         trusted_lifecycle = (self.source / "tools" / "llmtool" / "scripts" /
