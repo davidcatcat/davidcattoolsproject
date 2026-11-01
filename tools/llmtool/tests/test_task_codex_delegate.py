@@ -357,7 +357,14 @@ class CodexDelegateTests(unittest.TestCase):
 
         def capture_screen(value, limit):
             if limit == 64 * 1024:
-                packets.append(json.loads(value))
+                try:
+                    packet = json.loads(value)
+                except (TypeError, json.JSONDecodeError):
+                    packet = None
+                if (type(packet) is dict and
+                        {'task_id', 'run_id', 'developer_reported', 'tests',
+                         'review_pr_ci'}.issubset(packet)):
+                    packets.append(packet)
             return screen_text(value, limit)
 
         with patch.object(task_completion, 'collect_executor_worktree_result',
