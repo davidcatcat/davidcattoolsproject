@@ -427,9 +427,6 @@ def _completion_packet(task, evidence):
         'tests': [_test_packet(item) for item in evidence['tests']],
         'review_pr_ci': evidence['review_pr_ci'],
     }
-    if 'reported' in evidence['developer']:
-        packet['developer_reported'] = _developer_reported_packet(
-            evidence['developer']['reported'])
     if evidence.get('execution_mode') == 'HOST_WORKER':
         packet['host_worker_receipt'] = evidence['host_worker_receipt']
     return packet
@@ -2664,6 +2661,30 @@ def _codex_developer_report(result):
         reported['tests'] = [_screen_text(item, 1024) for item in tests]
     except (LLMToolError, AttributeError):
         pass
+    # The PM packet is ASCII JSON. Bound that representation so non-ASCII
+    # text cannot expand a valid per-field report beyond the PM packet limit.
+    def encoded_report():
+        return json.dumps(
+            reported, ensure_ascii=True, sort_keys=True, separators=(',', ':'))
+
+    while reported and len(encoded_report().encode('ascii')) > 8 * 1024:
+        field = max(reported, key=lambda key: len(json.dumps(
+            reported[key], ensure_ascii=True, separators=(',', ':'))))
+        value = reported[field]
+        if field == 'tests':
+            # Keep bounded leading claims and record that the rest were cut.
+            values = list(value)
+            if len(values) > 1:
+                reported[field] = values[:max(1, len(values) // 2)]
+            elif values:
+                reported[field] = [values[0][:max(0, len(values[0]) // 2)] +
+                                   ' [truncated]']
+            else:
+                reported.pop(field)
+        elif len(value) > 1:
+            reported[field] = value[:max(0, len(value) // 2)] + ' [truncated]'
+        else:
+            reported.pop(field)
     return reported
 
 

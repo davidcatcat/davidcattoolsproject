@@ -1094,6 +1094,14 @@ def _validate(record):
                     if (type(tests) is not list or len(tests) > 32 or
                             any(not _valid_reported_text(item, 1024) for item in tests)):
                         _fail()
+                try:
+                    reported_size = len(json.dumps(
+                        reported, ensure_ascii=True, sort_keys=True,
+                        separators=(',', ':')).encode('ascii'))
+                except (TypeError, UnicodeError):
+                    _fail()
+                if reported_size > 8 * 1024:
+                    _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
                     developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',

@@ -434,6 +434,7 @@ class TaskStoreTests(unittest.TestCase):
         for reported in (
                 {'other': 'field'}, {'summary': 4},
                 {'summary': 'x' * (8 * 1024 + 1)},
+                {'summary': 'x' * (4 * 1024), 'self_review': 'y' * (4 * 1024)},
                 {'tests': ['x' * 1025]},
                 {'tests': [''.join(('api', '_', 'key', '=', 'secret'))]},
                 {'tests': ['ok'] * 33}, {}):

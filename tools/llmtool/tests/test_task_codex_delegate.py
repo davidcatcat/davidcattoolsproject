@@ -292,6 +292,111 @@ class CodexDelegateTests(unittest.TestCase):
             'self_review': 'reviewed the diff'})
         callback.assert_called_once()
 
+    def test_store_maximal_report_reaches_pm_and_stays_out_of_evidence(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='DONE', summary='界' * 2730,
+            tests=tuple('測' * 341 for _ in range(32)),
+            self_review='審' * 2730, blocked_reason=None, exit_code=0,
+            thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='a' * 64, elapsed_ms=1,
+            cleanup_status='CONFIRMED', usage=None)
+
+        class MemoryStore:
+            def __init__(self, record):
+                self.value = dict(record)
+
+            def get(self, _task_id):
+                return self.value
+
+            def update(self, _task_id, **changes):
+                self.value.update(changes)
+                return self.value
+
+            def compare_and_update(self, _task_id, expected, **changes):
+                if any(self.value.get(key) != value for key, value in expected.items()):
+                    raise AssertionError('unexpected Task update')
+                self.value.update(changes)
+                return self.value
+
+        self.store = MemoryStore(task)
+        Registration = dataclasses.make_dataclass('Registration', [
+            ('task_id', object), ('trusted_agent_id', object),
+            ('session_ref', object), ('native_session_id', object),
+            ('root', object), ('common_dir', object), ('branch', object),
+            ('source_sha', object), ('result_sha', object), ('github_login', object),
+        ])
+        registration = Registration(task_id='executor-task-1',
+            trusted_agent_id='executor-agent', session_ref='executor-session',
+            native_session_id=None, root=str(self.root), common_dir=self.common_dir,
+            branch='feat/codex-delegate', source_sha=self.source_sha,
+            result_sha=self.source_sha, github_login='owner')
+        bound_registration = dataclasses.replace(registration, native_session_id=
+            '12345678-1234-4234-8234-123456789abc')
+        worktree_result = {'task_id': task['task_id'], 'run_id': task['run_id'],
+            'executor_task_id': registration.task_id,
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': bound_registration.native_session_id,
+            'executor_native_session': 'VERIFIED', 'root': str(self.root),
+            'common_dir': self.common_dir, 'branch': registration.branch,
+            'source_sha': self.source_sha, 'result_head': None,
+            'result_mode': 'UNCOMMITTED_WORKTREE', 'changed_paths': ['src.py'],
+            'diff_sha256': 'e' * 64, 'status_sha256': 'f' * 64,
+            'file_manifest_sha256': 'a' * 64}
+
+        def callback_handler(task_id, executor_task_id, *, store):
+            return run_task_direct_result_event(task_id, executor_task_id, store=store)
+
+        def done_with_report(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            return result
+
+        packets = []
+        screen_text = task_submission_cli._screen_text
+
+        def capture_screen(value, limit):
+            if limit == 64 * 1024:
+                packets.append(json.loads(value))
+            return screen_text(value, limit)
+
+        with patch.object(task_completion, 'collect_executor_worktree_result',
+                          return_value=worktree_result), \
+             patch.object(task_completion, 'run_bounded_worktree_tests',
+                          return_value=[]), \
+             patch.object(task_submission_cli, '_recollect_direct_worktree'), \
+             patch.object(task_submission_cli, '_active_pm_runtime', return_value=True), \
+             patch.object(task_submission_cli, '_record_ready_event'), \
+             patch.object(task_submission_cli, '_screen_text', side_effect=capture_screen), \
+             redirect_stdout(io.StringIO()):
+            _result, saved, _callback = self._dispatch(task,
+                callback_handler=callback_handler, registration=registration,
+                bound_registration=bound_registration, codex_error=done_with_report)
+
+        developer = saved['developer']
+        callback = developer['direct_result_callback']
+        self.assertEqual(callback['state'], 'PM_EVIDENCE_READY')
+        self.assertEqual(callback['missing_gates'], [])
+        self.assertEqual(callback['evidence']['tests'], [])
+        self.assertEqual(callback['evidence']['review_pr_ci'], {
+            'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
+            'ci_state': 'NOT_STARTED'})
+        self.assertEqual(len(packets), 1)
+        self.assertEqual(packets[0]['developer_reported']['label'],
+                         'Developer-reported, unverified')
+        self.assertLessEqual(len(json.dumps(packets[0], ensure_ascii=True).encode()),
+                             64 * 1024)
+        self.assertLessEqual(len(json.dumps(developer['reported'], ensure_ascii=True,
+                                            sort_keys=True,
+                                            separators=(',', ':')).encode()), 8 * 1024)
+        without_report = dict(developer)
+        without_report.pop('reported')
+        packet_without_report = task_submission_cli._direct_result_packet(
+            task, without_report, registration.task_id, callback['evidence'])
+        self.assertEqual(packet_without_report['tests'], packets[0]['tests'])
+        self.assertEqual(packet_without_report['review_pr_ci'], packets[0]['review_pr_ci'])
+        self.assertEqual(callback['missing_gates'], [])
+
     def test_oversized_and_unscreenable_report_fields_are_dropped(self):
         task = self._task()
         result = task_submission_cli.codex_direct_developer.DirectResult(
