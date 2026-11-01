@@ -298,8 +298,6 @@ def _read_scoped_file(root, name):
                 text = bytes(raw).decode('utf-8')
             except UnicodeError:
                 _reject('OPENCODE_SOURCE_INVALID')
-            if _emitted_sensitive(text):
-                _reject('OPENCODE_SOURCE_SENSITIVE')
             return {
                 'path': name, 'device': before.st_dev, 'inode': before.st_ino,
                 'size': before.st_size, 'mtime_ns': before.st_mtime_ns,
@@ -391,6 +389,8 @@ def configuration(*, read_paths, write_paths, model=MODEL,
 def _screen_prompt(prompt):
     if type(prompt) is not str or not prompt.strip():
         _reject('OPENCODE_PROMPT_INVALID')
+    if _emitted_sensitive(prompt):
+        _reject('OPENCODE_PROMPT_SENSITIVE')
     try:
         raw = prompt.encode('utf-8')
     except UnicodeError:
