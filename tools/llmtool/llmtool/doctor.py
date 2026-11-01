@@ -37,8 +37,15 @@ def doctor_output():
                  ('max_runs', 'max_total_bytes', 'max_age_days', 'max_run_bytes'))
     readiness = view['readiness']
     credential = view['credential']
+    credential_required = (kind == 'openai' or
+                           (kind == 'openai-compatible' and
+                            (credential != 'not-configured' or readiness != 'ready')))
+    if kind in ('claude-cli', 'codex-cli'):
+        credential = 'not-applicable'
+    credential_ready = (not credential_required or
+                        credential not in ('not-configured', 'env-configured-absent'))
     overall = ('ready' if readiness == 'ready' and executable != 'missing' and
-               credential not in ('not-configured', 'env-configured-absent') else 'not-ready')
+               credential_ready else 'not-ready')
     lines.append('provider_type=' + kind + ' readiness=' + readiness +
                  ' executable=' + executable + ' credential=' + credential)
     lines.append('overall=' + overall)

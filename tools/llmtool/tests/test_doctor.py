@@ -252,6 +252,13 @@ class DoctorTests(DoctorFixture):
                 if kind.endswith('-cli'):
                     lookup.assert_called_once_with(kind[:-4])
                     self.assertIn('executable=' + ('available' if found and found.startswith('/') else 'missing'), result[1])
+                    if found and found.startswith('/'):
+                        self.assertIn('credential=not-applicable', result[1])
+                        self.assertIn('overall=ready\n', result[1])
+                        with patch('llmtool.doctor.shutil.which', return_value=found):
+                            strict = self.invoke(('doctor', '--strict'))
+                        self.assertEqual(strict[0], 0)
+                        self.assertIn('overall=ready\n', strict[1])
                     if found is None or not found.startswith('/'):
                         self.assertIn('overall=not-ready\n', result[1])
                         with patch('llmtool.doctor.shutil.which', return_value=found):
