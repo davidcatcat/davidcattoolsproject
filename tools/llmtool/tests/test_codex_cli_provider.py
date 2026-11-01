@@ -59,7 +59,7 @@ if mode == "mutation":
     capture["git_status"] = git.returncode
 Path(%r).write_text(json.dumps(capture))
 if mode == "timeout":
-    time.sleep(5)
+    time.sleep(30)
 elif mode == "descendant":
     subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
 elif mode == "large":
