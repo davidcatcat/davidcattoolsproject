@@ -198,9 +198,9 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(packet['read_paths'], [fixture_path])
 
     def test_credential_material_in_pm_request_is_still_refused(self):
-        token = 'gh' + 'p_' + 'A' * 36
+        fake_pat = 'gh' + 'p_' + 'A' * 36
         with self.assertRaisesRegex(LLMToolError, 'recognizable credential material'):
-            self._run_agy_delegate(request=f'Use token {token} for this task')
+            self._run_agy_delegate(request=f'Use token {fake_pat} for this task')
 
     def test_out_of_scope_write_is_still_rejected(self):
         status, task, inbox_events, _prompts = self._run_agy_delegate(
