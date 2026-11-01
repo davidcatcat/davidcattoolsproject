@@ -493,6 +493,30 @@ class StoreTests(unittest.TestCase):
         self.assertNotIn('PRIVATE_PATH', store.warning.line())
         self.assertFalse(self.home.exists())
 
+    def test_start_cleanup_close_error_still_releases_remaining_descriptors(self):
+        def directory_descriptor_count():
+            count = 0
+            for name in os.listdir('/dev/fd'):
+                try:
+                    if stat.S_ISDIR(os.fstat(int(name)).st_mode):
+                        count += 1
+                except (OSError, ValueError):
+                    pass
+            return count
+        before = directory_descriptor_count()
+        real_close = os.close
+        calls = [0]
+        def closing(fd):
+            calls[0] += 1
+            if calls[0] == 1:
+                real_close(fd)
+                raise OSError('injected first transition close fault')
+            return real_close(fd)
+        with patch('llmtool.diagnostics_store.os.close', side_effect=closing):
+            self.assertIsNone(self.store().start())
+        self.assertGreaterEqual(calls[0], 2)
+        self.assertEqual(directory_descriptor_count(), before)
+
     def test_partial_writes_are_completed(self):
         writer = self.start()
         original = os.write

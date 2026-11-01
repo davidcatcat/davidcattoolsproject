@@ -139,8 +139,8 @@ def _home(path):
                 child = _directory(fd, name, private=index == len(path.parts) - 1)
             except FileNotFoundError:
                 child = _directory(fd, name, create=True)
-            os.close(fd)
-            fd = child
+            parent, fd = fd, child
+            os.close(parent)
         return fd
     except Exception:
         os.close(fd)
