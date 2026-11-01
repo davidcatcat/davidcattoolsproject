@@ -142,6 +142,10 @@ class DoctorTests(DoctorFixture):
         before = snapshot(self.base)
         result = self.invoke()
         self.assertEqual((result[0], result[2]), (0, ''))
+        self.assertIn('overall=not-ready\n', result[1])
+        strict = self.invoke(('doctor', '--strict'))
+        self.assertEqual(strict[0], 1)
+        self.assertIn('overall=not-ready\n', strict[1])
         self.assertIn('persist_metadata=false\n', result[1])
         self.assertIn('readiness=not-configured executable=not-applicable credential=not-configured', result[1])
         self.assertIn('store=absent ', result[1])
@@ -178,8 +182,24 @@ class DoctorTests(DoctorFixture):
         self.write_config('openai', extra='    api_key: ' + SECRET + '\n')
         result = self.invoke()
         self.assertEqual(result[0], 0)
+        self.assertIn('overall=ready\n', result[1])
+        strict = self.invoke(('doctor', '--strict'))
+        self.assertEqual(strict[0], 0)
+        self.assertIn('overall=ready\n', strict[1])
         self.assertIn('readiness=ready executable=not-applicable credential=literal-configured', result[1])
         self.assert_safe(result)
+
+    def test_missing_credential_environment_marks_overall_not_ready_and_strict_fails(self):
+        name = 'DOCTOR_' + 'SECRET'
+        self.write_config(extra='    api_key_env: ' + name + '\n')
+        default = self.invoke()
+        strict = self.invoke(('doctor', '--strict'))
+        for result in (default, strict):
+            self.assertIn('credential=env-configured-absent\n', result[1])
+            self.assertIn('overall=not-ready\n', result[1])
+            self.assert_safe(result)
+        self.assertEqual(default[0], 0)
+        self.assertEqual(strict[0], 1)
 
     def test_real_os_environ_never_fetches_configured_credential_value(self):
         self.write_config(extra='    api_key_env: DOCTOR_SECRET\n')
@@ -232,6 +252,12 @@ class DoctorTests(DoctorFixture):
                 if kind.endswith('-cli'):
                     lookup.assert_called_once_with(kind[:-4])
                     self.assertIn('executable=' + ('available' if found and found.startswith('/') else 'missing'), result[1])
+                    if found is None or not found.startswith('/'):
+                        self.assertIn('overall=not-ready\n', result[1])
+                        with patch('llmtool.doctor.shutil.which', return_value=found):
+                            strict = self.invoke(('doctor', '--strict'))
+                        self.assertEqual(strict[0], 1)
+                        self.assertIn('overall=not-ready\n', strict[1])
                 else:
                     lookup.assert_not_called()
                 self.assert_safe(result)
@@ -411,6 +437,10 @@ class DoctorStoreTests(DoctorFixture):
                 result = self.invoke()
                 self.assertEqual(result[0], 1)  # Degraded is never a silent success.
                 self.assertEqual(result[2], '')
+                self.assertIn('overall=not-ready\n', result[1])
+                strict = self.invoke(('doctor', '--strict'))
+                self.assertEqual(strict[0], 1)
+                self.assertIn('overall=not-ready\n', strict[1])
                 self.assertIn('store=present run_count=1 active_count=0 unknown_count=0', result[1])
                 self.assertIn('metadata=degraded damaged_count=1', result[1])
                 self.assertIn('Damaged diagnostics metadata reported; nothing repaired, '
