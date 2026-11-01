@@ -2161,6 +2161,7 @@ def _main(argv=None):
                     args.squash_evidence or args.train_evidence or
                     args.discard_uncommitted or args.retain_blocked_evidence or
                     args.reconcile_registry or args.execute_approved_reconcile or
+                    args.owner_approved_retain_release or
                     any(value is not None for value in create_values + create_options) or
                     args.resume_task_id is not None or args.resume_root is not None or
                     args.record_result_task_id is not None or
@@ -2170,6 +2171,22 @@ def _main(argv=None):
             return 0 if release_retained_records(
                 canonical_root=args.repo_root,
                 approvals=_parse_release_retain(args.release_retain)) else 1
+        if args.owner_approved_retain_release is not None:
+            if (args.retire_task_id is not None or args.squash_evidence or
+                    args.train_evidence or args.discard_uncommitted or
+                    args.retain_blocked_evidence or args.reconcile_registry or
+                    args.execute_approved_reconcile or args.release_retain or
+                    any(value is not None for value in create_values + create_options) or
+                    args.resume_task_id is not None or args.resume_root is not None or
+                    args.record_result_task_id is not None or
+                    args.bind_native_session_task_id is not None or
+                    args.execute_approved_lifecycle):
+                _stop("D6_TASK_INPUT_INVALID")
+            return 0 if owner_approved_retain_release(
+                canonical_root=args.repo_root,
+                approvals=_parse_owner_approved_retain_release(
+                    args.owner_approved_retain_release),
+                execute=args.execute_approved_retire) else 1
         if (args.execute_approved_retire or args.squash_evidence or args.train_evidence or
                 args.discard_uncommitted or args.retain_blocked_evidence or
                 args.release_retain):
