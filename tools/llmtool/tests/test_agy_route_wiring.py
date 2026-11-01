@@ -188,14 +188,10 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(packet['read_paths'], ['src.py'])
         self.assertEqual(packet['write_paths'], ['src.py'])
 
-    def test_credential_shaped_read_path_does_not_block_dispatch(self):
+    def test_credential_shaped_read_path_is_refused(self):
         fixture_path = 'fixtures/' + 'gh' + 'p_' + 'A' * 36
-        status, task, _inbox_events, prompts = self._run_agy_delegate(
-            read_paths=[fixture_path])
-        self.assertEqual(status, 0)
-        self.assertEqual(task['developer']['state'], 'DEVELOPER_RESPONDED')
-        packet = json.loads(prompts[0].split('TASK_JSON=', 1)[1])
-        self.assertEqual(packet['read_paths'], [fixture_path])
+        with self.assertRaisesRegex(LLMToolError, 'recognizable credential material'):
+            self._run_agy_delegate(read_paths=[fixture_path])
 
     def test_credential_material_in_pm_request_is_still_refused(self):
         fake_pat = 'gh' + 'p_' + 'A' * 36
@@ -313,6 +309,15 @@ class AgyRouteWiringTests(unittest.TestCase):
         _status, _task, _events, prompts = self._run_agy_delegate(repair_packet=packet)
         self.assertIn('untrusted_repair_reference', prompts[0])
         self.assertIn('Correct the import.', prompts[0])
+
+    def test_credential_shaped_repair_excerpt_is_refused(self):
+        fake_pat = 'gh' + 'p_' + 'A' * 36
+        packet = {'task': 'task-1', 'pr': 7, 'executor_task': 'executor-d6',
+            'failed_head': 'd' * 40, 'version': 1, 'verdict_comment_id': 9,
+            'findings_count': 1,
+            'reviewer_text_excerpt_untrusted_data': f'Use {fake_pat} here.'}
+        with self.assertRaisesRegex(LLMToolError, 'recognizable credential material'):
+            self._run_agy_delegate(repair_packet=packet)
 
 
 if __name__ == '__main__':

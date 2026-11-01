@@ -2450,6 +2450,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
               '\nTASK_JSON=' +
               json.dumps(prompt_packet, ensure_ascii=True, sort_keys=True,
                          separators=(',', ':')))
+    _screen_text(prompt, AGY_MAX_PROMPT_BYTES)
     if len(prompt.encode('utf-8')) > AGY_MAX_PROMPT_BYTES:
         raise LLMToolError('request or response exceeds the supported size')
     provider_input_bytes = len(prompt.encode('utf-8'))
