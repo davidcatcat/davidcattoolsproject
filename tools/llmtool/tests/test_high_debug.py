@@ -26,6 +26,40 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(argv[argv.index('-s') + 1], 'read-only')
         self.assertIn('model_reasoning_effort=high', argv)
 
+    def test_codex_invocation_is_isolated_like_the_developer_route(self):
+        secret_name = 'LLMTOOL_HIGH_DEBUG_TEST_SECRET'
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = str(Path(directory) / 'report.md')
+            with patch.dict(high_debug.os.environ, {secret_name: 'x'}), \
+                 patch.object(high_debug.subprocess, 'run') as run:
+                high_debug._run_codex(prompt='diagnosis', cwd=directory,
+                                      output_path=output_path)
+        argv = run.call_args.args[0]
+        env = run.call_args.kwargs['env']
+        self.assertIn('--ignore-user-config', argv)
+        self.assertIn('--ignore-rules', argv)
+        self.assertIn('shell_environment_policy.inherit="none"', argv)
+        self.assertIn('allow_login_shell=false', argv)
+        self.assertTrue(any(item.startswith('shell_environment_policy.set.PATH=')
+                            for item in argv))
+        # Rollouts must stay on: the observed model is read from them.
+        self.assertNotIn('--ephemeral', argv)
+        self.assertNotIn(secret_name, env)
+        self.assertTrue(set(env) <= {
+            'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
+            'CODEX_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR', 'TMPDIR'})
+
+    def test_long_executor_task_gets_a_valid_unique_d6_name(self):
+        executor = 'e' * 70 + '-' + 'f' * 25
+        first = high_debug._d6_name(executor, 1, 'a' * 40)
+        second = high_debug._d6_name(executor, 2, 'a' * 40)
+        other = high_debug._d6_name('e' * 70 + '-' + 'g' * 25, 1, 'a' * 40)
+        for name in (first, second, other):
+            self.assertRegex(name, r'\A[a-z0-9][a-z0-9-]{0,95}\Z')
+        self.assertEqual(len({first, second, other}), 3)
+        self.assertEqual(high_debug._d6_name('executor', 3, 'b' * 40),
+                         'executor-hd3-bbbbbbb')
+
     def test_dispatch_refusal_has_stable_code(self):
         store = SimpleNamespace(get=lambda _task: {
             'task_id': 'a' * 32,
@@ -41,6 +75,101 @@ class HighDebugTests(unittest.TestCase):
                     executor_task='executor', pr_number=17, family='family',
                     failed_corrections=2)
         self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_DISPATCH_REFUSED')
+
+    def _repo(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        subprocess.run(['git', 'init', '-q', str(root)], check=True)
+        subprocess.run(['git', '-C', str(root), '-c', 'user.name=t', '-c', 'user.email=t@e',
+                        'commit', '-q', '--allow-empty', '-m', 'base'], check=True)
+        return root
+
+    def _failing_case(self, store, root, *, returncode=0, report=None, create=None,
+                      runner_error=None, dirty=False):
+        registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
+                                       common_dir=str(root / '.git'))
+        created = []
+        def default_create(**kwargs):
+            return str(root)
+        def recording_create(**kwargs):
+            created.append(kwargs['task_id'])
+            return (create or default_create)(**kwargs)
+        def runner(*, prompt, cwd, output_path):
+            if runner_error is not None:
+                raise runner_error
+            Path(output_path).write_text(report or '', encoding='utf-8')
+            if dirty:
+                (Path(cwd) / 'unexpected.txt').write_text('changed', encoding='utf-8')
+            return subprocess.CompletedProcess([], returncode, stdout=b'', stderr=b'')
+        with patch.object(high_debug.worker_dispatch, 'evaluate',
+                          return_value=SimpleNamespace(allowed=True)), \
+             patch.object(high_debug.task_completion, 'collect_git_snapshot',
+                          return_value=SimpleNamespace(head='a' * 40)):
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.run_high_debug(store=store, task_id='a' * 32,
+                    executor_task='executor', pr_number=17, family='family',
+                    failed_corrections=2, runner=runner, create_d6=recording_create,
+                    repo_root=str(root),
+                    read_registration=lambda *_args, **_kwargs: registration)
+        return caught.exception.high_debug_code, created
+
+    def test_failed_codex_attempts_are_recorded_and_retry_uses_a_new_d6(self):
+        store = _Store()
+        root = self._repo()
+        cases = (
+            ({'returncode': 1}, 'HIGH_DEBUG_RUN_FAILED'),
+            ({'runner_error': subprocess.TimeoutExpired('codex', 1800)},
+             'HIGH_DEBUG_RUN_FAILED'),
+            ({'report': 'x' * 16385}, 'HIGH_DEBUG_REPORT_INVALID'),
+            ({'dirty': True}, 'HIGH_DEBUG_WROTE_FILES'),
+        )
+        for attempt, (kwargs, code) in enumerate(cases, 1):
+            with self.subTest(code=code, attempt=attempt):
+                observed, created = self._failing_case(store, root, **kwargs)
+                self.assertEqual(observed, code)
+                self.assertEqual(created, [f'executor-hd{attempt}-aaaaaaa'])
+                entry = store.entries[-1]
+                self.assertEqual((entry['status'], entry['report'], entry['d6']),
+                                 ('RUN_FAILED', code, created[0]))
+                (root / 'unexpected.txt').unlink(missing_ok=True)
+        self.assertEqual(len(store.entries), len(cases))
+        self.assertEqual(store.events, [])
+
+    def test_failed_create_costs_no_entry_and_retry_skips_a_leftover_d6(self):
+        store = _Store()
+        root = self._repo()
+        def leaves_branch(**kwargs):
+            subprocess.run(['git', '-C', str(root), 'branch',
+                            'llmtool/high-debug-' + kwargs['task_id']], check=True)
+            raise subprocess.TimeoutExpired('lifecycle', 180)
+        def leaves_record(**kwargs):
+            registry = root / '.git' / 'llmtool-worktrees'
+            registry.mkdir(exist_ok=True)
+            (registry / (kwargs['task_id'] + '.json')).write_text('{}', encoding='utf-8')
+            raise subprocess.CalledProcessError(1, 'lifecycle')
+        def leaves_nothing(**_kwargs):
+            raise subprocess.CalledProcessError(1, 'lifecycle')
+        expected = (
+            (leaves_branch, 'executor-hd1-aaaaaaa'),
+            (leaves_record, 'executor-hd2-aaaaaaa'),
+            (leaves_nothing, 'executor-hd3-aaaaaaa'),
+            (leaves_nothing, 'executor-hd3-aaaaaaa'),
+        )
+        for create, name in expected:
+            with self.subTest(name=name):
+                observed, created = self._failing_case(store, root, create=create)
+                self.assertEqual(observed, 'HIGH_DEBUG_D6_CREATE_FAILED')
+                self.assertEqual(created, [name])
+        self.assertEqual(store.entries, [])
+
+    def test_failed_attempt_keeps_its_code_when_recording_fails(self):
+        store = _Store()
+        def refuse(_task_id, _entry):
+            raise LLMToolError('limit')
+        store.append_high_debug = refuse
+        observed, _created = self._failing_case(store, self._repo(), returncode=1)
+        self.assertEqual(observed, 'HIGH_DEBUG_RUN_FAILED')
 
     def _run_case(self, report, *, dirty=False, snapshot_head=None):
         temporary = tempfile.TemporaryDirectory()

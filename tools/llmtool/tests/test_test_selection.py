@@ -35,6 +35,40 @@ class TestSelectionTests(unittest.TestCase):
         self.assertFalse(plan["executes_tests"])
         self.assertFalse(plan["pipeline_integrated"])
 
+    def test_pr_712_and_713_agy_paths_use_shared_impact_map(self):
+        cases = {
+            "tools/llmtool/llmtool/developer_routes/agy.py": [
+                "tools/llmtool/tests/test_developer_route_agy.py",
+                "tools/llmtool/tests/test_task_submission_cli.py",
+            ],
+            "tools/llmtool/llmtool/task_submission_cli.py": [
+                "tools/llmtool/tests/test_developer_route_agy.py",
+                "tools/llmtool/tests/test_task_submission_cli.py",
+            ],
+            "tools/llmtool/developer-routes.json": [
+                "tools/llmtool/tests/test_developer_route_agy.py",
+            ],
+        }
+        for source, expected in cases.items():
+            with self.subTest(source=source):
+                plan = select_test_plan([source])
+                self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L1"])
+                self.assertEqual(plan["levels"][1]["tests"], sorted(expected))
+
+    def test_unknown_config_dependency_and_deleted_test_keep_full_fallback(self):
+        for path in (
+            "tools/llmtool/llmtool/unknown_config.py",
+            "tools/llmtool/nested/unknown.py",
+            "tools/llmtool/nested/unknown.json",
+            "tools/llmtool/requirements-ci.txt",
+            "tools/llmtool/tests/test_deleted_agy.py",
+            ".github/workflows/llmtool-mac-ci.yml",
+        ):
+            with self.subTest(path=path):
+                plan = select_test_plan([path])
+                self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L3"])
+                self.assertIn("unmapped_path", plan["fallback_reasons"])
+
     def test_emitted_l1_command_runs_only_the_selected_module(self):
         if os.environ.get("LLMTOOL_TEST_SELECTION_COMMAND_CHILD"):
             self.skipTest("avoid recursively launching the command smoke test")
