@@ -97,7 +97,7 @@ gw-agent run --workdir <D6 root> --profile <name> --task-file <task.json> \
              --result-file <result.json> --audit-file <audit.jsonl>
 ```
 
-**`task.json`:** `schema_version`, `task_id`, `source_sha`, `goal`, `acceptance[]`, `read_paths[]`, `write_paths[]`, `budgets`.
+**`task.json`:** `schema_version`, `task_id`, `source_sha`, `goal`, `acceptance[]`, `read_paths[]`, `write_paths[]`, `egress_basis`, `data_class`, `budgets`. The gateway refuses a task without an `egress_basis`.
 
 **`result.json`:**
 - `status`: `DONE` / `BLOCKED` / `BUDGET_EXCEEDED` / `MODEL_ERROR` / `POLICY_REFUSED`.
@@ -113,13 +113,20 @@ Owner, verbatim: 「公司llm還可以透過這個gateway建立session,llmtool�
   - `gw-agent run …` starts a new session and prints `session_id` in `result.json`.
   - `gw-agent resume <session_id> --task-file …` continues it, for example a repair round with review findings.
   - `gw-agent sessions --json` lists sessions (id, created, last turn, workdir identity, status) without content.
-  - `gw-agent end <session_id>` marks a session closed. Closed sessions cannot be resumed.
-- **Binding:** a session is bound to one workdir identity (device and inode of the D6 root), `source_sha` at start, the profile and the `task_id`. Resume refuses a different workdir, profile or task, or a HEAD that is not a descendant of the recorded HEAD. This is the same rule llmtool applies to Codex repair rounds in one D6.
+  - `gw-agent end <session_id>` closes the session and deletes its conversation state (see Retention). Closed sessions cannot be resumed.
+- **Binding:** a session is bound to one workdir identity (device and inode of the D6 root), `source_sha` at start, the profile, the `task_id`, and a `scope_digest`. The digest is a SHA-256 over the canonical JSON of the authorization and scope fields: `read_paths`, `write_paths`, `egress_basis`, `data_class` and budget ceilings.
+  - A resume task file may change only `goal`, `acceptance` and the repair findings. Any change to the scope fields under the same `task_id` is refused with `SESSION_SCOPE_CHANGED`.
+  - Permission is re-validated on every resume: the dispatch policy via llmtool, and the egress basis is still present.
+  - A test must show that widened reads, writes or egress under the same task ID are rejected. Resume refuses a different workdir, profile or task, or a HEAD that is not a descendant of the recorded HEAD. This is the same rule llmtool applies to Codex repair rounds in one D6.
 - **Storage:**
   - A per-user state directory outside any Git worktree, mode 0700, one directory per session, files 0600.
   - The conversation state holds model-visible messages, so it is sensitive.
-  - **Retention:** state is kept only until the session ends or for a bounded time, then discarded. It is never copied into evidence, GitHub or the audit log; the audit log keeps only digests.
-  - Each resume re-applies the egress screen to anything newly sent.
+  - **Retention:** state is deleted immediately on `end`, on the llmtool Task reaching a terminal state, and on expiry. Expiry is 72 hours after the last turn by default, and the profile may set it lower but never higher.
+    - Deletion removes the conversation files; only a content-free tombstone remains (id, timestamps, end reason).
+    - Expiry is enforced on every gateway start and by `gw-agent sessions`.
+    - Conversation state is never copied into evidence, GitHub or the audit log; the audit log keeps only digests.
+    - A test must show that ended and expired sessions leave no readable content and cannot be resumed.
+  - **Screening on resume:** every provider call screens the complete serialized request: retained history, compaction summaries, repair findings, tool results and the new prompt. It never screens only the delta. A test must show that a sensitive value planted in stored history or in a repair finding cannot pass through a resumed call.
 - **Context management:** when history approaches the profile's context cap, the gateway compacts older turns into a bounded summary. It first screens the summary, then records the compaction in the audit chain. There is no silent truncation, and on overflow it returns `CONTEXT_EXHAUSTED`.
 - **Concurrency:** at most one active run per session, guarded by a lock file. A second `resume` while one is running is refused, not queued.
 - **llmtool mapping:**
