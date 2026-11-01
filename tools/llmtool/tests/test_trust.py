@@ -4,11 +4,13 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
-from llmtool.trust import TrustError, load_trust, verify_repository
+from llmtool.trust import TrustError, _check_directory, load_trust, verify_repository
 
 
 def _document(canonical, workspace, tasks):
@@ -149,6 +151,19 @@ class TrustTest(unittest.TestCase):
         self.config.rename(self.home / "config-real")
         self.config.symlink_to(self.home / "config-real", target_is_directory=True)
         self._error("TRUST_ANCESTOR_INVALID")
+
+    def test_root_owned_sticky_world_writable_ancestor_is_allowed(self):
+        info = os.stat_result((stat.S_IFDIR | 0o1777, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        with mock.patch("llmtool.trust.os.fstat", return_value=info):
+            result = _check_directory(123, os.geteuid(), "TRUST_ANCESTOR_INVALID")
+        self.assertEqual(result.st_uid, 0)
+
+    def test_non_sticky_world_writable_ancestor_is_rejected(self):
+        info = os.stat_result((stat.S_IFDIR | 0o777, 0, 0, 1, 0, 0, 0, 0, 0, 0))
+        with mock.patch("llmtool.trust.os.fstat", return_value=info):
+            with self.assertRaises(TrustError) as caught:
+                _check_directory(123, os.geteuid(), "TRUST_ANCESTOR_INVALID")
+        self.assertEqual(caught.exception.code, "TRUST_ANCESTOR_INVALID")
 
     def test_fifo_is_not_opened_as_a_trust_file(self):
         path = self.trust_dir / "trust.json"

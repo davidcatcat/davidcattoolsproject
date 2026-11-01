@@ -195,7 +195,7 @@ def _check_directory(fd, uid, code, private=False):
             _fail("TRUST_DIRECTORY_NOT_PRIVATE")
     elif (info.st_uid not in (0, uid) or
           (stat.S_IMODE(info.st_mode) & 0o022 and not
-           (info.st_uid == 0 and stat.S_ISVTX(info.st_mode)))):
+           (info.st_uid == 0 and (info.st_mode & stat.S_ISVTX)))):
         _fail(code)
     return info
 
@@ -338,7 +338,7 @@ def _safe_tool_ancestors(path, uid):
             return False
         if (not stat.S_ISDIR(info.st_mode) or info.st_uid not in (0, uid) or
                 (stat.S_IMODE(info.st_mode) & 0o022 and not
-                 (info.st_uid == 0 and stat.S_ISVTX(info.st_mode)))):
+                 (info.st_uid == 0 and (info.st_mode & stat.S_ISVTX)))):
             return False
         if current.parent == current:
             return True
