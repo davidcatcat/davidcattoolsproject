@@ -183,6 +183,7 @@ _LEGACY_DEVELOPER_FIELDS = frozenset((
     'created_at',
 ))
 _DEVELOPER_FIELDS = _LEGACY_DEVELOPER_FIELDS | frozenset(('execution',))
+_DEVELOPER_REPORTED_FIELDS = frozenset(('tests', 'summary', 'self_review'))
 _DEVELOPER_EXECUTOR_TASK_FIELDS = frozenset(('executor_task_id',))
 _DEVELOPER_INVALID_FINAL_FIELDS = frozenset(('result_status', 'final_answer'))
 _CLAUDE_RESULT_FIELDS = frozenset(('claude_result',))
@@ -222,6 +223,12 @@ _DEVELOPER_INVALID_FINAL_SHAPES = tuple(
         *_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
         *_DEVELOPER_BLOCKED_REASON_SHAPES, *_DEVELOPER_PROGRESS_SHAPES,
         *_DEVELOPER_CLAUDE_RESULT_SHAPES)
+)
+_DEVELOPER_REPORTED_SHAPES = tuple(
+    shape | frozenset(('reported',)) for shape in (
+        *_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+        *_DEVELOPER_BLOCKED_REASON_SHAPES, *_DEVELOPER_PROGRESS_SHAPES,
+        *_DEVELOPER_CLAUDE_RESULT_SHAPES, *_DEVELOPER_INVALID_FINAL_SHAPES)
 )
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
@@ -318,6 +325,20 @@ def _fail(code='TASK_STORE_INVALID'):
     error.task_store_code = category
     error.task_store_error_code = safe_code
     raise error from None
+
+
+def _valid_reported_text(value, limit):
+    if type(value) is not str or not value.strip():
+        return False
+    try:
+        if len(value.encode('utf-8')) > limit:
+            return False
+    except UnicodeError:
+        return False
+    return (not any((ord(char) < 32 and char not in '\t\n\r') or
+                    127 <= ord(char) <= 159 or
+                    unicodedata.category(char) == 'Cf' for char in value) and
+            not _emitted_sensitive(value))
 
 
 def _is_contention_error(error):
@@ -1050,12 +1071,37 @@ def _validate(record):
                                  *_DEVELOPER_BLOCKED_REASON_SHAPES,
                                  *_DEVELOPER_PROGRESS_SHAPES,
                                  *_DEVELOPER_CLAUDE_RESULT_SHAPES,
-                                 *_DEVELOPER_INVALID_FINAL_SHAPES)
+                                 *_DEVELOPER_INVALID_FINAL_SHAPES,
+                                 *_DEVELOPER_REPORTED_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if ('executor_task_id' in developer and
                     not _safe_identifier(developer['executor_task_id'], D6_TASK_ID)):
                 _fail()
+            if 'reported' in developer:
+                reported = developer['reported']
+                if (type(reported) is not dict or not reported or
+                        not set(reported).issubset(_DEVELOPER_REPORTED_FIELDS)):
+                    _fail()
+                if 'summary' in reported and (
+                        not _valid_reported_text(reported['summary'], 8 * 1024)):
+                    _fail()
+                if 'self_review' in reported and (
+                        not _valid_reported_text(reported['self_review'], 8 * 1024)):
+                    _fail()
+                if 'tests' in reported:
+                    tests = reported['tests']
+                    if (type(tests) is not list or len(tests) > 32 or
+                            any(not _valid_reported_text(item, 1024) for item in tests)):
+                        _fail()
+                try:
+                    reported_size = len(json.dumps(
+                        reported, ensure_ascii=True, sort_keys=True,
+                        separators=(',', ':')).encode('ascii'))
+                except (TypeError, UnicodeError):
+                    _fail()
+                if reported_size > 8 * 1024:
+                    _fail()
             if (not _safe_identifier(developer['assignment_id'], TASK_ID) or
                     developer['selection_source'] not in ('PM', 'USER') or
                     developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
