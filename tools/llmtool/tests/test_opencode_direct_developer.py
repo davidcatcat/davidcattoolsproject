@@ -406,17 +406,36 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertLessEqual(datetime.fromisoformat(result.started_at.replace('Z', '+00:00')),
                              datetime.fromisoformat(result.ended_at.replace('Z', '+00:00')))
 
-    def test_private_key_source_is_rejected_before_any_cli_launch(self):
-        private_key_header = '-----BEGIN ' + 'PRIVATE' + ' KEY-----'
-        private_key_footer = '-----END ' + 'PRIVATE' + ' KEY-----'
-        (self.root / 'source.py').write_text(
-            private_key_header + '\nfixture-only\n' + private_key_footer + '\n')
+    def test_credential_shaped_read_path_source_is_allowed(self):
+        source_text = 'OPENAI_' + 'API_' + 'KEY=' + 'sk-' + 'A' * 24 + '\n'
+        (self.root / 'source.py').write_text(source_text)
+        cli = self.fake_cli(self.event('step_start') + '\n')
+        result = self.run_with_valid_binding(
+            root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+            prompt='bounded task prompt', timeout_seconds=5, executable=cli)
+        self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.source_bytes, len(source_text.encode('utf-8')))
+
+    def test_non_utf8_source_is_rejected_before_cli_launch(self):
+        (self.root / 'source.py').write_bytes(b'VALUE = \xff\n')
         marker = self.root / 'invoked'
         cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
         with self.assertRaises(DirectOpenCodeError) as caught:
-            self.run_with_valid_binding(root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+            self.run_with_valid_binding(
+                root=self.root, read_paths=['source.py'], write_paths=['source.py'],
                 prompt='bounded task prompt', timeout_seconds=5, executable=cli)
-        self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_SOURCE_SENSITIVE')
+        self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_SOURCE_INVALID')
+        self.assertFalse(marker.exists())
+
+    def test_credential_shaped_pm_prompt_is_rejected_before_cli_launch(self):
+        prompt_text = '-----BEGIN ' + 'PRIVATE' + ' KEY-----\nfixture-only\n'
+        marker = self.root / 'invoked'
+        cli = self.fake_cli(self.event('step_start') + '\n', invocation_marker=marker)
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            self.run_with_valid_binding(
+                root=self.root, read_paths=['source.py'], write_paths=['source.py'],
+                prompt=prompt_text, timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code, 'OPENCODE_PROMPT_SENSITIVE')
         self.assertFalse(marker.exists())
 
     def test_source_identity_drift_after_version_probe_blocks_provider_run(self):

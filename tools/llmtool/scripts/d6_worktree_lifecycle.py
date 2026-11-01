@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 
@@ -64,6 +65,8 @@ def _stop(code):
 # bootstrap (a venv and wheel install) are not timed: they can legitimately
 # take minutes, and a kill would leave a lock or a half-built tree behind.
 GIT_TIMEOUT_SECONDS = 120
+BOOTSTRAP_STDERR_LIMIT = 4 * 1024
+BOOTSTRAP_STOP_RE = re.compile(rb"STOP: .+ \(([A-Z0-9_]{1,64})\)")
 
 
 def _run_git(cwd, *args, check=True, timeout=GIT_TIMEOUT_SECONDS):
@@ -378,16 +381,42 @@ def _bootstrap(root, task_id):
             "GIT_ATTR_NOSYSTEM": "1", "GIT_OPTIONAL_LOCKS": "0",
             "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
         }
-        result = subprocess.run(
-            [sys.executable, "-B", "-I", "-c", helper_code,
-             "--task-id", task_id, "--worktree-root", str(root)],
-            cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
-        )
+        stderr_read_fd, stderr_write_fd = os.pipe()
+        captured_stderr = bytearray()
+        stderr_oversized = []
+
+        def drain_stderr():
+            with os.fdopen(stderr_read_fd, "rb") as stream:
+                while True:
+                    chunk = stream.read(1024)
+                    if not chunk:
+                        break
+                    available = BOOTSTRAP_STDERR_LIMIT + 1 - len(captured_stderr)
+                    if available > 0:
+                        captured_stderr.extend(chunk[:available])
+                    if len(chunk) > available or len(captured_stderr) > BOOTSTRAP_STDERR_LIMIT:
+                        stderr_oversized.append(True)
+
+        stderr_reader = threading.Thread(target=drain_stderr)
+        stderr_reader.start()
+        try:
+            result = subprocess.run(
+                [sys.executable, "-B", "-I", "-c", helper_code,
+                 "--task-id", task_id, "--worktree-root", str(root)],
+                cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=stderr_write_fd, check=False,
+            )
+        finally:
+            os.close(stderr_write_fd)
+            stderr_reader.join()
     except (OSError, UnicodeDecodeError):
         _stop("ENV_BOOTSTRAP_UNAVAILABLE")
     if result.returncode:
-        _stop("ENV_BOOTSTRAP_REJECTED")
+        lines = bytes(captured_stderr).splitlines()
+        match = (BOOTSTRAP_STOP_RE.fullmatch(lines[0])
+                 if not stderr_oversized and len(lines) == 1 else None)
+        code = match.group(1).decode("ascii") if match else None
+        _stop("ENV_BOOTSTRAP_REJECTED:" + code if code else "ENV_BOOTSTRAP_REJECTED")
 
 
 def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
