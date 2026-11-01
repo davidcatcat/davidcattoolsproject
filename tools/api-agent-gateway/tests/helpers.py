@@ -203,7 +203,9 @@ class GatewayCase(unittest.TestCase):
         argv = [command]
         if session_id:
             argv.append(session_id)
-        if command == 'resume':
+        if command == 'run' and auth is None:
+            auth = self.auth_for(None, task)
+        if auth is not False:
             argv += ['--authorization-file', auth if isinstance(auth, str) else self._file('auth', auth)]
         argv += ['--workdir', workdir or self.repo, '--profile', 'fake', '--task-file', task_file,
                  '--result-file', result_file, '--audit-file', audit_file, '--state-dir', self.state,
@@ -219,12 +221,17 @@ class GatewayCase(unittest.TestCase):
         return self.invoke('run', task or self.task(), **kw)
 
     def auth_for(self, sid: str, task: dict, *, checked_at=None, **overrides) -> dict:
-        from api_agent_gateway.contract import parse_task
+        from api_agent_gateway.contract import Refusal, parse_task
         raw = json.dumps(task).encode()
-        digest = parse_task(json.loads(raw), raw).scope_digest()
+        try:
+            digest = parse_task(json.loads(raw), raw).scope_digest()
+        except Refusal:
+            digest = '0' * 64  # task itself is invalid; refused before the record matters
         auth = {'schema_version': 1, 'authorization_ref': 'llmtool-recheck-1',
                 'checked_at': time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(checked_at or time.time())),
-                'scope_digest': digest, 'task_id': task['task_id'], 'session_id': sid}
+                'scope_digest': digest, 'task_id': task.get('task_id'), 'session_id': sid,
+                'egress_basis': task.get('egress_basis'), 'data_class': task.get('data_class'),
+                'profile': 'fake'}
         auth.update(overrides)
         return auth
 

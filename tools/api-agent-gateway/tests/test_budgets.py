@@ -49,7 +49,9 @@ class BudgetTests(GatewayCase):
             now[0] += 40
             return now[0]
         self.server.script = [reply(tool_call('list_dir', path='src'))] * 5
-        self.assert_budget(self.run_task(self.budgets(max_wall_seconds=100), clock=clock), 'WALL_TIME_EXCEEDED')
+        task = self.budgets(max_wall_seconds=100)
+        auth = self.auth_for(None, task, checked_at=now[0])
+        self.assert_budget(self.run_task(task, clock=clock, auth=auth), 'WALL_TIME_EXCEEDED')
 
     def test_tool_result_cap_is_enforced_by_tools(self):
         big = 'x = 1\n' * 3000

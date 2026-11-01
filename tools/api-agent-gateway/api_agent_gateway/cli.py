@@ -49,7 +49,7 @@ def _parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name)
         if name == 'resume':
             p.add_argument('session_id')
-            p.add_argument('--authorization-file', required=True)
+        p.add_argument('--authorization-file', required=True)
         p.add_argument('--workdir', required=True)
         p.add_argument('--profile', required=True)
         p.add_argument('--task-file', required=True)
@@ -101,8 +101,15 @@ def _parse_iso(value: object) -> Optional[float]:
         return None
 
 
-def _check_authorization(path: str, sid: str, meta: dict, task: Task, now: float) -> str:
-    bad = Refusal(POLICY_REFUSED, 'SESSION_AUTHORIZATION_INVALID')
+def _check_authorization(path: str, sid: Optional[str], meta: Optional[dict], task: Task, profile: Profile,
+                         now: float) -> str:
+    """Validate llmtool's fresh authorization record before any provider call.
+
+    ``run`` (sid/meta None) and ``resume`` use the same record format; the
+    record must bind this task's computed scope_digest, task_id, egress_basis,
+    data_class and profile, and (for resume) the session id.
+    """
+    bad = Refusal(POLICY_REFUSED, 'SESSION_AUTHORIZATION_INVALID' if sid else 'RUN_AUTHORIZATION_INVALID')
     try:
         obj, raw = read_json_file(path, 'AUTHORIZATION')
     except Refusal as exc:
@@ -115,8 +122,14 @@ def _check_authorization(path: str, sid: str, meta: dict, task: Task, now: float
         raise bad
     if not (-AUTH_MAX_SKEW_SECONDS <= now - checked <= AUTH_MAX_AGE_SECONDS):
         raise bad
-    if (obj.get('scope_digest') != meta.get('scope_digest') or obj.get('scope_digest') != task.scope_digest()
-            or obj.get('task_id') != task.task_id or obj.get('session_id') != sid):
+    if obj.get('scope_digest') != task.scope_digest() or obj.get('task_id') != task.task_id:
+        raise bad
+    if meta is not None and obj.get('scope_digest') != meta.get('scope_digest'):
+        raise bad
+    if obj.get('session_id') != sid:  # must be null/absent for run
+        raise bad
+    if (obj.get('egress_basis') != task.egress_basis or obj.get('data_class') != task.data_class
+            or obj.get('profile') != profile.name):
         raise bad
     return sha256_hex(raw)
 
@@ -266,7 +279,10 @@ class Invocation:
             if meta.get('scope_digest') != task.scope_digest():
                 raise Refusal(POLICY_REFUSED, 'SESSION_SCOPE_CHANGED')
             self.header['authorization_sha256'] = _check_authorization(
-                args.authorization_file, sid, meta, task, self.clock())
+                args.authorization_file, sid, meta, task, profile, self.clock())
+        else:
+            self.header['authorization_sha256'] = _check_authorization(
+                args.authorization_file, None, None, task, profile, self.clock())
         _check_head(args.workdir, task)
         if meta is not None and not _is_ancestor(args.workdir, meta.get('source_sha', ''), task.source_sha):
             raise Refusal(POLICY_REFUSED, 'SESSION_HEAD_NOT_DESCENDANT')

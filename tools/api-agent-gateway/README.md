@@ -18,9 +18,9 @@ PYTHONDONTWRITEBYTECODE=1 python -B -m unittest discover -s tools/api-agent-gate
 ## Commands
 
 ```
-gw-agent run    --workdir <D6 root> --profile <name> --task-file task.json \
-                --result-file result.json --audit-file audit.jsonl
-gw-agent resume <session_id> --authorization-file auth.json  (same flags as run)
+gw-agent run    --authorization-file auth.json --workdir <D6 root> --profile <name> \
+                --task-file task.json --result-file result.json --audit-file audit.jsonl
+gw-agent resume <session_id> (same flags as run)
 gw-agent sessions --json
 gw-agent end <session_id> [--reason ended|task_terminal]
 ```
@@ -29,6 +29,34 @@ All four commands accept `--state-dir`, default `$GW_AGENT_STATE_DIR` or
 `~/.local/state/api-agent-gateway`. They also accept `--profiles-file`, default
 `$GW_AGENT_PROFILES` or `<state-dir>/profiles.json`. For `run` and `resume`,
 stdout is not part of the contract. `sessions` and `end` print one JSON object.
+
+## Authorization record (run and resume)
+
+The gateway never decides on its own that egress is authorized. llmtool
+re-checks the dispatch policy, the `egress_basis` (not withdrawn, expired or
+superseded), the data class, the profile and that the Task is not terminal, then
+writes a fresh record and passes it with `--authorization-file`. Both `run` and
+`resume` require it, and both validate it before any provider call:
+
+```json
+{"schema_version": 1, "authorization_ref": "...", "checked_at": "2026-11-02T10:00:00Z",
+ "scope_digest": "<64 hex>", "task_id": "...", "egress_basis": "...",
+ "data_class": "...", "profile": "<profile name>", "session_id": null}
+```
+
+- `authorization_ref`: non-empty, at most 512 characters.
+- `checked_at`: UTC, at most 15 minutes old and at most 60 seconds in the future.
+- `scope_digest`: must equal the digest the gateway computes from this
+  task.json (see Sessions). A record issued for a different scope does not
+  authorize this one.
+- `task_id`, `egress_basis`, `data_class`, `profile`: must equal the task's
+  values and the `--profile` in use.
+- `session_id`: `null` (or absent) for `run`; the session ID for `resume`.
+
+A missing, malformed, stale or mismatched record is refused with
+`RUN_AUTHORIZATION_INVALID` on `run` and `SESSION_AUTHORIZATION_INVALID` on
+`resume` (exit 5). Without the flag at all, the CLI exits 2 (usage). The SHA-256
+of the record is bound in the audit header (`authorization_sha256`).
 
 ## task.json
 
@@ -39,7 +67,7 @@ stdout is not part of the contract. `sessions` and `end` print one JSON object.
 | `source_sha` | Must equal the workdir `HEAD`. The workdir must be the repository top level. |
 | `goal`, `acceptance[]` | Text sent to the model, after screening |
 | `read_paths[]`, `write_paths[]` | Relative files. A trailing `/` means a subtree. `.`, `..`, absolute paths and `.git` are refused. Write paths are also readable. |
-| `egress_basis` | Required and non-empty. A run without it is refused with `EGRESS_BASIS_MISSING`. |
+| `egress_basis` | Required and non-empty (`EGRESS_BASIS_MISSING`), and must match the authorization record. |
 | `data_class` | Must be listed in the profile's `allowed_data_classes`. |
 | `budgets` | All of `max_turns`, `max_input_tokens`, `max_output_tokens`, `max_wall_seconds`, `max_tool_result_bytes`, `max_sent_bytes`, as integers. Budgets apply to each invocation. |
 | `findings[]` | Optional review findings for a repair round |
@@ -82,7 +110,7 @@ holds `status`, `code`, `session_id`, `run_id`, `task_id`, `changed_paths[]`,
 | `DONE` | 0 |
 | `BLOCKED` (`MODEL_REPORTED_BLOCKED`, `NO_TOOL_CALL`) | 3 |
 | `MODEL_ERROR` (`HTTP_<n>`, `HTTP_REDIRECT_REFUSED`, `MALFORMED_RESPONSE`, `TIMEOUT`, `TRANSPORT_ERROR`, `AUTH_ENV_MISSING`, …) | 4 |
-| `POLICY_REFUSED` (`EGRESS_BASIS_MISSING`, `DATA_CLASS_NOT_AUTHORIZED`, `SOURCE_SHA_MISMATCH`, `CONFINEMENT_VIOLATION`, `EGRESS_SCREEN_RESIDUAL`, `SESSION_*`, …) | 5 |
+| `POLICY_REFUSED` (`EGRESS_BASIS_MISSING`, `RUN_AUTHORIZATION_INVALID`, `DATA_CLASS_NOT_AUTHORIZED`, `SOURCE_SHA_MISMATCH`, `CONFINEMENT_VIOLATION`, `EGRESS_SCREEN_RESIDUAL`, `SESSION_*`, …) | 5 |
 | `BUDGET_EXCEEDED` (`TURN_BUDGET_EXCEEDED`, `INPUT_TOKEN_BUDGET_EXCEEDED`, `OUTPUT_TOKEN_BUDGET_EXCEEDED`, `WALL_TIME_EXCEEDED`, `SENT_BYTES_EXCEEDED`, `TOOL_RESULT_BYTES_EXCEEDED`, `CONTEXT_EXHAUSTED`) | 6 |
 | usage error (no result file) | 2 |
 | internal error | 1 |
@@ -107,14 +135,9 @@ Each budget has its own `code`. No retry or fallback model is ever used.
   - `HEAD` == `source_sha`, and `HEAD` descends from the recorded HEAD
     (`SESSION_HEAD_NOT_DESCENDANT`).
 
-  The authorization record looks like this:
-
-  ```json
-  {"schema_version": 1, "authorization_ref": "...", "checked_at": "2026-11-02T10:00:00Z",
-   "scope_digest": "<64 hex>", "task_id": "...", "session_id": "<32 hex>"}
-  ```
-
-  It must be at most 15 minutes old.
+  The record format is the one described under Authorization record, with
+  `session_id` set; its `scope_digest` must also equal the session's recorded
+  digest.
 - **Changes allowed on resume:** only `goal`, `acceptance` and `findings`.
 - **Lock.** Each session has an `flock`. A second `resume` while one is running
   is refused with `SESSION_LOCKED`, not queued. So is an `end` while it is running.
@@ -165,8 +188,8 @@ Each budget has its own `code`. No retry or fallback model is ever used.
 - **Records.** It is a canonical-JSON hash chain (`seq`, `prev_sha256`).
   - The header binds `run_id`, `task_id`, `source_sha`, the workdir identity,
     the profile and its digest, the budgets, the SHA-256 of `task.json`,
-    `scope_digest`, and on resume the session ID and the SHA-256 of the
-    authorization record.
+    `scope_digest`, the SHA-256 of the authorization record, and on resume
+    the session ID.
   - `model_call`, `tool`, `compaction`, `refusal` and `end` records hold only
     counts, codes and digests: path digests, the SHA-256 of what was sent, and
     redaction counts.

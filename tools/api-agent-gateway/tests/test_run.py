@@ -143,7 +143,8 @@ class RunTests(GatewayCase):
     def test_result_inside_workdir_refused(self):
         task_file = self._file('task', self.task())
         from api_agent_gateway import cli
-        code = cli.main(['run', '--workdir', self.repo, '--profile', 'fake', '--task-file', task_file,
+        code = cli.main(['run', '--authorization-file', self._file('auth', self.auth_for(None, self.task())),
+                         '--workdir', self.repo, '--profile', 'fake', '--task-file', task_file,
                          '--result-file', os.path.join(self.repo, 'r.json'),
                          '--audit-file', os.path.join(self.out, 'a.jsonl'), '--state-dir', self.state,
                          '--profiles-file', self.profiles_path], env={'HOME': self.tmp})
