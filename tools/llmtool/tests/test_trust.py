@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -51,8 +52,9 @@ class TrustTest(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         base = Path(self.temp.name)
-        self.home = base / "home"
-        self.home.mkdir(mode=0o700)
+        self.home = Path(tempfile.mkdtemp()).resolve()
+        self.home.chmod(0o700)
+        self.addCleanup(shutil.rmtree, self.home)
         self.config = self.home / ".config"
         self.config.mkdir(mode=0o700)
         self.trust_dir = self.config / "llmtool"
