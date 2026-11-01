@@ -34,11 +34,19 @@ class RunnerError(Exception):
     """A safe, bounded failure while resolving or running the selected plan."""
 
 
+GIT_TIMEOUT_SECONDS = 120
+
+
 def _git(root, *args):
-    result = subprocess.run(
-        ["git", "-C", str(root), *args], stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE, check=False,
-    )
+    # A git lock or a stuck filesystem must not hang test-scope resolution.
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL, check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise RunnerError("git command failed while resolving test scope") from None
     if result.returncode:
         raise RunnerError("git command failed while resolving test scope")
     return result.stdout
