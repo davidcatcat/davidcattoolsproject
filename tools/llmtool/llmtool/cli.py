@@ -55,6 +55,7 @@ TASK_ACTIONS = {
     'review-result': ('run_task_review_result', False),
     'show': ('run_task_show', False),
     'status': ('run_task_status', False),
+    'brief': ('run_task_brief', False),
     'submit': ('run_task_submit', False),
 }
 

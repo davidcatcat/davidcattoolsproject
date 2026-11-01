@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from llmtool.task_brief import format_task_brief, task_brief
 from llmtool.task_submission_cli import add_task_submission_parsers, run_task_brief
+from llmtool.cli import main
 
 
 def row(task_id, state, **extra):
@@ -76,6 +77,18 @@ class TaskBriefTests(unittest.TestCase):
             self.assertEqual(run_task_brief(args, stdout=output), 0)
         status.assert_called_once_with(pm_session='pm-test', limit=200, store=None)
         self.assertEqual(json.loads(output.getvalue())['tasks'][0]['state'], 'RUNNING')
+
+    def test_task_brief_top_level_cli_routing(self):
+        output = io.StringIO()
+        rows = [row('done', 'COMPLETED'), row('blocked', 'BLOCKED')]
+        with patch('llmtool.task_status.task_status', return_value={
+                'tasks': rows, 'unreadable': 0}) as status:
+            with patch('sys.stdout', output):
+                self.assertEqual(main(['task', 'brief', '--limit', '1', '--json']), 0)
+        status.assert_called_once_with(pm_session=None, limit=200, store=None)
+        result = json.loads(output.getvalue())
+        self.assertTrue(result['partial'])
+        self.assertEqual(result['tasks'][0]['task_id'], 'blocked')
 
 
 if __name__ == '__main__':
