@@ -1929,6 +1929,128 @@ def release_retained_records(*, canonical_root, approvals, workspace_root=None):
         os.close(lock_fd)
 
 
+OWNER_APPROVED_RETAIN_RELEASE_RE = re.compile(
+    r"https://github\.com/davidcatcat/davidcattoolsproject/issues/(?:289|529)"
+    r"#issuecomment-[0-9]+\Z")
+
+
+def _parse_owner_approved_retain_release(values):
+    approvals = {}
+    for value in values or []:
+        task_id, separator, approval = value.partition("=")
+        if (not separator or not TASK_ID_RE.fullmatch(task_id or "") or
+                task_id in approvals or
+                not OWNER_APPROVED_RETAIN_RELEASE_RE.fullmatch(approval)):
+            _stop("D6_TASK_INPUT_INVALID")
+        approvals[task_id] = approval
+    if not approvals:
+        _stop("D6_TASK_INPUT_INVALID")
+    return approvals
+
+
+def owner_approved_retain_release(*, canonical_root, approvals, execute=False,
+                                  workspace_root=None):
+    """Release Owner-approved RETAIN_BLOCKED records whose tree is absent.
+
+    Only a directory that is absent at lstat time is eligible; any other
+    result, including a symlink or an unreadable path, is refused. This is a
+    dry run unless ``execute`` is true.
+    """
+    if (type(approvals) is not dict or not approvals or
+            any(not TASK_ID_RE.fullmatch(task_id or "") or
+                type(approval) is not str or
+                not OWNER_APPROVED_RETAIN_RELEASE_RE.fullmatch(approval)
+                for task_id, approval in approvals.items())):
+        _stop("D6_TASK_INPUT_INVALID")
+    if workspace_root is None:
+        workspace_root = TASKS_ROOT
+    workspace_root = Path(workspace_root)
+    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+        _stop("D6_WORKSPACE_ROOT_INVALID")
+    workspace_root = Path(os.path.realpath(workspace_root))
+    canonical_root = Path(canonical_root).resolve(strict=True)
+    if _task_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
+        _stop("D6_REPOSITORY_INVALID")
+    common_dir = Path(_task_git(canonical_root, "rev-parse", "--path-format=absolute",
+                                "--git-common-dir").stdout.strip())
+    if (not common_dir.is_absolute() or common_dir.name != ".git" or
+            Path(os.path.realpath(common_dir)) != common_dir or
+            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS):
+        _stop("D6_COMMON_DIR_INVALID")
+    registry = common_dir / "llmtool-worktrees"
+    _safe_dir(registry, mode=0o700, uid=os.getuid())
+    lock_fd = None
+    if execute:
+        try:
+            lock_fd = os.open(registry / ".lifecycle.lock",
+                              os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            os.fchmod(lock_fd, 0o600)
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        except OSError:
+            _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
+    try:
+        results = []
+        for task_id, approval in sorted(approvals.items()):
+            record_path = registry / (task_id + ".json")
+            result = {"task_id": task_id,
+                      "mode": "execute" if execute else "dry-run",
+                      "result": "BLOCKED"}
+            try:
+                record = _read_registry_record(record_path)
+                root = workspace_root / task_id
+                if (record.get("schema_version") != 1 or
+                        record.get("task_id") != task_id or
+                        record.get("state") != "RETAIN_BLOCKED" or
+                        record.get("root_realpath") != str(root)):
+                    result["reason"] = "D6_RELEASE_RETAIN_RECORD_INVALID"
+                else:
+                    try:
+                        root.lstat()
+                    except FileNotFoundError:
+                        absent = True
+                    except OSError:
+                        absent = False
+                        result["reason"] = "D6_RELEASE_RETAIN_PATH_UNAVAILABLE"
+                    else:
+                        absent = False
+                        result["reason"] = "D6_RELEASE_RETAIN_WORKTREE_PRESENT"
+                    if absent and "reason" not in result:
+                        if _read_registry_record(record_path) != record:
+                            result["reason"] = "D6_REGISTRY_CHANGED"
+                        elif not execute:
+                            result.update(result="RELEASE_READY",
+                                          approval_ref=approval)
+                        else:
+                            now = _now()
+                            updated = dict(record)
+                            updated.update(
+                                state="RETIRED_EXTERNALLY",
+                                last_verified_at=now,
+                                retired_externally_at=now,
+                                owner_approval_ref=approval,
+                                disposition="Owner-approved retain release; worktree "
+                                "directory absent at " + now)
+                            _replace_record(record_path, updated)
+                            result.update(result="RETIRED_EXTERNALLY",
+                                          approval_ref=approval,
+                                          retired_externally_at=now)
+            except LifecycleError as exc:
+                result["reason"] = exc.code
+            results.append(result)
+        print(json.dumps({"mode": "owner-approved-retain-release",
+                          "execute": execute, "records": results}, sort_keys=True))
+        return all(item["result"] in ("RELEASE_READY", "RETIRED_EXTERNALLY")
+                   for item in results)
+    finally:
+        if lock_fd is not None:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
+# Keep the alternate verb order available for callers that mirror the CLI name.
+release_owner_approved_retain = owner_approved_retain_release
+
+
 def _parse_unknown_evidence(values):
     evidence = {}
     for value in values or []:
@@ -1991,6 +2113,11 @@ def _main(argv=None):
                         metavar="TASK_ID=OWNER_APPROVAL_URL",
                         help="release an absent RETAIN_BLOCKED record with an Owner approval "
                              "comment URL from issue 289 or 352 (repeatable)")
+    parser.add_argument("--owner-approved-retain-release", action="append",
+                        metavar="TASK_ID=OWNER_COMMENT_URL",
+                        help="release an absent RETAIN_BLOCKED record with an Owner approval "
+                             "comment URL from issue 289 or 529 (repeatable); dry run by "
+                             "default, --execute-approved-retire applies it")
     parser.add_argument("--discard-uncommitted", action="append", metavar="TASK_ID",
                         help="Owner-approved: discard this retire task's tracked and "
                              "untracked changes (repeatable); needs the execute flag to act")
@@ -2016,7 +2143,8 @@ def _main(argv=None):
                     args.train_evidence or args.reviewed_pr_evidence or
                     args.discard_uncommitted or
                     args.retain_blocked_evidence or args.reconcile_registry or
-                    args.execute_approved_reconcile or args.release_retain):
+                    args.execute_approved_reconcile or args.release_retain or
+                    args.owner_approved_retain_release):
                 _stop("D6_TASK_INPUT_INVALID")
             return 0 if rebind_device_tasks(
                 canonical_root=args.repo_root,
@@ -2034,7 +2162,7 @@ def _main(argv=None):
                     args.train_evidence or args.reviewed_pr_evidence or args.reconcile_registry or
                     args.execute_approved_reconcile or
                     args.discard_uncommitted or args.retain_blocked_evidence or
-                    args.release_retain):
+                    args.release_retain or args.owner_approved_retain_release):
                 _stop("D6_TASK_INPUT_INVALID")
             bind_native_session(task_id=args.bind_native_session_task_id,
                                 native_session_id=args.native_session_id,
@@ -2048,7 +2176,7 @@ def _main(argv=None):
                     args.train_evidence or args.reviewed_pr_evidence or args.reconcile_registry or
                     args.execute_approved_reconcile or
                     args.discard_uncommitted or args.retain_blocked_evidence or
-                    args.release_retain):
+                    args.release_retain or args.owner_approved_retain_release):
                 _stop("D6_TASK_INPUT_INVALID")
             record_result(task_id=args.record_result_task_id,
                           canonical_root=args.repo_root)
@@ -2056,7 +2184,8 @@ def _main(argv=None):
         if args.retire_task_id is not None:
             if (any(value is not None for value in create_values + create_options) or
                     args.resume_task_id is not None or args.resume_root is not None or
-                    args.execute_approved_lifecycle or args.release_retain):
+                    args.execute_approved_lifecycle or args.release_retain or
+                    args.owner_approved_retain_release):
                 _stop("D6_TASK_INPUT_INVALID")
             return 0 if retire_worktrees(
                 canonical_root=args.repo_root, task_ids=args.retire_task_id,
@@ -2072,7 +2201,7 @@ def _main(argv=None):
                     args.squash_evidence or args.train_evidence or
                     args.reviewed_pr_evidence or
                     args.discard_uncommitted or args.retain_blocked_evidence or
-                    args.release_retain or
+                    args.release_retain or args.owner_approved_retain_release or
                     any(value is not None for value in create_values + create_options) or
                     args.resume_task_id is not None or args.resume_root is not None or
                     args.record_result_task_id is not None or
@@ -2087,6 +2216,7 @@ def _main(argv=None):
                     args.reviewed_pr_evidence or
                     args.discard_uncommitted or args.retain_blocked_evidence or
                     args.reconcile_registry or args.execute_approved_reconcile or
+                    args.owner_approved_retain_release or
                     any(value is not None for value in create_values + create_options) or
                     args.resume_task_id is not None or args.resume_root is not None or
                     args.record_result_task_id is not None or
@@ -2096,6 +2226,22 @@ def _main(argv=None):
             return 0 if release_retained_records(
                 canonical_root=args.repo_root,
                 approvals=_parse_release_retain(args.release_retain)) else 1
+        if args.owner_approved_retain_release is not None:
+            if (args.retire_task_id is not None or args.squash_evidence or
+                    args.train_evidence or args.discard_uncommitted or
+                    args.retain_blocked_evidence or args.reconcile_registry or
+                    args.execute_approved_reconcile or args.release_retain or
+                    any(value is not None for value in create_values + create_options) or
+                    args.resume_task_id is not None or args.resume_root is not None or
+                    args.record_result_task_id is not None or
+                    args.bind_native_session_task_id is not None or
+                    args.execute_approved_lifecycle):
+                _stop("D6_TASK_INPUT_INVALID")
+            return 0 if owner_approved_retain_release(
+                canonical_root=args.repo_root,
+                approvals=_parse_owner_approved_retain_release(
+                    args.owner_approved_retain_release),
+                execute=args.execute_approved_retire) else 1
         if (args.execute_approved_retire or args.squash_evidence or args.train_evidence or
                 args.reviewed_pr_evidence or
                 args.discard_uncommitted or args.retain_blocked_evidence or
