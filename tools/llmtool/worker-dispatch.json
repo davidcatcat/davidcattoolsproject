@@ -14,7 +14,28 @@
       "decided_at": "2026-10-31",
       "reason": "Owner allows Claude Developer, including Claude Code Cloud, only for explicitly assigned Tasks; the PM confirms execution environment, ownership, Task ID, write scope and the formal record; earlier Task assignments were inventoried and are not restored",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656",
-      "owner_assignments": []
+      "owner_assignments": [
+        {
+          "task_id": "85247d6fa90a41c4bc8c7a71414b008b",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
+        },
+        {
+          "task_id": "781631c40a944385b7853394f8155ec6",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
+        },
+        {
+          "task_id": "e54b6705042c464295d9779588476b44",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
+        },
+        {
+          "task_id": "bc48a57e6b6546d5925d162f57a8ed38",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
+        },
+        {
+          "task_id": "b6b2a0d05ab649a48d5d05bb30209c8e",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
+        }
+      ]
     },
     "opencode-developer": {
       "dispatch": "PAUSED",
