@@ -148,7 +148,7 @@ class AuthorityTests(unittest.TestCase):
             with self.subTest(origin=origin):
                 hostdata=copy.deepcopy(self.h.hostdata)
                 hostdata['agents'][0]['origin']=origin
-                registration=a._decode_host(r.canonical(hostdata))
+                registration=a._decode_host(r.canonical(hostdata).decode())
                 self.assertEqual(registration.agents[0].origin,origin)
         for origin in (
             'git@github.com:davidcatcat/davidcattoolsproject.git/',
@@ -164,7 +164,7 @@ class AuthorityTests(unittest.TestCase):
             with self.subTest(origin=origin), self.assertRaises(Exception):
                 hostdata=copy.deepcopy(self.h.hostdata)
                 hostdata['agents'][0]['origin']=origin
-                a._decode_host(r.canonical(hostdata))
+                a._decode_host(r.canonical(hostdata).decode())
     def zero(self,result,code=None):
         self.assertEqual(result['provider_calls'],0);self.assertFalse(result['authorized'])
         self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
