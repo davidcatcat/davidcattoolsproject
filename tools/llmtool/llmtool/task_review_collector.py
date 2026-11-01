@@ -18,6 +18,7 @@ from pathlib import Path
 from . import git_intel
 from .task_lifecycle import Role, utc_time
 from .task_review import reject, digest, scope_path, canonical, screen, SOURCE_LIMIT
+from .review_origins import REVIEW_ORIGINS
 from .providers.cli_lifecycle import terminate
 
 MAX_METADATA = 1024 * 1024
@@ -199,7 +200,7 @@ def collect_local_facts(root, *, reader=None):
                                     common+'/refs/heads/'+branch+'.lock')):
         reject('REVIEW_GIT_LOCKED')
     origin = text(('config','--get','remote.origin.url'))
-    if origin != 'git@github.com:davidcatcat/davidcattoolsproject.git':
+    if origin not in REVIEW_ORIGINS:
         reject('REVIEW_REPOSITORY_INVALID')
     registration = reader.read(('worktree','list','--porcelain'))
     blocks = registration.decode().strip().split('\n\n')

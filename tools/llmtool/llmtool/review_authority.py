@@ -24,6 +24,7 @@ from .task_review import (HostServices,PairApproval,ReviewPacket,ReviewCallBindi
     _clocks_agree as clocks_agree)
 from .task_lifecycle import utc_time,inspect_task,Role
 from .task_review_collector import physical_directory,collect_local_facts,Observation
+from .review_origins import REVIEW_ORIGINS
 
 
 def _reference(value):
@@ -101,7 +102,7 @@ class RegisteredAgent:
         _path(self.common_dir[:-5],absolute=True)
         _integer(self.device);_integer(self.inode,minimum=1)
         _path(self.branch_prefix.rstrip('/'))
-        if (self.origin != 'git@github.com:davidcatcat/davidcattoolsproject.git' or
+        if (self.origin not in REVIEW_ORIGINS or
                 self.branch_prefix in ('main','automation/ai-loop') or
                 self.venv_prefix != self.root+'/tools/llmtool/.venv'):
             reject('REVIEW_REGISTRATION_INVALID')
