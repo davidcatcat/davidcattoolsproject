@@ -757,6 +757,74 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertTrue(all('expected failure' in item['text']
                             for item in evidence[0]['output_excerpt']))
 
+    def test_registered_script_discovers_all_classes_past_early_main_exit(self):
+        path = 'scripts/test_fixture.py'
+        expected_argv = [sys.executable, '-I', '-B', '-m', 'unittest',
+                         'discover', '-s', 'scripts', '-p', 'test_fixture.py']
+        expected_command_sha = hashlib.sha256(
+            json.dumps(expected_argv, separators=(',', ':')).encode()).hexdigest()
+
+        failing_later_script = (
+            'import unittest\n'
+            'class EarlyFixture(unittest.TestCase):\n'
+            '    def test_early(self): self.assertTrue(True)\n'
+            'if __name__ == "__main__":\n'
+            '    raise SystemExit(0)\n'
+            'class LaterFixture(unittest.TestCase):\n'
+            '    def test_later_fail(self): self.fail("later class failure")\n'
+        )
+        result_sha = self._make_path_result(path, failing_later_script)
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), source_sha=self.source_sha,
+            result_sha=result_sha, read_paths=[path], write_paths=[])
+        self.assertEqual(evidence[0]['path'], path)
+        self.assertEqual(evidence[0]['command_sha256'], expected_command_sha)
+        self.assertEqual(evidence[0]['status'], 'FAILED')
+        self.assertNotEqual(evidence[0]['exit_code'], 0)
+        self.assertTrue(evidence[0]['output_excerpt'])
+        self.assertTrue(any('later class failure' in item['text']
+                            for item in evidence[0]['output_excerpt']))
+
+        passing_all_classes_script = (
+            'import unittest\n'
+            'RAN = []\n'
+            'class FirstFixture(unittest.TestCase):\n'
+            '    def test_first(self):\n'
+            '        RAN.append("first")\n'
+            '        self.assertIn("SecondFixture", globals())\n'
+            'if __name__ == "__main__":\n'
+            '    raise SystemExit(0)\n'
+            'class SecondFixture(unittest.TestCase):\n'
+            '    def test_second(self):\n'
+            '        RAN.append("second")\n'
+            '        self.assertEqual(RAN, ["first", "second"])\n'
+        )
+        result_sha = self._make_path_result(path, passing_all_classes_script)
+        evidence = task_completion.run_bounded_tests(
+            root=str(self.root), source_sha=self.source_sha,
+            result_sha=result_sha, read_paths=[path], write_paths=[])
+        self.assertEqual(evidence[0]['path'], path)
+        self.assertEqual(evidence[0]['command_sha256'], expected_command_sha)
+        self.assertEqual(evidence[0]['exit_code'], 0)
+        self.assertEqual(evidence[0]['status'], 'PASSED')
+
+    def test_registered_script_with_no_tests_is_not_passed(self):
+        path = 'scripts/test_fixture.py'
+        for label, script in (
+            ('empty_module', 'VALUE = 1\n'),
+            ('main_only_exit_zero', 'if __name__ == "__main__":\n    raise SystemExit(0)\n'),
+            ('empty_testcase', 'import unittest\nclass Empty(unittest.TestCase):\n    pass\n'),
+            ('import_time_exit_zero', 'raise SystemExit(0)\n'),
+        ):
+            with self.subTest(case=label):
+                result_sha = self._make_path_result(path, script)
+                evidence = task_completion.run_bounded_tests(
+                    root=str(self.root), source_sha=self.source_sha,
+                    result_sha=result_sha, read_paths=[path], write_paths=[])
+                self.assertEqual(evidence[0]['path'], path)
+                self.assertNotEqual(evidence[0]['status'], 'PASSED')
+                self.assertEqual(evidence[0]['status'], 'FAILED')
+
     def test_out_of_registry_task_path_does_not_add_a_test_entry(self):
         result_sha = self._make_path_result('docs/guide.md', 'Documentation.\n')
         evidence = task_completion.run_bounded_tests(

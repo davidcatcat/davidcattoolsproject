@@ -23,6 +23,7 @@ on:
       - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
+      - 'tools/api-agent-gateway/**'
       - 'AGENTS.md'
       - 'CLAUDE.md'
       - 'skills/**'
@@ -36,6 +37,7 @@ on:
       - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
+      - 'tools/api-agent-gateway/**'
       - 'AGENTS.md'
       - 'CLAUDE.md'
       - 'skills/**'
@@ -67,6 +69,7 @@ jobs:
     outputs:
       code: ${{ steps.classify.outputs.code }}
       docs: ${{ steps.classify.outputs.docs }}
+      gateway: ${{ steps.classify.outputs.gateway }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -81,11 +84,13 @@ jobs:
         run: |
           code=false
           docs=false
+          gateway=false
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             paths="$RUNNER_TEMP/changed-paths"
             git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"
             while IFS= read -r -d '' path; do
               case "$path" in
+                tools/api-agent-gateway/*) code=true; gateway=true ;;
                 tools/llmtool/*/*.md) code=true; docs=true ;;
                 tools/llmtool/*.md) docs=true ;;
                 tools/llmtool/*) code=true ;;
@@ -96,8 +101,105 @@ jobs:
           else
             code=true
             docs=true
+            if [ -d tools/api-agent-gateway ]; then gateway=true; fi
           fi
-          printf 'code=%s\ndocs=%s\n' "$code" "$docs" >> "$GITHUB_OUTPUT"
+          printf 'code=%s\ndocs=%s\ngateway=%s\n' "$code" "$docs" "$gateway" >> "$GITHUB_OUTPUT"
+
+  gateway:
+    name: gateway tests (Linux 3.14)
+    needs: changes
+    if: >-
+      vars.LINUX_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && github.actor == 'davidcatcat'
+      && needs.changes.outputs.gateway == 'true'
+    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    timeout-minutes: 15
+    steps:
+      - name: Check EC2 runner boundary
+        shell: bash
+        run: |
+          fail() { echo "::error::EC2 runner boundary failed: $1"; exit 1; }
+          case "$RUNNER_NAME" in
+            ec2-self-runner) account=ghrunner ;;
+            ec2-self-runner-2) account=ghrunner2 ;;
+            ec2-self-runner-3) account=ghrunner3 ;;
+            *) fail "unexpected runner" ;;
+          esac
+          user=$(id -un) || fail "cannot identify job user"
+          test "$user" = "$account" || fail "runner $RUNNER_NAME runs as $user, expected $account"
+          test "$(id -u)" -ne 0 || fail "job runs as root"
+          groups=$(id -nG) || fail "cannot identify job groups"
+          test "$groups" = "$account" || fail "job user has extra groups: $groups"
+          python=/usr/bin/python3.14
+          test -x "$python" || fail "no $python on this host"
+          "$python" -B - <<'PY'
+          import os
+          from pathlib import Path
+          import socket
+          import sys
+          if '%d.%d' % sys.version_info[:2] != '3.14':
+              raise SystemExit('EC2 runner boundary failed: wrong Python')
+          credential_names = ('AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_SESSION_TOKEN',
+                              'AWS_WEB_IDENTITY_TOKEN_FILE', 'AWS_SHARED_CREDENTIALS_FILE')
+          if any(name in os.environ for name in credential_names) or (Path.home() / '.aws').exists():
+              raise SystemExit('EC2 runner boundary failed: AWS credential configuration present')
+          for address in ('169.254.169.254', 'fd00:ec2::254'):
+              try:
+                  with socket.create_connection((address, 80), timeout=2):
+                      raise SystemExit('EC2 runner boundary failed: instance metadata reachable')
+              except OSError:
+                  pass
+          print('EC2_RUNNER_BOUNDARY_PASS Python ' + sys.version.split()[0])
+          PY
+          echo "Runner: $RUNNER_NAME; account: $user; architecture: $(uname -m)"
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify Python 3.14
+        shell: bash
+        run: |
+          python=/usr/bin/python3.14
+          test -x "$python" || { echo "::error::no $python on this runner"; exit 1; }
+          "$python" -B - <<'PY'
+          import sys
+
+          if '%d.%d' % sys.version_info[:2] != '3.14':
+              raise SystemExit('expected Python 3.14, got ' + sys.version.split()[0])
+          print('Python ' + sys.version.split()[0])
+          PY
+
+      - name: Source revision
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          fail() { echo "::error::source revision check failed: $1"; exit 1; }
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "expected SHA is not a full commit id"
+          head=$(git rev-parse HEAD) || fail "cannot read HEAD"
+          test "$head" = "$EXPECTED_SHA" || fail "checked out $head, expected $EXPECTED_SHA"
+          echo "tested source HEAD: $head ($GITHUB_EVENT_NAME)"
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            test "$head" != "$GITHUB_SHA" || fail "checked out the merge ref instead of the PR head"
+            [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "missing PR base SHA"
+            if git merge-base --is-ancestor "$BASE_SHA" "$head"; then
+              echo "merge coverage: head contains base $BASE_SHA"
+            else
+              status=$?
+              test "$status" -eq 1 || fail "cannot compare head with base $BASE_SHA"
+              fail "head does not contain base $BASE_SHA; update the branch so CI tests the merge result"
+            fi
+          fi
+
+      - name: Offline gateway tests
+        working-directory: tools/api-agent-gateway
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: /usr/bin/python3.14 -B -m unittest discover -s tests -v
 
   shards:
     name: linux shard ${{ matrix.shard }}/3 (${{ matrix.python }})

@@ -14,13 +14,15 @@ from llmtool.errors import LLMToolError
 class AgyRouteWiringTests(unittest.TestCase):
     def _run_agy_delegate(self, route_error=None, *, diff_bytes=b'diff --git a/src.py b/src.py\n',
                           decisions=None, repair_packet=None, usage=None,
-                          binding_changes=False, fail_success_persist=False):
+                          binding_changes=False, fail_success_persist=False,
+                          read_paths=None, changed_paths=None, request='AGY goal',
+                          goal='AGY goal'):
         task_id = 'a' * 32
         task = {
             'schema_version': 2, 'task_id': task_id, 'run_id': 'b' * 32,
-            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'AGY goal',
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': request,
             'task_binding': {'contract_digest': 'c' * 64},
-            'pm_assignment': {'route': 'agy', 'risk': 'LOW', 'goal': 'AGY goal',
+            'pm_assignment': {'route': 'agy', 'risk': 'LOW', 'goal': goal,
                               'acceptance': ['the result is recorded']},
             'pm_route_binding': {'type': 'openai-compatible', 'model': 'pm-model',
                                  'base_url': None},
@@ -101,10 +103,9 @@ class AgyRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli.task_completion, 'read_d6_registration',
                           return_value=registration), \
              patch.object(task_submission_cli.task_completion, '_worktree_diff',
-                          return_value=(['src.py'], diff_bytes)), \
+                          return_value=(changed_paths or ['src.py'], diff_bytes)), \
              patch.object(task_submission_cli, '_assignment_paths',
-                          return_value=(['src.py'], ['src.py'])), \
-             patch.object(task_submission_cli, '_text_developer_source_files', return_value={}), \
+                          return_value=(read_paths or ['src.py'], ['src.py'])), \
              patch.object(task_submission_cli, '_direct_result_callback', return_value=callback), \
              patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='LOCAL'), \
              patch.object(task_submission_cli, 'load_route_config', return_value={
@@ -172,6 +173,38 @@ class AgyRouteWiringTests(unittest.TestCase):
         self.assertEqual(task['developer']['direct_result_callback']['state'], 'WAITING_EXECUTOR')
         self.assertEqual(inbox_events, [{'task_id': 'a' * 32,
                                          'executor_task_id': 'executor-d6'}])
+
+    def test_agy_prompt_contains_scope_but_no_source_file_payload(self):
+        _status, _task, _inbox_events, prompts = self._run_agy_delegate()
+        prompt = prompts[0]
+        self.assertNotIn('SOURCE_FILES_JSON', prompt)
+        self.assertNotIn('source_files', prompt)
+        self.assertIn('Read the authorized files from the worktree yourself', prompt)
+        packet = json.loads(prompt.split('TASK_JSON=', 1)[1])
+        self.assertEqual(packet['task_contract_digest'], 'c' * 64)
+        self.assertEqual(packet['source_sha'], 'd' * 40)
+        self.assertEqual(packet['goal'], 'AGY goal')
+        self.assertEqual(packet['acceptance'], ['the result is recorded'])
+        self.assertEqual(packet['read_paths'], ['src.py'])
+        self.assertEqual(packet['write_paths'], ['src.py'])
+
+    def test_credential_shaped_read_path_is_refused(self):
+        fixture_path = 'fixtures/' + 'gh' + 'p_' + 'A' * 36
+        with self.assertRaisesRegex(LLMToolError, 'recognizable credential material'):
+            self._run_agy_delegate(read_paths=[fixture_path])
+
+    def test_credential_material_in_pm_request_is_still_refused(self):
+        fake_pat = 'gh' + 'p_' + 'A' * 36
+        with self.assertRaisesRegex(LLMToolError, 'recognizable credential material'):
+            self._run_agy_delegate(request=f'Use token {fake_pat} for this task')
+
+    def test_out_of_scope_write_is_still_rejected(self):
+        status, task, inbox_events, _prompts = self._run_agy_delegate(
+            changed_paths=['outside.py'])
+        self.assertEqual(status, 1)
+        self.assertEqual(task['developer']['state'], 'BLOCKED')
+        self.assertEqual(task['developer']['error_code'], 'AGY_WRITE_SCOPE_VIOLATION')
+        self.assertEqual(inbox_events, [])
 
     def test_agy_unknown_usage_is_not_persisted_as_cli_reported(self):
         status, task, _inbox_events, _prompts = self._run_agy_delegate(
@@ -276,6 +309,15 @@ class AgyRouteWiringTests(unittest.TestCase):
         _status, _task, _events, prompts = self._run_agy_delegate(repair_packet=packet)
         self.assertIn('untrusted_repair_reference', prompts[0])
         self.assertIn('Correct the import.', prompts[0])
+
+    def test_credential_shaped_repair_excerpt_is_refused(self):
+        fake_pat = 'gh' + 'p_' + 'A' * 36
+        packet = {'task': 'task-1', 'pr': 7, 'executor_task': 'executor-d6',
+            'failed_head': 'd' * 40, 'version': 1, 'verdict_comment_id': 9,
+            'findings_count': 1,
+            'reviewer_text_excerpt_untrusted_data': f'Use {fake_pat} here.'}
+        with self.assertRaisesRegex(LLMToolError, 'recognizable credential material'):
+            self._run_agy_delegate(repair_packet=packet)
 
 
 if __name__ == '__main__':

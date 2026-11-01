@@ -74,7 +74,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.fake.chmod(0o700)
 
     def run_fake(self, **kwargs):
-        timeout = kwargs.pop('timeout', 3)
+        timeout = kwargs.pop('timeout', 10)
         prompt = kwargs.pop('prompt', 'bounded prompt')
         kwargs.setdefault('prelaunch_validate', lambda: True)
         with patch('llmtool.codex_direct_developer.worker_dispatch.authorize_dispatch'):

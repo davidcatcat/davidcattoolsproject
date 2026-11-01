@@ -30,6 +30,12 @@ def _fake_background(key, store=None):
         return _json.load(source)
 
 _status.read_background = _fake_background
+
+def _fake_detail(task_id, store=None):
+    with open(_os.environ["FAKE_TASK_DETAIL"], encoding="utf-8") as source:
+        return _json.load(source)[task_id]
+
+_status.read_task_detail = _fake_detail
 '''
 REPLY = ("改好了：見 llmtool/chat_tui.py:123 與 #654。\n\n"
          "```diff\n+ 新增一行\n- 刪除一行\n```\n\nEND MARKER")
@@ -51,7 +57,8 @@ class ThemePTYTests(unittest.TestCase):
         self.slow = float(os.environ.get("LLMTOOL_PTY_SLOW", "1"))
         self.evidence = os.environ.get("LLMTOOL_TUI_EVIDENCE_DIR")
 
-    def open_terminal(self, environ, git_remote=None):
+    def open_terminal(self, environ, git_remote=None, items=None, details=None, rows=24,
+                      refresh=None):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(os.path.realpath(temp.name))
@@ -59,10 +66,14 @@ class ThemePTYTests(unittest.TestCase):
             for args in (("init", "-q"), ("remote", "add", "origin", git_remote)):
                 subprocess.run(("git",) + args, cwd=root, check=True, stdin=subprocess.DEVNULL)
         background = root / "background.json"
-        background.write_text(json.dumps(_items()), encoding="utf-8")
-        environ = dict(environ, FAKE_BACKGROUND=str(background))
-        terminal = driver.Terminal(self.pyte, root, {"*": {"text": REPLY}}, 24, 80, self.slow,
-                                   environ=environ, child_prefix=FAKE_BACKGROUND)
+        background.write_text(json.dumps(_items() if items is None else items), encoding="utf-8")
+        detail = root / "task-detail.json"
+        detail.write_text(json.dumps(details or {}), encoding="utf-8")
+        environ = dict(environ, FAKE_BACKGROUND=str(background), FAKE_TASK_DETAIL=str(detail))
+        terminal = driver.Terminal(self.pyte, root, {"*": {"text": REPLY}}, rows, 80, self.slow,
+                                   environ=environ, child_prefix=FAKE_BACKGROUND + (
+                                       "" if refresh is None else
+                                       "\n_status.REFRESH_SECONDS = %d\n" % refresh))
         self.addCleanup(terminal.stop)
         terminal.wait_text("full-screen", "TUI startup")
         return terminal
@@ -171,6 +182,118 @@ class ThemePTYTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
         self.dump(terminal, "light-then-dark-pm")
 
+
+    def test_w59_background_task_detail_during_a_pm_turn(self):
+        """[Mac PTY (fake provider)] W59: Enter on the ↓ panel opens a read-only Task detail during a
+        PM turn; the turn finishes while it is open; Esc returns to the same reading position
+        with the draft kept; the PR URL is an OSC 8 link on iTerm2"""
+        now = datetime.now(timezone.utc)
+        task_a, task_b = "a" * 32, "b" * 32
+        items = [{"role": "Developer", "task": task_a, "pr": "#654", "state": "RUNNING",
+                  "updated_at": (now - timedelta(minutes=12)).isoformat()},
+                 {"role": "Reviewer", "task": task_b, "pr": "#661", "state": "WAITING_REVIEW",
+                  "updated_at": (now - timedelta(minutes=3)).isoformat()}]
+        details = {task_id: {"task_id": task_id, "request": "W59 PTY 詳情 " + task_id[:4],
+                             "state": "PM_RESPONDED", "developer": None,
+                             "created_at": now.isoformat(), "updated_at": now.isoformat(),
+                             "review_dispatch_claim": {"pr": pr, "state": "CLAIMED", "version": 1}}
+                   for task_id, pr in ((task_a, 654), (task_b, 661))}
+        terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
+                                      git_remote="git@github.com:o/r.git", items=items,
+                                      details=details, rows=16)
+        terminal.connect_pm()
+        terminal.wait_text("背景 2 · ↓ 查看", "status line background count")
+        terminal.submit("第零則 " + "長訊息內容，" * 40)
+        terminal.wait_text("PM 回覆：第零則", "first PM reply", 20)
+        terminal.wait_for(lambda rows: "待命" in rows[-1], "first turn end", 20)
+        slow = "slow:%d 第一則" % (8 * self.slow)
+        terminal.submit(slow)
+        terminal.wait_for(lambda rows: "Esc 中斷" in rows[-1], "second turn working")
+        bottom = terminal.pane()
+        terminal.wheel(True, 4)
+        terminal.wait_for(lambda rows: terminal.pane()[4:8] == bottom[0:4], "scrolled back 4 rows")
+        before = terminal.wait_stable("reading position")
+        top = terminal.pane()[:4]
+        terminal.send("\x1b[B")
+        terminal.wait_text("背景工作 2 項", "↓ panel")
+        terminal.send("\x1b[B")
+        terminal.send("\r")
+        rows = terminal.wait_text("Task 詳情（唯讀）", "detail opened")
+        terminal.wait_text("W59 PTY 詳情 bbbb", "detail of the selected Task")
+        self.assertIn("Esc 中斷", before[-1])
+        terminal.send("\x1b[6~")                                   # PageDown in the detail
+        terminal.wait_text("PR: #661", "PR line scrolled into view")
+        self.assertIn(";" + "https://github.com/davidcatcat/davidcattoolsproject/pull/661\x1b\\",
+                      terminal.raw_text())
+        terminal.send("草稿 W59")
+        terminal.wait_text("草稿 W59", "draft typed while the detail is open")
+        # The PM turn keeps going and ends while the detail is shown.
+        rows = terminal.wait_for(lambda rows: "待命" in rows[-1], "turn end with detail open", 30)
+        self.assertIn("最近事件", "\n".join(rows))                     # still the detail
+        self.assertIn("Esc 返回", rows[-1])
+        self.assertNotIn("PM 回覆：第一則", "\n".join(rows))
+        self.dump(terminal, "w59-task-detail")
+        terminal.esc()
+        terminal.wait_for(lambda rows: "最近事件" not in "\n".join(rows), "Esc closed it")
+        self.assertEqual(terminal.wait_stable("back in the chat") and terminal.pane()[:4], top)
+        self.assertTrue(any(row.startswith("pm> 草稿 W59") for row in terminal.rows()),
+                        terminal.rows())
+        self.assertEqual(terminal.claude_messages()[-1], slow)       # the draft was not sent
+        terminal.wheel(False, 200)
+        terminal.wait_text("PM 回覆：第一則", "reply that arrived while the detail was open")
+
+    def test_w59_empty_refresh_enter_and_escape_during_pm_turn(self):
+        """[Mac PTY (fake provider)] W59: the background list empties during a PM turn while the
+        panel is open; Enter shows UNKNOWN (no other Task, nothing sent), the draft and reading
+        position stay, and the first Esc closes the panel without interrupting the PM"""
+        now = datetime.now(timezone.utc)
+        task_a, task_b = "a" * 32, "b" * 32
+        items = [{"role": "Developer", "task": task_a, "pr": "#654", "state": "RUNNING",
+                  "updated_at": (now - timedelta(minutes=12)).isoformat()},
+                 {"role": "Reviewer", "task": task_b, "pr": "#661", "state": "WAITING_REVIEW",
+                  "updated_at": (now - timedelta(minutes=3)).isoformat()}]
+        terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
+                                      items=items, details={}, rows=16, refresh=1)
+        listing = terminal.root / "background.json"
+        terminal.connect_pm()
+        terminal.wait_text("背景 2 · ↓ 查看", "status line background count")
+        slow = "slow:%d 第一則" % (20 * self.slow)
+        terminal.submit(slow)
+        terminal.wait_for(lambda rows: "Esc 中斷" in rows[-1], "turn working")
+        top = terminal.wait_stable("reading position") and terminal.pane()[:4]
+        # Phase A: select B, the list empties, Enter -> UNKNOWN; the draft stays; Esc returns.
+        terminal.send("\x1b[B")
+        terminal.wait_text("背景工作 2 項", "↓ panel")
+        terminal.send("\x1b[B")
+        listing.write_text("[]", encoding="utf-8")
+        terminal.wait_text("選中的 Task bbbbbbbb 已不在清單", "empty refresh keeps the panel", 10)
+        terminal.send("\r")
+        terminal.wait_text("Core 狀態：UNKNOWN（選中的 Task bbbbbbbb 已不在背景清單",
+                           "UNKNOWN detail")
+        self.assertNotIn("aaaaaaaa", terminal.text())
+        terminal.send("草稿 W59")
+        terminal.wait_text("草稿 W59", "draft typed in the detail")
+        self.dump(terminal, "w59-empty-refresh-unknown")
+        terminal.esc()
+        terminal.wait_for(lambda rows: "Core 狀態" not in "\n".join(rows), "Esc closed the detail")
+        self.assertEqual(terminal.wait_stable("back in the chat") and terminal.pane()[:4], top)
+        self.assertTrue(any(row.startswith("pm> 草稿 W59") for row in terminal.rows()))
+        self.assertIn("Esc 中斷", terminal.rows()[-1])                     # still working
+        # Phase B: list back, panel open, list empties again; the first Esc only closes it.
+        terminal.send("\x15")                                              # Ctrl-U: empty draft
+        terminal.wait_for(lambda rows: any(row.rstrip() == "pm>" for row in rows), "draft cleared")
+        listing.write_text(json.dumps(items), encoding="utf-8")
+        terminal.wait_text("背景 2 · ↓ 查看", "list back", 10)
+        terminal.send("\x1b[B")
+        terminal.wait_text("背景工作 2 項", "↓ panel again")
+        listing.write_text("[]", encoding="utf-8")
+        terminal.wait_text("背景工作 0 項", "panel kept open on an empty list", 10)
+        terminal.esc()
+        terminal.wait_for(lambda rows: "背景工作" not in "\n".join(rows), "first Esc closed it")
+        self.assertIn("Esc 中斷", terminal.rows()[-1])                     # not interrupted
+        self.assertEqual(terminal.claude_messages(), [slow])               # nothing else sent
+        terminal.wait_text("PM 回覆：第一則", "the turn completed", 40)
+        self.assertNotIn("已中斷", terminal.text())
 
 if __name__ == "__main__":
     unittest.main()
