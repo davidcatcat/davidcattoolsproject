@@ -49,22 +49,25 @@ class TrustTest(unittest.TestCase):
     def setUp(self):
         if os.name != "posix" or not hasattr(os, "getuid") or os.geteuid() == 0:
             self.skipTest("trust loader requires an unprivileged POSIX identity")
-        self.temp = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temp.cleanup)
-        base = Path(self.temp.name)
-        self.home = Path(tempfile.mkdtemp()).resolve()
+        base = Path(tempfile.mkdtemp()).resolve()
+        base.chmod(0o700)
+        self.addCleanup(shutil.rmtree, base)
+        self.home = base / "home"
+        self.home.mkdir(mode=0o700)
         self.home.chmod(0o700)
-        self.addCleanup(shutil.rmtree, self.home)
         self.config = self.home / ".config"
         self.config.mkdir(mode=0o700)
         self.trust_dir = self.config / "llmtool"
         self.trust_dir.mkdir(mode=0o700)
         self.canonical = base / "canonical"
         self.canonical.mkdir(mode=0o700)
+        self.canonical.chmod(0o700)
         self.workspace = base / "workspace"
         self.workspace.mkdir(mode=0o700)
+        self.workspace.chmod(0o700)
         self.tasks = self.workspace / "tasks"
         self.tasks.mkdir(mode=0o700)
+        self.tasks.chmod(0o700)
         self.data = _document(self.canonical, self.workspace, self.tasks)
 
     def _write(self, value=None, *, raw=None, mode=0o600):
