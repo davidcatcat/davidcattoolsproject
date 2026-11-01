@@ -219,6 +219,7 @@ def _read_trust_bytes(home, uid):
                 _fail("TRUST_ANCESTOR_INVALID")
             open_fds.append(child)
             os.close(fd)
+            open_fds.remove(fd)
             fd = child
             is_private = index == len(components) - 1
             _check_directory(fd, uid, "TRUST_ANCESTOR_INVALID", is_private)
