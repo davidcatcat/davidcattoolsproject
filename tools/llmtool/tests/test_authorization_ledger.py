@@ -1096,13 +1096,18 @@ class ProviderLayout2Tests(ProviderLedgerTests):
             'CREATE TRIGGER t AFTER INSERT ON receipts BEGIN SELECT 1; END',
             'CREATE VIEW v AS SELECT nonce FROM receipts',
             "UPDATE ledger_meta SET creation_nonce='" + '0' * 64 + "'",
+            # The CHECK (layout_version = 2) would refuse these rows; bypass it
+            # so the reader's own meta check is what must catch them.
+            ('PRAGMA ignore_check_constraints=ON', 'UPDATE ledger_meta SET layout_version=1'),
+            ('PRAGMA ignore_check_constraints=ON', 'UPDATE ledger_meta SET layout_version=3'),
         )
         for statement in tampers:
             with self.subTest(statement=statement):
                 self.path2.write_bytes(pristine)
                 os.chmod(self.path2, 0o600)
                 db = sqlite3.connect(self.path2)
-                db.execute(statement)
+                for sql in (statement,) if type(statement) is str else statement:
+                    db.execute(sql)
                 db.commit()
                 db.close()
                 with self.assertRaises(l.LedgerError) as caught:
