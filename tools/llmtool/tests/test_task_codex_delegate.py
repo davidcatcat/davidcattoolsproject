@@ -280,8 +280,13 @@ class CodexDelegateTests(unittest.TestCase):
             self_review='reviewed the diff', blocked_reason=None, exit_code=0,
             thread_id='12345678-1234-4234-8234-123456789abc', stdout_sha256='a' * 64,
             elapsed_ms=1, cleanup_status='CONFIRMED', usage=None)
+
+        def done(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            return result
+
         with redirect_stdout(io.StringIO()):
-            _result, saved, callback = self._dispatch(task, codex_result=result)
+            _result, saved, callback = self._dispatch(task, codex_error=done)
         self.assertEqual(saved['developer']['reported'], {
             'summary': 'updated it', 'tests': ['checked one', 'checked two'],
             'self_review': 'reviewed the diff'})
@@ -292,7 +297,8 @@ class CodexDelegateTests(unittest.TestCase):
         result = task_submission_cli.codex_direct_developer.DirectResult(
             status='BLOCKED', summary='x' * (8 * 1024 + 1),
             tests=('safe test', ''.join(('api', '_', 'key', '=', 'secret'))),
-            self_review='credential AKIA' + 'A' * 16, blocked_reason=None, exit_code=0,
+            self_review=''.join(('api', '_', 'key', '=', 'secret')),
+            blocked_reason=None, exit_code=0,
             thread_id='12345678-1234-4234-8234-123456789abc', stdout_sha256='a' * 64,
             elapsed_ms=1, cleanup_status='CONFIRMED', usage=None)
         with redirect_stdout(io.StringIO()):
