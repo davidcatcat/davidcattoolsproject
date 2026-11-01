@@ -57,7 +57,8 @@ class ThemePTYTests(unittest.TestCase):
         self.slow = float(os.environ.get("LLMTOOL_PTY_SLOW", "1"))
         self.evidence = os.environ.get("LLMTOOL_TUI_EVIDENCE_DIR")
 
-    def open_terminal(self, environ, git_remote=None, items=None, details=None, rows=24):
+    def open_terminal(self, environ, git_remote=None, items=None, details=None, rows=24,
+                      refresh=None):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(os.path.realpath(temp.name))
@@ -70,7 +71,9 @@ class ThemePTYTests(unittest.TestCase):
         detail.write_text(json.dumps(details or {}), encoding="utf-8")
         environ = dict(environ, FAKE_BACKGROUND=str(background), FAKE_TASK_DETAIL=str(detail))
         terminal = driver.Terminal(self.pyte, root, {"*": {"text": REPLY}}, rows, 80, self.slow,
-                                   environ=environ, child_prefix=FAKE_BACKGROUND)
+                                   environ=environ, child_prefix=FAKE_BACKGROUND + (
+                                       "" if refresh is None else
+                                       "\n_status.REFRESH_SECONDS = %d\n" % refresh))
         self.addCleanup(terminal.stop)
         terminal.wait_text("full-screen", "TUI startup")
         return terminal
@@ -238,6 +241,59 @@ class ThemePTYTests(unittest.TestCase):
         self.assertEqual(terminal.claude_messages()[-1], slow)       # the draft was not sent
         terminal.wheel(False, 200)
         terminal.wait_text("PM 回覆：第一則", "reply that arrived while the detail was open")
+
+    def test_w59_empty_refresh_enter_and_escape_during_pm_turn(self):
+        """[Mac PTY (fake provider)] W59: the background list empties during a PM turn while the
+        panel is open; Enter shows UNKNOWN (no other Task, nothing sent), the draft and reading
+        position stay, and the first Esc closes the panel without interrupting the PM"""
+        now = datetime.now(timezone.utc)
+        task_a, task_b = "a" * 32, "b" * 32
+        items = [{"role": "Developer", "task": task_a, "pr": "#654", "state": "RUNNING",
+                  "updated_at": (now - timedelta(minutes=12)).isoformat()},
+                 {"role": "Reviewer", "task": task_b, "pr": "#661", "state": "WAITING_REVIEW",
+                  "updated_at": (now - timedelta(minutes=3)).isoformat()}]
+        terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
+                                      items=items, details={}, rows=16, refresh=1)
+        listing = terminal.root / "background.json"
+        terminal.connect_pm()
+        terminal.wait_text("背景 2 · ↓ 查看", "status line background count")
+        slow = "slow:%d 第一則" % (20 * self.slow)
+        terminal.submit(slow)
+        terminal.wait_for(lambda rows: "Esc 中斷" in rows[-1], "turn working")
+        top = terminal.wait_stable("reading position") and terminal.pane()[:4]
+        # Phase A: select B, the list empties, Enter -> UNKNOWN; the draft stays; Esc returns.
+        terminal.send("\x1b[B")
+        terminal.wait_text("背景工作 2 項", "↓ panel")
+        terminal.send("\x1b[B")
+        listing.write_text("[]", encoding="utf-8")
+        terminal.wait_text("選中的 Task bbbbbbbb 已不在清單", "empty refresh keeps the panel", 10)
+        terminal.send("\r")
+        terminal.wait_text("Core 狀態：UNKNOWN（選中的 Task bbbbbbbb 已不在背景清單",
+                           "UNKNOWN detail")
+        self.assertNotIn("aaaaaaaa", terminal.text())
+        terminal.send("草稿 W59")
+        terminal.wait_text("草稿 W59", "draft typed in the detail")
+        self.dump(terminal, "w59-empty-refresh-unknown")
+        terminal.esc()
+        terminal.wait_for(lambda rows: "Core 狀態" not in "\n".join(rows), "Esc closed the detail")
+        self.assertEqual(terminal.wait_stable("back in the chat") and terminal.pane()[:4], top)
+        self.assertTrue(any(row.startswith("pm> 草稿 W59") for row in terminal.rows()))
+        self.assertIn("Esc 中斷", terminal.rows()[-1])                     # still working
+        # Phase B: list back, panel open, list empties again; the first Esc only closes it.
+        terminal.send("\x15")                                              # Ctrl-U: empty draft
+        terminal.wait_for(lambda rows: any(row.rstrip() == "pm>" for row in rows), "draft cleared")
+        listing.write_text(json.dumps(items), encoding="utf-8")
+        terminal.wait_text("背景 2 · ↓ 查看", "list back", 10)
+        terminal.send("\x1b[B")
+        terminal.wait_text("背景工作 2 項", "↓ panel again")
+        listing.write_text("[]", encoding="utf-8")
+        terminal.wait_text("背景工作 0 項", "panel kept open on an empty list", 10)
+        terminal.esc()
+        terminal.wait_for(lambda rows: "背景工作" not in "\n".join(rows), "first Esc closed it")
+        self.assertIn("Esc 中斷", terminal.rows()[-1])                     # not interrupted
+        self.assertEqual(terminal.claude_messages(), [slow])               # nothing else sent
+        terminal.wait_text("PM 回覆：第一則", "the turn completed", 40)
+        self.assertNotIn("已中斷", terminal.text())
 
 if __name__ == "__main__":
     unittest.main()

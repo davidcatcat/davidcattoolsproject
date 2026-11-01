@@ -739,7 +739,9 @@ class ChatTUI:
         self.input.buffer.on_text_changed += lambda _buffer: self._refresh_menu(False)
         # Typing closes the ↓ background panel (it opens only on an empty input).
         self.input.buffer.on_text_changed += lambda _buffer: self._close_background_on_text()
-        showing_background = Condition(lambda: self.background_visible())
+        showing_background = Condition(lambda: self.background_visible())   # layout only
+        # W59: keys follow the Owner's open panel even when no row fits on screen.
+        panel_open = Condition(lambda: self.background_open())
         self.background_window = Window(
             FormattedTextControl(self.background_text), style="class:menu",
             height=lambda: Dimension.exact(max(1, self.background_rows())), wrap_lines=False)
@@ -805,34 +807,34 @@ class ChatTUI:
                                       and bool(self.background_all()))
 
         @keys.add("down", filter=input_focused & background_listed & ~picker_shown
-                  & ~showing_background & ~showing_task_view, eager=True)
+                  & ~panel_open & ~showing_task_view, eager=True)
         def _background_open(event):
             self.background_index = 0
             self.background_selected = _row_identity(self.background_all()[0])
             self.show_background = True
 
         # W59: Up/Down choose a panel row; Enter opens its read-only Task detail.
-        @keys.add("up", filter=input_focused & showing_background & ~picker_shown & ~searching,
+        @keys.add("up", filter=input_focused & panel_open & ~picker_shown & ~searching,
                   eager=True)
         def _background_up(event):
             self.move_background(-1)
 
-        @keys.add("down", filter=input_focused & showing_background & ~picker_shown & ~searching,
+        @keys.add("down", filter=input_focused & panel_open & ~picker_shown & ~searching,
                   eager=True)
         def _background_down(event):
             self.move_background(1)
 
-        @keys.add("escape", filter=showing_background & ~picker_shown)
+        @keys.add("escape", filter=panel_open & ~picker_shown)
         def _background_close(event):
             self.show_background = False
 
         @keys.add("escape", filter=reading_or_typing & pm_turn & ~picker_shown
-                  & ~showing_background & ~task_view_open)
+                  & ~panel_open & ~task_view_open)
         def _pm_interrupt(event):
             self.interrupt_pm()
 
         @keys.add("escape", filter=reading_or_typing & chat_request & ~picker_shown
-                  & ~showing_background & ~task_view_open)
+                  & ~panel_open & ~task_view_open)
         def _send_interrupt(event):
             self.interrupt_send()
 
@@ -845,7 +847,7 @@ class ChatTUI:
         def _detail_close(event):
             self.toggle_detail(False)
 
-        @keys.add("enter", filter=input_focused & showing_background & ~picker_shown & ~searching)
+        @keys.add("enter", filter=input_focused & panel_open & ~picker_shown & ~searching)
         def _background_enter(event):
             self.open_background_detail()
 
@@ -1354,7 +1356,7 @@ class ChatTUI:
         # lone Esc (close) would otherwise wait the full default timeout.
         shown = (sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
                  or self.events_visible() or self.task_view_visible() or self.pm_turn_active
-                 or self.background_visible()
+                 or self.background_open()
                  or (self.busy and self.worker_kind == "chat"))
         self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
@@ -2366,12 +2368,16 @@ class ChatTUI:
         self.background, self.background_error = outcome
         self.background_key = key
         self.background_loaded = time.monotonic()
-        if not self.background_all():
-            self.show_background = False
+        # W59: a refresh changes the data, never whether the Owner's panel is open.
         self.app.invalidate()
 
+    def background_open(self):
+        """The Owner opened the ↓ panel and has not closed it (keys follow this)."""
+        return self.show_background and self.pm_mode
+
     def background_visible(self):
-        return self.show_background and self.pm_mode and self.background_rows() > 0
+        """The panel has rows on screen (layout only)."""
+        return self.background_open() and self.background_rows() > 0
 
     def _close_background_on_text(self):
         if self.input.text:
@@ -2381,7 +2387,22 @@ class ChatTUI:
         """Panel rows (header + items) that fit beside the minimum chat layout."""
         input_rows = min(4, max(1, self.input.buffer.document.line_count))
         free = self.app.output.get_size().rows - 3 - input_rows - sum(self.picker_layout())
-        return max(0, min(1 + min(len(self.background_all()), BACKGROUND_LIMIT), free))
+        items = self.background_all()
+        body = min(len(items) + (1 if self._background_note(items) else 0), BACKGROUND_LIMIT)
+        return max(0, min(1 + body, free))
+
+    def _background_note(self, items):
+        """Placeholder row text when the selection is not a listed row, else None."""
+        if not self.show_background:
+            return None
+        if self.background_selected is None:
+            # Listed rows with no selection need no extra row (↑↓ select one; Enter says
+            # UNKNOWN); an empty list still shows why nothing is listed.
+            return None if items else "  背景清單目前是空的 — Enter 不會開任何 Task；Esc 關閉"
+        if self._selected_index(items) is None:
+            return ("  選中的 Task %s 已不在清單 — Enter 不會開其他列；↑↓ 重新選擇" % str(
+                self.background_selected[1] or chat_tui_task.UNKNOWN)[:8])
+        return None
 
     def background_text(self):
         width = max(1, self.app.output.get_size().columns)
@@ -2396,11 +2417,10 @@ class ChatTUI:
         result = [("class:menu.header", cut(header))]
         selected = self._selected_index(items)   # drawing never changes the selection
         shown = max(0, rows - 1)
-        if selected is None and self.background_selected is not None and shown:
+        note = self._background_note(items)
+        if note is not None and shown:
             # Its own row, so a narrow header never cuts it; nothing else is highlighted.
-            result += [("", "\n"), ("class:menu.header", cut(
-                "  選中的 Task %s 已不在清單 — Enter 不會開其他列；↑↓ 重新選擇" % str(
-                    self.background_selected[1] or chat_tui_task.UNKNOWN)[:8]))]
+            result += [("", "\n"), ("class:menu.header", cut(note))]
             shown -= 1
         first = 0 if selected is None else max(0, selected - shown + 1)   # selected in view
         for index in range(first, min(len(items), first + shown)):
@@ -2459,19 +2479,21 @@ class ChatTUI:
     def open_background_detail(self):
         """Enter on the panel: show the selected row's detail, read on a reader thread."""
         items = self.background_all()
-        if not items:
-            return
         selected = self.background_selected
-        if selected is None:
-            return
-        # Refreshes may shift or drop rows: open only the selected row; when it left the
-        # list, say so and never open a neighbouring row.
-        index = self._selected_index(items)
+        # Refreshes may shift, drop or empty rows: open only the selected row. Without one,
+        # Enter still belongs to the panel: it says why and never reads another Task, sends
+        # the draft or resumes the queue.
+        index = None if selected is None else self._selected_index(items)
         if index is None:
+            if selected is None:
+                reason = "沒有選中的列；沒有開啟任何 Task，按 Esc 返回後用 ↓ 選擇"
+            else:
+                reason = ("選中的 Task " + str(selected[1] or chat_tui_task.UNKNOWN)[:8]
+                          + " 已不在背景清單（清單剛更新）；沒有開啟其他列，按 Esc 返回再選一次")
+            if self.background_error is not None:
+                reason += "；背景清單讀取失敗：" + str(self.background_error)
             self._show_task_view(chat_tui_status.task_detail_text(
-                None, time.strftime("%H:%M:%S"),
-                "選中的 Task " + str(selected[1] or chat_tui_task.UNKNOWN)[:8]
-                + " 已不在背景清單（清單剛更新）；沒有開啟其他列，按 Esc 返回再選一次"))
+                None, time.strftime("%H:%M:%S"), reason))
             return
         tasks = (len(self.background) if self.pm_target and
                  self.background_key == self.pm_target[0] else 0)

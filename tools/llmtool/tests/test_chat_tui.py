@@ -4504,6 +4504,261 @@ class PMConversationTests(BoundedPMTest):
         with patch.object(chat_tui_status, 'read_task_detail', side_effect=read):
             self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
                         gone, '\r', shown])
+    # -- W59 v4: the panel's open state is the Owner's, never the list's (High Debug) ------
+    W59_ERROR = 'TaskStore read failed; details omitted'
+
+    @staticmethod
+    async def w59_esc(ui):
+        """A lone Esc, then the Esc timeouts, so the key has been handled."""
+        ui.app.input.send_text('\x1b')
+        await asyncio.sleep(1.2)
+
+    def w59_refresh(self, items, error=None):
+        def step(ui):
+            ui.finish_background(self.session_id, (items, error))
+            ui.app.invalidate()
+            ui.background_text()
+            return asyncio.sleep(0.1)
+        return step
+
+    def w59_sent(self):
+        return sum(len(fake.users()) for fake in self.fakes)
+
+    def test_w59_refresh_selection_transition_matrix(self):
+        a, b = self.w59_items()
+        b_role = dict(b, role='Developer')
+        task_b = ('Reviewer', self.W59_TASK_B)
+
+        def check(selected=task_b, highlighted=None, index=1):
+            def step(ui):
+                self.assertTrue(ui.show_background)               # still open (Owner's)
+                self.assertEqual(ui.background_selected, selected)
+                self.assertEqual(ui.background_index, index)
+                rows = self.w59_highlighted(ui)
+                if highlighted is None:
+                    self.assertEqual(rows, [])
+                else:
+                    self.assertEqual(len(rows), 1)
+                    self.assertIn(highlighted[:8], rows[0])
+            return step
+
+        self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                    check(highlighted=self.W59_TASK_B),
+                    self.w59_refresh([b, a]), check(highlighted=self.W59_TASK_B),   # reorder
+                    self.w59_refresh([a]), check(), self.w59_redraw, check(),       # removal
+                    self.w59_refresh([a, b]), check(highlighted=self.W59_TASK_B),   # reappears
+                    self.w59_refresh([a, b_role]), check(),                         # role change
+                    self.w59_refresh([]), self.w59_redraw, self.w59_redraw, check(),   # empty
+                    self.w59_refresh([], self.W59_ERROR), check(),                  # failed read
+                    self.w59_refresh([b, a]), check(highlighted=self.W59_TASK_B),   # recovery
+                    lambda ui: self.assertTrue(ui.background_visible()),
+                    self.w59_refresh([a]), '\x1b[A',                                # explicit only
+                    check(selected=('Developer', self.W59_TASK_A), highlighted=self.W59_TASK_A,
+                          index=0)])
+
+    def w59_enter_unknown(self, setup, reason):
+        reads = []
+
+        def read(task_id):
+            reads.append(task_id)
+            return self.w59_record(task_id)
+
+        def queued(ui):
+            ui.pm_outbox.append('排隊的訊息')
+            ui.pm_outbox_paused = 'esc'
+
+        def before(ui):
+            self.assertTrue(ui.show_background)                   # survives until Enter
+
+        async def shown(ui):
+            await self.until(ui, lambda ui: ui.show_task_view, 'UNKNOWN detail')
+            await asyncio.sleep(0.1)
+            self.assertIn('Core 狀態：UNKNOWN（', ui.task_view.text)
+            self.assertIn(reason, ui.task_view.text)
+            self.assertEqual(reads, [])                           # no Task read
+            self.assertEqual(self.w59_sent(), 0)                  # nothing sent to the PM
+            self.assertEqual(list(ui.pm_outbox), ['排隊的訊息'])  # the queue was not resumed
+            self.assertFalse(ui.show_background)
+
+        with patch.object(chat_tui_status, 'read_task_detail', side_effect=read):
+            self.drive([self.connect(), self.connected, queued] + setup
+                       + [self.w59_redraw, self.w59_redraw, before, '\r', shown])
+
+    def test_w59_empty_panel_enter_unknown(self):
+        selected_b = [self.w59_listed, '\x1b[B', '\x1b[B']
+        self.w59_enter_unknown(selected_b + [self.w59_refresh([])],
+                               '選中的 Task bbbbbbbb 已不在背景清單')
+        self.w59_enter_unknown(selected_b + [self.w59_refresh([], self.W59_ERROR)],
+                               '背景清單讀取失敗：' + self.W59_ERROR)
+
+        def turn_row(ui):
+            ui.finish_background(self.session_id, ([], None))
+            ui._pm_background_track(('turn', 99))
+            ui.app.invalidate()
+
+        def turn_gone(ui):
+            ui._pm_background_live.clear()                        # the last synthetic row ends
+            ui.app.invalidate()
+        self.w59_enter_unknown([turn_row, '\x1b[B', turn_gone], '已不在背景清單')
+
+    def test_w59_none_selection_enter_unknown(self):
+        def unselect(ui):
+            ui.background_selected = None
+        self.w59_enter_unknown([self.w59_listed, '\x1b[B', unselect], '沒有選中的列')
+        self.w59_enter_unknown([self.w59_listed, '\x1b[B', unselect, self.w59_refresh([])],
+                               '沒有選中的列')
+
+    def test_w59_user_close_survives_refresh(self):
+        a, b = self.w59_items()
+
+        def closed(ui):
+            self.assertFalse(ui.show_background)
+            self.assertFalse(ui.background_visible())
+
+        def reopened(ui):
+            self.assertTrue(ui.show_background)
+            self.assertEqual(ui.background_selected, ('Developer', self.W59_TASK_A))
+
+        self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                    self.w59_esc, closed, self.w59_refresh([]), closed,
+                    self.w59_refresh([a, b]), closed, '\x1b[B', reopened])
+        self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', 'x', closed,
+                    self.w59_refresh([]), closed, self.w59_refresh([a, b]), closed,
+                    '\x7f', closed, '\x1b[B', reopened])
+
+    def test_w59_modal_escape_priority_after_refresh(self):
+        self.turns = [_full_turn(hold=True)]
+        interrupts = []
+
+        def counting(ui):
+            original = ui.interrupt_pm
+            ui.interrupt_pm = lambda *a: (interrupts.append(1), original(*a))
+
+        def layer(panel=None, detail=None, searching=None, count=0):
+            def step(ui):
+                if panel is not None:
+                    self.assertEqual(ui.show_background, panel)
+                if detail is not None:
+                    self.assertEqual(ui.show_task_view, detail)
+                if searching is not None:
+                    self.assertEqual(ui.searching, searching)
+                self.assertEqual(len(interrupts), count)
+                if not count:
+                    self.assertTrue(ui.pm_turn_active)
+            return step
+
+        streaming = lambda ui: self.until(ui, lambda ui: 'PM\n  Hello' in ui.conversation.text)
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, counting, self.w59_listed,
+                        '請問進度？\r', streaming,
+                        # search -> panel -> PM, with an empty refresh under the panel
+                        '\x1b[B', self.w59_refresh([]), '\x12', layer(True, searching=True),
+                        self.w59_esc, layer(True, searching=False),
+                        self.w59_esc, layer(False),
+                        self.w59_esc, layer(False, count=1)])
+        self.turns = [_full_turn(hold=True)]
+        interrupts.clear()
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, counting, self.w59_listed,
+                        '請問進度？\r', streaming,
+                        # search -> detail -> PM, with an empty refresh under the detail
+                        '\x1b[B', '\r', self.w59_refresh([]), '\x12',
+                        layer(detail=True, searching=True),
+                        self.w59_esc, layer(detail=True, searching=False),
+                        self.w59_esc, layer(False, detail=False),
+                        self.w59_esc, layer(False, detail=False, count=1)])
+
+    def test_w59_zero_space_retains_modal_ownership(self):
+        self.turns = [_full_turn(hold=True)]
+        interrupts, reads = [], []
+        tiny, normal = Size(rows=4, columns=80), Size(rows=24, columns=80)
+
+        def size(value):
+            def step(ui):
+                ui.app.output.get_size = lambda: value
+                ui.app.invalidate()
+                return asyncio.sleep(0.1)
+            return step
+
+        def counting(ui):
+            original = ui.interrupt_pm
+            ui.interrupt_pm = lambda *a: (interrupts.append(1), original(*a))
+
+        def hidden(ui):
+            self.assertEqual(ui.background_rows(), 0)
+            self.assertFalse(ui.background_visible())
+            self.assertTrue(ui.show_background)                   # still the Owner's panel
+
+        def esc_closed(ui):
+            self.assertFalse(ui.show_background)
+            self.assertEqual(interrupts, [])
+            self.assertTrue(ui.pm_turn_active)
+
+        async def unknown(ui):
+            await self.until(ui, lambda ui: ui.show_task_view, 'UNKNOWN detail')
+            self.assertIn('已不在背景清單', ui.task_view.text)
+            self.assertEqual(reads, [])
+            self.assertEqual(self.w59_sent(), 1)                  # only the turn's own message
+
+        def restored(ui):
+            self.assertTrue(ui.show_task_view)
+            self.assertTrue(ui.task_view_visible())
+            self.assertEqual(interrupts, [])
+
+        def read(task_id):
+            reads.append(task_id)
+            return self.w59_record(task_id)
+
+        streaming = lambda ui: self.until(ui, lambda ui: 'PM\n  Hello' in ui.conversation.text)
+        with patch.object(chat_tui_status, 'read_task_detail', side_effect=read):
+            self.drive([self.connect(), self.connected, counting, self.w59_listed,
+                        '請問進度？\r', streaming,
+                        '\x1b[B', size(tiny), hidden, self.w59_esc, esc_closed, size(normal),
+                        '\x1b[B', '\x1b[B', size(tiny), self.w59_refresh(self.w59_items()[:1]),
+                        hidden, '\r', unknown, size(normal), restored,
+                        lambda ui: self.fakes[0].gate.set(), self.turn_done])
+
+    def test_w59_refresh_during_detail_preserves_snapshot(self):
+        self.turns = [_full_turn(hold=True)]
+        snap = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            ui.task_view.scroll_rows(3)
+            snap.update(text=ui.task_view.text, top=ui.task_view.top,
+                        offset=ui.view.top_offset, seq=ui.task_view_seq)
+
+        def same(ui):
+            self.assertTrue(ui.show_task_view)
+            self.assertEqual(ui.task_view.text, snap['text'])
+            self.assertEqual(ui.task_view.top, snap['top'])
+            self.assertEqual(ui.view.top_offset, snap['offset'])
+            self.assertEqual(ui.input.text, '草稿')
+
+        def stale(ui):
+            ui.finish_task_view(snap['seq'] - 1, 'STALE 舊結果')     # superseded read
+            self.assertNotIn('STALE', ui.task_view.text)
+
+        async def streamed(ui):
+            self.fakes[0].gate.set()
+            await self.until(ui, lambda ui: 'Hello 老闆' in ui.conversation.text
+                             and not ui.pm_turn_active, 'PM output while the detail is open')
+
+        def closed_stale(ui):
+            ui.finish_task_view(snap['seq'], 'LATE 結果')            # current seq, but closed
+            self.assertFalse(ui.show_task_view)
+            self.assertNotIn('LATE', ui.task_view.text)
+
+        streaming = lambda ui: self.until(ui, lambda ui: 'PM\n  Hello' in ui.conversation.text)
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed,
+                        '請問進度？\r', streaming, '\x1b[B', '\r', opened, '草稿', same,
+                        self.w59_refresh([]), same, self.w59_refresh([], self.W59_ERROR), same,
+                        self.w59_refresh(self.w59_items()), same, stale, same,
+                        streamed, same, self.w59_esc, closed_stale])
 
 class W59DetailTextTests(unittest.TestCase):
     """chat_tui_status.task_detail_text: Core state, source/time, at most 10 events."""
