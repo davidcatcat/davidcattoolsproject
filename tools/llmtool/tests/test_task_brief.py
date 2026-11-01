@@ -149,13 +149,13 @@ class TaskBriefTests(unittest.TestCase):
         add_task_submission_parsers(actions)
         args = parser.parse_args(['task', 'brief', '--pm-session', 'invalid'])
         with tempfile.TemporaryDirectory() as root:
-            store = TaskStore(Path(root) / 'tasks')
+            store = TaskStore(Path(root).resolve() / 'tasks')
             with self.assertRaises(LLMToolError):
                 run_task_brief(args, store=store, stdout=io.StringIO())
 
     def test_corrupt_record_is_reported_without_changing_records_or_inbox(self):
         with tempfile.TemporaryDirectory() as root:
-            store = TaskStore(Path(root) / 'tasks')
+            store = TaskStore(Path(root).resolve() / 'tasks')
             create_valid_record(root)
             task_id = 'a' * 32
             record_path = store.root / f'{task_id}.json'
