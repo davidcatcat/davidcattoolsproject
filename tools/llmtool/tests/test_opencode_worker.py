@@ -362,9 +362,9 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.failure_stage,'UNKNOWN')
 
     def test_omitted_native_stream_terminal_requires_actual_persisted_proof(self):
-        result=w.run_worker(self.job('omitted-terminal'),Host())
+        result=w.run_worker(self.job('omitted-terminal',budget=self.tight_budget()),Host())
         self.assertEqual(result.code,'OPENCODE_OUTPUT_RETURNED',result)
-        missing=w.run_worker(self.job('no-proof'),Host())
+        missing=w.run_worker(self.job('no-proof',budget=self.tight_budget()),Host())
         self.assertEqual(missing.status,'BLOCKED')
         self.assertIsNone(missing.content)
 
@@ -828,7 +828,7 @@ class OpenCodeWorkerTests(unittest.TestCase):
             return real_reject(code)
         with patch.object(w.CLIProcessLifecycle,'__exit__',record_exit), \
              patch.object(w,'reject',record_reject):
-            result=w.run_worker(self.job(script=SERVER_NONZERO),Host())
+            result=w.run_worker(self.job(script=SERVER_NONZERO,budget=self.tight_budget()),Host())
         self.assertEqual(result.code,'OPENCODE_RUNTIME_UNKNOWN',result)
         self.assertEqual(result.status,'BLOCKED')
         self.assertIsNone(result.content)

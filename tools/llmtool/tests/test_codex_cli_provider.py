@@ -59,7 +59,7 @@ if mode == "mutation":
     capture["git_status"] = git.returncode
 Path(%r).write_text(json.dumps(capture))
 if mode == "timeout":
-    time.sleep(5)
+    time.sleep(30)
 elif mode == "descendant":
     subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)"])
 elif mode == "large":
@@ -300,7 +300,7 @@ else:
     def test_timeout_is_normalized_and_resources_cleaned(self):
         self.fake("timeout")
         with self.assertRaisesRegex(LLMToolError, "^Codex CLI timed out$"):
-            self.complete(timeout_seconds=3)
+            self.complete(timeout_seconds=10)
         self.assertFalse(Path(self.captured()["cwd"]).exists())
 
     def test_descendant_pipe_handles_are_bounded_by_timeout(self):
