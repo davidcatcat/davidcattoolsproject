@@ -4871,6 +4871,50 @@ class PMConversationTests(BoundedPMTest):
                           side_effect=lambda task_id: self.w59_record(task_id)):
             self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened])
 
+    # Hostile TaskStore text (request, review actor, abandonment, events): OSC 52 clipboard
+    # write, screen clear, OSC 8 link to another site, C1 CSI and a bidi override.
+    W60_HOSTILE = ('\x1b]52;c;c2VjcmV0\x07 \x1b[2J \x1b]8;;https://evil.example/\x1b\\點我'
+                   '\x1b]8;;\x1b\\ \x9b31m \u202e')
+
+    def w60_hostile_record(self, task_id):
+        hostile, url = self.W60_HOSTILE, chat_tui_status.PR_URL
+        return {'task_id': task_id, 'state': 'PM_RESPONDED',
+                'request': 'W60 惡意' + hostile,
+                'created_at': '2026-11-01T00:00:00Z', 'updated_at': '2026-11-01T00:01:00Z' + hostile,
+                'pm_session_id': 'pm-test', 'developer': {'state': 'DEVELOPER_PENDING'},
+                'abandonment': {'reason': 'r' + hostile, 'pm_session_id': 'pm-test',
+                                'abandoned_at': '2026-11-01T00:02:00Z'},
+                'completion': {'state': 'WAITING_CI', 'evidence': {'review_pr_ci': {
+                    'stage': 'REVIEW_PR_CI', 'pr_number': 661, 'pr_state': 'OPEN',
+                    'ci_head_sha': 'ab' * 20, 'review_source': 'PR_COMMENT',
+                    'review_actor': ('bot' + hostile + ' ' + url
+                                     + '9 https://evil.example/pull/1 #77')}}},
+                'completion_events': [{'source': 'LOCAL' + hostile, 'state': 'S' + hostile,
+                                       'received_at': '2026-11-01T00:03:00Z'}]}
+
+    def test_w60_hostile_taskstore_text_is_escaped_and_links_only_full_pr_urls(self):
+        import unicodedata
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: '證據與出處' in self.w59_text(ui), 'detail read')
+            text = self.w59_text(ui)
+            controls = [char for char in text if char != '\n' and (
+                unicodedata.category(char) in ('Cc', 'Cf'))]
+            self.assertEqual(controls, [])                     # no live ESC, BEL, C1, bidi
+            self.assertIn('\\x1b]52;c;c2VjcmV0\\x07', text)    # shown, escaped
+            self.assertIn('\\x9b31m', text)
+            self.assertIn('\\u202e', text)
+            for row in ('  Reviewer 來源：', 'Stage: ABANDONED', '  讀取時間'):
+                self.assertIn(row, text)
+            self.assertNotIn('RUNNING', text)
+            links = chat_tui._TaskViewLinker(None).links(text, 0, len(text))
+            urls = sorted({url for _low, _high, url in links})
+            self.assertEqual(urls, [chat_tui_status.PR_URL + '661', chat_tui_status.PR_URL + '9'])
+            self.assertNotIn('\x1b', ui.status_text())
+
+        with patch.object(chat_tui_status, 'read_task_detail', side_effect=self.w60_hostile_record):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened])
+
     def test_w60_c_without_a_task_id_copies_nothing_and_says_why(self):
         seen = {}
 

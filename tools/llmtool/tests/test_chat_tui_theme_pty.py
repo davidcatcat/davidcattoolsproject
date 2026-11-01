@@ -371,5 +371,52 @@ class ThemePTYTests(unittest.TestCase):
                 terminal.stop()
 
 
+    def test_w60_hostile_taskstore_text_reaches_the_terminal_escaped(self):
+        """[Mac PTY (fake provider)] W60: TaskStore text with OSC 52, screen clear, OSC 8 to another
+        site, C1 CSI and a bidi override reaches the real terminal byte stream only escaped;
+        the only OSC 8 links in the detail are full PR URLs of the bound repository"""
+        import re
+        now = datetime.now(timezone.utc)
+        task = "a" * 32
+        pr_url = "https://github.com/davidcatcat/davidcattoolsproject/pull/"
+        hostile = ("\x1b]52;c;c2VjcmV0\x07 \x1b[2J \x1b]8;;https://evil.example/\x1b\\點我"
+                   "\x1b]8;;\x1b\\ \x9b31m \u202e")
+        items = [{"role": "Developer", "task": task, "pr": "#661", "state": "RUNNING",
+                  "updated_at": (now - timedelta(minutes=2)).isoformat()}]
+        details = {task: {
+            "task_id": task, "state": "PM_RESPONDED", "pm_session_id": "pm-test",
+            "request": "W60 惡意" + hostile,
+            "created_at": now.isoformat(), "updated_at": "2026-11-02T01:02:03Z",
+            "developer": {"state": "DEVELOPER_PENDING"},
+            "completion": {"state": "WAITING_CI", "evidence": {"review_pr_ci": {
+                "stage": "REVIEW_PR_CI", "pr_number": 661, "pr_state": "OPEN",
+                "ci_head_sha": "ab" * 20, "review_source": "PR_COMMENT",
+                "review_actor": ("bot" + hostile + " " + pr_url
+                                 + "9 https://evil.example/pull/1 #77")}}},
+            "completion_events": [{"source": "LOCAL" + hostile, "state": "S",
+                                   "received_at": now.isoformat()}]}}
+        terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
+                                      git_remote="git@github.com:o/r.git", items=items,
+                                      details=details, rows=60)
+        terminal.connect_pm()
+        terminal.wait_text("背景 1", "status line background count")
+        before = len(terminal.raw_text())
+        terminal.send("\x1b[B")
+        terminal.wait_text("背景工作 1 項", "↓ panel")
+        terminal.send("\r")
+        terminal.wait_text("證據與出處", "detail with the hostile record")
+        rows = self.dump(terminal, "w60-hostile")
+        screen = "\n".join(rows)
+        self.assertIn("\\x1b]52;c;c2VjcmV0\\x07", screen)              # visible, escaped
+        self.assertIn("Reviewer 來源：GitHub PR_COMMENT；actor bot\\x1b]52", screen)
+        raw = terminal.raw_text()[before:]
+        for live in ("\x1b]52", "\x1b[2J", "\x07", "\x9b", "\u202e", "\x1b]8;;https://evil"):
+            self.assertNotIn(live, raw)
+        urls = set(re.findall(r"\x1b\]8;id=[^;]*;([^\x1b\x07]*)", raw))
+        self.assertIn(pr_url + "9", urls)                               # a full PR URL links
+        self.assertEqual({url for url in urls if not url.startswith(pr_url)}, set(), urls)
+        self.assertLessEqual(urls, {pr_url + "9", pr_url + "661"})
+        terminal.esc()
+
 if __name__ == "__main__":
     unittest.main()
