@@ -2436,31 +2436,43 @@ class ChatTUI:
         if not items:
             return
         index = min(self.background_index, len(items) - 1)
-        # A refresh between the draw and Enter may shift rows: open the row the Owner saw.
-        drawn = [n for n, item in enumerate(items)
-                 if (item.get("role"), item.get("task")) == self.background_drawn]
-        if drawn and (items[index].get("role"), items[index].get("task")) != self.background_drawn:
+        # A refresh between the draw and Enter may shift or drop rows: open only the row the
+        # Owner saw; when it left the list, say so and never open a neighbouring row.
+        selected = self.background_drawn
+        if selected is not None:
+            drawn = [n for n, item in enumerate(items)
+                     if (item.get("role"), item.get("task")) == selected]
+            if not drawn:
+                self._show_task_view(chat_tui_status.task_detail_text(
+                    None, time.strftime("%H:%M:%S"),
+                    "選中的 Task " + str(selected[1] or chat_tui_task.UNKNOWN)[:8]
+                    + " 已不在背景清單（清單剛更新）；沒有開啟其他列，按 Esc 返回再選一次"))
+                return
             index = self.background_index = drawn[0]
         tasks = (len(self.background) if self.pm_target and
                  self.background_key == self.pm_target[0] else 0)
         task_id = str(items[index].get("task") or "")
-        self.show_background = False
-        self._leave_conversation()
-        self.task_view_seq += 1
-        self.show_task_view = True
         now = time.strftime("%H:%M:%S")
         if index >= tasks:
-            self._set_task_view(chat_tui_status.task_detail_text(None, now, TURN_ROW_REASON))
+            self._show_task_view(chat_tui_status.task_detail_text(None, now, TURN_ROW_REASON))
         elif not TASK_ID.fullmatch(task_id):
-            self._set_task_view(chat_tui_status.task_detail_text(
+            self._show_task_view(chat_tui_status.task_detail_text(
                 None, now, "背景清單的 Task ID 無法辨識"))
         else:
-            self._set_task_view("Task 詳情（唯讀）— Esc 返回對話\n讀取中…（TaskStore，本機）Task "
-                                + task_id)
+            self._show_task_view("Task 詳情（唯讀）— Esc 返回對話\n讀取中…（TaskStore，本機）Task "
+                                 + task_id)
             self._loop = asyncio.get_running_loop()
             threading.Thread(target=self._read_task_view,
                              args=(self._loop, self.task_view_seq, task_id),
                              name="llmtool-chat-task-detail", daemon=True).start()
+
+    def _show_task_view(self, text):
+        """Replace the conversation by the detail; its reading position and the draft stay."""
+        self.show_background = False
+        self._leave_conversation()
+        self.task_view_seq += 1
+        self.show_task_view = True
+        self._set_task_view(text)
         self.app.layout.focus(self.input)
         self._sync_picker()
         self.app.invalidate()

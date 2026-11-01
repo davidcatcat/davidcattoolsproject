@@ -4416,6 +4416,31 @@ class PMConversationTests(BoundedPMTest):
                                     self.w59_items()[1:] + self.w59_items()[:1], None)),
                                 '\r', opened])
 
+    def test_w59_enter_never_opens_another_task_when_the_highlighted_one_left_the_list(self):
+        reads = []
+
+        def read(task_id):
+            reads.append(task_id)
+            return self.w59_record(task_id)
+
+        def gone(ui):
+            ui.background_text()                              # Task B drawn highlighted
+            ui.finish_background(self.session_id, (self.w59_items()[:1], None))   # B is gone
+
+        async def shown(ui):
+            await self.until(ui, lambda ui: ui.show_task_view, 'detail view')
+            await asyncio.sleep(0.1)
+            self.assertIn('Core 狀態：UNKNOWN（選中的 Task ' + self.W59_TASK_B[:8]
+                          + ' 已不在背景清單（清單剛更新）', ui.task_view.text)
+            self.assertNotIn(self.W59_TASK_A, ui.task_view.text)
+            self.assertEqual(reads, [])                       # Task A was never opened
+            self.assertEqual(ui.input.text, '')
+            self.assertFalse(ui.busy)
+
+        with patch.object(chat_tui_status, 'read_task_detail', side_effect=read):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                        gone, '\r', shown])
+
 class W59DetailTextTests(unittest.TestCase):
     """chat_tui_status.task_detail_text: Core state, source/time, at most 10 events."""
 
