@@ -11,6 +11,7 @@ any UI starts. A UI failure never drops into, or replays input through, the REPL
 import asyncio
 import collections
 import os
+import re
 import shlex
 import signal
 import sys
@@ -114,7 +115,9 @@ Display
 In PM mode the status bar starts with ▸▸ PM 模式 · the PM permission mode · 背景 N (Tasks of
 this PM session with a Developer or Reviewer at work, read from TaskStore every %d s) ·
 ↓ 查看 · 佇列 N. With an empty input, Down opens the background list (role, Task/PR, state,
-age); Esc closes it.
+age); Esc closes it. In that list Up/Down choose a row and Enter opens its read-only Task
+detail (Core state, PR link, recent events, read once from TaskStore); PM replies keep
+arriving meanwhile, and Esc returns to the chat at the same place with the draft kept.
 
 A chat reply is never a Task: to dispatch work, /pm connect and tell the PM.%s"""
 
@@ -194,6 +197,8 @@ SLASH_COMMANDS = (
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
+TASK_ID = re.compile(r"[0-9a-f]{32}")   # W59: a background row opens a detail only for one
+TURN_ROW_REASON = "這一列是 PM 自行開始的背景回合，沒有 Task 記錄"
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
                  "scroll", "mouse", "help")
@@ -477,6 +482,35 @@ def _tokens(usage):
     return "%d+%d=%d" % (usage["prompt_tokens"], usage["completion_tokens"], usage["total_tokens"])
 
 
+class _TaskViewLinker:
+    """W59: OSC 8 links on the detail's full PR URLs only (Core binds PRs to PR_URL's repo;
+    a bare #N would follow the cwd's git remote and could point at another repo)."""
+
+    PR_LINK = re.compile(re.escape(chat_tui_status.PR_URL) + r"\d{1,9}(?![\w/])")
+
+    def __init__(self, base):
+        self.base = base
+        self._own = chat_tui_theme.Linker(os.getcwd(), None) if base is None else None
+
+    def links(self, text, start, end):
+        found = []
+        line_start = text.rfind("\n", 0, start) + 1
+        line_end = text.find("\n", end)
+        line_end = len(text) if line_end < 0 else line_end
+        for match in self.PR_LINK.finditer(text, line_start, line_end):
+            if match.end() > start and match.start() < end:
+                found.append((match.start(), match.end(), match.group(0)))
+        result, last = [], -1
+        for low, high, url in sorted(found):
+            if low >= last:
+                result.append((low, high, url))
+                last = high
+        return result
+
+    def open_sequence(self, url):
+        return (self.base or self._own).open_sequence(url)
+
+
 class ChatTUI:
     """Conversation pane, persistent multiline input, help and status bar."""
 
@@ -596,6 +630,13 @@ class ChatTUI:
         self.background_loaded = None    # monotonic time of the last finished read
         self.background_reader = None
         self.show_background = False
+        self.background_index = 0    # W59: the panel row Enter opens
+        self.background_drawn = None     # (role, task) of the row last drawn highlighted
+        # W59: read-only Task detail opened from the panel; read once on a reader thread
+        # (never busy), dropped when a newer open or Esc replaced it (task_view_seq).
+        self.show_task_view = False
+        self.task_view_seq = 0
+        self._task_view_linker = (None, None)   # (base Linker, wrapper) last handed out
         # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
         # a COMPLETED turn. Esc (W55), a failed/refused turn, Ctrl-C or a disconnect pauses
         # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
@@ -634,6 +675,11 @@ class ChatTUI:
         self.conversation = chat_tui_view.make_pane(
             self.view, colour=self.colour, styler=self._style,
             linker=lambda: self.linker if self.links_on() else None)
+        # W59: the Task detail is its own view, so the conversation keeps its reading position.
+        self.task_view = chat_tui_view.ConversationView(get_cwidth)
+        self.task_pane = chat_tui_view.make_pane(
+            self.task_view, colour=self.colour, styler=self._style,
+            linker=self.task_view_linker)
         history_text = ("History is stored locally." if session.history_saved
                         else "History stays in memory.")
         opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
@@ -667,6 +713,9 @@ class ChatTUI:
                                  and not self.show_help)
         showing_events = Condition(lambda: self.show_events and not self.show_list
                                    and not self.show_detail and not self.show_help)
+        showing_task_view = Condition(lambda: self.task_view_visible())
+        task_view_open = Condition(lambda: self.show_task_view)   # also under help/dev panes
+        task_view_focused = has_focus(self.task_pane)
         self.events = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True,
                                height=Dimension(min=1, weight=1))
         events_focused = has_focus(self.events)
@@ -696,7 +745,8 @@ class ChatTUI:
                                     height=Dimension.exact(1), wrap_lines=False)
         root = HSplit([ConditionalContainer(self.conversation,
                                             filter=~showing_help & ~showing_detail & ~showing_list
-                                            & ~showing_events),
+                                            & ~showing_events & ~showing_task_view),
+                       ConditionalContainer(self.task_pane, filter=showing_task_view),
                        ConditionalContainer(self.help, filter=showing_help),
                        ConditionalContainer(self.detail, filter=showing_detail),
                        ConditionalContainer(self.list_window, filter=showing_list),
@@ -747,27 +797,66 @@ class ChatTUI:
                                       and bool(self.background_all()))
 
         @keys.add("down", filter=input_focused & background_listed & ~picker_shown
-                  & ~showing_background, eager=True)
+                  & ~showing_background & ~showing_task_view, eager=True)
         def _background_open(event):
+            self.background_index = 0
+            self.background_drawn = None
             self.show_background = True
+
+        # W59: Up/Down choose a panel row; Enter opens its read-only Task detail.
+        @keys.add("up", filter=input_focused & showing_background & ~picker_shown & ~searching,
+                  eager=True)
+        def _background_up(event):
+            self.move_background(-1)
+
+        @keys.add("down", filter=input_focused & showing_background & ~picker_shown & ~searching,
+                  eager=True)
+        def _background_down(event):
+            self.move_background(1)
 
         @keys.add("escape", filter=showing_background & ~picker_shown)
         def _background_close(event):
             self.show_background = False
 
         @keys.add("escape", filter=reading_or_typing & pm_turn & ~picker_shown
-                  & ~showing_background)
+                  & ~showing_background & ~task_view_open)
         def _pm_interrupt(event):
             self.interrupt_pm()
 
         @keys.add("escape", filter=reading_or_typing & chat_request & ~picker_shown
-                  & ~showing_background)
+                  & ~showing_background & ~task_view_open)
         def _send_interrupt(event):
             self.interrupt_send()
+
+        # W59: Esc closes the Task detail (never interrupts the PM turn behind it).
+        @keys.add("escape", filter=showing_task_view & ~picker_shown)
+        def _task_view_close(event):
+            self.close_task_view()
 
         @keys.add("escape", filter=showing_detail & ~picker_shown)
         def _detail_close(event):
             self.toggle_detail(False)
+
+        @keys.add("enter", filter=input_focused & showing_background & ~picker_shown & ~searching)
+        def _background_enter(event):
+            self.open_background_detail()
+
+        # W59: with the detail open Enter never sends (the draft stays); it only completes a
+        # picker suggestion. Up/Down scroll the detail instead of recalling input history.
+        @keys.add("enter", filter=input_focused & showing_task_view & ~searching)
+        def _task_view_enter(event):
+            if menu_shown():
+                self.accept_menu()
+
+        @keys.add("up", filter=(input_focused | task_view_focused) & showing_task_view
+                  & ~menu_shown & ~searching, eager=True)
+        def _task_view_up(event):
+            self.task_view.scroll_rows(-1)
+
+        @keys.add("down", filter=(input_focused | task_view_focused) & showing_task_view
+                  & ~menu_shown & ~searching, eager=True)
+        def _task_view_down(event):
+            self.task_view.scroll_rows(1)
 
         @keys.add("c-r", filter=input_focused)
         def _history_search(event):
@@ -986,7 +1075,9 @@ class ChatTUI:
     def status_keys(self):
         """Keys that do something right now (status bar)."""
         keys = []
-        if self.pm_turn_active:
+        if self.task_view_visible():
+            keys.append("Esc 返回")   # W59: Esc closes the detail; it never interrupts here
+        elif self.pm_turn_active:
             keys.append("Esc 中斷")
         elif self.busy and self.worker_kind == "chat" and not self.send_interrupted:
             keys.append("Esc 中斷")
@@ -1254,7 +1345,8 @@ class ChatTUI:
         # The detail and events panes are text areas with Esc-prefixed bindings, so a
         # lone Esc (close) would otherwise wait the full default timeout.
         shown = (sum(self.picker_layout()) > 0 or (self.show_detail and not self.show_help)
-                 or self.events_visible() or self.pm_turn_active or self.background_visible()
+                 or self.events_visible() or self.task_view_visible() or self.pm_turn_active
+                 or self.background_visible()
                  or (self.busy and self.worker_kind == "chat"))
         self.app.timeoutlen = ESC_SEQUENCE_TIMEOUT if shown else self._default_timeoutlen
 
@@ -1469,11 +1561,12 @@ class ChatTUI:
             self._replace_block(segments, "".join(part for part, _token in segments))
 
     def conversation_visible(self):
-        return not (self.show_help or self.show_detail or self.show_list or self.show_events)
+        return not (self.show_help or self.show_detail or self.show_list or self.show_events
+                    or self.show_task_view)
 
     def scroll(self, direction):
         """PageUp/PageDown: one screen of rows; the pane keeps or resumes following itself."""
-        self.view.page(direction)
+        (self.task_view if self.task_view_visible() else self.view).page(direction)
 
     # -- mouse: wheel, drag selection, edge auto-scroll, copy ------------------------------
     def mouse_event(self, event):
@@ -1485,6 +1578,13 @@ class ChatTUI:
         picker, status) go to prompt_toolkit's own handler.
         """
         parsed = chat_tui_view.parse_mouse(event.data)
+        if parsed is not None and self.task_view_visible():
+            from prompt_toolkit.mouse_events import MouseEventType
+            if parsed[0] in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
+                rows = chat_tui_view.WHEEL_ROWS
+                self.task_view.scroll_rows(rows if parsed[0] == MouseEventType.SCROLL_DOWN
+                                           else -rows)
+                return None
         if parsed is None or not self.conversation_visible() or not self._pane_mouse(*parsed):
             return self._default_mouse_binding.call(event)
         return None
@@ -1615,7 +1715,8 @@ class ChatTUI:
         layout = self.app.layout
         pane = (self.help if self.show_help else self.detail if self.show_detail
                 else self.list_window if self.show_list
-                else self.events if self.show_events else self.conversation)
+                else self.events if self.show_events
+                else self.task_pane if self.show_task_view else self.conversation)
         layout.focus(pane if layout.has_focus(self.input) else self.input)
 
     def toggle_mouse(self):
@@ -2280,18 +2381,112 @@ class ChatTUI:
                                      self._get_cwidth)
         items = self.background_all()
         rows = self.background_rows()
-        header = " 背景工作 %d 項（TaskStore，每 %d 秒更新）— Esc 關閉" % (
+        header = " 背景工作 %d 項（TaskStore，每 %d 秒更新）— Esc 關閉 · ↑↓ 選擇 · Enter 詳情" % (
             len(items), chat_tui_status.REFRESH_SECONDS)
         if self.background_error is not None:
             header += " — 讀取失敗：" + self.background_error
         result = [("class:menu.header", cut(header))]
-        for item in items[:max(0, rows - 1)]:
+        shown = max(0, rows - 1)
+        selected = min(self.background_index, max(0, len(items) - 1))
+        first = max(0, selected - shown + 1)   # the selected row always stays in view
+        for index in range(first, min(len(items), first + shown)):
+            item = items[index]
             task = item.get("task") or chat_tui_task.UNKNOWN
             line = "  %-9s %-8s %-8s %-26s %s" % (
                 item.get("role", ""), task[:8], item.get("pr", ""), item.get("state", ""),
                 chat_tui_status.age_text(item.get("updated_at")))
-            result += [("", "\n"), ("class:menu", cut(line))]
+            style = "class:menu.current" if index == selected else "class:menu"
+            if index == selected:
+                self.background_drawn = (item.get("role"), item.get("task"))
+            result += [("", "\n"), (style, cut(line))]
         return result
+
+    # -- W59: read-only Task detail from the ↓ panel (TaskStore read, never busy) ------
+    def move_background(self, direction):
+        items = self.background_all()
+        if items:
+            self.background_index = max(0, min(len(items) - 1, self.background_index + direction))
+            # The chosen row is remembered at once: Enter may arrive before the next draw.
+            item = items[self.background_index]
+            self.background_drawn = (item.get("role"), item.get("task"))
+
+    def task_view_visible(self):
+        """The Task detail is on screen (help and the developer panes cover it)."""
+        return self.show_task_view and not (self.show_help or self.show_detail or self.show_list
+                                            or self.show_events)
+
+    def task_view_linker(self):
+        """Links of the detail: the pane's own (#123, path:line), plus full PR URLs."""
+        if not self.links_on():
+            return None
+        base = self.linker
+        if self._task_view_linker[1] is None or self._task_view_linker[0] is not base:
+            self._task_view_linker = (base, _TaskViewLinker(base))
+        return self._task_view_linker[1]
+
+    def _set_task_view(self, text):
+        view = self.task_view
+        view.set_text(terminal_safe_text(text))
+        view.top = view.top_offset = 0          # a detail is read from its first line
+        view.following = view.unseen = False
+
+    def open_background_detail(self):
+        """Enter on the panel: show the selected row's detail, read on a reader thread."""
+        items = self.background_all()
+        if not items:
+            return
+        index = min(self.background_index, len(items) - 1)
+        # A refresh between the draw and Enter may shift rows: open the row the Owner saw.
+        drawn = [n for n, item in enumerate(items)
+                 if (item.get("role"), item.get("task")) == self.background_drawn]
+        if drawn and (items[index].get("role"), items[index].get("task")) != self.background_drawn:
+            index = self.background_index = drawn[0]
+        tasks = (len(self.background) if self.pm_target and
+                 self.background_key == self.pm_target[0] else 0)
+        task_id = str(items[index].get("task") or "")
+        self.show_background = False
+        self._leave_conversation()
+        self.task_view_seq += 1
+        self.show_task_view = True
+        now = time.strftime("%H:%M:%S")
+        if index >= tasks:
+            self._set_task_view(chat_tui_status.task_detail_text(None, now, TURN_ROW_REASON))
+        elif not TASK_ID.fullmatch(task_id):
+            self._set_task_view(chat_tui_status.task_detail_text(
+                None, now, "背景清單的 Task ID 無法辨識"))
+        else:
+            self._set_task_view("Task 詳情（唯讀）— Esc 返回對話\n讀取中…（TaskStore，本機）Task "
+                                + task_id)
+            self._loop = asyncio.get_running_loop()
+            threading.Thread(target=self._read_task_view,
+                             args=(self._loop, self.task_view_seq, task_id),
+                             name="llmtool-chat-task-detail", daemon=True).start()
+        self.app.layout.focus(self.input)
+        self._sync_picker()
+        self.app.invalidate()
+
+    def _read_task_view(self, loop, seq, task_id):
+        try:
+            record = chat_tui_status.read_task_detail(task_id)
+            text = chat_tui_status.task_detail_text(record, time.strftime("%H:%M:%S"))
+        except Exception:
+            text = chat_tui_status.task_detail_text(
+                None, time.strftime("%H:%M:%S"), "TaskStore 讀取失敗（找不到或無法讀取）；細節省略")
+        self._post(loop, self.finish_task_view, seq, text)
+
+    def finish_task_view(self, seq, text):
+        if seq != self.task_view_seq or not self.show_task_view:
+            return   # closed, or replaced by a newer open
+        self._set_task_view(text)
+        self.app.invalidate()
+
+    def close_task_view(self):
+        """Esc: back to the chat; its reading position and the draft were never touched."""
+        self.show_task_view = False
+        self.task_view_seq += 1
+        self.app.layout.focus(self.input)
+        self._sync_picker()
+        self.app.invalidate()
 
     def run_pm_command(self, text):
         # Shell-style words, so a CWD with spaces can be quoted or escaped (W52 B3).

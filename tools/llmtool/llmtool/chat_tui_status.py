@@ -437,3 +437,46 @@ def detail_extra(record):
             lines.append(label + ": " + json.dumps(record[key], ensure_ascii=False,
                                                    sort_keys=True, indent=2))
     return "\n".join(lines)
+
+
+# W59: read-only Task detail opened from the ↓ background panel (non-dev).
+DETAIL_EVENTS = 10   # Newest timeline entries shown in that detail.
+
+
+def read_task_detail(task_id, store=None):
+    """The TaskStore record of one Task (reader thread; never written, never polled)."""
+    from .task_store import TaskStore
+    store = TaskStore() if store is None else store
+    return store.get(task_id)
+
+
+def task_detail_text(record, read_at, reason=None):
+    """Compact detail: source and read time, Core state, the TUI summary, newest events.
+
+    ``record`` None shows Core state UNKNOWN with ``reason``; nothing is guessed.
+    """
+    from .task_status import derive_state
+    from .chat_tui_events import format_event, task_events
+    lines = ["Task 詳情（唯讀）— Esc 返回對話 · ↑↓ PageUp/PageDown 捲動",
+             "來源：TaskStore（本機）｜讀取於 " + read_at]
+    if type(record) is not dict:
+        lines.append("Core 狀態：" + UNKNOWN + "（" + (reason or "沒有 Task 記錄") + "）")
+        return "\n".join(lines)
+    try:
+        core = derive_state(record)
+    except Exception:
+        core = UNKNOWN + "（Core 無法從記錄推導狀態）"
+    lines.append("Core 狀態：" + str(core) + "（task_status.derive_state）")
+    lines += ["", summary_text(record), "",
+              "最近事件（最多 %d 筆，新的在前；只讀 TaskStore 記錄，不確認、不輪詢）" % DETAIL_EVENTS]
+    try:
+        events = task_events(record)[:DETAIL_EVENTS]
+    except Exception:
+        events = None
+    if events is None:
+        lines.append("  " + UNKNOWN + "（事件無法從記錄讀出）")
+    elif not events:
+        lines.append("  沒有事件")
+    else:
+        lines += ["  " + format_event(event) for event in events]
+    return "\n".join(lines)
