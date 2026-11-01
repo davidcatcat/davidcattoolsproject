@@ -48,9 +48,9 @@ class D6RetireTests(unittest.TestCase):
         self.outside_file.write_text("keep\n", encoding="utf-8")
         self.cwds = [("1", "/")]
 
-    def _task(self, task_id, *, parent=None, publish=True):
+    def _task(self, task_id, *, parent=None, publish=True, reviewer=False):
         root = (parent or self.tasks) / task_id
-        branch = "task/" + task_id
+        branch = ("review/" if reviewer else "task/") + task_id
         _git(self.source, "worktree", "add", "-b", branch, str(root), self.base)
         os.chmod(root, 0o700)
         (root / "tools" / "llmtool" / "app.py").write_text("x = 2\n", encoding="utf-8")
@@ -58,6 +58,8 @@ class D6RetireTests(unittest.TestCase):
         head = _git(root, "rev-parse", "HEAD")
         if publish:
             _git(self.source, "update-ref", "refs/remotes/origin/main", head)
+            if reviewer:
+                _git(self.source, "update-ref", "refs/remotes/origin/" + branch, head)
         venv = root / "tools" / "llmtool" / ".venv"
         (venv / "lib").mkdir(parents=True)
         (venv / "lib" / "site.py").write_text("generated\n", encoding="utf-8")
@@ -65,12 +67,13 @@ class D6RetireTests(unittest.TestCase):
         (root / "tools" / "llmtool" / ".worktree-env.lock").write_text("ok\n", encoding="utf-8")
         info = root.lstat()
         record = {
-            "schema_version": 1, "task_id": task_id, "trusted_agent_id": "test",
+            "schema_version": 1, "task_id": task_id,
+            "trusted_agent_id": "codex-reviewer" if reviewer else "test",
             "session_ref": "s", "lease_ref": "l", "root_realpath": str(root),
             "physical_identity": {"device": info.st_dev, "inode": info.st_ino,
                                   "uid": info.st_uid, "mode": "0o700"},
             "git_common_dir": str(self.source / ".git"), "branch": branch,
-            "base_sha": self.base, "head_sha": self.base, "state": "ACTIVE",
+            "base_sha": self.base, "head_sha": head, "state": "ACTIVE",
             "last_verified_at": "2026-10-26T00:00:00Z", "evidence_refs": [],
             "retention_paths": ["tools/llmtool/.venv/", "tools/llmtool/.worktree-env.lock"],
             "lock_state": "LOCKED", "disposition": "ACTIVE_TASK",
@@ -88,7 +91,8 @@ class D6RetireTests(unittest.TestCase):
     def _record(self, task_id):
         return json.loads((self.registry / (task_id + ".json")).read_text())
 
-    def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None):
+    def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None,
+                reviewed_pr=None):
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
                 patch.object(lifecycle, "_process_cwds", side_effect=self._cwds), \
@@ -97,6 +101,7 @@ class D6RetireTests(unittest.TestCase):
                 canonical_root=self.source, task_ids=task_ids, execute=execute,
                 squash_evidence=squash, discard_uncommitted=discard,
                 unknown_evidence=evidence,
+                reviewed_pr_evidence=reviewed_pr,
                 workspace_root=self.tasks)
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([line["task_id"] for line in lines], task_ids)
@@ -116,6 +121,42 @@ class D6RetireTests(unittest.TestCase):
         self.assertEqual((record["state"], record["lock_state"], record["head_sha"]),
                          ("REMOVED", "UNLOCKED", head))
         self.assertIn("removed_at", record)
+
+    def test_closed_pr_reviewer_is_retired_with_bound_review_evidence(self):
+        root, head = self._task("review-clean", reviewer=True)
+        ok, (line,) = self._retire(
+            ["review-clean"], execute=True,
+            reviewed_pr={"review-clean": ("529", head)})
+        self.assertTrue(ok, line)
+        self.assertEqual(line["result"], "REMOVED")
+        self.assertEqual(line["publication"], "reviewed_pr_head")
+        self.assertEqual(line["reviewed_pr_number"], "529")
+        self.assertFalse(os.path.lexists(root))
+
+    def test_dirty_reviewer_is_refused_even_with_discard_authorization(self):
+        root, head = self._task("review-dirty", reviewer=True)
+        (root / "tools" / "llmtool" / "app.py").write_text("dirty\n", encoding="utf-8")
+        ok, (line,) = self._retire(
+            ["review-dirty"], execute=True, discard=["review-dirty"],
+            reviewed_pr={"review-dirty": ("530", head)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_DIRTY_TRACKED", line["reasons"])
+        self.assertTrue(root.is_dir())
+
+    def test_executor_cannot_use_reviewer_pr_evidence(self):
+        _root, head = self._task("executor-evidence")
+        ok, (line,) = self._retire(
+            ["executor-evidence"], reviewed_pr={"executor-evidence": ("531", head)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_REVIEW_EVIDENCE_NOT_APPLICABLE", line["reasons"])
+
+    def test_reviewer_pr_head_must_match_registry_and_worktree(self):
+        root, _head = self._task("review-mismatch", reviewer=True)
+        ok, (line,) = self._retire(
+            ["review-mismatch"], reviewed_pr={"review-mismatch": ("532", "0" * 40)})
+        self.assertFalse(ok)
+        self.assertIn("D6_RETIRE_REVIEW_HEAD_MISMATCH", line["reasons"])
+        self.assertTrue(root.is_dir())
 
     def test_dry_run_removes_nothing(self):
         root, _head = self._task("dry-task")

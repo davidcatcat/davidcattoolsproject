@@ -1140,9 +1140,19 @@ def _unknown_digest(paths):
     return hashlib.sha256(joined).hexdigest()
 
 
+def _is_reviewer_record(record):
+    """Reviewer D6s are explicitly marked and use the dedicated review branch."""
+    branch = record.get("branch")
+    agent_id = record.get("trusted_agent_id", "")
+    marked = (type(agent_id) is str and "reviewer" in agent_id.casefold())
+    marked = marked or record.get("role") == "reviewer" or record.get("reviewer") is True
+    return marked and type(branch) is str and branch.startswith("review/")
+
+
 def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root, squash,
                  train_squash=None,
-                 discard_uncommitted=False, unknown_evidence=None):
+                 discard_uncommitted=False, unknown_evidence=None,
+                 reviewed_pr_evidence=None):
     """Evaluate every retire gate for one task without changing anything.
 
     With ``discard_uncommitted`` (an Owner-approved task), tracked changes and
@@ -1195,13 +1205,32 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
     locks.append(common_dir / "refs" / "heads" / (branch + ".lock"))
     if any(os.path.lexists(path) for path in locks):
         plan["reasons"].append("D6_RETIRE_GIT_LOCKED")
-    plan["publication"] = _publication(root, branch, head, squash, train_squash)
-    if plan["publication"] is None:
-        plan["reasons"].append("D6_RETIRE_UNPUBLISHED")
+    reviewer_record = _is_reviewer_record(record)
+    if reviewed_pr_evidence is not None and not reviewer_record:
+        plan["reasons"].append("D6_RETIRE_REVIEW_EVIDENCE_NOT_APPLICABLE")
+    if reviewer_record:
+        if reviewed_pr_evidence is None:
+            plan["reasons"].append("D6_RETIRE_REVIEW_EVIDENCE_REQUIRED")
+        else:
+            pr_number, pr_head = reviewed_pr_evidence
+            if (pr_head != head or record.get("head_sha") != head):
+                plan["reasons"].append("D6_RETIRE_REVIEW_HEAD_MISMATCH")
+            else:
+                publication = _publication(root, branch, head, None, None)
+                if publication not in ("origin_branch", "origin_pr_head"):
+                    plan["reasons"].append("D6_RETIRE_UNPUBLISHED")
+                else:
+                    plan["publication"] = "reviewed_pr_head"
+                    plan["reviewed_pr_number"] = pr_number
+    else:
+        plan["publication"] = _publication(root, branch, head, squash, train_squash)
+        if plan["publication"] is None:
+            plan["reasons"].append("D6_RETIRE_UNPUBLISHED")
     if _task_git(root, "status", "--porcelain=v1", "-z",
                  "--untracked-files=no").stdout:
         tracked = _tracked_changes(root)
-        if discard_uncommitted and tracked and all(map(_safe_relative, tracked)):
+        if (discard_uncommitted and not reviewer_record and tracked and
+                all(map(_safe_relative, tracked))):
             plan["discard_tracked"] = tracked
         else:
             plan["reasons"].append("D6_RETIRE_DIRTY_TRACKED")
@@ -1224,7 +1253,7 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
             else:
                 plan["targets"].append((relative, is_dir))
     candidates = set()
-    if discard_uncommitted:
+    if discard_uncommitted and not reviewer_record:
         raw = _task_git(root, "ls-files", "--others", "--exclude-standard", "-z").stdout
         candidates = {path for path in raw.split("\0") if path}
     unknown = []
@@ -1570,6 +1599,7 @@ def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
 def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence=None,
                      train_evidence=None,
                      discard_uncommitted=(), unknown_evidence=None,
+                     reviewed_pr_evidence=None,
                      workspace_root=TASKS_ROOT):
     """Plan (default) or execute gated retirement; print one JSON line per task.
 
@@ -1579,11 +1609,13 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
     squash_evidence = squash_evidence or {}
     train_evidence = train_evidence or {}
     unknown_evidence = unknown_evidence or {}
+    reviewed_pr_evidence = reviewed_pr_evidence or {}
     if (not task_ids or len(task_ids) != len(set(task_ids)) or
             any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids) or
             not set(squash_evidence) <= set(task_ids) or
             not set(train_evidence) <= set(task_ids) or
             not set(unknown_evidence) <= set(task_ids) or
+            not set(reviewed_pr_evidence) <= set(task_ids) or
             len(discard_uncommitted) != len(set(discard_uncommitted)) or
             not set(discard_uncommitted) <= set(task_ids)):
         _stop("D6_TASK_INPUT_INVALID")
@@ -1624,7 +1656,8 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                                     squash=squash_evidence.get(task_id),
                                     train_squash=train_evidence.get(task_id),
                                     discard_uncommitted=task_id in discard_uncommitted,
-                                    unknown_evidence=unknown_evidence.get(task_id))
+                                    unknown_evidence=unknown_evidence.get(task_id),
+                                    reviewed_pr_evidence=reviewed_pr_evidence.get(task_id))
             except LifecycleError as exc:
                 record, plan = None, {"root": str(workspace_root / task_id),
                                       "reasons": [exc.code], "content_block": False,
@@ -1633,7 +1666,8 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                                       "pycache": []}
             result.update({key: plan[key] for key in (
                 "root", "branch", "head", "publication", "live_pids", "unknown_paths",
-                "unknown_count", "unknown_truncated", "unknown_digest") if plan.get(key)})
+                "unknown_count", "unknown_truncated", "unknown_digest",
+                "reviewed_pr_number") if plan.get(key)})
             if plan.get("publication") == "origin_branch":
                 result["publication_note"] = "pushed to origin/<branch>; merge not proven"
             elif plan.get("publication") == "origin_pr_head":
@@ -1905,6 +1939,19 @@ def _parse_unknown_evidence(values):
     return evidence
 
 
+def _parse_reviewed_pr_evidence(values):
+    evidence = {}
+    for value in values or []:
+        task_id, sep, binding = value.partition("=")
+        pr_number, sep2, head_sha = binding.partition(":")
+        if (not sep or not sep2 or task_id in evidence or
+                not re.fullmatch(r"[1-9][0-9]*", pr_number) or
+                not SHA40_RE.fullmatch(head_sha)):
+            _stop("D6_TASK_INPUT_INVALID")
+        evidence[task_id] = (pr_number, head_sha)
+    return evidence
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id")
@@ -1933,6 +1980,9 @@ def _main(argv=None):
     parser.add_argument("--train-evidence", action="append",
                         metavar="TASK_ID=PR_HEAD_SHA:TRAIN_HEAD_SHA:SQUASH_SHA",
                         help="merged squash train: PR head, train head and squash commit")
+    parser.add_argument("--reviewed-pr-evidence", action="append",
+                        metavar="TASK_ID=PR_NUMBER:HEAD_SHA",
+                        help="closed or unmerged reviewer PR and its published head")
     parser.add_argument("--reconcile-registry", action="store_true",
                         help="list registry records whose worktree is absent; dry run by default")
     parser.add_argument("--execute-approved-reconcile", action="store_true",
@@ -1963,7 +2013,8 @@ def _main(argv=None):
                     args.bind_native_session_task_id is not None or
                     args.retire_task_id is not None or args.execute_approved_retire or
                     args.execute_approved_lifecycle or args.squash_evidence or
-                    args.train_evidence or args.discard_uncommitted or
+                    args.train_evidence or args.reviewed_pr_evidence or
+                    args.discard_uncommitted or
                     args.retain_blocked_evidence or args.reconcile_registry or
                     args.execute_approved_reconcile or args.release_retain):
                 _stop("D6_TASK_INPUT_INVALID")
@@ -1980,7 +2031,7 @@ def _main(argv=None):
                     args.resume_root is not None or args.record_result_task_id is not None or
                     args.retire_task_id is not None or args.execute_approved_lifecycle or
                     args.execute_approved_retire or args.squash_evidence or
-                    args.train_evidence or args.reconcile_registry or
+                    args.train_evidence or args.reviewed_pr_evidence or args.reconcile_registry or
                     args.execute_approved_reconcile or
                     args.discard_uncommitted or args.retain_blocked_evidence or
                     args.release_retain):
@@ -1994,7 +2045,7 @@ def _main(argv=None):
                     args.resume_task_id is not None or args.resume_root is not None or
                     args.retire_task_id is not None or args.execute_approved_lifecycle or
                     args.execute_approved_retire or args.squash_evidence or
-                    args.train_evidence or args.reconcile_registry or
+                    args.train_evidence or args.reviewed_pr_evidence or args.reconcile_registry or
                     args.execute_approved_reconcile or
                     args.discard_uncommitted or args.retain_blocked_evidence or
                     args.release_retain):
@@ -2013,10 +2064,13 @@ def _main(argv=None):
                 discard_uncommitted=args.discard_uncommitted or (),
                 unknown_evidence=_parse_unknown_evidence(args.retain_blocked_evidence),
                 squash_evidence=_parse_squash_evidence(args.squash_evidence),
-                train_evidence=_parse_train_evidence(args.train_evidence)) else 1
+                train_evidence=_parse_train_evidence(args.train_evidence),
+                reviewed_pr_evidence=_parse_reviewed_pr_evidence(
+                    args.reviewed_pr_evidence)) else 1
         if args.reconcile_registry or args.execute_approved_reconcile:
             if (args.retire_task_id is not None or args.execute_approved_retire or
                     args.squash_evidence or args.train_evidence or
+                    args.reviewed_pr_evidence or
                     args.discard_uncommitted or args.retain_blocked_evidence or
                     args.release_retain or
                     any(value is not None for value in create_values + create_options) or
@@ -2030,6 +2084,7 @@ def _main(argv=None):
         if args.release_retain is not None:
             if (args.retire_task_id is not None or args.execute_approved_retire or
                     args.squash_evidence or args.train_evidence or
+                    args.reviewed_pr_evidence or
                     args.discard_uncommitted or args.retain_blocked_evidence or
                     args.reconcile_registry or args.execute_approved_reconcile or
                     any(value is not None for value in create_values + create_options) or
@@ -2042,6 +2097,7 @@ def _main(argv=None):
                 canonical_root=args.repo_root,
                 approvals=_parse_release_retain(args.release_retain)) else 1
         if (args.execute_approved_retire or args.squash_evidence or args.train_evidence or
+                args.reviewed_pr_evidence or
                 args.discard_uncommitted or args.retain_blocked_evidence or
                 args.release_retain):
             _stop("D6_TASK_INPUT_INVALID")
