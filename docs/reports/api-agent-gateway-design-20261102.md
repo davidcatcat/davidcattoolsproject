@@ -105,8 +105,31 @@ gw-agent run --workdir <D6 root> --profile <name> --task-file <task.json> \
 
 **Exit codes** are distinct per status. stdout is not part of the contract.
 
+### 5.1 Sessions (Owner direction 2026-11-02)
+
+Owner, verbatim: 「公司llm還可以透過這個gateway建立session,llmtool透過這個方式跟連接codex等ai是一樣的方式」. The gateway therefore gives an API-only model the same session semantics that llmtool already uses for Codex. Codex exposes `codex exec` and `codex exec resume <id>`. llmtool records the CLI-reported native session id and binds it to the D6 (`backend_session_semantics: CLI_REPORTED_SESSION_ID`; `d6_worktree_lifecycle.py --bind-native-session-task-id`).
+
+- **Commands (OPINION):**
+  - `gw-agent run …` starts a new session and prints `session_id` in `result.json`.
+  - `gw-agent resume <session_id> --task-file …` continues it, for example a repair round with review findings.
+  - `gw-agent sessions --json` lists sessions (id, created, last turn, workdir identity, status) without content.
+  - `gw-agent end <session_id>` marks a session closed. Closed sessions cannot be resumed.
+- **Binding:** a session is bound to one workdir identity (device and inode of the D6 root), `source_sha` at start, the profile and the `task_id`. Resume refuses a different workdir, profile or task, or a HEAD that is not a descendant of the recorded HEAD. This is the same rule llmtool applies to Codex repair rounds in one D6.
+- **Storage:**
+  - A per-user state directory outside any Git worktree, mode 0700, one directory per session, files 0600.
+  - The conversation state holds model-visible messages, so it is sensitive.
+  - **Retention:** state is kept only until the session ends or for a bounded time, then discarded. It is never copied into evidence, GitHub or the audit log; the audit log keeps only digests.
+  - Each resume re-applies the egress screen to anything newly sent.
+- **Context management:** when history approaches the profile's context cap, the gateway compacts older turns into a bounded summary. It first screens the summary, then records the compaction in the audit chain. There is no silent truncation, and on overflow it returns `CONTEXT_EXHAUSTED`.
+- **Concurrency:** at most one active run per session, guarded by a lock file. A second `resume` while one is running is refused, not queued.
+- **llmtool mapping:**
+  - The `api-agent` route stores `session_id` as the native session.
+  - Repair rounds use `resume` on the same D6, exactly like Codex direct.
+  - The PM can inspect status through `sessions` without reading content.
+- **Tests required:** resume continuity; refusal on a mismatched workdir, task or HEAD; lock contention; compaction keeps the task contract and the latest review findings; expired and ended sessions cannot be resumed; no content in `sessions` output or the audit log.
+
 **llmtool side** (a later, separate PR):
-- A new Developer route `api-agent`, modelled on the Codex direct route. It reuses D6 binding, the dispatch policy, screening of PM-written text, the post-run `changed_paths ⊆ write_paths` check, and test policy and callbacks.
+- A new Developer route `api-agent`, modelled on the Codex direct route, including session resume for repair rounds. It reuses D6 binding, the dispatch policy, screening of PM-written text, the post-run `changed_paths ⊆ write_paths` check, and test policy and callbacks.
 - A new `worker-dispatch.json` key, decided by the Owner.
 
 ## 6. Security
@@ -137,7 +160,7 @@ gw-agent run --workdir <D6 root> --profile <name> --task-file <task.json> \
 | Phase | Deliverable | Gate |
 |---|---|---|
 | 0 | Live probes, only after the gates required by `skills/company-llm-delegation/SKILL.md:64-69,130-145,211-213`: an existing data-permission basis; the Owner's own grant record for the probe (the C1B/Phase 0 rules: Owner-only grant, non-author verification of the per-invocation evidence afterwards); the `validate-runtime` gate; and the VPN step. Synthetic code in a scratch directory only, never a repo D6: multi-turn native tool calls (about 10 turns, 3+ tools, `tool_choice` auto and required); `tool_call_id` round-trip; tool calls while streaming; thinking plus tools within a 16K output budget; the `text-tools` fallback on the same scenarios | Probe report; decides the default adapter |
-| 1 | `tools/api-agent-gateway/` MVP: one adapter, the five tools, path policy, egress screen, budgets, audit log, CLI contract, offline tests with a fake model server | Cross-family review + Security review + CI |
+| 1 | `tools/api-agent-gateway/` MVP: one adapter, the five tools, path policy, egress screen, budgets, audit log, sessions (run/resume/sessions/end), CLI contract, offline tests with a fake model server | Cross-family review + Security review + CI |
 | 2 | Quality check: replay `tools/llmtool/eval/gw_ladder` L1–L6 in agent mode, compared with the proposal-mode baseline | Report with numbers |
 | 3 | llmtool `api-agent` route plus `worker-dispatch.json` key plus the AGENTS/SKILL update | Owner decision + Security review + CI |
 | 4 | Further profiles (other API-only models) as configuration only | Per-profile probe |
