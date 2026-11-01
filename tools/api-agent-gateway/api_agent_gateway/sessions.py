@@ -18,7 +18,8 @@ import stat
 import time
 from typing import Any, Optional
 
-from .contract import POLICY_REFUSED, Refusal
+from .audit import is_int, is_number
+from .contract import POLICY_REFUSED, SCHEMA_VERSION, Refusal
 
 _ID = re.compile(r'[0-9a-f]{32}')
 _CLOEXEC = getattr(os, 'O_CLOEXEC', 0)
@@ -154,7 +155,10 @@ class Store:
             raise Refusal(POLICY_REFUSED, 'SESSION_NOT_FOUND') from exc
         except (OSError, ValueError) as exc:
             raise Refusal(POLICY_REFUSED, 'SESSION_STATE_INVALID') from exc
-        if not isinstance(meta, dict) or meta.get('session_id') != sid or meta.get('status') != 'active':
+        if (not isinstance(meta, dict) or meta.get('session_id') != sid or meta.get('status') != 'active'
+                or not is_int(meta.get('schema_version'), SCHEMA_VERSION)
+                or not all(is_int(meta.get(k)) for k in ('turns', 'runs'))
+                or not all(is_number(meta.get(k)) for k in ('created_at', 'last_turn_at'))):
             raise Refusal(POLICY_REFUSED, 'SESSION_STATE_INVALID')
         return meta
 
@@ -166,7 +170,7 @@ class Store:
             hist = _read_json(os.path.join(self._dir(sid), 'history.json'))
         except (OSError, ValueError) as exc:
             raise Refusal(POLICY_REFUSED, 'SESSION_STATE_INVALID') from exc
-        if not isinstance(hist, dict):
+        if not isinstance(hist, dict) or not is_int(hist.get('schema_version'), 1):
             raise Refusal(POLICY_REFUSED, 'SESSION_STATE_INVALID')
         return hist
 
@@ -175,8 +179,10 @@ class Store:
 
     def expired(self, meta: dict) -> bool:
         try:
-            hours = min(int(meta['expiry_hours']), 72)
-            return self.clock() >= float(meta['last_turn_at']) + hours * 3600
+            hours, last = meta['expiry_hours'], meta['last_turn_at']
+            if not is_int(hours) or not 1 <= hours <= 72 or not is_number(last):
+                return True  # malformed retention data: fail toward deletion
+            return self.clock() >= last + hours * 3600
         except (KeyError, TypeError, ValueError):
             return True
 
@@ -190,8 +196,8 @@ class Store:
         meta = meta or {}
         tomb = {
             'session_id': sid,
-            'created_at': _iso(meta['created_at']) if isinstance(meta.get('created_at'), (int, float)) else None,
-            'last_turn_at': _iso(meta['last_turn_at']) if isinstance(meta.get('last_turn_at'), (int, float)) else None,
+            'created_at': _iso(meta['created_at']) if is_number(meta.get('created_at')) else None,
+            'last_turn_at': _iso(meta['last_turn_at']) if is_number(meta.get('last_turn_at')) else None,
             'ended_at': _iso(self.clock()),
             'end_reason': reason,
         }

@@ -16,7 +16,7 @@ from typing import Callable, Mapping, Optional
 from . import __version__
 from .adapters import make_adapter
 from .agent import AgentLoop, add_resume_round, new_history
-from .audit import AuditError, AuditLog, sha256_hex
+from .audit import AuditError, AuditLog, is_int, sha256_hex
 from .confine import ConfinementError, Workspace
 from .contract import (EXIT_CODES, EXIT_INTERNAL, EXIT_USAGE, MODEL_ERROR, POLICY_REFUSED, SCHEMA_VERSION,
                        Profile, Refusal, Task, outside, parse_profile, parse_task, read_json_file,
@@ -114,7 +114,7 @@ def _check_authorization(path: str, sid: Optional[str], meta: Optional[dict], ta
         obj, raw = read_json_file(path, 'AUTHORIZATION')
     except Refusal as exc:
         raise bad from exc
-    if not isinstance(obj, dict) or obj.get('schema_version') != SCHEMA_VERSION:
+    if not isinstance(obj, dict) or not is_int(obj.get('schema_version'), SCHEMA_VERSION):
         raise bad
     ref = obj.get('authorization_ref')
     checked = _parse_iso(obj.get('checked_at'))

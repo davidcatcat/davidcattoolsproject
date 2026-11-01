@@ -29,6 +29,15 @@ def sha256_hex(data: bytes | str) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def is_int(value: Any, expected: Any = None) -> bool:
+    """Strict JSON integer check: ``bool`` is not an int here (``True == 1`` in Python)."""
+    return type(value) is int and (expected is None or value == expected)
+
+
+def is_number(value: Any) -> bool:
+    return type(value) in (int, float)
+
+
 class AuditError(Exception):
     pass
 
@@ -77,7 +86,7 @@ def verify(path: str) -> str:
                 raise AuditError('AUDIT_MALFORMED') from exc
             if canonical(record) != line:
                 raise AuditError('AUDIT_NOT_CANONICAL')
-            if record.get('seq') != seq or record.get('prev_sha256') != prev:
+            if not is_int(record.get('seq'), seq) or record.get('prev_sha256') != prev:
                 raise AuditError('AUDIT_CHAIN_BROKEN')
             if seq == 0 and record.get('type') != 'header':
                 raise AuditError('AUDIT_HEADER_MISSING')

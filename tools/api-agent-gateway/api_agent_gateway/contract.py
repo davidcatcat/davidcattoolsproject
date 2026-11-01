@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 from urllib.parse import urlsplit
 
-from .audit import canonical, sha256_hex
+from .audit import canonical, is_int, sha256_hex
 from .confine import ConfinementError, Scope
 
 SCHEMA_VERSION = 1
@@ -117,7 +117,7 @@ def parse_task(obj: Any, raw: bytes) -> Task:
     def bad(code: str = 'TASK_INVALID') -> Refusal:
         return Refusal(POLICY_REFUSED, code)
 
-    if not isinstance(obj, dict) or obj.get('schema_version') != SCHEMA_VERSION:
+    if not isinstance(obj, dict) or not is_int(obj.get('schema_version'), SCHEMA_VERSION):
         raise bad()
     if set(obj) - TASK_KEYS:
         raise bad()
@@ -190,7 +190,7 @@ def parse_profile(profiles: Any, name: str) -> Profile:
     def bad(code: str = 'PROFILE_INVALID') -> Refusal:
         return Refusal(POLICY_REFUSED, code)
 
-    if not isinstance(profiles, dict) or profiles.get('schema_version') != SCHEMA_VERSION:
+    if not isinstance(profiles, dict) or not is_int(profiles.get('schema_version'), SCHEMA_VERSION):
         raise bad()
     table = profiles.get('profiles')
     if not isinstance(table, dict) or not isinstance(table.get(name), dict):
