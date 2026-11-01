@@ -169,6 +169,12 @@ def key_help(dev):
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
 # Picking one edits the input draft; it never runs the command.
 SLASH_COMMANDS = (
+    ("/pm connect", "/pm connect", "Talk to the PM: connect to the dedicated PM session"),
+    ("/pm new", "/pm new", "Create a dedicated PM session"),
+    ("/pm", "/pm", "Show the PM connection"),
+    ("/pm disconnect", "/pm disconnect", "End the PM connection"),
+    ("/pm history", "/pm history", "Show recent PM turns"),
+    ("/pm queue", "/pm queue", "List or resume queued PM messages"),
     ("/help", "/help", "Show commands"),
     ("/status", "/status", "狀態：PM 模式看 PM，聊天模式看供應商與模型"),
     ("/provider", "/provider ", "List profiles or switch provider"),
@@ -177,11 +183,6 @@ SLASH_COMMANDS = (
     ("/history", "/history", "Show user/assistant turns"),
     ("/exit", "/exit", "Exit"),
     ("/quit", "/quit", "Exit"),
-    ("/pm connect", "/pm connect", "Talk to the PM: connect to the dedicated PM session"),
-    ("/pm new", "/pm new", "Create a dedicated PM session (pm_runtime binding)"),
-    ("/pm disconnect", "/pm disconnect", "End the PM connection"),
-    ("/pm history", "/pm history", "Turns pm_runtime stored for this PM"),
-    ("/pm queue", "/pm queue", "Queued PM messages: list, clear, or send (resume)"),
     ("/task submit", "/task submit --provider ",
      "開發測試用：只登記，不會派工 (--provider PROFILE REQUEST)"),
     ("/task show", "/task show ", "Show a task by TASK_ID"),
@@ -263,8 +264,11 @@ def slash_matches(text, dev=True):
         return []
     query = text.lower()
     commands = [c for c in SLASH_COMMANDS if dev or not c[0].startswith("/task")]
-    prefix = [c for c in commands if c[0].startswith(query)]
-    inside = [c for c in commands if c not in prefix and len(query) > 2 and query[1:] in c[0]]
+    pm = [c for c in commands if c[0] == "/pm" or c[0].startswith("/pm ")]
+    other = [c for c in commands if c not in pm]
+    ordered = pm + other
+    prefix = [c for c in ordered if c[0].startswith(query)]
+    inside = [c for c in ordered if c not in prefix and len(query) > 2 and query[1:] in c[0]]
     return prefix + inside
 
 
@@ -1049,6 +1053,31 @@ class ChatTUI:
 
     def help_text(self):
         return key_help(self.dev) + "\n\n" + HELP
+
+    def command_help_text(self):
+        """Short, PM-first help for /help; F1 retains the full interaction guide."""
+        lines = [
+            "Talk to the PM",
+            "  /pm connect             Connect to your PM session",
+            "  /pm new [CWD]           Start a PM session",
+            "  /pm                    Show the PM connection",
+            "  /pm history             Show recent PM turns",
+            "  /pm queue               List, clear, or resume queued messages",
+            "  /pm disconnect         Leave the PM session",
+            "Chat",
+            "  /status                 Show the current chat or PM status",
+            "  /provider [PROFILE]     List or switch chat profiles",
+            "  /skill [NAME]           List, choose, or clear a skill",
+            "  /history                Show recent chat turns",
+            "  /clear                  Clear the chat",
+            "  /theme [dark|light|auto] Set the display theme",
+            "  /links [on|off]         Set clickable links",
+            "  /exit, /quit            Leave chat",
+            "Type / to choose a command. Enter runs a command you typed. F1 shows key help.",
+        ]
+        if self.dev:
+            lines.extend(("Developer tools", "  /task ...               Developer and test commands"))
+        return "\n".join(lines)
 
     def status_report(self):
         """/status (W57): what the current mode is talking to, in the status bar's words."""
@@ -1861,7 +1890,7 @@ class ChatTUI:
                 self.append("llmtool: " + TASK_HIDDEN)
             return
         if text.strip() == "/help":
-            self.append(self.help_text())
+            self.append(self.command_help_text())
             return
         if text.strip() == "/status":
             self.append(self.status_report())

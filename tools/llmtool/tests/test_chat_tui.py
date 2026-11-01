@@ -535,12 +535,19 @@ class WidgetTests(Base):
 
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
-        self.assertEqual(labels, ['/help', '/status', '/provider', '/skill', '/clear', '/history',
-                                  '/exit', '/quit', '/pm connect', '/pm new', '/pm disconnect', '/pm history',
-                                  '/pm queue', '/task submit', '/task show', '/task mode', '/task list', '/task events',
+        self.assertEqual(labels, ['/pm connect', '/pm new', '/pm', '/pm disconnect',
+                                  '/pm history', '/pm queue', '/help', '/status', '/provider', '/skill',
+                                  '/clear', '/history', '/exit', '/quit', '/task submit',
+                                  '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
+                         ['/pm connect', '/pm new', '/pm'])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/ory')][:2],
+                         ['/pm history', '/history'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/', dev=False)][:5],
+                         ['/pm connect', '/pm new', '/pm', '/pm disconnect', '/pm history'])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
         self.assertEqual(chat_tui.slash_matches('/nope'), [])
         self.assertEqual(chat_tui.slash_matches('/s\nx'), [])
@@ -618,9 +625,11 @@ class WidgetTests(Base):
         self.assertEqual(dict((c[0], c[1]) for c in picker)['/task submit'], '/task submit --provider ')
         ui, _ = self.drive(['/help\r'])
         shown = ui.conversation.text.split('> /help', 1)[1]
-        self.assertLess(shown.index('/pm new'), shown.index('/task submit'))
-        self.assertIn('開發測試用：只登記，不會派工', shown)
-        self.assertIn('/pm connect (or /pm new) talks to the dedicated PM', ui.conversation.text)
+        self.assertLess(shown.index('/pm new'), shown.index('/status'))
+        self.assertIn('Talk to the PM', shown)
+        self.assertIn('Type / to choose a command', shown)
+        self.assertIn('/task ...', shown)
+        self.assertNotIn('Ctrl-J', shown)
         self.factory.assert_not_called()
 
     def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
@@ -704,26 +713,26 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 20)
+            self.assertEqual(len(ui.menu_items), 21)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
-            self.assertIn('/help', rows[0])
-            self.assertIn('15 more (0 above, 15 below)', rows[-1])
+            self.assertIn('/pm connect', rows[0])
+            self.assertIn('16 more (0 above, 16 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
-            self.assertNotIn('/help', ''.join(rows))
-            self.assertIn('/exit', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('15 more (2 above, 13 below)', rows[-1])
+            self.assertNotIn('/pm connect', ''.join(rows))
+            self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('16 more (2 above, 14 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 19)
+            self.assertEqual(ui.menu_index, 20)
             self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(15 above, 0 below)', rows[-1])
+            self.assertIn('(16 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
-                            lambda ui: self.assertEqual(ui.input.text, '/exit'),
+                            lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
                            size=[Size(rows=24, columns=80)])
         self.assertTrue(ui.session.active)
@@ -924,8 +933,8 @@ class WidgetTests(Base):
                             '\x1bOP', lambda ui: self.assertFalse(ui.show_help),
                             lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
                             '/help\r'])
-        self.assertIn('/provider [profile]', ui.conversation.text)
-        self.assertIn('/task submit --provider PROFILE REQUEST', ui.conversation.text)
+        self.assertIn('/provider [PROFILE]', ui.conversation.text)
+        self.assertIn('/task ...', ui.conversation.text)
         self.factory.assert_not_called()
 
     def test_explicit_task_submit_uses_existing_api_off_event_loop(self):
@@ -1638,6 +1647,7 @@ class W57ChatTests(Base):
         self.assertEqual([t['content'] for t in self.session.history], ['plain', 'reply'])
         help_text = ui.help_text()
         self.assertNotIn('/task', help_text)
+        self.assertNotIn('/task', ui.command_help_text())
         self.assertNotIn('F3', help_text)
         self.assertNotIn('Task mode', help_text)
         self.assertIn('/pm connect', help_text)
