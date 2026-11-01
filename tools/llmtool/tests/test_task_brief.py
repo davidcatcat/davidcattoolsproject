@@ -11,6 +11,7 @@ from llmtool.task_submission_cli import add_task_submission_parsers, run_task_br
 from llmtool.cli import main
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
+from test_task_status import record as create_valid_record
 
 
 def row(task_id, state, **extra):
@@ -79,6 +80,10 @@ class TaskBriefTests(unittest.TestCase):
         self.assertEqual(item['review_claim_state'], 'REVIEW_PASS')
         self.assertIn('not a formal verdict', item['review_claim_label'])
         self.assertEqual(item['pending_inbox_count'], 2)
+        no_claim = task_brief({'tasks': [row('t2', 'RUNNING',
+                                             review_claim_state='NONE')],
+                               'unreadable': 0})
+        self.assertEqual(no_claim['tasks'][0]['review_claim_state'], 'NONE')
 
     def test_empty_human_output(self):
         result = task_brief({'tasks': [], 'unreadable': 0})
@@ -151,8 +156,8 @@ class TaskBriefTests(unittest.TestCase):
     def test_corrupt_record_is_reported_without_changing_records_or_inbox(self):
         with tempfile.TemporaryDirectory() as root:
             store = TaskStore(Path(root) / 'tasks')
+            create_valid_record(root)
             task_id = 'a' * 32
-            store.root.mkdir(mode=0o700, parents=True)
             record_path = store.root / f'{task_id}.json'
             record_path.write_text('{broken', encoding='utf-8')
             inbox_path = store.root / 'inbox'

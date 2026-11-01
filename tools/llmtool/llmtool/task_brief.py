@@ -39,8 +39,7 @@ def task_brief(status, *, limit=20):
             'last_event': {
                 'state': event_state if type(event_state) is str else 'UNKNOWN',
             },
-            'review_claim_state': (claim_state if type(claim_state) is str and
-                                   claim_state != 'NONE' else 'UNKNOWN'),
+            'review_claim_state': claim_state if type(claim_state) is str else 'UNKNOWN',
             'review_claim_label': 'stored claim state; not a formal verdict',
             'pending_inbox_count': (pending if type(pending) is int and pending >= 0
                                     else 'UNKNOWN'),
