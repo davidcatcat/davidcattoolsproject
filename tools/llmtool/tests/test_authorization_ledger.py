@@ -960,3 +960,186 @@ class NativeDeltaLedgerTests(unittest.TestCase):
         t.binding=replace(t.binding,rearm_from=receipt.nonce,grant_digest='e'*64,attempt_id='e'*32);t.issuer.binding=t.binding
         o=p.NotificationObserved(t.binding.digest,t.binding.host_pin,True,True,True,True,False,True,True,True,t.binding.risk_acceptance_digest)
         with self.assertRaises(l.LedgerError):t.ledger.issue_notification(p.decide_notification(t.binding,issuer=t.issuer,observed=o),ttl_seconds=100)
+
+
+class ProviderLayout2Tests(ProviderLedgerTests):
+    """#192-A: provider layout 2 reruns every provider mechanic, then adds key release."""
+
+    def setUp(self):
+        super().setUp()
+        self.layout1, self.path1 = self.h.ledger, self.h.ledger_path
+        self.path2 = self.h.hostdir / 'provider-v2.sqlite3'
+        self.h.ledger_path = self.path2  # inherited tests tamper with this file
+        self.h.ledger = l.ReceiptLedger.create(self.path2, clock=self.h.clock.utc,
+                                               kind='PROVIDER_REVIEW', provider_layout=2)
+        self.addCleanup(self.layout1.close)
+        self.addCleanup(lambda: self.h.ledger.close())
+
+    def again(self, receipt, run='e', ttl=120, ledger=None):
+        call = replace(receipt.binding.call, redeem_run_id=run * 32, reviewer_launch_nonce=run * 32)
+        b = p.ProviderReviewBinding(call)
+        o = p.ProviderObservedState(b.digest, call.source_sha, call.observation_digest, True)
+        decision = p.decide_provider_review(b, issuer=self.issuer, observed=o)
+        return (ledger or self.h.ledger).issue_provider(decision, ttl_seconds=ttl), o
+
+    def deny(self, receipt, observed):
+        self.assertFalse(self.consume(receipt, replace(observed, attested=False)))
+        self.assertEqual(self.h.ledger.status(receipt.nonce), 'DENIED')
+
+    def statuses(self, ledger=None):
+        return [r[0] for r in (ledger or self.h.ledger)._db.execute(
+            'SELECT status FROM receipts ORDER BY issued_at, rowid')]
+
+    def test_layout1_still_holds_key_after_denied_and_expired(self):
+        self.h.ledger.close()
+        self.h.ledger = self.layout1
+        receipt, o = self.issue('1')
+        self.deny(receipt, o)
+        with self.assertRaises(l.LedgerError) as caught:
+            self.again(receipt)
+        self.assertIs(caught.exception.code, l.LedgerCode.NOT_ALLOWED)
+        expired, o2 = self.issue('2', ttl=1)
+        self.h.fake.utc = '2026-10-13T00:00:11Z'
+        self.assertFalse(self.consume(expired, o2))
+        self.assertEqual(self.h.ledger.status(expired.nonce), 'EXPIRED')
+        with self.assertRaises(l.LedgerError):
+            self.again(expired)
+
+    def test_denied_and_expired_release_the_key(self):
+        receipt, o = self.issue('1')
+        self.deny(receipt, o)
+        again, o_again = self.again(receipt)
+        self.assertTrue(self.consume(again, o_again))
+        expired, o2 = self.issue('2', ttl=1)
+        self.h.fake.utc = '2026-10-13T00:00:11Z'
+        self.assertFalse(self.consume(expired, o2))
+        self.assertEqual(self.h.ledger.status(expired.nonce), 'EXPIRED')
+        self.again(expired)
+        self.assertEqual(self.statuses(), ['DENIED', 'CONSUMED', 'EXPIRED', 'ISSUED'])
+
+    def test_cap_refused_issued_row_expires_on_reissue(self):
+        first, o1 = self.issue('1')
+        second, o2 = self.issue('2', ttl=1)
+        self.assertTrue(self.consume(first, o1))
+        self.assertFalse(self.consume(second, o2))  # daily cap 1: stays ISSUED
+        self.assertEqual(self.h.ledger.status(second.nonce), 'ISSUED')
+        with self.assertRaises(l.LedgerError):
+            self.again(second)  # unexpired ISSUED still holds the key
+        self.h.fake.utc = '2026-10-13T00:00:11Z'
+        third, _ = self.again(second, run='f')
+        self.assertEqual(self.h.ledger.status(second.nonce), 'EXPIRED')
+        self.assertEqual(self.h.ledger.status(third.nonce), 'ISSUED')
+        row = self.h.ledger._db.execute('SELECT consumed_at, consumed_day, redeem_run_id FROM receipts '
+                                        'WHERE nonce=?', (second.nonce,)).fetchone()
+        self.assertEqual(row, (None, None, None))
+
+    def test_effect_rows_and_live_issue_hold_the_key(self):
+        for status in ('ISSUED', 'CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN'):
+            with self.subTest(status=status):
+                self.h.ledger.close()
+                self.path2.unlink()
+                self.h.ledger = l.ReceiptLedger.create(self.path2, clock=self.h.clock.utc,
+                                                       kind='PROVIDER_REVIEW', provider_layout=2)
+                receipt, o = self.issue('1', ttl=1)
+                if status != 'ISSUED':
+                    self.assertTrue(self.consume(receipt, o))
+                if status in ('EFFECT_DONE', 'EFFECT_UNKNOWN'):
+                    self.assertTrue(self.h.ledger.finalize_provider(receipt, status))
+                if status != 'ISSUED':
+                    self.h.fake.utc = '2026-10-13T00:00:11Z'  # expiry never frees an effect row
+                with self.assertRaises(l.LedgerError) as caught:
+                    self.again(receipt)
+                self.assertIs(caught.exception.code, l.LedgerCode.NOT_ALLOWED)
+                self.assertEqual(self.h.ledger.status(receipt.nonce), status)
+                self.h.fake.utc = '2026-10-13T00:00:10Z'
+
+    def test_released_rows_do_not_count_toward_daily_cap(self):
+        receipt, o = self.issue('1')
+        self.deny(receipt, o)
+        expired, o2 = self.issue('2', ttl=1)
+        self.h.fake.utc = '2026-10-13T00:00:11Z'
+        self.consume(expired, o2)
+        fresh, o3 = self.issue('3')
+        self.assertTrue(self.consume(fresh, o3))  # cap 1, still available
+        fourth, o4 = self.issue('4')
+        self.assertFalse(self.consume(fourth, o4))
+
+    def test_layout_parameter_and_cross_open_fail_closed(self):
+        nonce = self.h.ledger.creation_nonce
+        with self.assertRaises(l.LedgerError) as caught:
+            l.ReceiptLedger.open(self.path2, clock=self.h.clock.utc, kind='PROVIDER_REVIEW',
+                                 creation_nonce=nonce)
+        self.assertIs(caught.exception.code, l.LedgerCode.LEDGER_CORRUPT)
+        with self.assertRaises(l.LedgerError) as caught:
+            l.ReceiptLedger.open(self.path1, clock=self.h.clock.utc, kind='PROVIDER_REVIEW',
+                                 creation_nonce=self.layout1.creation_nonce, provider_layout=2)
+        self.assertIs(caught.exception.code, l.LedgerCode.LEDGER_CORRUPT)
+        reopened = l.ReceiptLedger.open(self.path2, clock=self.h.clock.utc, kind='PROVIDER_REVIEW',
+                                        creation_nonce=nonce, provider_layout=2)
+        reopened.close()
+        for kind, layout in (('PROVIDER_REVIEW', 3), ('PROVIDER_REVIEW', True), ('D1', 2),
+                             ('NOTIFICATION', 2)):
+            with self.subTest(kind=kind, layout=layout):
+                with self.assertRaises(l.LedgerError) as caught:
+                    l.ReceiptLedger.create(self.h.hostdir / 'bad.sqlite3', clock=self.h.clock.utc,
+                                           kind=kind, provider_layout=layout)
+                self.assertIs(caught.exception.code, l.LedgerCode.NOT_ALLOWED)
+                self.assertFalse((self.h.hostdir / 'bad.sqlite3').exists())
+
+    def test_schema_tampering_is_corrupt(self):
+        nonce = self.h.ledger.creation_nonce
+        self.h.ledger.close()
+        pristine = self.path2.read_bytes()
+        tampers = (
+            'DROP INDEX receipts_live_object_key',
+            'CREATE INDEX extra_status ON receipts(status)',
+            'CREATE TRIGGER t AFTER INSERT ON receipts BEGIN SELECT 1; END',
+            'CREATE VIEW v AS SELECT nonce FROM receipts',
+            "UPDATE ledger_meta SET creation_nonce='" + '0' * 64 + "'",
+        )
+        for statement in tampers:
+            with self.subTest(statement=statement):
+                self.path2.write_bytes(pristine)
+                os.chmod(self.path2, 0o600)
+                db = sqlite3.connect(self.path2)
+                db.execute(statement)
+                db.commit()
+                db.close()
+                with self.assertRaises(l.LedgerError) as caught:
+                    l.ReceiptLedger.open(self.path2, clock=self.h.clock.utc, kind='PROVIDER_REVIEW',
+                                         creation_nonce=nonce, provider_layout=2)
+                self.assertIs(caught.exception.code, l.LedgerCode.LEDGER_CORRUPT)
+        self.path2.write_bytes(pristine)
+        self.h.ledger = l.ReceiptLedger.open(self.path2, clock=self.h.clock.utc, kind='PROVIDER_REVIEW',
+                                             creation_nonce=nonce, provider_layout=2)
+
+    def test_two_handles_racing_leave_one_live_row(self):
+        receipt, o = self.issue('1', ttl=1)
+        self.h.fake.utc = '2026-10-13T00:00:11Z'
+        nonce = self.h.ledger.creation_nonce
+        results = []
+        barrier = threading.Barrier(2)
+
+        def attempt(run):
+            # One connection per thread, as two host processes would have.
+            ledger = l.ReceiptLedger.open(self.path2, clock=self.h.clock.utc, kind='PROVIDER_REVIEW',
+                                          creation_nonce=nonce, provider_layout=2)
+            try:
+                barrier.wait()
+                self.again(receipt, run=run, ledger=ledger)
+                results.append('ISSUED')
+            except l.LedgerError as error:
+                results.append(error.code.value)
+            finally:
+                ledger.close()
+
+        threads = [threading.Thread(target=attempt, args=(run,)) for run in ('e', 'f')]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(10)
+        self.assertEqual(sorted(results), ['ISSUED', 'NOT_ALLOWED'])
+        live = self.h.ledger._db.execute(
+            "SELECT count(*) FROM receipts WHERE status IN ('ISSUED','CONSUMED','EFFECT_DONE','EFFECT_UNKNOWN')"
+        ).fetchone()[0]
+        self.assertEqual(live, 1)
