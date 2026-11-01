@@ -177,6 +177,13 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('<REMOTE_WORKDIR>/test.py', excerpt)
         self.assertNotIn('/tmp/llmtool-remote-test.Abc123', excerpt)
         self.assertNotIn(cred_value, excerpt)
+        unsafe_header = self.failure_excerpt(
+            'FAIL: test_expected token=' + cred_value + '\n'
+            'Traceback (most recent call last):\n'
+            'AssertionError: expected value\n'
+            '----------------------------------------------------------------------\n')
+        self.assertNotIn(cred_value, unsafe_header)
+        self.assertIn('AssertionError: expected value', unsafe_header)
         self.assertEqual(self.failure_excerpt(''), '')
         with tempfile.TemporaryDirectory() as test_dir:
             fixture = Path(test_dir) / 'test_excerpt_fixture.py'
@@ -360,6 +367,11 @@ class RemoteTestTests(unittest.TestCase):
 
     def test_nobody_commands_change_directory_through_env_without_cwd(self):
         self.assertIn('["sudo","-n","-u","nobody","env","-i","-C",work]',
+                      remote_test._REMOTE_SCRIPT)
+        self.assertIn('"HOME":work+"/.home","TMPDIR":work+"/.tmp"',
+                      remote_test._REMOTE_SCRIPT)
+        self.assertIn('"GIT_OPTIONAL_LOCKS":"0"', remote_test._REMOTE_SCRIPT)
+        self.assertIn('["mkdir","-m","700","--",work+"/.home",work+"/.tmp"]',
                       remote_test._REMOTE_SCRIPT)
         self.assertNotIn('cwd=work', remote_test._REMOTE_SCRIPT)
         self.assertNotIn('cwd=work+', remote_test._REMOTE_SCRIPT)
