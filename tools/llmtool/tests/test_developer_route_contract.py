@@ -148,9 +148,10 @@ class DeveloperRouteContractTests(unittest.TestCase):
             raise TimeoutError
         with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
                         return_value=self.git):
-            with self.assertRaises(RouteError) as caught:
-                run_route(self.route, self.request, gate=lambda: True, runner=timeout,
-                          boundary=FakeBoundary(), snapshot=lambda root: self.before)
+            with mock.patch('llmtool.developer_routes.base._git_status_paths', return_value=()):
+                with self.assertRaises(RouteError) as caught:
+                    run_route(self.route, self.request, gate=lambda: True, runner=timeout,
+                              boundary=FakeBoundary(), snapshot=lambda root: self.before)
         self.assertEqual(caught.exception.code, 'FAKE_TIMEOUT')
 
     def _real_git_request(self, root):
@@ -222,10 +223,11 @@ class DeveloperRouteContractTests(unittest.TestCase):
             request = dict(self.request, state_dirs=[outside])
             with mock.patch('llmtool.developer_routes.base.task_completion.collect_git_snapshot',
                             return_value=self.git):
-                with self.assertRaises(RouteError) as caught:
-                    run_route(self.route, request, gate=lambda: True,
-                              runner=lambda *args: self.fail('runner must not start'),
-                              boundary=FakeBoundary(), snapshot=lambda root: self.before)
+                with mock.patch('llmtool.developer_routes.base._git_status_paths', return_value=()):
+                    with self.assertRaises(RouteError) as caught:
+                        run_route(self.route, request, gate=lambda: True,
+                                  runner=lambda *args: self.fail('runner must not start'),
+                                  boundary=FakeBoundary(), snapshot=lambda root: self.before)
             self.assertEqual(caught.exception.code, 'FAKE_REQUEST_INVALID')
 
     def test_request_error_uses_uppercase_route_code(self):
