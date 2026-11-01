@@ -75,6 +75,28 @@ class TaskStoreTests(unittest.TestCase):
             self.store.update(task['task_id'], high_debug=[changed])
         self.assertEqual(self.store.get(task['task_id'])['high_debug'], [entry])
 
+    def test_run_failed_high_debug_entries_from_high_debug_are_valid(self):
+        from llmtool import high_debug
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        reasons = ({'failed_corrections': 2, 'early_reason': None},
+                   {'failed_corrections': None, 'early_reason': 'early'})
+        codes = ('HIGH_DEBUG_RUN_FAILED', 'HIGH_DEBUG_WROTE_FILES',
+                 'HIGH_DEBUG_REPORT_INVALID')
+        expected = []
+        for index, (reason, code) in enumerate(
+                [(reason, code) for reason in reasons for code in codes], 1):
+            entry = high_debug._failed_entry(
+                family='test-family', head='a' * 40, d6=f'executor-hd{index}-aaaaaaa',
+                code=code, observed='UNKNOWN', effort='UNKNOWN',
+                usage={'input': 1, 'cached': 0, 'output': 1, 'reasoning': 0},
+                recorded_at='2026-10-27T00:00:00Z', **reason)
+            self.store.append_high_debug(task['task_id'], entry)
+            expected.append(entry)
+        self.assertEqual(self.store.get(task['task_id'])['high_debug'], expected)
+        with self.assertRaises(LLMToolError):
+            self.store.append_high_debug(task['task_id'], dict(expected[0], status='FAILED'))
+
     def test_review_repair_claim_can_fail_only_after_dispatch(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

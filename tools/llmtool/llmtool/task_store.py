@@ -695,7 +695,8 @@ def _validate(record):
                 hashlib.sha256(item['report'].encode('utf-8')).hexdigest() != item['report_sha256'] or
                 (item.get('usage') != 'UNKNOWN' and type(item.get('usage')) is not dict) or
                 type(item.get('recorded_at')) is not str or
-                item.get('status') not in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID')):
+                item.get('status') not in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID',
+                                        'RUN_FAILED')):
                 _fail('HIGH_DEBUG_INVALID')
     if 'review_dispatch_claim' in record:
         claim = record['review_dispatch_claim']
