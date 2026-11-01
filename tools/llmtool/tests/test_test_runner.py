@@ -150,6 +150,16 @@ class TestRunnerTests(unittest.TestCase):
         self.assertFalse(result["summary"]["execution_verified"])
 
 
+class GitTimeoutTests(unittest.TestCase):
+    def test_stuck_git_is_a_runner_error_not_a_hang(self):
+        from llmtool import test_runner
+        with patch("llmtool.test_runner.subprocess.run",
+                   side_effect=subprocess.TimeoutExpired("git", 120)) as run:
+            with self.assertRaises(test_runner.RunnerError):
+                test_runner._git(Path("."), "rev-parse", "HEAD")
+        self.assertEqual(run.call_args.kwargs["timeout"], test_runner.GIT_TIMEOUT_SECONDS)
+
+
 class ZeroTestsExitStatusTests(unittest.TestCase):
     """A zero-test observation must never be returned as a success exit code."""
 

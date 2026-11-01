@@ -1,9 +1,14 @@
 import importlib.util
 import json
+import os
 import pathlib
+import signal
 import shutil
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from unittest import mock
 
@@ -66,13 +71,107 @@ class GwLadderTests(unittest.TestCase):
     def test_timeout_is_reported_as_error(self):
         scorer = load_scorer()
         process = mock.Mock()
+        process.pid = 4242
         process.wait.side_effect = [subprocess.TimeoutExpired("command", 60), -9]
         process.stdout = mock.Mock()
         process.stdout.read.return_value = b""
         process.stderr = mock.Mock()
         process.stderr.read.return_value = b""
-        with mock.patch.object(scorer.subprocess, "Popen", return_value=process):
-            result = scorer._run_tests(["python3"], pathlib.Path("."))
+        with mock.patch.object(scorer.subprocess, "Popen", return_value=process) as popen, \
+                mock.patch.object(scorer.os, "killpg") as killpg:
+            result = scorer._run_tests(["python3"], pathlib.Path("."), "unused.json")
         self.assertEqual(result[0], "ERROR")
         self.assertEqual(result[3], "test process exceeded 60 seconds")
-        process.kill.assert_called_once()
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+        killpg.assert_any_call(4242, scorer.signal.SIGKILL)
+
+    def _level(self, hidden_test):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root = pathlib.Path(directory.name)
+        level_dir = root / "tools" / "llmtool" / "eval" / "gw_ladder" / "L1"
+        level_dir.mkdir(parents=True)
+        (level_dir / "hidden_test.py").write_text(hidden_test, encoding="utf-8")
+        return root
+
+    def test_printed_ran_line_and_early_exit_are_not_a_pass(self):
+        root = self._level(
+            "import os, sys\n"
+            "sys.stderr.write('Ran 3 tests in 0.001s\\n\\nOK\\n')\n"
+            "sys.stderr.flush()\n"
+            "os._exit(0)\n")
+        result = load_scorer().score("L1", root)
+        self.assertEqual(result, {"level": "L1", "result": "ERROR", "ran": 0, "failures": 0})
+
+    def test_failing_hidden_test_is_fail_with_counts(self):
+        root = self._level(
+            "import unittest\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_a(self): self.assertTrue(False)\n"
+            "    def test_b(self): raise RuntimeError('x')\n"
+            "    def test_c(self): pass\n")
+        result = load_scorer().score("L1", root)
+        self.assertEqual(result, {"level": "L1", "result": "FAIL", "ran": 3, "failures": 2})
+
+    def test_descendant_holding_the_pipes_does_not_hang_the_scorer(self):
+        # Before the fix the scorer joined its pipe readers without a bound,
+        # so a grandchild that inherited stdout kept it waiting forever.
+        root = self._level(
+            "import subprocess, unittest\n"
+            "subprocess.Popen(['sleep', '300'])\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_ok(self): pass\n")
+        scorer = load_scorer()
+        finished = []
+        worker = threading.Thread(
+            target=lambda: finished.append(scorer.score("L1", root)), daemon=True)
+        worker.start()
+        worker.join(30)
+        self.assertFalse(worker.is_alive(), "scorer hung on a descendant's pipe")
+        self.assertEqual(finished, [{"level": "L1", "result": "PASS", "ran": 1, "failures": 0}])
+
+    def test_timeout_kills_the_whole_group(self):
+        root = self._level(
+            "import subprocess, time, unittest\n"
+            "subprocess.Popen(['sleep', '300'])\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_slow(self): time.sleep(300)\n")
+        scorer = load_scorer()
+        level_dir = root / "tools" / "llmtool" / "eval" / "gw_ladder" / "L1"
+        with tempfile.TemporaryDirectory() as directory:
+            result_path = str(pathlib.Path(directory) / "result.json")
+            command = [sys.executable, "-I", "-B", "-c", scorer._HARNESS,
+                       str(level_dir), result_path]
+            started = time.monotonic()
+            result = scorer._run_tests(command, root, result_path, timeout=2)
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertEqual(result[0], "ERROR")
+        self.assertEqual(result[3], "test process exceeded 60 seconds")
+
+    def test_descendant_in_its_own_session_is_a_bounded_error(self):
+        # killpg cannot reach a descendant that started its own session, so
+        # the pipes stay open: one shared drain deadline bounds the wait.
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        pid_file = pathlib.Path(directory.name) / "pid"
+        root = self._level(
+            "import subprocess, unittest\n"
+            "child = subprocess.Popen(['sleep', '300'], start_new_session=True)\n"
+            f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+            "class T(unittest.TestCase):\n"
+            "    def test_ok(self): pass\n")
+        def kill_leftover():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
+        self.addCleanup(kill_leftover)
+        scorer = load_scorer()
+        level_dir = root / "tools" / "llmtool" / "eval" / "gw_ladder" / "L1"
+        result_path = str(pathlib.Path(directory.name) / "result.json")
+        command = [sys.executable, "-I", "-B", "-c", scorer._HARNESS,
+                   str(level_dir), result_path]
+        started = time.monotonic()
+        result = scorer._run_tests(command, root, result_path)
+        self.assertLess(time.monotonic() - started, scorer.DRAIN_SECONDS + 3)
+        self.assertEqual(result, ("ERROR", 0, 0, "test output did not close"))

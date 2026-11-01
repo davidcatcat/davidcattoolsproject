@@ -42,15 +42,19 @@
         {
           "task_id": "a1ecb15e26ad4a92b815d6012673a8ae",
           "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6559226030"
+        },
+        {
+          "task_id": "f8711927dfd7499a891fbd10b757fce2",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6561354943"
         }
       ]
     },
     "opencode-developer": {
-      "dispatch": "PAUSED",
+      "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-31",
-      "reason": "Owner paused OpenCode because the free token allowance is exhausted; do not dispatch, retry, buy tokens or use a paid fallback until the Owner re-enables it",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
+      "decided_at": "2026-11-02",
+      "reason": "Owner re-enabled PM-selected OpenCode dispatch with model opencode/deepseek-v4.1-flash-free (variant high); free model only, no paid fallback; PM pauses again on free-limit refusal or 2 consecutive route failures",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6560737617"
     },
     "agy": {
       "dispatch": "ALLOWED",
