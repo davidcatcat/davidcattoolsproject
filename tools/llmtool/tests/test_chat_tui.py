@@ -583,7 +583,7 @@ class WidgetTests(Base):
                          ['/pm history', '/history'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/', dev=False)][:5],
-                         ['/pm list', '/pm use', '/pm accounts', '/pm connect', '/pm new'])
+                         ['/pm connect', '/pm new', '/pm', '/pm disconnect', '/pm history'])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
         self.assertEqual(chat_tui.slash_matches('/nope'), [])
         self.assertEqual(chat_tui.slash_matches('/s\nx'), [])
@@ -810,7 +810,7 @@ class WidgetTests(Base):
         def wrapped(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 20)
-            self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('/pm accounts', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('(19 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/help'),

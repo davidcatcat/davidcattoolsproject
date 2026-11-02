@@ -290,9 +290,9 @@ def slash_matches(text, dev=True):
         return []
     query = text.lower()
     commands = [c for c in SLASH_COMMANDS if dev or not c[0].startswith("/task")]
-    pm = [c for c in commands if c[0] == "/pm" or c[0].startswith("/pm ")]
-    other = [c for c in commands if c not in pm]
-    ordered = pm + other
+    # Keep the command table's order: new commands are appended there so they do
+    # not move existing picker entries when they happen to share a prefix.
+    ordered = commands
     prefix = [c for c in ordered if c[0].startswith(query)]
     inside = [c for c in ordered if c not in prefix and len(query) > 2 and query[1:] in c[0]]
     return prefix + inside
@@ -3103,13 +3103,17 @@ class ChatTUI:
             try:
                 index = 2
                 while index < len(parts):
-                    if parts[index] == "--runtime" and index + 1 < len(parts):
+                    if parts[index] == "--runtime":
+                        if index + 1 >= len(parts):
+                            raise ValueError()
                         value = parts[index + 1]
                         if value not in ("claude", "codex"):
                             raise ValueError()
                         runtime = "claude-code" if value == "claude" else "codex"
                         index += 2
-                    elif parts[index] == "--account" and index + 1 < len(parts):
+                    elif parts[index] == "--account":
+                        if index + 1 >= len(parts):
+                            raise ValueError()
                         account = parts[index + 1]
                         index += 2
                     elif cwd is None:
