@@ -100,36 +100,37 @@ If a formal Reviewer is unavailable, do **not** replace it with an unapproved mo
 
 ## Queue and IDLE
 
-Authorized PM work scope covers open Issues already authorized, Roadmap work, in-flight Tasks, and unfinished PRs, reviews and CI (Owner 2026-11-02, #763, replacing the 2026-10-27 rule to work only from Owner prompts and never find work in the repository). The PM may split work and choose Developers under current gates, but never expand product scope, permissions, data egress or paid use.
+Authorized PM work scope covers open Issues already authorized, Roadmap work, in-flight Tasks, and unfinished PRs, reviews and CI (Owner 2026-11-02, #763, replacing the 2026-10-27 rule to work only from Owner prompts and never find work in the repository). The single work source is the #763 backlog inventory (plus GitHub deltas) within this authorized scope. The PM may split work and choose Developers under current gates, but never expand product scope, permissions, data egress or paid use.
 
-After a work package completes, or after a Task is isolated, the PM picks the next listed package or step that is executable and authorized, and has a Worker permitted by worker-dispatch.json with freshly confirmed live availability. The PM reports **IDLE** only when no such package or step exists. The IDLE report lists every remaining item and the reason it cannot run.
-
-### Parallel dispatch check (Owner 2026-10-27)
-
-The PM does not wait on CI, a review or a single Worker while other listed work can move. About every 10 minutes (a recurring schedule in the PM session, for example `/loop 10m`), and after every result, the PM re-reads the work-package list and the state of each in-flight Task, then dispatches every package or next step (formal review, repair, merge, the next slice after a dependency lands) that is unblocked and writes no file another in-flight Task writes. It repeats until nothing more can run in parallel, then reports what is running and what each waiting item waits for. A check that finds nothing reports "no new dispatch". The schedule never authorizes work outside the list, a Worker the policy does not allow, or a merge without its gates.
+After a work package completes, or after a Task is isolated, the PM runs the [Scheduled sweep](#scheduled-sweep) to advance in-flight work and pick the next executable, authorized item from the #763 inventory that has a Worker permitted by [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) with freshly confirmed live availability. The PM reports **IDLE** only when no in-flight step can move and no backlog item can run. The IDLE report lists every remaining item with its required undispatched-reason class and evidence (see below).
 
 ## Scheduled sweep
 
-Every scheduled sweep (Owner 2026-11-02, #763) runs in this order:
+This single recurring schedule (about every 10 minutes in the PM session, for example `/loop 10m`, and after every result) replaces the 2026-10-27 `Parallel dispatch check` (Owner 2026-11-02, #763). The PM does not wait on CI, a review or a single Worker while other authorized work in the #763 inventory can move. The schedule never authorizes work outside the authorized #763 scope, a Worker the policy does not allow, or a merge without its gates. Every sweep runs in this order:
 
-1. **Continue in-flight work:** advance every active Task, formal review, repair, CI check and merge that can move.
-2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items). Never decide from only a few Issues, and never invent low-value Issues.
-3. **Dispatch executable work:** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 Tasks; at the concurrency cap, make no new dispatch. An Owner wait blocks only its dependent item and never stops other work.
+1. **Continue in-flight work (uncapped):** advance every active Task, formal review, bounded repair, CI check and merge that can move. The per-sweep cap of 2 applies only to new Developer Tasks in step 3; reviews, repairs, CI checks and merges have no per-sweep cap.
+2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items) within authorized scope. Never decide from only a few Issues, and never invent low-value Issues.
+3. **Dispatch executable work (1–2 new Tasks):** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 new Developer Tasks per sweep that write no file another in-flight Task writes; at the concurrency cap, make no new Developer Task dispatch. The concurrency cap is the maximum concurrent in-flight Developer Tasks set on tracking Issue #763 (bounded by distinct authorized, live-available Developer routes in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) and one writer per D6 Task with non-overlapping `write_paths` under [AGENTS.md](../../AGENTS.md)). An Owner wait blocks only its dependent item and never stops other work.
 
-**Sweep record:** post one short comment per sweep on the tracking Issue (no new Issue, no raw logs) starting with a whole-line `<!-- activity: type=pm_progress ... -->` marker. Record:
+**Sweep record:** post one short comment per sweep on tracking Issue #763 (no new Issue, no raw logs) starting with the exact whole-line marker:
+
+`<!-- activity: type=pm_progress actor=PM target=PM status=SWEEP -->`
+
+Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scripts/llmtool_monitor.py) star rows for Owner decisions are neither raised nor settled by sweep comments. Each record holds:
 
 - timestamp, sweep run ID, PM session and trigger (`schedule` or `Owner message`);
 - backlog, in-flight and dispatchable counts;
-- new Task IDs with Developer and Issue, plus Developer start evidence;
-- a reason for each undispatched item (or a reference to the unchanged list) and next steps.
+- new Task IDs with Developer and Issue, plus verified Developer start evidence (per [Transition record](#transition-record));
+- for each undispatched item (or by reference to the previous sweep comment when the undispatched list is unchanged), one allowed reason class with its evidence—`running` (`PR #N` or `Task <id>`), `waiting_owner` (link to the open `type=waiting_owner` comment), `blocked` (`blocked by #N` or overlapping writer `Task <id>`), `unauthorized` (specific scope/policy/budget/availability clause), or `closed` (`PR/Issue #N`)—forbidding vague free text such as `not suitable`, `later` or `low priority`;
+- next steps.
 
 **Anomalies, notifications and schedule control:**
 
-- Zero dispatch while executable work and a free Developer are available is an anomaly, not **IDLE**.
-- Normal sweeps are silent; anomalies, sweep failures, Developer start failures and real Owner decisions get GitHub records.
-- Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->`; verify with `llmtool_monitor.py --once`.
+- Zero new dispatch while executable work and a free Developer are available below the concurrency cap is an anomaly, not **IDLE**.
+- Normal sweeps are silent in chat (send no chat message) but still post the `type=pm_progress` sweep record on the tracking Issue; anomalies, sweep failures, Developer start failures and real Owner decisions also get dedicated GitHub records.
+- Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->`; verify both with `llmtool_monitor.py --once`.
 - Status answers give numbers first (`dispatched`, `merged`, `remaining`).
-- The schedule prompt must tell the PM to re-read this `Scheduled sweep` section from canonical `main` every sweep. The PM may stop and re-enable the schedule, recording both on the tracking Issue.
+- The schedule prompt must instruct the PM to re-read this `Scheduled sweep` section from canonical `main` on every sweep. The PM may stop and re-enable the schedule, recording both on the tracking Issue.
 
 ## Transition record
 
