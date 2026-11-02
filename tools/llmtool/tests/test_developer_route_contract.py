@@ -8,7 +8,7 @@ import tempfile
 
 from llmtool import task_completion
 from llmtool.developer_routes.base import (
-    DeveloperRoute, RouteError, capture_snapshot, run_route,
+    DeveloperRoute, RouteError, _git_state_changed, capture_snapshot, run_route,
 )
 
 _DEFAULT_MODEL = object()
@@ -348,6 +348,53 @@ class DeveloperRouteContractTests(unittest.TestCase):
                 run_route(self.route, request, gate=lambda: True, runner=runner,
                           boundary=FakeBoundary(), snapshot=capture_snapshot)
             self.assertEqual(caught.exception.code, 'FAKE_GIT_STATE_CHANGED')
+
+    def test_other_branch_tracking_config_is_ignored_with_linked_worktree(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            linked = Path(temp) / 'linked'
+            root.mkdir()
+            request = self._real_git_request(root)
+            subprocess.run(['/usr/bin/git', '-C', str(root), 'worktree', 'add',
+                            '-b', 'other-task', str(linked), request['expected_head']],
+                           check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            before = capture_snapshot(root)
+            subprocess.run(['/usr/bin/git', '-C', str(root), 'config',
+                            'branch.other-task.remote', 'origin'], check=True)
+            subprocess.run(['/usr/bin/git', '-C', str(root), 'config',
+                            'branch.other-task.merge', 'refs/heads/other-task'], check=True)
+            after = capture_snapshot(root)
+            self.assertFalse(_git_state_changed(before, after))
+
+    def test_current_branch_and_security_config_changes_are_detected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            request = self._real_git_request(root)
+            config = root / '.git' / 'config'
+            mutations = (
+                ('core.hooksPath', 'hooks'),
+                ('include.path', 'included.conf'),
+                ('includeIf.onbranch:main.path', 'conditional.conf'),
+                ('filter.test.clean', 'clean-command'),
+                ('alias.test', '!custom-command'),
+                ('remote.origin.url', 'https://example.invalid/repo'),
+                ('credential.helper', 'custom-helper'),
+            )
+            branch_key = f"branch.{request['expected_branch']}.remote"
+            mutations = ((branch_key, 'origin'),) + mutations
+            for key, value in mutations:
+                with self.subTest(key=key):
+                    before = capture_snapshot(root)
+                    subprocess.run(['/usr/bin/git', '-C', str(root), 'config', key, value],
+                                   check=True)
+                    after = capture_snapshot(root)
+                    self.assertTrue(_git_state_changed(before, after))
+            before = capture_snapshot(root)
+            config.write_text('[broken\n')
+            after = capture_snapshot(root)
+            self.assertTrue(_git_state_changed(before, after))
 
     def test_preexisting_ignored_directory_and_in_scope_edit_succeed(self):
         with tempfile.TemporaryDirectory() as temp:

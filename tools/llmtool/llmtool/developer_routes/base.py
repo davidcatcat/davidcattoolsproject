@@ -256,6 +256,46 @@ def capture_snapshot(root):
         except FileNotFoundError:
             return None
 
+    def common_config_digest(path, current_branch):
+        """Fingerprint common config except concurrent branch/worktree metadata."""
+        try:
+            raw = task_completion._git(
+                root, ('config', '--no-includes', '--null', '--list', '--file', str(path)),
+                limit=1024 * 1024)
+        except Exception:
+            # Preserve a marker so _git_state_changed can reject an invalid
+            # config even when both snapshots see the same malformed bytes.
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                raw = b''
+            return 'INVALID:' + hashlib.sha256(raw).hexdigest()
+        branch_bytes = os.fsencode(current_branch)
+        entries = []
+        for record in raw.split(b'\0'):
+            if not record:
+                continue
+            key, separator, value = record.partition(b'\n')
+            if not separator:
+                raise RouteError('ROUTE_SNAPSHOT_INVALID')
+            # Git writes branch.<name>.remote/merge while another Task creates
+            # and pushes its branch. The current D6 branch remains significant.
+            if key.startswith(b'branch.'):
+                subsection, dot, _variable = key[len(b'branch.'):].rpartition(b'.')
+                if dot and subsection != branch_bytes:
+                    continue
+            # Worktree-specific bookkeeping lives in worktree sections.
+            if key.startswith(b'worktree.'):
+                continue
+            entries.append((key, value))
+        digest = hashlib.sha256()
+        for key, value in entries:
+            digest.update(len(key).to_bytes(8, 'big'))
+            digest.update(key)
+            digest.update(len(value).to_bytes(8, 'big'))
+            digest.update(value)
+        return digest.hexdigest()
+
     git = {
         'head': head,
         'branch': branch,
@@ -267,7 +307,7 @@ def capture_snapshot(root):
         'refs': refs,
         'head_commits': head_commits,
         'config_worktree': file_digest(git_dir / 'config.worktree'),
-        'config_common': file_digest(common_dir / 'config'),
+        'config_common': common_config_digest(common_dir / 'config', branch),
     }
     pointer = root / '.git'
     if pointer.is_symlink():
@@ -313,6 +353,10 @@ def _git_state_changed(before, after):
         return _git_signature(before) != _git_signature(after)
     for key in ('head', 'branch', 'branch_ref', 'git_dir', 'index', 'stash',
                 'pointer', 'config_worktree', 'config_common'):
+        if (key == 'config_common' and
+                (str(a.get(key, '')).startswith('INVALID:') or
+                 str(b.get(key, '')).startswith('INVALID:'))):
+            return True
         if a.get(key) != b.get(key):
             return True
     before_refs, after_refs = a.get('refs', {}), b.get('refs', {})
