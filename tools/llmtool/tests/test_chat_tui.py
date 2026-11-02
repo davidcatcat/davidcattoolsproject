@@ -3934,12 +3934,16 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(ui.pm_target, (created, cwd))
 
     def test_pm_list_is_compact_bounded_and_selectable_by_index_or_prefix(self):
-        repo_root, _slug = chat_tui_theme.repo_info()
-        self.assertIsNotNone(repo_root)
-        bindings = [self.binding]
+        repo_root = (self.temp_root / 'repo').resolve()
+        repo_root.mkdir()
+        self.api = type(self.api)(state_root=self.temp_root / 'pm-list-state',
+                                  environ={'HOME': str(self.temp_root)})
+        bindings = [self.api.create_dedicated(str(repo_root))]
         for _index in range(11):
-            bindings.append(self.api.create_dedicated(repo_root))
-        ui, _ = self.drive(['/pm list\r'])
+            bindings.append(self.api.create_dedicated(str(repo_root)))
+        with patch.object(chat_tui_theme, 'repo_info',
+                          return_value=(str(repo_root), 'test-repo')):
+            ui, _ = self.drive(['/pm list\r'])
         lines = [line for line in ui.conversation.text.splitlines() if line.startswith('  ')]
         self.assertEqual(len([line for line in lines if line[2:3].isdigit()]), 10)
         self.assertIn('… 2 more (/pm list --all)', ui.conversation.text)
@@ -3948,7 +3952,9 @@ class PMConversationTests(BoundedPMTest):
         self.assertNotIn(bindings[0]['native_session_id'], ui.conversation.text)
         self.assertIn(bindings[-1]['native_session_id'][:8], lines[0])
         self.assertRegex(lines[0], r'^  1\. claude-code · account default · [0-9a-f]{8} · [0-9]+[smhd] ago · cwd \.')
-        ui, _ = self.drive(['/pm list --all\r'])
+        with patch.object(chat_tui_theme, 'repo_info',
+                          return_value=(str(repo_root), 'test-repo')):
+            ui, _ = self.drive(['/pm list --all\r'])
         self.assertEqual(len([line for line in ui.conversation.text.splitlines()
                               if re.match(r'^  \d+\.', line)]), 12)
         ui, _ = self.drive(['/pm use 1\r'])

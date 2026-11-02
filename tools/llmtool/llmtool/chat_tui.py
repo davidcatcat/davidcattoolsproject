@@ -224,7 +224,7 @@ STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usag
 STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
-PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "keys", "identity")
+PM_STATUS_DROP_ORDER = ("help", "identity", "scroll", "session", "mouse", "keys")
 STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
 STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
