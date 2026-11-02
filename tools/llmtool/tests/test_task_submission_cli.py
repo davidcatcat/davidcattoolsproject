@@ -978,9 +978,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
                             candidate.get('state') == 'DEVELOPER_RESPONDED'):
                         raced = True
                         current = store.get(task_id)['developer']
-                        newer = dict(current, context_sha256='c' * 64)
-                        original_compare(task_id, expected={'developer': current},
-                                         developer=newer)
+                        newer = dict(current)
+                        newer.update(
+                            state='DEVELOPER_OUTCOME_UNKNOWN',
+                            error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
+                            execution={
+                                'status': 'UNKNOWN', 'native_session_id': None,
+                                'process_exit_code': None, 'stdout_sha256': None,
+                                'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                                'usage_source': 'UNKNOWN', 'source_bytes': None,
+                                'source_file_count': None,
+                                'source_manifest_sha256': None,
+                            })
+                        raced_record = original_compare(
+                            task_id, expected={'developer': current}, developer=newer)
+                        self.assertEqual(raced_record['developer'], newer)
                     return original_compare(task_id, expected=expected, **changes)
 
                 def execute(**kwargs):
@@ -989,7 +1001,26 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     return result
 
                 output = io.StringIO()
+                snapshot = type('Snapshot', (), {
+                    'common_dir': self.executor_common_dir,
+                    'root': str(self.executor_root),
+                    'branch': 'feat/test-executor',
+                    'head': self.executor_head,
+                })()
+                registration = type('Registration', (), {
+                    'task_id': 'executor-task-1',
+                    'trusted_agent_id': 'opencode-developer',
+                    'session_ref': 'Executor Session 1',
+                    'native_session_id': None,
+                    'root': str(self.executor_root),
+                    'common_dir': self.executor_common_dir,
+                    'branch': 'feat/test-executor',
+                })()
                 with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                     return_value=snapshot), \
+                        patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                     return_value=(registration, snapshot)), \
                         patch.object(store, 'compare_and_update', side_effect=compare), \
                         patch('llmtool.task_submission_cli.opencode_direct_developer.run',
                               side_effect=execute), \
@@ -999,8 +1030,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                         with self.assertRaises(TaskStoreConflict):
                             run_task_opencode_delegate(args, store=store)
                         self.assertTrue(raced)
-                        self.assertEqual(store.get(task['task_id'])['developer']['context_sha256'],
-                                         'c' * 64)
+                        self.assertEqual(store.get(task['task_id'])['developer'], newer)
                     else:
                         run_task_opencode_delegate(args, store=store)
                         self.assertEqual(store.get(task['task_id'])['developer']['state'],
@@ -3258,10 +3288,17 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                     if not raced:
                         raced = True
                         newer = dict(current)
-                        newer_execution = dict(current['execution'])
-                        newer_execution.update(
-                            child_pid=654, child_start_time='654321', child_pgid=654)
-                        newer['execution'] = newer_execution
+                        newer.update(
+                            state='DEVELOPER_OUTCOME_UNKNOWN',
+                            error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
+                            execution={
+                                'status': 'UNKNOWN', 'native_session_id': None,
+                                'process_exit_code': None, 'stdout_sha256': None,
+                                'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                                'usage_source': 'UNKNOWN', 'source_bytes': None,
+                                'source_file_count': None,
+                                'source_manifest_sha256': None,
+                            })
                         raced_record = original(
                             task_id, expected={'developer': current}, developer=newer)
                         self.assertEqual(raced_record['developer'], newer)
