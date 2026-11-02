@@ -49,7 +49,7 @@ security sign-off, QA verdict, or merge authority.
 This classification applies to the triage use above and to the company `gw` Developer
 route in [AGENTS.md](../../AGENTS.md). Check the four layers separately. Record each
 layer as `PASS`, `FAIL` or `UNKNOWN`, with its time and evidence, in the
-[Worker dispatch authority and live technical state](../../docs/history/llmtool-roadmap-archive-20261028.md#worker-dispatch-authority-and-live-technical-state):
+[Worker dispatch authority and live technical state](../../tools/llmtool/ROADMAP.md):
 
 1. **TCP:** can a connection to the configured endpoint open? Example: a bounded
    `nc -z` connect, with no request body.
@@ -147,12 +147,12 @@ its savings claims.
   canonical/fixed roots and unrelated repositories, even in private0700 folders.
   Bounded physical ancestor/.git checks are cooperative, not same-UID race isolation.
 - **Worker schema v2 (breaking).** Fixture and grant routes both return
-  schema_version2. digests.request_body hashes actual HTTP wire bytes; the old
+  `schema_version=2`. `digests.request_body` hashes actual HTTP wire bytes; the old
   compact-message digests.prompt key is removed. Grant DATA remains schema_version1.
 - **One serialization.** The provider's own request bytes are capped (64 KiB),
   re-scanned, digested and sent once through its own opener (no proxy, no redirect).
 - **`max_calls` is informational.** There is no store, so it cannot be enforced across
-  runs. Capture and max_calls limits are1..7. The run report must list every invocation
+  runs. Capture and `max_calls` limits are 1..7. The run report must list every invocation
   with its request-body digest; no cross-process replay/call cap is claimed.
 
 - **Deterministic first.** The selector must be COMPLETE and every failure ID must have
