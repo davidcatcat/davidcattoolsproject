@@ -1,3 +1,5 @@
 # Explicit Mac-required unittest IDs; module IDs run the complete test module.
+# PTY terminal behavior depends on Darwin TTY and process signal semantics.
 test_chat_tui_pty.ChatTUIPTYTests
+# Native provider and restricted-environment checks cover Mac sandbox boundaries.
 test_review_authority_native.NativeProviderTests
