@@ -83,3 +83,4 @@ runner under GitHub → Settings → Actions → Runners.
   `install.sh`; ghrunner's work, temp and log folders are kept.
 - Never re-enable the disabled GitHub-hosted workflows (`llmtool CI`,
   `nlf CI`, `ai-loop helper CI`), and never run the runner as the Owner.
+  The self-hosted ai-loop job in llmtool Linux CI is a separate job.
