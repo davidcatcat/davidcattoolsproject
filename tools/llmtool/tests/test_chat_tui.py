@@ -1954,6 +1954,8 @@ class TaskListTests(Base):
         raise AssertionError('list read did not finish')
 
     def test_list_detail_and_keys(self):
+        seen = {}
+
         def list_open(ui):
             self.assertTrue(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
@@ -1968,11 +1970,27 @@ class TaskListTests(Base):
             self.assertEqual(sum('UNAVAILABLE' in row for row in rows), 1)
             self.assertTrue(rows[2].startswith('▶ '))
 
+            seen['list_copies'] = []
+            ui.list_view._copier = lambda text: seen['list_copies'].append(text) or True
+
+        def list_copied(ui):
+            ui.list_view.wait_copy()
+            self.assertEqual(seen['list_copies'], [ui.selected_task_id()])
+
         def detail_open(ui):
             self.assertTrue(ui.show_detail)
+            self.assertEqual(ui.detail_view.text.splitlines()[:3], [
+                '狀態：等待 Developer 派送', '下一步輪到誰：PM', '你需要做：目前不用'])
+            self.assertTrue(ui.detail_view.spans)
             self.assertIn('Status (from TaskStore record', ui.detail.text)
             self.assertIn('Task: ' + ui.selected_task_id(), ui.detail.text)
             self.assertIn('Task detail (llmtool Core task show', ui.detail.text)
+            seen['detail_copies'] = []
+            ui.detail_view._copier = lambda text: seen['detail_copies'].append(text) or True
+
+        def detail_copied(ui):
+            ui.detail_view.wait_copy()
+            self.assertEqual(seen['detail_copies'], [ui.selected_task_id()])
 
         def back_to_list(ui):
             self.assertFalse(ui.show_detail)
@@ -1985,7 +2003,8 @@ class TaskListTests(Base):
                             lambda ui: setattr(self, 'calls', self.pm.complete.call_count),
                             '/task list\r', self.listed, list_open,
                             '\x1b[B', lambda ui: self.assertEqual(ui.list_index, 1),
-                            '\r', self.idle, detail_open, '\x1b', self.esc_settled, back_to_list,
+                            'c', list_copied, '\r', self.idle, detail_open, 'c', detail_copied,
+                            '\x1b', self.esc_settled, back_to_list,
                             '\x1b', self.esc_settled, lambda ui: self.assertFalse(ui.show_list),
                             lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
                             '\x1bOR', self.listed, lambda ui: self.assertTrue(ui.show_list),
