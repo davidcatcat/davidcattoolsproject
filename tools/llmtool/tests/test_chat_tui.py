@@ -201,12 +201,12 @@ class FallbackTests(Base):
 class WidgetTests(Base):
     """Drive the real Application through a pipe input and a dummy output."""
 
-    def drive(self, steps, size=None):
+    def drive(self, steps, size=None, dev=None):
         output = DummyOutput()
         if size is not None:
             output.get_size = lambda: size[0]
         with create_pipe_input() as pipe:
-            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output)
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output, dev=dev)
             self.ui = ui
 
             async def main():
@@ -584,7 +584,15 @@ class WidgetTests(Base):
             self.assertEqual(ui.app.output.get_size().columns, 50)
             self.assertTrue(self.menu_rows(ui))
 
-        self.drive(['/ta', '\t', candidates], size=[Size(rows=24, columns=50)])
+        self.drive(['/ta', '\t', candidates], size=[Size(rows=24, columns=50)], dev=True)
+        self.factory.assert_not_called()
+
+    def test_tab_does_not_offer_dev_commands_without_dev_mode(self):
+        def unchanged(ui):
+            self.assertEqual(ui.input.text, '/ta')
+            self.assertEqual(ui.menu_items, [])
+
+        self.drive(['/ta', '\t', unchanged], dev=False)
         self.factory.assert_not_called()
 
     def test_tab_without_match_keeps_slash_draft_and_non_slash_tab_behavior(self):
