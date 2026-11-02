@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+import uuid
 from argparse import Namespace
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -23,6 +24,7 @@ from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore, TaskStoreConflict, new_id
 from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
 from llmtool import remote_test
+from llmtool import active_pm_inbox
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT, _record,
                                          _provider_route_binding, run_task_complete,
@@ -661,6 +663,106 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with patch.dict(os.environ, {'HOME': str(self.home)}), redirect_stdout(output):
             self.assertEqual(main(['task', 'show', saved['task_id']]), 0)
         self.assertEqual(json.loads(output.getvalue())['pm_provenance'], saved['pm_provenance'])
+
+    def test_task_adopt_moves_open_tasks_and_second_run_is_noop(self):
+        pm_cwd = Path(self.temp.name).resolve() / 'pm-cwd'
+        pm_cwd.mkdir()
+        claude_home = Path(self.temp.name).resolve() / 'claude-home'
+        old_native, new_native = str(uuid.uuid4()), str(uuid.uuid4())
+        env = {'HOME': str(self.home), 'CLAUDE_CONFIG_DIR': str(claude_home)}
+        old_file = active_pm_inbox.claude_session_file(old_native, str(pm_cwd), env)
+        old_file.parent.mkdir(parents=True)
+        old_file.write_text('{}\n', encoding='utf-8')
+        new_file = active_pm_inbox.claude_session_file(new_native, str(pm_cwd), env)
+        new_file.parent.mkdir(parents=True, exist_ok=True)
+        new_file.write_text('{}\n', encoding='utf-8')
+        store = TaskStore(Path(self.temp.name).resolve() / 'adopt-store')
+        response = json.dumps({'schema_version': 1, 'summary': 'A bounded plan.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW',
+                'goal': 'Add a focused test.', 'acceptance': ['The test passes.']}})
+        with patch.dict(os.environ, env):
+            task = run_task_record_pm(
+                Namespace(stdin_json=True, pm_session_id=old_native,
+                          pm_runtime='claude-code', pm_cwd=str(pm_cwd)),
+                store=store, input_stream=io.StringIO(json.dumps({
+                    'request': 'Add a focused test.', 'response': response})),
+                return_record=True)
+        old_file.unlink()
+        self.assertEqual(parser_for_cli().parse_args([
+            'task', 'adopt', '--from-pm-session', old_native,
+            '--to-pm-session', 'pm-' + new_native]).action, 'adopt')
+        with patch.dict(os.environ, env), \
+                patch('llmtool.task_submission_cli.os.getcwd', return_value=str(pm_cwd)), \
+                patch('llmtool.task_submission_cli.TaskStore', return_value=store):
+            first_out = io.StringIO()
+            with redirect_stdout(first_out):
+                self.assertEqual(main(['task', 'adopt', '--from-pm-session', old_native,
+                                       '--to-pm-session', 'pm-' + new_native]), 0)
+            first = json.loads(first_out.getvalue())
+            self.assertEqual(first, {'moved': [task['task_id']], 'skipped': []})
+            self.assertNotIn(str(pm_cwd), first_out.getvalue())
+            self.assertNotIn(old_file.name, first_out.getvalue())
+
+            snapshot = store.get(task['task_id'])
+            second_out = io.StringIO()
+            with redirect_stdout(second_out):
+                self.assertEqual(main(['task', 'adopt', '--from-pm-session', 'pm-' + old_native,
+                                       '--to-pm-session', new_native]), 0)
+            self.assertEqual(json.loads(second_out.getvalue()),
+                             {'moved': [], 'skipped': []})
+            self.assertEqual(store.get(task['task_id']), snapshot)
+
+    def test_task_adopt_refusals_are_sanitized_and_do_not_change_records(self):
+        pm_cwd = Path(self.temp.name).resolve() / 'pm-refusal-cwd'
+        pm_cwd.mkdir()
+        claude_home = Path(self.temp.name).resolve() / 'claude-refusal-home'
+        old_native, new_native = str(uuid.uuid4()), str(uuid.uuid4())
+        env = {'HOME': str(self.home), 'CLAUDE_CONFIG_DIR': str(claude_home)}
+        old_file = active_pm_inbox.claude_session_file(old_native, str(pm_cwd), env)
+        old_file.parent.mkdir(parents=True)
+        old_file.write_text('{}\n', encoding='utf-8')
+        new_file = active_pm_inbox.claude_session_file(new_native, str(pm_cwd), env)
+        new_file.parent.mkdir(parents=True, exist_ok=True)
+        new_file.write_text('{}\n', encoding='utf-8')
+        store = TaskStore(Path(self.temp.name).resolve() / 'adopt-refusal-store')
+        response = json.dumps({'schema_version': 1, 'summary': 'A bounded plan.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW',
+                'goal': 'Add a focused test.', 'acceptance': ['The test passes.']}})
+        with patch.dict(os.environ, env):
+            task = run_task_record_pm(
+                Namespace(stdin_json=True, pm_session_id=old_native,
+                          pm_runtime='claude-code', pm_cwd=str(pm_cwd)),
+                store=store, input_stream=io.StringIO(json.dumps({
+                    'request': 'Add a focused test.', 'response': response})),
+                return_record=True)
+        before = store.get(task['task_id'])
+        attempts = (
+            (old_native, new_native, 'PM_SESSION_ADOPTION_OLD_SESSION_PRESENT'),
+            (old_native, old_native, 'PM_SESSION_ADOPTION_KEYS_EQUAL'),
+            ('malformed-key', new_native, 'PM_SESSION_ADOPTION_KEY_INVALID'),
+        )
+        with patch.dict(os.environ, env), \
+                patch('llmtool.task_submission_cli.os.getcwd', return_value=str(pm_cwd)), \
+                patch('llmtool.task_submission_cli.TaskStore', return_value=store):
+            for old_key, new_key, code in attempts:
+                out = io.StringIO()
+                with self.subTest(code=code):
+                    with redirect_stdout(out):
+                        self.assertEqual(main(['task', 'adopt', '--from-pm-session', old_key,
+                                               '--to-pm-session', new_key]), 1)
+                    self.assertEqual(json.loads(out.getvalue()), {
+                        'code': code, 'moved': [], 'skipped': []})
+                    self.assertNotIn(str(pm_cwd), out.getvalue())
+                    self.assertNotIn(old_file.name, out.getvalue())
+                    self.assertEqual(store.get(task['task_id']), before)
+
+    def test_task_adopt_appears_in_help_and_other_task_parser_remains(self):
+        parser = parser_for_cli()
+        task_action = next(action for action in parser._actions
+                           if action.dest == 'command').choices['task']
+        help_text = task_action.format_help()
+        self.assertIn('adopt', help_text)
+        self.assertEqual(parser.parse_args(['task', 'show', 'a' * 32]).action, 'show')
 
     def test_record_pm_reports_safe_assignment_limit_diagnostics(self):
         cases = (
