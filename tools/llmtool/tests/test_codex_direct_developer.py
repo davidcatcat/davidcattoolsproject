@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from llmtool import codex_direct_developer as direct
+from llmtool import review_dispatch
 from llmtool import task_submission_cli
 from llmtool.errors import LLMToolError
 from llmtool.worker_dispatch import WorkerDispatchDenied
@@ -126,6 +127,10 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertTrue(self.invoked.exists())
         argv = direct._argv('/fake/codex', self.root, 'gpt-6-luna', 'high',
                             pycache_prefix='/tmp/codex-direct-cache')
+        self.assertNotIn('--ephemeral', argv)
+        for control in ('--ignore-user-config', '--ignore-rules', '--strict-config',
+                        '--sandbox', 'workspace-write', '--cd', str(self.root)):
+            self.assertIn(control, argv)
         self.assertIn('--sandbox', argv)
         self.assertIn('workspace-write', argv)
         self.assertIn('model_reasoning_effort=high', argv)
@@ -140,6 +145,10 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('shell_environment_policy.set.PYTHONDONTWRITEBYTECODE="1"', argv)
         self.assertIn('shell_environment_policy.set.PYTHONPYCACHEPREFIX="/tmp/codex-direct-cache"',
                       argv)
+
+    def test_reviewer_argv_remains_ephemeral(self):
+        argv = review_dispatch._codex_argv('/fake/codex', self.root)
+        self.assertIn('--ephemeral', argv)
 
     def test_shell_commands_get_an_explicit_path_with_the_worktree_venv_first(self):
         # Regression (#352 G5): with inherit="none" and no PATH, every Codex
