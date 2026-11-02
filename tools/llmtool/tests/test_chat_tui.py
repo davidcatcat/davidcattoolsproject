@@ -1654,6 +1654,19 @@ class W57ChatTests(Base):
         self.assertEqual([c for c in chat_tui.slash_matches('/', dev=False)
                           if c[0].startswith('/task')], [])
 
+    def test_w60_up_down_with_nothing_to_open_say_why_once(self):
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        hint = 'llmtool: 沒有 Task 面板；/pm connect 連 PM 後 ↓ 看背景 Task'
+
+        def once(ui):
+            self.assertEqual(ui.conversation.text.count(hint), 1)
+            self.assertNotIn('F3', ui.conversation.text)       # F3 exists only with --dev
+            self.assertEqual(ui.input.text, '')
+
+        ui, _ = self.drive(['\x1b[B', once, '\x1b[B', once, '\x1b[A', once,
+                            'hello\r', self.idle, '\x1b[A',
+                            lambda ui: self.assertEqual(ui.input.text, 'hello')])  # history
+
     def test_dev_flag_from_env_or_option(self):
         self.assertTrue(chat_tui.dev_enabled({chat_tui.DEV_ENV: '1'}))
         self.assertFalse(chat_tui.dev_enabled({chat_tui.DEV_ENV: '0'}))
@@ -1934,6 +1947,176 @@ class TaskListTests(Base):
                             '\x1bOR', lambda ui: self.assertFalse(ui.show_list)])
         self.assertEqual(self.pm.complete.call_count, self.calls)
         self.factory.assert_not_called()
+
+    # -- W60 Owner acceptance: F3 list, F4 events and the F2 detail select and copy ------
+    @staticmethod
+    async def w60_drag_row(ui, row, length=12):
+        """Drag over ``length`` cells of the shown pane's ``row``; returns after release."""
+        left, top, _height = ui._pane_geometry()
+        for event in (press(left + 1, top + row + 1), drag(left + length, top + row + 1),
+                      release(left + length, top + row + 1)):
+            ui.app.input.send_text(event)
+            await asyncio.sleep(0.05)
+
+    def w60_copier(self, view):
+        copies = []
+        view._copier = lambda text: copies.append(text) or True
+        return copies
+
+    def test_w60_f3_list_drag_selects_copies_and_shift_c_copies_the_whole_list(self):
+        seen = {}
+
+        def render(ui):
+            ui.app.renderer.render(ui.app, ui.app.layout)
+
+        async def dragged(ui):
+            self.assertIs(ui._mouse_view(), ui.list_view)
+            self.assertIn('拖曳即複製', ui.status_text())
+            seen['copies'] = copies = self.w60_copier(ui.list_view)
+            await self.w60_drag_row(ui, 2)
+            self.assertTrue(ui.list_view.wait_copy())
+            row = ui.list_view.text.splitlines()[2]
+            self.assertTrue(copies and row.startswith(copies[-1]), (copies, row))
+            self.assertIn('Cmd+V 貼上', ui.status_text())
+            self.assertNotIn('Cmd+C', ui.status_text())
+            ui.app.input.send_text('\x03')                      # Ctrl-C copies it again
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.list_view.wait_copy())
+            self.assertEqual(copies[-1], copies[-2])
+            self.assertFalse(ui.quit_pending)
+            self.assertTrue(ui.show_list)
+
+        async def copied_all(ui):
+            copies = seen['copies']
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.list_view.wait_copy())
+            text = copies[-1]
+            for record in ui.list_records:
+                self.assertIn(record['task_id'], text)          # full IDs, every Task
+            self.assertIn('Stage (derived)', text)
+            self.assertNotIn('\x1b', text)
+            self.assertIn('全文 已複製', ui.status_text())
+            self.assertTrue(ui.show_list)
+
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle,
+                    '/task mode profile first\r', 'second task\r', self.idle,
+                    '/task list\r', self.listed, render, dragged, copied_all])
+
+    def test_w60_detail_opened_from_the_f3_list_drags_and_copies_like_the_panel(self):
+        async def detail(ui):
+            self.assertTrue(ui.show_detail)
+            render = ui.app.renderer.render
+            render(ui.app, ui.app.layout)
+            self.assertIs(ui._mouse_view(), ui.detail_view)
+            copies = self.w60_copier(ui.detail_view)
+            await self.w60_drag_row(ui, 0, 10)
+            self.assertTrue(ui.detail_view.wait_copy())
+            first = ui.detail_view.text.splitlines()[0]
+            self.assertTrue(copies and first.startswith(copies[-1]), (copies, first))
+            self.assertFalse(ui.view.selected_range())          # never the hidden chat
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.detail_view.wait_copy())
+            self.assertEqual(copies[-1], ui.detail_view.text)   # the whole detail
+            self.assertIn('Task detail (llmtool Core task show', copies[-1])
+            self.assertNotIn('\x1b', copies[-1])
+            self.assertEqual(ui.input.text, '')
+
+        async def back(ui):
+            await asyncio.sleep(1.2)
+            self.assertFalse(ui.show_detail)
+            self.assertTrue(ui.show_list)
+            self.assertFalse(ui.detail_view.selected_range())
+
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle,
+                    '/task list\r', self.listed, '\r', self.idle, detail, '\x1b', back])
+
+    def test_w60_f4_events_drag_and_shift_c(self):
+        async def events(ui):
+            await asyncio.sleep(0.2)
+            ui.app.renderer.render(ui.app, ui.app.layout)
+            self.assertIs(ui._mouse_view(), ui.events_view)
+            copies = self.w60_copier(ui.events_view)
+            await self.w60_drag_row(ui, 0, 10)
+            self.assertTrue(ui.events_view.wait_copy())
+            self.assertTrue(copies and ui.events_view.text.startswith(copies[-1]), copies)
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.events_view.wait_copy())
+            self.assertEqual(copies[-1], ui.events_view.text)
+            self.assertIn('Recent events', copies[-1])
+
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle,
+                    '\x1bOS', self.listed, events])
+
+    def test_w60_f3_list_longer_than_the_screen_scrolls_and_shift_c_copies_every_row(self):
+        """Owner 3rd acceptance: C copied only the first page; the list must scroll."""
+        ids = [('%02d' % n) * 16 for n in range(40)]          # distinct first 8 characters
+        records = [_record(task_id=task, request='W60 第%02d列' % n,
+                           updated_at='2026-11-02T%02d:%02d:00Z' % (n // 60, n % 60))
+                   for n, task in enumerate(ids)]
+        size = [Size(rows=24, columns=80)]
+        seen = {}
+
+        def render(ui):
+            ui.app.renderer.render(ui.app, ui.app.layout)
+
+        def shown(ui):
+            _left, _top, height = ui._pane_geometry()
+            view = ui.list_view
+            return [ui.list_view.text.splitlines()[row] for row in
+                    range(view.top, min(view.top + height, len(view.text.splitlines())))]
+
+        async def first(ui):
+            render(ui)
+            self.assertTrue(ui.app.layout.has_focus(ui.list_window))
+            self.assertEqual(len(ui.list_view.text.splitlines()), 2 + 40)   # every row
+            self.assertNotIn(ids[39][:8], '\n'.join(shown(ui)))         # beyond the screen
+            seen['copies'] = self.w60_copier(ui.list_view)
+
+        async def down_past_edge(ui):
+            for _ in range(30):
+                ui.app.input.send_text('\x1b[B')
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
+            render(ui)
+            self.assertEqual(ui.list_index, 30)
+            self.assertGreater(ui.list_view.top, 0)                      # scrolled
+            self.assertIn('▶ ' + ids[30][:8], '\n'.join(shown(ui)))     # selection on screen
+
+        async def page_down(ui):
+            before = ui.list_index
+            ui.app.input.send_text('\x1b[6~')                            # PgDn
+            await asyncio.sleep(0.1)
+            render(ui)
+            self.assertGreater(ui.list_index, before)
+            self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
+            ui.app.input.send_text('\x1b[5~')                            # PgUp
+            await asyncio.sleep(0.1)
+            render(ui)
+            self.assertLess(ui.list_index, 39)
+            self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
+
+        async def wheel(ui):
+            top = ui.list_view.top
+            ui.app.input.send_text(WHEEL_UP * 3)
+            await asyncio.sleep(0.1)
+            self.assertLess(ui.list_view.top, top)
+
+        async def copy_all(ui):
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.list_view.wait_copy())
+            text = seen['copies'][-1]
+            for task in ids:
+                self.assertIn(task, text)                                # all 40, full IDs
+            self.assertEqual(len(text.splitlines()), 2 + 40)
+            self.assertNotIn('\x1b', text)
+
+        with patch('llmtool.chat_tui_status.load_records', return_value=(records, 0)):
+            self.drive(['/task list\r', self.listed, first, down_past_edge, page_down, wheel,
+                        copy_all], size=size)
 
     def test_refresh_on_key_and_interval_only(self):
         from llmtool import chat_tui_status
@@ -4337,7 +4520,7 @@ class PMConversationTests(BoundedPMTest):
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
             ui, _ = self.drive([self.connect(), self.connected, self.w59_listed, scrolled, back,
-                                '\x1b[B', '\r', opened, '草稿 不見不行',
+                                '\x1b[B', '\r', opened, '\t', '草稿 不見不行',
                                 '\x1b[A', '\x1b[B', '\x1b[6~', '\r', kept,
                                 '\x1b', lambda ui: asyncio.sleep(0.6), closed])
         self.assertEqual(self.fakes[0].users(), [])          # Enter in the detail sent nothing
@@ -4681,7 +4864,7 @@ class PMConversationTests(BoundedPMTest):
             self.drive([self.connect(), self.connected, counting, self.w59_listed,
                         '請問進度？\r', streaming,
                         # search -> detail -> PM, with an empty refresh under the detail
-                        '\x1b[B', '\r', self.w59_refresh([]), '\x12',
+                        '\x1b[B', '\r', self.w59_refresh([]), '\t', '\x12',
                         layer(detail=True, searching=True),
                         self.w59_esc, layer(detail=True, searching=False),
                         self.w59_esc, layer(False, detail=False),
@@ -4772,10 +4955,344 @@ class PMConversationTests(BoundedPMTest):
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
             self.drive([self.connect(), self.connected, self.w59_listed,
-                        '請問進度？\r', streaming, '\x1b[B', '\r', opened, '草稿', same,
+                        '請問進度？\r', streaming, '\x1b[B', '\r', opened, '\t', '草稿', same,
                         self.w59_refresh([]), same, self.w59_refresh([], self.W59_ERROR), same,
                         self.w59_refresh(self.w59_items()), same, stale, same,
                         streamed, same, self.w59_esc, closed_stale])
+
+    # -- W60: evidence and provenance in the Task detail; c copies the Task ID --------------
+    def w60_copies(self, ui):
+        copies = []
+        ui.task_view._copier = lambda text: copies.append(text) or True
+        return copies
+
+    def test_w60_c_copies_the_opened_task_id_even_after_a_refresh(self):
+        a, _b = self.w59_items()
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_B in self.w59_text(ui), 'detail read')
+            self.assertIn('c 複製 Task ID', ui.status_text())
+            self.assertIn('c 複製 Task ID', self.w59_text(ui).splitlines()[0])
+            seen['copies'] = self.w60_copies(ui)
+
+        async def copied(ui):
+            await self.until(ui, lambda ui: seen['copies'], 'Task ID copied')
+            ui.task_view.wait_copy()
+            self.assertEqual(seen['copies'], [self.W59_TASK_B])   # the opened Task, not A
+            self.assertEqual(ui.input.text, '')                    # c never typed
+            self.assertTrue(ui.show_task_view)
+            self.assertIn('已複製 32 字', ui.status_keys())
+            self.assertIn('Task ID', ui.status_keys())
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                        '\r', opened, self.w59_refresh([a]), 'c', copied])
+        self.assertEqual(self.w59_sent(), 0)
+
+    def test_w60_c_types_into_a_draft_and_after_the_detail_closes(self):
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            seen['copies'] = self.w60_copies(ui)
+
+        def drafted(ui):
+            self.assertEqual(ui.input.text, '草c')                  # a draft keeps typing
+            self.assertNotIn('c 複製 Task ID', ui.status_text())
+            ui.input.text = ''
+
+        async def closed(ui):
+            await self.until(ui, lambda ui: not ui.show_task_view, 'Esc closed the detail')
+
+        def typed(ui):
+            self.assertEqual(ui.input.text, 'c')                    # chat typing as before
+            self.assertEqual(seen['copies'], [])
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened,
+                        '\t', '草', 'c', drafted, self.w59_esc, closed, 'c', typed])
+
+    def test_w60_c_and_shift_c_type_on_the_input_line_and_act_only_in_the_detail(self):
+        """Owner 3rd acceptance (HIGH): "cat" after pm> must stay "cat"; c/C act only while the
+        detail pane has focus (it has focus when it opens; Tab goes to the input and back)."""
+        seen = {}
+
+        def typed_cat(ui):
+            self.assertEqual(ui.input.text, 'cat')               # no detail open: plain typing
+            ui.input.text = ''
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            self.assertTrue(ui.app.layout.has_focus(ui.task_pane))
+            seen['copies'] = self.w60_copies(ui)
+
+        def on_input(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+            self.assertIn('Tab 回詳情', ui.status_keys())
+
+        async def drafted(ui):
+            await asyncio.sleep(0.1)
+            self.assertEqual(ui.input.text, 'cat Cat')            # typed, never copied
+            self.assertEqual(seen['copies'], [])
+            self.assertTrue(ui.show_task_view)
+
+        async def copied(ui):
+            await self.until(ui, lambda ui: seen['copies'], 'Task ID copied')
+            ui.task_view.wait_copy()
+            self.assertEqual(seen['copies'], [self.W59_TASK_A])
+            self.assertEqual(ui.input.text, 'cat Cat')            # the draft is untouched
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, 'cat', typed_cat, self.w59_listed,
+                        '\x1b[B', '\r', opened, '\t', on_input, 'cat Cat', drafted,
+                        '\t', lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.task_pane)),
+                        'c', copied])
+        self.assertEqual(self.w59_sent(), 0)
+
+    def test_w60_slow_copy_still_reports_its_result(self):
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            seen['copies'] = self.w60_copies(ui)
+            ui.copy_task_id()
+            ui.task_view.wait_copy()
+            ui.task_copy_at -= 10                 # the key press was long ago (slow pbcopy)
+            self.assertIn('Task ID 已複製 32 字', ui.status_keys())
+            ui.task_view.copied = (32, time.monotonic() - 10)
+            self.assertNotIn('已複製', ui.status_keys())
+            self.assertIn('c 複製 Task ID', ui.status_keys())
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=lambda task_id: self.w59_record(task_id)):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened])
+
+    # Hostile TaskStore text (request, review actor, abandonment, events): OSC 52 clipboard
+    # write, screen clear, OSC 8 link to another site, C1 CSI and a bidi override.
+    W60_HOSTILE = ('\x1b]52;c;c2VjcmV0\x07 \x1b[2J \x1b]8;;https://evil.example/\x1b\\點我'
+                   '\x1b]8;;\x1b\\ \x9b31m \u202e')
+
+    def w60_hostile_record(self, task_id):
+        hostile, url = self.W60_HOSTILE, chat_tui_status.PR_URL
+        return {'task_id': task_id, 'state': 'PM_RESPONDED',
+                'request': 'W60 惡意' + hostile,
+                'created_at': '2026-11-01T00:00:00Z', 'updated_at': '2026-11-01T00:01:00Z' + hostile,
+                'pm_session_id': 'pm-test', 'developer': {'state': 'DEVELOPER_PENDING'},
+                'abandonment': {'reason': 'r' + hostile, 'pm_session_id': 'pm-test',
+                                'abandoned_at': '2026-11-01T00:02:00Z'},
+                'completion': {'state': 'WAITING_CI', 'evidence': {'review_pr_ci': {
+                    'stage': 'REVIEW_PR_CI', 'pr_number': 661, 'pr_state': 'OPEN',
+                    'ci_head_sha': 'ab' * 20, 'review_source': 'PR_COMMENT',
+                    'review_actor': ('bot' + hostile + ' ' + url
+                                     + '9 https://evil.example/pull/1 #77')}}},
+                'completion_events': [{'source': 'LOCAL' + hostile, 'state': 'S' + hostile,
+                                       'received_at': '2026-11-01T00:03:00Z'}]}
+
+    def test_w60_hostile_taskstore_text_is_escaped_and_links_only_full_pr_urls(self):
+        import unicodedata
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: '證據與出處' in self.w59_text(ui), 'detail read')
+            text = self.w59_text(ui)
+            controls = [char for char in text if char != '\n' and (
+                unicodedata.category(char) in ('Cc', 'Cf'))]
+            self.assertEqual(controls, [])                     # no live ESC, BEL, C1, bidi
+            self.assertIn('\\x1b]52;c;c2VjcmV0\\x07', text)    # shown, escaped
+            self.assertIn('\\x9b31m', text)
+            self.assertIn('\\u202e', text)
+            for row in ('  Reviewer 來源：', 'Stage: ABANDONED', '  讀取時間'):
+                self.assertIn(row, text)
+            self.assertNotIn('RUNNING', text)
+            links = chat_tui._TaskViewLinker(None).links(text, 0, len(text))
+            urls = sorted({url for _low, _high, url in links})
+            self.assertEqual(urls, [chat_tui_status.PR_URL + '661', chat_tui_status.PR_URL + '9'])
+            self.assertNotIn('\x1b', ui.status_text())
+
+        with patch.object(chat_tui_status, 'read_task_detail', side_effect=self.w60_hostile_record):
+            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened])
+
+    # -- W60 Owner acceptance: drag-select and copy-all in the Task detail ----------------
+    def w60_open(self, steps, record=None, size=None):
+        """Open the first row's detail, run ``steps`` (functions of ui and copies)."""
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: '證據與出處' in self.w59_text(ui), 'detail read')
+            seen['copies'] = self.w60_copies(ui)
+            for step in steps:
+                result = step(ui, seen['copies'])
+                if asyncio.iscoroutine(result):
+                    await result
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=record or (lambda task_id: self.w59_record(task_id))):
+            ui, _ = self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r',
+                                opened], size=size)
+        return ui, seen['copies']
+
+    @staticmethod
+    async def w60_mouse(ui, *events, pause=0.05):
+        for event in events:
+            ui.app.input.send_text(event)
+            await asyncio.sleep(pause)
+
+    def test_w60_drag_in_the_detail_selects_and_copies_like_the_conversation(self):
+        async def dragged(ui, copies):
+            left, top, _height = ui._pane_geometry()
+            self.assertEqual(ui._mouse_view(), ui.task_view)
+            await self.w60_mouse(ui, press(left + 1, top + 2), drag(left + 16, top + 2))
+            self.assertTrue(ui.task_view.dragging)
+            self.assertTrue(ui.task_view.selected_range())          # highlighted while dragging
+            self.assertFalse(ui.view.selected_range())               # never the hidden chat
+            await self.w60_mouse(ui, release(left + 16, top + 2))
+            self.assertTrue(ui.task_view.wait_copy())
+            line = ui.task_view.text.splitlines()[1]
+            self.assertTrue(copies and line.startswith(copies[-1]), (copies, line))
+            self.assertTrue(copies[-1].startswith('來源：TaskStore'))
+            self.assertIn('已複製 %d 字' % len(copies[-1]), ui.status_keys())
+            self.assertNotIn('Task ID 已複製', ui.status_keys())
+            count = len(copies)
+            ui.app.input.send_text('\x03')                          # Ctrl-C: copy again
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.task_view.wait_copy())
+            self.assertEqual(copies[count:], [copies[count - 1]])
+            self.assertFalse(ui.task_view.selected_range())
+            self.assertFalse(ui.quit_pending)
+            self.assertTrue(ui.show_task_view)
+            self.assertEqual(ui.input.text, '')
+
+        ui, _copies = self.w60_open([dragged])
+        self.assertEqual(self.w59_sent(), 0)
+
+    def test_w60_double_click_in_the_detail_selects_a_word(self):
+        async def clicked(ui, copies):
+            left, top, _height = ui._pane_geometry()
+            lines = ui.task_view.text.splitlines()
+            row = next(n for n, line in enumerate(lines) if line.startswith('Status (from'))
+            self.assertTrue(all(get_cwidth(line) < 80 for line in lines[:row]))  # no wrap above
+            x = left + 1 + get_cwidth(lines[row][:lines[row].index('TaskStore')]) + 2
+            y = top + 1 + row
+            await self.w60_mouse(ui, press(x, y), release(x, y), press(x, y), release(x, y))
+            self.assertTrue(ui.task_view.wait_copy())
+            self.assertEqual(copies[-1:], ['TaskStore'])
+
+        self.w60_open([clicked])
+
+    def test_w60_drag_past_the_detail_edge_autoscrolls(self):
+        async def edge(ui, copies):
+            left, top, height = ui._pane_geometry()
+            self.assertEqual(ui.task_view.top, 0)
+            await self.w60_mouse(ui, press(left + 1, top + 3), drag(left + 5, top + 4),
+                                 drag(left + 5, top + height + 3))   # below the pane
+            await asyncio.sleep(0.5)                                 # held: keeps scrolling
+            self.assertGreater(ui.task_view.top, 1)
+            self.assertEqual(ui.view.top_offset, before['offset'])   # the chat never moved
+            await self.w60_mouse(ui, release(left + 5, top + height + 3))
+            self.assertTrue(ui.task_view.wait_copy())
+            self.assertIn('\n', copies[-1])                          # several rows copied
+            self.assertIn(copies[-1], ui.task_view.text)
+
+        before = {}
+
+        def remember(ui, copies):
+            before['offset'] = ui.view.top_offset
+
+        self.w60_open([remember, edge],
+                      record=lambda task_id: dict(self.w59_record(task_id), completion_events=[
+                          {'source': 'LOCAL', 'state': 'S%d' % n,
+                           'received_at': '2026-11-01T00:%02d:00Z' % n} for n in range(10)]))
+
+    def test_w60_shift_c_copies_the_whole_multi_screen_detail_as_plain_text(self):
+        async def copied_all(ui, copies):
+            _left, _top, height = ui._pane_geometry()
+            self.assertIn('C 複製全文', self.w59_text(ui).splitlines()[0])
+            self.assertIn('c 複製 Task ID · C 全文', ui.status_keys())
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.task_view.wait_copy())
+            text = copies[-1]
+            self.assertEqual(text, ui.task_view.text)                 # every line, not the screen
+            self.assertGreater(len(text.splitlines()), height)
+            self.assertIn('最近事件', text)
+            self.assertNotIn('\x1b', text)
+            self.assertNotIn('\x07', text)
+            self.assertNotIn('\x9b', text)
+            self.assertIn('\\x1b]52', text)                          # hostile text, escaped
+            self.assertNotIn('RUNNING', text)
+            self.assertEqual(ui.input.text, '')
+            self.assertIn('全文 已複製 %d 字' % len(text), ui.status_keys())
+            self.assertEqual(ui.task_view.top, 0)                     # reading place unchanged
+
+        self.w60_open([copied_all], record=lambda task_id: dict(
+            self.w60_hostile_record(task_id), completion_events=[
+                {'source': 'LOCAL', 'state': 'S%d' % n,
+                 'received_at': '2026-11-01T00:%02d:00Z' % n} for n in range(10)]),
+            size=[Size(rows=24, columns=80)])
+
+    def test_w60_esc_ends_a_detail_selection_and_keeps_chat_position(self):
+        async def selected(ui, copies):
+            left, top, _height = ui._pane_geometry()
+            await self.w60_mouse(ui, press(left + 1, top + 2), drag(left + 10, top + 2))
+            self.assertTrue(ui.task_view.selected_range())
+            await self.w59_esc(ui)
+            self.assertFalse(ui.show_task_view)
+            self.assertFalse(ui.task_view.selected_range())
+            self.assertFalse(ui.task_view.dragging and ui._autoscroll_handle)
+            self.assertEqual(ui._mouse_view(), ui.view)
+
+        self.w60_open([selected])
+
+    def test_w60_down_in_pm_mode_without_background_rows_says_why(self):
+        def hinted(ui):
+            self.assertFalse(ui.show_background)
+            self.assertIn('llmtool: 沒有背景 Task；PM 派工後 ↓ 可看', ui.conversation.text)
+
+        self.drive([self.connect(), self.connected,
+                    lambda ui: ui.finish_background(self.session_id, ([], None)),
+                    '\x1b[B', hinted])
+
+    def test_w60_down_right_after_pm_connect_says_loading_not_no_tasks(self):
+        """Owner 3rd acceptance: before the first background read finishes, ↓ says 讀取中…"""
+        def unread(ui):
+            ui.background_key, ui.background_loaded = None, None
+            ui.background_reader = object()          # a read is still running
+
+        def loading(ui):
+            self.assertIn('背景 Task 讀取中…', ui.conversation.text)
+            self.assertNotIn('沒有背景 Task', ui.conversation.text)
+
+        def finished(ui):
+            ui.background_reader = None
+            ui.finish_background(self.session_id, ([], None))
+            ui.background_reader = object()          # no further read during the test
+
+        def empty(ui):
+            self.assertIn('llmtool: 沒有背景 Task；PM 派工後 ↓ 可看', ui.conversation.text)
+
+        self.drive([self.connect(), self.connected, unread, '\x1b[B', loading,
+                    finished, '\x1b[B', empty])
+
+    def test_w60_c_without_a_task_id_copies_nothing_and_says_why(self):
+        seen = {}
+
+        async def unknown(ui):
+            await self.until(ui, lambda ui: 'Core 狀態：UNKNOWN' in self.w59_text(ui), 'UNKNOWN')
+            self.assertNotIn('c 複製 Task ID', ui.status_text())
+            self.assertNotIn('c 複製 Task ID', self.w59_text(ui))
+            seen['copies'] = self.w60_copies(ui)
+
+        def refused(ui):
+            self.assertEqual(seen['copies'], [])
+            self.assertEqual(ui.input.text, '')
+            self.assertIn('沒有 Task ID 可複製', ui.status_keys())
+
+        self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\x1b[B',
+                    self.w59_refresh([]), '\r', unknown, 'c', refused])
+
 
 class W59DetailTextTests(unittest.TestCase):
     """chat_tui_status.task_detail_text: Core state, source/time, at most 10 events."""
@@ -4797,6 +5314,132 @@ class W59DetailTextTests(unittest.TestCase):
         text = chat_tui_status.task_detail_text(None, '12:34:56', reason='TaskStore 讀取失敗')
         self.assertIn('Core 狀態：UNKNOWN（TaskStore 讀取失敗）', text)
         self.assertNotIn('最近事件', text)
+
+
+class W60EvidenceTextTests(unittest.TestCase):
+    """chat_tui_status.task_detail_text: the W60 evidence and provenance rows."""
+
+    SHA = '0123456789abcdef0123456789abcdef01234567'
+
+    def record(self, **changes):
+        record = {'task_id': 'd' * 32, 'request': '證據測試', 'state': 'PM_RESPONDED',
+                  'created_at': '2026-11-02T01:00:00Z', 'updated_at': '2026-11-02T01:02:03Z',
+                  'pm_session_id': 'pm-test', 'developer': {'state': 'DEVELOPER_PENDING'}}
+        record.update(changes)
+        return record
+
+    def completion(self, **review_ci):
+        evidence = {'stage': 'REVIEW_PR_CI', 'pr_number': 661, 'pr_state': 'OPEN',
+                    'ci_head_sha': self.SHA, 'review_source': 'PR_COMMENT',
+                    'review_actor': 'reviewer-bot', 'formal_review_state': 'ACCEPTED',
+                    'required_checks': ['ci'], 'successful_checks': ['ci']}
+        evidence.update(review_ci)
+        return {'state': 'WAITING_CI', 'evidence': {'review_pr_ci': evidence}}
+
+    @staticmethod
+    def rows(text):
+        block = text.split('證據與出處', 1)[1].split('\n\n', 1)[0].splitlines()[1:]
+        return {row.split('：', 1)[0].strip(): row for row in block}
+
+    def test_evidence_rows_name_their_source_and_align_in_display_columns(self):
+        text = chat_tui_status.task_detail_text(
+            self.record(completion=self.completion(pr_state='MERGED')), '12:34:56')
+        rows = self.rows(text)
+        self.assertEqual(list(rows), ['PR', 'PR 狀態', 'CI head SHA', 'Reviewer 來源', '讀取時間'])
+        self.assertIn('#661', rows['PR'])
+        self.assertIn('completion review_pr_ci.pr_number', rows['PR'])
+        self.assertIn('MERGED', rows['PR 狀態'])
+        self.assertIn('review_pr_ci.pr_state', rows['PR 狀態'])
+        self.assertIn(self.SHA, rows['CI head SHA'])              # the full head, not cut
+        self.assertIn('review_pr_ci.ci_head_sha', rows['CI head SHA'])
+        self.assertIn('PR_COMMENT', rows['Reviewer 來源'])
+        self.assertIn('reviewer-bot', rows['Reviewer 來源'])
+        self.assertIn('12:34:56', rows['讀取時間'])
+        self.assertIn('2026-11-02T01:02:03Z', rows['讀取時間'])
+        columns = {get_cwidth(row.split('：', 1)[0]) for row in rows.values()}
+        self.assertEqual(len(columns), 1, rows)                   # values start in one column
+
+    def test_disagreeing_pr_numbers_are_shown_as_conflict(self):
+        record = self.record(completion=self.completion(),
+                             review_dispatch_claim={'pr': 654, 'state': 'CLAIMED', 'version': 1})
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertIn('CONFLICT', rows['PR'])
+        self.assertIn('#654', rows['PR'])
+        self.assertIn('#661', rows['PR'])
+        self.assertIn('review claim', rows['PR'])
+        self.assertIn('CONFLICT', rows['PR 狀態'])               # no single PR state is chosen
+        self.assertIn('#661', rows['PR 狀態'])                   # what review_pr_ci did store
+
+    def test_missing_evidence_is_unknown_with_a_reason(self):
+        rows = self.rows(chat_tui_status.task_detail_text(self.record(), '12:34:56'))
+        for label in ('PR', 'PR 狀態', 'CI head SHA', 'Reviewer 來源'):
+            self.assertRegex(rows[label], '：UNKNOWN（.+）$', label)
+        self.assertNotIn('NOT_AVAILABLE', '\n'.join(rows.values()))
+
+    def test_evidence_rows_use_no_east_asian_ambiguous_characters(self):
+        import unicodedata
+        record = self.record(completion=self.completion(),
+                             review_dispatch_claim={'pr': 654, 'state': 'CLAIMED', 'version': 1})
+        evidence = chat_tui_status.evidence_text(record, '12:34:56')
+        self.assertEqual([char for char in evidence
+                          if unicodedata.east_asian_width(char) == 'A'], [])
+
+    def test_ci_not_started_and_claim_only_reviewer_stay_unknown(self):
+        record = self.record(
+            completion={'state': 'WAITING_REVIEW', 'evidence': {'review_pr_ci': {
+                'stage': 'EXECUTOR_RESULT', 'formal_review_state': 'NOT_STARTED',
+                'ci_state': 'NOT_STARTED'}}},
+            review_dispatch_claim={'pr': 654, 'state': 'CLAIMED', 'version': 1,
+                                   'reviewer_task': 'e' * 32})
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertRegex(rows['CI head SHA'], 'UNKNOWN（.*NOT_STARTED.*）')
+        self.assertRegex(rows['Reviewer 來源'], 'UNKNOWN（.*claim.*）')
+        self.assertNotIn('：PASS', rows['Reviewer 來源'])          # a claim is not a PASS
+        self.assertRegex(rows['PR 狀態'], 'UNKNOWN（.+）')
+
+    def test_review_receipt_is_the_reviewer_source(self):
+        record = self.record(developer={'state': 'DEVELOPER_RESPONDED', 'direct_result_callback': {
+            'state': 'PM_RETURNED', 'review_handoff': {'dispatch_state': 'DISPATCHED', 'receipt': {
+                'reviewer_identity': 'codex-reviewer', 'reviewer_task_id': 'f' * 32,
+                'execution_status': 'COMPLETED', 'verdict': 'PASS',
+                'provenance': 'TRUSTED_REVIEW_ADAPTER'}}}})
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertIn('review receipt', rows['Reviewer 來源'])
+        self.assertIn('TRUSTED_REVIEW_ADAPTER', rows['Reviewer 來源'])
+        self.assertIn('codex-reviewer', rows['Reviewer 來源'])
+
+    def test_a_merge_event_outranks_pr_state_collected_while_open(self):
+        record = self.record(completion=self.completion(), completion_events=[{
+            'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED',
+            'state': 'MERGED', 'received_at': '2026-11-02T01:03:00Z'}])
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertRegex(rows['PR 狀態'], '：MERGED（GitHub merge')
+        self.assertIn('#661 為 OPEN', rows['PR 狀態'])            # the older evidence, named
+
+    def test_out_of_range_pr_number_has_no_pr_state(self):
+        record = self.record(completion=self.completion(pr_number=0))
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertRegex(rows['PR'], '：UNKNOWN（')
+        self.assertRegex(rows['PR 狀態'], '：UNKNOWN（')
+
+    def test_a_github_merge_event_is_a_stored_pr_state(self):
+        record = self.record(completion_events=[{
+            'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED',
+            'state': 'MERGED', 'received_at': '2026-11-02T01:03:00Z'}])
+        rows = self.rows(chat_tui_status.task_detail_text(record, '12:34:56'))
+        self.assertIn('MERGED', rows['PR 狀態'])
+        self.assertIn('GitHub', rows['PR 狀態'])
+
+    def test_abandoned_task_is_never_shown_as_running(self):
+        record = self.record(abandonment={'reason': '需求取消', 'pm_session_id': 'pm-test',
+                                          'abandoned_at': '2026-11-02T01:05:00Z'})
+        text = chat_tui_status.task_detail_text(record, '12:34:56')
+        self.assertIn('Core 狀態：ABANDONED', text)
+        self.assertIn('Stage: ABANDONED', text)
+        self.assertIn('需求取消', text)
+        self.assertNotIn('RUNNING', text)
+        self.assertEqual(chat_tui_status.stage(record)[0], 'ABANDONED')
+        self.assertEqual(chat_tui_status.background_items([record]), [])   # not in-flight work
 
 
 def pane_rows(ui):
