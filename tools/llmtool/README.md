@@ -1717,15 +1717,20 @@ llmtool chat --tui
 
 `--tui` is opt-in; plain `llmtool chat` is unchanged and never imports the UI.
 Normal chat mode uses the same `ChatSession`, provider/skill rules, saved-history default and error rollback as line mode. The TUI also calls separate PM runtime and Task APIs; their records and execution permissions follow those Core interfaces and are not controlled by `--no-history`. Layout: a scrollable conversation pane, a
-persistent multiline input, and a status bar. Keys: Enter sends; Ctrl-J or Esc
-Enter inserts a newline (bracketed paste keeps newlines without sending); Up/Down
-on the first/last input line recall earlier inputs from this process only; Tab
+persistent multiline input, and a status bar. Keys: Enter sends; Shift+Enter (when
+the terminal sends it), Option+Enter, Ctrl-J or Esc+Enter inserts a newline
+(bracketed paste keeps newlines without sending); Up/Down on the first/last input
+line recall earlier inputs from this process only; Tab
 switches focus between input and conversation; PageUp/PageDown (Fn+↑/↓ on a Mac
 keyboard) scroll the conversation one screen and the mouse wheel or trackpad one
 row per wheel step (mouse reporting is on by default); F1 toggles key help; Ctrl-C
 (or Ctrl-D on empty input) exits with status 0. Model output, reported model names
 and errors are untrusted and rendered through the same control-character escaping
 as TTY line mode.
+
+macOS Terminal.app sends plain Enter for Shift+Enter by default. Use Ctrl-J or
+Option+Enter there, or set Terminal → Settings → Profiles → Keyboard: add
+Shift+Return → Send Text `\033[13;2u`.
 
 The conversation pane keeps its own reading position, selection and follow state
 (`chat_tui_view.py`), in screen rows rather than prompt-toolkit's caret-anchored
