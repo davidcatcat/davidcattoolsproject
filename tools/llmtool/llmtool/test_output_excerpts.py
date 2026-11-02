@@ -35,14 +35,28 @@ _UNIT_OK = re.compile(r'OK(?: \(([^\n]+)\))?')
 _NODE_ID = re.compile(r'(?:[\w.-]+/)*[\w.-]+\.py(?:::[\w.]+)*(?:\[[^\n]*\])?')
 _PYTEST_STATS = re.compile(
     r'([0-9][^\n]*?) in [0-9]+(?:\.[0-9]+)?s(?: \([0-9:]+\))?')
-_SENSITIVE = re.compile(
+_SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
     r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
     r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
     r'\bxox[abprs]-[A-Za-z0-9-]{20,}|'
     r'\b(?:bearer|basic)\s+\S+|'
     r'["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
-    r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]', re.IGNORECASE)
+    r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]')
+# A keyword assignment whose whole remaining line is a null/boolean literal
+# (e.g. `token = None`, `password: null`) carries no value. Any other text
+# after the literal on that line, including a second assignment, still matches.
+_SENSITIVE = re.compile(
+    _SENSITIVE_PREFIX + r'(?!\s*(?:none|null|true|false)[ \t]*(?:\r?\n|$))', re.IGNORECASE)
+# The same exemption over the CLI's JSON-escaped payload, where line breaks and
+# TABs are printed as backslash escapes. Used only alongside the raw-text gate.
+_SENSITIVE_JSON = re.compile(
+    _SENSITIVE_PREFIX + r'(?!(?:\s|\\[nrt])*(?:none|null|true|false)(?: |\\t)*(?:\\r\\n|\\n|$))',
+    re.IGNORECASE)
+# Stdlib logging's default `LEVEL:logger:message` form, plus pytest's
+# captured-log `LEVEL    logger:file:line message` form; never failure headers.
+_LOG_ERROR = re.compile(r'ERROR:[\w.-]+:')
+_PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
 _JWT_START = re.compile(r'\beyJ', re.IGNORECASE)
 _JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
@@ -105,7 +119,7 @@ def _emitted_json_sensitive(text):
     # the keyword/credential patterns here: the URL and JWT heuristics would
     # treat escaped LF/TAB as joining separate tokens.
     return (_emitted_sensitive(text)
-            or _SENSITIVE.search(json.dumps(text, ensure_ascii=True)[1:-1]) is not None)
+            or _SENSITIVE_JSON.search(json.dumps(text, ensure_ascii=True)[1:-1]) is not None)
 
 
 def _error(category):
@@ -262,7 +276,7 @@ def _unittest(lines, reasons):
         # Stdlib logging can emit this line between unittest progress tokens.
         # It is not a test header. Keep an ambiguous separator-anchored form
         # malformed, and retain the full-source and final-emission privacy gates.
-        if (line.text.startswith('ERROR:root:')
+        if (_LOG_ERROR.match(line.text)
                 and (index == 0 or lines[index - 1].text != '=' * 70)):
             continue
         if not line.text.startswith(('FAIL:', 'ERROR:')):
@@ -346,6 +360,11 @@ def _pytest(lines, reasons):
         summary = _PYTEST_STATS.fullmatch(wrapped[1] if wrapped else content)
         if summary:
             summaries.append((index, summary[1]))
+        # Captured log/stderr sections precede the single summary banner, and
+        # failure headers count only after it, so a log line there cannot hide
+        # or add an ID. After the banner, keep log-shaped lines malformed.
+        if not banners and _PYTEST_LOG_ERROR.match(line.text):
+            continue
         header = re.match(r'(FAILED|ERROR) (.*)', line.text)
         if not header:
             if re.match(r'(?:FAIL|FAILED|ERROR)(?:[: ]|$)', line.text):
