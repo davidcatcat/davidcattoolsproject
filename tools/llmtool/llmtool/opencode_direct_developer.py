@@ -564,6 +564,7 @@ def _version(executable):
 
 def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
         dispatch_store=None, dispatch_task_id=None,
+        launch_callback=None,
         timeout_seconds=MAX_WALL_CLOCK_SECONDS, executable=None, model=MODEL,
         steps=DEFAULT_AGENT_STEPS):
     """Invoke one bounded OpenCode run in the existing D6 task worktree."""
@@ -642,6 +643,13 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                         lifecycle.own(process)
                     except Exception:
                         _reject('OPENCODE_RUNTIME_UNAVAILABLE')
+                    if launch_callback is not None:
+                        try:
+                            from .codex_direct_developer import process_start_time
+                            launch_callback(process.pid, process_start_time(process.pid),
+                                            os.getpgid(process.pid))
+                        except Exception:
+                            _reject('OPENCODE_LAUNCH_RECORD_REJECTED')
                     selector = selectors.DefaultSelector()
                     for stream, name in ((process.stdout, 'stdout'),
                                          (process.stderr, 'stderr')):

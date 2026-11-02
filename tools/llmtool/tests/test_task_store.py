@@ -505,6 +505,39 @@ class TaskStoreTests(unittest.TestCase):
             start_time='123456', pgid=123)
         self.assertEqual(saved['developer']['execution'], launch['execution'])
 
+    def test_opencode_child_identity_is_profile_checked_and_trusted(self):
+        self._allow_codex_dispatch()
+        task = self._codex_dispatch_task()
+        task['pm_assignment']['route'] = 'opencode'
+        store = TaskStore(Path(self.temp.name).resolve() / 'opencode-tasks')
+        store.create(task)
+        pending = self._developer_assignment(provider='opencode', max_tokens=4096)
+        pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        pending['execution'] = None
+        store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'opencode-cli', 'model': 'opencode/test-free'}
+        store.update(task['task_id'], developer=dispatching)
+        launch = {**dispatching, 'execution': {
+            'status': 'RUNNING', 'native_session_id': None,
+            'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+            'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'child_pid': 123,
+            'child_start_time': '123456', 'child_pgid': 123}}
+        with self.assertRaises(LLMToolError):
+            store.update(task['task_id'], developer=launch)
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            saved = store.record_opencode_launch(
+                task['task_id'], assignment_id=pending['assignment_id'], pid=123,
+                start_time='123456', pgid=123)
+        self.assertEqual(saved['developer']['execution'], launch['execution'])
+        with self.assertRaises(LLMToolError):
+            store.record_opencode_launch(
+                task['task_id'], assignment_id=pending['assignment_id'], pid=124,
+                start_time='123457', pgid=124)
+
     def test_codex_direct_success_persists_native_thread_and_usage(self):
         task = self._codex_dispatch_task()
         self.store.create(task)

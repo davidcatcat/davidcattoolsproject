@@ -81,6 +81,53 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn("test_developer_route_agy", route["test_ids"])
         self.assertNotIn("test_task_submission_cli", route["test_ids"])
 
+    def test_worker_dispatch_policy_selects_reader_test_and_mac_baseline(self):
+        report = ci_mac_modules.selection_report(
+            ["tools/llmtool/worker-dispatch.json"], REPO_ROOT
+        )
+
+        self.assertEqual(report["level"], "L1")
+        self.assertEqual(report["test_ids"], sorted(
+            MAC_REQUIRED | {"test_worker_dispatch"}
+        ))
+        self.assertEqual(report["fallback_reasons"], [])
+        self.assertEqual(report["fallback_paths"], [])
+
+    def test_deleted_worker_dispatch_policy_still_falls_back_to_full(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with patch.object(ci_mac_modules, "required_test_ids", return_value=MAC_REQUIRED):
+                report = ci_mac_modules.selection_report(
+                    ["tools/llmtool/worker-dispatch.json"], root
+                )
+
+        self.assertEqual(report["level"], "L3")
+        self.assertEqual(report["test_ids"], ["FULL"])
+        self.assertIn("missing_file", report["fallback_reasons"])
+        self.assertEqual(report["fallback_paths"], ["tools/llmtool/worker-dispatch.json"])
+
+    def test_whole_module_id_removes_its_class_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tests = root / "tools/llmtool/tests"
+            tests.mkdir(parents=True)
+            (tests / "test_sample.py").write_text(
+                "import unittest\n"
+                "class SampleTests(unittest.TestCase): pass\n",
+                encoding="utf-8",
+            )
+            manifest = root / "tools/llmtool/ci/mac-modules.txt"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("test_sample.SampleTests\n", encoding="utf-8")
+            with patch.object(ci_mac_modules, "MODULE_LIST", manifest):
+                report = ci_mac_modules.selection_report(
+                    ["tools/llmtool/tests/test_sample.py"], root
+                )
+
+        self.assertEqual(report["level"], "L1")
+        self.assertEqual(report["test_ids"], ["test_sample"])
+        self.assertEqual(report["fallback_reasons"], [])
+
     def test_unmapped_llmtool_modules_select_direct_and_importing_tests(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -136,7 +183,13 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertNotEqual(report["level"], "L3")
                 self.assertIn(direct_id, report["test_ids"])
-                self.assertTrue(MAC_REQUIRED <= set(report["test_ids"]))
+                selected_ids = set(report["test_ids"])
+                normalized_mac_required = {
+                    test_id.partition(".")[0]
+                    if test_id.partition(".")[0] in selected_ids else test_id
+                    for test_id in MAC_REQUIRED
+                }
+                self.assertTrue(normalized_mac_required <= selected_ids)
                 for importer_id in importer_ids:
                     self.assertIn(importer_id, report["test_ids"])
 
@@ -220,7 +273,6 @@ class MacTestIdSelectionTests(unittest.TestCase):
         cases = (
             ("tools/llmtool/llmtool/opencode_direct_developer.py",
              "high_risk_file"),
-            ("tools/llmtool/worker-dispatch.json", "unmapped_source"),
         )
         for path, reason in cases:
             with self.subTest(path=path):
@@ -298,9 +350,9 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     "tools/llmtool/worker-dispatch.json",
                     "tools/llmtool/tests/test_worker_dispatch.py",
                 ],
-                "L3",
-                {"FULL"},
-                ("tools/llmtool/worker-dispatch.json", "unmapped_source"),
+                "L1",
+                MAC_REQUIRED | {"test_worker_dispatch"},
+                None,
             ),
             (
                 "#792",
@@ -329,6 +381,9 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     self.assertTrue(all(":" not in reason
                                         for reason in report["fallback_reasons"]))
                     self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
+                elif label == "#791":
+                    self.assertEqual(report["fallback_reasons"], [])
+                    self.assertEqual(report["fallback_paths"], [])
 
     def test_readme_and_candidate_only_role_config_are_evaluated_in_candidate_tree(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -359,7 +414,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     root,
                 )
         self.assertEqual(report["level"], "L1")
-        self.assertEqual(report["test_ids"], ["test_role_config", "test_role_config.RoleConfigTests"])
+        self.assertEqual(report["test_ids"], ["test_role_config"])
         self.assertEqual(report["fallback_reasons"], [])
         self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 

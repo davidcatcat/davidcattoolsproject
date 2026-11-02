@@ -22,33 +22,15 @@ not separate development backlogs. **A11b.2.2.2 private disposable-fixture-only 
 Retain [Issue #66](https://github.com/davidcatcat/davidcattoolsproject/issues/66) separately for C1 excerpt egress privacy. Offline A11b design does not wait for full company Phase 0 / paid-token benchmarking.
 Only F1's private disposable-fixture Git ADD is implemented and reviewed. **Real user-repository/public Git ADD (F2) remains NOT AUTHORIZED** pending its own approved contract, Security/QA and Mac gates.
 
-**Until native llmtool can coordinate Codex/Claude, use the
-standard Git-provided temporary `ai-loop` launcher and controller.**
-The owner confirms the Mac entrypoint is again the original
-`.git/ai-loop/run.sh` shortcut to the tracked `scripts/ai-loop.sh`,
-without a locally customized script. The Git launcher fetches the
-latest `automation/ai-loop` revision, caches the corresponding tracked
-shell/Python files and executes the Python controller with
-`--control-sha` for that invocation. No per-revision owner signoff
-is required. The tracked source behavior is verified in Git; real
-Mac checkout and execution still need Mac evidence.
-
-**AI owns the controller release:** review the immutable candidate
-diff on a non-executable staging ref, obtain independent technical/
-Security review where applicable, validate exact candidate with
-helper CI and required Mac probes, then publish the unchanged
-reviewed revision to the executable branch. Missing evidence is
-a STOP; do not treat a latest-tip fetch as a release gate. See the
-single [ai-team-delivery Skill](../../skills/ai-team-delivery/SKILL.md).
-No second permanent controller, no model prompt couriering by the owner,
-and no relaxed provider egress permissions.
+The standalone transitional helper is documented in
+[tools/ai-loop/README.md](../ai-loop/README.md); it is not an llmtool
+route. This workflow covers llmtool only.
 
 
 **Cutover happens in A11c, not by renaming C3:** prove on the canonical
 Mac that one llmtool task can run a scoped Codex/Claude/test/repair
 cycle and return a verified Draft PR or explicit STOP, with independent
-Security/Functional QA and no manual prompt handoff. Only then
-freeze/retire overlapping ai-loop orchestration. C1 excerpt output must
+Security/Functional QA and no manual prompt handoff. C1 excerpt output must
 not cross any company/external LLM boundary without its final-output
 safety gate and explicit authorization; other source/log/diff exports
 need their own distinct trust review. Claim Token savings only after
@@ -71,18 +53,10 @@ courier or routine technical signoff authority. Only genuine product/scope/risk
 decisions, or a needed Mac-local command when no execution access exists,
 should interrupt the owner.
 
-The Mac-local `.git/ai-loop/run.sh` is the standard
-Git-version shortcut restored by the owner; no custom launcher
-is in scope. The tracked control-branch `scripts/ai-loop.sh` and
-`scripts/ai_loop.py` are the reviewed source of execution.
-AI owns technical review, staged CI and applicable Mac checks before
-promoting control revisions; publishing an unreviewed latest tip is
-not permitted. The user is only a physical Mac operator if tools
-cannot access the Mac. Do not infer that GitHub source inspection
-proves the current local symlink/launch state.  The C1 local-only excerpts feature
+The standalone transitional helper is documented in
+[tools/ai-loop/README.md](../ai-loop/README.md). The C1 local-only excerpts feature
 does not authorize sending excerpts to company/external providers
-(Issue #63 remains open). The frozen `--qa-low*` route is not a
-normal product release gate.
+(Issue #63 remains open).
 
 A coordinator may decide a documented **nonblocking Low** disposition
 within the approved product boundary and leave a concise follow-up; it
@@ -171,7 +145,7 @@ Apply the [normative work-package policy](../../skills/ai-team-delivery/SKILL.md
 
 **HISTORICAL local-reviewer rule:** The former same-provider Reviewer-child assignments for Codex Developer and Claude Developer sessions are historical. Any current Developer may use a distinct read-only child only when its CLI supports one and effective restrictive permissions are verified; the child never edits, commits, fetches, creates worktrees or acts as a second writer. A local same-provider child is **pre-review only**. Obtain non-author independent Security/Functional/QA **once per complete candidate** and bounded rereview only when affected code changes. Issue #92 budgets and required native/exact-head release gates remain binding.
 
-Batch deterministic worktree/branch/baseline state checks where permitted, but do not skip real independently accepted C3 old-final/new-start baselines, Git shared-ref serialization, matching release, TaskContract allowlists or meaningful STOP. Preserve the task-final candidate at published HEAD so the next handoff does not mistakenly compare post-commit source to task-start baseline. No current proof exists that GitHub messages awaken Mac CLIs or that a cross-provider listener is installed. If a physical operator action is unavoidable, give one action for a work package; report an A11c capability gap rather than claim impossible unattended progress. Use the reviewed ai-loop only within its actual accepted scope until llmtool provides the full native Codex/Claude/test/repair route.
+Batch deterministic worktree/branch/baseline state checks where permitted, but do not skip real independently accepted C3 old-final/new-start baselines, Git shared-ref serialization, matching release, TaskContract allowlists or meaningful STOP. Preserve the task-final candidate at published HEAD so the next handoff does not mistakenly compare post-commit source to task-start baseline. No current proof exists that GitHub messages awaken Mac CLIs or that a cross-provider listener is installed. If a physical operator action is unavoidable, give one action for a work package; report an A11c capability gap rather than claim impossible unattended progress.
 
 **VPN transition:** Before a real company LLM call remind the owner: 「接下來要使用公司 LLM，請先連上公司 VPN。」 Corporate VPN may block external Codex Hooks documentation or GitHub; batch permitted public-doc checks outside VPN-only phases where practical and never equate a blocked request with an absent API. VPN connectivity is not provider-egress authorization; the [Issue #66 privacy gate](https://github.com/davidcatcat/davidcattoolsproject/issues/66) remains in force. [VPN record](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6155066742).
 
@@ -315,7 +289,7 @@ Native, T1, F2/S2, A11b and Owner Full Access/never are unchanged.
 ### Supervised self-hosting dogfood (M1)
 
 M1a/M1b/M2 map to [A11c.1 delivery stages](../../docs/history/llmtool-roadmap-archive-20261028.md#supervised-self-hosting-delivery-within-a11c1-m1).
-They do not replace S1a/S1b/S2, waive F2/Host/provider gates, or retire ai-loop.
+They do not replace S1a/S1b/S2 or waive F2/Host/provider gates.
 Follow the existing [team policy](../../skills/ai-team-delivery/SKILL.md) and
 [safe-git](../../skills/safe-git/SKILL.md); Owner decisions in Issue #120 remain
 traceable evidence rather than model-generated authority.
@@ -658,8 +632,8 @@ defines the separate exact-SHA packet and permitted data route; it is not an
 S1a provider path or an execution grant. S2 later adds permission-controlled
 repair/execution under A11b's separately accepted approval/sandbox/recovery/audit/
 budget gates. **F2 remains NOT AUTHORIZED**;
-S1a does not imply A11b DONE, full A11c acceptance or ai-loop parity/cutover.
-No daemon/scheduler, new temporary ai-loop controller or duplicate approval/logging
+S1a does not imply A11b DONE or full A11c acceptance.
+No daemon/scheduler or duplicate approval/logging
 system. Company-LLM Round 1–3 evidence and existing measurement/privacy policy
 are reused without rerunning benchmarks; no company or other provider calls in
 S1a, no new savings claim, and company integration stays deferred.
@@ -671,8 +645,8 @@ checks; relevant TaskContract/A11a/CLI regressions; required full checks and
 exact-head Python 3.9/3.14 CI; focused native Mac file/CLI checks where applicable.
 Publish a separate Draft product PR for independent Claude Security + Functional
 review. Offline tests do not satisfy later live collector, concurrent ledger or
-real-agent/repair acceptance. Keep required missing gates blocking, retain interim
-ai-loop until canonical parity, and use Issue #92 for nonblocking Low dispositions.
+real-agent/repair acceptance. Keep required missing gates blocking and use Issue #92
+for nonblocking Low dispositions.
 
 ### S1b foreground review contract (DRAFT)
 
@@ -927,8 +901,7 @@ This is a proposed future allowlist, not permission to edit those files now.
 Changes to existing shared schemas/providers/authorization/Git hardening need
 explicit accepted scope amendment before authoring; do not copy or weaken them
 to avoid that gate. No daemon/scheduler/second framework/logging/approval store,
-temporary ai-loop controller, F2/S2 mutation, Git write, automatic repair or PR
-merge. Interim ai-loop and company Round 1–3 evidence/policies remain unchanged;
+F2/S2 mutation, Git write, automatic repair or PR merge. Company Round 1–3 evidence/policies remain unchanged;
 no company call, rerun or new savings claim.
 
 | Required future test | Expected behavior |
@@ -1040,7 +1013,7 @@ not implement budget enforcement or an automatic cost router.
 
 **DESIGN ONLY / IMPLEMENTATION NOT AUTHORIZED by this document.** This is the
 next read-only S1b preparation boundary within S1a -> S1b -> S2, not a new
-milestone, dispatcher, approval system or replacement ai-loop. Public
+milestone, dispatcher or approval system. Public
 `task review` remains unavailable for production. Existing B1 source merged
 via PR #133; T1 additional native measurement is HOLD_REPRIORITIZE, and
 production Host/ledger installation, real-provider T2/T3 and S2/F2 remain gated.
@@ -1221,8 +1194,8 @@ cooperative fallback; they do not prove prevention of late inference.
 Private fake-child collection checks bounded output, simulated time and owned
 exit without launching processes. This is not an OS timeout or native lifecycle
 proof. Real dequeue/cancel/tool restriction/usage/context permission (L2/L4) remain
-unverified; NATIVE_PICKUP_GRANT is NOT_AUTHORIZED. T1 HOLD, F2/S2 restrictions and
-ai-loop fallback remain unchanged. Unresolved pending records need separately
+unverified; NATIVE_PICKUP_GRANT is NOT_AUTHORIZED. T1 HOLD and F2/S2 restrictions
+remain unchanged. Unresolved pending records need separately
 trusted reconciliation, never deletion, auto-retry or an invented supervisor.
 
 #### Native Delta A1 source acceptance
@@ -1260,7 +1233,7 @@ experimental opt-in/client-local behavior, dual inference/context/data routes,
 UNKNOWN cost and original Claude owned waiter/notification/ack evidence require
 independent acceptance. No Session cloning, transcript/TTY injection, Host
 installation, daemon, supervisor, T1/F2/S2 or automatic merge is authorized.
-Full Access stays unchanged; ai-loop remains fallback.
+Full Access stays unchanged.
 
 #### Native Composition A1 source/fake acceptance
 
@@ -1295,7 +1268,7 @@ CR-K2-B source/fake mode below accepts completed-only rollout coverage with
 explicit limitations. Native remains BLOCKED/NOT_VERIFIED; live structure-only
 inspection and Native execution still require separate grants. P2/P4 remain one-shot STOP/PRESERVE; L3 possible-tool types
 stay fail-closed. N1 context retention, N4 opt-in and dual inference/data routes
-remain Native Grant conditions. T1 HOLD, F2/S2 ungranted, ai-loop fallback retained.
+remain Native Grant conditions. T1 HOLD and F2/S2 remain ungranted.
 
 #### CR-K2-B HOST_ROLLOUT source/fake acceptance
 
@@ -1329,7 +1302,7 @@ re-resolution, resume, retry/recovery framework or second store. A finite EOF
 snapshot cannot prove future silence; invisible approval/transient errors/item
 starts remain NOT_VERIFIED. R2–R6 LOW/LATER remain grouped rather than opening
 new repair loops. Owner Full Access/never stays unchanged; AUDIT_ONLY is not
-ENFORCED_NO_TOOLS. T1/F2/S2/#153 remain held/ungranted; ai-loop stays fallback.
+ENFORCED_NO_TOOLS. T1/F2/S2/#153 remain held/ungranted.
 
 #### Acceptance matrix and dependencies
 
@@ -1583,7 +1556,7 @@ still requires non-author Security/Functional review. Original allowlist:
   (`--output-format json`) to report actual usage; without it usage/cost stay
   UNKNOWN.
 - **Excluded:** diagnostics schema, TaskContract schema, Git hardening, F1/F2,
-  ai-loop controller, any daemon/scheduler/second approval store.
+  any daemon/scheduler/second approval store.
 
 #### B7. Threat model and required negative controls
 
@@ -1629,7 +1602,7 @@ Production enablement is a later combined Coordinator decision requiring A
 exact-head acceptance (fake-only), B contract and implementation acceptance,
 T1 native evidence and an explicitly authorized T2. Until then S1b real-provider
 route stays **NOT_AUTHORIZED/BLOCKED**. No F2/S2, Git mutation, automatic merge,
-daemon, scheduler or second ai-loop.
+daemon or scheduler.
 
 ## Quality-gate model
 
