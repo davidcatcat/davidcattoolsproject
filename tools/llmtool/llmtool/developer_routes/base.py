@@ -203,6 +203,13 @@ def _snapshot_value(value):
 def capture_snapshot(root):
     """Fingerprint worktree files and read-only Git identity/state."""
     root = Path(root).resolve(strict=True)
+
+    def git(*args, limit):
+        try:
+            return task_completion._git(root, args, limit=limit)
+        except LLMToolError:
+            raise RouteError('ROUTE_GIT_INSPECTION_FAILED') from None
+
     files = {}
     for base, dirs, names in os.walk(root, topdown=True, followlinks=False):
         if Path(base) == root:
@@ -227,28 +234,26 @@ def capture_snapshot(root):
                     files[rel] = ('unsupported', stat.S_IFMT(info.st_mode))
             except OSError:
                 files[rel] = ('unavailable',)
-    branch = task_completion._git(root, ('branch', '--show-current'), limit=4096).decode().strip()
-    branch_ref = (task_completion._git(
-        root, ('rev-parse', '--verify', f'refs/heads/{branch}'), limit=4096).decode().strip()
+    branch = git('branch', '--show-current', limit=4096).decode().strip()
+    branch_ref = (git(
+        'rev-parse', '--verify', f'refs/heads/{branch}', limit=4096).decode().strip()
                   if branch else '')
-    git_dir = Path(task_completion._git(
-        root, ('rev-parse', '--path-format=absolute', '--git-dir'),
-        limit=4096).decode().strip())
-    common_dir = Path(task_completion._git(
-        root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
-        limit=4096).decode().strip())
-    refs_raw = task_completion._git(
-        root, ('for-each-ref',
-              '--format=%(refname) %(objectname) %(*objectname) %(objecttype)'),
+    git_dir = Path(git(
+        'rev-parse', '--path-format=absolute', '--git-dir', limit=4096).decode().strip())
+    common_dir = Path(git(
+        'rev-parse', '--path-format=absolute', '--git-common-dir', limit=4096).decode().strip())
+    refs_raw = git(
+        'for-each-ref',
+        '--format=%(refname) %(objectname) %(*objectname) %(objecttype)',
         limit=1024 * 1024)
     refs = {}
     for line in refs_raw.decode().splitlines():
         name, object_id, peeled_id, object_type = line.split(' ', 3)
         commit_id = peeled_id or (object_id if object_type == 'commit' else '')
         refs[name] = (object_id, commit_id)
-    head = task_completion._git(root, ('rev-parse', '--verify', 'HEAD'), limit=4096).decode().strip()
-    head_commits = frozenset(task_completion._git(
-        root, ('rev-list', '--topo-order', 'HEAD'), limit=1024 * 1024).decode().splitlines())
+    head = git('rev-parse', '--verify', 'HEAD', limit=4096).decode().strip()
+    head_commits = frozenset(git(
+        'rev-list', '--topo-order', 'HEAD', limit=1024 * 1024).decode().splitlines())
 
     def file_digest(path):
         try:
@@ -301,9 +306,9 @@ def capture_snapshot(root):
         'branch': branch,
         'branch_ref': branch_ref,
         'git_dir': str(git_dir),
-        'index': task_completion._git(root, ('ls-files', '--stage', '-z'), limit=1024 * 1024),
-        'stash': task_completion._git(root, ('for-each-ref', '--format=%(objectname)',
-                                             'refs/stash'), limit=4096).strip(),
+        'index': git('ls-files', '--stage', '-z', limit=1024 * 1024),
+        'stash': git('for-each-ref', '--format=%(objectname)',
+                     'refs/stash', limit=4096).strip(),
         'refs': refs,
         'head_commits': head_commits,
         'config_worktree': file_digest(git_dir / 'config.worktree'),
