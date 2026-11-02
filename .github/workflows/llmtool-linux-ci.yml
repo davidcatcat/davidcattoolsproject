@@ -24,6 +24,7 @@ on:
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
       - 'tools/api-agent-gateway/**'
+      - 'tools/ai-loop/**'
       - 'AGENTS.md'
       - 'CLAUDE.md'
       - 'skills/**'
@@ -38,6 +39,7 @@ on:
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
       - 'tools/api-agent-gateway/**'
+      - 'tools/ai-loop/**'
       - 'AGENTS.md'
       - 'CLAUDE.md'
       - 'skills/**'
@@ -70,6 +72,7 @@ jobs:
       code: ${{ steps.classify.outputs.code }}
       docs: ${{ steps.classify.outputs.docs }}
       gateway: ${{ steps.classify.outputs.gateway }}
+      ai_loop: ${{ steps.classify.outputs.ai_loop }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
@@ -85,11 +88,13 @@ jobs:
           code=false
           docs=false
           gateway=false
+          ai_loop=false
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             paths="$RUNNER_TEMP/changed-paths"
             git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"
             while IFS= read -r -d '' path; do
               case "$path" in
+                tools/ai-loop/*) ai_loop=true ;;
                 tools/api-agent-gateway/*) code=true; gateway=true ;;
                 tools/llmtool/*/*.md) code=true; docs=true ;;
                 tools/llmtool/*.md) docs=true ;;
@@ -102,8 +107,30 @@ jobs:
             code=true
             docs=true
             if [ -d tools/api-agent-gateway ]; then gateway=true; fi
+            if [ -d tools/ai-loop ]; then ai_loop=true; fi
           fi
-          printf 'code=%s\ndocs=%s\ngateway=%s\n' "$code" "$docs" "$gateway" >> "$GITHUB_OUTPUT"
+          printf 'code=%s\ndocs=%s\ngateway=%s\nai_loop=%s\n' "$code" "$docs" "$gateway" "$ai_loop" >> "$GITHUB_OUTPUT"
+
+  ai-loop:
+    name: ai-loop helper tests (Python 3.14)
+    needs: changes
+    if: >-
+      vars.LINUX_CI_ENABLED == 'true'
+      && github.repository == 'davidcatcat/davidcattoolsproject'
+      && github.actor == 'davidcatcat'
+      && needs.changes.outputs.ai_loop == 'true'
+    runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Offline ai-loop helper tests
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: /usr/bin/python3.14 -B -m unittest discover -s tools/ai-loop
 
   gateway:
     name: gateway tests (Linux 3.14)
