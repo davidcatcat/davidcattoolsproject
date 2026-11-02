@@ -71,8 +71,11 @@ class Audit:
 
 
 class GuardedRun:
-    def __init__(self, client, audit, expected_model, started, max_calls=None, max_tokens=None):
-        self.client, self.audit, self.expected_model = client, audit, expected_model
+    def __init__(self, client, audit, request_model, started, max_calls=None, max_tokens=None,
+                 expected_served_model=None):
+        self.client, self.audit, self.request_model = client, audit, request_model
+        self.expected_served_model = (request_model if expected_served_model is None
+                                      else expected_served_model)
         self.started = started
         self.max_calls, self.max_tokens = max_calls, max_tokens
         self.calls = self.tokens = self.connection_errors = 0
@@ -115,7 +118,8 @@ class GuardedRun:
                 raise StopRun("CONNECTION_ERRORS")
         else:
             self.connection_errors = 0
-        if status == 200 and served != self.expected_model:
+        if status == 200 and not result.get("error_code") and served is not None and \
+                served != self.expected_served_model:
             raise StopRun("UNEXPECTED_MODEL")
         if self.max_tokens is not None and self.tokens > self.max_tokens:
             raise StopRun("TOKEN_CAP")
@@ -202,6 +206,8 @@ class GuardedRun:
     def valid_call(call):
         if not call or call.get("type") != "function" or call.get("function", {}).get("name") != TOOL_NAME:
             return False
+        if not isinstance(call.get("id"), str) or not call["id"].strip():
+            return False
         try:
             args = json.loads(call["function"]["arguments"])
             return args == {"summary": EXPECTED}
@@ -225,35 +231,45 @@ class GuardedRun:
 
 
 def _tool_result(call):
-    return {"role": "tool", "tool_call_id": call.get("id", ""),
+    return {"role": "tool", "tool_call_id": call["id"],
             "content": "recorded" if GuardedRun.valid_call(call) else "invalid arguments"}
 
 
+def _tool_result_matches(call, result):
+    call_id = call.get("id") if isinstance(call, dict) else None
+    result_id = result.get("tool_call_id") if isinstance(result, dict) else None
+    return isinstance(call_id, str) and bool(call_id) and result_id == call_id
+
+
 def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
-    body = {"model": run.expected_model, "messages": [{"role": "user", "content": run.task_prompt}],
+    body = {"model": run.request_model, "messages": [{"role": "user", "content": run.task_prompt}],
             "max_tokens": 512, "tools": [TOOL],
             "tool_choice": {"type": "function", "function": {"name": TOOL_NAME}} if forced else "auto"}
     if thinking:
         body["chat_template_kwargs"] = {"enable_thinking": True}
-    first = run.send(body)
-    call = run.tool_call(first)
-    if not run.valid_call(call):
-        return False, "EXPECTED_TOOL_CALL_MISSING_OR_INVALID"
-    messages = body["messages"] + [{"role": "assistant", "content": None, "tool_calls": [call]},
-                                   _tool_result(call)]
-    if match_id and messages[-1].get("tool_call_id") != call.get("id"):
-        return False, "TOOL_CALL_ID_MISMATCH"
-    followup = run.send({"model": run.expected_model, "messages": messages,
-                         "max_tokens": 128, "tools": [TOOL], "tool_choice": "none"})
-    _, _, message = _response(followup)
-    answer = message.get("content")
-    return EXPECTED in answer if isinstance(answer, str) else False, "FINAL_SUMMARY_SCORE"
+    messages = list(body["messages"])
+    used_tool = False
+    for _ in range(4):
+        result = run.send({**body, "messages": messages,
+                           "max_tokens": 128 if used_tool else body["max_tokens"],
+                           "tool_choice": "auto" if used_tool else body["tool_choice"]})
+        call = run.tool_call(result)
+        if call is None:
+            _, _, message = _response(result)
+            answer = message.get("content")
+            return used_tool and isinstance(answer, str) and EXPECTED in answer, "MULTI_ROUND_FINAL_SCORE"
+        if not run.valid_call(call):
+            return False, "EXPECTED_TOOL_CALL_MISSING_OR_INVALID"
+        used_tool = True
+        tool_result = _tool_result(call)
+        if not _tool_result_matches(call, tool_result):
+            return False, "TOOL_CALL_ID_MISMATCH" if match_id else "TOOL_RESULT_ID_INVALID"
+        messages.extend([{"role": "assistant", "content": None, "tool_calls": [call]}, tool_result])
+    return False, "ROUND_CAP"
 
 
 def _stream_scenario(run):
-    # OpenAI-compatible gateways may return a complete JSON response for stream=true;
-    # the test fixture and real server are both accepted if the accumulated call is valid.
-    body = {"model": run.expected_model, "messages": [{"role": "user", "content": run.task_prompt}],
+    body = {"model": run.request_model, "messages": [{"role": "user", "content": run.task_prompt}],
             "max_tokens": 512, "tools": [TOOL], "tool_choice": "auto", "stream": True}
     result = run.send(body, stream=True)
     call = run.tool_call(result)
@@ -261,7 +277,7 @@ def _stream_scenario(run):
         return False, "STREAMED_TOOL_CALL_MISSING_OR_INVALID"
     messages = body["messages"] + [{"role": "assistant", "content": None, "tool_calls": [call]},
                                    _tool_result(call)]
-    second = run.send({"model": run.expected_model, "messages": messages, "max_tokens": 128})
+    second = run.send({"model": run.request_model, "messages": messages, "max_tokens": 128})
     _, _, message = _response(second)
     answer = message.get("content")
     return EXPECTED in answer if isinstance(answer, str) else False, "STREAM_TOOL_ROUND_TRIP_SCORE"
@@ -270,30 +286,31 @@ def _stream_scenario(run):
 def _text_tool_scenario(run):
     prompt = (run.task_prompt + "\nRespond exactly as TOOL_CALL: " + TOOL_NAME +
               " {\"summary\":\"...\"}")
-    first = run.send({"model": run.expected_model, "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 256})
-    _, _, message = _response(first)
-    content = message.get("content")
-    match = re.search(r"TOOL_CALL:\s*" + re.escape(TOOL_NAME) + r"\s*(\{[^\n]*\})", content or "")
-    if not match:
-        return False, "TEXT_TOOL_CALL_MISSING"
-    try:
-        args = json.loads(match.group(1))
-    except ValueError:
-        return False, "TEXT_TOOL_CALL_INVALID"
-    if args != {"summary": EXPECTED}:
-        return False, "TEXT_TOOL_ARGUMENT_SCORE"
-    second = run.send({"model": run.expected_model, "messages": [{"role": "user", "content":
-                      "Tool result: recorded. Return the exact summary only: " + EXPECTED}], "max_tokens": 128})
-    _, _, message = _response(second)
-    answer = message.get("content")
-    return EXPECTED in answer if isinstance(answer, str) else False, "TEXT_TOOL_ROUND_TRIP_SCORE"
+    messages = [{"role": "user", "content": prompt}]
+    used_tool = False
+    for _ in range(4):
+        result = run.send({"model": run.request_model, "messages": messages, "max_tokens": 256})
+        _, _, message = _response(result)
+        content = message.get("content")
+        match = re.search(r"TOOL_CALL:\s*" + re.escape(TOOL_NAME) + r"\s*(\{[^\n]*\})", content or "")
+        if not match:
+            return used_tool and isinstance(content, str) and EXPECTED in content, "TEXT_MULTI_ROUND_FINAL_SCORE"
+        try:
+            args = json.loads(match.group(1))
+        except ValueError:
+            return False, "TEXT_TOOL_CALL_INVALID"
+        if args != {"summary": EXPECTED}:
+            return False, "TEXT_TOOL_ARGUMENT_SCORE"
+        used_tool = True
+        messages.extend([{"role": "assistant", "content": content},
+                         {"role": "user", "content": "Tool result: recorded. Return the exact summary only: " + EXPECTED}])
+    return False, "ROUND_CAP"
 
 
-def _run(client, audit_path, expected_model, max_calls=None, max_tokens=None):
+def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, expected_served_model=None):
     audit = Audit(audit_path)
     started = time.monotonic()
-    run = GuardedRun(client, audit, expected_model, started, max_calls, max_tokens)
+    run = GuardedRun(client, audit, request_model, started, max_calls, max_tokens, expected_served_model)
     # The project is generated and isolated. Nothing from the checkout is read.
     synthetic = Path(tempfile.mkdtemp(prefix="gw-probe-mini-"))
     os.chmod(synthetic, 0o700)
@@ -332,9 +349,11 @@ def _run(client, audit_path, expected_model, max_calls=None, max_tokens=None):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--live", action="store_true", help="authorize a configured non-loopback gateway run")
-    parser.add_argument("--owner-authorization-url")
+    parser.add_argument("--owner-authorization-url", help="PM-relayed Issue comment URL recording Owner authorization")
     parser.add_argument("--base-url", help="loopback-only fake-server endpoint")
-    parser.add_argument("--model", help="expected model name for loopback fake-server tests")
+    parser.add_argument("--model", help="request model name; loopback fake-server override")
+    parser.add_argument("--expected-served-model", default="qwen3.8-27b",
+                        help="required response model name (default: qwen3.8-27b)")
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--max-calls", type=int, help="optional maximum number of gateway calls")
     parser.add_argument("--max-total-tokens", type=int, help="optional maximum total token usage")
@@ -349,7 +368,7 @@ def main(argv=None):
         parser.error("--live requires --owner-authorization-url")
     if args.owner_authorization_url and not re.fullmatch(
             r"https://github\.com/[^/]+/[^/]+/issues/\d+#issuecomment-\d+", args.owner_authorization_url):
-        parser.error("authorization must be an Owner GitHub issue comment URL")
+        parser.error("authorization must be the PM-relayed Issue comment URL")
     if args.base_url:
         if not args.model:
             parser.error("loopback fake-server runs require --model")
@@ -370,7 +389,8 @@ def main(argv=None):
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output_dir, 0o700)
     client = ProbeClient(base_url, model, key)
-    result = _run(client, output_dir / "audit.jsonl", model, args.max_calls, args.max_total_tokens)
+    result = _run(client, output_dir / "audit.jsonl", model, args.max_calls,
+                  args.max_total_tokens, args.expected_served_model)
     result["started_at"] = datetime.now(timezone.utc).isoformat()
     result["audit_path"] = os.fspath(output_dir / "audit.jsonl")
     result = _redact(result, key)
