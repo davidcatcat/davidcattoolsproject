@@ -21,11 +21,9 @@ class CollectorTests(unittest.TestCase):
         automation_expect=replace(expect,agents=(automation,reviewer),authored_by=(automation,))
         automation_observation=replace(observation,agents=(automation,reviewer),authored_by=(automation,))
         self.assertIsNone(automation_observation.validate(automation_expect,events,NOW,10))
-        main=replace(dev,branch='main')
-        main_expect=replace(expect,agents=(main,reviewer),authored_by=(main,))
-        main_observation=replace(observation,agents=(main,reviewer),authored_by=(main,))
-        with self.assertRaises(LLMToolError):
-            main_observation.validate(main_expect,events,NOW,10)
+        with self.assertRaises(LLMToolError) as raised:
+            replace(dev,branch='main')
+        self.assertEqual(raised.exception.lifecycle_code,'TASK_BINDING_MISMATCH')
 
     def test_fixed_git_reads_reject_arbitrary_argv_before_process(self):
         with patch('subprocess.Popen',side_effect=AssertionError('not allowed')):
