@@ -83,7 +83,7 @@ Every Owner decision request must appear in the monitor (Owner 2026-10-28, #515)
 
 - Ask in chat with the options in plain language and a recommendation.
 - In the same step, post a comment on the relevant Issue or PR. It begins with `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`.
-- When the Owner answers, post a new comment that quotes the answer verbatim. It begins with `<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->`.
+- When the Owner answers in chat, post a new comment that quotes the answer verbatim and says the PM is relaying it. It begins with `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->`. The Owner never posts on GitHub, so the PM never writes an `actor=Owner` marker; the monitor settles the open row from this `target=Owner status=ANSWERED` marker.
 
 A chat question alone does not count as asking the Owner.
 
@@ -123,7 +123,7 @@ Sweep records must never use `target=Owner`, so [llmtool_monitor.py](../../scrip
 
 - Zero new dispatch while executable work and a free Developer are available below the concurrency cap is an anomaly, not **IDLE**.
 - Normal sweeps are silent in chat (send no chat message) but still post the `type=pm_progress` sweep record on the tracking Issue; anomalies, sweep failures, Developer start failures and real Owner decisions also get dedicated GitHub records.
-- Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->`; verify both with `llmtool_monitor.py --once`.
+- Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->` (never an `actor=Owner` marker; the Owner does not use GitHub); verify both with `llmtool_monitor.py --once`.
 - Status answers give numbers first (`dispatched`, `merged`, `remaining`).
 - The schedule prompt must instruct the PM to re-read this `Scheduled sweep` section from canonical `main` on every sweep. The PM may stop and re-enable the schedule, recording both on the tracking Issue.
 
