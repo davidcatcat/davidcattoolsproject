@@ -1343,10 +1343,6 @@ class ChatTUI:
             "  /theme [dark|light|auto] Set the display theme",
             "  /links [on|off]         Set clickable links",
             "  /exit, /quit            Leave chat",
-            "換行 = Shift+Enter (terminal must send it) / Option+Enter / Ctrl-J",
-            "macOS Terminal.app sends plain Enter for Shift+Enter; use Ctrl-J or Option+Enter,",
-            "or configure Terminal → Settings → Profiles → Keyboard: add Shift+Return →",
-            "Send Text \\033[13;2u",
             "Type / to choose a command. Enter runs a command you typed. F1 shows key help.",
         ]
         if self.dev:

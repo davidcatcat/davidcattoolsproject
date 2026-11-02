@@ -1022,11 +1022,6 @@ class WidgetTests(Base):
                             '/help\r'])
         self.assertIn('/provider [PROFILE]', ui.conversation.text)
         self.assertIn('/task ...', ui.conversation.text)
-        self.assertIn('換行 = Shift+Enter (terminal must send it) / Option+Enter / Ctrl-J',
-                      ui.conversation.text)
-        self.assertIn('macOS Terminal.app sends plain Enter for Shift+Enter',
-                      ui.conversation.text)
-        self.assertIn(r'Send Text \033[13;2u', ui.conversation.text)
         self.factory.assert_not_called()
 
     def test_explicit_task_submit_uses_existing_api_off_event_loop(self):
