@@ -468,7 +468,11 @@ def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
             refuse('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
         runtime = provenance['pm_runtime']
         recorded_cwd = provenance['pm_cwd']
-        if type(cwd) is not str or os.path.normpath(os.path.abspath(cwd)) != recorded_cwd:
+        # The caller-supplied directory is only a consistency check. Session
+        # presence and observation are always checked against each Task's
+        # recorded directory, and require the caller to supply that exact
+        # canonical value (normalizing here would accept a trailing-slash alias).
+        if type(cwd) is not str or cwd != recorded_cwd:
             refuse('PM_SESSION_ADOPTION_CWD_MISMATCH')
         if runtime == 'claude-code':
             if claude_session_present(old_native_id, recorded_cwd, environ):

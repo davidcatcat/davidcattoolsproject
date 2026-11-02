@@ -205,9 +205,8 @@ class ActivePMInboxTests(unittest.TestCase):
                 active_pm_inbox.adopt_pm_session(
                     self.store, 'pm-' + self.session, 'pm-' + str(uuid.uuid4()),
                     old_native_id=self.session, cwd=caller_cwd)
-            expected = ('PM_SESSION_ADOPTION_CWD_MISMATCH' if caller_cwd == str(self.base)
-                        else 'PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
-            self.assertEqual(caught.exception.task_store_error_code, expected)
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'PM_SESSION_ADOPTION_CWD_MISMATCH')
             self.assertEqual(self.store.get(task['task_id']), before)
 
     def test_codex_adoption_uses_recorded_runtime_and_observes_new_session(self):
@@ -215,6 +214,14 @@ class ActivePMInboxTests(unittest.TestCase):
         task = self._record_pm(session=old_native, runtime='codex')
         new_native, _ = self._codex_session()
         old_path.unlink()
+        before = self.store.get(task['task_id'])
+        with self.assertRaises(LLMToolError) as caught:
+            active_pm_inbox.adopt_pm_session(
+                self.store, 'pm-' + old_native, 'pm-' + new_native,
+                old_native_id=old_native, cwd=str(self.pm_cwd) + '/')
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'PM_SESSION_ADOPTION_CWD_MISMATCH')
+        self.assertEqual(self.store.get(task['task_id']), before)
         result = active_pm_inbox.adopt_pm_session(
             self.store, 'pm-' + old_native, 'pm-' + new_native,
             old_native_id=old_native, cwd=str(self.pm_cwd))
