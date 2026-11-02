@@ -447,13 +447,19 @@ class MacTestIdSelectionTests(unittest.TestCase):
             "AGENTS.md",
             "CLAUDE.md",
             "skills/ai-team-delivery/pm-continuation.md",
-            "docs/ci/README.md",
+            "docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md",
             "tools/llmtool/README.md",
         ):
             with self.subTest(path=path):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertEqual(report["level"], "L0")
                 self.assertEqual(report["test_ids"], [])
+
+    def test_ci_documentation_stays_a_conservative_full_run(self):
+        report = ci_mac_modules.selection_report(["docs/ci/README.md"], REPO_ROOT)
+        self.assertEqual(report["level"], "L3")
+        self.assertEqual(report["test_ids"], ["FULL"])
+        self.assertIn("ci_or_dependency_change", report["fallback_reasons"])
 
     def test_repo_readme_stays_unsupported_and_runtime_markdown_is_not_docs(self):
         readme = ci_mac_modules.selection_report(["README.md"], REPO_ROOT)
@@ -471,7 +477,8 @@ class MacTestIdSelectionTests(unittest.TestCase):
 
     def test_repo_docs_can_mix_with_runtime_without_becoming_fallbacks(self):
         report = ci_mac_modules.selection_report(
-            ["docs/ci/README.md", "tools/llmtool/tests/test_worker_dispatch.py"],
+            ["docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md",
+             "tools/llmtool/tests/test_worker_dispatch.py"],
             REPO_ROOT,
         )
         self.assertEqual(report["level"], "L1")
