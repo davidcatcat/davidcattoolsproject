@@ -189,7 +189,7 @@ class ReviewRepairTests(unittest.TestCase):
 
         fixture = ActivePMInboxTests()
         fixture.setUp()
-        self.addCleanup(fixture.tearDown)
+        self.addCleanup(fixture.doCleanups)
         self.store = TaskStore(Path(self.temp.name).resolve())
         with redirect_stdout(StringIO()):
             task = task_submission_cli.run_task_record_pm(
@@ -222,11 +222,14 @@ class ReviewRepairTests(unittest.TestCase):
             review_repair_claims=[claim])
         self.assertEqual(saved['review_repair_claims'], [claim])
 
-        invalid = dict(claim, version=0)
-        with self.assertRaises(LLMToolError):
+        invalid = dict(claim, version=0, attempt=2, repair_task_id='2' * 32,
+                       claimed_at='2026-10-27T01:01:00Z')
+        with self.assertRaises(LLMToolError) as caught:
             self.store.compare_and_update(
                 TASK, expected={'record_sha256': saved['record_sha256']},
-                review_repair_claims=[invalid])
+                review_repair_claims=[claim, invalid])
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'REVIEW_REPAIR_CLAIM_INVALID')
 
     def test_replay_after_restart_does_not_dispatch_twice(self):
         self.dispatch()
