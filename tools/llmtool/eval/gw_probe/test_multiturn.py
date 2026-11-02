@@ -87,10 +87,24 @@ class MultiTurnFakeServerTests(unittest.TestCase):
                              ["S1", "S2", "S3", "S4", "S5", "S6"])
             self.assertTrue(all(item["passed"] for item in result["scenarios"]))
             self.assertTrue(result["audit_verified"])
+            self.assertEqual(result["caps"]["calls"], None)
+            self.assertEqual(result["caps"]["total_tokens"], None)
             self.assertTrue(Audit(audit_path).verify())
             audit = audit_path.read_text(encoding="utf-8")
             self.assertNotIn("Authorization", audit)
             self.assertNotIn("127.0.0.1", audit)
+
+    def test_optional_call_limit_stops_and_scores_active_scenario(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "audit.jsonl"
+            client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+            result = _run(client, audit_path, MODEL, max_calls=1)
+            self.assertEqual(result["status"], "STOPPED")
+            self.assertEqual(result["stop_reason"], "CALL_CAP")
+            self.assertEqual(result["calls"], 1)
+            self.assertEqual(result["scenarios"][0]["id"], "S1")
+            self.assertEqual(result["scenarios"][0]["detail"], "STOPPED_CALL_CAP")
+            self.assertTrue(result["audit_verified"])
 
 
 if __name__ == "__main__":

@@ -17,8 +17,6 @@ from urllib import error, request
 sys.path.insert(0, os.fspath(Path(__file__).resolve().parent))
 from probe import NoRedirect, ProbeClient, _config, _local_url, _redact, _response, _usage  # noqa: E402
 
-MAX_CALLS = 16
-MAX_TOKENS = 10_000
 MAX_SECONDS = 3600
 CALL_TIMEOUT = 300
 TOOL_NAME = "record_project_summary"
@@ -73,9 +71,10 @@ class Audit:
 
 
 class GuardedRun:
-    def __init__(self, client, audit, expected_model, started):
+    def __init__(self, client, audit, expected_model, started, max_calls=None, max_tokens=None):
         self.client, self.audit, self.expected_model = client, audit, expected_model
         self.started = started
+        self.max_calls, self.max_tokens = max_calls, max_tokens
         self.calls = self.tokens = self.connection_errors = 0
         self.scenarios = []
         self.stop_reason = None
@@ -91,7 +90,7 @@ class GuardedRun:
             raise StopRun("CREDENTIAL_SCAN_HIT")
         if time.monotonic() - self.started >= MAX_SECONDS:
             raise StopRun("TIME_CAP")
-        if self.calls >= MAX_CALLS:
+        if self.max_calls is not None and self.calls >= self.max_calls:
             raise StopRun("CALL_CAP")
         self.calls += 1
         result = self._send_stream(body) if stream else self.client.send(body=body, timeout=CALL_TIMEOUT)
@@ -118,7 +117,7 @@ class GuardedRun:
             self.connection_errors = 0
         if status == 200 and served != self.expected_model:
             raise StopRun("UNEXPECTED_MODEL")
-        if self.tokens > MAX_TOKENS:
+        if self.max_tokens is not None and self.tokens > self.max_tokens:
             raise StopRun("TOKEN_CAP")
         if time.monotonic() - self.started >= MAX_SECONDS:
             raise StopRun("TIME_CAP")
@@ -291,10 +290,10 @@ def _text_tool_scenario(run):
     return EXPECTED in answer if isinstance(answer, str) else False, "TEXT_TOOL_ROUND_TRIP_SCORE"
 
 
-def _run(client, audit_path, expected_model):
+def _run(client, audit_path, expected_model, max_calls=None, max_tokens=None):
     audit = Audit(audit_path)
     started = time.monotonic()
-    run = GuardedRun(client, audit, expected_model, started)
+    run = GuardedRun(client, audit, expected_model, started, max_calls, max_tokens)
     # The project is generated and isolated. Nothing from the checkout is read.
     synthetic = Path(tempfile.mkdtemp(prefix="gw-probe-mini-"))
     os.chmod(synthetic, 0o700)
@@ -325,7 +324,7 @@ def _run(client, audit_path, expected_model):
     audit_ok = audit.verify()
     return {"status": "STOPPED" if run.stop_reason else "DONE", "stop_reason": run.stop_reason,
             "scenarios": run.scenarios, "calls": run.calls, "total_tokens": run.tokens,
-            "caps": {"calls": MAX_CALLS, "total_tokens": MAX_TOKENS,
+            "caps": {"calls": max_calls, "total_tokens": max_tokens,
                      "wall_seconds": MAX_SECONDS, "call_timeout_seconds": CALL_TIMEOUT},
             "audit_verified": audit_ok, "audit_entries": audit.count}
 
@@ -337,7 +336,13 @@ def main(argv=None):
     parser.add_argument("--base-url", help="loopback-only fake-server endpoint")
     parser.add_argument("--model", help="expected model name for loopback fake-server tests")
     parser.add_argument("--out-dir", type=Path)
+    parser.add_argument("--max-calls", type=int, help="optional maximum number of gateway calls")
+    parser.add_argument("--max-total-tokens", type=int, help="optional maximum total token usage")
     args = parser.parse_args(argv)
+    if args.max_calls is not None and args.max_calls < 1:
+        parser.error("--max-calls must be positive")
+    if args.max_total_tokens is not None and args.max_total_tokens < 1:
+        parser.error("--max-total-tokens must be positive")
     if args.base_url and not _local_url(args.base_url):
         parser.error("--base-url must be a loopback URL")
     if args.live and not args.owner_authorization_url:
@@ -365,7 +370,7 @@ def main(argv=None):
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(output_dir, 0o700)
     client = ProbeClient(base_url, model, key)
-    result = _run(client, output_dir / "audit.jsonl", model)
+    result = _run(client, output_dir / "audit.jsonl", model, args.max_calls, args.max_total_tokens)
     result["started_at"] = datetime.now(timezone.utc).isoformat()
     result["audit_path"] = os.fspath(output_dir / "audit.jsonl")
     result = _redact(result, key)
