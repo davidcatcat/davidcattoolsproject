@@ -422,6 +422,39 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
                                             sleep=sleep)
         self.assertEqual(len(calls), 2)
         self.assertEqual(len(result['unclaimed_assignments']), 2)
+        # Woken by the newly UNCLAIMED assignment, not by the bound.
+        self.assertIs(result['timed_out'], False)
+
+    def test_pm_wait_with_only_old_unclaimed_reports_timed_out(self):
+        past = datetime.now(timezone.utc) - timedelta(seconds=700)
+        self.assign(now=past)
+        clock = iter(range(0, 1000, 5))
+        result = active_pm_inbox.wait_inbox(self.store, PM, wait=True, timeout=12,
+                                            clock=lambda: next(clock),
+                                            sleep=lambda _: None)
+        self.assertEqual(len(result['unclaimed_assignments']), 1)
+        self.assertIs(result['timed_out'], True)
+
+    def test_claim_delayed_by_lock_contention_past_expiry_is_expired(self):
+        start = datetime.now(timezone.utc).replace(microsecond=0)
+        current = [start]
+        with patch.object(inbox, '_now', lambda now=None: current[0]):
+            assigned = self.assign(expires_in=60)
+            session = str(uuid.uuid4())
+            self.transcript(session, self.account_b)
+            real = TaskStore._with_assignments
+
+            def contended(store, **kwargs):
+                # The claimer was ready before expiry, but waits on the sidecar
+                # lock until after it; the clock moves on while it waits.
+                current[0] = start + timedelta(seconds=120)
+                return real(store, **kwargs)
+
+            with patch.object(TaskStore, '_with_assignments', contended):
+                self.assert_refused('ASSIGNMENT_EXPIRED', self.claim,
+                                    assigned['assignment_id'], session=session)
+        item = self.stored(assigned['assignment_id'])
+        self.assertEqual((item['state'], item.get('claim')), ('EXPIRED', None))
 
     def test_damaged_sidecar_fails_closed_without_hiding_pm_inbox(self):
         self.assign()

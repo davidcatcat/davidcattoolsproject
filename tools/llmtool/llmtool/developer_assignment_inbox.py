@@ -164,7 +164,7 @@ def claim(store, assignment_id, *, worker, d6_task_id, session_id, environ=None,
 
     return store.claim_developer_assignment(
         assignment_id, worker=worker, d6_task_id=d6_task_id, session_id=session_id,
-        account_dir_label=label, claimed_at=_stamp(_now(now)), gate=gate)
+        account_dir_label=label, clock=lambda: _stamp(_now(now)), gate=gate)
 
 
 def _live(item, now):

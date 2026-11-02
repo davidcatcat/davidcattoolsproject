@@ -3046,9 +3046,12 @@ class TaskStore:
         return self._with_assignments(exclusive=True, change=change)
 
     def claim_developer_assignment(self, assignment_id, *, worker, d6_task_id, session_id,
-                                   account_dir_label, claimed_at, gate):
+                                   account_dir_label, clock, gate):
         """One-shot ASSIGNED -> CLAIMED with a receipt; ASSIGNED -> EXPIRED when late.
 
+        ``clock()`` returns the current UTC-seconds stamp; it is read once
+        under the exclusive lock, so time spent waiting for the lock counts
+        toward expiry, and the same stamp is the receipt's ``claimed_at``.
         ``gate(item)`` runs under the exclusive lock and returns
         ``(audit_entry, error)``: the dispatch-gate result is appended to the
         assignment's bounded audit either way, and ``error`` (dispatch, D6 or
@@ -3060,9 +3063,8 @@ class TaskStore:
         if (not _safe_identifier(session_id, PM_NATIVE_SESSION_ID) or
                 type(account_dir_label) is not str or
                 re.fullmatch(r'[0-9a-f]{16}', account_dir_label) is None or
-                not _valid_utc_seconds(claimed_at)):
+                not callable(clock)):
             _fail('ASSIGNMENT_CLAIM_INVALID')
-        now = _utc_seconds(claimed_at)
 
         def refused(code):
             try:
@@ -3071,6 +3073,10 @@ class TaskStore:
                 return error
 
         def change(assignments):
+            claimed_at = clock()
+            if not _valid_utc_seconds(claimed_at):
+                return None, None, refused('ASSIGNMENT_CLAIM_INVALID')
+            now = _utc_seconds(claimed_at)
             item = next((item for item in assignments
                          if item['assignment_id'] == assignment_id), None)
             if item is None:

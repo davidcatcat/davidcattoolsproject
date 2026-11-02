@@ -545,7 +545,8 @@ def wait_inbox(store, session_key, *, wait=False, timeout=DEFAULT_WAIT_SECONDS,
         already_unclaimed = unclaimed if already_unclaimed is None else already_unclaimed
         if (inbox['events'] or inbox['blocked'] or newly_unclaimed or not wait or
                 clock() >= deadline):
-            inbox['timed_out'] = bool(wait and not inbox['events'] and not inbox['blocked'])
+            inbox['timed_out'] = bool(wait and not inbox['events'] and not inbox['blocked']
+                                      and not newly_unclaimed)
             return inbox
         sleep(max(0.0, min(poll, deadline - clock())))
 
