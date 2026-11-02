@@ -1429,6 +1429,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     self.update_error = exc
                     raise
 
+            def compare_and_update(self, task_id, **kwargs):
+                # The initial DEVELOPER_PENDING claim is admission. Count the
+                # dispatching and terminal writes that follow it.
+                developer = kwargs.get('developer')
+                if not (type(developer) is dict and
+                        developer.get('state') == 'DEVELOPER_PENDING'):
+                    self.update_count += 1
+                    if self.update_count == 2:
+                        raise KeyboardInterrupt()
+                try:
+                    return self.store.compare_and_update(task_id, **kwargs)
+                except BaseException as exc:
+                    self.update_error = exc
+                    raise
+
         wrapped = InterruptOnTerminalWrite(backing)
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
@@ -3233,14 +3248,17 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
             with self.subTest(profile=profile):
                 store, task_id = self._store(profile)
                 original = store.compare_and_update
-                newer = dict(store.get(task_id)['developer'], context_sha256='c' * 64)
+                current = store.get(task_id)['developer']
+                newer = None
                 raced = False
                 def compare(_task_id, *, expected, **changes):
-                    nonlocal raced
+                    nonlocal raced, newer
                     if not raced:
                         raced = True
-                        original(task_id, expected={'developer': store.get(task_id)['developer']},
-                                 developer=newer)
+                        newer = store.record_opencode_launch(
+                            task_id, assignment_id=current['assignment_id'],
+                            pid=654, start_time='new-start', pgid=654)['developer']
+                        self.assertEqual(store.get(task_id)['developer'], newer)
                     return original(_task_id, expected=expected, **changes)
                 snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
                 registration = type('Registration', (), {
@@ -3257,6 +3275,8 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                             Namespace(task_id=task_id, executor_task='executor-one'),
                             store.get(task_id), store.get(task_id)['developer'], store,
                             expected_agent=agent)
+                self.assertTrue(raced)
+                self.assertIsNotNone(newer)
                 self.assertEqual(store.get(task_id)['developer'], newer)
 
 
