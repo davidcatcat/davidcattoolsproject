@@ -137,6 +137,13 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
+    def test_company_gw_agent_key_is_known_and_paused(self):
+        self.assertIn('company-gw-agent', worker_dispatch.WORKERS)
+        self.assertEqual(worker_dispatch.worker_key_for('gw-agent'), 'company-gw-agent')
+        decision = worker_dispatch.evaluate('company-gw-agent')
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
+
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self._set_state('agy', 'ALLOWED')
         self._set_state('opencode-developer', 'PAUSED')

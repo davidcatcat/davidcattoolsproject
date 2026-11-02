@@ -56,7 +56,8 @@ def load_route_config(path=None):
     if 'gw-agent' in routes:
         gw = routes['gw-agent']
         expected_gw = {'package_path', 'default_model', 'default_effort',
-                       'profile_name', 'profile', 'authorization_ref'}
+                       'profile_name', 'profile', 'authorization_ref',
+                       'allowed_data_classes'}
         if (set(gw) != expected_gw or
                 type(gw.get('package_path')) is not str or not gw['package_path'].startswith('/') or
                 type(gw.get('default_model')) is not str or
@@ -66,6 +67,10 @@ def load_route_config(path=None):
                 type(gw.get('profile')) is not dict or
                 gw['profile'].get('auth_env') != 'GW_AGENT_API_KEY' or
                 gw['profile'].get('model') != gw['default_model'] or
+                type(gw.get('allowed_data_classes')) is not list or
+                not gw['allowed_data_classes'] or
+                any(type(item) is not str or not item for item in gw['allowed_data_classes']) or
+                len(set(gw['allowed_data_classes'])) != len(gw['allowed_data_classes']) or
                 type(gw.get('authorization_ref')) is not str or not gw['authorization_ref'].strip()):
             raise RouteError('ROUTE_CONFIG_INVALID')
         normalized['gw-agent'] = dict(gw)

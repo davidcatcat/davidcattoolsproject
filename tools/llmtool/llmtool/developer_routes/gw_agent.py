@@ -22,6 +22,37 @@ _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
 _STATUS_EXIT = {'DONE': 0, 'BLOCKED': 3, 'MODEL_ERROR': 4,
                 'POLICY_REFUSED': 5, 'BUDGET_EXCEEDED': 6}
+_AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+
+
+def cleanup_audit_copies(*, now=None, temp_root=None):
+    """Remove llmtool-owned audit copies older than the 30-day retention window."""
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    root = Path(temp_root or tempfile.gettempdir())
+    removed = []
+    try:
+        candidates = list(root.glob('llmtool-gw-agent-audit-*'))
+    except OSError:
+        return removed
+    for directory in candidates:
+        try:
+            info = directory.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or
+                    now - info.st_mtime < _AUDIT_RETENTION_SECONDS):
+                continue
+            children = list(directory.iterdir())
+            if len(children) != 1 or children[0].name != 'audit.jsonl':
+                continue
+            child_info = children[0].lstat()
+            if (not stat.S_ISREG(child_info.st_mode) or child_info.st_uid != os.getuid() or
+                    child_info.st_nlink != 1):
+                continue
+            children[0].unlink()
+            directory.rmdir()
+            removed.append(directory.name)
+        except (OSError, ValueError):
+            continue
+    return removed
 
 
 def _unique_pairs(pairs):
@@ -57,6 +88,7 @@ class GwAgentRoute(DeveloperRoute):
 
     def __init__(self, config):
         super().__init__(config)
+        cleanup_audit_copies()
         package = config.get('package_path')
         profile = config.get('profile')
         profile_name = config.get('profile_name')
@@ -76,6 +108,12 @@ class GwAgentRoute(DeveloperRoute):
         self.profile_name = profile_name
         self.authorization_ref = authorization_ref
         self.expected_served_model = expected
+        classes = config.get('allowed_data_classes')
+        if (type(classes) is not list or not classes or
+                any(type(item) is not str or not item for item in classes) or
+                len(set(classes)) != len(classes)):
+            raise RouteError('GW_AGENT_CONFIG_INVALID')
+        self.allowed_data_classes = frozenset(classes)
         self._result = None
         self.audit_copy_path = None
 
@@ -105,7 +143,8 @@ class GwAgentRoute(DeveloperRoute):
                 type(task.get('budgets')) is not dict or
                 any(type(budget) is not int for budget in task['budgets'].values()) or
                 type(task.get('egress_basis')) is not str or not task['egress_basis'] or
-                type(task.get('data_class')) is not str):
+                type(task.get('data_class')) is not str or
+                task.get('data_class') not in self.allowed_data_classes):
             raise RouteError('GW_AGENT_REQUEST_INVALID')
         if any(type(path) is not str for path in task['read_paths'] + task['write_paths']):
             raise RouteError('GW_AGENT_REQUEST_INVALID')
@@ -295,8 +334,7 @@ class GwAgentRoute(DeveloperRoute):
             if (type(expected) is not str or not re.fullmatch(r'[0-9a-f]{64}', expected) or
                     expected != actual):
                 raise RouteError('GW_AGENT_AUDIT_INVALID')
-            # Audit copies are retained outside the D6 for PM hand-off and are
-            # not automatically pruned by this route.
+            # Audit copies are retained outside the D6 and pruned after 30 days.
             audit_dir = tempfile.mkdtemp(prefix='llmtool-gw-agent-audit-')
             os.chmod(audit_dir, 0o700)
             if Path(audit_dir).resolve().is_relative_to(root):
