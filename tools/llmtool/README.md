@@ -590,6 +590,36 @@ codex_direct:
   timeout_seconds: 900
 ```
 
+### User-only accounts and roles
+
+Optional `accounts` and `roles` live only in `~/.config/llmtool/config.yaml`.
+An account names a Claude or Codex CLI configuration directory; a role can select
+an account and optionally specify a provider profile, model and effort. Account
+directories must already exist, be real directories owned by the current user,
+and not be writable by the group or others. llmtool checks directory metadata
+only and never opens credential files. Project `.llmtool.yaml` cannot set either
+section.
+
+```yaml
+accounts:
+  work-claude:
+    kind: claude
+    config_dir: /home/example/.config/claude-work
+roles:
+  reviewer:
+    account: work-claude
+    provider_profile: default
+    model: example-model
+    effort: high
+```
+
+`resolve_role(role, cli=None, environ=None)` resolves one role with one-shot CLI
+overrides above `LLMTOOL_ROLE_*` environment overrides, saved role settings,
+the legacy `pm_runtime.claude_config_dir` mapping for `pm`, and neutral built-in
+defaults. Overrides are returned in memory and never saved. Existing
+`pm_runtime.claude_config_dir` remains supported; when both it and `roles.pm`
+select account directories, they must agree.
+
 ### Project config 的低信任邊界
 
 `.llmtool.yaml` **只能**修改已由 user/default 定義的 provider 的 `model`、

@@ -155,9 +155,12 @@ def repository_config(home=None):
 
 def _apply_user(config, fragment):
     _fields(fragment, {"providers", "generation", "active_provider", "diagnostics", "codex_direct",
-                       "repository", "pm_runtime"}, "user config")
+                       "repository", "pm_runtime", "accounts", "roles"}, "user config")
     if "pm_runtime" in fragment:
         _validate_pm_runtime(fragment["pm_runtime"])
+    if "accounts" in fragment or "roles" in fragment:
+        from .role_config import validate_role_config
+        validate_role_config(fragment)
     if "repository" in fragment:
         _validate_repository(fragment["repository"])
     if "diagnostics" in fragment:
