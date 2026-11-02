@@ -111,6 +111,9 @@ class DeveloperRoute(ABC):
     def validate_exit(self, exit_code: int, parsed: Mapping[str, Any]) -> None:
         """Validate provider-specific status and process exit consistency."""
 
+    def validate_status(self, parsed: Mapping[str, Any]) -> None:
+        """Map a consistent provider status to route-specific errors, when needed."""
+
     def validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise RouteError(f'{self.name.upper()}_REQUEST_INVALID')
@@ -612,6 +615,12 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
                          progress=quota_progress if quota else None)
     if quota:
         raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'), progress=quota_progress)
+    try:
+        route.validate_status(parsed)
+    except RouteError:
+        raise
+    except Exception:
+        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
     try:
         verified = route.verified_model(log_text, value['model'])
     except Exception:

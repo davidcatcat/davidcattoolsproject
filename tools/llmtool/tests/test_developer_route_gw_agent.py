@@ -146,8 +146,9 @@ class GwAgentRouteTests(unittest.TestCase):
                 ('POLICY_REFUSED', 'DATA_CLASS_NOT_AUTHORIZED', 5)):
             self.route._status = status
             self.route._gateway_code = code
+            self.route.validate_exit(exit_code, {})
             with self.assertRaises(RouteError) as caught:
-                self.route.validate_exit(exit_code, {})
+                self.route.validate_status({})
             self.assertEqual(caught.exception.code, 'GW_AGENT_' + status)
             self.assertEqual(caught.exception.facts['gateway_code'], code)
         with self.assertRaises(RouteError) as caught:
@@ -159,6 +160,58 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(self.route.verified_model('', 'fake-model'), 'other-model')
         self.route._gateway_code = 'HTTP_429'
         self.assertTrue(self.route.quota_exhausted({}, b''))
+
+    def test_run_route_prioritizes_scope_and_quota_statuses(self):
+        record = {'seq': 1, 'prev_sha256': '0' * 64, 'type': 'end'}
+        digest = hashlib.sha256(json.dumps(
+            record, ensure_ascii=False, sort_keys=True,
+            separators=(',', ':')).encode()).hexdigest()
+
+        def run(status, gateway_code, exit_code, *, outside_write=False):
+            def runner(argv, cwd, env, timeout):
+                if outside_write:
+                    (self.root / 'outside.py').write_text('outside\n')
+                result = {'schema_version': 1, 'status': status, 'code': gateway_code,
+                          'run_id': 'b' * 24, 'session_id': None, 'task_id': 'task-001',
+                          'changed_paths': ['outside.py'] if outside_write else [],
+                          'summary': 'bounded', 'served_model': 'fake-model', 'usage': {},
+                          'turns': 1, 'budget_used': {}, 'audit_sha256': digest}
+                result_path = Path(argv[argv.index('--result-file') + 1])
+                self._write_json(result_path, result)
+                result_path.chmod(0o600)
+                audit_path = Path(argv[argv.index('--audit-file') + 1])
+                audit_path.write_text(json.dumps(record, sort_keys=True,
+                                                 separators=(',', ':')) + '\n')
+                audit_path.chmod(0o600)
+                return exit_code, b'', b''
+
+            with self.assertRaises(RouteError) as caught:
+                self.run_route_with_credential(
+                    self.route, self.request(), gate=lambda: True, runner=runner,
+                    boundary=Boundary(), snapshot=capture_snapshot)
+            return caught.exception
+
+        scope_error = run('BLOCKED', 'NO_TOOL_CALL', 3, outside_write=True)
+        self.assertEqual(scope_error.code, 'GW_AGENT_WRITE_SCOPE_VIOLATION')
+        self.assertEqual(scope_error.facts['changed_files'], ('outside.py',))
+        (self.root / 'outside.py').unlink()
+        quota_error = run('MODEL_ERROR', 'HTTP_429', 4)
+        self.assertEqual(quota_error.code, 'GW_AGENT_QUOTA_EXHAUSTED')
+
+    def test_audit_verifier_rejects_self_declared_digest_on_broken_chain(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result_path = Path(temp) / 'result.json'
+            result_path.write_text(json.dumps({'task_id': 'task-001',
+                                               'audit_sha256': 'a' * 64}))
+            result_path.chmod(0o600)
+            audit_path = Path(temp) / 'audit.jsonl'
+            audit_path.write_text(json.dumps({'seq': 2, 'prev_sha256': 'f' * 64,
+                                              'type': 'end', 'sha256': 'a' * 64}) + '\n')
+            audit_path.chmod(0o600)
+            with self.assertRaises(RouteError) as caught:
+                self.route.collect(temp, {'root': str(self.root),
+                                          'task': {'task_id': 'task-001'}})
+            self.assertEqual(caught.exception.code, 'GW_AGENT_AUDIT_INVALID')
 
     def test_offline_gateway_subprocess_edits_only_authorized_file(self):
         gateway_tests = Path(self.route.package_path) / 'tests'

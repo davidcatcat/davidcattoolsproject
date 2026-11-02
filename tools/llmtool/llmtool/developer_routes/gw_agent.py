@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import hashlib
+import importlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -215,9 +217,37 @@ class GwAgentRoute(DeveloperRoute):
         if type(exit_code) is not int or exit_code != _STATUS_EXIT.get(self._status):
             raise RouteError('GW_AGENT_OUTPUT_INVALID',
                              facts={'gateway_code': self._gateway_code})
+
+    def validate_status(self, parsed):
         if self._status != 'DONE':
             raise RouteError('GW_AGENT_' + self._status,
                              facts={'gateway_code': self._gateway_code})
+
+    def _verified_audit_digest(self, path):
+        """Load the verifier from the configured gateway package, isolated by name."""
+        package_dir = Path(self.package_path) / 'api_agent_gateway'
+        module_name = '_llmtool_gateway_audit_' + hashlib.sha256(
+            os.fsencode(str(package_dir))).hexdigest()[:16]
+        package_spec = importlib.util.spec_from_file_location(
+            module_name, package_dir / '__init__.py',
+            submodule_search_locations=[str(package_dir)])
+        if package_spec is None or package_spec.loader is None:
+            raise ValueError
+        package = importlib.util.module_from_spec(package_spec)
+        loaded = []
+        try:
+            sys.modules[module_name] = package
+            loaded.append(module_name)
+            package_spec.loader.exec_module(package)
+            audit = importlib.import_module(module_name + '.audit')
+            loaded.append(module_name + '.audit')
+            digest = audit.verify(path)
+            if type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+                raise ValueError
+            return digest
+        finally:
+            for name in reversed(loaded):
+                sys.modules.pop(name, None)
 
     def verified_model(self, log_text, requested):
         if not isinstance(self._result, dict):
@@ -257,20 +287,16 @@ class GwAgentRoute(DeveloperRoute):
             lines = audit.splitlines()
             if not lines or len(lines) != len([line for line in lines if line.strip()]):
                 raise ValueError
-            last = json.loads(lines[-1].decode('utf-8'), object_pairs_hook=_unique_pairs)
             expected = self._result.get('audit_sha256') if type(self._result) is dict else None
-            candidates = set()
-            if type(last) is dict:
-                for field in ('sha256', 'record_sha256', 'digest'):
-                    if type(last.get(field)) is str:
-                        candidates.add(last[field])
-                unsigned = {field: value for field, value in last.items()
-                            if field not in ('sha256', 'record_sha256', 'digest')}
-                candidates.add(hashlib.sha256(_canonical(unsigned)).hexdigest())
-                candidates.add(hashlib.sha256(_canonical(last)).hexdigest())
+            try:
+                actual = self._verified_audit_digest(source)
+            except Exception:
+                raise RouteError('GW_AGENT_AUDIT_INVALID') from None
             if (type(expected) is not str or not re.fullmatch(r'[0-9a-f]{64}', expected) or
-                    expected not in candidates):
+                    expected != actual):
                 raise RouteError('GW_AGENT_AUDIT_INVALID')
+            # Audit copies are retained outside the D6 for PM hand-off and are
+            # not automatically pruned by this route.
             audit_dir = tempfile.mkdtemp(prefix='llmtool-gw-agent-audit-')
             os.chmod(audit_dir, 0o700)
             if Path(audit_dir).resolve().is_relative_to(root):

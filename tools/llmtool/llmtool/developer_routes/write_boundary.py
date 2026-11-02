@@ -9,7 +9,6 @@ from abc import ABC, abstractmethod
 import hashlib
 import os
 from pathlib import Path
-import re
 import shutil
 import sys
 import tempfile
@@ -147,7 +146,11 @@ class SandboxExecBoundary(WriteBoundary):
         rows.extend('(allow file-write* (subpath ' + _sbpl_quote(path) + '))'
                     for path in state_paths)
         for parent in gw_tmp_parents:
-            pattern = '^' + re.escape(parent.rstrip('/') + '/') + r'\.gw-agent-tmp-[0-9a-f]{16}$'
+            literal_parent = ''.join(
+                char if char.isalnum() or char in '/_-' else '[' + char + ']'
+                for char in parent.rstrip('/') + '/')
+            suffix = '.gw-agent-tmp-' + '[0-9a-f]' * 16
+            pattern = '^' + literal_parent + suffix + '$'
             rows.append('(allow file-write* (regex #' + _sbpl_quote(pattern) + '))')
         rows.extend('(allow file-write* (literal ' + _sbpl_quote(path) + '))'
                     for path in ('/dev/null', '/dev/tty'))
