@@ -55,7 +55,7 @@ Fetch only when remote state is required and the root/branch is verified. Develo
 
 Stage only task-named files. Inspect staged names and the full staged diff; run `git diff --cached --check` and task-required validation. Commit only the approved scope. Push normally and verify remote branch SHA, PR head, exact CI and review provenance.
 
-For GitHub API documentation edits, pin reads and the change branch to a known base SHA, apply authorized files sequentially using returned blob SHAs, then inspect the final remote diff. API edits do not establish local checkout or test evidence. Changes to the executable control tip must follow the [controller release and Mac handoff gate](../ai-team-delivery/controller-release.md). If the environment cannot write `.git`, do not create another checkout or move to `/tmp`; preserve source changes in the authorized repository and give the exact staging/commit/push commands for that root.
+For GitHub API documentation edits, pin reads and the change branch to a known base SHA, apply authorized files sequentially using returned blob SHAs, then inspect the final remote diff. API edits do not establish local checkout or test evidence. For Mac operator handoff and frozen routes, see [Mac operator handoff and frozen paths](../ai-team-delivery/controller-release.md). If the environment cannot write `.git`, do not create another checkout or move to `/tmp`; preserve source changes in the authorized repository and give the exact staging/commit/push commands for that root.
 
 ## PR review and merge
 

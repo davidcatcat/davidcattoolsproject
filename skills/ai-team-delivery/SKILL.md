@@ -72,7 +72,7 @@ Evidence must not contain credentials or restricted logs. Use redacted identifie
 
 ## Interim controller changes
 
-Changes to the temporary ai-loop controller and frozen routes follow the [controller release and Mac handoff gate](controller-release.md).
+For Mac operator handoff and frozen routes, see [Mac operator handoff and frozen paths](controller-release.md).
 
 ## Efficient handoffs
 
