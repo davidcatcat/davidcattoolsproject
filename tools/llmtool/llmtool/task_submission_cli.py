@@ -751,6 +751,8 @@ def add_task_submission_parsers(actions):
     advance = actions.add_parser('advance', help='Advance one Task through its next review or closure step')
     advance.add_argument('task_id', help='existing durable Task ID')
     advance.add_argument('--pr', type=int, help='public GitHub pull request number')
+    advance.add_argument('--merge', action='store_true',
+                         help='merge the bound PR after exact-head review and check gates pass')
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
@@ -1028,6 +1030,7 @@ def run_task_advance(args, *, store=None, **adapters):
         result = advance(task_id=args.task_id, store=TaskStore() if store is None else store,
             pr_number=getattr(args, 'pr', None),
             integration_pr=getattr(args, 'integration_pr', None),
+            merge=getattr(args, 'merge', False),
             reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
     _print(result)
     return 1 if result.get('codes') else 0

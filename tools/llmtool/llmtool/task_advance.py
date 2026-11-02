@@ -90,6 +90,177 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head):
     return number
 
 
+def _merge_refusal(code):
+    return {'step': 'MERGE_REFUSED', 'codes': [code], 'result': None}
+
+
+def _owner_acceptance_required(files):
+    if type(files) is not list:
+        return True
+    for item in files:
+        path = item.get('filename') if type(item) is dict else None
+        if type(path) is not str:
+            return True
+        if (re.fullmatch(r'tools/llmtool/llmtool/chat_tui[^/]*\.py', path) or
+                re.fullmatch(r'tools/llmtool/llmtool/tui_[^/]*\.py', path) or
+                re.fullmatch(r'tools/llmtool/tests/test_chat_tui[^/]*', path) or
+                re.fullmatch(r'tools/llmtool/tests/test_tui_[^/]*', path) or
+                path == 'tools/llmtool/tests/tui_pty_driver.py'):
+            return True
+    return False
+
+
+def _merge_checks(record, number, head, pr, github_get):
+    try:
+        checks = github_get(f'commits/{head}/check-runs?per_page=100')
+        files = github_get(f'pulls/{number}/files?per_page=100')
+    except Exception:
+        return 'MERGE_CHECKS_UNAVAILABLE'
+    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+            type(checks.get('total_count')) is not int or
+            checks['total_count'] != len(checks['check_runs']) or
+            len(checks['check_runs']) > 100 or type(files) is not list or len(files) >= 100):
+        return 'MERGE_CHECKS_UNAVAILABLE'
+    check_runs = checks['check_runs']
+    if not check_runs:
+        return 'MERGE_CHECKS_MISSING'
+    if any(type(item) is not dict or type(item.get('name')) is not str or
+           item.get('head_sha') != head or
+           item.get('status') != 'completed' or
+           item.get('conclusion') not in ('success', 'skipped') for item in check_runs):
+        return 'MERGE_CHECKS_NOT_GREEN'
+    if pr.get('state') not in (None, 'open') or pr.get('merged') is True:
+        return 'MERGE_PR_NOT_OPEN'
+    if type(pr.get('mergeable')) is not bool or pr.get('mergeable') is not True:
+        return 'MERGE_PR_NOT_MERGEABLE'
+    paths = [item.get('filename') for item in files if type(item) is dict]
+    if len(paths) != len(files) or any(type(path) is not str for path in paths):
+        return 'MERGE_CHECKS_UNAVAILABLE'
+    docs_only = bool(paths) and all(path.endswith('.md') for path in paths)
+    required_checks = ['check (docs)'] if docs_only else ['check (Linux 3.14)']
+    if not docs_only:
+        required_checks.append('check (macOS 3.13)')
+    names = {item['name'] for item in check_runs}
+    if any(name not in names for name in required_checks):
+        return 'MERGE_REQUIRED_CHECK_MISSING'
+    if not docs_only:
+        mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
+        if any(item.get('conclusion') != 'success' for item in mac_runs):
+            return 'MERGE_MACOS_CHECK_REQUIRED'
+    if _owner_acceptance_required(files):
+        return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
+    return None
+
+
+def _merge_pass_claim(record, number, head, events):
+    candidates = []
+    for claim in _claims(record):
+        if (type(claim) is not dict or claim.get('pr') != number or
+                claim.get('head_sha') != head or claim.get('state') != 'COMPLETED' or
+                type(claim.get('version')) is not int):
+            continue
+        result = claim.get('review_result')
+        if type(result) is not dict:
+            continue
+        outcome = next((event.get('outcome') or event.get('state') for event in events
+                        if type(event) is dict and event.get('source') == 'REVIEWER' and
+                        event.get('source_sha') == head and
+                        event.get('version') == claim['version']), None)
+        if outcome is None:
+            continue
+        candidates.append((claim['version'], result.get('verdict'), outcome))
+    if not candidates:
+        return None
+    latest = max(candidates, key=lambda item: item[0])
+    if latest[1] != 'PASS' or latest[2] != 'REVIEW_PASS':
+        return 'MERGE_REVIEW_NOT_PASS'
+    if any(type(event) is dict and event.get('source') == 'REVIEWER' and
+           event.get('source_sha') == head and type(event.get('version')) is int and
+           event['version'] > latest[0] for event in events):
+        return 'MERGE_NEWER_REVIEW_EXISTS'
+    return latest[0]
+
+
+def _merge_once(*, store, record, number, head, pr, events, github_get,
+                gh_runner, root):
+    if type(number) is not int or number < 1:
+        return _merge_refusal('MERGE_PR_UNAVAILABLE')
+    if type(pr) is not dict or pr.get('number', number) != number:
+        return _merge_refusal('MERGE_PR_UNAVAILABLE')
+    pr_head = pr.get('head') if type(pr) is dict else None
+    if type(pr_head) is not dict or pr_head.get('sha') != head:
+        return _merge_refusal('MERGE_STALE_HEAD')
+    if any(type(claim) is dict and claim.get('head_sha') == head and
+           claim.get('pr') != number for claim in _claims(record)):
+        return _merge_refusal('MERGE_CONFLICTING_PR')
+    review_version = _merge_pass_claim(record, number, head, events)
+    if type(review_version) is not int:
+        return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
+    code = _merge_checks(record, number, head, pr, github_get)
+    if code:
+        return _merge_refusal(code)
+    try:
+        current_pr = github_get(f'pulls/{number}')
+    except Exception:
+        return _merge_refusal('MERGE_PR_UNAVAILABLE')
+    current_head = current_pr.get('head') if type(current_pr) is dict else None
+    if (type(current_head) is not dict or current_head.get('sha') != head or
+            current_pr.get('number', number) != number):
+        return _merge_refusal('MERGE_STALE_HEAD')
+    if current_pr.get('state') not in (None, 'open') or current_pr.get('merged') is True:
+        return _merge_refusal('MERGE_PR_NOT_OPEN')
+    if current_pr.get('mergeable') is not True:
+        return _merge_refusal('MERGE_PR_NOT_MERGEABLE')
+    prior = record.get('merge_attempt')
+    if prior is not None:
+        if prior.get('pr') != number or prior.get('head_sha') != head:
+            return _merge_refusal('MERGE_CONFLICTING_PR')
+        return _merge_refusal('MERGE_ALREADY_CLAIMED')
+    claim = {'pr': number, 'head_sha': head, 'state': 'CLAIMED',
+             'claimed_at': TaskStore._completion_now()}
+    try:
+        store.compare_and_update(record['task_id'],
+            expected={'record_sha256': record['record_sha256']}, merge_attempt=claim)
+    except Exception:
+        return _merge_refusal('MERGE_CLAIM_CONFLICT')
+    args = ['pr', 'merge', str(number), '--squash', '--match-head-commit', head]
+    try:
+        result = gh_runner(root, args)
+    except Exception:
+        result = None
+    if result is None or getattr(result, 'returncode', 1) != 0:
+        claim['state'] = 'UNKNOWN'
+        try:
+            store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                dict(claim, state='CLAIMED')}, merge_attempt=claim)
+        except Exception:
+            pass
+        return _merge_refusal('MERGE_OUTCOME_UNKNOWN')
+    claim['state'] = 'MERGED'
+    warning_codes = []
+    try:
+        store.compare_and_update(record['task_id'], expected={'merge_attempt':
+            dict(claim, state='CLAIMED')}, merge_attempt=claim)
+    except Exception:
+        # The remote merge succeeded. A bounded state-record retry cannot
+        # repeat the merge and avoids leaving a transient failure as CLAIMED.
+        try:
+            store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                dict(claim, state='CLAIMED')}, merge_attempt=claim)
+        except Exception:
+            pass
+        warning_codes.append('MERGE_RESULT_RECORD_FAILED')
+    body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
+            f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
+    try:
+        comment = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
+        if getattr(comment, 'returncode', 1) != 0:
+            warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
+    except Exception:
+        warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
+    return {'step': 'MERGED', 'codes': warning_codes, 'result': {'pr': number, 'head': head}}
+
+
 def _record_d6_result(*, task_id, canonical_root, root):
     lifecycle_path = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
     spec = importlib.util.spec_from_file_location('_llmtool_d6_worktree_lifecycle', lifecycle_path)
@@ -586,12 +757,12 @@ def _merged_review_target(record, claims, events, pr, integration_pr, github_get
     return None
 
 
-def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
+def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=False,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None,
             run_task_complete_call=None, record_github_event_call=None,
             github_get=None, cwd=None, publish_git_runner=None,
-            publish_gh_runner=None, record_result_call=None):
+            publish_gh_runner=None, record_result_call=None, merge_gh_runner=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
     store = TaskStore() if store is None else store
     try:
@@ -650,6 +821,22 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                      getattr(exc, 'completion_code', None) else
                      _refusal(exc, 'task_store_error_code')]}, record, store,
                 d6.get('result_head') if type(d6) is dict else None)
+    if merge:
+        if type(d6) is not dict or type(d6.get('result_head')) is not str:
+            return _ack_consumed_events(_merge_refusal('MERGE_D6_UNAVAILABLE'),
+                                        record, store, None)
+        if d6.get('dirty') is True or d6.get('state') == 'DIRTY':
+            return _ack_consumed_events(_merge_refusal('MERGE_D6_NOT_CLEAN'),
+                                        record, store, d6['result_head'])
+        if d6.get('recorded_result_head') != d6['result_head']:
+            return _ack_consumed_events(_merge_refusal('MERGE_STALE_HEAD'),
+                                        record, store, d6['result_head'])
+        merge_result = _merge_once(store=store, record=record, number=number,
+            head=d6['result_head'], pr=pr, events=related['events'], github_get=get,
+            gh_runner=_publish_run_gh if merge_gh_runner is None else merge_gh_runner,
+            root=d6.get('root') or cwd or os.getcwd())
+        merge_result.update(task_id=task_id, next=merge_result['step'])
+        return _ack_consumed_events(merge_result, record, store, d6['result_head'])
     if type(d6) is dict and d6.get('state') == 'D6_BINDING_UNAVAILABLE':
         code = d6.get('code') if type(d6.get('code')) is str else 'D6_BINDING_UNAVAILABLE'
         return _ack_consumed_events(
