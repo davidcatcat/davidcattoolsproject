@@ -55,6 +55,15 @@ class TestSelectionTests(unittest.TestCase):
                 self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L1"])
                 self.assertEqual(plan["levels"][1]["tests"], sorted(expected))
 
+    def test_worker_dispatch_policy_maps_to_its_reader_test(self):
+        plan = select_test_plan(["tools/llmtool/worker-dispatch.json"])
+
+        self.assertEqual([level["level"] for level in plan["levels"]], ["L0", "L1"])
+        self.assertEqual(plan["levels"][1]["tests"], [
+            "tools/llmtool/tests/test_worker_dispatch.py",
+        ])
+        self.assertEqual(plan["fallback_reasons"], [])
+
     def test_unknown_config_dependency_and_deleted_test_keep_full_fallback(self):
         for path in (
             "tools/llmtool/llmtool/unknown_config.py",

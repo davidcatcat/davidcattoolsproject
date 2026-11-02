@@ -352,7 +352,12 @@ def selection_report(
                 "test_id_count": 0,
                 "selector_revision": _selector_revision(), "source_head": source_head}
 
-    output = sorted(ids)
+    # A whole-module ID already includes every class in that module. Avoid
+    # running those classes twice when both forms come from the manifest,
+    # shared impact map, or a directly changed test module.
+    whole_modules = {test_id for test_id in ids if "." not in test_id}
+    output = sorted(test_id for test_id in ids
+                    if "." not in test_id or test_id.partition(".")[0] not in whole_modules)
     has_submission = any(test_id.endswith("test_task_submission_cli") for test_id in output)
     return {"changed_paths": normalized, "level": "L2" if has_submission else "L1",
             "test_ids": output, "selection_reason": "explicit Mac manifest plus shared-map impacted tests",

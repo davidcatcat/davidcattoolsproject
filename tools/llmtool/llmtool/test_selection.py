@@ -48,6 +48,10 @@ IMPACT_TEST_MAP = {
     "tools/llmtool/llmtool/test_selection.py": (
         "tools/llmtool/tests/test_test_selection.py",
     ),
+    # The worker dispatch implementation loads worker-dispatch.json directly.
+    "tools/llmtool/worker-dispatch.json": (
+        "tools/llmtool/tests/test_worker_dispatch.py",
+    ),
 }
 
 # Changes in these areas receive the full repository check even if a direct
