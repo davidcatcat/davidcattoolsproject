@@ -387,7 +387,7 @@ def _write_json_atomic(root, path, value):
 
 
 def current_binding(pm_session_id=None, *, state_root=None, environ=None,
-                    resolve_legacy_account=True, resolved_account=_UNSET):
+                    home=None, resolve_legacy_account=True, resolved_account=_UNSET):
     """Read a persisted dedicated-session binding, or the most recently created one."""
     root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
     root = _ensure_state_dir(Path(root_arg))
@@ -429,7 +429,8 @@ def current_binding(pm_session_id=None, *, state_root=None, environ=None,
                 try:
                     binding['account'] = role_config.resolve_role(
                         'pm', environ=environ,
-                        home=None if environ is None else environ.get('HOME')).get('account')
+                        home=(home if home is not None else
+                              (None if environ is None else environ.get('HOME')))).get('account')
                 except LLMToolError:
                     return None
     # Bindings written before session_started existed already went through the
@@ -459,7 +460,7 @@ def _read_state_json(root, path):
         raise _error('PM_BINDING_INVALID', 'PM binding is malformed or unavailable') from None
 
 
-def list_bindings(*, state_root=None):
+def list_bindings(*, state_root=None, environ=None, home=None):
     """Return valid dedicated PM bindings newest first; reject unsafe entries."""
     root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
     root = _ensure_state_dir(Path(root_arg))
@@ -472,7 +473,8 @@ def list_bindings(*, state_root=None):
                 native_id = entry.name[:-len('.binding.json')]
                 if not active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native_id):
                     raise _error('PM_BINDING_INVALID', 'PM binding filename is malformed')
-                valid = current_binding(native_id, state_root=root)
+                valid = current_binding(native_id, state_root=root, environ=environ,
+                                        home=home)
                 if valid is None:
                     raise _error('PM_BINDING_INVALID', 'PM binding is malformed')
                 bindings.append(valid)
@@ -495,7 +497,8 @@ def select_binding(native_id, *, state_root=None):
     return binding
 
 
-def create_dedicated_pm(cwd, runtime='claude-code', account=None, *, state_root=None, clock=None):
+def create_dedicated_pm(cwd, runtime='claude-code', account=None, *, state_root=None,
+                        clock=None, environ=None, home=None):
     """Reserve a fresh PM session ID and durably bind its runtime and account."""
     if type(runtime) is not str or runtime not in _SUPPORTED_BINDING_RUNTIMES:
         raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
@@ -507,8 +510,10 @@ def create_dedicated_pm(cwd, runtime='claude-code', account=None, *, state_root=
         raise _error('PM_SESSION_INVALID', 'PM working directory is invalid') from None
     native_id = str(uuid.uuid4())
     try:
-        resolved = role_config.resolve_role(
-            'pm', cli={'account': account} if account is not None else None)
+        role_options = {'environ': environ, 'home': home}
+        if account is not None:
+            role_options['cli'] = {'account': account}
+        resolved = role_config.resolve_role('pm', **role_options)
     except LLMToolError:
         raise _error('PM_CONFIG_INVALID', 'PM account configuration is invalid') from None
     account = resolved.get('account')
@@ -1657,7 +1662,8 @@ class PMRuntime:
             record['result_text'] = _safe_result_text(result_text)
             record['usage'] = usage if isinstance(usage, dict) else {}
             if status == 'COMPLETED':
-                binding = current_binding(self.pm_session_id, state_root=self._root)
+                binding = current_binding(self.pm_session_id, state_root=self._root,
+                                         resolve_legacy_account=False)
                 if binding is not None and not binding.get('session_started'):
                     binding['session_started'] = True
                     _write_json_atomic(self._root,

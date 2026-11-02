@@ -664,6 +664,27 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertNotIn('--session-id', argv)
         later.close()
 
+    def test_completed_turn_does_not_persist_legacy_account_override(self):
+        account = os.path.join(self.temp.name, 'legacy-account')
+        os.mkdir(account, 0o700)
+        self.write_user_config('accounts:\n  A:\n    kind: claude\n    config_dir: ' +
+                               account + '\n')
+        binding_path = pm_runtime._binding_path(self.root, SESSION)
+        binding = pm_runtime.current_binding(SESSION, state_root=self.root,
+                                             resolve_legacy_account=False)
+        binding.pop('account', None)
+        pm_runtime._write_json_atomic(self.root, binding_path, binding)
+        process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
+        runtime = self.runtime(process, clock=time.time)
+        runtime.environ['LLMTOOL_ROLE_PM_ACCOUNT'] = 'A'
+        runtime.open()
+        list(runtime.send('first request'))
+        runtime.close()
+        persisted = pm_runtime.current_binding(SESSION, state_root=self.root,
+                                               resolve_legacy_account=False)
+        self.assertNotIn('account', persisted)
+        self.assertTrue(persisted['session_started'])
+
     def test_create_then_connect_does_not_treat_creator_as_live_session(self):
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root)
         process = FakeProcess()
