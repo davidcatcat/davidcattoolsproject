@@ -23,6 +23,11 @@ class Boundary:
         return {'verified': True, 'policy_sha256': 'a' * 64, 'probes': []}
 
 
+class DirectBoundary(Boundary):
+    def prepare(self, root, write_paths, state_dirs=()):
+        return [], 'a' * 64
+
+
 class GwAgentRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -190,7 +195,7 @@ class GwAgentRouteTests(unittest.TestCase):
         request['task']['goal'] = 'Change source.py from original to changed.'
         result = self.run_route_with_credential(
             self.route, request, gate=lambda: True,
-            boundary=Boundary(), snapshot=capture_snapshot)
+            boundary=DirectBoundary(), snapshot=capture_snapshot)
         self.assertEqual(result.status, 'DONE')
         self.assertEqual(result.changed_files, ('source.py',))
         self.assertEqual((self.root / 'source.py').read_text(), 'changed\n')
