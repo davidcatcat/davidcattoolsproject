@@ -418,5 +418,66 @@ class ThemePTYTests(unittest.TestCase):
         self.assertLessEqual(urls, {pr_url + "9", pr_url + "661"})
         terminal.esc()
 
+    def test_w60_detail_drag_select_and_copy_all_at_80x24(self):
+        """[Mac PTY (fake provider)] W60 Owner acceptance: in the Task detail at 80x24 a left drag
+        highlights and copies the selected text (fake pbcopy), C copies the whole multi-screen
+        detail as plain text without ESC/OSC, and Esc returns with the draft kept"""
+        now = datetime.now(timezone.utc)
+        task = "a" * 32
+        items = [{"role": "Developer", "task": task, "pr": "#661", "state": "RUNNING",
+                  "updated_at": (now - timedelta(minutes=2)).isoformat()}]
+        details = {task: {
+            "task_id": task, "state": "PM_RESPONDED", "pm_session_id": "pm-test",
+            "request": "W60 反白複製", "created_at": now.isoformat(),
+            "updated_at": "2026-11-02T01:02:03Z", "developer": {"state": "DEVELOPER_PENDING"},
+            "review_dispatch_claim": {"pr": 661, "state": "CLAIMED", "version": 1},
+            "completion_events": [{"source": "LOCAL", "state": "S%d" % n,
+                                   "received_at": "2026-11-02T01:%02d:00Z" % n}
+                                  for n in range(10)]}}
+        terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "Apple_Terminal"},
+                                      items=items, details=details, rows=24)
+        terminal.connect_pm()
+        terminal.wait_text("背景 1", "status line background count")
+        terminal.send("草稿")
+        terminal.wait_text("pm> 草稿", "draft")
+        terminal.send("\x15")                                         # empty draft for ↓
+        terminal.wait_for(lambda rows: any(row.rstrip() == "pm>" for row in rows), "cleared")
+        terminal.send("\x1b[B")
+        terminal.wait_text("背景工作 1 項", "↓ panel")
+        terminal.send("\r")
+        rows = terminal.wait_text("證據與出處", "detail opened")
+        rows = terminal.wait_stable("detail drawn")
+        self.assertTrue(rows[0].startswith("Task 詳情（唯讀）"))
+        self.assertIn("C 複製全文", rows[0])                           # header: one row at 80
+        # The status bar drops optional hints from the end when 80 columns are too few
+        # ("暖機中…" here): Esc and c stay, C is named in the header.
+        self.assertIn("Esc 返回 · c 複製 Task ID", rows[-1])
+        # Drag over row 2 (來源：TaskStore…): highlighted while held, copied on release.
+        terminal.press(1, 2)
+        terminal.drag(16, 2)
+        terminal.wait_for(lambda _rows: terminal.cell(1, 2).reverse or
+                          terminal.cell(1, 2).bg not in ("default",), "selection highlight")
+        terminal.release(16, 2)
+        copied = terminal.wait_clipboard()
+        self.assertTrue(copied.startswith("來源：TaskStore"), copied)
+        self.assertTrue(rows[1].startswith(copied), (copied, rows[1]))
+        terminal.wait_text("已複製 %d 字" % len(copied), "copy result")
+        # C: the whole detail, not only the 21 rows on screen.
+        terminal.send("C")
+        terminal.wait_for(lambda _rows: (terminal.clipboard() or "").startswith("Task 詳情"),
+                          "copy-all clipboard")
+        whole = terminal.wait_clipboard()
+        self.assertGreater(len(whole.splitlines()), 24)
+        for needle in ("證據與出處", "最近事件", "S0", "S9", "W60 反白複製"):
+            self.assertIn(needle, whole)
+        self.assertNotIn("\x1b", whole)
+        self.assertNotIn("\x07", whole)
+        terminal.wait_text("全文 已複製", "copy-all result")
+        self.assertFalse(any(row.startswith("pm> C") for row in terminal.rows()))
+        self.dump(terminal, "w60-drag-copy-all")
+        terminal.esc()
+        terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed")
+
+
 if __name__ == "__main__":
     unittest.main()

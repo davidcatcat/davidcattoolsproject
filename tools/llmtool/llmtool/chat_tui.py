@@ -120,8 +120,10 @@ detail (Core state, PR link, recent events, read once from TaskStore); PM replie
 arriving meanwhile, and Esc returns to the chat at the same place with the draft kept.
 The detail lists its evidence and where each value comes from (PR, CONFLICT when TaskStore
 names different PRs, PR state, CI head SHA, Reviewer source, read time; UNKNOWN with the
-reason when Core has none). With an empty draft, c copies the Task ID it shows (so a
-draft typed in the detail cannot start with c; type it after Esc, or after another letter).
+reason when Core has none). With an empty draft, c copies the Task ID it shows and C
+(Shift-C) copies the whole detail as plain text (so a draft typed in the detail cannot start
+with c or C; type it after Esc, or after another letter). A drag in the detail selects and
+copies like the conversation (double-click: a word; Ctrl-C copies the selection again).
 
 A chat reply is never a Task: to dispatch work, /pm connect and tell the PM.%s"""
 
@@ -653,6 +655,8 @@ class ChatTUI:
         # Task record), fixed when the detail opens, and when c was last pressed.
         self.task_view_task_id = None
         self.task_copy_at = None
+        # W60: what the detail's last copy was ("Task ID", "全文", None for a selection).
+        self.task_copy_label = None
         # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
         # a COMPLETED turn. Esc (W55), a failed/refused turn, Ctrl-C or a disconnect pauses
         # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
@@ -873,6 +877,13 @@ class ChatTUI:
         def _task_view_copy(event):
             self.copy_task_id()
 
+        # W60: C (Shift-C) copies the whole detail text, every line, as plain text.
+        @keys.add("C", filter=showing_task_view & ~picker_shown & ~searching
+                  & ((input_focused & Condition(lambda: not self.input.text))
+                     | task_view_focused))
+        def _task_view_copy_all(event):
+            self.copy_task_detail()
+
         @keys.add("up", filter=(input_focused | task_view_focused) & showing_task_view
                   & ~menu_shown & ~searching, eager=True)
         def _task_view_up(event):
@@ -998,10 +1009,13 @@ class ChatTUI:
             # With a selection, Ctrl-C copies it again and clears it instead of interrupting
             # or exiting (a second Ctrl-C then acts as usual). Cmd+C never arrives here:
             # Warp and Terminal.app keep it for their own copy (W52 F3, Warp log).
-            if self.view.selected_range() and self.conversation_visible():
-                self.view.copy_selection()
-                self.view.clear_selection()
-                self.view.copy_note = "選取已清除，再按 Ctrl-C 中斷/離開"
+            view = self._mouse_view()
+            if view is not None and view.selected_range():
+                if view is self.task_view:
+                    self.task_copy_label = None
+                view.copy_selection()
+                view.clear_selection()
+                view.copy_note = "選取已清除，再按 Ctrl-C 中斷/離開"
                 return
             self.request_quit()
 
@@ -1081,6 +1095,17 @@ class ChatTUI:
         for name in PM_STATUS_DROP_ORDER if self.pm_mode else STATUS_DROP_ORDER:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
+            if name == "keys" and "keys" in shown and self.task_view_visible():
+                # W60: in the detail the optional key hints go first (from the end), so
+                # "Esc 返回" stays as long as anything fits.
+                items = fields["keys"].split(" · ")
+                while len(items) > 1 and self._get_cwidth(STATUS_SEPARATOR.join(
+                        fields[key] for key in shown)) > width:
+                    items.pop()
+                    fields["keys"] = " · ".join(items)
+                if self._get_cwidth(STATUS_SEPARATOR.join(
+                        fields[key] for key in shown)) <= width:
+                    break
             if name in shown:
                 shown.remove(name)
         if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) > width:
@@ -1106,8 +1131,10 @@ class ChatTUI:
             copied = self._task_copy_status()
             if copied:
                 keys.append(copied)
-            elif self.task_view_task_id and not self.input.text:
-                keys.append("c 複製 Task ID")
+            elif not self.input.text:
+                if self.task_view_task_id:
+                    keys.append("c 複製 Task ID")
+                keys.append(chat_tui_status.COPY_ALL_STATUS)
         elif self.pm_turn_active:
             keys.append("Esc 中斷")
         elif self.busy and self.worker_kind == "chat" and not self.send_interrupted:
@@ -1609,26 +1636,34 @@ class ChatTUI:
         picker, status) go to prompt_toolkit's own handler.
         """
         parsed = chat_tui_view.parse_mouse(event.data)
-        if parsed is not None and self.task_view_visible():
-            from prompt_toolkit.mouse_events import MouseEventType
-            if parsed[0] in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
-                rows = chat_tui_view.WHEEL_ROWS
-                self.task_view.scroll_rows(rows if parsed[0] == MouseEventType.SCROLL_DOWN
-                                           else -rows)
-                return None
-        if parsed is None or not self.conversation_visible() or not self._pane_mouse(*parsed):
+        if parsed is None or self._mouse_pane() is None or not self._pane_mouse(*parsed):
             return self._default_mouse_binding.call(event)
         return None
 
+    def _mouse_pane(self):
+        """(view, pane) that the wheel and drag selection act on: the W59 Task detail when it
+        is shown (W60: same selection and copy as the conversation), else the conversation
+        when it is shown, else None."""
+        if self.task_view_visible():
+            return self.task_view, self.task_pane
+        if self.conversation_visible():
+            return self.view, self.conversation
+        return None
+
+    def _mouse_view(self):
+        shown = self._mouse_pane()
+        return None if shown is None else shown[0]
+
     def _pane_geometry(self):
-        info = self.conversation.window.render_info
+        shown = self._mouse_pane()
+        info = None if shown is None else shown[1].window.render_info
         if info is None:
             return None
         return info._x_offset, info._y_offset, info.window_height
 
     def _pane_mouse(self, kind, button, x, y):
         from prompt_toolkit.mouse_events import MouseButton, MouseEventType
-        view = self.view
+        view = self._mouse_view()
         geometry = self._pane_geometry()
         if geometry is None:
             return False
@@ -1661,6 +1696,8 @@ class ChatTUI:
         if kind == MouseEventType.MOUSE_DOWN and button == MouseButton.LEFT:
             self._autoscroll_stop()
             self._drag_copy_stop()   # a drag whose release never came is replaced
+            if view is self.task_view:
+                self.task_copy_label = None   # W60: a drag copy is reported as plain 已複製
             view.begin_drag(view.offset_at(view.top + y - top, x - left))
             self._drag_pointer = self._drag_origin = (x, y)
             self._drag_moved = False
@@ -1675,7 +1712,7 @@ class ChatTUI:
         if geometry is None:
             return
         left, top, height = geometry
-        view = self.view
+        view = self._mouse_view()
         row = max(view.top, min(view.top + height - 1, view.top + y - top))
         view.extend_drag(view.offset_at(row, max(0, x - left)))
         self.app.invalidate()
@@ -1686,7 +1723,7 @@ class ChatTUI:
         Only reached after the pointer left the press cell. The pane's first and last rows
         count as the edge because Terminal.app clamps drags that leave the window to them.
         """
-        view = self.view
+        view = self._mouse_view()
         geometry = self._pane_geometry()
         if geometry is None:
             return
@@ -1722,8 +1759,9 @@ class ChatTUI:
         request, so the clipboard ends with the selection as it was last drawn.
         """
         self._drag_copy_handle = None
-        if self.view.dragging and self._drag_moved and self.conversation_visible():
-            self.view.copy_selection()
+        view = self._mouse_view()
+        if view is not None and view.dragging and self._drag_moved:
+            view.copy_selection()
             self.app.invalidate()
 
     def _drag_copy_stop(self):
@@ -1733,7 +1771,8 @@ class ChatTUI:
 
     def _autoscroll_tick(self):
         self._autoscroll_handle = None
-        if self.view.dragging and self._drag_pointer is not None and self.conversation_visible():
+        view = self._mouse_view()
+        if view is not None and view.dragging and self._drag_pointer is not None:
             self._drag_to(*self._drag_pointer)
 
     def _autoscroll_stop(self):
@@ -1756,6 +1795,7 @@ class ChatTUI:
         self.mouse_enabled = not self.mouse_enabled
         self._autoscroll_stop()
         self.view.clear_selection()
+        self.task_view.clear_selection()
         if self.mouse_enabled:
             self.append("llmtool: mouse on; the wheel scrolls the conversation and a drag selects"
                         " and copies text. F6 turns it off to select with the terminal instead")
@@ -1770,6 +1810,7 @@ class ChatTUI:
         self._drag_copy_stop()
         self._drag_pointer = None
         self.view.clear_selection()
+        self.task_view.clear_selection()   # W60: the detail's selection too
 
     def toggle_help(self):
         self.show_help = not self.show_help
@@ -2527,7 +2568,7 @@ class ChatTUI:
                 None, now, "背景清單的 Task ID 無法辨識"))
         else:
             self._show_task_view("Task 詳情（唯讀）— Esc 返回對話" + chat_tui_status.COPY_HINT
-                                 + "\n讀取中…（TaskStore，本機）Task " + task_id, task_id)
+                                 + chat_tui_status.COPY_ALL_HINT + "\n讀取中…（TaskStore，本機）Task " + task_id, task_id)
             self._loop = asyncio.get_running_loop()
             threading.Thread(target=self._read_task_view,
                              args=(self._loop, self.task_view_seq, task_id),
@@ -2541,6 +2582,8 @@ class ChatTUI:
         """
         self.task_view_task_id = task_id
         self.task_copy_at = None
+        self.task_copy_label = None
+        self.task_view.copied = None   # a new detail starts without the last copy's status
         self.show_background = False
         self._leave_conversation()
         self.task_view_seq += 1
@@ -2570,30 +2613,45 @@ class ChatTUI:
     def copy_task_id(self):
         """W60 c: the open detail's Task ID to the clipboard (the pane's clipboard worker)."""
         self.task_copy_at = time.monotonic()
+        self.task_copy_label = "Task ID"
         if self.task_view_task_id:
             self.task_view.copy(self.task_view_task_id)
         self.app.invalidate()
 
+    def copy_task_detail(self):
+        """W60 C: the whole detail (every line, not only the screen) as the plain text shown.
+
+        The detail text was made terminal-safe when it was set, so the copy carries no live
+        escape sequence; links are drawn around the text and are not part of it.
+        """
+        view = self.task_view
+        self.task_copy_at = time.monotonic()
+        self.task_copy_label = "全文"
+        view.clear_selection()
+        view.copy_range(0, len(view.text))
+        self.app.invalidate()
+
     def _task_copy_status(self):
-        """Status text of the last c while it is recent (copying, copied, failed), else None."""
-        if self.task_copy_at is None:
-            return None
+        """Status text of the detail's last copy while it is recent, else None."""
         view = self.task_view
         now = time.monotonic()
-        recent = now - self.task_copy_at < chat_tui_view.COPIED_SECONDS
-        if not self.task_view_task_id:
-            return "沒有 Task ID 可複製" if recent else None
+        if (self.task_copy_at is not None and self.task_copy_label == "Task ID"
+                and not self.task_view_task_id):
+            return ("沒有 Task ID 可複製"
+                    if now - self.task_copy_at < chat_tui_view.COPIED_SECONDS else None)
         # The worker stamps ``copied`` when pbcopy returns, so a slow copy still reports.
         finished = (view.copied is not None
                     and now - view.copied[1] < chat_tui_view.COPIED_SECONDS)
-        if not (recent or finished or view.copy_pending()):
+        if not (finished or view.copy_pending()):
             return None
-        return "Task ID " + view.status()
+        return (self.task_copy_label + " " if self.task_copy_label else "") + view.status()
 
     def close_task_view(self):
         """Esc: back to the chat; its reading position and the draft were never touched."""
         self.task_view_task_id = None
         self.task_copy_at = None
+        self.task_copy_label = None
+        self._leave_conversation()   # ends a drag in the detail and its selection
         self.show_task_view = False
         self.task_view_seq += 1
         self.app.layout.focus(self.input)

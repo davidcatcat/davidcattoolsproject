@@ -4915,6 +4915,137 @@ class PMConversationTests(BoundedPMTest):
         with patch.object(chat_tui_status, 'read_task_detail', side_effect=self.w60_hostile_record):
             self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened])
 
+    # -- W60 Owner acceptance: drag-select and copy-all in the Task detail ----------------
+    def w60_open(self, steps, record=None, size=None):
+        """Open the first row's detail, run ``steps`` (functions of ui and copies)."""
+        seen = {}
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: '證據與出處' in self.w59_text(ui), 'detail read')
+            seen['copies'] = self.w60_copies(ui)
+            for step in steps:
+                result = step(ui, seen['copies'])
+                if asyncio.iscoroutine(result):
+                    await result
+
+        with patch.object(chat_tui_status, 'read_task_detail',
+                          side_effect=record or (lambda task_id: self.w59_record(task_id))):
+            ui, _ = self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r',
+                                opened], size=size)
+        return ui, seen['copies']
+
+    @staticmethod
+    async def w60_mouse(ui, *events, pause=0.05):
+        for event in events:
+            ui.app.input.send_text(event)
+            await asyncio.sleep(pause)
+
+    def test_w60_drag_in_the_detail_selects_and_copies_like_the_conversation(self):
+        async def dragged(ui, copies):
+            left, top, _height = ui._pane_geometry()
+            self.assertEqual(ui._mouse_view(), ui.task_view)
+            await self.w60_mouse(ui, press(left + 1, top + 2), drag(left + 16, top + 2))
+            self.assertTrue(ui.task_view.dragging)
+            self.assertTrue(ui.task_view.selected_range())          # highlighted while dragging
+            self.assertFalse(ui.view.selected_range())               # never the hidden chat
+            await self.w60_mouse(ui, release(left + 16, top + 2))
+            self.assertTrue(ui.task_view.wait_copy())
+            line = ui.task_view.text.splitlines()[1]
+            self.assertTrue(copies and line.startswith(copies[-1]), (copies, line))
+            self.assertTrue(copies[-1].startswith('來源：TaskStore'))
+            self.assertIn('已複製 %d 字' % len(copies[-1]), ui.status_keys())
+            self.assertNotIn('Task ID 已複製', ui.status_keys())
+            count = len(copies)
+            ui.app.input.send_text('\x03')                          # Ctrl-C: copy again
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.task_view.wait_copy())
+            self.assertEqual(copies[count:], [copies[count - 1]])
+            self.assertFalse(ui.task_view.selected_range())
+            self.assertFalse(ui.quit_pending)
+            self.assertTrue(ui.show_task_view)
+            self.assertEqual(ui.input.text, '')
+
+        ui, _copies = self.w60_open([dragged])
+        self.assertEqual(self.w59_sent(), 0)
+
+    def test_w60_double_click_in_the_detail_selects_a_word(self):
+        async def clicked(ui, copies):
+            left, top, _height = ui._pane_geometry()
+            lines = ui.task_view.text.splitlines()
+            row = next(n for n, line in enumerate(lines) if line.startswith('Status (from'))
+            self.assertTrue(all(get_cwidth(line) < 80 for line in lines[:row]))  # no wrap above
+            x = left + 1 + get_cwidth(lines[row][:lines[row].index('TaskStore')]) + 2
+            y = top + 1 + row
+            await self.w60_mouse(ui, press(x, y), release(x, y), press(x, y), release(x, y))
+            self.assertTrue(ui.task_view.wait_copy())
+            self.assertEqual(copies[-1:], ['TaskStore'])
+
+        self.w60_open([clicked])
+
+    def test_w60_drag_past_the_detail_edge_autoscrolls(self):
+        async def edge(ui, copies):
+            left, top, height = ui._pane_geometry()
+            self.assertEqual(ui.task_view.top, 0)
+            await self.w60_mouse(ui, press(left + 1, top + 3), drag(left + 5, top + 4),
+                                 drag(left + 5, top + height + 3))   # below the pane
+            await asyncio.sleep(0.5)                                 # held: keeps scrolling
+            self.assertGreater(ui.task_view.top, 1)
+            self.assertEqual(ui.view.top_offset, before['offset'])   # the chat never moved
+            await self.w60_mouse(ui, release(left + 5, top + height + 3))
+            self.assertTrue(ui.task_view.wait_copy())
+            self.assertIn('\n', copies[-1])                          # several rows copied
+            self.assertIn(copies[-1], ui.task_view.text)
+
+        before = {}
+
+        def remember(ui, copies):
+            before['offset'] = ui.view.top_offset
+
+        self.w60_open([remember, edge],
+                      record=lambda task_id: dict(self.w59_record(task_id), completion_events=[
+                          {'source': 'LOCAL', 'state': 'S%d' % n,
+                           'received_at': '2026-11-01T00:%02d:00Z' % n} for n in range(10)]))
+
+    def test_w60_shift_c_copies_the_whole_multi_screen_detail_as_plain_text(self):
+        async def copied_all(ui, copies):
+            _left, _top, height = ui._pane_geometry()
+            self.assertIn('C 複製全文', self.w59_text(ui).splitlines()[0])
+            self.assertIn('c 複製 Task ID · C 全文', ui.status_keys())
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.task_view.wait_copy())
+            text = copies[-1]
+            self.assertEqual(text, ui.task_view.text)                 # every line, not the screen
+            self.assertGreater(len(text.splitlines()), height)
+            self.assertIn('最近事件', text)
+            self.assertNotIn('\x1b', text)
+            self.assertNotIn('\x07', text)
+            self.assertNotIn('\x9b', text)
+            self.assertIn('\\x1b]52', text)                          # hostile text, escaped
+            self.assertNotIn('RUNNING', text)
+            self.assertEqual(ui.input.text, '')
+            self.assertIn('全文 已複製 %d 字' % len(text), ui.status_keys())
+            self.assertEqual(ui.task_view.top, 0)                     # reading place unchanged
+
+        self.w60_open([copied_all], record=lambda task_id: dict(
+            self.w60_hostile_record(task_id), completion_events=[
+                {'source': 'LOCAL', 'state': 'S%d' % n,
+                 'received_at': '2026-11-01T00:%02d:00Z' % n} for n in range(10)]),
+            size=[Size(rows=24, columns=80)])
+
+    def test_w60_esc_ends_a_detail_selection_and_keeps_chat_position(self):
+        async def selected(ui, copies):
+            left, top, _height = ui._pane_geometry()
+            await self.w60_mouse(ui, press(left + 1, top + 2), drag(left + 10, top + 2))
+            self.assertTrue(ui.task_view.selected_range())
+            await self.w59_esc(ui)
+            self.assertFalse(ui.show_task_view)
+            self.assertFalse(ui.task_view.selected_range())
+            self.assertFalse(ui.task_view.dragging and ui._autoscroll_handle)
+            self.assertEqual(ui._mouse_view(), ui.view)
+
+        self.w60_open([selected])
+
     def test_w60_c_without_a_task_id_copies_nothing_and_says_why(self):
         seen = {}
 

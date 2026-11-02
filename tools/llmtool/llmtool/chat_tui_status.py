@@ -482,6 +482,9 @@ def read_task_detail(task_id, store=None):
 
 
 COPY_HINT = " · c 複製 Task ID"   # W60: the detail's header names the key (any width)
+COPY_ALL_KEY = "C 複製全文"        # W60: Shift-C copies the whole detail text
+COPY_ALL_HINT = " · " + COPY_ALL_KEY
+COPY_ALL_STATUS = "C 全文"         # the same key, short enough for the 80-column status bar
 
 
 def task_detail_text(record, read_at, reason=None, copy_hint=False):
@@ -492,8 +495,8 @@ def task_detail_text(record, read_at, reason=None, copy_hint=False):
     """
     from .task_status import derive_state
     from .chat_tui_events import format_event, task_events
-    lines = ["Task 詳情（唯讀）— Esc 返回對話 · ↑↓ PageUp/PageDown 捲動"
-             + (COPY_HINT if copy_hint else ""),
+    lines = ["Task 詳情（唯讀）— Esc 返回 · ↑↓ PgUp/PgDn 捲動"   # one row at 80 columns
+             + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT,
              "來源：TaskStore（本機）｜讀取於 " + read_at]
     if type(record) is not dict:
         lines.append("Core 狀態：" + UNKNOWN + "（" + (reason or "沒有 Task 記錄") + "）")
