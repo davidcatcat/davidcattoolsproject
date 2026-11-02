@@ -791,9 +791,12 @@ class ProviderLedgerTests(unittest.TestCase):
     def test_atomic_cap_keeps_unconsumed_row_issued(self):
         first,o1=self.issue('1');second,o2=self.issue('2')
         self.assertTrue(self.consume(first,o1));self.assertFalse(self.consume(second,o2))
-        self.assertEqual(self.h.ledger.status(second.nonce),'ISSUED')
+        expected='DENIED' if self.h.ledger.provider_layout == 2 else 'ISSUED'
+        self.assertEqual(self.h.ledger.status(second.nonce),expected)
         self.assertTrue(self.h.ledger.finalize_provider(first,'EFFECT_UNKNOWN'))
-        self.assertFalse(self.consume(second,o2))
+        if expected == 'ISSUED': self.assertFalse(self.consume(second,o2))
+        else:
+            with self.assertRaises(l.LedgerError): self.consume(second,o2)
 
     def test_day_is_consume_day_not_issue_or_finalize_day(self):
         self.h.fake.utc='2026-10-13T23:59:59Z'
@@ -1017,21 +1020,31 @@ class ProviderLayout2Tests(ProviderLedgerTests):
         self.again(expired)
         self.assertEqual(self.statuses(), ['DENIED', 'CONSUMED', 'EXPIRED', 'ISSUED'])
 
-    def test_cap_refused_issued_row_expires_on_reissue(self):
+    def test_cap_refusal_releases_key_for_same_object_retry(self):
         first, o1 = self.issue('1')
         second, o2 = self.issue('2', ttl=1)
         self.assertTrue(self.consume(first, o1))
-        self.assertFalse(self.consume(second, o2))  # daily cap 1: stays ISSUED
-        self.assertEqual(self.h.ledger.status(second.nonce), 'ISSUED')
-        with self.assertRaises(l.LedgerError):
-            self.again(second)  # unexpired ISSUED still holds the key
-        self.h.fake.utc = '2026-10-13T00:00:11Z'
-        third, _ = self.again(second, run='f')
-        self.assertEqual(self.h.ledger.status(second.nonce), 'EXPIRED')
-        self.assertEqual(self.h.ledger.status(third.nonce), 'ISSUED')
+        self.assertFalse(self.consume(second, o2))  # daily cap 1: zero effect
+        self.assertEqual(self.h.ledger.status(second.nonce), 'DENIED')
         row = self.h.ledger._db.execute('SELECT consumed_at, consumed_day, redeem_run_id FROM receipts '
                                         'WHERE nonce=?', (second.nonce,)).fetchone()
         self.assertEqual(row, (None, None, None))
+        self.h.fake.utc = '2026-10-14T00:00:00Z'
+        third, o3 = self.again(second, run='f')
+        self.assertEqual(self.h.ledger.status(second.nonce), 'DENIED')
+        self.assertEqual(self.h.ledger.status(third.nonce), 'ISSUED')
+        self.assertTrue(self.consume(third, o3))
+
+    def test_same_reviewed_object_is_rejected_across_observations(self):
+        first, _ = self.issue('1')
+        call = replace(first.binding.call, packet_digest='2'*64, sequence=first.binding.call.sequence+1,
+                       observation_digest='3'*64, redeem_run_id='e'*32, reviewer_launch_nonce='e'*32)
+        b = p.ProviderReviewBinding(call)
+        observed = p.ProviderObservedState(b.digest, call.source_sha, call.observation_digest, True)
+        decision = p.decide_provider_review(b, issuer=self.issuer, observed=observed)
+        self.assertEqual(b.object_key, first.binding.object_key)
+        with self.assertRaises(l.LedgerError):
+            self.h.ledger.issue_provider(decision, ttl_seconds=120)
 
     def test_effect_rows_and_live_issue_hold_the_key(self):
         for status in ('ISSUED', 'CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN'):

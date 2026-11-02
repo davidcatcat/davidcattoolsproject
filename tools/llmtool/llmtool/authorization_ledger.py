@@ -612,7 +612,13 @@ class ReceiptLedger:
             day=now//86400
             count=self._db.execute("SELECT count(*) FROM receipts WHERE route_digest=? AND consumed_day=? "
                 "AND status IN ('CONSUMED','EFFECT_DONE','EFFECT_UNKNOWN')",(b.call.route_digest,day)).fetchone()[0]
-            if count >= cap: return False  # Remains ISSUED, zero effect.
+            if count >= cap:
+                # Layout 2 releases the reviewed-object key for a refused,
+                # zero-effect attempt in this transaction. Preserve layout 1
+                # semantics exactly: its unique object key remains held.
+                if self.provider_layout == 2:
+                    self._set(receipt.nonce,'DENIED','ISSUED')
+                return False
             updated=self._db.execute("UPDATE receipts SET status='CONSUMED',redeem_run_id=?,consumed_at=?,consumed_day=? "
                 "WHERE nonce=? AND status='ISSUED'",(b.call.redeem_run_id,now,day,receipt.nonce))
             return updated.rowcount == 1
