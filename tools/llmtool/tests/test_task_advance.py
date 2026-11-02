@@ -184,7 +184,7 @@ class TaskAdvanceTests(unittest.TestCase):
                          'DEVELOPER_ATTENTION')
         related['repair_claims'][0]['repair_state'] = 'RESPONDED'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
-                         'REPAIR_RESULT_NOT_PUBLISHED')
+                         'PUBLISH')
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(False), PR, related),
                          'PUBLISH')
         new_head = 'b' * 40
@@ -417,7 +417,7 @@ class TaskAdvanceTests(unittest.TestCase):
             ({'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN'}}, 'UNKNOWN',
              'REPAIR_OUTCOME_UNKNOWN'),
             ({'developer': {'state': 'DEVELOPER_RESPONDED'}}, 'RESPONDED',
-             'REPAIR_RESULT_NOT_PUBLISHED'),
+             'PUBLISH'),
             ({'developer': {'state': 'DEVELOPER_OUTPUT_REJECTED'}},
              'OUTPUT_REJECTED', 'REPAIR_RETRY'),
         )

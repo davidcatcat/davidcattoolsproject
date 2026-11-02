@@ -512,6 +512,12 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_default_adapter_rebuilds_original_direct_developer_request(self):
         seen = []
+        registration = type('Registration', (), {
+            'root': '/registered/d6', 'common_dir': '/tmp/git',
+            'branch': 'feat/task', 'result_sha': HEAD})()
+        snapshot = type('Snapshot', (), {
+            'head': HEAD, 'root': '/registered/d6',
+            'common_dir': '/tmp/git', 'branch': 'feat/task'})()
         def recorder(**request):
             packet = request['packet']
             bounded = (f"Repair attempt {request['attempt']}/"
@@ -522,7 +528,11 @@ class ReviewRepairTests(unittest.TestCase):
             return {'task_id': request['repair_task_id'], 'pm_assignment': {
                 'acceptance': ['Repair the reported issue.', bounded]}}
         with patch.object(review_repair.worker_dispatch, 'evaluate',
-                          return_value=type('Decision', (), {'allowed': True})()):
+                          return_value=type('Decision', (), {'allowed': True})()), \
+             patch.object(review_repair.task_completion, 'read_d6_registration',
+                          return_value=registration), \
+             patch.object(review_repair.task_completion, 'collect_git_snapshot',
+                          return_value=snapshot):
             result = review_repair.repair_review(
                 store=self.store, task_id=TASK, executor_task=EXECUTOR,
                 pr_number=PR, github_get=lambda _path: [_comment()],

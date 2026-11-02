@@ -333,7 +333,7 @@ def decide(record, d6, pr, related):
                 if state == 'RECORD_UNAVAILABLE':
                     return 'DEVELOPER_ATTENTION'
                 if state == 'RESPONDED':
-                    return 'REPAIR_RESULT_NOT_PUBLISHED'
+                    return 'PUBLISH'
             return 'REPAIR_REVIEW'
         if remote_status not in ('PASS', 'ADMISSION_DENIED'):
             return 'RUN_REMOTE_TEST'
@@ -370,7 +370,7 @@ def decide(record, d6, pr, related):
                 return 'DEVELOPER_ATTENTION'
             if (current_repair is not None and current_repair.get('state') == 'DISPATCHED' and
                     current_repair.get('repair_state') == 'RESPONDED'):
-                return 'REPAIR_RESULT_NOT_PUBLISHED'
+                return 'PUBLISH'
             return 'REPAIR_REVIEW'
         if outcome == 'REVIEW_PASS':
             completion = record.get('completion')
