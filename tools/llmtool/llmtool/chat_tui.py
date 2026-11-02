@@ -188,9 +188,6 @@ def key_help(dev):
 # Existing commands only: (label shown, text a completion puts in the draft, summary).
 # Picking one edits the input draft; it never runs the command.
 SLASH_COMMANDS = (
-    ("/pm list", "/pm list", "List dedicated PM sessions"),
-    ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
-    ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
     ("/pm connect", "/pm connect", "Talk to the PM: connect to the dedicated PM session"),
     ("/pm new", "/pm new", "Create a dedicated PM session"),
     ("/pm", "/pm", "Show the PM connection"),
@@ -213,6 +210,9 @@ SLASH_COMMANDS = (
     ("/task events", "/task events", "Recent Task events from TaskStore"),
     ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
     ("/links", "/links ", "Clickable file and #PR links: on or off (saved)"),
+    ("/pm list", "/pm list", "List dedicated PM sessions"),
+    ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
+    ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
@@ -3062,12 +3062,12 @@ class ChatTUI:
             return
         if parts[1:2] == ["accounts"] and parts[2:] in ([], ["--check"]):
             try:
-                accounts = self.pm_api.accounts()
                 if parts[2:] == ["--check"]:
                     checks = self.pm_api.account_checks()
                     self.append("\n".join("yes" if checked else "no" for checked in checks)
                                 if checks else "no")
                 else:
+                    accounts = self.pm_api.accounts()
                     lines = ["  %s · %s · folder %s" % (
                         chat_tui_pm.safe_text(row['name']), chat_tui_pm.safe_text(row['kind']),
                         chat_tui_pm.safe_text(row['status'])) for row in accounts]

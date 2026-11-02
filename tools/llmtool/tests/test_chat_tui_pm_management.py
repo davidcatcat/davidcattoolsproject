@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import yaml
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from llmtool import chat_tui_pm, role_config
@@ -18,12 +20,14 @@ class PMManagementTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.state = self.root / "state"
         self.claude_home = self.root / "claude-home"
+        self.claude_work_home = self.root / "claude-work-home"
         self.codex_home = self.root / "codex-home"
         self.unsafe_home = self.root / "unsafe-home"
-        for folder in (self.claude_home, self.codex_home, self.unsafe_home):
+        for folder in (self.claude_home, self.claude_work_home, self.codex_home,
+                       self.unsafe_home):
             folder.mkdir(mode=0o700)
-        self.claude_home.chmod(0o700)
-        self.codex_home.chmod(0o700)
+        for folder in (self.claude_home, self.claude_work_home, self.codex_home):
+            folder.chmod(0o700)
         self.unsafe_home.chmod(0o777)
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -33,42 +37,40 @@ class PMManagementTests(unittest.TestCase):
         self.config = {
             "accounts": {
                 "claude-main": {"kind": "claude", "config_dir": str(self.claude_home)},
+                "claude-work": {"kind": "claude", "config_dir": str(self.claude_work_home)},
                 "codex-main": {"kind": "codex", "config_dir": str(self.codex_home)},
                 "unsafe": {"kind": "claude", "config_dir": str(self.unsafe_home)},
             },
             "roles": {},
         }
+        self.config_path = self.root / ".config" / "llmtool" / "config.yaml"
+        self.config_path.parent.mkdir(parents=True)
+        self._write_config()
         self.api = chat_tui_pm.PMRuntimeAPI(state_root=self.state, environ=self.environ)
+
+    def _write_config(self):
+        self.config_path.write_text(yaml.safe_dump(self.config, sort_keys=True))
 
     def _script(self, name, body):
         path = self.bin / name
         path.write_text("#!/bin/sh\nprintf '%s\\n' 'secret-provider-output'\n" + body)
         path.chmod(0o700)
 
-    def _accounts(self):
-        from llmtool import config
-        return patch.object(config, "user_config_path", return_value=self.root / "config.yaml"), \
-            patch.object(config, "_read_yaml", return_value=self.config)
-
     def test_account_listing_hides_paths_and_marks_unsafe_directory(self):
-        patches = self._accounts()
-        with patches[0], patches[1]:
-            rows = self.api.accounts()
+        rows = self.api.accounts()
         self.assertEqual([(row["name"], row["kind"], row["status"]) for row in rows], [
                 ("claude-main", "claude", "private"),
+                ("claude-work", "claude", "private"),
                 ("codex-main", "codex", "private"),
                 ("unsafe", "claude", "not private"),
         ], msg="actual account rows: %r" % rows)
 
     def test_check_discards_provider_output_and_rejects_unsafe_folder(self):
-        patches = self._accounts()
-        with patches[0], patches[1]:
-            checks = self.api.account_checks()
-        self.assertEqual(checks, [True, False, False])
+        checks = self.api.account_checks()
+        self.assertEqual(checks, [True, True, False, False])
 
     def test_create_list_select_and_reselect_saved_binding_without_config_write(self):
-        config_path = self.root / "config.yaml"
-        config_path.write_text("unchanged config bytes\n")
+        config_path = self.config_path
         before = (config_path.read_bytes(), config_path.stat().st_mtime_ns)
 
         def resolve(role, cli=None, environ=None, home=None):
@@ -79,9 +81,7 @@ class PMManagementTests(unittest.TestCase):
             return {"provider": "claude", "account": account,
                     "config_dir": str(self.claude_home)}
 
-        config_patches = self._accounts()
-        with patch.object(role_config, "resolve_role", side_effect=resolve), \
-                config_patches[0], config_patches[1]:
+        with patch.object(role_config, "resolve_role", side_effect=resolve):
             first = self.api.create_dedicated(str(self.root), "claude-code", "claude-main")
             second = self.api.create_dedicated(str(self.root), "codex", "codex-main")
             rows = self.api.list_bindings()

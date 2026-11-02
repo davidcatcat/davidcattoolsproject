@@ -571,15 +571,14 @@ class WidgetTests(Base):
 
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
-        self.assertEqual(labels, ['/pm list', '/pm use', '/pm accounts', '/pm connect',
-                                  '/pm new', '/pm', '/pm disconnect',
+        self.assertEqual(labels, ['/pm connect', '/pm new', '/pm', '/pm disconnect',
                                   '/pm history', '/pm queue', '/help', '/status', '/provider', '/skill',
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
-                                  '/theme', '/links'])
+                                  '/theme', '/links', '/pm list', '/pm use', '/pm accounts'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
-                         ['/pm list', '/pm use', '/pm accounts'])
+                         ['/pm connect', '/pm new', '/pm'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/ory')][:2],
                          ['/pm history', '/history'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
@@ -799,20 +798,20 @@ class WidgetTests(Base):
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/pm connect', rows[0])
-            self.assertIn('16 more (0 above, 16 below)', rows[-1])
+            self.assertIn('19 more (0 above, 19 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
             self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('16 more (2 above, 14 below)', rows[-1])
+            self.assertIn('19 more (2 above, 17 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 20)
             self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(16 above, 0 below)', rows[-1])
+            self.assertIn('(19 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
