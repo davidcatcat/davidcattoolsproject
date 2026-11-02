@@ -2,6 +2,7 @@
 
 import dataclasses
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -1442,7 +1443,8 @@ def _capture_rejected_output(store, task_id, value):
 
 
 def _persist_developer_output_rejection(store, task_id, developer, error_code,
-                                        usage, value, **fields):
+                                        usage, value, *, expected_developer=None,
+                                        **fields):
     """Persist the rejection even if its optional private diagnostic capture fails."""
     try:
         capture = _capture_rejected_output(store, task_id, value)
@@ -1456,12 +1458,18 @@ def _persist_developer_output_rejection(store, task_id, developer, error_code,
     if capture is not None:
         developer['rejected_output_capture'] = capture
     try:
-        return store.update(task_id, developer=developer)
+        if expected_developer is None:
+            return store.update(task_id, developer=developer)
+        return store.compare_and_update(
+            task_id, expected={'developer': expected_developer}, developer=developer)
     except Exception:
         if capture is None:
             raise
         developer.pop('rejected_output_capture', None)
-        return store.update(task_id, developer=developer)
+        if expected_developer is None:
+            return store.update(task_id, developer=developer)
+        return store.compare_and_update(
+            task_id, expected={'developer': expected_developer}, developer=developer)
 
 
 def _ignored_file_fingerprints(root):
@@ -2057,7 +2065,8 @@ def _interrupted_execution(exc):
     return value
 
 
-def _persist_opencode_interruption(store, task_id, developer, exc, *, model, result=None):
+def _persist_opencode_interruption(store, task_id, developer, exc, *, model,
+                                  expected_developer, result=None):
     """Persist an ambiguous outcome without replaying the provider request."""
     developer.update(
         state='DEVELOPER_OUTCOME_UNKNOWN',
@@ -2070,7 +2079,8 @@ def _persist_opencode_interruption(store, task_id, developer, exc, *, model, res
                    else _interrupted_execution(exc)),
     )
     try:
-        return store.update(task_id, developer=developer)
+        return store.compare_and_update(
+            task_id, expected={'developer': expected_developer}, developer=developer)
     except BaseException:
         # Keep the original interrupt/termination even if the recovery write
         # is itself interrupted or otherwise unavailable.
@@ -2132,6 +2142,12 @@ def _opencode_developer_profile():
 def run_task_opencode_delegate(args, *, store):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     task = store.get(args.task_id)
+    previous_developer = task.get('developer')
+    if (type(previous_developer) is dict and
+            previous_developer.get('provider_profile') == 'opencode' and
+            previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
+        _recover_direct_child_dispatch(
+            args, task, previous_developer, store, expected_agent='opencode-developer')
     if (task['state'] != 'PM_RESPONDED' or not task['response'] or
             task['schema_version'] != 2):
         raise LLMToolError('task has no successful PM response')
@@ -2212,10 +2228,12 @@ def run_task_opencode_delegate(args, *, store):
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
+        expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
                          model=model,
                          max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
-        store.update(task['task_id'], developer=developer)
+        dispatching_record = store.update(task['task_id'], developer=developer)
+        expected_developer = copy.deepcopy(dispatching_record['developer'])
 
         def validate_prelaunch_d6_binding():
             current_registration, current_snapshot = task_completion.bind_executor_task(
@@ -2238,11 +2256,20 @@ def run_task_opencode_delegate(args, *, store):
             binding_error_code='OPENCODE_D6_BINDING_CHANGED',
             marker_error_code='OPENCODE_ENV2_MARKER_INVALID')
 
+        def record_opencode_launch(pid, started_at, pgid):
+            nonlocal expected_developer
+            saved = store.record_opencode_launch(
+                task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
+                start_time=started_at, pgid=pgid)
+            expected_developer = copy.deepcopy(saved['developer'])
+            return saved
+
         result = opencode_direct_developer.run(
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
-            prelaunch_validate=validate_prelaunch_d6_binding, model=model)
+            prelaunch_validate=validate_prelaunch_d6_binding, model=model,
+            launch_callback=record_opencode_launch)
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
@@ -2263,7 +2290,9 @@ def run_task_opencode_delegate(args, *, store):
         else:
             developer.update(state='DEVELOPER_UNAVAILABLE',
                               error_code=exc.direct_opencode_code)
-        saved = store.update(task['task_id'], developer=developer)
+        saved = store.compare_and_update(
+            task['task_id'], expected={'developer': expected_developer},
+            developer=developer)
         _print(_task_view(saved))
         return 1
     except (KeyboardInterrupt, CLIHostTermination) as exc:
@@ -2272,7 +2301,8 @@ def run_task_opencode_delegate(args, *, store):
         # adapter attaches only observed process/cleanup facts; absent facts
         # remain UNKNOWN, and this path never replays the provider request.
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, model=model)
+            store, task['task_id'], developer, exc, model=model,
+            expected_developer=expected_developer)
         _print_without_masking_interrupt(saved)
         raise
     except Exception:
@@ -2289,7 +2319,9 @@ def run_task_opencode_delegate(args, *, store):
                 'source_manifest_sha256': None,
             })
         try:
-            saved = store.update(task['task_id'], developer=developer)
+            saved = store.compare_and_update(
+                task['task_id'], expected={'developer': expected_developer},
+                developer=developer)
         except Exception:
             raise LLMToolError('OpenCode outcome is ambiguous and could not be persisted') from None
         _print(_task_view(saved))
@@ -2313,7 +2345,8 @@ def run_task_opencode_delegate(args, *, store):
                 store, task['task_id'], developer, rejection, result.usage, artifact,
                 provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
-                execution=execution)
+                execution=execution, expected_developer=expected_developer)
+            expected_developer = copy.deepcopy(saved['developer'])
         else:
             developer.update(state='DEVELOPER_RESPONDED',
                 provider_type='opencode-cli', model=model,
@@ -2324,7 +2357,8 @@ def run_task_opencode_delegate(args, *, store):
     except BaseException as exc:
         if isinstance(exc, (KeyboardInterrupt, CLIHostTermination)):
             saved = _persist_opencode_interruption(
-                store, task['task_id'], developer, exc, model=model, result=result)
+                store, task['task_id'], developer, exc, model=model,
+                expected_developer=expected_developer, result=result)
             _print_without_masking_interrupt(saved)
             raise
         developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
@@ -2334,14 +2368,19 @@ def run_task_opencode_delegate(args, *, store):
             execution=_direct_execution(result, status='UNKNOWN'))
         if not isinstance(exc, Exception):
             try:
-                store.update(task['task_id'], developer=developer)
+                store.compare_and_update(
+                    task['task_id'], expected={'developer': expected_developer},
+                    developer=developer)
             finally:
                 raise
     try:
-        saved = store.update(task['task_id'], developer=developer)
+        saved = store.compare_and_update(
+            task['task_id'], expected={'developer': expected_developer},
+            developer=developer)
     except (KeyboardInterrupt, CLIHostTermination) as exc:
         saved = _persist_opencode_interruption(
-            store, task['task_id'], developer, exc, model=model, result=result)
+            store, task['task_id'], developer, exc, model=model,
+            expected_developer=expected_developer, result=result)
         _print_without_masking_interrupt(saved)
         raise
     if developer['state'] == 'DEVELOPER_RESPONDED':
@@ -2493,6 +2532,12 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     if getattr(args, 'context_stdin', False):
         raise LLMToolError('AGY direct reads only its registered D6 task scope')
     task = store.get(args.task_id)
+    previous_developer = task.get('developer')
+    if (type(previous_developer) is dict and
+            previous_developer.get('provider_profile') == 'agy' and
+            previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
+        _recover_direct_child_dispatch(
+            args, task, previous_developer, store, expected_agent='agy-developer')
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
@@ -2698,6 +2743,76 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     _print(_task_view(saved))
     return 1
+
+
+def _direct_child_liveness(execution):
+    if (type(execution) is not dict or
+            not {'child_pid', 'child_start_time', 'child_pgid'}.issubset(execution)):
+        return 'UNKNOWN'
+    pid, start_time, pgid = (execution.get('child_pid'),
+                             execution.get('child_start_time'),
+                             execution.get('child_pgid'))
+    if (type(pid) is not int or pid <= 0 or type(pgid) is not int or pgid <= 0 or
+            type(start_time) is not str or not start_time):
+        return 'UNKNOWN'
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return 'DEAD'
+    except PermissionError:
+        pass
+    except OSError:
+        return 'UNKNOWN'
+    current_start = codex_direct_developer.process_start_time(pid)
+    if current_start is None:
+        return 'UNKNOWN'
+    if current_start != start_time:
+        return 'DEAD'
+    try:
+        if os.getpgid(pid) != pgid:
+            return 'DEAD'
+    except (ProcessLookupError, PermissionError, OSError):
+        return 'UNKNOWN'
+    return 'ALIVE'
+
+
+def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
+    previous_developer = developer
+    if (developer.get('provider_profile') != 'opencode' or
+            developer.get('state') != 'DEVELOPER_DISPATCHING'):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    try:
+        snapshot = task_completion.collect_git_snapshot(os.getcwd())
+        registration, _ = task_completion.bind_executor_task(
+            args.executor_task, expected_common_dir=snapshot.common_dir,
+            root=snapshot.root)
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    if (developer.get('executor_task_id') != registration.task_id or
+            registration.trusted_agent_id != expected_agent):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    liveness = _direct_child_liveness(developer.get('execution'))
+    if liveness == 'ALIVE':
+        raise LLMToolError('DIRECT_CHILD_STILL_RUNNING')
+    if liveness != 'DEAD':
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
+    outcome = dict(developer)
+    execution = {
+        'status': 'UNKNOWN', 'native_session_id': None,
+        'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+        'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+        'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None,
+    }
+    outcome.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                   error_code='DIRECT_CHILD_NOT_RUNNING', execution=execution)
+    try:
+        store.compare_and_update(args.task_id,
+                                 expected={'developer': previous_developer},
+                                 developer=outcome)
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    raise LLMToolError('DIRECT_CHILD_OUTCOME_UNKNOWN') from None
 
 
 def _normalize_agy_usage(value):
