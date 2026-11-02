@@ -146,6 +146,13 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('shell_environment_policy.set.PYTHONPYCACHEPREFIX="/tmp/codex-direct-cache"',
                       argv)
 
+    def test_role_account_sets_codex_home_without_changing_default_environment(self):
+        with patch.dict(os.environ, {'CODEX_HOME': '/inherited/codex'}, clear=False):
+            default_env = direct._environment('/tmp/codex-child')
+            role_env = direct._environment('/tmp/codex-child', '/role/codex-account')
+        self.assertEqual(default_env['CODEX_HOME'], '/inherited/codex')
+        self.assertEqual(role_env['CODEX_HOME'], '/role/codex-account')
+
     def test_launch_callback_receives_child_identity_before_result(self):
         observed = []
         self.write_fake(self.events(self.final), delay_after_output=0.2)

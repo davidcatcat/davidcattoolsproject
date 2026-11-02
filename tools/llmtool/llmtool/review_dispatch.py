@@ -148,11 +148,12 @@ def _create_d6(*, task_id, base_sha, repo_root, executor_task, github_login,
         raise RuntimeError('REVIEWER_D6_CREATE_FAILED')
 
 
-def _codex_argv(executable, reviewer_root):
+def _codex_argv(executable, reviewer_root, *, model=_CODEX_REVIEW_MODEL,
+                effort=_CODEX_REVIEW_EFFORT):
     return [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
             '--ignore-user-config', '--ignore-rules', '--ephemeral',
             '--strict-config', '--color', 'never', '--json', '--model',
-            _CODEX_REVIEW_MODEL, '-c', 'model_reasoning_effort=' + _CODEX_REVIEW_EFFORT,
+            model, '-c', 'model_reasoning_effort=' + effort,
             '-s', 'read-only', '--cd', str(reviewer_root), '-']
 
 
@@ -285,17 +286,21 @@ def _review_return(claim, result):
     return output
 
 
-def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1):
+def _dispatch_codex(*, reviewer_root, prompt, task, head, version=1,
+                    model=_CODEX_REVIEW_MODEL, effort=_CODEX_REVIEW_EFFORT,
+                    config_dir=None):
     executable = shutil.which('codex')
     if executable is None:
         _refuse('REVIEWER_RUNTIME_UNAVAILABLE')
     try:
         result = subprocess.run(
-            _codex_argv(executable, reviewer_root), cwd=str(reviewer_root),
+            _codex_argv(executable, reviewer_root, model=model, effort=effort),
+            cwd=str(reviewer_root),
             input=prompt.encode('utf-8'), stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env={'PATH': os.pathsep.join((str(Path(executable).parent), '/usr/bin', '/bin')),
-                 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'NO_COLOR': '1'},
+                 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'NO_COLOR': '1',
+                 **({'CODEX_HOME': config_dir} if config_dir is not None else {})},
             check=False,
             timeout=_CODEX_REVIEW_TIMEOUT)
     except subprocess.TimeoutExpired:
@@ -387,12 +392,22 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     policy = _policy(task, reviewer_key)
     if not policy.allowed:
         _refuse(policy.reason_code)
-    reviewer_role = (role_config.resolve_role('reviewer')
-                     if reviewer_key == 'claude-reviewer' else None)
+    reviewer_role = role_config.resolve_role(
+        'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
     if reviewer_key == 'codex-reviewer':
-        account_mode = 'CODEX_CLI'
+        if reviewer_role.get('provider') not in (None, 'codex'):
+            _refuse('REVIEWER_CONFIG_INVALID')
+        codex_model = reviewer_role.get('model') or _CODEX_REVIEW_MODEL
+        codex_effort = reviewer_role.get('effort') or _CODEX_REVIEW_EFFORT
+        from .codex_direct_developer import validate_profile
+        try:
+            validate_profile(codex_model, codex_effort)
+        except LLMToolError:
+            _refuse('REVIEWER_CONFIG_INVALID')
+        account_mode = ('ROLES' if reviewer_role['source'] == 'roles' else 'CODEX_CLI')
     else:
+        codex_model, codex_effort = _CODEX_REVIEW_MODEL, _CODEX_REVIEW_EFFORT
         account_mode = {
             'roles': 'ROLES', 'env': 'EXPLICIT', 'cli': 'EXPLICIT',
             'pm_runtime': 'LEGACY', 'builtin': 'BUILTIN_DEFAULT',
@@ -402,6 +417,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
              'version': version, 'state': 'CLAIMED', 'reviewer_task': reviewer_task,
              'native_session_id': None, 'account_mode': account_mode,
              'claimed_at': _now(), 'updated_at': _now()}
+    if reviewer_role.get('account') is not None:
+        claim['account'] = reviewer_role['account']
     try:
         store.compare_and_update(task_id, expected={'record_sha256': task['record_sha256']},
                                  review_dispatch_claim=claims + [claim])
@@ -450,7 +467,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                 allowed_states=task_completion._D6_EVIDENCE_STATES)
             run_codex = codex_runner or _dispatch_codex
             codex_result = run_codex(reviewer_root=reviewer.root, prompt=prompt,
-                                     task=task, head=head, version=version)
+                                     task=task, head=head, version=version,
+                                     model=codex_model, effort=codex_effort,
+                                     config_dir=config_dir)
             if type(codex_result) is not dict:
                 _refuse('REVIEW_NOT_POSTED')
             session_id = codex_result.get('thread_id')

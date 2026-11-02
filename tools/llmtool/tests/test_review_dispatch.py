@@ -76,8 +76,9 @@ class ReviewDispatchTests(unittest.TestCase):
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
                 bind_session=bind, prompt_renderer=lambda *_: 'bound prompt',
                 codex_runner=codex_runner)
-            if selected[4] == 'claude-reviewer' and creates_claim:
-                resolve_role.assert_called_once_with('reviewer')
+            if creates_claim:
+                resolve_role.assert_called_once_with(
+                    'reviewer' if selected[4] == 'claude-reviewer' else 'codex-reviewer')
             else:
                 resolve_role.assert_not_called()
             return result
@@ -231,8 +232,37 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(self.bound[0]['session_id'], '0123456789abcdef')
         self.assertEqual(result['review_text'], _codex_review_text())
         self.assertEqual(result['verdict'], 'PASS')
+        self.assertEqual(runner_args[0]['model'], 'gpt-6-luna')
+        self.assertEqual(runner_args[0]['effort'], 'high')
         self.assertEqual(self.store.get(TASK)['review_dispatch_claim'][0]['review_result']['verdict'],
                          'PASS')
+
+    def test_codex_reviewer_role_passes_model_effort_and_records_account_name(self):
+        self.store.data.update({
+            'developer': {'provider_profile': 'claude'},
+            'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+        })
+        reviewer = SimpleNamespace(root='/repo/reviewer-d6')
+        calls = []
+        with patch.object(review_dispatch.task_completion, 'read_d6_registration',
+                          return_value=reviewer):
+            result = self.invoke(
+                preflight=[(TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer'),
+                           (TASK, self.executor, HEAD, 'd' * 40, 'codex-reviewer')],
+                codex_runner=lambda **kw: (calls.append(kw) or {
+                    'thread_id': '0123456789abcdef',
+                    'review_text': _codex_review_text(), 'verdict': 'PASS'}),
+                reviewer_role={'provider': 'codex', 'config_dir': '/private/codex-review',
+                    'account': 'review-account', 'model': 'gpt-review', 'effort': 'medium',
+                    'source': 'roles'})
+        claim = self.store.get(TASK)['review_dispatch_claim'][0]
+        self.assertEqual(result['account_mode'], 'ROLES')
+        self.assertEqual(claim['account'], 'review-account')
+        self.assertNotIn('/private/codex-review', repr(claim))
+        self.assertEqual(calls[0]['model'], 'gpt-review')
+        self.assertEqual(calls[0]['effort'], 'medium')
+        self.assertEqual(calls[0]['config_dir'], '/private/codex-review')
 
     def test_codex_argv_is_read_only_and_uses_required_profile_and_d6(self):
         review_text = _codex_review_text(run_id='c' * 32, contract='d' * 64)
