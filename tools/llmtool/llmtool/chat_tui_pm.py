@@ -53,8 +53,9 @@ _RECOVERY = {
                           "unaffected",
     "PM_HISTORY_WRITE_FAILED": "pm_runtime could not save the turn history; check the llmtool state "
                                "directory",
-    "PM_CONFIG_INVALID": "pm_runtime.claude_config_dir in ~/.config/llmtool/config.yaml must be "
-                         "an absolute path; fix it, then connect again",
+    "PM_CONFIG_INVALID": "pm_runtime.claude_config_dir or roles.pm in "
+                         "~/.config/llmtool/config.yaml is invalid; configure a Claude PM "
+                         "account and model, then connect again",
     "PM_STATE_INVALID": "the llmtool PM runtime state directory must be a plain user directory",
 }
 
