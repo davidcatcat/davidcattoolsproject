@@ -180,7 +180,7 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(claim['version'], 1)
 
     def test_remote_test_repair_claim_passes_real_task_store_validation(self):
-        self.store = TaskStore(self.temp.name)
+        self.store = TaskStore(Path(self.temp.name).resolve())
         self.store.create(_record())
         receipt = {
             'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
