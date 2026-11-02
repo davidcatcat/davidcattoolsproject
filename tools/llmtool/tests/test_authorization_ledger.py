@@ -760,7 +760,8 @@ class ProviderLedgerTests(unittest.TestCase):
         self.base,_=self.h.binding()
 
     def issue(self,tag='1',ttl=120):
-        call=replace(self.base,packet_digest=tag*64,deadline='2026-10-14T00:05:00Z')
+        call=replace(self.base,packet_digest=tag*64,reviewed_object_digest=tag*64,
+                     deadline='2026-10-14T00:05:00Z')
         binding=p.ProviderReviewBinding(call)
         observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
         decision=p.decide_provider_review(binding,issuer=self.issuer,observed=observed)
@@ -791,9 +792,12 @@ class ProviderLedgerTests(unittest.TestCase):
     def test_atomic_cap_keeps_unconsumed_row_issued(self):
         first,o1=self.issue('1');second,o2=self.issue('2')
         self.assertTrue(self.consume(first,o1));self.assertFalse(self.consume(second,o2))
-        self.assertEqual(self.h.ledger.status(second.nonce),'ISSUED')
+        expected='DENIED' if self.h.ledger.provider_layout == 2 else 'ISSUED'
+        self.assertEqual(self.h.ledger.status(second.nonce),expected)
         self.assertTrue(self.h.ledger.finalize_provider(first,'EFFECT_UNKNOWN'))
-        self.assertFalse(self.consume(second,o2))
+        if expected == 'ISSUED': self.assertFalse(self.consume(second,o2))
+        else:
+            with self.assertRaises(l.LedgerError): self.consume(second,o2)
 
     def test_day_is_consume_day_not_issue_or_finalize_day(self):
         self.h.fake.utc='2026-10-13T23:59:59Z'
@@ -986,6 +990,74 @@ class ProviderLayout2Tests(ProviderLedgerTests):
         self.assertFalse(self.consume(receipt, replace(observed, attested=False)))
         self.assertEqual(self.h.ledger.status(receipt.nonce), 'DENIED')
 
+    def mechanics_issuer(self, harness):
+        from llmtool.review_authority import ProductionReviewIssuer
+        class SyntheticMechanicsIssuer(ProductionReviewIssuer):
+            def matches(inner, call, observed):
+                return observed.attested
+        return SyntheticMechanicsIssuer(harness.pin, harness.clock, harness.observer, harness.context)
+
+    def test_layout2_cap_refusal_releases_object_key_for_reissue(self):
+        from test_review_authority import Harness
+        h = Harness(cap=1, provider_layout=2)
+        self.addCleanup(h.close)
+        issuer = self.mechanics_issuer(h)
+        issue_number = 0
+
+        def issue(tag):
+            nonlocal issue_number
+            issue_number += 1
+            call, _ = h.binding()
+            call = replace(call, reviewed_object_digest=tag * 64,
+                           deadline='2026-10-14T00:05:00Z',
+                           redeem_run_id=f'{issue_number:032x}',
+                           reviewer_launch_nonce=f'{issue_number + 16:032x}')
+            binding = p.ProviderReviewBinding(call)
+            observed = p.ProviderObservedState(binding.digest, call.source_sha,
+                                               call.observation_digest, True)
+            decision = p.decide_provider_review(binding, issuer=issuer, observed=observed)
+            self.assertIs(decision.decision, p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+            return h.ledger.issue_provider(decision, ttl_seconds=120), observed
+
+        first, o1 = issue('1')
+        refused, o2 = issue('2')
+        self.assertTrue(h.ledger.consume_provider(first, issuer=issuer, observed=o1))
+        self.assertFalse(h.ledger.consume_provider(refused, issuer=issuer, observed=o2))
+        self.assertEqual(h.ledger.status(refused.nonce), 'DENIED')
+        retry, _ = issue('2')
+        self.assertEqual(retry.binding.call.reviewed_object_digest,
+                         refused.binding.call.reviewed_object_digest)
+
+    def test_layout2_denied_consume_releases_object_key_for_retry(self):
+        from test_review_authority import Harness
+        h = Harness(cap=1, provider_layout=2)
+        self.addCleanup(h.close)
+        issuer = self.mechanics_issuer(h)
+        call, _ = h.binding()
+        call = replace(call, deadline='2026-10-14T00:05:00Z')
+        binding = p.ProviderReviewBinding(call)
+        observed = p.ProviderObservedState(binding.digest, call.source_sha,
+                                           call.observation_digest, True)
+        decision = p.decide_provider_review(binding, issuer=issuer, observed=observed)
+        self.assertIs(decision.decision, p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        receipt = h.ledger.issue_provider(decision, ttl_seconds=120)
+        h.hostdata['route_policies'][0]['revoked'] = True
+        h.write_host()
+        self.assertFalse(h.ledger.consume_provider(receipt, issuer=issuer, observed=observed))
+        self.assertEqual(h.ledger.status(receipt.nonce), 'DENIED')
+        h.hostdata['route_policies'][0]['revoked'] = False
+        h.write_host()
+        retry_call = replace(call, redeem_run_id='e' * 32, reviewer_launch_nonce='d' * 32)
+        retry_binding = p.ProviderReviewBinding(retry_call)
+        retry_observed = p.ProviderObservedState(retry_binding.digest, retry_call.source_sha,
+                                                 retry_call.observation_digest, True)
+        retry_decision = p.decide_provider_review(retry_binding, issuer=issuer,
+                                                 observed=retry_observed)
+        self.assertIs(retry_decision.decision, p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        retry = h.ledger.issue_provider(retry_decision, ttl_seconds=120)
+        self.assertEqual(retry.binding.call.reviewed_object_digest,
+                         receipt.binding.call.reviewed_object_digest)
+
     def statuses(self, ledger=None):
         return [r[0] for r in (ledger or self.h.ledger)._db.execute(
             'SELECT status FROM receipts ORDER BY issued_at, rowid')]
@@ -1017,21 +1089,37 @@ class ProviderLayout2Tests(ProviderLedgerTests):
         self.again(expired)
         self.assertEqual(self.statuses(), ['DENIED', 'CONSUMED', 'EXPIRED', 'ISSUED'])
 
-    def test_cap_refused_issued_row_expires_on_reissue(self):
+    def test_cap_refusal_releases_key_for_same_object_retry(self):
         first, o1 = self.issue('1')
         second, o2 = self.issue('2', ttl=1)
         self.assertTrue(self.consume(first, o1))
-        self.assertFalse(self.consume(second, o2))  # daily cap 1: stays ISSUED
-        self.assertEqual(self.h.ledger.status(second.nonce), 'ISSUED')
-        with self.assertRaises(l.LedgerError):
-            self.again(second)  # unexpired ISSUED still holds the key
-        self.h.fake.utc = '2026-10-13T00:00:11Z'
-        third, _ = self.again(second, run='f')
-        self.assertEqual(self.h.ledger.status(second.nonce), 'EXPIRED')
-        self.assertEqual(self.h.ledger.status(third.nonce), 'ISSUED')
+        self.assertFalse(self.consume(second, o2))  # daily cap 1: zero effect
+        self.assertEqual(self.h.ledger.status(second.nonce), 'DENIED')
         row = self.h.ledger._db.execute('SELECT consumed_at, consumed_day, redeem_run_id FROM receipts '
                                         'WHERE nonce=?', (second.nonce,)).fetchone()
         self.assertEqual(row, (None, None, None))
+        self.h.fake.utc = '2026-10-14T00:00:00Z'
+        third, o3 = self.again(second, run='f')
+        self.assertEqual(self.h.ledger.status(second.nonce), 'DENIED')
+        self.assertEqual(self.h.ledger.status(third.nonce), 'ISSUED')
+        self.assertTrue(self.consume(third, o3))
+
+    def test_same_reviewed_object_is_rejected_across_observations(self):
+        first, _ = self.issue('1')
+        call = replace(first.binding.call, packet_digest='2'*64, sequence=first.binding.call.sequence+1,
+                       observation_digest='3'*64, redeem_run_id='e'*32, reviewer_launch_nonce='e'*32)
+        b = p.ProviderReviewBinding(call)
+        observed = p.ProviderObservedState(b.digest, call.source_sha, call.observation_digest, True)
+        decision = p.decide_provider_review(b, issuer=self.issuer, observed=observed)
+        self.assertEqual(b.object_key, first.binding.object_key)
+        with self.assertRaises(l.LedgerError):
+            self.h.ledger.issue_provider(decision, ttl_seconds=120)
+
+    def test_distinct_reviewed_object_can_be_issued(self):
+        first, _ = self.issue('1')
+        distinct, _ = self.issue('2')
+        self.assertNotEqual(first.binding.object_key, distinct.binding.object_key)
+        self.assertEqual(self.h.ledger.status(distinct.nonce), 'ISSUED')
 
     def test_effect_rows_and_live_issue_hold_the_key(self):
         for status in ('ISSUED', 'CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN'):
