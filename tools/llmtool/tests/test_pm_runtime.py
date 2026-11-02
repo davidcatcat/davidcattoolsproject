@@ -581,17 +581,18 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
     def test_binding_listing_selection_and_codex_runtime(self):
-        first = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
+        binding_root = self.root / 'listing-state'
+        first = pm_runtime.create_dedicated_pm(self.cwd, state_root=binding_root,
                                                clock=lambda: 1000)
         second = pm_runtime.create_dedicated_pm(self.cwd, runtime='codex',
-                                                state_root=self.root, clock=lambda: 1001)
+                                                state_root=binding_root, clock=lambda: 1001)
         self.assertEqual([item['native_session_id'] for item in pm_runtime.list_bindings(
-            state_root=self.root)], [second['native_session_id'], first['native_session_id']])
-        selected = pm_runtime.select_binding(first['native_session_id'], state_root=self.root)
+            state_root=binding_root)], [second['native_session_id'], first['native_session_id']])
+        selected = pm_runtime.select_binding(first['native_session_id'], state_root=binding_root)
         self.assertEqual(selected['native_session_id'], first['native_session_id'])
-        self.assertEqual(pm_runtime.current_binding(state_root=self.root)['native_session_id'],
+        self.assertEqual(pm_runtime.current_binding(state_root=binding_root)['native_session_id'],
                          first['native_session_id'])
-        runtime = self.runtime(runtime='claude-code')
+        runtime = self.runtime(runtime='claude-code', state_root=binding_root)
         runtime.pm_session_id = second['native_session_id']
         with self.assertRaises(LLMToolError) as raised:
             runtime.open()

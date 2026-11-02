@@ -985,10 +985,13 @@ class PMRuntime:
         try:
             # Trusted user config only; the user config is under the same HOME
             # the transcript lookup uses.
-            resolved_role = role_config.resolve_role(
-                'pm', cli={'account': self.account} if self.account is not None else None,
-                environ=self.environ,
-                home=None if self.environ is None else self.environ.get('HOME'))
+            role_options = {
+                'environ': self.environ,
+                'home': None if self.environ is None else self.environ.get('HOME'),
+            }
+            if self.account is not None:
+                role_options['cli'] = {'account': self.account}
+            resolved_role = role_config.resolve_role('pm', **role_options)
             bound_account = binding.get('account', resolved_role.get('account'))
             if bound_account != resolved_role.get('account'):
                 raise _error('PM_ACCOUNT_MISMATCH', 'PM binding account does not match configuration')
