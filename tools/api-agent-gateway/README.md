@@ -80,6 +80,7 @@ Unknown keys are refused (`TASK_INVALID`).
 {"schema_version": 1, "profiles": {"gw": {
   "adapter": "openai-chat-tools", "base_url": "https://host/v1", "model": "name",
   "auth_env": "ENV_VAR_NAME", "context_cap_tokens": 131072, "max_output_tokens": 16384,
+  "max_length_retries": 2,
   "allowed_data_classes": ["synthetic"], "session_expiry_hours": 72,
   "timeout_seconds": 120, "tool_choice": "auto", "request_extra": {}}}}
 ```
@@ -96,8 +97,22 @@ Unknown keys are refused (`TASK_INVALID`).
   key is read at run time and never stored. It is also screened as a literal.
 - **`session_expiry_hours`:** at most 72.
 - **`request_extra`:** carries provider-specific switches, such as thinking
-  on/off, until phase 0 decides them. It cannot override `model`, `messages`,
-  `tools`, `tool_choice`, `max_tokens` or `stream`.
+  on/off, until phase 0 decides them. For example,
+  `{"chat_template_kwargs":{"enable_thinking":false}}` is sent unchanged on
+  every request. It cannot override `model`, `messages`, `tools`, `tool_choice`,
+  `max_tokens` or `stream`. The profile digest includes this object, so changing
+  it prevents resuming a session created with the prior profile.
+- **Output budget:** with thinking enabled, start with `max_output_tokens: 16384`
+  and set the task's `max_output_tokens` budget to cover the expected replies
+  and any budgeted truncation re-prompts. Thinking tokens count toward the
+  provider's output limit and the gateway's output-token budget.
+- **`max_length_retries`:** integer from 0 through 5, default 2. A response
+  ending with `finish_reason: "length"` is audited, but its assistant message
+  and any partial tool calls are discarded. The gateway adds a fixed user
+  nudge and makes another normal, budgeted turn. The retry count is consecutive;
+  any non-length response resets it. Once the configured retries are exceeded,
+  the run ends with `BUDGET_EXCEEDED` / `OUTPUT_TRUNCATED` (exit 6). A retry is
+  a budgeted turn, never a fallback model.
 - **`adapter`:** `text-tools` is refused with `ADAPTER_NOT_IMPLEMENTED` in phase 1.
 - **File safety:** the profiles file must be a regular file owned by the
   current user and not writable by group or others (`PROFILES_UNSAFE`).
@@ -117,11 +132,13 @@ holds `status`, `code`, `session_id`, `run_id`, `task_id`, `changed_paths[]`,
 | `BLOCKED` (`MODEL_REPORTED_BLOCKED`, `NO_TOOL_CALL`) | 3 |
 | `MODEL_ERROR` (`HTTP_<n>`, `HTTP_REDIRECT_REFUSED`, `MALFORMED_RESPONSE`, `TIMEOUT`, `TRANSPORT_ERROR`, `AUTH_ENV_MISSING`, …) | 4 |
 | `POLICY_REFUSED` (`EGRESS_BASIS_MISSING`, `RUN_AUTHORIZATION_INVALID`, `DATA_CLASS_NOT_AUTHORIZED`, `SOURCE_SHA_MISMATCH`, `CONFINEMENT_VIOLATION`, `EGRESS_SCREEN_RESIDUAL`, `SESSION_*`, …) | 5 |
-| `BUDGET_EXCEEDED` (`TURN_BUDGET_EXCEEDED`, `INPUT_TOKEN_BUDGET_EXCEEDED`, `OUTPUT_TOKEN_BUDGET_EXCEEDED`, `WALL_TIME_EXCEEDED`, `SENT_BYTES_EXCEEDED`, `TOOL_RESULT_BYTES_EXCEEDED`, `CONTEXT_EXHAUSTED`) | 6 |
+| `BUDGET_EXCEEDED` (`TURN_BUDGET_EXCEEDED`, `INPUT_TOKEN_BUDGET_EXCEEDED`, `OUTPUT_TOKEN_BUDGET_EXCEEDED`, `OUTPUT_TRUNCATED`, `WALL_TIME_EXCEEDED`, `SENT_BYTES_EXCEEDED`, `TOOL_RESULT_BYTES_EXCEEDED`, `CONTEXT_EXHAUSTED`) | 6 |
 | usage error (no result file) | 2 |
 | internal error | 1 |
 
-Each budget has its own `code`. No retry or fallback model is ever used.
+Each budget has its own `code`. Length re-prompts are the only retry: they use
+the same configured model and consume the ordinary turn, input, output, sent
+byte and wall-time budgets. No fallback model is ever used.
 
 ## Sessions (section 5.1)
 

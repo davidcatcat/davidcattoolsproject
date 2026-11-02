@@ -17,6 +17,10 @@ from .tools import TOOL_SCHEMAS, ToolExecutor
 HISTORY_SCHEMA = 1
 SUMMARY_MAX_CHARS = 4000
 MAX_NO_TOOL_REPLIES = 2
+LENGTH_REPROMPT = (
+    'Your previous response was truncated by the output limit. Make one short tool call now; '
+    'do not repeat or refer to the truncated response.'
+)
 
 SYSTEM_PROMPT = (
     'You are a coding agent working inside one repository directory through the gateway tools '
@@ -244,6 +248,7 @@ class AgentLoop:
 
     def _loop(self) -> tuple[str, Optional[str], str]:
         no_tool = 0
+        consecutive_lengths = 0
         while True:
             if self.turns >= self.b['max_turns']:
                 raise BudgetExceeded('TURN_BUDGET_EXCEEDED')
@@ -289,6 +294,15 @@ class AgentLoop:
                               served_model=reply.served_model, usage=reply.usage or 'UNKNOWN',
                               finish_reason=_reason(reply.finish_reason), tool_calls=len(calls),
                               response_sha256=sha256_hex(canonical(msg)))
+            if reply.finish_reason == 'length':
+                consecutive_lengths += 1
+                if consecutive_lengths > self.profile.max_length_retries:
+                    raise BudgetExceeded('OUTPUT_TRUNCATED')
+                # The provider response may contain partial tool arguments. Keep none of it.
+                self.hist['groups'].append([{'role': 'user', 'content': LENGTH_REPROMPT}])
+                self.persist(self.hist)
+                continue
+            consecutive_lengths = 0
             group = [msg]
             self.hist['groups'].append(group)
             if self.out_tokens > self.b['max_output_tokens']:

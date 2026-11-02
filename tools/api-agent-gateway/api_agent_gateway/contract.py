@@ -211,6 +211,7 @@ class Profile:
     timeout_seconds: int
     tool_choice: str
     request_extra: dict
+    max_length_retries: int
     sha256: str
 
 
@@ -268,12 +269,15 @@ def parse_profile(profiles: Any, name: str) -> Profile:
         extra = p.get('request_extra', {})
         if not isinstance(extra, dict) or set(extra) & _RESERVED_BODY or len(canonical(extra)) > 4096:
             raise ValueError
+        max_length_retries = p.get('max_length_retries', 2)
+        if type(max_length_retries) is not int or not 0 <= max_length_retries <= 5:
+            raise ValueError
     except (KeyError, ValueError, TypeError) as exc:
         raise bad() from exc
     if adapter == 'text-tools':
         raise bad('ADAPTER_NOT_IMPLEMENTED')
     return Profile(name, adapter, base_url.rstrip('/'), model, auth_env, ctx, out, classes, expiry,
-                   timeout, tool_choice, extra, sha256_hex(canonical(p)))
+                   timeout, tool_choice, extra, max_length_retries, sha256_hex(canonical(p)))
 
 
 def write_result(path: str, result: dict) -> None:
