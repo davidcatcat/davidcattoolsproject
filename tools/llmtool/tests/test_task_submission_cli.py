@@ -970,9 +970,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
                 original_compare = store.compare_and_update
                 raced = False
+                newer = None
 
                 def compare(task_id, *, expected, **changes):
-                    nonlocal raced
+                    nonlocal raced, newer
                     candidate = changes.get('developer')
                     if (introduce_race and not raced and type(candidate) is dict and
                             candidate.get('state') == 'DEVELOPER_RESPONDED'):
