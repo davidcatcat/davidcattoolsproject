@@ -237,7 +237,6 @@ class ActivePMInboxTests(unittest.TestCase):
         duplicate = old_path.parent / ('rollout-20261030-120001-' + old_native + '.jsonl')
         duplicate.write_text(old_path.read_text())
         new_native, _ = self._codex_session()
-        old_path.unlink()
         before = self.store.get(task['task_id'])
 
         with self.assertRaises(LLMToolError) as caught:
