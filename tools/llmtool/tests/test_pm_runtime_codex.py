@@ -40,6 +40,10 @@ class CodexRuntimeTests(unittest.TestCase):
             #!__INTERPRETER__
             import json, os, pathlib, sys, time
             args = sys.argv[1:]
+            if 'exec' in args:
+                exec_index = args.index('exec')
+                if any(flag in args[exec_index:] for flag in ('--cd', '--sandbox')):
+                    sys.exit(2)
             with open(__LOG__, 'a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'args': args,
                     'sentinel_present': 'FAKE_VALUE' in os.environ}) + '\\n')
@@ -51,6 +55,7 @@ class CodexRuntimeTests(unittest.TestCase):
                 {'id':__THREAD__,'cwd':os.getcwd()}}) + '\\n', encoding='utf-8')
             if __MODE__ == 'malformed':
                 print('{', flush=True)
+                sys.exit(3)
             elif __MODE__ == 'exit':
                 print(json.dumps({'type':'thread.started','thread_id':__THREAD__}), flush=True)
                 sys.exit(3)
@@ -97,6 +102,13 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertNotIn('resume', calls[0]['args'])
         self.assertIn('resume', calls[1]['args'])
         self.assertIn(THREAD, calls[1]['args'])
+        expected_common = ['--cd', str(self.cwd), '--sandbox', 'workspace-write',
+                           '--no-daemon', '--ask-for-approval', 'never', 'exec']
+        self.assertEqual(calls[0]['args'], expected_common + [
+            '--json', '-c', 'sandbox_workspace_write.network_access=true', '-'])
+        self.assertEqual(calls[1]['args'], expected_common + [
+            'resume', THREAD, '--json', '-c',
+            'sandbox_workspace_write.network_access=true', '-'])
         self.assertFalse(any(call['sentinel_present'] for call in calls))
         self.assertTrue(all('--sandbox' in call['args'] and
                             'workspace-write' in call['args'] and
@@ -105,7 +117,7 @@ class CodexRuntimeTests(unittest.TestCase):
 
     def test_malformed_output_and_process_exit_return_runtime_error_then_turn_end(self):
         expected_codes = {
-            'malformed': ['PM_STREAM_INVALID'],
+            'malformed': ['PM_PROCESS_EXITED'],
             'exit': ['PM_PROCESS_EXITED'],
         }
         for mode, expected in expected_codes.items():

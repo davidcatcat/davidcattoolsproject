@@ -56,7 +56,7 @@ class CodexRuntime:
             if owner.account is not None:
                 options['cli'] = {'account': owner.account}
             resolved = role_config.resolve_role('pm', **options)
-            if resolved.get('provider') not in (None, 'codex'):
+            if resolved.get('provider') != 'codex':
                 raise LLMToolError('PM account is not Codex')
             if binding.get('account') != resolved.get('account'):
                 raise _error('PM_ACCOUNT_MISMATCH')
@@ -107,7 +107,8 @@ class CodexRuntime:
                     _, command = line.strip().split(None, 1)
                 except ValueError:
                     continue
-                if 'codex' in command and thread_id in command and 'exec' in command:
+                if ('codex' in command and thread_id in command and
+                        ('exec' in command or 'resume' in command)):
                     return True
         except (OSError, subprocess.SubprocessError):
             pass
@@ -179,6 +180,8 @@ class CodexRuntime:
         if self.owner.account is not None:
             options['cli'] = {'account': self.owner.account}
         resolved = role_config.resolve_role('pm', **options)
+        if resolved.get('provider') != 'codex':
+            raise _error('PM_CONFIG_INVALID')
         if resolved.get('config_dir') is not None:
             env['CODEX_HOME'] = resolved['config_dir']
         for key in ('HOME', 'CODEX_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
@@ -236,11 +239,11 @@ class CodexRuntime:
         executable = shutil.which('codex', path=self._environment().get('PATH'))
         if executable is None or not os.path.isabs(executable):
             raise _error('PM_PROCESS_START_FAILED')
-        argv = [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec']
+        argv = [executable, '--cd', self.owner.cwd, '--sandbox', 'workspace-write',
+                '--no-daemon', '--ask-for-approval', 'never', 'exec']
         if self._thread_id is not None:
             argv.extend(('resume', self._thread_id))
-        argv.extend(('--json', '--cd', self.owner.cwd, '--sandbox', 'workspace-write',
-                     '-c', 'sandbox_workspace_write.network_access=true', '-'))
+        argv.extend(('--json', '-c', 'sandbox_workspace_write.network_access=true', '-'))
         try:
             child = subprocess.Popen(argv, cwd=self.owner.cwd, env=self._environment(),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -343,19 +346,18 @@ class CodexRuntime:
                 elif kind in ('error', 'turn.failed'):
                     error = 'PM_PROCESS_EXITED'
                     break
-            if error is None:
-                # EOF can become readable just before poll() observes the child's
-                # exit status. Wait for that status so a truncated stream caused
-                # by a failed process has the same process-exit classification as
-                # the Claude runtime's EOF path.
-                try:
-                    exit_code = process.wait(timeout=5)
-                except Exception:
-                    exit_code = process.poll()
-                if exit_code not in (0, None):
-                    error = 'PM_PROCESS_EXITED'
-                else:
-                    error = 'PM_STREAM_INVALID'
+            # EOF can become readable just before poll() observes the child's
+            # exit status. A failed process takes precedence over a malformed
+            # final stream line, matching the process-exit classification used
+            # by the Claude adapter when its child exits during a turn.
+            try:
+                exit_code = process.wait(timeout=5)
+            except Exception:
+                exit_code = process.poll()
+            if exit_code not in (0, None):
+                error = 'PM_PROCESS_EXITED'
+            elif error is None:
+                error = 'PM_STREAM_INVALID'
         finally:
             if process.poll() is None:
                 try:
