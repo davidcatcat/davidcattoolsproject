@@ -638,6 +638,8 @@ def add_task_submission_parsers(actions):
     advance = actions.add_parser('advance', help='Advance one Task through its next review or closure step')
     advance.add_argument('task_id', help='existing durable Task ID')
     advance.add_argument('--pr', type=int, help='public GitHub pull request number')
+    advance.add_argument('--merge', action='store_true',
+                         help='merge the bound PR after exact-head review and check gates pass')
     advance.add_argument('--integration-pr', type=int,
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
@@ -915,6 +917,7 @@ def run_task_advance(args, *, store=None, **adapters):
         result = advance(task_id=args.task_id, store=TaskStore() if store is None else store,
             pr_number=getattr(args, 'pr', None),
             integration_pr=getattr(args, 'integration_pr', None),
+            merge=getattr(args, 'merge', False),
             reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
     _print(result)
     return 1 if result.get('codes') else 0
@@ -2113,11 +2116,12 @@ def _opencode_developer_profile():
         profile = resolve_profile_config('opencode-developer', require_configured=False)
     except LLMToolError as exc:
         if str(exc) == 'requested provider profile is not defined':
-            return (opencode_direct_developer.MODEL,
-                    opencode_direct_developer.DEFAULT_AGENT_STEPS)
-        raise LLMToolError('opencode-developer profile is invalid in the llmtool '
-                           'user config (~/.config/llmtool/config.yaml)') from None
-    provider = selected_provider(profile)
+            profile = None
+        else:
+            raise LLMToolError('opencode-developer profile is invalid in the llmtool '
+                               'user config (~/.config/llmtool/config.yaml)') from None
+    provider = (selected_provider(profile) if profile is not None else
+                {'model': None, 'provider_options': {}})
     options = provider.get('provider_options', {})
     if type(options) is not dict:
         raise LLMToolError('opencode-developer profile provider_options must be a mapping')
@@ -2131,10 +2135,43 @@ def _opencode_developer_profile():
     if model is None:
         model = opencode_direct_developer.MODEL
     try:
+        role = role_config.resolve_role('opencode-developer')
+    except LLMToolError:
+        raise LLMToolError('opencode-developer role configuration is invalid') from None
+    if role.get('account') is not None:
+        error = LLMToolError('opencode-developer role accounts are not supported')
+        error.role_config_code = 'OPENCODE_ROLE_ACCOUNT_UNSUPPORTED'
+        raise error
+    if role.get('model') is not None:
+        model = role['model']
+    if role.get('effort') is not None:
+        model = model.split('#', 1)[0] + '#' + role['effort']
+    try:
         return opencode_direct_developer.validate_model(model), steps
     except opencode_direct_developer.DirectOpenCodeError:
         raise LLMToolError('opencode-developer profile model must be an '
                            'opencode/<name>-free model') from None
+
+
+def _agy_developer_profile(route_config):
+    """Apply the AGY role model and effort before the route's normal validation."""
+    try:
+        role = role_config.resolve_role('agy-developer')
+    except LLMToolError:
+        raise LLMToolError('agy-developer role configuration is invalid') from None
+    if role.get('account') is not None:
+        error = LLMToolError('agy-developer role accounts are not supported')
+        error.role_config_code = 'AGY_ROLE_ACCOUNT_UNSUPPORTED'
+        raise error
+    model = role.get('model') or route_config['default_model']
+    effort = role.get('effort') or route_config['default_effort']
+    try:
+        model, effort = AgyRoute(route_config).validate_profile(model, effort)
+    except RouteError:
+        error = LLMToolError('agy-developer role model or effort is invalid')
+        error.role_config_code = 'AGY_ROLE_PROFILE_INVALID'
+        raise error from None
+    return model, effort
 
 
 def run_task_opencode_delegate(args, *, store):
@@ -2574,10 +2611,10 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     _screen_text(task['response'], RESPONSE_LIMIT)
     config = load_route_config()
     route_config = dict(config['routes']['agy'])
+    model, effort = _agy_developer_profile(route_config)
     executable = shutil.which(route_config['executable'])
     if executable is None:
         raise LLMToolError('AGY executable is unavailable')
-    model, effort = route_config['default_model'], route_config['default_effort']
     route_config['executable'] = executable
     route = AgyRoute(route_config)
     pm_goal = (_screen_text(assignment.get('goal'), REQUEST_LIMIT)
