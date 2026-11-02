@@ -40,7 +40,8 @@ KEY_HELP = """Keys
   Ctrl-R                Search this session's earlier inputs: type to filter, Ctrl-R/Up/Down
                         choose, Enter puts the entry in the draft without running it,
                         Esc cancels and leaves the draft unchanged
-  Tab, Shift-Tab        Switch focus between input and conversation
+  Tab                   Complete a slash command; elsewhere switch focus to/from the conversation
+  Shift-Tab             Switch focus between input and conversation
   PageUp/PageDown       Scroll conversation one screen (Fn+↑/↓ on a Mac keyboard); when it is
                         focused Up/Down scroll one row, Home/End go to the top/bottom
   Mouse wheel           Scroll conversation one row per wheel step (trackpad works the same);
@@ -282,6 +283,23 @@ def slash_matches(text, dev=True):
     prefix = [c for c in ordered if c[0].startswith(query)]
     inside = [c for c in ordered if c not in prefix and len(query) > 2 and query[1:] in c[0]]
     return prefix + inside
+
+
+def _common_prefix(values):
+    """Return the longest case-sensitive common prefix of command labels."""
+    if not values:
+        return ""
+    prefix = values[0]
+    for value in values[1:]:
+        length = 0
+        for left, right in zip(prefix, value):
+            if left != right:
+                break
+            length += 1
+        prefix = prefix[:length]
+        if not prefix:
+            break
+    return prefix
 
 
 def history_matches(entries, query):
@@ -965,7 +983,26 @@ class ChatTUI:
             self.close_menu()
             self.input.buffer.insert_text("\n")
 
-        @keys.add("tab")
+        @keys.add("tab", eager=True)
+        def _tab(event):
+            if not input_focused():
+                self.toggle_focus()
+                return
+            if self.searching:
+                self.toggle_focus()
+                return
+            text = self.input.text
+            if not text.startswith("/"):
+                self.toggle_focus()
+                return
+            self._complete_slash_tab()
+
+        @keys.add("tab", filter=input_focused & menu_shown, eager=True)
+        def _tab_complete(event):
+            # A visible picker must not consume Tab before slash completion. Esc
+            # remains the explicit way to dismiss it without changing the draft.
+            self._complete_slash_tab()
+
         @keys.add("s-tab")
         def _focus(event):
             self.toggle_focus()
@@ -1455,6 +1492,31 @@ class ChatTUI:
             self.menu_offset = 0
         self.menu_items = items
         self._sync_picker()
+
+    def _complete_slash_tab(self):
+        """Complete the slash draft or extend it to its candidates' common prefix."""
+        text = self.input.text
+        if self.input.buffer.cursor_position != len(text):
+            self.close_menu()
+            return
+        # Tab completion is narrower than the interactive picker's fuzzy search:
+        # only commands whose full label starts with the typed draft are candidates.
+        commands = [command for command in SLASH_COMMANDS
+                    if self.dev or not command[0].startswith("/task")]
+        matches = [command for command in commands if command[0].startswith(text)]
+        if not matches:
+            self.close_menu()
+            return
+        if len(matches) == 1:
+            self.close_menu()
+            fill = matches[0][1]
+            self.input.buffer.set_document(self._Document(fill, len(fill)))
+            return
+        prefix = _common_prefix([item[0] for item in matches])
+        if len(prefix) > len(text):
+            self.input.buffer.set_document(self._Document(prefix, len(prefix)))
+            matches = [command for command in commands if command[0].startswith(prefix)]
+        self._set_menu(matches)
 
     def _sync_picker(self):
         """Match picker state to what is on screen.
