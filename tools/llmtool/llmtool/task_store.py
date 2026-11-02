@@ -1254,7 +1254,7 @@ def _validate(record):
                                 _DIRECT_EXECUTION_LAUNCH_FIELDS,
                                 *_DEVELOPER_EXECUTION_DIFF_SHAPES) or
                             (set(execution) == _DIRECT_EXECUTION_LAUNCH_FIELDS and
-                             (developer['provider_profile'] != 'codex' or
+                             (developer['provider_profile'] not in ('codex', 'opencode') or
                               execution['status'] != 'RUNNING' or
                               type(execution['child_pid']) is not int or
                               execution['child_pid'] <= 0 or
@@ -1269,7 +1269,7 @@ def _validate(record):
                               re.fullmatch(r'[A-Z0-9_]{1,64}',
                                            execution['native_session_binding']) is None)) or
                             execution['status'] not in (
-                                ('SUCCEEDED', 'FAILED', 'UNKNOWN')
+                                ('SUCCEEDED', 'FAILED', 'UNKNOWN', 'RUNNING')
                                 if developer['provider_profile'] == 'opencode' else
                                 ('DONE', 'FAILED', 'UNKNOWN', 'BLOCKED', 'TIMEOUT',
                                  'RUNNING')) or
@@ -1475,7 +1475,9 @@ def _validate(record):
                         type(execution) is not dict or execution['status'] not in ('SUCCEEDED', 'DONE') or
                         execution['usage_source'] != ('CLI_REPORTED' if usage is not None else 'UNKNOWN')):
                     _fail()
-                if dev_state == 'DEVELOPER_DISPATCHING' and execution is not None:
+                if (dev_state == 'DEVELOPER_DISPATCHING' and execution is not None and
+                        not (type(execution) is dict and execution.get('status') == 'RUNNING' and
+                             set(execution) == _DIRECT_EXECUTION_LAUNCH_FIELDS)):
                     _fail()
             if dev_state == 'DEVELOPER_OUTPUT_REJECTED' and (
                     developer['provider_type'] is None or artifact is not None or
@@ -2101,6 +2103,19 @@ class TaskStore:
 
     def record_codex_launch(self, task_id, *, assignment_id, pid, start_time, pgid):
         """Persist the direct Codex child identity through the trusted launch path."""
+        return self._record_direct_launch(
+            task_id, assignment_id=assignment_id, pid=pid, start_time=start_time,
+            pgid=pgid, provider_profile='codex', trusted_flag='trusted_codex_launch')
+
+    def record_opencode_launch(self, task_id, *, assignment_id, pid, start_time, pgid):
+        """Persist the direct OpenCode child identity through the trusted launch path."""
+        return self._record_direct_launch(
+            task_id, assignment_id=assignment_id, pid=pid, start_time=start_time,
+            pgid=pgid, provider_profile='opencode',
+            trusted_flag='trusted_opencode_launch')
+
+    def _record_direct_launch(self, task_id, *, assignment_id, pid, start_time, pgid,
+                              provider_profile, trusted_flag):
         if (not _safe_identifier(assignment_id, TASK_ID) or type(pid) is not int or
                 pid <= 0 or type(pgid) is not int or pgid <= 0 or
                 type(start_time) is not str or not 1 <= len(start_time) <= 64 or
@@ -2109,7 +2124,7 @@ class TaskStore:
         current = self.get(task_id)
         developer = current.get('developer')
         if (type(developer) is not dict or developer.get('assignment_id') != assignment_id or
-                developer.get('provider_profile') != 'codex' or
+                developer.get('provider_profile') != provider_profile or
                 developer.get('state') != 'DEVELOPER_DISPATCHING' or
                 developer.get('execution') is not None):
             _fail('CODEX_LAUNCH_IDENTITY_INVALID')
@@ -2123,7 +2138,7 @@ class TaskStore:
         }
         developer = dict(developer, execution=execution)
         return self._update(task_id, expected={'record_sha256': current['record_sha256']},
-                            changes={'developer': developer}, trusted_codex_launch=True)
+                            changes={'developer': developer}, **{trusted_flag: True})
 
     def adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
                          expected_record_sha256):
@@ -2752,14 +2767,14 @@ class TaskStore:
     def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False,
                 trusted_completion_events=False, trusted_abandonment=False,
                 abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
-                trusted_codex_launch=False):
+                trusted_codex_launch=False, trusted_opencode_launch=False):
         if ('developer' in changes and type(changes['developer']) is dict and
                 'execution' in changes['developer'] and
                 type(changes['developer'].get('execution')) is dict and
                 'child_pid' in changes['developer']['execution'] and
-                not trusted_codex_launch):
+                not (trusted_codex_launch or trusted_opencode_launch)):
             _fail('CODEX_LAUNCH_IDENTITY_FORBIDDEN')
-        if trusted_codex_launch and set(changes) != {'developer'}:
+        if (trusted_codex_launch or trusted_opencode_launch) and set(changes) != {'developer'}:
             _fail('CODEX_LAUNCH_IDENTITY_INVALID')
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
@@ -2838,12 +2853,13 @@ class TaskStore:
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
                 raise TaskStoreConflict() from None
-            if trusted_codex_launch:
+            if trusted_codex_launch or trusted_opencode_launch:
                 proposed = changes.get('developer')
                 old = current.get('developer')
                 execution = (proposed.get('execution')
                              if type(proposed) is dict else None)
-                if (type(old) is not dict or old.get('provider_profile') != 'codex' or
+                expected_profile = 'codex' if trusted_codex_launch else 'opencode'
+                if (type(old) is not dict or old.get('provider_profile') != expected_profile or
                         old.get('state') != 'DEVELOPER_DISPATCHING' or
                         type(proposed) is not dict or
                         proposed.get('assignment_id') != old.get('assignment_id') or

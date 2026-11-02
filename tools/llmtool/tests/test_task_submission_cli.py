@@ -924,6 +924,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(kwargs['read_paths'], ['sample.py'])
             self.assertEqual(kwargs['write_paths'], ['sample.py'])
             self.assertIn(task['task_id'], kwargs['prompt'])
+            kwargs['launch_callback'](321, '123456', 321)
             (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
             return DirectResult(0, 'ses_Abc123', 'Updated fixture.',
                 {'prompt_tokens': 18, 'completion_tokens': 9, 'total_tokens': 27},
@@ -957,6 +958,87 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       developer['direct_result_callback']['missing_gates'])
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
+
+    def test_opencode_completion_cas_succeeds_and_preserves_newer_record(self):
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                              'UNKNOWN', 'a' * 64, 32, 'CONFIRMED',
+                              'opencode v2.0.32', 10, 1, 'b' * 64)
+        for introduce_race in (False, True):
+            with self.subTest(introduce_race=introduce_race):
+                task = self._pm_task_with_opencode_assignment()
+                args = self._opencode_delegate_args(task)
+                store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+                original_compare = store.compare_and_update
+                raced = False
+                newer = None
+
+                def compare(task_id, *, expected, **changes):
+                    nonlocal raced, newer
+                    candidate = changes.get('developer')
+                    if (introduce_race and not raced and type(candidate) is dict and
+                            candidate.get('state') == 'DEVELOPER_RESPONDED'):
+                        raced = True
+                        current = store.get(task_id)['developer']
+                        newer = dict(
+                            current,
+                            state='DEVELOPER_OUTCOME_UNKNOWN',
+                            error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
+                            execution={
+                                'status': 'UNKNOWN', 'native_session_id': None,
+                                'process_exit_code': None, 'stdout_sha256': None,
+                                'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                                'usage_source': 'UNKNOWN', 'source_bytes': None,
+                                'source_file_count': None,
+                                'source_manifest_sha256': None,
+                            })
+                        raced_record = original_compare(
+                            task_id, expected={'developer': current}, developer=newer)
+                        self.assertEqual(raced_record['developer'], newer)
+                    return original_compare(task_id, expected=expected, **changes)
+
+                def execute(**kwargs):
+                    kwargs['launch_callback'](321, '123456', 321)
+                    (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+                    return result
+
+                output = io.StringIO()
+                snapshot = type('Snapshot', (), {
+                    'common_dir': self.executor_common_dir,
+                    'root': str(self.executor_root),
+                    'branch': 'feat/test-executor',
+                    'head': self.executor_head,
+                })()
+                registration = type('Registration', (), {
+                    'task_id': 'executor-task-1',
+                    'trusted_agent_id': 'opencode-developer',
+                    'session_ref': 'Executor Session 1',
+                    'native_session_id': None,
+                    'root': str(self.executor_root),
+                    'common_dir': self.executor_common_dir,
+                    'branch': 'feat/test-executor',
+                })()
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                     return_value=snapshot), \
+                        patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                     return_value=(registration, snapshot)), \
+                        patch.object(submission_cli, '_bootstrap_registered_d6'), \
+                        patch.object(submission_cli, '_refresh_d6_binding_after_bootstrap',
+                                     return_value=registration), \
+                        patch.object(store, 'compare_and_update', side_effect=compare), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=execute), \
+                        patch('llmtool.task_submission_cli._developer_output_rejection',
+                              return_value=None), redirect_stdout(output):
+                    if introduce_race:
+                        with self.assertRaises(TaskStoreConflict):
+                            run_task_opencode_delegate(args, store=store)
+                        self.assertTrue(raced)
+                        self.assertEqual(store.get(task['task_id'])['developer'], newer)
+                    else:
+                        run_task_opencode_delegate(args, store=store)
+                        self.assertEqual(store.get(task['task_id'])['developer']['state'],
+                                         'DEVELOPER_RESPONDED')
 
     def test_run_task_delegate_binds_explicit_registered_root_outside_process_cwd(self):
         task = self._pm_task_with_opencode_assignment()
@@ -1383,15 +1465,31 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.update_count = 0
                 self.update_error = None
 
+            def _before_write(self, kwargs):
+                # Count both store APIs: terminal writes use compare_and_update,
+                # while dispatching still uses update.
+                developer = kwargs.get('developer')
+                if not (type(developer) is dict and
+                        developer.get('state') == 'DEVELOPER_PENDING'):
+                    self.update_count += 1
+                    if self.update_count == 2:
+                        raise KeyboardInterrupt()
+
             def __getattr__(self, name):
                 return getattr(self.store, name)
 
             def update(self, task_id, **kwargs):
-                self.update_count += 1
-                if self.update_count == 2:
-                    raise KeyboardInterrupt()
+                self._before_write(kwargs)
                 try:
                     return self.store.update(task_id, **kwargs)
+                except BaseException as exc:
+                    self.update_error = exc
+                    raise
+
+            def compare_and_update(self, task_id, **kwargs):
+                self._before_write(kwargs)
+                try:
+                    return self.store.compare_and_update(task_id, **kwargs)
                 except BaseException as exc:
                     self.update_error = exc
                     raise
@@ -3041,6 +3139,208 @@ class CodexChildLivenessTests(unittest.TestCase):
         self.assertEqual(str(error), 'CODEX_LIVENESS_UNKNOWN')
         self.assertEqual(store.updates, 0)
         self.assertEqual(store.task['developer']['state'], 'DEVELOPER_DISPATCHING')
+
+
+class DirectRouteChildLivenessTests(unittest.TestCase):
+    # AGY liveness is deferred by the PM scope decision for this Task.
+    routes = (('opencode', 'opencode-developer'),)
+
+    def setUp(self):
+        patcher = patch.object(submission_cli.worker_dispatch,
+                               'authorize_task_store_change', return_value=None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _store(self, profile):
+        self.assertEqual(profile, 'opencode')
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TaskStore(Path(tmp.name).resolve() / 'tasks')
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bounded liveness test.',
+            'developer_assignment': {
+                'route': 'opencode', 'risk': 'LOW', 'goal': 'Record child liveness.',
+                'acceptance': ['The outcome is persisted once.'],
+            },
+        })
+        task = run_task_record_pm(
+            Namespace(stdin_json=True), store=store,
+            input_stream=io.StringIO(json.dumps({
+                'request': 'Record OpenCode child liveness.', 'response': response,
+            })), return_record=True)
+        task_id = task['task_id']
+        developer = {
+            'assignment_id': new_id(), 'selection_source': 'PM',
+            'executor_task_id': 'executor-one', 'state': 'DEVELOPER_PENDING',
+            'provider_profile': 'opencode', 'provider_type': None, 'model': None,
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED', 'read_paths': ['src.py'],
+            'write_paths': ['src.py'], 'acceptance': ['The outcome is persisted once.'],
+            'context_sha256': 'b' * 64, 'egress_basis': 'Approved test fixture.',
+            'input_bytes': 1, 'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None, 'error_code': None,
+            'execution': None, 'created_at': '2026-11-02T00:00:00Z',
+        }
+        with patch.object(submission_cli.worker_dispatch,
+                          'authorize_task_store_change', return_value=None):
+            store.compare_and_update(task_id, expected={'developer': None},
+                                     developer=developer)
+            developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
+                             model='opencode/test-free',
+                             max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
+            store.update(task_id, developer=developer)
+            store.record_opencode_launch(task_id, assignment_id=developer['assignment_id'],
+                                         pid=321, start_time='123456', pgid=321)
+        return store, task_id
+
+    def _recover(self, store, task_id, *, agent, start='123456'):
+        args = Namespace(task_id=task_id, executor_task='executor-one')
+        snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+        registration = type('Registration', (), {
+            'task_id': 'executor-one', 'trusted_agent_id': agent})()
+        with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                          return_value=snapshot), \
+             patch.object(submission_cli.task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(submission_cli.os, 'kill', side_effect=ProcessLookupError()), \
+             patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                          return_value=start), \
+             patch.object(submission_cli.os, 'getpgid', return_value=321):
+            with self.assertRaises(LLMToolError) as caught:
+                submission_cli._recover_direct_child_dispatch(
+                    args, store.get(task_id), store.get(task_id)['developer'], store,
+                    expected_agent=agent)
+        return caught.exception
+
+    def test_opencode_launch_persists_the_child_identity(self):
+        store, task_id = self._store('opencode')
+        self.assertEqual(store.get(task_id)['developer']['execution'], {
+            'status': 'RUNNING', 'native_session_id': None,
+            'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+            'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None,
+            'child_pid': 321, 'child_start_time': '123456', 'child_pgid': 321,
+        })
+
+    def test_dead_and_reused_children_transition_once_for_opencode(self):
+        for profile, agent in self.routes:
+            with self.subTest(profile=profile):
+                store, task_id = self._store(profile)
+                error = self._recover(store, task_id, agent=agent)
+                self.assertEqual(str(error), 'DIRECT_CHILD_OUTCOME_UNKNOWN')
+                saved = store.get(task_id)['developer']
+                self.assertEqual(saved['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(saved['execution'], {
+                    'status': 'UNKNOWN', 'native_session_id': None,
+                    'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+                    'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+                    'source_bytes': None, 'source_file_count': None,
+                    'source_manifest_sha256': None,
+                })
+                self.assertEqual(saved['error_code'], 'DIRECT_CHILD_NOT_RUNNING')
+                persisted = store.get(task_id)
+                self.assertEqual(persisted['developer'], saved)
+                with self.assertRaisesRegex(LLMToolError, 'DIRECT_CHILD_LIVENESS_UNKNOWN'):
+                    submission_cli._recover_direct_child_dispatch(
+                        Namespace(task_id=task_id, executor_task='executor-one'),
+                        persisted, saved, store, expected_agent=agent)
+                self.assertEqual(store.get(task_id), persisted)
+
+                reused, reused_id = self._store(profile)
+                with patch.object(submission_cli.os, 'kill', return_value=None), \
+                     patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                                  return_value='987654'), \
+                     patch.object(submission_cli.os, 'getpgid', return_value=321), \
+                     patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                  return_value=type('Snapshot', (), {
+                                      'common_dir': '/repo/.git', 'root': '/repo'})()), \
+                     patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                  return_value=(type('Registration', (), {
+                                      'task_id': 'executor-one', 'trusted_agent_id': agent})(), None)):
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'DIRECT_CHILD_OUTCOME_UNKNOWN'):
+                        submission_cli._recover_direct_child_dispatch(
+                            Namespace(task_id=reused_id, executor_task='executor-one'),
+                            reused.get(reused_id), reused.get(reused_id)['developer'], reused,
+                            expected_agent=agent)
+                self.assertEqual(reused.get(reused_id)['developer']['state'],
+                                 'DEVELOPER_OUTCOME_UNKNOWN')
+
+    def test_alive_child_refuses_a_second_writer_for_opencode(self):
+        for profile, agent in self.routes:
+            with self.subTest(profile=profile):
+                store, task_id = self._store(profile)
+                args = Namespace(task_id=task_id, executor_task='executor-one')
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                registration = type('Registration', (), {
+                    'task_id': 'executor-one', 'trusted_agent_id': agent})()
+                with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                  return_value=snapshot), \
+                     patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                  return_value=(registration, snapshot)), \
+                     patch.object(submission_cli.os, 'kill', return_value=None), \
+                     patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                                  return_value='123456'), \
+                     patch.object(submission_cli.os, 'getpgid', return_value=321):
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'DIRECT_CHILD_STILL_RUNNING'):
+                        submission_cli._recover_direct_child_dispatch(
+                            args, store.get(task_id), store.get(task_id)['developer'], store,
+                            expected_agent=agent)
+                self.assertEqual(store.get(task_id)['developer']['state'],
+                                 'DEVELOPER_DISPATCHING')
+                self.assertEqual(store.get(task_id)['state'], 'PM_RESPONDED')
+
+    def test_conflict_does_not_overwrite_newer_record_for_opencode(self):
+        for profile, agent in self.routes:
+            with self.subTest(profile=profile):
+                store, task_id = self._store(profile)
+                original = store.compare_and_update
+                current = store.get(task_id)['developer']
+                self.assertEqual(current['execution']['status'], 'RUNNING')
+                newer = None
+                raced = False
+                def compare(_task_id, *, expected, **changes):
+                    nonlocal raced, newer
+                    if not raced:
+                        raced = True
+                        newer = dict(current)
+                        newer.update(
+                            state='DEVELOPER_OUTCOME_UNKNOWN',
+                            error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
+                            execution={
+                                'status': 'UNKNOWN', 'native_session_id': None,
+                                'process_exit_code': None, 'stdout_sha256': None,
+                                'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                                'usage_source': 'UNKNOWN', 'source_bytes': None,
+                                'source_file_count': None,
+                                'source_manifest_sha256': None,
+                            })
+                        raced_record = original(
+                            task_id, expected={'developer': current}, developer=newer)
+                        self.assertEqual(raced_record['developer'], newer)
+                        self.assertEqual(store.get(task_id)['developer'], newer)
+                    return original(_task_id, expected=expected, **changes)
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                registration = type('Registration', (), {
+                    'task_id': 'executor-one', 'trusted_agent_id': agent})()
+                with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                  return_value=snapshot), \
+                     patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                  return_value=(registration, snapshot)), \
+                     patch.object(submission_cli.os, 'kill', side_effect=ProcessLookupError()), \
+                     patch.object(store, 'compare_and_update', side_effect=compare):
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'DIRECT_CHILD_LIVENESS_UNKNOWN'):
+                        submission_cli._recover_direct_child_dispatch(
+                            Namespace(task_id=task_id, executor_task='executor-one'),
+                            store.get(task_id), store.get(task_id)['developer'], store,
+                            expected_agent=agent)
+                self.assertTrue(raced)
+                self.assertIsNotNone(newer)
+                self.assertEqual(store.get(task_id)['developer'], newer)
 
 
 class DispatcherGitTimeoutTests(unittest.TestCase):
