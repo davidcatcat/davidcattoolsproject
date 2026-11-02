@@ -29,6 +29,7 @@ MAX_MESSAGE_BYTES = 16384
 MAX_STREAM_LINE_BYTES = 1024 * 1024
 MAX_HISTORY_TURNS = 200
 _ADAPTERS = {'claude-code': 'claude'}
+_SUPPORTED_BINDING_RUNTIMES = frozenset(('claude-code', 'codex'))
 _LIVE_WINDOW_SECONDS = 20
 _STDERR_LIMIT = 65536
 # Fixed tool set for the PM process (claude CLI 2.1.312: --strict-mcp-config uses only the
@@ -46,6 +47,7 @@ PM_SESSION_INSTRUCTION = (
 # (system notices, a late control_response) is not the start of a Claude Code turn.
 _TURN_LINE_TYPES = ('stream_event', 'assistant', 'user', 'result')
 _STDOUT_EOF = object()
+_UNSET = object()
 # Claude Code 2.1.312 reports the fate of a user message sent with a uuid as
 # `command_lifecycle` frames: queued, started (it drains into a turn), then one of
 # completed / cancelled / discarded / refused.
@@ -384,7 +386,8 @@ def _write_json_atomic(root, path, value):
             pass
 
 
-def current_binding(pm_session_id=None, *, state_root=None):
+def current_binding(pm_session_id=None, *, state_root=None, environ=None,
+                    resolve_legacy_account=True, resolved_account=_UNSET):
     """Read a persisted dedicated-session binding, or the most recently created one."""
     root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
     root = _ensure_state_dir(Path(root_arg))
@@ -393,34 +396,109 @@ def current_binding(pm_session_id=None, *, state_root=None):
     else:
         pointer = root / 'current-binding.json'
         try:
-            with pointer.open(encoding='utf-8') as stream:
-                native_id = json.load(stream).get('native_session_id')
-        except (OSError, ValueError, AttributeError):
+            value = _read_state_json(root, pointer)
+            native_id = value.get('native_session_id') if type(value) is dict else None
+        except (LLMToolError, OSError, ValueError, AttributeError):
             return None
     if type(native_id) is not str or not active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native_id):
         return None
     path = _binding_path(root, native_id)
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
-        with os.fdopen(fd, encoding='utf-8') as stream:
-            binding = json.load(stream)
-    except (OSError, ValueError):
+        binding = _read_state_json(root, path)
+    except (LLMToolError, OSError, ValueError):
         return None
-    expected = {'runtime': 'claude-code', 'native_session_id': native_id,
-                'dedicated': True}
-    if (not isinstance(binding, dict) or any(binding.get(k) != v for k, v in expected.items()) or
+    expected = {'native_session_id': native_id, 'dedicated': True}
+    allowed_fields = {'runtime', 'account', 'native_session_id', 'cwd', 'dedicated',
+                      'created_at', 'session_started'}
+    if (not isinstance(binding, dict) or set(binding) - allowed_fields or
+            any(binding.get(k) != v for k, v in expected.items()) or
+            not {'native_session_id', 'cwd', 'dedicated', 'created_at'} <= set(binding) or
             type(binding.get('dedicated')) is not bool or type(binding.get('cwd')) is not str or
             type(binding.get('created_at')) is not str or
-            type(binding.get('session_started', False)) is not bool):
+            type(binding.get('session_started', False)) is not bool or
+            binding.get('runtime', 'claude-code') not in _SUPPORTED_BINDING_RUNTIMES or
+            ('account' in binding and binding['account'] is not None and
+             not role_config._name(binding['account']))):
         return None
+    binding.setdefault('runtime', 'claude-code')
+    if 'account' not in binding:
+        if resolve_legacy_account:
+            if resolved_account is not _UNSET:
+                binding['account'] = resolved_account
+            else:
+                try:
+                    binding['account'] = role_config.resolve_role(
+                        'pm', environ=environ,
+                        home=None if environ is None else environ.get('HOME')).get('account')
+                except LLMToolError:
+                    return None
     # Bindings written before session_started existed already went through the
     # old creator process, so they must be resumed rather than initialized again.
     binding.setdefault('session_started', True)
     return binding
 
 
-def create_dedicated_pm(cwd, *, state_root=None, clock=None):
-    """Reserve a fresh Claude session ID and durably bind it as the dedicated PM."""
+def _read_state_json(root, path):
+    """Read a regular file directly inside the PM state directory, without symlinks."""
+    if path.parent != root or not hasattr(os, 'O_NOFOLLOW'):
+        raise _error('PM_BINDING_INVALID', 'PM binding is not a safe state file')
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid():
+            raise _error('PM_BINDING_INVALID', 'PM binding is not a regular user file')
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_uid != os.getuid():
+            os.close(fd)
+            raise _error('PM_BINDING_INVALID', 'PM binding is not a regular user file')
+        with os.fdopen(fd, encoding='utf-8') as stream:
+            return json.load(stream)
+    except LLMToolError:
+        raise
+    except (OSError, ValueError, UnicodeError):
+        raise _error('PM_BINDING_INVALID', 'PM binding is malformed or unavailable') from None
+
+
+def list_bindings(*, state_root=None):
+    """Return valid dedicated PM bindings newest first; reject unsafe entries."""
+    root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+    root = _ensure_state_dir(Path(root_arg))
+    bindings = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not entry.name.endswith('.binding.json'):
+                    continue
+                native_id = entry.name[:-len('.binding.json')]
+                if not active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native_id):
+                    raise _error('PM_BINDING_INVALID', 'PM binding filename is malformed')
+                valid = current_binding(native_id, state_root=root)
+                if valid is None:
+                    raise _error('PM_BINDING_INVALID', 'PM binding is malformed')
+                bindings.append(valid)
+    except OSError:
+        raise _error('PM_BINDING_INVALID', 'PM binding directory is unavailable') from None
+    return sorted(bindings, key=lambda item: (item['created_at'], item['native_session_id']),
+                  reverse=True)
+
+
+def select_binding(native_id, *, state_root=None):
+    """Move the current PM binding pointer without opening or starting a session."""
+    if type(native_id) is not str or not active_pm_inbox.PM_NATIVE_SESSION_ID.fullmatch(native_id):
+        raise _error('PM_BINDING_INVALID', 'PM binding ID is invalid')
+    root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+    root = _ensure_state_dir(Path(root_arg))
+    binding = current_binding(native_id, state_root=root)
+    if binding is None:
+        raise _error('PM_BINDING_INVALID', 'PM binding is malformed or unavailable')
+    _write_json_atomic(root, root / 'current-binding.json', {'native_session_id': native_id})
+    return binding
+
+
+def create_dedicated_pm(cwd, runtime='claude-code', account=None, *, state_root=None, clock=None):
+    """Reserve a fresh PM session ID and durably bind its runtime and account."""
+    if type(runtime) is not str or runtime not in _SUPPORTED_BINDING_RUNTIMES:
+        raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
     try:
         cwd = os.path.normpath(os.path.abspath(cwd))
         if not os.path.isdir(cwd):
@@ -428,9 +506,16 @@ def create_dedicated_pm(cwd, *, state_root=None, clock=None):
     except (OSError, TypeError, ValueError):
         raise _error('PM_SESSION_INVALID', 'PM working directory is invalid') from None
     native_id = str(uuid.uuid4())
+    try:
+        resolved = role_config.resolve_role(
+            'pm', cli={'account': account} if account is not None else None)
+    except LLMToolError:
+        raise _error('PM_CONFIG_INVALID', 'PM account configuration is invalid') from None
+    account = resolved.get('account')
     root_arg = state_root or Path.home() / '.local/state/llmtool/pm-runtime'
     root = _ensure_state_dir(Path(root_arg))
-    binding = {'runtime': 'claude-code', 'native_session_id': native_id, 'cwd': cwd,
+    binding = {'runtime': runtime, 'account': account,
+               'native_session_id': native_id, 'cwd': cwd,
                'dedicated': True, 'created_at': _timestamp(clock or time.time),
                'session_started': False}
     _write_json_atomic(root, _binding_path(root, native_id), binding)
@@ -748,11 +833,12 @@ class _TurnParser:
 class PMRuntime:
     """Drive exactly one bound Claude PM session at a time."""
 
-    def __init__(self, pm_session_id, *, cwd, runtime='claude-code', runner=None,
+    def __init__(self, pm_session_id, *, cwd, runtime='claude-code', account=None, runner=None,
                  state_root=None, environ=None, clock=None):
         self.pm_session_id = pm_session_id
         self.cwd = cwd
         self.runtime = runtime
+        self.account = account
         self.runner = runner
         self.state_root = state_root
         self.environ = environ
@@ -883,21 +969,36 @@ class PMRuntime:
     def open(self):
         if self._child is not None:
             return self
+        base_env = os.environ if self.environ is None else self.environ
+        root_arg = self.state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+        root = _ensure_state_dir(Path(root_arg))
+        binding = current_binding(self.pm_session_id, state_root=root, environ=self.environ,
+                                  resolve_legacy_account=False)
+        if binding is None:
+            raise _error('PM_SESSION_INVALID', 'PM session binding could not be validated')
+        if self.runtime != 'claude-code' and self.runtime != binding['runtime']:
+            raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
+        self.runtime = binding['runtime']
         adapter = _ADAPTERS.get(self.runtime)
         if adapter is None:
             raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
-        base_env = os.environ if self.environ is None else self.environ
         try:
             # Trusted user config only; the user config is under the same HOME
             # the transcript lookup uses.
             resolved_role = role_config.resolve_role(
-                'pm', environ=self.environ,
+                'pm', cli={'account': self.account} if self.account is not None else None,
+                environ=self.environ,
                 home=None if self.environ is None else self.environ.get('HOME'))
+            bound_account = binding.get('account', resolved_role.get('account'))
+            if bound_account != resolved_role.get('account'):
+                raise _error('PM_ACCOUNT_MISMATCH', 'PM binding account does not match configuration')
             if resolved_role.get('provider') not in (None, 'claude'):
                 raise LLMToolError('roles.pm must use a Claude account')
             config_dir = resolved_role['config_dir']
             model = resolved_role.get('model')
-        except LLMToolError:
+        except LLMToolError as exc:
+            if getattr(exc, 'pm_runtime_code', None) == 'PM_ACCOUNT_MISMATCH':
+                raise
             raise _error('PM_CONFIG_INVALID',
                          'pm_runtime.claude_config_dir in the user config is invalid') from None
         env = dict(base_env)
@@ -905,9 +1006,8 @@ class PMRuntime:
             env['CLAUDE_CONFIG_DIR'] = config_dir
         try:
             key = active_pm_inbox.pm_session_key(self.pm_session_id)
-            root_arg = self.state_root or Path.home() / '.local/state/llmtool/pm-runtime'
-            root = _ensure_state_dir(Path(root_arg))
-            binding = current_binding(self.pm_session_id, state_root=root)
+            binding = current_binding(self.pm_session_id, state_root=root, environ=self.environ,
+                                      resolved_account=resolved_role.get('account'))
             if (binding is not None and binding.get('dedicated') is True and
                     not binding.get('session_started')):
                 if type(self.cwd) is not str:
@@ -950,7 +1050,8 @@ class PMRuntime:
             for turn in turns:
                 if isinstance(turn, dict) and isinstance(turn.get('idempotency_key'), str):
                     self._idempotency[turn['idempotency_key']] = turn
-            binding = current_binding(self.pm_session_id, state_root=root)
+            binding = current_binding(self.pm_session_id, state_root=root, environ=self.environ,
+                                      resolved_account=resolved_role.get('account'))
             if binding is None or binding.get('cwd') != cwd:
                 raise _error('PM_SESSION_NOT_DEDICATED',
                              'PM session is not dedicated; create a dedicated PM session and retry')
