@@ -1951,6 +1951,44 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(saved['abandonment']['reason'], 'PM stopped this Task')
         self.assertEqual(saved['schema_version'], 1)
 
+    def test_pm_session_adoption_fields_are_not_writable_through_generic_updates(self):
+        value = self._codex_dispatch_task()
+        self.store.create(value)
+        original = self.store.get(value['task_id'])
+        changes = {
+            'pm_provenance': {'forged': True},
+            'pm_session_adoptions': [{'old_session_key': original['pm_session_id'],
+                'new_session_key': 'pm-' + new_id(), 'at': '2026-10-29T00:00:00Z'}],
+        }
+        for field, field_value in changes.items():
+            for mutate in (
+                    lambda field=field, field_value=field_value:
+                        self.store.update(value['task_id'], **{field: field_value}),
+                    lambda field=field, field_value=field_value:
+                        self.store.compare_and_update(value['task_id'],
+                            expected={'record_sha256': original['record_sha256']},
+                            **{field: field_value})):
+                with self.subTest(field=field), self.assertRaises(LLMToolError) as caught:
+                    mutate()
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'PM_SESSION_ADOPTION_INVALID')
+                self.assertEqual(self.store.get(value['task_id']), original)
+
+    def test_pm_session_adoption_refuses_abandoned_task_under_update_lock(self):
+        value = record()
+        self.store.create(value)
+        self.store.abandon(value['task_id'], pm_session_id=value['pm_session_id'],
+                           reason='Stopped before adoption')
+        current = self.store.get(value['task_id'])
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.adopt_pm_session(
+                value['task_id'], old_session_key=current['pm_session_id'],
+                new_session_key='pm-' + new_id(), at='2026-10-29T00:00:00Z',
+                expected_record_sha256=current['record_sha256'])
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'PM_SESSION_ADOPTION_ABANDONED')
+        self.assertEqual(self.store.get(value['task_id']), current)
+
 
 if __name__ == '__main__':
     unittest.main()

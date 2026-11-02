@@ -86,7 +86,8 @@ _V2_REMOTE_RECEIPT_OUTCOME_SHAPES = tuple(shape | frozenset((
 FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
     'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
-    'review_repair_claims', 'high_debug', 'abandonment'))
+    'review_repair_claims', 'high_debug', 'abandonment', 'pm_session_adoptions',
+    'pm_provenance'))
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
@@ -635,6 +636,8 @@ def _validate_remote_test_outcomes(record):
 
 def _validate(record):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
+    if type(record) is dict and 'pm_session_adoptions' in record:
+        keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
             (record.get('schema_version') == 1 and keys != _FIELDS_V1) or
             (record.get('schema_version') == 2 and keys not in
@@ -691,6 +694,22 @@ def _validate(record):
                 not _safe_identifier(item['pm_session_id'], SESSION_ID) or
                 item['pm_session_id'] != record['pm_session_id']):
             _fail('TASK_ABANDONMENT_INVALID')
+    if 'pm_session_adoptions' in record:
+        adoptions = record['pm_session_adoptions']
+        if type(adoptions) is not list or len(adoptions) > 32:
+            _fail('PM_SESSION_ADOPTION_INVALID')
+        for item in adoptions:
+            if (type(item) is not dict or set(item) !=
+                    frozenset(('old_session_key', 'new_session_key', 'at')) or
+                    not _safe_identifier(item.get('old_session_key'), SESSION_ID) or
+                    not _safe_identifier(item.get('new_session_key'), SESSION_ID)):
+                _fail('PM_SESSION_ADOPTION_INVALID')
+            try:
+                stamp = datetime.strptime(item.get('at'), '%Y-%m-%dT%H:%M:%SZ')
+            except (TypeError, ValueError):
+                _fail('PM_SESSION_ADOPTION_INVALID')
+            if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != item['at']:
+                _fail('PM_SESSION_ADOPTION_INVALID')
     if 'completion_events' in record:
         _validate_completion_events(record)
         _validate_completion_tombstones(record)
@@ -2005,7 +2024,8 @@ class TaskStore:
         if type(record) is dict and 'abandonment' in record:
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
         if (type(record) is not dict or 'dispatch_audit' in record or
-                'completion_events' in record or 'completion_event_tombstones' in record):
+                'completion_events' in record or 'completion_event_tombstones' in record or
+                'pm_session_adoptions' in record):
             _fail()
         record = dict(record)
         developer = record.get('developer')
@@ -2056,6 +2076,32 @@ class TaskStore:
         if type(expected) is not dict or not expected:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
+
+    def adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
+                         expected_record_sha256):
+        """Library-internal: atomically move one PM binding, inbox and audit entry."""
+        current = self.get(task_id)
+        if current.get('pm_session_id') != old_session_key:
+            raise TaskStoreConflict() from None
+        if len(current.get('pm_session_adoptions', [])) >= 32:
+            _fail('PM_SESSION_ADOPTION_LIMIT')
+        audit = list(current.get('pm_session_adoptions', []))
+        audit.append({'old_session_key': old_session_key,
+                      'new_session_key': new_session_key, 'at': at})
+        events = current.get('completion_events')
+        changes = {'pm_session_id': new_session_key, 'pm_session_adoptions': audit}
+        provenance = current.get('pm_provenance')
+        if type(provenance) is dict and 'pm_native_session_id' in provenance:
+            changes['pm_provenance'] = dict(
+                provenance, pm_native_session_id=new_session_key[3:])
+        if events is not None:
+            changes['completion_events'] = [
+                dict(event, pm_session_id=new_session_key) for event in events]
+        return self._update(task_id,
+            expected={'record_sha256': expected_record_sha256,
+                      'pm_session_id': old_session_key}, changes=changes,
+            trusted_completion_events=events is not None,
+            trusted_pm_session_adoption=True)
 
     def abandon(self, task_id, *, pm_session_id, reason):
         """Record a PM-only terminal abandonment, idempotent for the same reason."""
@@ -2657,7 +2703,7 @@ class TaskStore:
 
     def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False,
                 trusted_completion_events=False, trusted_abandonment=False,
-                abandonment_pm_session_id=None):
+                abandonment_pm_session_id=None, trusted_pm_session_adoption=False):
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
         if (('completion_events' in changes or 'completion_event_tombstones' in changes)
@@ -2665,9 +2711,17 @@ class TaskStore:
             _fail('COMPLETION_EVENT_MUTATION_FORBIDDEN')
         if 'abandonment' in changes and not trusted_abandonment:
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+        if ({'pm_provenance', 'pm_session_adoptions'} & set(changes) and
+                not trusted_pm_session_adoption):
+            _fail('PM_SESSION_ADOPTION_INVALID')
         if trusted_abandonment and (set(changes) != {'abandonment'} or
                 not _safe_identifier(abandonment_pm_session_id, SESSION_ID)):
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+        if trusted_pm_session_adoption and (
+                not {'pm_session_id', 'pm_session_adoptions'}.issubset(changes) or
+                set(changes) - {'pm_session_id', 'pm_session_adoptions', 'completion_events',
+                                'pm_provenance'}):
+            _fail('PM_SESSION_ADOPTION_INVALID')
         directory = self._dirfd()
         lock = '.' + self._name(task_id) + '.lock'
         lock_fd = None
@@ -2734,6 +2788,8 @@ class TaskStore:
                         type(item) is not dict or
                         item.get('pm_session_id') != abandonment_pm_session_id):
                     _fail('TASK_PM_SESSION_DENIED')
+            if trusted_pm_session_adoption and current.get('abandonment') is not None:
+                _fail('PM_SESSION_ADOPTION_ABANDONED')
             if 'review_dispatch_claim' in changes:
                 old_claim = current.get('review_dispatch_claim')
                 new_claim = changes['review_dispatch_claim']
@@ -2880,8 +2936,12 @@ class TaskStore:
                 current['record_sha256'] = _digest(current)
                 self._write(current, create=False)
                 raise dispatch_denial
-            if set(changes) - (FIELDS - {'schema_version', 'task_id', 'run_id', 'pm_session_id',
-                                         'created_at', 'task_contract', 'task_binding', 'record_sha256'}):
+            immutable = {'schema_version', 'task_id', 'run_id', 'pm_session_id',
+                         'created_at', 'task_contract', 'task_binding', 'record_sha256'}
+            writable = FIELDS - immutable
+            if trusted_pm_session_adoption:
+                writable = writable | {'pm_session_id'}
+            if set(changes) - writable:
                 _fail()
             current.update(changes)
             current['updated_at'] = datetime.now(timezone.utc).replace(

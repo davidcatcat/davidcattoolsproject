@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .errors import LLMToolError
 from .task_index import TaskStatusIndex
-from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID
+from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID, TaskStoreConflict
 
 DEFAULT_WAIT_SECONDS = 540
 MAX_WAIT_SECONDS = 3600
@@ -150,8 +150,10 @@ def observe_codex_session(native_session_id, cwd, environ=None):
                 raise LLMToolError(
                     'Codex PM session is malformed or bound to another directory') from None
             matches.append(candidate)
-    if len(matches) != 1:
-        raise LLMToolError('Codex PM session was not found uniquely for this directory')
+    if not matches:
+        raise LLMToolError('Codex PM session was not found for this directory')
+    if len(matches) > 1:
+        raise LLMToolError('Codex PM session was found multiple times for this directory')
     return cwd
 
 
@@ -425,6 +427,85 @@ def _inbox(store, session_key, *, reconcile):
 def read_inbox(store, session_key):
     """Reconcile READY Tasks, then return every unacknowledged event of this PM."""
     return _inbox(store, session_key, reconcile=True)
+
+
+def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
+                     cwd, environ=None):
+    """Move open Tasks to a replacement PM session after its old transcript is gone.
+
+    Per-Task compare-and-swap conflicts are skipped and returned in ``skipped``;
+    remaining eligible Tasks are still adopted.
+    """
+    def refuse(code):
+        error = LLMToolError('PM session adoption refused')
+        error.task_store_error_code = code
+        raise error
+
+    if (type(old_native_id) is not str or
+            PM_NATIVE_SESSION_ID.fullmatch(old_native_id) is None or
+            type(old_session_key) is not str or
+            SESSION_ID.fullmatch(old_session_key) is None or
+            old_session_key != 'pm-' + old_native_id or
+            type(new_session_key) is not str or
+            SESSION_ID.fullmatch(new_session_key) is None or
+            PM_NATIVE_SESSION_ID.fullmatch(new_session_key[3:]) is None):
+        refuse('PM_SESSION_ADOPTION_KEY_INVALID')
+    if old_session_key == new_session_key:
+        refuse('PM_SESSION_ADOPTION_KEYS_EQUAL')
+    at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    moved, skipped = [], []
+    candidates = []
+    for task_id in store.task_ids():
+        record = store.get(task_id)
+        if (record.get('pm_session_id') != old_session_key or
+                record.get('abandonment') is not None):
+            continue
+        provenance = record.get('pm_provenance')
+        if (type(provenance) is not dict or
+                not {'pm_runtime', 'pm_native_session_id', 'pm_cwd',
+                     'native_session_id_status'}.issubset(provenance) or
+                provenance.get('native_session_id_status') !=
+                'LOCAL_SESSION_FILE_OBSERVED' or
+                provenance.get('pm_native_session_id') != old_native_id):
+            refuse('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+        runtime = provenance['pm_runtime']
+        recorded_cwd = provenance['pm_cwd']
+        # The caller-supplied directory is only a consistency check. Session
+        # presence and observation are always checked against each Task's
+        # recorded directory, and require the caller to supply that exact
+        # canonical value (normalizing here would accept a trailing-slash alias).
+        if type(cwd) is not str or cwd != recorded_cwd:
+            refuse('PM_SESSION_ADOPTION_CWD_MISMATCH')
+        if runtime == 'claude-code':
+            if claude_session_present(old_native_id, recorded_cwd, environ):
+                refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
+            observe_claude_session(new_session_key[3:], recorded_cwd, environ)
+        elif runtime == 'codex':
+            try:
+                observe_codex_session(old_native_id, recorded_cwd, environ)
+            except LLMToolError as exc:
+                if str(exc) == 'Codex PM session was found multiple times for this directory':
+                    refuse('PM_SESSION_ADOPTION_OLD_SESSION_AMBIGUOUS')
+                if str(exc) != 'Codex PM session was not found for this directory':
+                    raise
+            else:
+                refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
+            observe_codex_session(new_session_key[3:], recorded_cwd, environ)
+        else:
+            refuse('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+        candidates.append((task_id, record))
+
+    for task_id, record in candidates:
+        try:
+            store.adopt_pm_session(
+                task_id, old_session_key=old_session_key,
+                new_session_key=new_session_key, at=at,
+                expected_record_sha256=record['record_sha256'])
+        except TaskStoreConflict:
+            skipped.append(task_id)
+        else:
+            moved.append(task_id)
+    return {'moved': moved, 'skipped': skipped}
 
 
 def peek_inbox(store, session_key):
