@@ -148,7 +148,7 @@ def _background_read(fd):
     return value
 
 
-def _run_background_delegate(args, *, provider, store):
+def _run_background_delegate(args, *, provider, store, d6_binding):
     """Run the existing direct delegate path in a detached, double-forked child."""
     if not hasattr(os, 'fork') or not hasattr(os, 'setsid'):
         raise LLMToolError('background Developer execution is unavailable on this platform')
@@ -184,9 +184,11 @@ def _run_background_delegate(args, *, provider, store):
                 write_fd, {'kind': 'launched', 'pid': pid})
             try:
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
-                    result = (run_task_codex_delegate(args, store=store)
-                              if provider == 'codex' else
-                              run_task_opencode_delegate(args, store=store))
+                    result = (run_task_codex_delegate(
+                        args, store=store, d6_binding=d6_binding)
+                        if provider == 'codex' else
+                        run_task_opencode_delegate(
+                            args, store=store, d6_binding=d6_binding))
                 _background_send(write_fd, {'kind': 'finished', 'return_code': result,
                                             'output': output.getvalue()})
             except BaseException as exc:
@@ -2247,7 +2249,7 @@ def _opencode_developer_profile():
                            'opencode/<name>-free model') from None
 
 
-def run_task_opencode_delegate(args, *, store):
+def run_task_opencode_delegate(args, *, store, d6_binding=None):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -2270,7 +2272,8 @@ def run_task_opencode_delegate(args, *, store):
             raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
-    registration, snapshot = _delegate_d6_binding(args)
+    registration, snapshot = (d6_binding if d6_binding is not None else
+                              _delegate_d6_binding(args))
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -3040,7 +3043,7 @@ def _delegate_d6_binding(args):
     return registration, snapshot
 
 
-def run_task_codex_delegate(args, *, store):
+def run_task_codex_delegate(args, *, store, d6_binding=None):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -3095,7 +3098,8 @@ def run_task_codex_delegate(args, *, store):
         run_id=task.get('run_id'),
         contract_digest=task.get('task_binding', {}).get('contract_digest'))
     try:
-        registration, snapshot = _delegate_d6_binding(args)
+        registration, snapshot = (d6_binding if d6_binding is not None else
+                                  _delegate_d6_binding(args))
     except LLMToolError as exc:
         raise LLMToolError(
             'Codex direct D6 binding failed (' + codex_direct_developer.adapter_error_code(
@@ -3541,7 +3545,9 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
         if registration.task_id != getattr(args, 'executor_task', None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
-        return _run_background_delegate(args, provider=provider, store=store)
+        return _run_background_delegate(
+            args, provider=provider, store=store,
+            d6_binding=(registration, _snapshot))
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
