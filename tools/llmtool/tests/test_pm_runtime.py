@@ -412,6 +412,7 @@ class PMRuntimeTests(unittest.TestCase):
         # Owner 10-27 "claude2 only": the PM runs on the configured account, even
         # when the inherited environment names another one.
         account = os.path.join(self.temp.name, 'claude-account2')
+        os.mkdir(account, 0o700)
         self.write_user_config('pm_runtime:\n  claude_config_dir: ' + account + '\n')
         runtime = self.runtime()
         runtime.environ['CLAUDE_CONFIG_DIR'] = os.path.join(self.temp.name, 'default-claude')

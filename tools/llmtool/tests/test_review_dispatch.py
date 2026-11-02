@@ -58,6 +58,13 @@ class ReviewDispatchTests(unittest.TestCase):
         bind = lambda **kw: self.bound.append(kw)
         gate = SimpleNamespace(allowed=policy, reason_code='PAUSED')
         selected = preflight[0] if type(preflight) is list else self.preflight
+        existing = self.store.get(TASK).get('review_dispatch_claim', [])
+        creates_claim = not any(
+            type(claim) is dict and
+            claim.get('executor_task') == 'executor-d6' and
+            claim.get('pr') == 42 and claim.get('head_sha') == selected[2] and
+            claim.get('version') == 1
+            for claim in existing)
         with patch.object(review_dispatch, '_preflight', side_effect=preflight or [self.preflight, self.preflight]), \
                 patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
                 patch.object(review_dispatch, '_resolve_github_login', return_value='reviewer-user'), \
@@ -69,7 +76,7 @@ class ReviewDispatchTests(unittest.TestCase):
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
                 bind_session=bind, prompt_renderer=lambda *_: 'bound prompt',
                 codex_runner=codex_runner)
-            if selected[4] == 'claude-reviewer':
+            if selected[4] == 'claude-reviewer' and creates_claim:
                 resolve_role.assert_called_once_with('reviewer')
             else:
                 resolve_role.assert_not_called()
