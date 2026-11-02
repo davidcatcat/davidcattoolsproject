@@ -3028,6 +3028,149 @@ class CodexChildLivenessTests(unittest.TestCase):
         self.assertEqual(store.task['developer']['state'], 'DEVELOPER_DISPATCHING')
 
 
+class DirectRouteChildLivenessTests(unittest.TestCase):
+    routes = (('opencode', 'opencode-developer'), ('agy', 'agy-developer'))
+
+    def _store(self, profile):
+        task_id, run_id = new_id(), new_id()
+        request = 'Bounded non-sensitive liveness test.'
+        task = _record(task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(response='PM returned a bounded task.',
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            pm_assignment={'schema_version': 1, 'route': profile, 'risk': 'LOW',
+                           'goal': 'Record the liveness outcome.',
+                           'acceptance': ['the outcome is recorded']})
+        task['developer'] = {
+            'assignment_id': new_id(), 'selection_source': 'PM',
+            'executor_task_id': 'executor-one', 'state': 'DEVELOPER_DISPATCHING',
+            'provider_profile': profile,
+            'provider_type': 'opencode-cli' if profile == 'opencode' else 'agy-cli',
+            'model': 'test-model', 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED', 'read_paths': ['src.py'],
+            'write_paths': ['src.py'], 'acceptance': ['the outcome is recorded'],
+            'context_sha256': 'b' * 64, 'egress_basis': 'Approved non-sensitive test context.',
+            'input_bytes': 10, 'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'execution': {
+                'child_pid': 321, 'child_start_time': '123456', 'child_pgid': 321},
+            'created_at': '2026-10-23T00:00:00Z',
+        }
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TaskStore(Path(tmp.name).resolve() / 'tasks')
+        store.create(task)
+        return store, task_id
+
+    def _recover(self, store, task_id, *, agent, start='123456'):
+        args = Namespace(task_id=task_id, executor_task='executor-one')
+        snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+        registration = type('Registration', (), {
+            'task_id': 'executor-one', 'trusted_agent_id': agent})()
+        with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                          return_value=snapshot), \
+             patch.object(submission_cli.task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(submission_cli.os, 'kill', side_effect=ProcessLookupError()), \
+             patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                          return_value=start), \
+             patch.object(submission_cli.os, 'getpgid', return_value=321):
+            with self.assertRaises(LLMToolError) as caught:
+                submission_cli._recover_direct_child_dispatch(
+                    args, store.get(task_id), store.get(task_id)['developer'], store,
+                    expected_agent=agent)
+        return caught.exception
+
+    def test_dead_and_reused_children_transition_once_for_both_routes(self):
+        for profile, agent in self.routes:
+            with self.subTest(profile=profile):
+                store, task_id = self._store(profile)
+                error = self._recover(store, task_id, agent=agent)
+                self.assertEqual(str(error), 'DIRECT_CHILD_OUTCOME_UNKNOWN')
+                saved = store.get(task_id)['developer']
+                self.assertEqual(saved['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(saved['execution']['child_pid'], 321)
+                self.assertEqual(saved['error_code'], 'DIRECT_CHILD_NOT_RUNNING')
+                self.assertEqual(store.get(task_id)['developer'], saved)
+
+                reused, reused_id = self._store(profile)
+                with patch.object(submission_cli.os, 'kill', return_value=None), \
+                     patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                                  return_value='987654'), \
+                     patch.object(submission_cli.os, 'getpgid', return_value=321), \
+                     patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                  return_value=type('Snapshot', (), {
+                                      'common_dir': '/repo/.git', 'root': '/repo'})()), \
+                     patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                  return_value=(type('Registration', (), {
+                                      'task_id': 'executor-one', 'trusted_agent_id': agent})(), None)):
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'DIRECT_CHILD_OUTCOME_UNKNOWN'):
+                        submission_cli._recover_direct_child_dispatch(
+                            Namespace(task_id=reused_id, executor_task='executor-one'),
+                            reused.get(reused_id), reused.get(reused_id)['developer'], reused,
+                            expected_agent=agent)
+
+    def test_alive_child_refuses_a_second_writer_for_both_routes(self):
+        for profile, agent in self.routes:
+            with self.subTest(profile=profile):
+                store, task_id = self._store(profile)
+                args = Namespace(task_id=task_id, executor_task='executor-one')
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                registration = type('Registration', (), {
+                    'task_id': 'executor-one', 'trusted_agent_id': agent})()
+                with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                  return_value=snapshot), \
+                     patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                  return_value=(registration, snapshot)), \
+                     patch.object(submission_cli.os, 'kill', return_value=None), \
+                     patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                                  return_value='123456'), \
+                     patch.object(submission_cli.os, 'getpgid', return_value=321):
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'DIRECT_CHILD_STILL_RUNNING'):
+                        submission_cli._recover_direct_child_dispatch(
+                            args, store.get(task_id), store.get(task_id)['developer'], store,
+                            expected_agent=agent)
+                self.assertEqual(store.get(task_id)['developer']['state'],
+                                 'DEVELOPER_DISPATCHING')
+
+    def test_conflict_does_not_overwrite_newer_record_for_both_routes(self):
+        for profile, agent in self.routes:
+            with self.subTest(profile=profile):
+                store, task_id = self._store(profile)
+                original = store.compare_and_update
+                newer = dict(store.get(task_id)['developer'], error_code='NEWER')
+                raced = False
+                def compare(_task_id, *, expected, **changes):
+                    nonlocal raced
+                    if not raced:
+                        raced = True
+                        original(task_id, expected={'developer': store.get(task_id)['developer']},
+                                 developer=newer)
+                    return original(_task_id, expected=expected, **changes)
+                snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+                registration = type('Registration', (), {
+                    'task_id': 'executor-one', 'trusted_agent_id': agent})()
+                with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                                  return_value=snapshot), \
+                     patch.object(submission_cli.task_completion, 'bind_executor_task',
+                                  return_value=(registration, snapshot)), \
+                     patch.object(submission_cli.os, 'kill', side_effect=ProcessLookupError()), \
+                     patch.object(store, 'compare_and_update', side_effect=compare):
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'DIRECT_CHILD_LIVENESS_UNKNOWN'):
+                        submission_cli._recover_direct_child_dispatch(
+                            Namespace(task_id=task_id, executor_task='executor-one'),
+                            store.get(task_id), store.get(task_id)['developer'], store,
+                            expected_agent=agent)
+                self.assertEqual(store.get(task_id)['developer'], newer)
+
+
 class DispatcherGitTimeoutTests(unittest.TestCase):
     def test_dispatcher_git_preflight_timeout_is_a_preflight_failure(self):
         def timeout(*args, **kwargs):

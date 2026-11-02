@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import secrets
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -2129,6 +2130,12 @@ def _opencode_developer_profile():
 def run_task_opencode_delegate(args, *, store):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     task = store.get(args.task_id)
+    previous_developer = task.get('developer')
+    if (type(previous_developer) is dict and
+            previous_developer.get('provider_profile') == 'opencode' and
+            previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
+        _recover_direct_child_dispatch(
+            args, task, previous_developer, store, expected_agent='opencode-developer')
     if (task['state'] != 'PM_RESPONDED' or not task['response'] or
             task['schema_version'] != 2):
         raise LLMToolError('task has no successful PM response')
@@ -2241,7 +2248,9 @@ def run_task_opencode_delegate(args, *, store):
             root=registration.root, read_paths=read_paths,
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
-            prelaunch_validate=validate_prelaunch_d6_binding, model=model)
+            prelaunch_validate=validate_prelaunch_d6_binding, model=model,
+            launch_callback=lambda pid, started_at, pgid: _record_direct_child_launch(
+                store, task['task_id'], developer, pid, started_at, pgid))
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
@@ -2492,6 +2501,12 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     if getattr(args, 'context_stdin', False):
         raise LLMToolError('AGY direct reads only its registered D6 task scope')
     task = store.get(args.task_id)
+    previous_developer = task.get('developer')
+    if (type(previous_developer) is dict and
+            previous_developer.get('provider_profile') == 'agy' and
+            previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
+        _recover_direct_child_dispatch(
+            args, task, previous_developer, store, expected_agent='agy-developer')
     if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
             task.get('schema_version') != 2):
         raise LLMToolError('task has no successful PM response')
@@ -2640,7 +2655,8 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': 600,
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
-           snapshot=capture_snapshot)
+           snapshot=capture_snapshot,
+           runner=_agy_liveness_runner(store, task['task_id'], developer, executable))
         after_registration = task_completion.read_d6_registration(
             registration.task_id, registration.common_dir)
         after = task_completion.collect_git_snapshot(registration.root)
@@ -2699,6 +2715,125 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
     _print(_task_view(saved))
     return 1
+
+
+def _record_direct_child_launch(store, task_id, developer, pid, start_time, pgid):
+    """Persist the child identity while the one-shot dispatch claim is current."""
+    observed = dict(developer)
+    observed['execution'] = {
+        'child_pid': pid, 'child_start_time': start_time, 'child_pgid': pgid,
+    }
+    store.compare_and_update(task_id, expected={'developer': developer},
+                             developer=observed)
+    developer.clear()
+    developer.update(observed)
+
+
+def _direct_child_liveness(execution):
+    if (type(execution) is not dict or
+            not {'child_pid', 'child_start_time', 'child_pgid'}.issubset(execution)):
+        return 'UNKNOWN'
+    pid, start_time, pgid = (execution.get('child_pid'),
+                             execution.get('child_start_time'),
+                             execution.get('child_pgid'))
+    if (type(pid) is not int or pid <= 0 or type(pgid) is not int or pgid <= 0 or
+            type(start_time) is not str or not start_time):
+        return 'UNKNOWN'
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return 'DEAD'
+    except PermissionError:
+        pass
+    except OSError:
+        return 'UNKNOWN'
+    current_start = codex_direct_developer.process_start_time(pid)
+    if current_start is None:
+        return 'UNKNOWN'
+    if current_start != start_time:
+        return 'DEAD'
+    try:
+        if os.getpgid(pid) != pgid:
+            return 'DEAD'
+    except (ProcessLookupError, PermissionError, OSError):
+        return 'UNKNOWN'
+    return 'ALIVE'
+
+
+def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
+    try:
+        snapshot = task_completion.collect_git_snapshot(os.getcwd())
+        registration, _ = task_completion.bind_executor_task(
+            args.executor_task, expected_common_dir=snapshot.common_dir,
+            root=snapshot.root)
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    if (developer.get('executor_task_id') != registration.task_id or
+            registration.trusted_agent_id != expected_agent):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    liveness = _direct_child_liveness(developer.get('execution'))
+    if liveness == 'ALIVE':
+        raise LLMToolError('DIRECT_CHILD_STILL_RUNNING')
+    if liveness != 'DEAD':
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
+    outcome = dict(developer)
+    execution = dict(developer.get('execution') or {})
+    execution.update({
+        'status': 'UNKNOWN', 'native_session_id': None,
+        'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+        'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+        'source_bytes': None, 'source_file_count': None,
+        'source_manifest_sha256': None,
+    })
+    outcome.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                   error_code='DIRECT_CHILD_NOT_RUNNING', execution=execution)
+    try:
+        store.compare_and_update(args.task_id, expected={'developer': developer},
+                                 developer=outcome)
+    except Exception:
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
+    raise LLMToolError('DIRECT_CHILD_OUTCOME_UNKNOWN') from None
+
+
+def _agy_liveness_runner(store, task_id, developer, executable):
+    """Run the AGY child with a durable identity captured immediately after launch."""
+    def run(argv, cwd, env, timeout):
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
+            close_fds=True, start_new_session=True)
+        is_agy_invocation = (executable in argv and '--output-format' in argv and
+                             '--log-file' in argv and '-p' in argv)
+        try:
+            if is_agy_invocation:
+                _record_direct_child_launch(store, task_id, developer, process.pid,
+                    codex_direct_developer.process_start_time(process.pid),
+                    os.getpgid(process.pid))
+        except Exception:
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except OSError:
+                pass
+            process.communicate()
+            raise
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except OSError:
+                pass
+            try:
+                stdout, stderr = process.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(argv, timeout, output=stdout or exc.output,
+                                               stderr=stderr or exc.stderr) from None
+        return process.returncode, stdout, stderr
+    return run
 
 
 def _normalize_agy_usage(value):
