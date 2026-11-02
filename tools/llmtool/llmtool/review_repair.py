@@ -60,12 +60,20 @@ def _delegate_repair(*, task, developer, packet, executor_task, delegate=None,
     if (type(acceptance) is not list or type(read_paths) is not list or
             type(write_paths) is not list):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+    try:
+        original_task = store.get(packet['task'])
+    except Exception:
+        _refuse('REPAIR_HEAD_MOVED')
+    if type(original_task) is not dict:
+        _refuse('REPAIR_HEAD_MOVED')
+    registration, _snapshot = _registered_d6(original_task, executor_task)
     args = Namespace(
         task_id=task['task_id'], provider=developer['provider_profile'],
         mode='direct' if developer['provider_profile'] in ('codex', 'agy') else 'proposal',
         owner_ref=developer.get('owner_assignment_ref'),
         selection_source='PM',
-        executor_task=executor_task, read_path=list(read_paths),
+        executor_task=executor_task, cwd=registration.root,
+        read_path=list(read_paths),
         write_path=list(write_paths), acceptance=list(acceptance),
         egress_basis=developer.get('egress_basis'), repair_packet=packet,
     )
@@ -132,9 +140,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
     return record
 
 
-def _current_d6_head(task, executor_task, current_head):
-    if current_head is not None:
-        return current_head(task, executor_task)
+def _registered_d6(task, executor_task):
     completion = task.get('completion')
     evidence = completion.get('evidence') if type(completion) is dict else None
     if (type(evidence) is not dict or evidence.get('common_dir') is None or
@@ -151,6 +157,13 @@ def _current_d6_head(task, executor_task, current_head):
             snapshot.common_dir != registration.common_dir or
             snapshot.branch != registration.branch):
         _refuse('REPAIR_HEAD_MOVED')
+    return registration, snapshot
+
+
+def _current_d6_head(task, executor_task, current_head):
+    if current_head is not None:
+        return current_head(task, executor_task)
+    registration, _snapshot = _registered_d6(task, executor_task)
     return registration.result_sha
 
 

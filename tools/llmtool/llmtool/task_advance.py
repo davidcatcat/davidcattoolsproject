@@ -713,9 +713,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
     elif step in ('REPAIR_REVIEW', 'REPAIR_RETRY'):
-        # decide() is the pre-check: RECORD_UNAVAILABLE must surface before cwd/runtime checks.
-        if type(d6) is not dict or type(cwd or os.getcwd()) != str or os.path.realpath(cwd or os.getcwd()) != os.path.realpath(d6['root']):
-            step, codes = 'NEEDS_CWD', ['NEEDS_CWD']
+        # The repair dispatcher binds the provider cwd to the registered D6 root.
+        # It also revalidates the registry and head before creating a repair claim.
+        if type(d6) is not dict or type(d6.get('root')) is not str:
+            step, codes = 'REFUSED', ['D6_BINDING_UNAVAILABLE']
         else:
             profile = (record.get('developer') or {}).get('provider_profile')
             if profile in ('codex', 'claude') and shutil.which(profile) is None:

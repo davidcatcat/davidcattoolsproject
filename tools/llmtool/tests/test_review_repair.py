@@ -90,16 +90,55 @@ class ReviewRepairTests(unittest.TestCase):
         developer = {'provider_profile': 'agy', 'owner_assignment_ref':
                      'https://github.com/example/repo/issues/1#issuecomment-2',
                      'read_paths': ['src'], 'write_paths': ['src/file.py']}
-        result = review_repair._delegate_repair(
-            task=task, developer=developer, packet={'verdict_comment_id': 9,
-                'failed_head': HEAD, 'version': 1, 'findings_count': 1,
-                'reviewer_text_excerpt_untrusted_data': 'Fix the reported issue.'},
-            executor_task=EXECUTOR, delegate=lambda args, store: captured.append(args) or 0,
-            store=object())
+        with patch.object(review_repair, '_registered_d6', return_value=(
+                type('Registration', (), {'root': '/registered/d6'})(), object())):
+            result = review_repair._delegate_repair(
+                task=task, developer=developer, packet={'verdict_comment_id': 9,
+                    'task': TASK,
+                    'failed_head': HEAD, 'version': 1, 'findings_count': 1,
+                    'reviewer_text_excerpt_untrusted_data': 'Fix the reported issue.'},
+                executor_task=EXECUTOR,
+                delegate=lambda args, store: captured.append(args) or 0,
+                store=type('S', (), {'get': lambda _self, _task_id: _record()})())
         self.assertEqual(result, 0)
         self.assertEqual(captured[0].provider, 'agy')
         self.assertEqual(captured[0].mode, 'direct')
         self.assertEqual(captured[0].owner_ref, developer['owner_assignment_ref'])
+        self.assertEqual(captured[0].cwd, '/registered/d6')
+
+    def test_repair_delegate_refuses_unregistered_or_moved_d6_before_provider(self):
+        original = _record()
+        repair_task = {'task_id': 'f' * 32,
+                       'pm_assignment': {'acceptance': ['Fix it.']}}
+        developer = {'provider_profile': 'agy', 'read_paths': ['src'],
+                     'write_paths': ['src/file.py'], 'acceptance': ['Fix it.']}
+        packet = {'task': TASK, 'failed_head': HEAD, 'version': 1,
+                  'verdict_comment_id': 9, 'findings_count': 1,
+                  'reviewer_text_excerpt_untrusted_data': 'Finding'}
+        provider_calls = []
+        store = type('S', (), {'get': lambda _self, _task_id: original})()
+        registration = type('Registration', (), {
+            'root': '/registered/d6', 'common_dir': '/canonical/.git',
+            'branch': 'feat/task', 'result_sha': HEAD})()
+        moved_snapshot = type('Snapshot', (), {
+            'head': 'f' * 40, 'root': '/registered/d6',
+            'common_dir': '/canonical/.git', 'branch': 'feat/task'})()
+        for reader, snapshot in ((RuntimeError('missing'), None),
+                                 (registration, moved_snapshot)):
+            with self.subTest(registration=reader), \
+                 patch.object(review_repair.task_completion,
+                              'read_d6_registration',
+                              side_effect=reader if isinstance(reader, Exception) else None,
+                              return_value=None if isinstance(reader, Exception) else reader), \
+                 patch.object(review_repair.task_completion,
+                              'collect_git_snapshot', return_value=snapshot):
+                with self.assertRaises(LLMToolError) as caught:
+                    review_repair._delegate_repair(
+                        task=repair_task, developer=developer, packet=packet,
+                        executor_task=EXECUTOR, store=store,
+                        delegate=lambda *args, **kwargs: provider_calls.append(args))
+                self.assertEqual(caught.exception.review_repair_code, 'REPAIR_HEAD_MOVED')
+        self.assertEqual(provider_calls, [])
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
