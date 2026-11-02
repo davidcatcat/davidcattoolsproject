@@ -25,7 +25,9 @@ An HTTP or transport error is represented in that probe's result and does not st
 
 ## Multi-turn tools probe
 
-`multiturn.py` runs six synthetic scenarios: native tool round-trip (S1), forced tool selection (S2), matching `tool_call_id` round-trip (S3), streamed tool calls (S4), thinking with tools (S5), and a text-tools redo of S1 (S6). S5 accepts reported reasoning content or, when the gateway omits that field, higher completion-token usage than the S1 baseline as evidence that thinking was enabled. It creates a small synthetic project in a mode-0700 temporary directory and does not read repository source.
+`multiturn.py` runs six synthetic scenarios: native tool round-trip (S1), forced tool selection (S2), matching `tool_call_id` round-trip (S3), streamed tool calls (S4), thinking with tools (S5), and a text-tools reference redo of S1 (S6). Native tools are the chosen adapter; S6 is informational and retained only for comparison. S5 always enables thinking and accepts reported reasoning content or, when the gateway omits that field, higher completion-token usage than the S1 baseline as evidence that thinking was enabled. It creates a small synthetic project in a mode-0700 temporary directory and does not read repository source.
+
+`--max-output-tokens N` sets the per-request output limit from 1 through 65536 tokens (default 4096), including follow-up requests. `--thinking default|off|on` controls thinking for S1-S4 and S6; `default` omits the setting. S5 always enables thinking. Both settings are recorded in the result `caps`.
 
 Loopback fake-server runs need no live authorization:
 
