@@ -450,16 +450,44 @@ def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
         refuse('PM_SESSION_ADOPTION_KEY_INVALID')
     if old_session_key == new_session_key:
         refuse('PM_SESSION_ADOPTION_KEYS_EQUAL')
-    if claude_session_present(old_native_id, cwd, environ):
-        refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
-
     at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     moved, skipped = [], []
+    candidates = []
     for task_id in store.task_ids():
         record = store.get(task_id)
         if (record.get('pm_session_id') != old_session_key or
                 record.get('abandonment') is not None):
             continue
+        provenance = record.get('pm_provenance')
+        if (type(provenance) is not dict or
+                not {'pm_runtime', 'pm_native_session_id', 'pm_cwd',
+                     'native_session_id_status'}.issubset(provenance) or
+                provenance.get('native_session_id_status') !=
+                'LOCAL_SESSION_FILE_OBSERVED' or
+                provenance.get('pm_native_session_id') != old_native_id):
+            refuse('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+        runtime = provenance['pm_runtime']
+        recorded_cwd = provenance['pm_cwd']
+        if type(cwd) is not str or os.path.normpath(os.path.abspath(cwd)) != recorded_cwd:
+            refuse('PM_SESSION_ADOPTION_CWD_MISMATCH')
+        if runtime == 'claude-code':
+            if claude_session_present(old_native_id, recorded_cwd, environ):
+                refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
+            observe_claude_session(new_session_key[3:], recorded_cwd, environ)
+        elif runtime == 'codex':
+            try:
+                observe_codex_session(old_native_id, recorded_cwd, environ)
+            except LLMToolError as exc:
+                if str(exc) != 'Codex PM session was not found uniquely for this directory':
+                    raise
+            else:
+                refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
+            observe_codex_session(new_session_key[3:], recorded_cwd, environ)
+        else:
+            refuse('PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+        candidates.append((task_id, record))
+
+    for task_id, record in candidates:
         try:
             store.adopt_pm_session(
                 task_id, old_session_key=old_session_key,

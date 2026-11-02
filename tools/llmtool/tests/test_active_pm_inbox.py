@@ -80,12 +80,12 @@ class ActivePMInboxTests(unittest.TestCase):
         path.write_text(json.dumps(metadata) + '\n')
         return native, path
 
-    def _record_pm(self, session=None, store=None, cwd=None):
+    def _record_pm(self, session=None, store=None, cwd=None, runtime=None):
         out = StringIO()
         with redirect_stdout(out):
             run_task_record_pm(Namespace(stdin_json=True,
                 pm_session_id=self.session if session is None else session,
-                pm_runtime=None, pm_cwd=str(cwd or self.pm_cwd)),
+                pm_runtime=runtime, pm_cwd=str(cwd or self.pm_cwd)),
                 store=store or self.store,
                 input_stream=StringIO(json.dumps({'request': 'Add a bounded test.',
                                                   'response': _RESPONSE})))
@@ -145,7 +145,8 @@ class ActivePMInboxTests(unittest.TestCase):
                          {first['task_id'], second['task_id']})
         old_path = active_pm_inbox.claude_session_file(self.session, str(self.pm_cwd))
         old_path.unlink()
-        new_key = 'pm-' + str(uuid.uuid4())
+        new_native = self._claude_session()
+        new_key = 'pm-' + new_native
         result = active_pm_inbox.adopt_pm_session(
             self.store, 'pm-' + self.session, new_key,
             old_native_id=self.session, cwd=str(self.pm_cwd))
@@ -157,6 +158,9 @@ class ActivePMInboxTests(unittest.TestCase):
                          {event['event_id'] for event in before['events']})
         self.assertEqual(active_pm_inbox.read_inbox(
             self.store, 'pm-' + self.session)['events'], [])
+        for task_id in result['moved']:
+            self.assertEqual(self.store.get(task_id)['pm_provenance'][
+                'native_session_id_status'], 'LOCAL_SESSION_FILE_OBSERVED')
         self.assertEqual(self.store.get(third['task_id'])['pm_session_id'],
                          'pm-' + third_native)
         self.assertEqual(self.store.get(closed['task_id'])['pm_session_id'],
@@ -195,6 +199,47 @@ class ActivePMInboxTests(unittest.TestCase):
                     cwd=str(self.pm_cwd))
             self.assertEqual(caught.exception.task_store_error_code, code)
             self.assertEqual(self.store.get(task['task_id']), before)
+
+        for caller_cwd in (str(self.base), str(self.pm_cwd) + '/'):
+            with self.subTest(cwd=caller_cwd), self.assertRaises(LLMToolError) as caught:
+                active_pm_inbox.adopt_pm_session(
+                    self.store, 'pm-' + self.session, 'pm-' + str(uuid.uuid4()),
+                    old_native_id=self.session, cwd=caller_cwd)
+            expected = ('PM_SESSION_ADOPTION_CWD_MISMATCH' if caller_cwd == str(self.base)
+                        else 'PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
+            self.assertEqual(caught.exception.task_store_error_code, expected)
+            self.assertEqual(self.store.get(task['task_id']), before)
+
+    def test_codex_adoption_uses_recorded_runtime_and_observes_new_session(self):
+        old_native, old_path = self._codex_session()
+        task = self._record_pm(session=old_native, runtime='codex')
+        new_native, _ = self._codex_session()
+        old_path.unlink()
+        result = active_pm_inbox.adopt_pm_session(
+            self.store, 'pm-' + old_native, 'pm-' + new_native,
+            old_native_id=old_native, cwd=str(self.pm_cwd))
+        self.assertEqual(result, {'moved': [task['task_id']], 'skipped': []})
+        moved = self.store.get(task['task_id'])
+        self.assertEqual(moved['pm_session_id'], 'pm-' + new_native)
+        self.assertEqual(moved['pm_provenance']['pm_runtime'], 'codex')
+        self.assertEqual(moved['pm_provenance']['pm_native_session_id'], new_native)
+
+    def test_adoption_refuses_task_without_session_provenance(self):
+        task = self._record_pm()
+        raw = self.store.get(task['task_id'])
+        raw.pop('pm_provenance')
+        raw['record_sha256'] = task_store_module._digest(raw)
+        self.store._write(raw, create=False)
+        before = self.store.get(task['task_id'])
+        old_path = active_pm_inbox.claude_session_file(self.session, str(self.pm_cwd))
+        old_path.unlink()
+        with self.assertRaises(LLMToolError) as caught:
+            active_pm_inbox.adopt_pm_session(
+                self.store, 'pm-' + self.session, 'pm-' + str(uuid.uuid4()),
+                old_native_id=self.session, cwd=str(self.pm_cwd))
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
+        self.assertEqual(self.store.get(task['task_id']), before)
 
     def test_adoption_skips_compare_and_swap_conflict_and_moves_other_tasks(self):
         conflicted = self._record_pm()

@@ -2711,6 +2711,9 @@ class TaskStore:
             _fail('COMPLETION_EVENT_MUTATION_FORBIDDEN')
         if 'abandonment' in changes and not trusted_abandonment:
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
+        if ({'pm_provenance', 'pm_session_adoptions'} & set(changes) and
+                not trusted_pm_session_adoption):
+            _fail('PM_SESSION_ADOPTION_INVALID')
         if trusted_abandonment and (set(changes) != {'abandonment'} or
                 not _safe_identifier(abandonment_pm_session_id, SESSION_ID)):
             _fail('TASK_ABANDONMENT_MUTATION_FORBIDDEN')
@@ -2785,6 +2788,8 @@ class TaskStore:
                         type(item) is not dict or
                         item.get('pm_session_id') != abandonment_pm_session_id):
                     _fail('TASK_PM_SESSION_DENIED')
+            if trusted_pm_session_adoption and current.get('abandonment') is not None:
+                _fail('PM_SESSION_ADOPTION_ABANDONED')
             if 'review_dispatch_claim' in changes:
                 old_claim = current.get('review_dispatch_claim')
                 new_claim = changes['review_dispatch_claim']
