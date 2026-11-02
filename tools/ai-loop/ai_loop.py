@@ -3604,6 +3604,15 @@ def main():
         parser.error('--qa-security-fail is standalone frozen-risk triage')
     if args.install_launcher and (args.check or args.test_mode or args.resume):
         parser.error('--install-launcher cannot be combined with task/check/test options')
+    disabled_routes = {
+        'qa_low_review_diagnose': '--qa-low-review-diagnose',
+        'qa_low': '--qa-low',
+        'maintenance_issue52': '--maintenance-issue52',
+        'install_launcher': '--install-launcher',
+    }
+    for attribute, option in disabled_routes.items():
+        if getattr(args, attribute):
+            parser.error(option + ' is historical data and disabled in standalone ai-loop')
     root = Path(args.repo).expanduser().resolve()
     global REPO, LOCAL_TASK_DIR
     REPO = root

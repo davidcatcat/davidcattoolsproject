@@ -23,4 +23,9 @@ esac
 test "$(git -C "$repo" branch --show-current)" = main || { echo 'STOP: launcher requires the main branch' >&2; exit 1; }
 test -z "$(git -C "$repo" status --porcelain --untracked-files=all)" || { echo 'STOP: working tree is not clean' >&2; exit 1; }
 command -v python3 >/dev/null || { echo 'STOP: python3 is required' >&2; exit 1; }
-exec python3 -B "$(dirname "$0")/ai_loop.py" --repo "$repo" --task-dir "$task_dir"
+script_dir=$(cd "$(dirname "$0")" 2>/dev/null && pwd -P) || { echo 'STOP: launcher source path is unavailable' >&2; exit 1; }
+case "$script_dir/" in
+  "$repo/"*) ;;
+  *) echo 'STOP: ai_loop.py must be under the checked repository' >&2; exit 1 ;;
+esac
+exec python3 -B "$script_dir/ai_loop.py" --repo "$repo" --task-dir "$task_dir"

@@ -37,6 +37,29 @@ class StandaloneSafetyTests(unittest.TestCase):
         self.assertIn("--repo", source)
         self.assertIn("--task-dir", source)
 
+    def test_launcher_executes_helper_from_checked_repository(self):
+        source = LAUNCHER.read_text(encoding="utf-8")
+        self.assertIn("ai_loop.py must be under the checked repository", source)
+        self.assertIn('python3 -B "$script_dir/ai_loop.py"', source)
+
+    def test_frozen_bootstrap_routes_are_disabled_before_execution(self):
+        for arguments in (("--qa-low", "fixture"),
+                          ("--qa-low-review-diagnose", "fixture"),
+                          ("--maintenance-issue52",),
+                          ("--install-launcher",)):
+            with self.subTest(arguments=arguments), \
+                 patch.object(ai_loop.sys, "argv", ["ai_loop.py", *arguments]), \
+                 patch.object(ai_loop, "git") as git:
+                with self.assertRaises(SystemExit) as stopped:
+                    ai_loop.main()
+                self.assertEqual(stopped.exception.code, 2)
+                git.assert_not_called()
+
+    def test_readme_describes_historical_feature_branch_publication(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        self.assertIn("push a feature branch", readme)
+        self.assertIn("gh pr create", readme)
+
     def test_launcher_refuses_non_checkout(self):
         with tempfile.TemporaryDirectory() as directory:
             task = Path(directory) / "task"

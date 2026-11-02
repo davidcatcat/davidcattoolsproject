@@ -13,6 +13,10 @@ Direct publication to `automation/ai-loop` and diagnostics refs is disabled.
 Frozen QA and maintenance material in this directory is historical evidence,
 not an active dispatch or publication contract.
 
+The historical implementation flow can push a feature branch and run
+`gh pr create`; those actions are not part of this standalone helper contract.
+Do not treat this transitional tool as an approved publication route.
+
 Run its local tests with:
 
 ```sh
