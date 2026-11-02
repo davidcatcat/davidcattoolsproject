@@ -231,6 +231,28 @@ class TaskAdvanceTests(unittest.TestCase):
         record['remote_test_outcomes'] = []
         self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'RUN_REMOTE_TEST')
 
+    def test_remote_test_gate_does_not_override_existing_review_states(self):
+        record = base_record(remote_test_outcomes=[])
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'CLAIMED'}
+        record['review_dispatch_claim'] = [claim]
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                         'REVIEW_OUTCOME_UNKNOWN')
+
+        claim['state'] = 'DISPATCHED'
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                         'RECORD_REVIEW_RESULT')
+
+        related = {'events': [{'source': 'REVIEWER', 'source_sha': HEAD,
+                               'version': 1, 'outcome': 'REVIEW_FAIL'}]}
+        self.assertEqual(task_advance.decide(record, d6(), PR, related), 'REPAIR_REVIEW')
+
+        related['events'][0]['outcome'] = 'REVIEW_PASS'
+        record['completion'] = {'executor_task_id': 'executor-1',
+            'state': 'PM_EVIDENCE_READY', 'evidence': {
+                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}}
+        self.assertEqual(task_advance.decide(record, d6(), PR, related),
+                         'READY_FOR_INTEGRATION')
+
     def test_remote_test_fail_uses_repair_path_with_excerpt(self):
         record = base_record(remote_test_receipts=[remote_receipt(
             base_record(), result='FAIL', excerpt='FAIL: test_example\nAssertionError')])

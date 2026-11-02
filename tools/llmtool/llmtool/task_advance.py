@@ -305,30 +305,29 @@ def decide(record, d6, pr, related):
     if type(pr_head) is not dict or pr_head.get('sha') != result_head:
         return 'PUBLISH'
 
-    remote_status, _ = _remote_test_status(record, d6)
-    if remote_status == 'FAIL':
-        repairs = related.get('repair_claims', []) if type(related) is dict else []
-        current_repair = next((item for item in reversed(repairs)
-                               if type(item) is dict and item.get('head_sha') == result_head), None)
-        if current_repair is not None and current_repair.get('state') == 'DISPATCHED':
-            state = current_repair.get('repair_state')
-            if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
-                return 'REPAIR_RETRY'
-            if state in ('RUNNING', 'PENDING'):
-                return 'WAITING_REPAIR'
-            if state == 'UNKNOWN':
-                return 'REPAIR_OUTCOME_UNKNOWN'
-            if state == 'RECORD_UNAVAILABLE':
-                return 'DEVELOPER_ATTENTION'
-            if state == 'RESPONDED':
-                return 'REPAIR_RESULT_NOT_PUBLISHED'
-        return 'REPAIR_REVIEW'
-    if remote_status not in ('PASS', 'ADMISSION_DENIED'):
-        return 'RUN_REMOTE_TEST'
-
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
     if not matching:
+        remote_status, _ = _remote_test_status(record, d6)
+        if remote_status == 'FAIL':
+            repairs = related.get('repair_claims', []) if type(related) is dict else []
+            current_repair = next((item for item in reversed(repairs)
+                                   if type(item) is dict and item.get('head_sha') == result_head), None)
+            if current_repair is not None and current_repair.get('state') == 'DISPATCHED':
+                state = current_repair.get('repair_state')
+                if state in ('UNAVAILABLE', 'BLOCKED', 'OUTPUT_REJECTED'):
+                    return 'REPAIR_RETRY'
+                if state in ('RUNNING', 'PENDING'):
+                    return 'WAITING_REPAIR'
+                if state == 'UNKNOWN':
+                    return 'REPAIR_OUTCOME_UNKNOWN'
+                if state == 'RECORD_UNAVAILABLE':
+                    return 'DEVELOPER_ATTENTION'
+                if state == 'RESPONDED':
+                    return 'REPAIR_RESULT_NOT_PUBLISHED'
+            return 'REPAIR_REVIEW'
+        if remote_status not in ('PASS', 'ADMISSION_DENIED'):
+            return 'RUN_REMOTE_TEST'
         return 'DISPATCH_REVIEW'
     claim = max(matching, key=lambda item: item.get('version', 0))
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
