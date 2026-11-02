@@ -591,7 +591,7 @@ class PMRuntimeTests(unittest.TestCase):
         fake.chmod(0o700)
         binding = pm_runtime.create_dedicated_pm(
             self.cwd, runtime='codex', account='codex-pm', state_root=self.root,
-            environ={'HOME': self.temp.name})
+            environ={'HOME': self.temp.name}, home=self.temp.name)
         runtime = self.runtime(state_root=self.root)
         runtime.pm_session_id = binding['native_session_id']
         with patch.dict(os.environ, {'PATH': str(bin_dir)}):
@@ -617,7 +617,9 @@ class PMRuntimeTests(unittest.TestCase):
         self.write_user_config('accounts:\n  codex-pm:\n    kind: codex\n    config_dir: ' +
                                str(codex_account) + '\n')
         second = pm_runtime.create_dedicated_pm(self.cwd, runtime='codex', account='codex-pm',
-                                                state_root=binding_root, clock=lambda: 1001)
+                                                state_root=binding_root, clock=lambda: 1001,
+                                                environ={'HOME': self.temp.name},
+                                                home=self.temp.name)
         self.assertEqual([item['native_session_id'] for item in pm_runtime.list_bindings(
             state_root=binding_root)], [second['native_session_id'], first['native_session_id']])
         selected = pm_runtime.select_binding(first['native_session_id'], state_root=binding_root)

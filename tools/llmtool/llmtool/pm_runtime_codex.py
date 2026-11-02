@@ -376,7 +376,7 @@ class CodexRuntime:
                 exit_code = process.wait(timeout=5)
             except Exception:
                 exit_code = process.poll()
-            if exit_code not in (0, None):
+            if exit_code not in (0, None) and error is None:
                 error = 'PM_PROCESS_EXITED'
             elif error is None:
                 error = 'PM_STREAM_INVALID'

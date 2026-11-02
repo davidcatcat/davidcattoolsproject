@@ -92,7 +92,7 @@ class CodexRuntimeTests(unittest.TestCase):
         if create:
             binding = pm_runtime.create_dedicated_pm(
                 str(self.cwd), runtime='codex', account='codex-pm', state_root=self.state,
-                environ=self.environ)
+                environ=self.environ, home=str(self.root))
             session = binding['native_session_id']
         runtime = pm_runtime.PMRuntime(session, cwd=str(self.cwd), state_root=self.state,
                                        environ=self.environ)
@@ -131,7 +131,7 @@ class CodexRuntimeTests(unittest.TestCase):
 
     def test_malformed_output_and_process_exit_return_runtime_error_then_turn_end(self):
         expected_codes = {
-            'malformed': ['PM_PROCESS_EXITED'],
+            'malformed': ['PM_STREAM_INVALID'],
             'exit': ['PM_PROCESS_EXITED'],
         }
         for mode, expected in expected_codes.items():
@@ -161,7 +161,7 @@ class CodexRuntimeTests(unittest.TestCase):
             self.make_runtime(create=False)
         binding = pm_runtime.create_dedicated_pm(str(self.cwd), runtime='codex',
                                                  account='codex-pm', state_root=self.state,
-                                                 environ=self.environ)
+                                                 environ=self.environ, home=str(self.root))
         binding = pm_runtime.current_binding(state_root=self.state)
         binding['session_started'] = True
         pm_runtime._write_json_atomic(self.state,
@@ -175,7 +175,7 @@ class CodexRuntimeTests(unittest.TestCase):
     def test_busy_binding_is_refused_before_cli(self):
         binding = pm_runtime.create_dedicated_pm(str(self.cwd), runtime='codex',
                                                  account='codex-pm', state_root=self.state,
-                                                 environ=self.environ)
+                                                 environ=self.environ, home=str(self.root))
         key = 'pm-' + binding['native_session_id']
         lock = pm_runtime._check_state_file(self.state / (key + '.lock'), create=True)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
