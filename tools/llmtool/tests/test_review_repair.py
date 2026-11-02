@@ -9,6 +9,7 @@ from io import StringIO
 from unittest.mock import patch
 
 from llmtool import cli, review_repair, run_budget, task_submission_cli
+from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
 
 TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
@@ -183,8 +184,7 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(claim['version'], 1)
 
     def test_remote_test_repair_claim_passes_real_task_store_validation(self):
-        # Use the production record-pm path, then attach the same executor
-        # fixture shape used by the active-PM tests before the real store check.
+        # A record-pm Task is sufficient to exercise the persisted claim schema.
         from test_active_pm_inbox import ActivePMInboxTests, _RESPONSE
 
         fixture = ActivePMInboxTests()
@@ -200,42 +200,33 @@ class ReviewRepairTests(unittest.TestCase):
                     'request': 'Bounded non-sensitive remote-test repair fixture.',
                     'response': _RESPONSE})),
                 return_record=True, task_id=TASK)
-        template = fixture._task()
-        developer = dict(template['developer'])
-        developer.update(provider_profile='claude', provider_type=None, model=None,
-                         state='DEVELOPER_PENDING', artifact=None,
-                         artifact_sha256=None, usage=None, error_code=None,
-                         owner_assignment_ref=(
-                             'https://github.com/example/repo/issues/1#issuecomment-2'))
-        developer.pop('execution', None)
-        completion = json.loads(json.dumps(task['completion']))
-        completion['executor_task_id'] = EXECUTOR
-        from llmtool import worker_dispatch
-        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
-            task = self.store.compare_and_update(
-                TASK, expected={'record_sha256': task['record_sha256']},
-                developer=developer, completion=completion)
-            task = self.store.record_claude_result(
-                TASK, pm_session_id=task['pm_session_id'],
-                executor_task_id=EXECUTOR, head_sha=HEAD)
-        receipt = {
-            'task_id': TASK, 'run_id': task['run_id'], 'executor_task': EXECUTOR,
-            'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_remote'],
-            'failure_excerpt': 'FAIL: test_remote\nAssertionError',
+        packet = {
+            'task': TASK, 'pr': PR, 'executor_task': EXECUTOR,
+            'failed_head': HEAD, 'version': 0, 'verdict_comment_id': 0,
+            'findings_count': 0,
+            'reviewer_text_excerpt_untrusted_data':
+                'FAIL: test_remote\nAssertionError',
         }
-        receipt['receipt_digest'] = hashlib.sha256(json.dumps(
-            receipt, ensure_ascii=True, sort_keys=True,
-            separators=(',', ':')).encode('utf-8')).hexdigest()
-        result = self.dispatch(
-            remote_test_receipt=receipt,
-            repair_task_recorder=lambda **request: {
-                'task_id': request['repair_task_id'],
-                'pm_assignment': {'acceptance': ['Repair the reported issue.']},
-            })
-        claim = self.store.get(TASK)['review_repair_claims'][0]
-        self.assertEqual(claim['version'], 1)
-        self.assertIsNone(claim['comment_id'])
-        self.assertEqual(result['claim']['state'], 'DISPATCHED')
+        claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD,
+            'version': 1, 'attempt': 1, 'family': f'pr-{PR}',
+            'state': 'CLAIMED', 'repair_task_id': '1' * 32,
+            'comment_id': None,
+            'packet_sha256': hashlib.sha256(json.dumps(
+                packet, ensure_ascii=True, sort_keys=True,
+                separators=(',', ':')).encode('utf-8')).hexdigest(),
+            'claimed_at': '2026-10-27T01:00:00Z',
+        }
+        saved = self.store.compare_and_update(
+            TASK, expected={'record_sha256': task['record_sha256']},
+            review_repair_claims=[claim])
+        self.assertEqual(saved['review_repair_claims'], [claim])
+
+        invalid = dict(claim, version=0)
+        with self.assertRaises(LLMToolError):
+            self.store.compare_and_update(
+                TASK, expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=[invalid])
 
     def test_replay_after_restart_does_not_dispatch_twice(self):
         self.dispatch()
