@@ -25,6 +25,9 @@ def base_record(**changes):
                       'evidence': {'result': {'result_head': HEAD}}},
         'review_dispatch_claim': [], 'review_repair_claims': [],
         'completion_events': [],
+        'remote_test_outcomes': [{'result': 'ADMISSION_DENIED',
+            'code': 'MODULE_NOT_ADMITTED', 'executor_task': 'executor-1',
+            'sha': HEAD, 'modules': []}],
     }
     record.update(changes)
     return record
@@ -34,6 +37,21 @@ def d6(clean=True, recorded=HEAD):
     return {'root': '/repo/task', 'result_head': HEAD,
             'recorded_result_head': recorded, 'registered_result_head': recorded,
             'dirty': not clean}
+
+
+def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
+                   executor_task='executor-1'):
+    receipt = {
+        'task_id': record['task_id'], 'run_id': record['run_id'],
+        'executor_task': executor_task, 'source_sha': source_sha,
+        'result': result, 'modules': ['test_task_advance'],
+    }
+    if excerpt is not None:
+        receipt['failure_excerpt'] = excerpt
+    receipt['receipt_digest'] = hashlib.sha256(json.dumps(
+        receipt, ensure_ascii=True, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
+    return receipt
 
 
 class TaskAdvanceTests(unittest.TestCase):
@@ -174,7 +192,120 @@ class TaskAdvanceTests(unittest.TestCase):
             {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
              'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
             {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                         'outcome': 'REVIEW_FAIL'}], 'repair_claims': []}), 'RUN_REMOTE_TEST')
+        repaired_record = base_record(
+            review_dispatch_claim=[claim],
+            remote_test_receipts=[remote_receipt(
+                base_record(), source_sha=new_head)])
+        self.assertEqual(task_advance.decide(repaired_record,
+            {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
+             'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
+            {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
                          'outcome': 'REVIEW_FAIL'}], 'repair_claims': []}), 'DISPATCH_REVIEW')
+
+    def test_advance_requires_exact_head_remote_test_then_dispatches_idempotently(self):
+        class Store:
+            def __init__(self):
+                self.record = base_record()
+            def get(self, _task_id):
+                return self.record
+
+        store = Store()
+        store.record['remote_test_outcomes'] = []
+        calls = []
+        def remote_test(args, *, store):
+            calls.append((args.sha, args.executor_task, args.ref))
+            store.record.setdefault('remote_test_receipts', []).append(
+                remote_receipt(store.record))
+            return 0
+        dispatched = []
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+             patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            first = task_advance.advance(task_id=store.record['task_id'], store=store,
+                pr_number=17, dispatch_review_call=lambda **kwargs: dispatched.append(kwargs))
+            second = task_advance.advance(task_id=store.record['task_id'], store=store,
+                pr_number=17, dispatch_review_call=lambda **kwargs: dispatched.append(kwargs))
+        self.assertEqual(first['step'], 'RUN_REMOTE_TEST')
+        self.assertEqual(first['result'], {'task_id': store.record['task_id'],
+            'executor_task': 'executor-1', 'head': HEAD})
+        self.assertEqual(second['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls, [(HEAD, 'executor-1', 'refs/pull/17/head')])
+        self.assertEqual(len(dispatched), 1)
+
+    def test_old_head_remote_test_receipt_does_not_satisfy_gate(self):
+        record = base_record(remote_test_receipts=[remote_receipt(
+            base_record(), source_sha='b' * 40)])
+        record['remote_test_outcomes'] = []
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'RUN_REMOTE_TEST')
+
+    def test_remote_test_gate_does_not_override_existing_review_states(self):
+        record = base_record(remote_test_outcomes=[])
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'CLAIMED'}
+        record['review_dispatch_claim'] = [claim]
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                         'REVIEW_OUTCOME_UNKNOWN')
+
+        claim['state'] = 'DISPATCHED'
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                         'RECORD_REVIEW_RESULT')
+
+        related = {'events': [{'source': 'REVIEWER', 'source_sha': HEAD,
+                               'version': 1, 'outcome': 'REVIEW_FAIL'}]}
+        self.assertEqual(task_advance.decide(record, d6(), PR, related), 'REPAIR_REVIEW')
+
+        related['events'][0]['outcome'] = 'REVIEW_PASS'
+        record['completion'] = {'executor_task_id': 'executor-1',
+            'state': 'PM_EVIDENCE_READY', 'evidence': {
+                'result': {'result_head': HEAD}, 'review_pr_ci': {'stage': 'READY'}}}
+        self.assertEqual(task_advance.decide(record, d6(), PR, related),
+                         'READY_FOR_INTEGRATION')
+
+    def test_remote_test_fail_uses_repair_path_with_excerpt(self):
+        record = base_record(remote_test_receipts=[remote_receipt(
+            base_record(), result='FAIL', excerpt='FAIL: test_example\nAssertionError')])
+        store = type('S', (), {'get': lambda self, _id: record})()
+        seen = {}
+        def repair(**kwargs):
+            seen.update(kwargs)
+            return {'state': 'DISPATCHED'}
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_pr_snapshot', return_value=PR):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, cwd='/repo/task', repair_review_call=repair)
+        self.assertEqual(result['step'], 'REPAIR_REVIEW')
+        self.assertEqual(seen['remote_test_receipt']['failure_excerpt'],
+                         'FAIL: test_example\nAssertionError')
+
+    def test_timeout_and_sha_mismatch_receipts_require_attention(self):
+        for outcome, code in (('TIMEOUT', 'REMOTE_TEST_TIMEOUT'),
+                              ('SHA_MISMATCH', 'REMOTE_TEST_SHA_MISMATCH')):
+            record = base_record(remote_test_outcomes=[])
+            if outcome == 'TIMEOUT':
+                record['remote_test_outcomes'] = [{
+                    'result': 'TIMEOUT', 'executor_task': 'executor-1',
+                    'sha': HEAD, 'modules': ['test_task_advance'],
+                }]
+            else:
+                record['remote_test_receipts'] = [remote_receipt(
+                    base_record(), result=outcome)]
+            self.assertEqual(task_advance.decide(record, d6(), PR, {}),
+                             'NEEDS_ATTENTION')
+            store = type('S', (), {'get': lambda self, _id: record})()
+            with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                 patch.object(task_advance, '_pr_snapshot', return_value=PR):
+                result = task_advance.advance(task_id=record['task_id'], store=store,
+                    pr_number=17)
+            self.assertEqual(result['step'], 'NEEDS_ATTENTION')
+            self.assertEqual(result['codes'], [code])
+
+    def test_no_admitted_modules_admission_denied_allows_review(self):
+        record = base_record(remote_test_outcomes=[{
+            'result': 'ADMISSION_DENIED', 'code': 'MODULE_NOT_ADMITTED',
+            'executor_task': 'executor-1', 'sha': HEAD, 'modules': [],
+        }])
+        self.assertEqual(task_advance.decide(record, d6(), PR, {}), 'DISPATCH_REVIEW')
 
     def test_completed_codex_pass_with_recorded_event_reaches_integration(self):
         record, claim = self._completed_codex_review('PASS')
