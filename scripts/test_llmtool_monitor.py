@@ -2805,6 +2805,73 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(got, {"title w": mon.WORKING, "等人操作，要你回": mon.ATTENTION,
                                "推測 Claude CLI 已關閉（title s）": mon.CLOSED})
 
+    def test_live_session_precedence_picks_the_most_urgent_cli(self):
+        # Several CLIs naming one session: the most urgent wins whatever the
+        # registry order, then the newest statusUpdatedAt, then the higher PID.
+        idle = {"sessionId": "s", "status": "idle", "statusUpdatedAt": 9}
+        waiting = {"sessionId": "s", "status": "waiting", "statusUpdatedAt": 1}
+        for registered in ({1: idle, 2: waiting}, {2: waiting, 1: idle}):
+            got = mon._live_by_session(registered)["s"]
+            self.assertEqual((got["status"], got["pid"], got["clis"]), ("waiting", 2, 2))
+        blocked = {"sessionId": "s", "status": "busy", "jobState": "blocked"}
+        busy = {"sessionId": "s", "status": "busy"}
+        self.assertEqual(mon._live_by_session({1: busy, 2: blocked})["s"]["pid"], 2)
+        self.assertEqual(mon._live_by_session({1: busy, 2: idle})["s"]["pid"], 1)
+        self.assertEqual(mon._live_by_session({1: idle, 2: {"sessionId": "s"}})["s"]["pid"], 1)
+        newer = dict(idle, statusUpdatedAt=20)
+        self.assertEqual(mon._live_by_session({1: newer, 2: idle})["s"]["pid"], 1)
+        self.assertEqual(mon._live_by_session({1: idle, 2: dict(idle)})["s"]["pid"], 2)
+        self.assertEqual(mon._live_by_session({1: idle})["s"]["clis"], 1)
+        self.assertEqual(mon._live_by_session(None), {})
+
+    def test_live_session_shared_by_several_clis_shows_the_most_urgent(self):
+        for sid in ("o1", "o2", "bk", "wk"):
+            self._write(self.claude / "proj" / f"{sid}.jsonl", [
+                {"type": "user", "cwd": self.canonical, "entrypoint": "cli",
+                 "message": {"content": "PROMPT-SECRET"}},
+                {"type": "ai-title", "aiTitle": f"title {sid}"}], age=600)
+        self._job("jb", "blocked")
+        procs = [
+            # idle + waiting, in both registry orders
+            self._registry(61, sessionId="o1", kind="bg", status="idle"),
+            self._registry(62, sessionId="o1", kind="bg", status="waiting"),
+            self._registry(63, sessionId="o2", kind="bg", status="waiting"),
+            self._registry(64, sessionId="o2", kind="bg", status="idle"),
+            # busy + blocked job
+            self._registry(65, sessionId="bk", kind="bg", status="busy"),
+            self._registry(66, sessionId="bk", kind="bg", status="busy", jobId="jb"),
+            # busy + idle
+            self._registry(67, sessionId="wk", kind="bg", status="idle"),
+            self._registry(68, sessionId="wk", kind="bg", status="busy"),
+            # a shared session outside this repository is still not listed
+            self._registry(69, sessionId="out", kind="bg", status="waiting",
+                           cwd=self.tmp.name + "/elsewhere"),
+            self._registry(70, sessionId="out", kind="bg", status="idle",
+                           cwd=self.tmp.name + "/elsewhere")]
+        rows = [row for row in self.rows(procs) if row.kind != "worker"]
+        got = sorted((row.state, row.detail) for row in rows)
+        self.assertEqual(got, sorted([
+            (mon.ATTENTION, "等人回覆，要你回（同一 session 有 2 個 CLI）"),
+            (mon.ATTENTION, "等人回覆，要你回（同一 session 有 2 個 CLI）"),
+            (mon.ATTENTION, "等人操作，要你回（同一 session 有 2 個 CLI）"),
+            (mon.WORKING, "title wk（同一 session 有 2 個 CLI）")]))
+        text = "\n".join(mon.office_lines(rows))
+        for secret in SECRETS:
+            self.assertNotIn(secret, text)
+
+    def test_claude_agents_blocked_beats_idle_clis_sharing_the_session(self):
+        procs = [self._registry(61, sessionId="aaaaaaaa-0001", kind="bg", status="idle",
+                                cwd=self.canonical),
+                 self._registry(62, sessionId="aaaaaaaa-0001", kind="bg", status="busy",
+                                cwd=self.canonical)]
+        listed = mon.parse_claude_agents(json.dumps(
+            [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "cwd": self.canonical}]))
+        rows = [row for row in mon.office_rows(
+            procs, self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+            canonical=self.canonical, agents=listed) if row.kind != "worker"]
+        self.assertEqual([(row.state, row.detail) for row in rows],
+                         [(mon.ATTENTION, "等人操作，要你回（同一 session 有 2 個 CLI）（還沒有對話紀錄）")])
+
     def test_running_cli_without_a_readable_entry_keeps_its_launcher_role(self):
         self._write(self.claude / "proj" / "r.jsonl", [
             {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},

@@ -3493,6 +3493,9 @@ def _claude_state(entry: dict, who: str, task: str, detail: str, age: float | No
         # is still with the model, not idle.
         state = WORKING if quiet <= OFFICE_STALL else STALLED
         detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + suffix
+    clis = entry.get("clis")
+    if type(clis) is int and clis > 1:
+        detail += f"（同一 session 有 {clis} 個 CLI）"
     return state, detail, age
 
 
@@ -5290,6 +5293,38 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
     return out
 
 
+def _live_rank(entry: dict) -> int:
+    """How urgent a live session's status words are: 0 waits for a person,
+    1 works, 2 sits idle, 3 anything else."""
+    status, job = entry.get("status"), entry.get("jobState")
+    if status == "waiting" or job == "blocked":
+        return 0
+    if status == "busy" or job == "working":
+        return 1
+    return 2 if status == "idle" else 3
+
+
+def _live_by_session(registered: dict | None) -> dict[str, dict]:
+    """{session id: entry} of running CLIs. When several CLIs name one session
+    the most urgent wins (waiting/blocked > busy/working > idle > other), then
+    the newest statusUpdatedAt, then the higher PID; `clis` counts them."""
+    groups: dict[str, list] = {}
+    for pid, entry in (registered or {}).items():
+        groups.setdefault(entry["sessionId"], []).append((pid, entry))
+
+    def order(item):
+        pid, entry = item
+        since = entry.get("statusUpdatedAt")
+        since = since if type(since) in (int, float) else float("-inf")
+        return (_live_rank(entry), -since, -pid)
+
+    out = {}
+    for sid, items in groups.items():
+        pid, entry = min(items, key=order)
+        out[sid] = dict(entry, pid=pid, clis=len(items))
+    return out
+
+
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root=None,
                 canonical: str | None = None,
@@ -5316,12 +5351,16 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             return "PM（Codex）"
         return "你" if not owner or owner.startswith("Claude Code daemon") else f"啟動它的 {family(owner)}"
 
-    live = {entry["sessionId"]: (entry, answerer(owners.get(pid, "")))
-            for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
+    live = {sid: (entry, answerer(owners.get(entry.get("pid"), "")))
+            for sid, entry in _live_by_session(_claude_registered(sessions, processes)).items()}
     for sid, listed in (agents or {}).items():
-        # What `claude agents` says beats the registry's own status word; a
-        # session it lists but no running CLI names waits for you.
+        # What `claude agents` says beats the registry's own status word unless
+        # the registry is more urgent; a session it lists but no running CLI
+        # names waits for you.
         entry, who = live.get(sid, ({}, "你"))
+        if entry and _live_rank(entry) < _live_rank(listed):
+            listed = {key: value for key, value in listed.items()
+                      if key not in ("status", "jobState")}
         merged = {**entry, **listed}
         if "cwd" in entry:
             merged["cwd"] = entry["cwd"]
