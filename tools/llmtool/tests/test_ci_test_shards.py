@@ -120,6 +120,7 @@ class CiTestShardsTests(unittest.TestCase):
                     )
                     subprocess.run(
                         ["bash", "-c", classify_script],
+                        cwd=TOOLS_ROOT.parent.parent,
                         env=env,
                         check=True,
                         capture_output=True,
