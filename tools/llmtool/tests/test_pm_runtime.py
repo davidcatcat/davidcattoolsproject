@@ -425,6 +425,17 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.claude_config_dir, account)
         self.assertEqual(argv[argv.index('--permission-prompts') + 1], 'none')
 
+    def test_pm_role_config_selects_account_for_child(self):
+        account = os.path.join(self.temp.name, 'pm-role-account')
+        runtime = self.runtime()
+        with patch.object(pm_runtime.role_config, 'resolve_role', return_value={
+                'config_dir': account, 'source': 'roles'}) as resolve:
+            runtime.open()
+        resolve.assert_called_once_with('pm', environ=runtime.environ,
+                                       home=self.temp.name)
+        self.assertEqual(self.calls[0][2]['CLAUDE_CONFIG_DIR'], account)
+        self.assertEqual(runtime.claude_config_dir, account)
+
     def test_unset_claude_account_keeps_inherited_environment(self):
         runtime = self.runtime()
         runtime.open()

@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import active_pm_inbox, config as llmtool_config
+from . import active_pm_inbox, role_config
 from .errors import LLMToolError
 from .test_output_excerpts import _emitted_sensitive
 
@@ -890,8 +890,10 @@ class PMRuntime:
         try:
             # Trusted user config only; the user config is under the same HOME
             # the transcript lookup uses.
-            config_dir = llmtool_config.pm_claude_config_dir(
-                None if self.environ is None else self.environ.get('HOME'))
+            resolved_role = role_config.resolve_role(
+                'pm', environ=self.environ,
+                home=None if self.environ is None else self.environ.get('HOME'))
+            config_dir = resolved_role['config_dir']
         except LLMToolError:
             raise _error('PM_CONFIG_INVALID',
                          'pm_runtime.claude_config_dir in the user config is invalid') from None

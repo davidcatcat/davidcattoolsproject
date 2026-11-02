@@ -12,7 +12,7 @@ import subprocess
 import sys
 
 from .errors import LLMToolError
-from . import task_completion, worker_dispatch
+from . import role_config, task_completion, worker_dispatch
 
 
 _CODEX_REVIEW_MODEL = 'gpt-6-luna'
@@ -387,9 +387,16 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     policy = _policy(task, reviewer_key)
     if not policy.allowed:
         _refuse(policy.reason_code)
-    config_dir = os.environ.get('CLAUDE_CONFIG_DIR')
-    account_mode = ('CODEX_CLI' if reviewer_key == 'codex-reviewer' else
-                    'EXPLICIT_CLAUDE_CONFIG_DIR' if config_dir else 'DEFAULT_SECOND_ACCOUNT')
+    reviewer_role = (role_config.resolve_role('reviewer')
+                     if reviewer_key == 'claude-reviewer' else None)
+    config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
+    if reviewer_key == 'codex-reviewer':
+        account_mode = 'CODEX_CLI'
+    else:
+        account_mode = {
+            'roles': 'ROLES', 'env': 'EXPLICIT', 'cli': 'EXPLICIT',
+            'pm_runtime': 'LEGACY', 'builtin': 'BUILTIN_DEFAULT',
+        }.get(reviewer_role['source'], 'BUILTIN_DEFAULT')
     reviewer_task = 'reviewer-' + os.urandom(10).hex()
     claim = {'executor_task': executor_task, 'pr': pr_number, 'head_sha': head,
              'version': version, 'state': 'CLAIMED', 'reviewer_task': reviewer_task,
@@ -433,7 +440,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         if not gate.allowed:
             _refuse(gate.reason_code)
         env = os.environ.copy()
-        if not config_dir:
+        if config_dir:
+            env['CLAUDE_CONFIG_DIR'] = config_dir
+        else:
             env.pop('CLAUDE_CONFIG_DIR', None)
         if reviewer_key == 'codex-reviewer':
             reviewer = task_completion.read_d6_registration(
