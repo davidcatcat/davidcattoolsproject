@@ -153,8 +153,8 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
             if key not in _ROLE_FIELDS:
                 continue
             _override_value(key, value)
-            settings[key] = value
             if key == "account":
+                settings[key] = value
                 if value not in accounts:
                     _fail("role override names an unknown account", "ROLE_CONFIG_OVERRIDE_INVALID")
                 settings["provider"] = accounts[value]["kind"]
@@ -166,5 +166,7 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
                         settings["provider"] != value):
                     _fail("role override conflicts with account directory", "ROLE_CONFIG_OVERRIDE_INVALID")
                 settings["provider"] = value
+            else:
+                settings[key] = value
     settings["source"] = source
     return settings
