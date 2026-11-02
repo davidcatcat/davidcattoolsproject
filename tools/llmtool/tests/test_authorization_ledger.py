@@ -799,30 +799,6 @@ class ProviderLedgerTests(unittest.TestCase):
         else:
             with self.assertRaises(l.LedgerError): self.consume(second,o2)
 
-    def test_layout2_cap_refusal_releases_object_key_for_reissue(self):
-        from test_review_authority import Harness
-        h=Harness(cap=1,provider_layout=2);self.addCleanup(h.close)
-        issue_number=0
-        def issue(tag):
-            nonlocal issue_number
-            issue_number += 1
-            call,_=h.binding()
-            call=replace(call,reviewed_object_digest=tag*64,deadline='2026-10-14T00:05:00Z',
-                         redeem_run_id=f'{issue_number:032x}',
-                         reviewer_launch_nonce=f'{issue_number + 16:032x}')
-            binding=p.ProviderReviewBinding(call)
-            observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
-            decision=p.decide_provider_review(binding,issuer=h.issuer,observed=observed)
-            receipt=h.ledger.issue_provider(decision,ttl_seconds=120)
-            return receipt,observed
-        first,o1=issue('1'); refused,o2=issue('2')
-        self.assertTrue(h.ledger.consume_provider(first,issuer=h.issuer,observed=o1))
-        self.assertFalse(h.ledger.consume_provider(refused,issuer=h.issuer,observed=o2))
-        self.assertEqual(h.ledger.status(refused.nonce),'DENIED')
-        # The zero-effect refusal no longer holds the unique live key.
-        retry,_=issue('2')
-        self.assertEqual(retry.binding.call.reviewed_object_digest,refused.binding.call.reviewed_object_digest)
-
     def test_day_is_consume_day_not_issue_or_finalize_day(self):
         self.h.fake.utc='2026-10-13T23:59:59Z'
         receipt,o=self.issue('1')
@@ -865,26 +841,6 @@ class ProviderLedgerTests(unittest.TestCase):
         receipt,o=self.issue()
         self.h.hostdata['route_policies'][0]['revoked']=True;self.h.write_host()
         self.assertFalse(self.consume(receipt,o));self.assertEqual(self.h.ledger.status(receipt.nonce),'DENIED')
-
-    def test_layout2_denied_consume_releases_object_key_for_retry(self):
-        from test_review_authority import Harness
-        h=Harness(cap=1,provider_layout=2);self.addCleanup(h.close)
-        call,_=h.binding();call=replace(call,deadline='2026-10-14T00:05:00Z')
-        binding=p.ProviderReviewBinding(call)
-        observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
-        decision=p.decide_provider_review(binding,issuer=h.issuer,observed=observed)
-        receipt=h.ledger.issue_provider(decision,ttl_seconds=120)
-        h.hostdata['route_policies'][0]['revoked']=True;h.write_host()
-        self.assertFalse(h.ledger.consume_provider(receipt,issuer=h.issuer,observed=observed))
-        self.assertEqual(h.ledger.status(receipt.nonce),'DENIED')
-        h.hostdata['route_policies'][0]['revoked']=False;h.write_host()
-        retry_call=replace(call,redeem_run_id='e'*32,reviewer_launch_nonce='d'*32)
-        retry_binding=p.ProviderReviewBinding(retry_call)
-        retry_observed=p.ProviderObservedState(retry_binding.digest,retry_call.source_sha,
-                                               retry_call.observation_digest,True)
-        retry_decision=p.decide_provider_review(retry_binding,issuer=h.issuer,observed=retry_observed)
-        retry=h.ledger.issue_provider(retry_decision,ttl_seconds=120)
-        self.assertEqual(retry.binding.call.reviewed_object_digest,receipt.binding.call.reviewed_object_digest)
 
     def test_wrong_binding_burns_without_consuming_or_charging(self):
         receipt,o=self.issue()
@@ -1033,6 +989,74 @@ class ProviderLayout2Tests(ProviderLedgerTests):
     def deny(self, receipt, observed):
         self.assertFalse(self.consume(receipt, replace(observed, attested=False)))
         self.assertEqual(self.h.ledger.status(receipt.nonce), 'DENIED')
+
+    def mechanics_issuer(self, harness):
+        from llmtool.review_authority import ProductionReviewIssuer
+        class SyntheticMechanicsIssuer(ProductionReviewIssuer):
+            def matches(inner, call, observed):
+                return observed.attested
+        return SyntheticMechanicsIssuer(harness.pin, harness.clock, harness.observer, harness.context)
+
+    def test_layout2_cap_refusal_releases_object_key_for_reissue(self):
+        from test_review_authority import Harness
+        h = Harness(cap=1, provider_layout=2)
+        self.addCleanup(h.close)
+        issuer = self.mechanics_issuer(h)
+        issue_number = 0
+
+        def issue(tag):
+            nonlocal issue_number
+            issue_number += 1
+            call, _ = h.binding()
+            call = replace(call, reviewed_object_digest=tag * 64,
+                           deadline='2026-10-14T00:05:00Z',
+                           redeem_run_id=f'{issue_number:032x}',
+                           reviewer_launch_nonce=f'{issue_number + 16:032x}')
+            binding = p.ProviderReviewBinding(call)
+            observed = p.ProviderObservedState(binding.digest, call.source_sha,
+                                               call.observation_digest, True)
+            decision = p.decide_provider_review(binding, issuer=issuer, observed=observed)
+            self.assertIs(decision.decision, p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+            return h.ledger.issue_provider(decision, ttl_seconds=120), observed
+
+        first, o1 = issue('1')
+        refused, o2 = issue('2')
+        self.assertTrue(h.ledger.consume_provider(first, issuer=issuer, observed=o1))
+        self.assertFalse(h.ledger.consume_provider(refused, issuer=issuer, observed=o2))
+        self.assertEqual(h.ledger.status(refused.nonce), 'DENIED')
+        retry, _ = issue('2')
+        self.assertEqual(retry.binding.call.reviewed_object_digest,
+                         refused.binding.call.reviewed_object_digest)
+
+    def test_layout2_denied_consume_releases_object_key_for_retry(self):
+        from test_review_authority import Harness
+        h = Harness(cap=1, provider_layout=2)
+        self.addCleanup(h.close)
+        issuer = self.mechanics_issuer(h)
+        call, _ = h.binding()
+        call = replace(call, deadline='2026-10-14T00:05:00Z')
+        binding = p.ProviderReviewBinding(call)
+        observed = p.ProviderObservedState(binding.digest, call.source_sha,
+                                           call.observation_digest, True)
+        decision = p.decide_provider_review(binding, issuer=issuer, observed=observed)
+        self.assertIs(decision.decision, p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        receipt = h.ledger.issue_provider(decision, ttl_seconds=120)
+        h.hostdata['route_policies'][0]['revoked'] = True
+        h.write_host()
+        self.assertFalse(h.ledger.consume_provider(receipt, issuer=issuer, observed=observed))
+        self.assertEqual(h.ledger.status(receipt.nonce), 'DENIED')
+        h.hostdata['route_policies'][0]['revoked'] = False
+        h.write_host()
+        retry_call = replace(call, redeem_run_id='e' * 32, reviewer_launch_nonce='d' * 32)
+        retry_binding = p.ProviderReviewBinding(retry_call)
+        retry_observed = p.ProviderObservedState(retry_binding.digest, retry_call.source_sha,
+                                                 retry_call.observation_digest, True)
+        retry_decision = p.decide_provider_review(retry_binding, issuer=issuer,
+                                                 observed=retry_observed)
+        self.assertIs(retry_decision.decision, p.Decision.ALLOW_WITH_TRUSTED_RECEIPT)
+        retry = h.ledger.issue_provider(retry_decision, ttl_seconds=120)
+        self.assertEqual(retry.binding.call.reviewed_object_digest,
+                         receipt.binding.call.reviewed_object_digest)
 
     def statuses(self, ledger=None):
         return [r[0] for r in (ledger or self.h.ledger)._db.execute(
