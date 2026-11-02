@@ -15,6 +15,8 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 LLMTOOL_ROOT = SCRIPT_DIR.parent
 DEFAULT_REPO_ROOT = LLMTOOL_ROOT.parents[1]
 sys.path.insert(0, str(LLMTOOL_ROOT))
+sys.path.insert(0, str(SCRIPT_DIR))
+from ci_path_classes import classify_path  # noqa: E402
 from llmtool.test_selection import (  # noqa: E402
     HIGH_RISK_FILES, HIGH_RISK_PREFIXES, IMPACT_TEST_MAP,
 )
@@ -225,16 +227,21 @@ def select_test_ids(
         if not path or "\0" in path:
             reject(path, "unsupported_path")
             continue
+        path_class = classify_path(path)
         if path in MONITOR_PATHS:
             continue
-        if path.startswith("tools/llmtool/") and path.endswith(".md"):
+        if (path_class == "docs" and path.startswith("tools/llmtool/")
+                and path.endswith(".md")):
             continue
-        if (path.startswith(".github/workflows/") or path == "tools/llmtool/ci/mac-modules.txt"
+        if path_class == "runtime" and path.endswith(".md"):
+            continue
+        if (path_class == "workflow" or path == "tools/llmtool/ci/mac-modules.txt"
                 or path in {"tools/llmtool/scripts/ci_mac_modules.py",
+                            "tools/llmtool/scripts/ci_path_classes.py",
                             "tools/llmtool/llmtool/test_selection.py"}
                 or "/ci/" in path or path == "tools/llmtool/Makefile"
                 or "requirements" in Path(path).name):
-            reason = "workflow_change" if path.startswith(".github/workflows/") else (
+            reason = "workflow_change" if path_class == "workflow" else (
                 "selector_change" if path in {
                     "tools/llmtool/scripts/ci_mac_modules.py",
                     "tools/llmtool/llmtool/test_selection.py",
@@ -245,6 +252,9 @@ def select_test_ids(
             reject(path, reason)
             continue
         if not path.startswith("tools/llmtool/"):
+            if (path_class == "docs" and (path in {"AGENTS.md", "CLAUDE.md"}
+                                           or path.startswith(("skills/", "docs/")))):
+                continue
             reject(path, "unsupported_path")
             continue
 

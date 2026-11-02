@@ -59,6 +59,7 @@ _active_review_dispatches = set()
 _active_review_dispatches_lock = threading.Lock()
 _active_review_pm_returns = set()
 _active_review_pm_returns_lock = threading.Lock()
+_background_launch_notifier = None
 _SYSTEM = (
     'You are the user-selected llmtool Integrator/PM AI. Respond directly to the '
     'submitted development request with a concise understanding, proposed next '
@@ -113,6 +114,116 @@ _REVIEW_RESULT_SYSTEM = (
 
 def _timestamp():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _background_send(fd, value):
+    raw = json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode('utf-8')
+    packet = len(raw).to_bytes(4, 'big') + raw
+    offset = 0
+    while offset < len(packet):
+        offset += os.write(fd, packet[offset:])
+
+
+def _background_read(fd):
+    header = bytearray()
+    while len(header) < 4:
+        chunk = os.read(fd, 4 - len(header))
+        if not chunk:
+            raise LLMToolError('background Developer exited before its launch receipt')
+        header.extend(chunk)
+    size = int.from_bytes(header, 'big')
+    if size > 1024 * 1024:
+        raise LLMToolError('background Developer startup result exceeded its limit')
+    raw = bytearray()
+    while len(raw) < size:
+        chunk = os.read(fd, size - len(raw))
+        if not chunk:
+            raise LLMToolError('background Developer startup result was incomplete')
+        raw.extend(chunk)
+    try:
+        value = json.loads(raw.decode('utf-8'))
+    except (UnicodeError, ValueError):
+        raise LLMToolError('background Developer startup result was invalid') from None
+    if type(value) is not dict:
+        raise LLMToolError('background Developer startup result was invalid')
+    return value
+
+
+def _run_background_delegate(args, *, provider, store, d6_binding):
+    """Run the existing direct delegate path in a detached, double-forked child."""
+    if not hasattr(os, 'fork') or not hasattr(os, 'setsid'):
+        raise LLMToolError('background Developer execution is unavailable on this platform')
+    read_fd, write_fd = os.pipe()
+    try:
+        launcher_pid = os.fork()
+    except OSError:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise LLMToolError('background Developer process could not be started') from None
+    if launcher_pid == 0:
+        os.close(read_fd)
+        try:
+            worker_pid = os.fork()
+        except OSError:
+            _background_send(write_fd, {'kind': 'error',
+                                        'message': 'background Developer process could not be started'})
+            os._exit(1)
+        if worker_pid:
+            os.close(write_fd)
+            os._exit(0)
+        try:
+            os.setsid()
+            null_fd = os.open(os.devnull, os.O_RDWR)
+            os.dup2(null_fd, 0)
+            os.dup2(null_fd, 1)
+            os.dup2(null_fd, 2)
+            if null_fd > 2:
+                os.close(null_fd)
+            output = io.StringIO()
+            global _background_launch_notifier
+            _background_launch_notifier = lambda pid: _background_send(
+                write_fd, {'kind': 'launched', 'pid': pid})
+            try:
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    result = (run_task_codex_delegate(
+                        args, store=store, d6_binding=d6_binding)
+                        if provider == 'codex' else
+                        run_task_opencode_delegate(
+                            args, store=store, d6_binding=d6_binding))
+                _background_send(write_fd, {'kind': 'finished', 'return_code': result,
+                                            'output': output.getvalue()})
+            except BaseException as exc:
+                _background_send(write_fd, {'kind': 'error', 'message': str(exc),
+                    'error_type': type(exc).__name__, 'output': output.getvalue()})
+            finally:
+                _background_launch_notifier = None
+        except BaseException:
+            try:
+                _background_send(write_fd, {'kind': 'error',
+                    'message': 'background Developer setup failed'})
+            except Exception:
+                pass
+        os.close(write_fd)
+        os._exit(0)
+    os.close(write_fd)
+    try:
+        os.waitpid(launcher_pid, 0)
+        result = _background_read(read_fd)
+    finally:
+        os.close(read_fd)
+    if result.get('kind') == 'launched':
+        pid = result.get('pid')
+        if type(pid) is not int or pid <= 0:
+            raise LLMToolError('background Developer launch receipt was invalid')
+        _print({'task_id': args.task_id, 'state': 'DEVELOPER_DISPATCHING',
+                'child_pid': pid})
+        return 0
+    output = result.get('output')
+    if type(output) is str and output:
+        sys.stdout.write(output)
+    if result.get('kind') == 'error':
+        raise LLMToolError(result.get('message') or 'background Developer setup failed')
+    return result.get('return_code', 1)
 
 
 def _screen_text(value, limit):
@@ -620,6 +731,8 @@ def add_task_submission_parsers(actions):
                           help='explicit Developer route')
     delegate.add_argument('--mode', choices=('proposal', 'direct'), default='proposal',
                           help='Codex: text proposal (default) or direct D6 development')
+    delegate.add_argument('--background', action='store_true',
+                          help='run a direct Codex or OpenCode Developer in a detached child')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -2174,7 +2287,7 @@ def _agy_developer_profile(route_config):
     return model, effort
 
 
-def run_task_opencode_delegate(args, *, store):
+def run_task_opencode_delegate(args, *, store, d6_binding=None):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -2197,7 +2310,8 @@ def run_task_opencode_delegate(args, *, store):
             raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
-    registration, snapshot = _delegate_d6_binding(args)
+    registration, snapshot = (d6_binding if d6_binding is not None else
+                              _delegate_d6_binding(args))
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -2293,10 +2407,21 @@ def run_task_opencode_delegate(args, *, store):
 
         def record_opencode_launch(pid, started_at, pgid):
             nonlocal expected_developer
+            if _background_launch_notifier is not None:
+                # Track the detached delegate through result persistence, not
+                # only the provider CLI whose exit precedes task completion.
+                pid = os.getpid()
+                started_at = codex_direct_developer.process_start_time(pid)
+                try:
+                    pgid = os.getpgid(pid)
+                except OSError:
+                    pgid = None
             saved = store.record_opencode_launch(
                 task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
                 start_time=started_at, pgid=pgid)
             expected_developer = copy.deepcopy(saved['developer'])
+            if _background_launch_notifier is not None:
+                _background_launch_notifier(pid)
             return saved
 
         result = opencode_direct_developer.run(
@@ -2966,7 +3091,7 @@ def _delegate_d6_binding(args):
     return registration, snapshot
 
 
-def run_task_codex_delegate(args, *, store):
+def run_task_codex_delegate(args, *, store, d6_binding=None):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -3021,7 +3146,8 @@ def run_task_codex_delegate(args, *, store):
         run_id=task.get('run_id'),
         contract_digest=task.get('task_binding', {}).get('contract_digest'))
     try:
-        registration, snapshot = _delegate_d6_binding(args)
+        registration, snapshot = (d6_binding if d6_binding is not None else
+                                  _delegate_d6_binding(args))
     except LLMToolError as exc:
         raise LLMToolError(
             'Codex direct D6 binding failed (' + codex_direct_developer.adapter_error_code(
@@ -3156,15 +3282,30 @@ def run_task_codex_delegate(args, *, store):
         except Exception:
             raise codex_direct_developer.DirectCodexError(
                 'CODEX_IGNORED_BASELINE_UNAVAILABLE') from None
+        def record_launch(pid, started_at, pgid):
+            # In background mode the provider CLI can exit before the detached
+            # delegate has persisted its result. Track the process that owns
+            # that full completion path instead, so a second delegate sees
+            # the writer as live for the whole operation. Read its start
+            # marker with the same platform-aware helper used by liveness.
+            if _background_launch_notifier is not None:
+                pid = os.getpid()
+                started_at = codex_direct_developer.process_start_time(pid)
+                try:
+                    pgid = os.getpgid(pid)
+                except OSError:
+                    pgid = None
+            store.record_codex_launch(task['task_id'],
+                assignment_id=developer['assignment_id'], pid=pid,
+                start_time=started_at, pgid=pgid)
+            if _background_launch_notifier is not None:
+                _background_launch_notifier(pid)
         result = codex_direct_developer.run(root=registration.root, prompt=prompt,
             model=provider['model'], reasoning_effort=reasoning_effort,
             codex_home=provider.get('config_dir'),
             dispatch_store=store, dispatch_task_id=task['task_id'],
             prelaunch_validate=validate_binding,
-            launch_callback=lambda pid, started_at, pgid: (
-                store.record_codex_launch(task['task_id'],
-                    assignment_id=developer['assignment_id'], pid=pid,
-                    start_time=started_at, pgid=pgid)),
+            launch_callback=record_launch,
             timeout=effective_timeout,
             dispatch_action=('TIMEOUT_CONTINUATION' if recovering_timeout else 'DISPATCH'))
     except worker_dispatch.WorkerDispatchDenied as exc:
@@ -3400,6 +3541,63 @@ def run_task_codex_delegate(args, *, store):
 
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
+    if getattr(args, 'background', False):
+        provider = getattr(args, 'provider', None)
+        if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
+            raise LLMToolError('--background requires --mode direct for the Codex Developer route')
+        if provider not in ('codex', 'opencode'):
+            raise LLMToolError('--background is supported only for direct Codex and OpenCode Developers')
+        _validate_acceptance_scope(getattr(args, 'acceptance', None))
+        worker_key = provider + '-developer'
+        dispatch_decision = worker_dispatch.evaluate(worker_key)
+        if not dispatch_decision.allowed:
+            raise LLMToolError(dispatch_decision.reason_code)
+        # Refuse a duplicate while the recorded detached writer is still live
+        # in the invoking process. Running this check in the forked delegate
+        # can lose the refusal when the D6 tree changes during the active run,
+        # and would also make the caller depend on a child startup response.
+        existing = store.get(args.task_id)
+        previous = existing.get('developer')
+        expected_profile = provider
+        if (type(previous) is dict and
+                previous.get('provider_profile') == expected_profile and
+                previous.get('state') == 'DEVELOPER_DISPATCHING'):
+            completion = existing.get('completion')
+            recorded_executor = (previous.get('executor_task_id') or
+                (completion.get('executor_task_id') if type(completion) is dict else None))
+            if recorded_executor != getattr(args, 'executor_task', None):
+                code = ('CODEX_LIVENESS_UNKNOWN' if provider == 'codex'
+                        else 'DIRECT_CHILD_LIVENESS_UNKNOWN')
+                raise LLMToolError(code)
+            liveness = (_codex_child_liveness(previous.get('execution'))
+                        if provider == 'codex' else
+                        _direct_child_liveness(previous.get('execution')))
+            if liveness == 'ALIVE':
+                code = ('CODEX_CHILD_STILL_RUNNING' if provider == 'codex'
+                        else 'DIRECT_CHILD_STILL_RUNNING')
+                raise LLMToolError(code)
+            if provider == 'codex' and liveness == 'UNKNOWN':
+                raise LLMToolError('CODEX_LIVENESS_UNKNOWN')
+            if provider == 'opencode' and liveness != 'DEAD':
+                raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
+        # Bind the requested D6 worktree before forking so an invalid binding
+        # is always a synchronous refusal and cannot start a detached child.
+        try:
+            registration, _snapshot = _delegate_d6_binding(args)
+        except Exception as exc:
+            if provider == 'codex':
+                raise LLMToolError(
+                    'Codex direct D6 binding failed (' +
+                    codex_direct_developer.adapter_error_code(exc, prefix='') +
+                    '): run it with the current directory at the registered D6 root '
+                    'of --executor-task, on its registered branch and HEAD, with a '
+                    'clean tree') from None
+            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+        if registration.task_id != getattr(args, 'executor_task', None):
+            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+        return _run_background_delegate(
+            args, provider=provider, store=store,
+            d6_binding=(registration, _snapshot))
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
