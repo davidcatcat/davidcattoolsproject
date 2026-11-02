@@ -20,6 +20,11 @@ from types import MappingProxyType
 
 MAX_TRUST_BYTES = 16 * 1024
 _TRUST_CACHE = None
+_HAS_DIR_FD_SUPPORT = (
+    hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW") and
+    os.open in getattr(os, "supports_dir_fd", ()) and
+    os.stat in getattr(os, "supports_dir_fd", ())
+)
 _SLUG = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}\Z")
 _WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9._-]{1,100}\.ya?ml\Z")
 _RUNNER = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
@@ -203,8 +208,7 @@ def _check_directory(fd, uid, code, private=False):
 
 
 def _read_trust_bytes(home, uid):
-    if (not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW") or
-            os.open not in os.supports_dir_fd or os.stat not in os.supports_dir_fd):
+    if not _HAS_DIR_FD_SUPPORT:
         _fail("TRUST_UNSUPPORTED_PLATFORM")
     flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     flags_file = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) |

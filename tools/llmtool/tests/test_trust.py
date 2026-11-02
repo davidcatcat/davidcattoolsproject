@@ -126,11 +126,13 @@ class TrustTest(unittest.TestCase):
     def test_malformed_json_and_duplicate_keys_are_refused(self):
         for raw in (b"{", b'{"schema_version":1,"schema_version":1}',
                     b'{"schema_version":NaN}', b'{"schema_version":Infinity}',
-                    b'{"outer":{"value":1,"value":2}}', b"\xef\xbb\xbf{}", b"\xff", b"[]",
+                    b'{"outer":{"value":1,"value":2}}', b"\xef\xbb\xbf{}", b"\xff",
                     b"[" + b"[" * 1100 + b"0" + b"]" * 1100 + b"]"):
             with self.subTest(raw=raw):
                 self._write(raw=raw)
                 self._error("TRUST_MALFORMED")
+        self._write(raw=b"[]")
+        self._error("TRUST_SCHEMA_INVALID")
 
     def test_schema_fields_types_and_paths_are_strict(self):
         mutations = [
