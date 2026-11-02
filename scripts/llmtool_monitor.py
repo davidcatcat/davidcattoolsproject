@@ -45,6 +45,7 @@ from datetime import date, datetime, timezone
 import math
 import os
 import re
+import select
 import shutil
 import stat
 import struct
@@ -5115,14 +5116,53 @@ def _run_claude_agents(claude: str, config_dir: str, timeout: float) -> str | No
     else:
         env["CLAUDE_CONFIG_DIR"] = config_dir
     try:
-        done = subprocess.run([claude, "agents", "--json"], stdin=subprocess.DEVNULL,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                              env=env, timeout=timeout, check=False)
+        child = subprocess.Popen([claude, "agents", "--json"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
     except (OSError, subprocess.SubprocessError, ValueError):
         return None
-    if done.returncode != 0 or len(done.stdout) > AGENTS_OUTPUT:
+    # Read with a size cap and a deadline: a noisy or stuck CLI is killed as
+    # soon as it passes AGENTS_OUTPUT bytes or the timeout, never buffered whole.
+    chunks, size, ok = [], 0, False
+    deadline = time.monotonic() + timeout
+    try:
+        fd = child.stdout.fileno()
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], left)
+            if not ready:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                ok = True
+                break
+            size += len(chunk)
+            if size > AGENTS_OUTPUT:
+                break
+            chunks.append(chunk)
+        if ok:
+            left = max(0.0, deadline - time.monotonic())
+            ok = child.wait(timeout=left) == 0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        ok = False
+    finally:
+        if child.poll() is None:
+            try:
+                child.kill()
+            except OSError:
+                pass
+        try:
+            child.wait(timeout=1.0)
+        except subprocess.SubprocessError:
+            pass
+        try:
+            child.stdout.close()
+        except OSError:
+            pass
+    if not ok:
         return None
-    return done.stdout.decode("utf-8", "replace")
+    return b"".join(chunks).decode("utf-8", "replace")
 
 
 class ClaudeAgents:

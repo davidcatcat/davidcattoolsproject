@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from unittest.mock import patch
@@ -2722,6 +2723,22 @@ class OfficeViewTests(unittest.TestCase):
                         encoding="utf-8")
         out = mon._run_claude_agents(str(fake), str(self.claude.parent), 2)
         self.assertEqual(json.loads(out)[0]["dir"], str(self.claude.parent))
+        # A CLI that floods more than AGENTS_OUTPUT bytes (and never stops) is
+        # cut off and killed well before the timeout, and gives no rows.
+        fake.write_text("#!/bin/sh\nexec yes '[{\"sessionId\": \"aaaaaaaa-0001\", "
+                        "\"state\": \"blocked\"}]'\n", encoding="utf-8")
+        start = time.monotonic()
+        self.assertIsNone(mon._run_claude_agents(str(fake), str(self.claude.parent), 30))
+        self.assertLess(time.monotonic() - start, 10)
+        # Just over the cap, then a clean exit, is still an overflow.
+        fake.write_text("#!/bin/sh\nhead -c %d /dev/zero | tr '\\0' ' '\necho '[]'\n"
+                        % mon.AGENTS_OUTPUT, encoding="utf-8")
+        self.assertIsNone(mon._run_claude_agents(str(fake), str(self.claude.parent), 10))
+        fake.write_text("#!/bin/sh\nexec yes x\n", encoding="utf-8")
+        flood = mon.ClaudeAgents(runner=lambda config_dir: mon._run_claude_agents(
+            str(fake), config_dir, 30), background=False)
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        self.assertEqual(flood.sessions([str(self.claude.parent)]), {})
         # The office still builds with no listing.
         self.assertEqual([row for row in mon.office_rows(
             [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
@@ -2730,10 +2747,15 @@ class OfficeViewTests(unittest.TestCase):
     def test_claude_agents_refresh_runs_in_the_background(self):
         (self.claude.parent / "sessions").mkdir(exist_ok=True)
         clock = [100.0]
-        agents = mon.ClaudeAgents(runner=lambda config_dir: self._listing(),
-                                  clock=lambda: clock[0], every=60.0)
+        release = threading.Event()
+
+        def runner(config_dir):
+            release.wait(5)
+            return self._listing()
+        agents = mon.ClaudeAgents(runner=runner, clock=lambda: clock[0], every=60.0)
         dirs = mon.claude_config_dirs(str(self.claude))
         self.assertEqual(agents.sessions(dirs), {})   # nothing yet: the call runs off the UI thread
+        release.set()
         agents.thread.join(5)
         self.assertIn("aaaaaaaa-0001", agents.sessions(dirs))
         first = agents.thread
