@@ -802,9 +802,14 @@ class ProviderLedgerTests(unittest.TestCase):
     def test_layout2_cap_refusal_releases_object_key_for_reissue(self):
         from test_review_authority import Harness
         h=Harness(cap=1,provider_layout=2);self.addCleanup(h.close)
+        issue_number=0
         def issue(tag):
+            nonlocal issue_number
+            issue_number += 1
             call,_=h.binding()
-            call=replace(call,reviewed_object_digest=tag*64,deadline='2026-10-14T00:05:00Z')
+            call=replace(call,reviewed_object_digest=tag*64,deadline='2026-10-14T00:05:00Z',
+                         redeem_run_id=f'{issue_number:032x}',
+                         reviewer_launch_nonce=f'{issue_number + 16:032x}')
             binding=p.ProviderReviewBinding(call)
             observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
             decision=p.decide_provider_review(binding,issuer=h.issuer,observed=observed)
@@ -873,7 +878,12 @@ class ProviderLedgerTests(unittest.TestCase):
         self.assertFalse(h.ledger.consume_provider(receipt,issuer=h.issuer,observed=observed))
         self.assertEqual(h.ledger.status(receipt.nonce),'DENIED')
         h.hostdata['route_policies'][0]['revoked']=False;h.write_host()
-        retry=h.ledger.issue_provider(decision,ttl_seconds=120)
+        retry_call=replace(call,redeem_run_id='e'*32,reviewer_launch_nonce='d'*32)
+        retry_binding=p.ProviderReviewBinding(retry_call)
+        retry_observed=p.ProviderObservedState(retry_binding.digest,retry_call.source_sha,
+                                               retry_call.observation_digest,True)
+        retry_decision=p.decide_provider_review(retry_binding,issuer=h.issuer,observed=retry_observed)
+        retry=h.ledger.issue_provider(retry_decision,ttl_seconds=120)
         self.assertEqual(retry.binding.call.reviewed_object_digest,receipt.binding.call.reviewed_object_digest)
 
     def test_wrong_binding_burns_without_consuming_or_charging(self):
