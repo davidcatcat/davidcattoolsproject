@@ -187,7 +187,7 @@ def collect_local_facts(root, *, reader=None):
                    r'^(core\.(hookspath|fsmonitor|sshcommand|gitproxy)|filter\.|url\.|include\.|includeif\.|remote\..*\.promisor|extensions\.partialclone)')):
         reject('REVIEW_CONFIG_UNSAFE')
     branch = text(git_intel.BRANCH)
-    if not branch or branch in ('main','automation/ai-loop'):
+    if not branch or branch == 'main':
         reject('REVIEW_BRANCH_INVALID')
     head = text(git_intel.HEAD)
     common = text(('rev-parse','--path-format=absolute','--git-common-dir'))
@@ -395,7 +395,7 @@ class Observation:
             reject('REVIEW_IDENTITY_NOT_ATTESTED')
         developers = [a for a in self.agents if a.role is Role.DEVELOPER]
         if len({a.branch for a in developers}) != len(developers) or any(
-                a.branch in ('main','automation/ai-loop') or a.branch == r.branch
+                a.branch == 'main' or a.branch == r.branch
                 for a in developers for r in self.agents if r.role is Role.REVIEWER):
             reject('REVIEW_BRANCH_INVALID')
         if not developers or len(self.runtime_paths) != 3 or any(

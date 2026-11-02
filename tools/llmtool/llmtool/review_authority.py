@@ -103,7 +103,7 @@ class RegisteredAgent:
         _integer(self.device);_integer(self.inode,minimum=1)
         _path(self.branch_prefix.rstrip('/'))
         if (self.origin not in REVIEW_ORIGINS or
-                self.branch_prefix in ('main','automation/ai-loop') or
+                self.branch_prefix == 'main' or
                 self.venv_prefix != self.root+'/tools/llmtool/.venv'):
             reject('REVIEW_REGISTRATION_INVALID')
 
@@ -276,7 +276,7 @@ class HostAuthorshipObserver:
             if a.agent_id not in registered: reject('REVIEW_IDENTITY_NOT_ATTESTED')
             r=registered[a.agent_id]
             if (a.role is not Role.DEVELOPER or a.root != r.root or a.common_dir != r.common_dir or
-                    not a.branch.startswith(r.branch_prefix) or a.branch in ('main','automation/ai-loop')):
+                    not a.branch.startswith(r.branch_prefix) or a.branch == 'main'):
                 reject('REVIEW_IDENTITY_NOT_ATTESTED')
             f=self._facts(Path(r.root))
             if (not f.clean_tracked or f.root != r.root or f.branch != a.branch or
