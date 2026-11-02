@@ -849,6 +849,24 @@ ATTENTION` and a `blocked` entry with `COMPLETION_EVENT_LIMIT` and action
 delivered events and reading again records the new result. Other failures to record an
 event are listed under `blocked` with action `RETRY_INBOX`.
 
+Developer assignment inbox (#367). `llmtool task assign --worker WORKER --d6-task D6
+--pm-session SESSION [--task-id ID] [--owner-ref URL] [--claim-timeout N]` writes one
+ASSIGNED event, only after the worker-dispatch gate allows that worker (a refusal prints
+`{"code": ...}`, exits 1 and writes nothing). An open assignment for the same worker and
+D6 task is refused as `ASSIGNMENT_DUPLICATE`. The Developer runs `llmtool task
+assignments --worker WORKER [--wait] [--timeout N]` (same bounded sleep-poll as `task
+inbox`) and then `llmtool task claim ASSIGNMENT_ID --session SESSION_UUID [--worker
+WORKER]`. A claim succeeds once; a second claim is refused with
+`ASSIGNMENT_ALREADY_CLAIMED`. The claim stores a receipt (claimer session id, a digest of
+the claimer's `CLAUDE_CONFIG_DIR` (or `~/.claude`) path as the account identity, UTC time,
+and `late` when it came after the claim timeout); that receipt is the PM's delivery
+evidence. Assignments still unclaimed after their claim timeout (default 120 s) appear in
+the assigning PM's `task inbox` under `unclaimed_assignments` with state UNCLAIMED and
+`status: ATTENTION`; `--wait` returns when an assignment newly becomes UNCLAIMED. All
+assignments live in one locked, atomically replaced `.developer-assignments.json` in the
+TaskStore root, so accounts that share the store share the inbox. At most 128 are kept;
+the oldest claimed receipt is compacted first and open assignments are never dropped.
+
 The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
 verified process exit and bounded test gate. Later independent review, PR and CI
 collection still use the manual `task complete` command; the full user-to-PM-to-review

@@ -417,11 +417,26 @@ def _inbox(store, session_key, *, reconcile):
                 'pm_recovery': recovery(record),
             })
     events.sort(key=lambda event: (event['received_at'], event['task_id'], event['sequence']))
+    unclaimed, assignments_code = _unclaimed_assignments(store, session_key)
     return {'pm_session_id': session_key,
-            'status': 'ATTENTION' if blocked or unreadable else 'OK',
+            'status': ('ATTENTION' if blocked or unreadable or unclaimed or assignments_code
+                       else 'OK'),
             'events': events, 'blocked': blocked,
             'unreadable_task_count': unreadable,
+            'unclaimed_assignments': unclaimed,
+            **({'assignments_error_code': assignments_code} if assignments_code else {}),
             **({'pending': pending} if not reconcile else {})}
+
+
+def _unclaimed_assignments(store, session_key):
+    """#367: this PM's Developer assignments past their claim timeout (read-only)."""
+    from .developer_assignment_inbox import unclaimed_for_pm
+
+    try:
+        return unclaimed_for_pm(store, session_key), None
+    except LLMToolError as exc:
+        # A damaged assignment sidecar must not hide completion events.
+        return [], getattr(exc, 'task_store_error_code', None) or 'ASSIGNMENTS_UNAVAILABLE'
 
 
 def read_inbox(store, session_key):
@@ -518,9 +533,16 @@ def wait_inbox(store, session_key, *, wait=False, timeout=DEFAULT_WAIT_SECONDS,
     if type(timeout) is not int or not 0 <= timeout <= MAX_WAIT_SECONDS:
         raise LLMToolError('inbox timeout must be 0 to %d seconds' % MAX_WAIT_SECONDS)
     deadline = clock() + timeout
+    already_unclaimed = None
     while True:
         inbox = read_inbox(store, session_key)
-        if inbox['events'] or inbox['blocked'] or not wait or clock() >= deadline:
+        unclaimed = {item['assignment_id'] for item in inbox['unclaimed_assignments']}
+        # Wake for assignments that become UNCLAIMED during this wait only, so a
+        # long-unclaimed assignment does not turn --wait into a tight loop.
+        newly_unclaimed = already_unclaimed is not None and bool(unclaimed - already_unclaimed)
+        already_unclaimed = unclaimed if already_unclaimed is None else already_unclaimed
+        if (inbox['events'] or inbox['blocked'] or newly_unclaimed or not wait or
+                clock() >= deadline):
             inbox['timed_out'] = bool(wait and not inbox['events'] and not inbox['blocked'])
             return inbox
         sleep(max(0.0, min(poll, deadline - clock())))

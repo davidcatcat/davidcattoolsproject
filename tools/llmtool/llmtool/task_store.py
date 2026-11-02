@@ -323,6 +323,94 @@ _WORKER_AVAILABILITY_FIELDS = frozenset((
     'schema_version', 'observations', 'record_sha256',
 ))
 
+# #367 Developer assignment inbox: PM -> Developer ASSIGNED events and their
+# one-time claim receipts, in one locked sidecar inside the TaskStore root so
+# every account that shares the store sees the same assignments.
+ASSIGNMENTS_SCHEMA_VERSION = 1
+ASSIGNMENTS_NAME = '.developer-assignments.json'
+ASSIGNMENTS_LOCK_NAME = '.developer-assignments.lock'
+ASSIGNMENTS_MAX_BYTES = 256 * 1024
+MAX_ASSIGNMENTS = 128
+ASSIGNMENT_CLAIM_TIMEOUT_MAX_SECONDS = 86400
+_ASSIGNMENTS_FIELDS = frozenset(('schema_version', 'assignments', 'record_sha256'))
+_ASSIGNMENT_FIELDS = frozenset((
+    'assignment_id', 'event', 'worker', 'd6_task_id', 'pm_session_id', 'task_id',
+    'owner_assignment_ref', 'assigned_at', 'claim_timeout_seconds', 'dispatch',
+    'state', 'claim',
+))
+_ASSIGNMENT_DISPATCH_FIELDS = frozenset(('decision', 'reason_code', 'policy_sha256'))
+_ASSIGNMENT_CLAIM_FIELDS = frozenset((
+    'claimer_session_id', 'claimer_account', 'claimed_at', 'late',
+))
+_UTC_SECONDS = '%Y-%m-%dT%H:%M:%SZ'
+
+
+def _valid_utc_seconds(value):
+    if type(value) is not str:
+        return False
+    try:
+        return datetime.strptime(value, _UTC_SECONDS).strftime(_UTC_SECONDS) == value
+    except ValueError:
+        return False
+
+
+def _validate_assignment(item):
+    if type(item) is not dict or set(item) != _ASSIGNMENT_FIELDS:
+        _fail('ASSIGNMENTS_INVALID')
+    dispatch = item['dispatch']
+    claim = item['claim']
+    ref = item['owner_assignment_ref']
+    timeout = item['claim_timeout_seconds']
+    if (not _safe_identifier(item['assignment_id'], TASK_ID) or
+            item['event'] != 'ASSIGNED' or
+            type(item['worker']) is not str or
+            re.fullmatch(r'[a-z][a-z0-9-]{0,63}', item['worker']) is None or
+            not _safe_identifier(item['d6_task_id'], D6_TASK_ID) or
+            not _safe_identifier(item['pm_session_id'], SESSION_ID) or
+            (item['task_id'] is not None and not _safe_identifier(item['task_id'], TASK_ID)) or
+            (ref is not None and (type(ref) is not str or not 0 < len(ref) <= 512 or
+                                  any(ord(char) <= 0x20 or ord(char) >= 0x7f
+                                      for char in ref))) or
+            not _valid_utc_seconds(item['assigned_at']) or
+            type(timeout) is not int or
+            not 1 <= timeout <= ASSIGNMENT_CLAIM_TIMEOUT_MAX_SECONDS or
+            type(dispatch) is not dict or set(dispatch) != _ASSIGNMENT_DISPATCH_FIELDS or
+            dispatch['decision'] != 'ALLOWED' or
+            type(dispatch['reason_code']) is not str or
+            re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', dispatch['reason_code']) is None or
+            type(dispatch['policy_sha256']) is not str or
+            re.fullmatch(r'[0-9a-f]{64}', dispatch['policy_sha256']) is None or
+            item['state'] not in ('ASSIGNED', 'CLAIMED') or
+            (item['state'] == 'ASSIGNED') != (claim is None)):
+        _fail('ASSIGNMENTS_INVALID')
+    if claim is not None and (
+            type(claim) is not dict or set(claim) != _ASSIGNMENT_CLAIM_FIELDS or
+            not _safe_identifier(claim['claimer_session_id'], PM_NATIVE_SESSION_ID) or
+            type(claim['claimer_account']) is not str or
+            re.fullmatch(r'[0-9a-f]{16}', claim['claimer_account']) is None or
+            not _valid_utc_seconds(claim['claimed_at']) or
+            type(claim['late']) is not bool):
+        _fail('ASSIGNMENTS_INVALID')
+    return item
+
+
+def _validate_assignments(record):
+    if (type(record) is not dict or set(record) != _ASSIGNMENTS_FIELDS or
+            type(record['schema_version']) is not int or
+            record['schema_version'] != ASSIGNMENTS_SCHEMA_VERSION or
+            type(record['assignments']) is not list or
+            len(record['assignments']) > MAX_ASSIGNMENTS):
+        _fail('ASSIGNMENTS_INVALID')
+    seen = set()
+    for item in record['assignments']:
+        _validate_assignment(item)
+        if item['assignment_id'] in seen:
+            _fail('ASSIGNMENTS_INVALID')
+        seen.add(item['assignment_id'])
+    if record['record_sha256'] != _digest(record):
+        _fail('ASSIGNMENTS_INVALID')
+    return record
+
 
 def _fail(code='TASK_STORE_INVALID'):
     safe_code = code if (type(code) is str and
@@ -2583,55 +2671,69 @@ class TaskStore:
             _fail('WORKER_AVAILABILITY_INVALID')
         return record
 
-    def _read_worker_availability_at(self, directory):
+    def _read_sidecar_at(self, directory, name, *, max_bytes, code):
+        """Read one owner-only JSON sidecar in the store root; None when absent.
+
+        ``code`` prefixes the fail-closed error codes (``<code>_INVALID`` etc.).
+        """
         try:
-            fd = os.open(WORKER_AVAILABILITY_NAME,
-                         os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
                          dir_fd=directory)
         except FileNotFoundError:
-            return {'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
-                    'observations': [], 'record_sha256': None}
+            return None
         except OSError:
-            _fail('WORKER_AVAILABILITY_UNAVAILABLE')
+            _fail(code + '_UNAVAILABLE')
         try:
             before = os.fstat(fd)
             if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or
                     stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1 or
-                    before.st_size > WORKER_AVAILABILITY_MAX_BYTES):
+                    before.st_size > max_bytes):
                 os.close(fd)
                 fd = None
-                _fail('WORKER_AVAILABILITY_INVALID')
+                _fail(code + '_INVALID')
             with os.fdopen(fd, 'rb') as stream:
                 fd = None
-                raw = stream.read(WORKER_AVAILABILITY_MAX_BYTES + 1)
+                raw = stream.read(max_bytes + 1)
                 after = os.fstat(stream.fileno())
-            current = os.stat(WORKER_AVAILABILITY_NAME, dir_fd=directory,
-                              follow_symlinks=False)
-            if (len(raw) > WORKER_AVAILABILITY_MAX_BYTES or
+            current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if (len(raw) > max_bytes or
                     _identity(before) != _identity(after) or
                     _identity(before) != _identity(current)):
-                _fail('WORKER_AVAILABILITY_CHANGED')
-            record = json.loads(raw.decode('utf-8'),
-                                object_pairs_hook=self._unique_pairs,
-                                parse_constant=lambda _: _fail(
-                                    'WORKER_AVAILABILITY_INVALID'))
+                _fail(code + '_CHANGED')
+            return json.loads(raw.decode('utf-8'),
+                              object_pairs_hook=self._unique_pairs,
+                              parse_constant=lambda _: _fail(code + '_INVALID'))
+        except LLMToolError:
+            raise
+        except Exception:
+            _fail(code + '_INVALID')
+        finally:
+            if fd is not None:
+                os.close(fd)
+
+    def _read_worker_availability_at(self, directory):
+        record = self._read_sidecar_at(directory, WORKER_AVAILABILITY_NAME,
+                                       max_bytes=WORKER_AVAILABILITY_MAX_BYTES,
+                                       code='WORKER_AVAILABILITY')
+        if record is None:
+            return {'schema_version': WORKER_AVAILABILITY_SCHEMA_VERSION,
+                    'observations': [], 'record_sha256': None}
+        try:
             return self._validate_worker_availability(record)
         except LLMToolError:
             raise
         except Exception:
             _fail('WORKER_AVAILABILITY_INVALID')
-        finally:
-            if fd is not None:
-                os.close(fd)
 
     @staticmethod
-    def _lock_worker_availability(directory, *, exclusive):
+    def _lock_sidecar(directory, lock_name, *, exclusive, code):
+        """Take a shared or exclusive flock on a sidecar lock file in the store root."""
         deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
         try:
             while True:
                 try:
                     lock_fd = os.open(
-                        WORKER_AVAILABILITY_LOCK_NAME,
+                        lock_name,
                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
                         0o600, dir_fd=directory)
                     break
@@ -2646,7 +2748,7 @@ class TaskStore:
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
                     stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
                 os.close(lock_fd)
-                _fail('WORKER_AVAILABILITY_INVALID')
+                _fail(code + '_INVALID')
             fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
             return lock_fd
         except LLMToolError:
@@ -2654,7 +2756,43 @@ class TaskStore:
         except OSError:
             if 'lock_fd' in locals():
                 os.close(lock_fd)
-            _fail('WORKER_AVAILABILITY_UNAVAILABLE')
+            _fail(code + '_UNAVAILABLE')
+
+    @staticmethod
+    def _unlock_sidecar(lock_fd):
+        if lock_fd is not None:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
+
+    @staticmethod
+    def _lock_worker_availability(directory, *, exclusive):
+        return TaskStore._lock_sidecar(directory, WORKER_AVAILABILITY_LOCK_NAME,
+                                       exclusive=exclusive, code='WORKER_AVAILABILITY')
+
+    @staticmethod
+    def _write_sidecar_at(directory, name, raw, *, code):
+        """Atomically replace one sidecar (temp file, fsync, rename, dir fsync)."""
+        temporary = name + '.' + uuid.uuid4().hex + '.tmp'
+        try:
+            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                         os.O_NOFOLLOW, 0o600, dir_fd=directory)
+            with os.fdopen(fd, 'wb') as stream:
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        except LLMToolError:
+            raise
+        except OSError:
+            _fail(code + '_UNAVAILABLE')
+        finally:
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                pass
 
     def _write_worker_availability_at(self, directory, record):
         value = dict(record)
@@ -2664,26 +2802,8 @@ class TaskStore:
         raw = _json_bytes(value)
         if len(raw) > WORKER_AVAILABILITY_MAX_BYTES:
             _fail('WORKER_AVAILABILITY_LIMIT')
-        temporary = WORKER_AVAILABILITY_NAME + '.' + uuid.uuid4().hex + '.tmp'
-        try:
-            fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                         os.O_NOFOLLOW, 0o600, dir_fd=directory)
-            with os.fdopen(fd, 'wb') as stream:
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, WORKER_AVAILABILITY_NAME,
-                       src_dir_fd=directory, dst_dir_fd=directory)
-            os.fsync(directory)
-        except LLMToolError:
-            raise
-        except OSError:
-            _fail('WORKER_AVAILABILITY_UNAVAILABLE')
-        finally:
-            try:
-                os.unlink(temporary, dir_fd=directory)
-            except OSError:
-                pass
+        self._write_sidecar_at(directory, WORKER_AVAILABILITY_NAME, raw,
+                               code='WORKER_AVAILABILITY')
         return value
 
     @staticmethod
@@ -2770,6 +2890,119 @@ class TaskStore:
                     os.close(lock_fd)
             os.close(directory)
         return self._worker_availability_view(record)
+
+    def _read_assignments_at(self, directory):
+        record = self._read_sidecar_at(directory, ASSIGNMENTS_NAME,
+                                       max_bytes=ASSIGNMENTS_MAX_BYTES, code='ASSIGNMENTS')
+        if record is None:
+            return []
+        return _validate_assignments(record)['assignments']
+
+    def _write_assignments_at(self, directory, assignments):
+        value = {'schema_version': ASSIGNMENTS_SCHEMA_VERSION, 'assignments': assignments}
+        value['record_sha256'] = _digest(value)
+        _validate_assignments(value)
+        raw = _json_bytes(value)
+        if len(raw) > ASSIGNMENTS_MAX_BYTES:
+            _fail('ASSIGNMENT_LIMIT')
+        self._write_sidecar_at(directory, ASSIGNMENTS_NAME, raw, code='ASSIGNMENTS')
+
+    def _with_assignments(self, *, exclusive, change=None):
+        directory = self._dirfd()
+        lock_fd = None
+        try:
+            lock_fd = self._lock_sidecar(directory, ASSIGNMENTS_LOCK_NAME,
+                                         exclusive=exclusive, code='ASSIGNMENTS')
+            assignments = self._read_assignments_at(directory)
+            if change is None:
+                return [dict(item) for item in assignments]
+            updated, result = change([dict(item) for item in assignments])
+            self._write_assignments_at(directory, updated)
+            return result
+        finally:
+            self._unlock_sidecar(lock_fd)
+            os.close(directory)
+
+    def get_developer_assignments(self):
+        """Read every stored Developer assignment (ASSIGNED and CLAIMED)."""
+        return self._with_assignments(exclusive=False)
+
+    def record_developer_assignment(self, *, worker, d6_task_id, pm_session_id,
+                                    assigned_at, claim_timeout_seconds, task_id=None,
+                                    owner_assignment_ref=None):
+        """Write one ASSIGNED event, only after the worker-dispatch gate allows ``worker``.
+
+        The gate is evaluated under the exclusive assignment lock; a refusal
+        raises ``WorkerDispatchDenied`` and writes nothing. An unclaimed
+        assignment for the same worker and D6 task is a duplicate dispatch.
+        """
+        from . import worker_dispatch
+
+        candidate = {
+            'assignment_id': new_id(), 'event': 'ASSIGNED', 'worker': worker,
+            'd6_task_id': d6_task_id, 'pm_session_id': pm_session_id, 'task_id': task_id,
+            'owner_assignment_ref': owner_assignment_ref, 'assigned_at': assigned_at,
+            'claim_timeout_seconds': claim_timeout_seconds,
+            'dispatch': {'decision': 'ALLOWED', 'reason_code': 'OWNER_POLICY_ALLOWED',
+                         'policy_sha256': '0' * 64},
+            'state': 'ASSIGNED', 'claim': None,
+        }
+        # Validate the caller's input shape before taking the lock or the gate.
+        _validate_assignment(candidate)
+
+        def change(assignments):
+            decision = worker_dispatch.evaluate(
+                worker, owner_assignment_ref=owner_assignment_ref, task_id=task_id)
+            if not decision.allowed:
+                raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+            if any(item['state'] == 'ASSIGNED' and item['worker'] == worker and
+                   item['d6_task_id'] == d6_task_id for item in assignments):
+                _fail('ASSIGNMENT_DUPLICATE')
+            candidate['dispatch'] = {'decision': 'ALLOWED',
+                                     'reason_code': decision.reason_code,
+                                     'policy_sha256': decision.policy_sha256}
+            _validate_assignment(candidate)
+            if len(assignments) >= MAX_ASSIGNMENTS:
+                # Compact the oldest claimed receipt; never drop an open assignment.
+                oldest = next((item for item in assignments if item['state'] == 'CLAIMED'),
+                              None)
+                if oldest is None:
+                    _fail('ASSIGNMENT_LIMIT')
+                assignments.remove(oldest)
+            return assignments + [candidate], dict(candidate)
+
+        return self._with_assignments(exclusive=True, change=change)
+
+    def claim_developer_assignment(self, assignment_id, *, claimer_session_id,
+                                   claimer_account, claimed_at, worker=None):
+        """Claim an assignment exactly once and persist the claim receipt."""
+        if not _safe_identifier(assignment_id, TASK_ID):
+            _fail('ASSIGNMENT_ID_INVALID')
+
+        def change(assignments):
+            item = next((item for item in assignments
+                         if item['assignment_id'] == assignment_id), None)
+            if item is None:
+                _fail('ASSIGNMENT_NOT_FOUND')
+            if worker is not None and item['worker'] != worker:
+                _fail('ASSIGNMENT_WORKER_MISMATCH')
+            if item['state'] != 'ASSIGNED':
+                _fail('ASSIGNMENT_ALREADY_CLAIMED')
+            assigned = datetime.strptime(item['assigned_at'], _UTC_SECONDS)
+            claimed = datetime.strptime(claimed_at, _UTC_SECONDS) \
+                if _valid_utc_seconds(claimed_at) else None
+            if claimed is None:
+                _fail('ASSIGNMENTS_INVALID')
+            item['state'] = 'CLAIMED'
+            item['claim'] = {
+                'claimer_session_id': claimer_session_id,
+                'claimer_account': claimer_account, 'claimed_at': claimed_at,
+                'late': (claimed - assigned).total_seconds() >= item['claim_timeout_seconds'],
+            }
+            _validate_assignment(item)
+            return assignments, dict(item)
+
+        return self._with_assignments(exclusive=True, change=change)
 
     def append_dispatch_audit(self, task_id, entry, *, expected=None):
         """Append one bounded gate result using the existing TaskStore CAS lock."""
