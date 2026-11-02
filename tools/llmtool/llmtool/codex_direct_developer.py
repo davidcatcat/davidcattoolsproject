@@ -310,13 +310,18 @@ def _unique_keys(pairs):
     return result
 
 
-def _environment(tmpdir):
+def _environment(tmpdir, codex_home=None):
     env = {name: os.environ[name] for name in (
         'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
         'CODEX_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR') if name in os.environ}
     for name in ('HOME', 'CODEX_HOME', 'SSL_CERT_FILE', 'SSL_CERT_DIR'):
         if name in env and (not os.path.isabs(env[name]) or any(ord(c) < 32 for c in env[name])):
             _fail('CODEX_ENV_INVALID')
+    if codex_home is not None:
+        if (type(codex_home) is not str or not os.path.isabs(codex_home) or
+                any(ord(c) < 32 for c in codex_home)):
+            _fail('CODEX_ENV_INVALID')
+        env['CODEX_HOME'] = codex_home
     env['TMPDIR'] = tmpdir
     return env
 
@@ -359,7 +364,7 @@ def _argv(executable, root, model, effort, *, pycache_prefix, command_path=None)
 
 def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_id,
         prelaunch_validate=None, launch_callback=None, timeout=None,
-        dispatch_action='DISPATCH'):
+        dispatch_action='DISPATCH', codex_home=None):
     root = Path(root).resolve(strict=True)
     if type(prompt) is not str or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES:
         _fail('CODEX_PROMPT_INVALID')
@@ -387,7 +392,7 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
     try:
         with tempfile.TemporaryDirectory(prefix='llmtool-codex-direct-') as tmpdir:
             os.chmod(tmpdir, 0o700)
-            env = _environment(tmpdir)
+            env = _environment(tmpdir, codex_home=codex_home)
             try:
                 if prelaunch_validate is not None:
                     try:
