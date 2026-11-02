@@ -2868,27 +2868,21 @@ class CodexChildLivenessTests(unittest.TestCase):
         return caught.exception, store
 
     def _real_store(self):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        store = TaskStore(Path(tmp.name).resolve() / 'tasks')
-        response = json.dumps({
-            'schema_version': 1, 'summary': 'A bounded liveness test task.',
-            'developer_assignment': {
-                'route': 'codex', 'risk': 'LOW',
-                'goal': 'Record the liveness outcome.',
-                'acceptance': ['the outcome is recorded'],
-            },
-        })
-        task = run_task_record_pm(
-            Namespace(stdin_json=True), store=store,
-            input_stream=io.StringIO(json.dumps({
-                'request': 'Bounded non-sensitive liveness test.',
-                'response': response,
-            })), return_record=True)
-        task_id = task['task_id']
+        task_id, run_id = new_id(), new_id()
+        request = 'Bounded non-sensitive liveness test.'
+        task = _record(task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(response='PM returned a bounded task.',
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Record the liveness outcome.',
+                           'acceptance': ['the outcome is recorded']})
         developer = {
             'assignment_id': new_id(), 'selection_source': 'PM',
-            'executor_task_id': 'executor-one', 'state': 'DEVELOPER_PENDING',
+            'executor_task_id': 'executor-one', 'state': 'DEVELOPER_DISPATCHING',
             'provider_profile': 'codex', 'provider_type': 'codex-cli',
             'model': 'gpt-6-luna', 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
             'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
@@ -2899,29 +2893,13 @@ class CodexChildLivenessTests(unittest.TestCase):
             'artifact': None, 'artifact_sha256': None, 'usage': None,
             'error_code': None, 'execution': None, 'created_at': '2026-10-23T00:00:00Z',
         }
+        task['developer'] = developer
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TaskStore(Path(tmp.name).resolve() / 'tasks')
+        store.create(task)
         with patch.object(submission_cli.worker_dispatch,
                           'authorize_task_store_change', return_value=None):
-            store.compare_and_update(task_id,
-                expected={'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None},
-                developer=developer,
-                completion={
-                    'state': 'WAITING_EXECUTOR', 'executor_task_id': 'executor-one',
-                    'reviewer_task_id': None, 'evidence': {
-                        'task_id': task_id, 'run_id': task['run_id'],
-                        'contract_digest': task['task_binding']['contract_digest'],
-                        'executor_identity': 'codex-developer',
-                        'executor_session_ref': None, 'executor_native_session_id': None,
-                        'executor_native_session': 'UNKNOWN', 'execution_mode': 'DIRECT_D6',
-                        'root': '/repo', 'common_dir': '/repo/.git', 'branch': 'task-branch',
-                        'source_sha': 'a' * 40, 'result_head': None,
-                    },
-                    'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
-                    'pm_response': None, 'pm_recommendation': None,
-                    'pm_usage': None, 'pm_error_code': None,
-                })
-            # This is the same durable launch transition used by the #776
-            # liveness tests; it binds the child identity to the assignment.
             store.record_codex_launch(task_id,
                 assignment_id=developer['assignment_id'], pid=321,
                 start_time='123456', pgid=321)
