@@ -97,7 +97,7 @@ class AgentBinding(ContractValue):
         _path(self.common_dir[:-5], absolute=True)
         _path(self.branch)
         _text(self.branch, 256)
-        if self.role is Role.DEVELOPER and self.branch in ('main', 'automation/ai-loop'):
+        if self.role is Role.DEVELOPER and self.branch == 'main':
             invalid('TASK_BINDING_MISMATCH')
         _privacy(self.to_dict())
 

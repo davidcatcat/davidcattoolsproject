@@ -142,6 +142,15 @@ class Harness:
 
 class AuthorityTests(unittest.TestCase):
     def setUp(self): self.h=Harness();self.addCleanup(self.h.close)
+    def test_registered_agent_allows_automation_branch_prefix_but_not_main(self):
+        hostdata=copy.deepcopy(self.h.hostdata)
+        hostdata['agents'][0]['branch_prefix']='automation/ai-loop'
+        registration=a._decode_host(r.canonical(hostdata).decode())
+        self.assertEqual(registration.agents[0].branch_prefix,'automation/ai-loop')
+        hostdata['agents'][0]['branch_prefix']='main'
+        with self.assertRaises(Exception):
+            a._decode_host(r.canonical(hostdata).decode())
+
     def test_registered_agent_accepts_only_exact_review_origins(self):
         for origin in (
             'git@github.com:davidcatcat/davidcattoolsproject.git',
