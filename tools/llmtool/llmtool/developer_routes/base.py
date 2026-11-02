@@ -261,8 +261,8 @@ def capture_snapshot(root):
         except FileNotFoundError:
             return None
 
-    def common_config_digest(path, current_branch):
-        """Fingerprint common config except concurrent branch/worktree metadata."""
+    def common_config_digest(path, current_branch, existing_branches, default_branches):
+        """Fingerprint common config except another existing branch's tracking data."""
         try:
             raw = task_completion._git(
                 root, ('config', '--no-includes', '--null', '--list', '--file', str(path)),
@@ -275,23 +275,24 @@ def capture_snapshot(root):
             except OSError:
                 raw = b''
             return 'INVALID:' + hashlib.sha256(raw).hexdigest()
-        branch_bytes = os.fsencode(current_branch)
         entries = []
         for record in raw.split(b'\0'):
             if not record:
                 continue
             key, separator, value = record.partition(b'\n')
             if not separator:
-                raise RouteError('ROUTE_SNAPSHOT_INVALID')
-            # Git writes branch.<name>.remote/merge while another Task creates
-            # and pushes its branch. The current D6 branch remains significant.
+                # In --null --list output a key without a value separator is
+                # Git's valueless boolean key, equivalent to an explicit true.
+                value = b'true'
+            # Git writes remote/merge when another Task pushes an existing
+            # non-default branch. Keep all other branch variables significant.
             if key.startswith(b'branch.'):
-                subsection, dot, _variable = key[len(b'branch.'):].rpartition(b'.')
-                if dot and subsection != branch_bytes:
+                subsection, dot, variable = key[len(b'branch.'):].rpartition(b'.')
+                if (dot and subsection != os.fsencode(current_branch) and
+                        subsection in existing_branches and
+                        subsection not in default_branches and
+                        variable in (b'remote', b'merge')):
                     continue
-            # Worktree-specific bookkeeping lives in worktree sections.
-            if key.startswith(b'worktree.'):
-                continue
             entries.append((key, value))
         digest = hashlib.sha256()
         for key, value in entries:
@@ -300,6 +301,30 @@ def capture_snapshot(root):
             digest.update(len(value).to_bytes(8, 'big'))
             digest.update(value)
         return digest.hexdigest()
+
+    # Only tracking values for branches that already exist can be concurrent
+    # push -u bookkeeping. Protect conventional and configured default branches.
+    existing_branches = {
+        os.fsencode(name[len('refs/heads/'):]) for name in refs
+        if name.startswith('refs/heads/')
+    }
+    default_branches = {b'main', b'master', b'default'}
+    try:
+        configured_default = task_completion._git(
+            root, ('config', '--no-includes', '--get', 'init.defaultBranch'),
+            limit=4096).decode().strip()
+        if configured_default:
+            default_branches.add(os.fsencode(configured_default))
+    except LLMToolError:
+        pass
+    try:
+        remote_head = task_completion._git(
+            root, ('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'),
+            limit=4096).decode().strip()
+        if remote_head.startswith('refs/remotes/origin/'):
+            default_branches.add(os.fsencode(remote_head[len('refs/remotes/origin/'):]))
+    except LLMToolError:
+        pass
 
     git = {
         'head': head,
@@ -312,7 +337,8 @@ def capture_snapshot(root):
         'refs': refs,
         'head_commits': head_commits,
         'config_worktree': file_digest(git_dir / 'config.worktree'),
-        'config_common': common_config_digest(common_dir / 'config', branch),
+        'config_common': common_config_digest(
+            common_dir / 'config', branch, existing_branches, default_branches),
     }
     pointer = root / '.git'
     if pointer.is_symlink():

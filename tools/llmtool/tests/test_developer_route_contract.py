@@ -367,6 +367,52 @@ class DeveloperRouteContractTests(unittest.TestCase):
             after = capture_snapshot(root)
             self.assertFalse(_git_state_changed(before, after))
 
+    def test_other_branch_non_tracking_and_default_branch_config_is_detected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            linked = Path(temp) / 'linked'
+            root.mkdir()
+            request = self._real_git_request(root)
+            subprocess.run(['/usr/bin/git', '-C', str(root), 'worktree', 'add',
+                            '-b', 'other-task', str(linked), request['expected_head']],
+                           check=True, stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+            for key, value in (
+                    ('branch.other-task.pushRemote', 'changed'),
+                    ('branch.other-task.rebase', 'true'),
+                    ('branch.main.pushRemote', 'changed'),
+                    ('branch.master.remote', 'changed'),
+                    ('branch.default.remote', 'changed')):
+                with self.subTest(key=key):
+                    before = capture_snapshot(root)
+                    subprocess.run(['/usr/bin/git', '-C', str(root), 'config', key, value],
+                                   check=True)
+                    after = capture_snapshot(root)
+                    self.assertTrue(_git_state_changed(before, after))
+
+    def test_worktree_common_config_changes_are_detected(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            self._real_git_request(root)
+            before = capture_snapshot(root)
+            subprocess.run(['/usr/bin/git', '-C', str(root), 'config',
+                            'worktree.guessRemote', 'true'], check=True)
+            after = capture_snapshot(root)
+            self.assertTrue(_git_state_changed(before, after))
+
+    def test_valueless_config_keys_are_normalized_as_true(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            self._real_git_request(root)
+            before = capture_snapshot(root)
+            with (root / '.git' / 'config').open('a') as config:
+                config.write('\n[route-test]\nflag\n')
+            after = capture_snapshot(root)
+            self.assertNotEqual(before['git_state']['config_common'],
+                                after['git_state']['config_common'])
+
     def test_current_branch_and_security_config_changes_are_detected(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'repo'
