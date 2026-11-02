@@ -2,6 +2,7 @@
 
 from .base import DeveloperRoute, RouteError, RouteResult, capture_snapshot, run_route
 from .agy import AgyRoute, owner_assignment_gate
+from .gw_agent import GwAgentRoute
 from .write_boundary import (
     SandboxExecBoundary,
     UnsupportedBoundary,
@@ -11,7 +12,7 @@ from .write_boundary import (
 
 __all__ = [
     'DeveloperRoute', 'RouteError', 'RouteResult', 'capture_snapshot', 'run_route',
-    'AgyRoute', 'owner_assignment_gate', 'load_route_config',
+    'AgyRoute', 'GwAgentRoute', 'owner_assignment_gate', 'load_route_config',
     'SandboxExecBoundary', 'UnsupportedBoundary', 'WriteBoundary',
     'for_platform',
 ]
@@ -36,7 +37,9 @@ def load_route_config(path=None):
             type(value.get('routes')) is not dict):
         raise RouteError('ROUTE_CONFIG_INVALID')
     routes = value['routes']
-    if set(routes) != {'agy'} or type(routes['agy']) is not dict:
+    if ('agy' not in routes or set(routes) - {'agy', 'gw-agent'} or
+            type(routes['agy']) is not dict or
+            ('gw-agent' in routes and type(routes['gw-agent']) is not dict)):
         raise RouteError('ROUTE_CONFIG_INVALID')
     entry = routes['agy']
     expected = {'executable', 'default_model', 'default_effort', 'denied_dirs', 'state_dirs'}
@@ -49,7 +52,24 @@ def load_route_config(path=None):
             type(entry['denied_dirs']) is not list or entry['denied_dirs'] != ['.gemini'] or
             entry['state_dirs'] != {'policy': 'private-temp-only'}):
         raise RouteError('ROUTE_CONFIG_INVALID')
-    return {'schema_version': 1, 'routes': {'agy': dict(entry)}}
+    normalized = {'agy': dict(entry)}
+    if 'gw-agent' in routes:
+        gw = routes['gw-agent']
+        expected_gw = {'package_path', 'default_model', 'default_effort',
+                       'profile_name', 'profile', 'authorization_ref'}
+        if (set(gw) != expected_gw or
+                type(gw.get('package_path')) is not str or not gw['package_path'].startswith('/') or
+                type(gw.get('default_model')) is not str or
+                re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', gw['default_model']) is None or
+                gw.get('default_effort') not in ('minimal', 'low', 'medium', 'high') or
+                type(gw.get('profile_name')) is not str or not gw['profile_name'] or
+                type(gw.get('profile')) is not dict or
+                gw['profile'].get('auth_env') != 'GW_AGENT_API_KEY' or
+                gw['profile'].get('model') != gw['default_model'] or
+                type(gw.get('authorization_ref')) is not str or not gw['authorization_ref'].strip()):
+            raise RouteError('ROUTE_CONFIG_INVALID')
+        normalized['gw-agent'] = dict(gw)
+    return {'schema_version': 1, 'routes': normalized}
 
 
 def _unique_config_pairs(pairs):
