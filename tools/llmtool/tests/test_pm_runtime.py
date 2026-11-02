@@ -276,9 +276,11 @@ class PMRuntimeTests(unittest.TestCase):
             return self.process
 
         kwargs.setdefault('clock', lambda: 1000)
+        kwargs.setdefault('state_root', self.root)
+        state_root = kwargs.pop('state_root')
         runtime = pm_runtime.PMRuntime(SESSION, cwd=self.cwd, runner=runner,
-                                       state_root=self.root, environ={'HOME': self.temp.name},
-                                       **kwargs)
+                                       state_root=state_root,
+                                       environ={'HOME': self.temp.name}, **kwargs)
         self.runtimes.add(runtime)
         self.addCleanup(runtime.close)
         return runtime
@@ -581,7 +583,7 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
     def test_binding_listing_selection_and_codex_runtime(self):
-        binding_root = self.root / 'listing-state'
+        binding_root = Path(self.temp.name) / 'listing-state'
         first = pm_runtime.create_dedicated_pm(self.cwd, state_root=binding_root,
                                                clock=lambda: 1000)
         second = pm_runtime.create_dedicated_pm(self.cwd, runtime='codex',
