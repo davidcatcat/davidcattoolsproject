@@ -181,7 +181,42 @@ class ReviewRepairTests(unittest.TestCase):
 
     def test_remote_test_repair_claim_passes_real_task_store_validation(self):
         self.store = TaskStore(Path(self.temp.name).resolve())
-        self.store.create(_record())
+        request = 'Bounded non-sensitive remote-test repair fixture.'
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        task = task_submission_cli._record(
+            TASK, RUN, 'pm-' + '1' * 32, 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible',
+            model='pm-model', backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=request_sha)
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            response='PM returned a bounded repair fixture.', error_code=None,
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Repair the reported issue.',
+                           'acceptance': ['Repair the reported issue.']},
+            developer={
+                'assignment_id': 'f' * 32, 'selection_source': 'PM',
+                'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex',
+                'provider_type': 'codex-cli', 'model': 'gpt-test',
+                'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+                'session_id': 'dev-' + '2' * 32, 'source_sha': HEAD,
+                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+                'read_paths': ['tools/llmtool/llmtool'],
+                'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
+                'acceptance': ['Repair the reported issue.'],
+                'context_sha256': 'b' * 64,
+                'egress_basis': 'Approved non-sensitive test context.',
+                'input_bytes': 10, 'max_tokens': None,
+                'artifact_format': 'unified_diff', 'artifact': None,
+                'artifact_sha256': None, 'usage': None, 'error_code': None,
+                'created_at': '2026-10-27T00:00:00Z',
+            },
+            completion={'executor_task_id': EXECUTOR, 'state': 'PM_EVIDENCE_READY',
+                        'evidence': {'result': {'result_head': HEAD},
+                                     'review_pr_ci': {'stage': 'READY'}}},
+        )
+        self.store.create(task)
         receipt = {
             'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
             'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_remote'],
