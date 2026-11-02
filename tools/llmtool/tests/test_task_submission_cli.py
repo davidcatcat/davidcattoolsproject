@@ -1416,13 +1416,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 self.update_count = 0
                 self.update_error = None
 
+            def _before_write(self, kwargs):
+                # Count both store APIs: terminal writes use compare_and_update,
+                # while dispatching still uses update.
+                developer = kwargs.get('developer')
+                if not (type(developer) is dict and
+                        developer.get('state') == 'DEVELOPER_PENDING'):
+                    self.update_count += 1
+                    if self.update_count == 2:
+                        raise KeyboardInterrupt()
+
             def __getattr__(self, name):
                 return getattr(self.store, name)
 
             def update(self, task_id, **kwargs):
-                self.update_count += 1
-                if self.update_count == 2:
-                    raise KeyboardInterrupt()
+                self._before_write(kwargs)
                 try:
                     return self.store.update(task_id, **kwargs)
                 except BaseException as exc:
@@ -1430,14 +1438,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     raise
 
             def compare_and_update(self, task_id, **kwargs):
-                # The initial DEVELOPER_PENDING claim is admission. Count the
-                # dispatching and terminal writes that follow it.
-                developer = kwargs.get('developer')
-                if not (type(developer) is dict and
-                        developer.get('state') == 'DEVELOPER_PENDING'):
-                    self.update_count += 1
-                    if self.update_count == 2:
-                        raise KeyboardInterrupt()
+                self._before_write(kwargs)
                 try:
                     return self.store.compare_and_update(task_id, **kwargs)
                 except BaseException as exc:
@@ -3249,15 +3250,21 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                 store, task_id = self._store(profile)
                 original = store.compare_and_update
                 current = store.get(task_id)['developer']
+                self.assertEqual(current['execution']['status'], 'RUNNING')
                 newer = None
                 raced = False
                 def compare(_task_id, *, expected, **changes):
                     nonlocal raced, newer
                     if not raced:
                         raced = True
-                        newer = store.record_opencode_launch(
-                            task_id, assignment_id=current['assignment_id'],
-                            pid=654, start_time='new-start', pgid=654)['developer']
+                        newer = dict(current)
+                        newer_execution = dict(current['execution'])
+                        newer_execution.update(
+                            child_pid=654, child_start_time='654321', child_pgid=654)
+                        newer['execution'] = newer_execution
+                        raced_record = original(
+                            task_id, expected={'developer': current}, developer=newer)
+                        self.assertEqual(raced_record['developer'], newer)
                         self.assertEqual(store.get(task_id)['developer'], newer)
                     return original(_task_id, expected=expected, **changes)
                 snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
