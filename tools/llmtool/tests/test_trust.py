@@ -10,6 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from llmtool import trust
 from llmtool.trust import TrustError, _check_directory, load_trust, verify_repository
 
 
@@ -49,8 +50,11 @@ def _document(canonical, workspace, tasks):
 
 class TrustTest(unittest.TestCase):
     def setUp(self):
-        if os.name != "posix" or not hasattr(os, "getuid") or os.geteuid() == 0:
-            self.skipTest("trust loader requires an unprivileged POSIX identity")
+        if os.name != "posix" or not hasattr(os, "getuid"):
+            self.skipTest("trust loader requires a POSIX identity")
+        self.allow_root = os.geteuid() == 0
+        trust._TRUST_CACHE = None
+        self.addCleanup(setattr, trust, "_TRUST_CACHE", None)
         base = Path(tempfile.mkdtemp()).resolve()
         base.chmod(0o700)
         self.addCleanup(shutil.rmtree, base)
@@ -82,25 +86,53 @@ class TrustTest(unittest.TestCase):
 
     def _error(self, code, *, home=None):
         with self.assertRaises(TrustError) as caught:
-            load_trust(home=str(self.home) if home is None else home)
+            load_trust(home=str(self.home) if home is None else home,
+                       _allow_root=self.allow_root)
         self.assertEqual(caught.exception.code, code)
+        self.assertEqual(str(caught.exception), code)
 
     def test_valid_file_loads_frozen_config(self):
         self._write()
-        result = load_trust(home=str(self.home))
+        result = load_trust(home=str(self.home), _allow_root=self.allow_root)
         self.assertEqual(result.canonical_root, str(self.canonical))
         self.assertEqual(result.repository["slug"], "example/project")
         self.assertEqual(result.ci_trust["workflows"][0]["runner_names"], ("runner-1",))
         self.assertEqual(len(result.sha256), 64)
+        self.assertEqual(len(result.binding_sha256), 64)
         with self.assertRaises(TypeError):
             result.repository["slug"] = "changed/repo"
 
+    def test_default_load_is_frozen_once_per_process(self):
+        self._write()
+        trust._TRUST_CACHE = None
+        with mock.patch("llmtool.trust.pwd.getpwuid", return_value=mock.Mock(pw_dir=str(self.home))), \
+                mock.patch("llmtool.trust.os.open", wraps=os.open) as open_call:
+            first = load_trust(_allow_root=self.allow_root)
+            opens_after_first_load = open_call.call_count
+            second = load_trust(_allow_root=self.allow_root)
+        self.assertIs(first, second)
+        self.assertEqual(open_call.call_count, opens_after_first_load)
+
+    def test_binding_digest_is_stable_and_ignores_non_binding_fields(self):
+        self._write()
+        first = load_trust(home=str(self.home), _allow_root=self.allow_root)
+        changed = json.loads(json.dumps(self.data))
+        changed["ci_trust"]["not_run_checks"].append("Other CI")
+        self._write(changed)
+        second = load_trust(home=str(self.home), _allow_root=self.allow_root)
+        self.assertNotEqual(first.sha256, second.sha256)
+        self.assertEqual(first.binding_sha256, second.binding_sha256)
+
     def test_malformed_json_and_duplicate_keys_are_refused(self):
         for raw in (b"{", b'{"schema_version":1,"schema_version":1}',
-                    b'{"schema_version":NaN}', b"\xef\xbb\xbf{}", b"\xff"):
+                    b'{"schema_version":NaN}', b'{"schema_version":Infinity}',
+                    b'{"outer":{"value":1,"value":2}}', b"\xef\xbb\xbf{}", b"\xff",
+                    b"[" + b"[" * 1100 + b"0" + b"]" * 1100 + b"]"):
             with self.subTest(raw=raw):
                 self._write(raw=raw)
                 self._error("TRUST_MALFORMED")
+        self._write(raw=b"[]")
+        self._error("TRUST_SCHEMA_INVALID")
 
     def test_schema_fields_types_and_paths_are_strict(self):
         mutations = [
@@ -114,10 +146,21 @@ class TrustTest(unittest.TestCase):
             (lambda d: d["repository"].update(extra="x"), "TRUST_SCHEMA_INVALID"),
             (lambda d: d["repository"].update(slug="bad slug"), "TRUST_SCHEMA_INVALID"),
             (lambda d: d["repository"].update(allowed_origins=["https://github.com/else/repo.git"]), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["repository"].update(allowed_origins=["https://github.com/example/project.git"] * 2), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["repository"].update(allowed_origins=["https://github.com/example/project.git", "git@github.com:example/project.git", "https://github.com/example/project.git"]), "TRUST_SCHEMA_INVALID"),
             (lambda d: d["repository"]["approval_refs"].update(worker_dispatch_issue=True), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["repository"]["approval_refs"].update(reviewer_host_policy_issue=0), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["repository"]["approval_refs"].update(worker_dispatch_issue=10**9 + 1), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["repository"]["approval_refs"].update(retain_release_issues=[]), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["repository"]["approval_refs"].update(retain_release_issues=[289, 289]), "TRUST_SCHEMA_INVALID"),
             (lambda d: d["ci_trust"].update(github_actions_app_id=True), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["ci_trust"].update(mode="unknown"), "TRUST_CI_INVALID"),
             (lambda d: d["ci_trust"]["workflows"][0].update(runner_names="runner-1"), "TRUST_CI_INVALID"),
+            (lambda d: d["ci_trust"]["workflows"][0].update(runner_names=None), "TRUST_CI_INVALID"),
+            (lambda d: d["ci_trust"]["workflows"][0].update(runner_names=["runner?"]), "TRUST_CI_INVALID"),
             (lambda d: d["ci_trust"]["workflows"][0].update(path="workflow.yml"), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["ci_trust"]["workflows"][0].update(path=".github/workflows/../x.yml"), "TRUST_SCHEMA_INVALID"),
+            (lambda d: d["ci_trust"]["workflows"][1].update(code_check="check (code)"), "TRUST_CI_INVALID"),
             (lambda d: d["tools"].update(git="relative/git"), "TRUST_TOOL_INVALID"),
         ]
         for mutate, code in mutations:
@@ -135,6 +178,9 @@ class TrustTest(unittest.TestCase):
         path.symlink_to(self.canonical / "absent")
         self._error("TRUST_FILE_NOT_PRIVATE")
         path.unlink()
+        path.mkdir()
+        self._error("TRUST_FILE_NOT_PRIVATE")
+        path.rmdir()
         self._write(raw=b"x" * (16 * 1024 + 1))
         self._error("TRUST_TOO_LARGE")
         self._write(raw=b"")
@@ -142,8 +188,10 @@ class TrustTest(unittest.TestCase):
 
     def test_private_directory_mode_is_required(self):
         self._write()
-        self.trust_dir.chmod(0o750)
-        self._error("TRUST_DIRECTORY_NOT_PRIVATE")
+        for mode in (0o750, 0o755):
+            with self.subTest(mode=oct(mode)):
+                self.trust_dir.chmod(mode)
+                self._error("TRUST_DIRECTORY_NOT_PRIVATE")
 
     def test_trust_path_ancestors_do_not_follow_symlinks(self):
         self._write()
@@ -164,6 +212,15 @@ class TrustTest(unittest.TestCase):
                 _check_directory(123, os.geteuid(), "TRUST_ANCESTOR_INVALID")
         self.assertEqual(caught.exception.code, "TRUST_ANCESTOR_INVALID")
 
+    def test_trust_directory_owner_must_match(self):
+        info = os.stat_result((stat.S_IFDIR | 0o700, 0, 0, 1, os.geteuid() + 1,
+                               os.getegid() if hasattr(os, "getegid") else 0,
+                               0, 0, 0, 0))
+        with mock.patch("llmtool.trust.os.fstat", return_value=info):
+            with self.assertRaises(TrustError) as caught:
+                _check_directory(123, os.geteuid(), "TRUST_ANCESTOR_INVALID", private=True)
+        self.assertEqual(caught.exception.code, "TRUST_DIRECTORY_NOT_PRIVATE")
+
     def test_fifo_is_not_opened_as_a_trust_file(self):
         path = self.trust_dir / "trust.json"
         os.mkfifo(path, 0o600)
@@ -175,12 +232,12 @@ class TrustTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
                         "https://github.com/example/project.git"], check=True)
         self._write()
-        trust = load_trust(home=str(self.home))
-        self.assertTrue(verify_repository(trust))
+        trusted = load_trust(home=str(self.home), _allow_root=self.allow_root)
+        self.assertTrue(verify_repository(trusted))
         subprocess.run(["git", "-C", str(repo), "remote", "set-url", "origin",
                         "https://github.com/else/project.git"], check=True)
         with self.assertRaises(TrustError) as caught:
-            verify_repository(trust)
+            verify_repository(trusted)
         self.assertEqual(caught.exception.code, "TRUST_REPOSITORY_INVALID")
 
     def test_missing_file_and_trust_directory_have_exact_code(self):
@@ -203,7 +260,7 @@ class TrustTest(unittest.TestCase):
         raw += b" " * (16 * 1024 - len(raw))
         self.assertEqual(len(raw), 16 * 1024)
         self._write(raw=raw)
-        self.assertEqual(load_trust(home=str(self.home)).canonical_root, str(self.canonical))
+        self.assertEqual(load_trust(home=str(self.home), _allow_root=self.allow_root).canonical_root, str(self.canonical))
         self._write(raw=raw + b" ")
         self._error("TRUST_TOO_LARGE")
 
@@ -239,11 +296,18 @@ class TrustTest(unittest.TestCase):
         self._error("TRUST_HOME_INVALID", home=str(symlink_home))
         with mock.patch("llmtool.trust.pwd.getpwuid", side_effect=KeyError):
             with self.assertRaises(TrustError) as caught:
-                load_trust()
+                load_trust(_allow_root=self.allow_root)
         self.assertEqual(caught.exception.code, "TRUST_HOME_INVALID")
         with mock.patch("llmtool.trust.os.getuid", return_value=os.geteuid() + 1):
             self._error("TRUST_IDENTITY_INVALID")
+        with mock.patch("llmtool.trust.os.getuid", return_value=0), \
+                mock.patch("llmtool.trust.os.geteuid", return_value=0):
+            with self.assertRaises(TrustError) as caught:
+                load_trust(home=str(self.home))
+            self.assertEqual(caught.exception.code, "TRUST_IDENTITY_INVALID")
         with mock.patch("llmtool.trust.sys.platform", "win32"):
+            self._error("TRUST_UNSUPPORTED_PLATFORM")
+        with mock.patch("llmtool.trust.os.name", "nt"):
             self._error("TRUST_UNSUPPORTED_PLATFORM")
 
     def test_schema_matrix_exact_codes(self):
@@ -271,7 +335,16 @@ class TrustTest(unittest.TestCase):
             workflow["runner_names"] = None
             workflow["runner_labels"] = ["ubuntu-latest"]
         self._write(value)
-        self.assertEqual(load_trust(home=str(self.home)).ci_trust["mode"], "github-hosted")
+        self.assertEqual(load_trust(home=str(self.home), _allow_root=self.allow_root).ci_trust["mode"], "github-hosted")
+
+    def test_github_hosted_runner_names_must_be_null(self):
+        value = json.loads(json.dumps(self.data))
+        value["ci_trust"]["mode"] = "github-hosted"
+        for workflow in value["ci_trust"]["workflows"]:
+            workflow["runner_labels"] = ["ubuntu-latest"]
+        value["ci_trust"]["workflows"][0]["runner_names"] = ["runner-1"]
+        self._write(value)
+        self._error("TRUST_CI_INVALID")
 
     def test_path_invalid_and_overlap_have_exact_codes(self):
         value = json.loads(json.dumps(self.data))
@@ -279,6 +352,20 @@ class TrustTest(unittest.TestCase):
         self._write(value)
         self._error("TRUST_PATH_INVALID")
         value["canonical_root"] = str(self.workspace)
+        self._write(value)
+        self._error("TRUST_PATHS_OVERLAP")
+        value["canonical_root"] = str(self.workspace / "tasks")
+        self._write(value)
+        self._error("TRUST_PATHS_OVERLAP")
+        value["canonical_root"] = str(self.canonical)
+        value["workspace_root"] = str(self.canonical.parent)
+        self._write(value)
+        self._error("TRUST_PATHS_OVERLAP")
+        value["workspace_root"] = str(self.workspace)
+        value["tasks_root"] = str(self.canonical)
+        self._write(value)
+        self._error("TRUST_PATHS_OVERLAP")
+        value["tasks_root"] = str(self.home)
         self._write(value)
         self._error("TRUST_PATHS_OVERLAP")
 
@@ -309,18 +396,18 @@ class TrustTest(unittest.TestCase):
         subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", "-q",
                         str(linked)], check=True)
         self._write()
-        trust = load_trust(home=str(self.home))
-        linked_trust = trust.__class__(trust.schema_version, str(linked), trust.workspace_root,
-                                       trust.tasks_root, trust.repository, trust.ci_trust,
-                                       trust.tools, trust.sha256, trust.binding_sha256)
+        trusted = load_trust(home=str(self.home), _allow_root=self.allow_root)
+        linked_trust = trusted.__class__(trusted.schema_version, str(linked), trusted.workspace_root,
+                                         trusted.tasks_root, trusted.repository, trusted.ci_trust,
+                                         trusted.tools, trusted.sha256, trusted.binding_sha256)
         with self.assertRaises(TrustError) as caught:
             verify_repository(linked_trust)
         self.assertEqual(caught.exception.code, "TRUST_REPOSITORY_INVALID")
         nested = self.canonical / "nested"
         nested.mkdir()
-        nested_trust = trust.__class__(trust.schema_version, str(nested), trust.workspace_root,
-                                       trust.tasks_root, trust.repository, trust.ci_trust,
-                                       trust.tools, trust.sha256, trust.binding_sha256)
+        nested_trust = trusted.__class__(trusted.schema_version, str(nested), trusted.workspace_root,
+                                         trusted.tasks_root, trusted.repository, trusted.ci_trust,
+                                         trusted.tools, trusted.sha256, trusted.binding_sha256)
         with self.assertRaises(TrustError) as caught:
             verify_repository(nested_trust)
         self.assertEqual(caught.exception.code, "TRUST_REPOSITORY_INVALID")
