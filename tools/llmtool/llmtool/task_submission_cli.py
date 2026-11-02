@@ -182,24 +182,6 @@ def _run_background_delegate(args, *, provider, store):
             global _background_launch_notifier
             _background_launch_notifier = lambda pid: _background_send(
                 write_fd, {'kind': 'launched', 'pid': pid})
-            original_popen = subprocess.Popen
-            lifecycle_class = opencode_direct_developer.CLIProcessLifecycle
-            original_own = lifecycle_class.own
-            launched_pids = set()
-            if provider == 'opencode':
-                def observed_popen(argv, *popen_args, **popen_kwargs):
-                    process = original_popen(argv, *popen_args, **popen_kwargs)
-                    if (type(argv) in (list, tuple) and len(argv) > 1 and
-                            argv[1] == 'run'):
-                        launched_pids.add(process.pid)
-                    return process
-                def observed_own(lifecycle, process):
-                    result = original_own(lifecycle, process)
-                    if process.pid in launched_pids:
-                        _background_launch_notifier(process.pid)
-                    return result
-                subprocess.Popen = observed_popen
-                lifecycle_class.own = observed_own
             try:
                 with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
                     result = (run_task_codex_delegate(args, store=store)
@@ -211,8 +193,7 @@ def _run_background_delegate(args, *, provider, store):
                 _background_send(write_fd, {'kind': 'error', 'message': str(exc),
                     'error_type': type(exc).__name__, 'output': output.getvalue()})
             finally:
-                subprocess.Popen = original_popen
-                lifecycle_class.own = original_own
+                _background_launch_notifier = None
         except BaseException:
             try:
                 _background_send(write_fd, {'kind': 'error',
@@ -2385,10 +2366,21 @@ def run_task_opencode_delegate(args, *, store):
 
         def record_opencode_launch(pid, started_at, pgid):
             nonlocal expected_developer
+            if _background_launch_notifier is not None:
+                # Track the detached delegate through result persistence, not
+                # only the provider CLI whose exit precedes task completion.
+                pid = os.getpid()
+                started_at = codex_direct_developer.process_start_time(pid)
+                try:
+                    pgid = os.getpgid(pid)
+                except OSError:
+                    pgid = None
             saved = store.record_opencode_launch(
                 task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
                 start_time=started_at, pgid=pgid)
             expected_developer = copy.deepcopy(saved['developer'])
+            if _background_launch_notifier is not None:
+                _background_launch_notifier(pid)
             return saved
 
         result = opencode_direct_developer.run(
@@ -3502,6 +3494,53 @@ def run_task_delegate(args, *, store=None):
         if provider not in ('codex', 'opencode'):
             raise LLMToolError('--background is supported only for direct Codex and OpenCode Developers')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
+        worker_key = provider + '-developer'
+        dispatch_decision = worker_dispatch.evaluate(worker_key)
+        if not dispatch_decision.allowed:
+            raise LLMToolError(dispatch_decision.reason_code)
+        # Refuse a duplicate while the recorded detached writer is still live
+        # in the invoking process. Running this check in the forked delegate
+        # can lose the refusal when the D6 tree changes during the active run,
+        # and would also make the caller depend on a child startup response.
+        existing = store.get(args.task_id)
+        previous = existing.get('developer')
+        expected_profile = provider
+        if (type(previous) is dict and
+                previous.get('provider_profile') == expected_profile and
+                previous.get('state') == 'DEVELOPER_DISPATCHING'):
+            completion = existing.get('completion')
+            recorded_executor = (previous.get('executor_task_id') or
+                (completion.get('executor_task_id') if type(completion) is dict else None))
+            if recorded_executor != getattr(args, 'executor_task', None):
+                code = ('CODEX_LIVENESS_UNKNOWN' if provider == 'codex'
+                        else 'DIRECT_CHILD_LIVENESS_UNKNOWN')
+                raise LLMToolError(code)
+            liveness = (_codex_child_liveness(previous.get('execution'))
+                        if provider == 'codex' else
+                        _direct_child_liveness(previous.get('execution')))
+            if liveness == 'ALIVE':
+                code = ('CODEX_CHILD_STILL_RUNNING' if provider == 'codex'
+                        else 'DIRECT_CHILD_STILL_RUNNING')
+                raise LLMToolError(code)
+            if provider == 'codex' and liveness == 'UNKNOWN':
+                raise LLMToolError('CODEX_LIVENESS_UNKNOWN')
+            if provider == 'opencode' and liveness != 'DEAD':
+                raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
+        # Bind the requested D6 worktree before forking so an invalid binding
+        # is always a synchronous refusal and cannot start a detached child.
+        try:
+            registration, _snapshot = _delegate_d6_binding(args)
+        except Exception as exc:
+            if provider == 'codex':
+                raise LLMToolError(
+                    'Codex direct D6 binding failed (' +
+                    codex_direct_developer.adapter_error_code(exc, prefix='') +
+                    '): run it with the current directory at the registered D6 root '
+                    'of --executor-task, on its registered branch and HEAD, with a '
+                    'clean tree') from None
+            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+        if registration.task_id != getattr(args, 'executor_task', None):
+            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
         return _run_background_delegate(args, provider=provider, store=store)
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
