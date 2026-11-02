@@ -105,6 +105,10 @@ class FakeHandler(BaseHTTPRequestHandler):
             value["model"] = type(self).model_override
         if type(self).response_marker is not None:
             value["marker"] = type(self).response_marker
+        choices = value.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            message = choices[0].get("message", {})
+            choices[0].setdefault("finish_reason", "tool_calls" if message.get("tool_calls") else "stop")
         encoded = json.dumps(value).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -147,6 +151,16 @@ class MultiTurnFakeServerTests(unittest.TestCase):
             self.assertTrue(result["audit_verified"])
             self.assertEqual(result["caps"]["calls"], None)
             self.assertEqual(result["caps"]["total_tokens"], None)
+            diagnostics = result["diagnostics"]
+            self.assertTrue(diagnostics)
+            self.assertTrue(any(item["tool_calls"] and item["tool_calls"][0]["tool_name"] == TOOL_NAME
+                                and item["tool_calls"][0]["step"] == 1
+                                and item["tool_calls"][0]["id"] == "call_local_1"
+                                and item["finish_reason"] == "tool_calls" for item in diagnostics))
+            final = next(item["final_answer"] for item in reversed(diagnostics) if item["final_answer"])
+            self.assertTrue(final["expected_marker_found"])
+            self.assertIn(EXPECTED, final["excerpt"])
+            self.assertLessEqual(len(final["excerpt"]), 300)
             verifier = object.__new__(Audit)
             verifier.path = audit_path
             self.assertTrue(verifier.verify())
