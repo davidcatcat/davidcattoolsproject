@@ -252,6 +252,27 @@ class WidgetTests(Base):
         self.assertIn('provider: first', ui.conversation.text)
         self.factory.assert_not_called()
 
+    def test_pm_ghost_hints_render_after_the_cursor_without_editing_input(self):
+        seen = {}
+
+        def capture(ui, key):
+            screen = ui.app.renderer.last_rendered_screen
+            size = ui.app.output.get_size()
+            seen[key] = "".join(screen.data_buffer[y][x].char
+                                for y in range(size.rows) for x in range(size.columns))
+            seen[key + "_draft"] = ui.input.text
+
+        ui, _ = self.drive(['/pm ', lambda ui: capture(ui, 'subcommands'),
+                            'new ', lambda ui: capture(ui, 'new'),
+                            '--runtime', lambda ui: capture(ui, 'argument')])
+        self.assertIn('new | list [--all] | use N|SESSION', seen['subcommands'])
+        self.assertIn('[--runtime claude|codex] [--account NAME] [CWD]', seen['new'])
+        self.assertNotIn('[--runtime claude|codex]', seen['argument'])
+        self.assertEqual(seen['subcommands_draft'], '/pm ')
+        self.assertEqual(seen['new_draft'], '/pm new ')
+        self.assertEqual(seen['argument_draft'], '/pm new --runtime')
+        self.assertEqual(ui.input.text, '/pm new --runtime')
+
     def test_saved_history_is_identified_in_opening_text(self):
         history_path = self.temp_root / '.local/state/llmtool/chat/history.json'
         self.session = ChatSession(self.session.config, history_path=history_path)
@@ -3911,6 +3932,68 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(argv[argv.index('--session-id') + 1], created)
         ui, _ = self.drive(['/pm connect ' + created + ' ' + cwd + '\r', self.connected])
         self.assertEqual(ui.pm_target, (created, cwd))
+
+    def test_pm_list_is_compact_bounded_and_selectable_by_index_or_prefix(self):
+        repo_root = (self.temp_root / 'repo').resolve()
+        repo_root.mkdir()
+        self.api = type(self.api)(state_root=self.temp_root / 'pm-list-state',
+                                  environ={'HOME': str(self.temp_root)})
+        bindings = [self.api.create_dedicated(str(repo_root))]
+        for _index in range(11):
+            bindings.append(self.api.create_dedicated(str(repo_root)))
+        with patch.object(chat_tui_theme, 'repo_info',
+                          return_value=(str(repo_root), 'test-repo')):
+            ui, _ = self.drive(['/pm list\r'])
+        lines = [line for line in ui.conversation.text.splitlines() if line.startswith('  ')]
+        self.assertEqual(len([line for line in lines if line[2:3].isdigit()]), 10)
+        self.assertIn('… 2 more (/pm list --all)', ui.conversation.text)
+        self.assertIn('cwd .', ui.conversation.text)
+        self.assertNotIn('created ', ui.conversation.text)
+        self.assertNotIn(bindings[0]['native_session_id'], ui.conversation.text)
+        self.assertIn(bindings[-1]['native_session_id'][:8], lines[0])
+        self.assertRegex(lines[0], r'^  1\. claude-code · account default · [0-9a-f]{8} · [0-9]+[smhd] ago · cwd \.')
+        with patch.object(chat_tui_theme, 'repo_info',
+                          return_value=(str(repo_root), 'test-repo')):
+            ui, _ = self.drive(['/pm list --all\r'])
+        self.assertEqual(len([line for line in ui.conversation.text.splitlines()
+                              if re.match(r'^  \d+\.', line)]), 12)
+        ui, _ = self.drive(['/pm use 1\r'])
+        self.assertEqual(self.api.current_binding()['native_session_id'],
+                         bindings[-1]['native_session_id'])
+        first_id = bindings[-1]['native_session_id']
+        ui, _ = self.drive(['/pm use ' + first_id[:8] + '\r'])
+        self.assertEqual(self.api.current_binding()['native_session_id'], first_id)
+
+    def test_pm_accounts_guidance_named_checks_and_invalid_options(self):
+        ui, _ = self.drive(['/pm accounts\r', '/pm accounts --check\r'])
+        for text in ('accounts in ~/.config/llmtool/config.yaml', 'claude-NAME', 'codex-NAME',
+                     'built-in default Claude account is used meanwhile'):
+            self.assertIn(text, ui.conversation.text)
+
+        self.api.accounts = lambda: [{'name': 'claude-test', 'kind': 'claude', 'status': 'private'},
+                                     {'name': 'codex-test', 'kind': 'codex', 'status': 'private'}]
+        self.api.account_checks = lambda: [True, False]
+        ui, _ = self.drive(['/pm accounts\r'])
+        self.assertIn('claude-test · claude · folder private', ui.conversation.text)
+        self.assertIn('codex-test · codex · folder private', ui.conversation.text)
+        ui, _ = self.drive(['/pm accounts --check\r'])
+        self.assertIn('claude-test: logged in yes', ui.conversation.text)
+        self.assertIn('codex-test: logged in no', ui.conversation.text)
+
+        fake_count = len(self.fakes)
+        ui, _ = self.drive(['/pm new --acount name\r', '/pm accounts --acount\r',
+                            '/pm accounts --check extra\r', '/pm use --acount value\r'])
+        self.assertIn('unknown option --acount', ui.conversation.text)
+        self.assertIn('usage: /pm new [--runtime claude|codex]', ui.conversation.text)
+        self.assertEqual(ui.conversation.text.count('unknown option --acount'), 3)
+        self.assertNotIn('unknown option --check', ui.conversation.text)
+        self.assertIn('usage: /pm accounts [--check]', ui.conversation.text)
+        self.assertEqual(ui.conversation.text.count('usage: /pm accounts [--check]'), 2)
+        self.assertEqual(ui.conversation.text.count(
+            'usage: /pm new [--runtime claude|codex] [--account NAME] [CWD]'), 1)
+        self.assertEqual(ui.conversation.text.count('usage: /pm use N|SESSION'), 1)
+        self.assertNotIn('       /pm list [--all]', ui.conversation.text)
+        self.assertEqual(len(self.fakes), fake_count)
 
     def test_pm_paths_with_spaces_are_quoted_or_escaped_and_bad_quotes_are_explained(self):
         # W52 B3: text.split() broke "/private/tmp/tui qa" into two words.
