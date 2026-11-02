@@ -4405,7 +4405,11 @@ def run_task_direct_result_event(task_id, executor_task_id, *, store=None,
                 if developer.get('provider_profile') == 'codex' else 'LOCAL')
             callback = _direct_result_callback(
                 task, registration, developer['source_sha'], test_policy=policy)
-        except Exception:
+        except Exception as exc:
+            if (isinstance(exc, LLMToolError) and
+                    getattr(exc, 'completion_code', None) ==
+                    'REMOTE_TEST_CONFIG_INVALID'):
+                raise
             raise LLMToolError('direct Executor admission evidence is unavailable') from None
         developer_with_callback = dict(developer)
         developer_with_callback['direct_result_callback'] = callback
