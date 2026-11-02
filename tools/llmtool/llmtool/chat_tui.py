@@ -609,6 +609,7 @@ class ChatTUI:
         self.last_task_request = None
         self.last_task_id = None
         self.show_detail = False
+        self.detail_task_id = None
         # Task list: rows read from TaskStore on a reader thread (never busy/single-flight).
         self.show_list = False
         self.list_records = []
@@ -931,6 +932,12 @@ class ChatTUI:
                   & (detail_focused | list_focused | events_focused))
         def _dev_pane_copy_all(event):
             self.copy_pane_all()
+
+        # F2's selected Task detail and F3's list/detail copy the full selected Task ID.
+        @keys.add("c", filter=dev_pane_shown & ~picker_shown & ~searching
+                  & (detail_focused | list_focused))
+        def _dev_pane_copy_task_id(event):
+            self.copy_dev_task_id()
 
         @keys.add("up", filter=(detail_focused | events_focused) & dev_pane_shown)
         def _dev_pane_up(event):
@@ -2198,8 +2205,10 @@ class ChatTUI:
                          + stage + item["updated"][:20] + "  " + item["name"])
         return terminal_safe_text("\n".join(lines))
 
-    def set_detail(self, text):
-        self._set_read_text(self.detail_view, terminal_safe_text(text), keep=False)
+    def set_detail(self, text, task_id=None):
+        self.detail_task_id = task_id
+        safe_text = terminal_safe_text(text)
+        self._set_read_text(self.detail_view, safe_text, keep=False, highlight_lines=3)
         self.show_help = False
         self.toggle_detail(True)
 
@@ -2415,10 +2424,12 @@ class ChatTUI:
         try:
             record = TaskStore().get(view["task_id"])
         except Exception:
-            summary = "Status: " + chat_tui_task.UNKNOWN + " (TaskStore record unreadable)"
+            summary = ("\n".join(chat_tui_status.task_owner_summary(None)) + "\n\n"
+                       + "Status: " + chat_tui_task.UNKNOWN + " (TaskStore record unreadable)")
             extra = ""
         else:
-            summary = (chat_tui_status.summary_text(record) + "\n\n"
+            summary = ("\n".join(chat_tui_status.task_owner_summary(record)) + "\n\n"
+                       + chat_tui_status.summary_text(record) + "\n\n"
                        + chat_tui_events.timeline_text(record))
             extra = chat_tui_status.detail_extra(record)
         text = summary + "\n\n" + chat_tui_task.detail_text(view)
@@ -2491,7 +2502,8 @@ class ChatTUI:
                 self.last_task_id = chat_tui_task.value(view, "task_id")
             self.append(self.task_outcome_text(result))
             if result["detail"] is not None:
-                self.set_detail(result["detail"])
+                task_id = (chat_tui_task.value(view, "task_id") if view is not None else None)
+                self.set_detail(result["detail"], task_id=task_id)
         self._finish(render)
 
     def stream_text(self, text):
@@ -2752,7 +2764,17 @@ class ChatTUI:
 
     def _set_task_view(self, text):
         view = self.task_view
-        view.set_text(terminal_safe_text(text))
+        safe_text = terminal_safe_text(text)
+        view.set_text(safe_text)
+        if safe_text.startswith("Task 詳情（唯讀）—"):
+            start = safe_text.find("\n") + 1
+            if safe_text.startswith("狀態：", start):
+                view._clip_spans(0)
+                end = start
+                for _ in range(3):
+                    newline = safe_text.find("\n", end)
+                    end = len(safe_text) if newline < 0 else newline + 1
+                view._add_segments(start, [(safe_text[start:end], "role.pm")])
         view.top = view.top_offset = 0          # a detail is read from its first line
         view.following = view.unseen = False
 
@@ -2837,6 +2859,22 @@ class ChatTUI:
             self.task_view.copy(self.task_view_task_id)
         self.app.invalidate()
 
+    def copy_dev_task_id(self):
+        """W62 c: copy the selected Task ID in the F2 detail or F3 list/detail pane."""
+        view = self._mouse_view()
+        if view is self.list_view:
+            task_id = self.selected_task_id()
+        elif view is self.detail_view:
+            task_id = getattr(self, "detail_task_id", None)
+        else:
+            return
+        if not task_id or task_id in (chat_tui_task.UNKNOWN, chat_tui_task.NOT_AVAILABLE):
+            return
+        view.clear_selection()
+        self.copy_labels[id(view)] = "Task ID"
+        view.copy(task_id)
+        self.app.invalidate()
+
     def copy_task_detail(self):
         """W60 C: the whole detail (every line, not only the screen) as the plain text shown.
 
@@ -2883,10 +2921,16 @@ class ChatTUI:
             self.task_copy_label = None
         self.copy_labels.pop(id(view), None)
 
-    def _set_read_text(self, view, text, keep=True):
+    def _set_read_text(self, view, text, keep=True, highlight_lines=0):
         """Replace a developer pane's text (already terminal-safe); ``keep`` the place."""
         top_offset = view.top_offset
         view.set_tail(0, [(text, "text")])
+        if highlight_lines:
+            end = 0
+            for _ in range(highlight_lines):
+                newline = text.find("\n", end)
+                end = len(text) if newline < 0 else newline + 1
+            view._add_segments(0, [(text[:end], "role.pm")])
         if not keep:
             view.top = view.top_offset = 0
         else:
