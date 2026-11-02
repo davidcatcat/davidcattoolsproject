@@ -1,6 +1,6 @@
 # Formal verdict comment for `llmtool task complete`
 
-This format applies only when an llmtool Task's formal Claude review is checked by
+This format applies only when an llmtool Task's formal Claude or Codex review is checked by
 `llmtool task complete --reviewer-task --pr`, which parses it strictly
 (`tools/llmtool/llmtool/task_completion.py`). Every other PR records its review
 conclusion under the [Transition record](pm-continuation.md#transition-record) rule,

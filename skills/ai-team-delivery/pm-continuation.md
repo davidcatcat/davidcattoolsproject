@@ -35,7 +35,7 @@ Run tests locally on the Mac only for what EC2 cannot run: interactive TUI/PTY t
 These checks prevent refusals that cost a dispatch round (2026-11-02):
 
 - **One Task ID per work package.** A Task ID names exactly one D6. Once a D6 is retired, its Task ID cannot be reused (`D6_TASK_ALREADY_EXISTS`). A standing Owner assignment that covers several slices, such as the TUI slices, needs one registered Task ID per slice in `worker-dispatch.json`.
-- **PM-written Task text is screened.** Each acceptance item must be ≤ 512 bytes. Request, response and acceptance text must not contain credential-shaped text (a credential keyword followed by an assignment or a value), even when quoting a finding; describe it in words instead. Every write path must also be listed as a read path.
+- **PM-written Task text is screened.** The goal must be ≤ 512 bytes (`PM_RESPONSE_GOAL_TOO_LONG`); each acceptance item must be ≤ 512 bytes; acceptance must contain 1–16 items (`PM_RESPONSE_ACCEPTANCE_COUNT`). Limits count UTF-8 bytes, so a CJK character is typically about 3 bytes. Request, response and acceptance text must not contain credential-shaped text (a credential keyword followed by an assignment or a value), even when quoting a finding; describe it in words instead. Every write path must also be listed as a read path.
 - **Sync the canonical checkout before dispatch.** Run `git merge --ff-only origin/main` in the canonical root first; a stale install refuses with `LLMTOOL_SOURCE_STALE`.
 - **A branch update needs a new review.** After `gh pr update-branch`, or any merge of main into a PR, the verdict no longer covers the head. Request a merge-delta re-review of the new head before merging, unless the new head equals the reviewed head.
 
@@ -94,7 +94,7 @@ When an AI finds that it missed something, whether the AI or the Owner noticed i
 
 ### Reviewer and Developer quota continuation (Owner 2026-10-27)
 
-Quota exhaustion is a technical availability observation, not a dispatch-authority change. An `OWNER_ASSIGNMENT_ONLY` Worker (including AGY) cannot be assigned to a different Task, retried or used as fallback without the exact Owner binding. For quota-limited Developer Tasks, persist the exact Task/Session, checked-out SHA, partial artifacts, changed-file scope, tests and the last confirmed action; mark UNKNOWN operations as non-replayable. Confirm the previous Writer released its D6 lease before any reassignment. Never broaden a Task or silently buy a fallback.
+Quota exhaustion is a technical availability observation, not a dispatch-authority change. An `OWNER_ASSIGNMENT_ONLY` Worker cannot be assigned to a different Task, retried or used as fallback without the exact Owner binding. For quota-limited Developer Tasks, persist the exact Task/Session, checked-out SHA, partial artifacts, changed-file scope, tests and the last confirmed action; mark UNKNOWN operations as non-replayable. Confirm the previous Writer released its D6 lease before any reassignment. Never broaden a Task or silently buy a fallback.
 
 If a formal Reviewer is unavailable, do **not** replace it with an unapproved model or treat Developer pre-review as acceptance. Mark only the affected Reviewer handoff WAITING with recovery condition, let other independent work continue, and request an Owner decision only if an exception to the [cross-family Reviewer pairing](owner-escalation.md) is actually needed. No merged PR may rely on a missing formal verdict.
 
@@ -172,4 +172,4 @@ Confirm the receipt within 2 minutes of dispatch. Until then record the dispatch
 - notification deduplication and replay protection;
 - confirming Worker status.
 
-Editing documents does not deliver a runtime capability. The [Roadmap](../../docs/history/llmtool-roadmap-archive-20261028.md#a11c-work-packages-and-continuation-runtime-gaps) tracks which runtime handoffs are implemented and which are still gaps. Until a handoff is implemented and verified, the PM performs that step manually. The PM never reports a manual step as automatic.
+Editing documents does not deliver a runtime capability. Current implementation status is tracked in the [Roadmap](../../tools/llmtool/ROADMAP.md) or the relevant Task/Issue. Until a handoff is implemented and verified, the PM performs that step manually. The PM never reports a manual step as automatic.
