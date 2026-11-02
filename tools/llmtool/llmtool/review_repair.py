@@ -328,7 +328,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         'head_sha': packet['failed_head'], 'version': packet_version,
         'attempt': attempt, 'family': family, 'state': 'CLAIMED',
         'repair_task_id': repair_task_id,
-        'comment_id': packet.get('verdict_comment_id'), 'packet_sha256': packet_sha,
+        'comment_id': (None if packet_version == 0 else packet.get('verdict_comment_id')),
+        'packet_sha256': packet_sha,
         'claimed_at': _now(),
     }
     next_claims = list(claims)
