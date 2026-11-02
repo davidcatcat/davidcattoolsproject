@@ -338,7 +338,7 @@ def _argv(executable, root, model, effort, *, pycache_prefix, command_path=None)
                 for entry in command_path.split(':'))):
         _fail('CODEX_ENV_INVALID')
     args = [executable, '--no-daemon', '--ask-for-approval', 'never', 'exec',
-            '--ignore-user-config', '--ignore-rules', '--ephemeral', '--strict-config',
+            '--ignore-user-config', '--ignore-rules', '--strict-config',
             '--color', 'never', '--json', '--model', model,
             '-c', 'model_reasoning_effort=' + effort,
             '--sandbox', 'workspace-write', '--cd', str(root), '-']
