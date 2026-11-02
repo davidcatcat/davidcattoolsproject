@@ -287,11 +287,6 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile in ('codex', 'claude') and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
-    decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), task_id)
-    if not decision.allowed:
-        _refuse(decision.reason_code)
-
     if remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
                                        pr_number=pr_number, github_get=github_get)
@@ -300,6 +295,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                       pr_number=pr_number, receipt=remote_test_receipt)
     if _current_d6_head(task, executor_task, current_head) != packet['failed_head']:
         _refuse('REPAIR_HEAD_MOVED')
+    decision = worker_dispatch.evaluate(
+        worker, developer.get('owner_assignment_ref'), task_id)
+    if not decision.allowed:
+        _refuse(decision.reason_code)
     family = f'pr-{pr_number}' if family is None else family
     if type(family) is not str or re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None:
         _refuse('REPAIR_FAMILY_INVALID')
@@ -396,6 +395,9 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         adapter = lambda **request: _delegate_repair(
             **request, delegate=delegate_callable, store=store)
     try:
+        # Revalidate after recording so a D6 moved during repair Task creation
+        # cannot redirect the provider; the pre-write head check above ensures
+        # unregistered or already-moved worktrees consume no repair attempt.
         result = adapter(task=repair_task, developer=developer, packet=packet,
                          executor_task=executor_task, provider_profile=profile,
                          model=developer.get('model'))

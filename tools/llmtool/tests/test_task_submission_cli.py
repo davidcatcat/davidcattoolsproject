@@ -958,6 +958,21 @@ class TaskSubmissionCLITests(unittest.TestCase):
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
 
+    def test_run_task_delegate_binds_explicit_registered_root_outside_process_cwd(self):
+        task = self._pm_task_with_opencode_assignment()
+        args = self._opencode_delegate_args(task, cwd=str(self.executor_root))
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                              'CLI_REPORTED', 'a' * 64, 12, 'CONFIRMED',
+                              'opencode v2.0.32', 10, 1, 'b' * 64)
+        output = io.StringIO()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch.object(submission_cli.os, 'getcwd', return_value=str(self.home)), \
+                patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                      return_value=result) as invoke, redirect_stdout(output):
+            code = run_task_delegate(args)
+        self.assertEqual(code, 1, output.getvalue())
+        self.assertEqual(invoke.call_args.kwargs['root'], str(self.executor_root))
+
     def test_opencode_direct_callback_accepts_docs_only_and_blocks_mixed_unregistered(self):
         for mixed in (False, True):
             with self.subTest(mixed=mixed):

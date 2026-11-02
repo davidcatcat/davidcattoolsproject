@@ -2143,9 +2143,7 @@ def run_task_opencode_delegate(args, *, store):
             raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
-    snapshot = task_completion.collect_git_snapshot(os.getcwd())
-    registration, snapshot = task_completion.bind_executor_task(
-        args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+    registration, snapshot = _delegate_d6_binding(args)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -2506,13 +2504,11 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
         if (type(assignment) is not dict or assignment.get('route') != 'agy' or
                 assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
             raise LLMToolError('no matching low-risk AGY recommendation from the selected PM route')
+    registration, snapshot = _delegate_d6_binding(args)
     # A fresh Owner decision is required before creating the durable assignment.
     decision = worker_dispatch.evaluate('agy', owner_ref, task['task_id'])
     if not decision.allowed:
         raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
-    snapshot = task_completion.collect_git_snapshot(os.getcwd())
-    registration, snapshot = task_completion.bind_executor_task(
-        args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
         raise LLMToolError('developer acceptance scope is invalid')
@@ -2787,6 +2783,26 @@ def _codex_child_liveness(execution):
     return 'ALIVE'
 
 
+def _delegate_d6_binding(args):
+    """Bind a delegate to its requested D6 root, defaulting to the CLI cwd."""
+    requested_root = getattr(args, 'cwd', None)
+    explicit_root = requested_root is not None
+    if not explicit_root:
+        requested_root = os.getcwd()
+    if not isinstance(requested_root, (str, os.PathLike)):
+        raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+    try:
+        snapshot = task_completion.collect_git_snapshot(requested_root)
+        registration, snapshot = task_completion.bind_executor_task(
+            args.executor_task, expected_common_dir=snapshot.common_dir,
+            root=snapshot.root)
+    except Exception:
+        if explicit_root:
+            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+        raise
+    return registration, snapshot
+
+
 def run_task_codex_delegate(args, *, store):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
@@ -2795,10 +2811,7 @@ def run_task_codex_delegate(args, *, store):
             previous_developer.get('provider_profile') == 'codex' and
             previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
         try:
-            current_snapshot = task_completion.collect_git_snapshot(os.getcwd())
-            current_registration, _ = task_completion.bind_executor_task(
-                args.executor_task, expected_common_dir=current_snapshot.common_dir,
-                root=current_snapshot.root)
+            current_registration, _ = _delegate_d6_binding(args)
         except Exception:
             raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
         if (previous_developer.get('executor_task_id') != current_registration.task_id or
@@ -2845,9 +2858,7 @@ def run_task_codex_delegate(args, *, store):
         run_id=task.get('run_id'),
         contract_digest=task.get('task_binding', {}).get('contract_digest'))
     try:
-        snapshot = task_completion.collect_git_snapshot(os.getcwd())
-        registration, snapshot = task_completion.bind_executor_task(
-            args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+        registration, snapshot = _delegate_d6_binding(args)
     except LLMToolError as exc:
         raise LLMToolError(
             'Codex direct D6 binding failed (' + codex_direct_developer.adapter_error_code(
@@ -3263,9 +3274,7 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('no validated low-risk recommendation from the selected PM route')
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
-    snapshot = task_completion.collect_git_snapshot(os.getcwd())
-    registration, snapshot = task_completion.bind_executor_task(
-        args.executor_task, expected_common_dir=snapshot.common_dir, root=snapshot.root)
+    registration, snapshot = _delegate_d6_binding(args)
     source_sha = snapshot.head
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
