@@ -24,6 +24,8 @@ class FakeHandler(BaseHTTPRequestHandler):
     response_marker = None
     call_id_mode = None
     text_step_mode = None
+    s4_followup_mode = None
+    request_bodies = []
 
     def log_message(self, format_string, *args):
         return
@@ -40,6 +42,7 @@ class FakeHandler(BaseHTTPRequestHandler):
             return
         size = int(self.headers.get("Content-Length", "0"))
         body = json.loads(self.rfile.read(size))
+        type(self).request_bodies.append(body)
         messages = body.get("messages", [])
         last = messages[-1] if messages else {}
         text_steps = sum(1 for item in messages if item.get("role") == "assistant" and
@@ -59,6 +62,15 @@ class FakeHandler(BaseHTTPRequestHandler):
         tool_steps = sum(1 for item in messages if item.get("role") == "tool")
         is_s3 = "Scenario S3:" in str(messages[0].get("content", ""))
         is_s4 = "Scenario S4:" in str(messages[0].get("content", ""))
+        if is_s4 and last.get("role") == "tool" and type(self).s4_followup_mode == "length":
+            self._json({"model": MODEL, "choices": [{"message": {"content": "partial"},
+                                                       "finish_reason": "length"}]})
+            return
+        if is_s4 and last.get("role") == "tool" and type(self).s4_followup_mode == "continue":
+            call = {"id": "call_local_2", "type": "function", "function": {
+                "name": TOOL_NAME, "arguments": json.dumps({"step": 2, "summary": "Inspected synthetic file 2"})}}
+            self._json({"model": MODEL, "choices": [{"message": {"content": None, "tool_calls": [call]}}]})
+            return
         if last.get("role") == "tool" and (tool_steps >= 10 or (is_s3 and tool_steps >= 2) or is_s4):
             payload = {"model": MODEL, "choices": [{"message": {"content": EXPECTED}}],
                        "usage": {"prompt_tokens": 12, "completion_tokens":
@@ -125,6 +137,8 @@ class MultiTurnFakeServerTests(unittest.TestCase):
         FakeHandler.response_marker = None
         FakeHandler.call_id_mode = None
         FakeHandler.text_step_mode = None
+        FakeHandler.s4_followup_mode = None
+        FakeHandler.request_bodies = []
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -139,6 +153,8 @@ class MultiTurnFakeServerTests(unittest.TestCase):
         FakeHandler.response_marker = None
         FakeHandler.call_id_mode = None
         FakeHandler.text_step_mode = None
+        FakeHandler.s4_followup_mode = None
+        FakeHandler.request_bodies = []
 
     def test_scenarios_and_audit_with_loopback_server(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -240,6 +256,47 @@ class MultiTurnFakeServerTests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 multiturn.main(["--owner-authorization-url",
                                 "https://github.com/example/project/issues/1#issuecomment-2"])
+
+    def test_live_gate_still_requires_authorization_url(self):
+        with self.assertRaises(SystemExit):
+            multiturn.main(["--live"])
+
+    def test_invalid_cli_flags_are_rejected_by_argparse(self):
+        for args in (("--max-output-tokens", "0"), ("--max-output-tokens", "65537"),
+                     ("--thinking", "maybe")):
+            with self.subTest(args=args), self.assertRaises(SystemExit):
+                multiturn.main(list(args))
+
+    def test_s4_accepts_valid_step_two_continuation(self):
+        FakeHandler.s4_followup_mode = "continue"
+        with tempfile.TemporaryDirectory() as directory:
+            client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+            result = _run(client, Path(directory) / "audit.jsonl", MODEL)
+            scenario = next(item for item in result["scenarios"] if item["id"] == "S4")
+            self.assertTrue(scenario["passed"])
+            self.assertEqual(scenario["detail"], "STREAM_ROUND_TRIP_CONTINUED")
+
+    def test_s4_length_is_reported_as_output_truncated(self):
+        FakeHandler.s4_followup_mode = "length"
+        with tempfile.TemporaryDirectory() as directory:
+            client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+            result = _run(client, Path(directory) / "audit.jsonl", MODEL)
+            scenario = next(item for item in result["scenarios"] if item["id"] == "S4")
+            self.assertFalse(scenario["passed"])
+            self.assertEqual(scenario["detail"], "OUTPUT_TRUNCATED")
+
+    def test_request_flags_apply_to_every_scenario_request(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+            result = _run(client, Path(directory) / "audit.jsonl", MODEL,
+                          max_output_tokens=77, thinking="off")
+            self.assertTrue(FakeHandler.request_bodies)
+            self.assertTrue(all(body["max_tokens"] == 77 for body in FakeHandler.request_bodies))
+            for body in FakeHandler.request_bodies:
+                is_s5 = "Scenario S5:" in str(body.get("messages", [{}])[0].get("content", ""))
+                self.assertEqual(body.get("chat_template_kwargs"), {"enable_thinking": is_s5})
+            self.assertEqual(result["caps"]["max_output_tokens"], 77)
+            self.assertEqual(result["caps"]["thinking"], "off")
 
     def test_optional_call_limit_stops_and_scores_active_scenario(self):
         with tempfile.TemporaryDirectory() as directory:
