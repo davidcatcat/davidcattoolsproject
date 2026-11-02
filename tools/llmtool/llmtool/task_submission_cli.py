@@ -560,6 +560,12 @@ def _task_view(record):
 
 
 def add_task_submission_parsers(actions):
+    adopt = actions.add_parser(
+        'adopt', help='Adopt open Tasks from an ended PM session')
+    adopt.add_argument('--from-pm-session', required=True,
+                       help='old native PM session UUID or stored pm- session ID')
+    adopt.add_argument('--to-pm-session', required=True,
+                       help='new native PM session UUID or stored pm- session ID')
     status = actions.add_parser('status', help='Read a bounded summary of durable Tasks')
     status.add_argument('--pm-session', help='filter by stored PM session ID')
     status.add_argument('--limit', type=int, default=20, help='maximum Tasks to list (1-200)')
@@ -731,6 +737,30 @@ def run_task_brief(args, *, store=None, stdout=None):
     stream = sys.stdout if stdout is None else stdout
     stream.write(format_task_brief(brief, as_json=args.json) + '\n')
     stream.flush()
+    return 0
+
+
+def run_task_adopt(args, *, store=None, stdout=None):
+    """Move open Tasks to a replacement active PM session, with code-only refusals."""
+    store = TaskStore() if store is None else store
+    stream = sys.stdout if stdout is None else stdout
+    old_value = args.from_pm_session
+    try:
+        old_key = active_pm_inbox.pm_session_key(old_value)
+        new_key = active_pm_inbox.pm_session_key(args.to_pm_session)
+        old_native_id = old_value[3:] if old_value.startswith('pm-') else old_value
+        result = active_pm_inbox.adopt_pm_session(
+            store, old_key, new_key, old_native_id=old_native_id, cwd=os.getcwd())
+    except LLMToolError as exc:
+        code = getattr(exc, 'task_store_error_code', None)
+        if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+            code = ('PM_SESSION_ADOPTION_KEY_INVALID'
+                    if 'pm_session_key' in str(exc) or
+                    'PM session must be a native session UUID' in str(exc)
+                    else 'PM_SESSION_ADOPTION_FAILED')
+        _print({'code': code, 'moved': [], 'skipped': []}, stdout=stream)
+        return 1
+    _print(result, stdout=stream)
     return 0
 
 

@@ -3,9 +3,14 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from llmtool import cli, review_repair, run_budget, task_submission_cli
+from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore
 
 TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
 EXECUTOR, PR, EVENT_ID = 'executor-d6', 42, 'e' * 32
@@ -145,6 +150,86 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(self.store.get(TASK)['review_repair_claims'][0]['state'], 'DISPATCHED')
         self.assertEqual(self.store.get(TASK)['review_repair_claims'][0]['repair_task_id'],
                          self.calls[0]['task']['task_id'])
+
+    def test_remote_test_fail_receipt_enters_real_repair_path(self):
+        receipt = {
+            'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
+            'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_remote'],
+            'failure_excerpt': 'FAIL: test_remote\nAssertionError',
+        }
+        receipt['receipt_digest'] = hashlib.sha256(json.dumps(
+            receipt, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+        dispatched = []
+        def adapter(**request):
+            dispatched.append(request)
+            return {'status': 'DISPATCHED', 'head': HEAD}
+        result = self.dispatch(
+            remote_test_receipt=receipt, dispatch_adapter=adapter,
+            repair_task_recorder=lambda **request: {
+                'task_id': request['repair_task_id'],
+                'pm_assignment': {'acceptance': ['Repair the reported issue.']},
+            })
+        packet = dispatched[0]['packet']
+        self.assertEqual(result['next_action'], 'review-dispatch --version 1')
+        self.assertEqual(packet['failed_head'], HEAD)
+        self.assertEqual(packet['version'], 0)
+        self.assertEqual(packet['verdict_comment_id'], 0)
+        self.assertEqual(packet['findings_count'], 0)
+        self.assertEqual(packet['reviewer_text_excerpt_untrusted_data'],
+                         'FAIL: test_remote\nAssertionError')
+        self.assertEqual(task_submission_cli._validate_repair_packet(packet), packet)
+        claim = self.store.get(TASK)['review_repair_claims'][0]
+        self.assertIsNone(claim['comment_id'])
+        self.assertEqual(claim['version'], 1)
+
+    def test_remote_test_repair_claim_passes_real_task_store_validation(self):
+        # A record-pm Task is sufficient to exercise the persisted claim schema.
+        from test_active_pm_inbox import ActivePMInboxTests, _RESPONSE
+
+        fixture = ActivePMInboxTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+        self.store = TaskStore(Path(self.temp.name).resolve())
+        with redirect_stdout(StringIO()):
+            task = task_submission_cli.run_task_record_pm(
+                Namespace(stdin_json=True, pm_session_id=fixture.session,
+                          pm_runtime='claude-code', pm_cwd=str(fixture.pm_cwd)),
+                store=self.store,
+                input_stream=StringIO(json.dumps({
+                    'request': 'Bounded non-sensitive remote-test repair fixture.',
+                    'response': _RESPONSE})),
+                return_record=True, task_id=TASK)
+        packet = {
+            'task': TASK, 'pr': PR, 'executor_task': EXECUTOR,
+            'failed_head': HEAD, 'version': 0, 'verdict_comment_id': 0,
+            'findings_count': 0,
+            'reviewer_text_excerpt_untrusted_data':
+                'FAIL: test_remote\nAssertionError',
+        }
+        claim = {
+            'executor_task': EXECUTOR, 'pr': PR, 'head_sha': HEAD,
+            'version': 1, 'attempt': 1, 'family': f'pr-{PR}',
+            'state': 'CLAIMED', 'repair_task_id': '1' * 32,
+            'comment_id': None,
+            'packet_sha256': hashlib.sha256(json.dumps(
+                packet, ensure_ascii=True, sort_keys=True,
+                separators=(',', ':')).encode('utf-8')).hexdigest(),
+            'claimed_at': '2026-10-27T01:00:00Z',
+        }
+        saved = self.store.compare_and_update(
+            TASK, expected={'record_sha256': task['record_sha256']},
+            review_repair_claims=[claim])
+        self.assertEqual(saved['review_repair_claims'], [claim])
+
+        invalid = dict(claim, version=0, attempt=2, repair_task_id='2' * 32,
+                       claimed_at='2026-10-27T01:01:00Z')
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.compare_and_update(
+                TASK, expected={'record_sha256': saved['record_sha256']},
+                review_repair_claims=[claim, invalid])
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'REVIEW_REPAIR_CLAIM_INVALID')
 
     def test_replay_after_restart_does_not_dispatch_twice(self):
         self.dispatch()

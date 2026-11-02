@@ -41,6 +41,7 @@ from .trust_cli import add_trust_parser, run_trust
 TASK_ACTIONS = {
     'abandon': ('run_task_abandon', False),
     'ack': ('run_task_ack', False),
+    'adopt': ('run_task_adopt', False),
     'advance': ('run_task_advance', False),
     'brief': ('run_task_brief', False),
     'claude-result': ('run_task_claude_result', False),
