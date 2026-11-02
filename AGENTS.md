@@ -10,7 +10,7 @@
   - Codex Developer (`gpt-6-luna`, high reasoning effort) remains a Developer route and self-reviews and self-repairs before hand-back.
   - OpenCode Developer remains a normal Developer route; the PM selects it from currently available Workers.
   - Claude Developer / UI Agent (`claude-developer`) is a normal Developer route the PM may dispatch (Owner 2026-10-28), under the same gates.
-  - OpenCode and individually Owner-assigned AGY direct CLI work do not require Host D4/G3/M2, but require a verified D6 task worktree and actual provider CLI, session and permission checks.
+  - OpenCode and AGY direct CLI work are PM-selected routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; AGY is `ALLOWED` since 2026-10-31 and needs no individual Owner assignment. Neither requires Host D4/G3/M2. Both require a verified D6 task worktree and actual provider CLI, model, session and permission checks.
   - The first Mac OpenCode CLI launch may require the Owner to start the prepared session once; the Owner does not handle routine dispatch.
 
 - **Worker dispatch:**
@@ -31,9 +31,9 @@
   - Keep credential, secret, personal/customer-data and restricted-log protection unchanged. Do not infer containment from prompt text or a resident TUI PID.
 
 - **AGY direct Developer:**
-  - AGY follows its [worker-dispatch.json](tools/llmtool/worker-dispatch.json) row: `ALLOWED` permits PM-selected dispatch under Owner #289 c6506062108; `OWNER_ASSIGNMENT_ONLY` requires the exact recorded Owner Task assignment. No automatic retry or fallback.
-  - When authorized, direct AGY CLI work may use the OpenCode-style registered D6 worktree path without waiting for Host D4/G3/M2. Validate AGY authentication, actual model, executable/session semantics, least-privilege writable allowlist, remaining quota and required reviews before execution.
-  - `ALLOWED` or an assigned policy result alone does not prove a working adapter.
+  - AGY follows its [worker-dispatch.json](tools/llmtool/worker-dispatch.json) row. The current `ALLOWED` entry (since 2026-10-31) permits PM-selected dispatch, subject to the normal scope, privacy, budget, live-availability and review gates. No automatic retry or fallback.
+  - As with OpenCode, direct AGY CLI work uses a verified registered D6 task worktree and requires authentication, actual model, executable/session semantics, least-privilege writable allowlist and remaining-quota checks. It does not wait for Host D4/G3/M2. A formal Reviewer must be independent and from another model family.
+  - `ALLOWED` alone does not prove a working adapter.
   - On quota exhaustion, record bounded Task progress, SHA, changed files, unfinished checks and state (including UNKNOWN); release Writer ownership before reassignment. Never replay uncertain mutations or buy a fallback.
 
 - **Company LLM Developer:**

@@ -21,7 +21,7 @@ This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../
 | Root/sudo or macOS core/system changes | Ask for explicit approval before execution, even if a technical fix would be convenient. |
 | Formal GO / LIMITED GO / NO-GO and major deployment or release decision | Owner decides based on evidence; technical PASS alone is not release approval. |
 | Change of formal Reviewer pairing due to quota or other unavailability | Owner authorization is required for the particular eligible cross-family pairing. No same-family or self-review; absence of a qualified Reviewer leaves the affected review waiting. |
-| Assignment of `OWNER_ASSIGNMENT_ONLY` Workers, including AGY | Require the specific Owner Task assignment and exact policy binding before dispatch; a chat suggestion or healthy provider alone does not authorize work. |
+| Assignment of `OWNER_ASSIGNMENT_ONLY` Workers | Require the specific Owner Task assignment and exact policy binding before dispatch; a chat suggestion or healthy provider alone does not authorize work. AGY is currently `ALLOWED` for PM-selected dispatch under its worker-dispatch entry. |
 
 ### macOS core/system boundary
 

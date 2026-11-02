@@ -9,8 +9,8 @@ Status: Owner-approved **role / resource inventory**, 2026-10-27. This is not li
 | Owner | Human product owner | [Owner authority matrix](../../skills/ai-team-delivery/owner-escalation.md) | Product, priority, material cost/egress/risk, selected Developer tasks and Reviewer-pairing exceptions. |
 | Integrator / PM | Claude PM (role, not a dispatch-map Worker key) | [AGENTS.md](../../AGENTS.md) | Plan, orchestrate, continue/recover, report, integrate; cannot bypass review or approve its own change. |
 | Developer | `codex-developer` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | Normal authorized Developer; high reasoning model route defined in AGENTS. |
-| Developer | `opencode-developer` | Worker dispatch | **PAUSED** (Owner 2026-10-27); do not dispatch until the Owner re-enables it. |
-| Developer | `agy` | Worker dispatch | **OWNER_ASSIGNMENT_ONLY**; direct CLI D6 candidate, not proven fully integrated; quota-limited. |
+| Developer | `opencode-developer` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | **ALLOWED** (Owner 2026-11-02); PM-selected direct route, free model only; registered D6, task-local permissions and independent review required; no paid fallback. |
+| Developer | `agy` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | **ALLOWED** (Owner 2026-10-31); PM-selected direct route, no individual Owner assignment or Host D4/G3/M2; verified D6 and auth/model/session/permission/quota checks, independent cross-family review and no automatic retry or paid fallback. |
 | Developer | `claude-developer` | Worker dispatch | **ALLOWED** (Owner 2026-10-28); per-Task Owner assignments remain recorded in `worker-dispatch.json`. |
 | Developer proposal route | `company-gw` | Worker dispatch + [company delegation](../../skills/company-llm-delegation/SKILL.md) | Low-risk via llmtool only; no shell/filesystem/Git authority; external input screened. |
 | Formal reviewer | `claude-reviewer` | Worker dispatch + [formal verdict](../../skills/ai-team-delivery/formal-verdict.md) | Separate read-only D6 reviewer for eligible cross-family Developer Tasks. |
@@ -32,7 +32,7 @@ See [execution-resources.json](../../tools/llmtool/execution-resources.json) for
 ## Routing and operational boundaries
 
 - PM picks an authorized model/Worker for a bounded Task, consults live technical availability and uses the Python dispatch gate at every handoff. The gate returns a compact permit/deny reason and policy digest; do not paste the entire JSON to an LLM every time.
-- PM may use a direct CLI D6 route for OpenCode or **specifically Owner-assigned** AGY without waiting on Host D4/G3/M2. Both still require independent review, exact-head CI and actual per-provider execution receipts.
+- PM may use a direct CLI D6 route for OpenCode or AGY under their current worker-dispatch entries without waiting on Host D4/G3/M2. Both still require independent review, exact-head CI and actual per-provider execution receipts.
 - When free quotas expire, record confirmed progress and unfinished steps. Protect uncommitted changes and single Writer lease; do not replay an UNKNOWN mutation. PM continues unrelated tasks and uses only authorized qualified fallback routes.
 - Current EC2 runners are CI executors under guarded GitHub workflows, **not** blanket remote-SSH code execution authorization. General SSH execution, dirty-worktree transfer and live Token savings require separate design, source screening and evidence; [EC2 work inventory](../ci/ec2-deterministic-work-inventory-20261027.md).
 - One GitHub login may post Developer and Reviewer records; a login alone is **not** independent review evidence. Require distinct read-only Reviewer Session, D6 record, exact-SHA verdict and merge gate. A second personal GitHub account is **not required** by current process; GitHub App integration is optional future work, not approved implementation.
