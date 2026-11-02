@@ -5,7 +5,9 @@ from unittest.mock import ANY
 
 import yaml
 
-from llmtool.config import inspect_config, resolve_config, user_config_path
+from llmtool.config import (
+    DEFAULTS, _apply_user, _read_yaml, inspect_config, resolve_config, user_config_path,
+)
 from llmtool.errors import LLMToolError
 from llmtool.role_config import resolve_role
 
@@ -44,6 +46,13 @@ class RoleConfigTests(unittest.TestCase):
         self.save({"accounts": self.account_config()["accounts"],
                    "roles": {"pm": {"account": "work", "model": "role-model", "effort": "low"}},
                    "pm_runtime": {"claude_config_dir": str(self.account_dir)}})
+        loaded = DEFAULTS.copy()
+        _apply_user(loaded, _read_yaml(user_config_path(self.home), "user config"))
+        self.assertEqual(loaded["roles"]["pm"]["model"], "role-model")
+        self.assertEqual(loaded["accounts"]["work"]["config_dir"], str(self.account_dir))
+        role_only = resolve_role("pm", environ={}, home=self.home)
+        self.assertEqual((role_only["account"], role_only["model"], role_only["source"]),
+                         ("work", "role-model", "roles"))
         env = {"LLMTOOL_ROLE_MODEL": "env-model", "LLMTOOL_ROLE_EFFORT": "medium"}
         cli = {"model": "cli-model", "effort": "max"}
         before = self.user.read_bytes()
@@ -54,8 +63,8 @@ class RoleConfigTests(unittest.TestCase):
         env_only = resolve_role("pm", environ=env, home=self.home)
         self.assertEqual((env_only["model"], env_only["effort"], env_only["source"]),
                          ("env-model", "medium", "env"))
-        role_only = resolve_role("reviewer", environ={}, home=self.home)
-        self.assertEqual((role_only["account"], role_only["model"], role_only["source"]),
+        reviewer = resolve_role("reviewer", environ={}, home=self.home)
+        self.assertEqual((reviewer["account"], reviewer["model"], reviewer["source"]),
                          ("work", "sonnet", "roles"))
 
     def test_project_config_cannot_set_roles_or_accounts(self):

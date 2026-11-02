@@ -161,6 +161,13 @@ def _apply_user(config, fragment):
     if "accounts" in fragment or "roles" in fragment:
         from .role_config import validate_role_config
         validate_role_config(fragment)
+        # Keep the user-only role data in the validated configuration view so
+        # consumers resolve it from the same explicit user-config load as the
+        # rest of llmtool's settings. Project config is still rejected below.
+        if "accounts" in fragment:
+            config["accounts"] = copy.deepcopy(fragment["accounts"])
+        if "roles" in fragment:
+            config["roles"] = copy.deepcopy(fragment["roles"])
     if "repository" in fragment:
         _validate_repository(fragment["repository"])
     if "diagnostics" in fragment:

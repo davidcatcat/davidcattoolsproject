@@ -109,8 +109,14 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
         _fail("role name is invalid", "ROLE_CONFIG_ROLE_INVALID")
     path = user_config_path(home)
     user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
-    _apply_user(copy.deepcopy(DEFAULTS), user)
-    accounts, roles = validate_role_config(user)
+    loaded = copy.deepcopy(DEFAULTS)
+    _apply_user(loaded, user)
+    # _apply_user retains validated accounts/roles in this user-config view;
+    # read from it so role resolution follows the same loader path as the
+    # ordinary llmtool configuration.
+    accounts = loaded.get("accounts", {})
+    roles = loaded.get("roles", {})
+    validate_role_config({**user, "accounts": accounts, "roles": roles})
     legacy = user.get("pm_runtime", {}).get("claude_config_dir")
     configured = roles.get(role, {})
     settings = {"role": role, "provider": None, "provider_profile": None,
