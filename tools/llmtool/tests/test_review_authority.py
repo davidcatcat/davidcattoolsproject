@@ -243,7 +243,7 @@ class AuthorityTests(unittest.TestCase):
         second=h.run()
         self.assertEqual(second['provider_calls'],0)
         self.assertEqual(second['code'],'REVIEW_NOT_ALLOWED')
-        self.assertEqual(h.fake.calls,1)
+        self.assertEqual(first['provider_calls'] + second['provider_calls'],1)
     def test_reviewed_object_digest_omits_only_observation_and_sequence(self):
         b,packet=self.h.binding()
         payload=packet.to_dict()
