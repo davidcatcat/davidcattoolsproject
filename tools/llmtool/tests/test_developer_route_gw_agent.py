@@ -1,6 +1,5 @@
 """Offline contract tests for the gw-agent Developer route."""
 
-import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -86,11 +85,23 @@ class GwAgentRouteTests(unittest.TestCase):
     def _write_json(path, value):
         Path(path).write_text(json.dumps(value, sort_keys=True))
 
+    def _write_valid_audit(self, path, status='DONE', code=None, changed_paths=1):
+        package = Path(self.route.package_path)
+        package_parent = str(package)
+        sys.path.insert(0, package_parent)
+        try:
+            from api_agent_gateway.audit import AuditLog
+        finally:
+            sys.path.remove(package_parent)
+        audit = AuditLog(str(path))
+        audit.append('header', run_id='a' * 24, command='run', task_id='task-001')
+        audit.append('end', status=status, code=code, turns=1, changed_paths=changed_paths)
+        digest = audit.last_sha256
+        audit.close()
+        return digest
+
     def test_private_files_env_secret_result_and_audit_collection(self):
         seen = {}
-        record = {'seq': 1, 'prev_sha256': '0' * 64, 'type': 'end'}
-        audit_digest = hashlib.sha256(json.dumps(
-            record, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
         def runner(argv, cwd, env, timeout):
             seen['argv'] = argv
@@ -110,6 +121,8 @@ class GwAgentRouteTests(unittest.TestCase):
             seen['task'] = json.loads(task_file.read_text())
             seen['auth'] = json.loads(auth_file.read_text())
             (self.root / 'source.py').write_text('changed\n')
+            audit_path = Path(argv[argv.index('--audit-file') + 1])
+            audit_digest = self._write_valid_audit(audit_path)
             result = {'schema_version': 1, 'status': 'DONE', 'code': None,
                       'run_id': 'a' * 24, 'session_id': 'session_12345678',
                       'task_id': 'task-001', 'changed_paths': ['source.py'],
@@ -119,9 +132,6 @@ class GwAgentRouteTests(unittest.TestCase):
             result_path = Path(argv[argv.index('--result-file') + 1])
             self._write_json(result_path, result)
             result_path.chmod(0o600)
-            audit_path = Path(argv[argv.index('--audit-file') + 1])
-            audit_path.write_text(json.dumps(record, sort_keys=True, separators=(',', ':')) + '\n')
-            audit_path.chmod(0o600)
             private_dir = task_file.parent
             for path in private_dir.rglob('*'):
                 if path.is_file():
@@ -162,15 +172,14 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertTrue(self.route.quota_exhausted({}, b''))
 
     def test_run_route_prioritizes_scope_and_quota_statuses(self):
-        record = {'seq': 1, 'prev_sha256': '0' * 64, 'type': 'end'}
-        digest = hashlib.sha256(json.dumps(
-            record, ensure_ascii=False, sort_keys=True,
-            separators=(',', ':')).encode()).hexdigest()
-
         def run(status, gateway_code, exit_code, *, outside_write=False):
             def runner(argv, cwd, env, timeout):
                 if outside_write:
                     (self.root / 'outside.py').write_text('outside\n')
+                audit_path = Path(argv[argv.index('--audit-file') + 1])
+                digest = self._write_valid_audit(
+                    audit_path, status=status, code=gateway_code,
+                    changed_paths=1 if outside_write else 0)
                 result = {'schema_version': 1, 'status': status, 'code': gateway_code,
                           'run_id': 'b' * 24, 'session_id': None, 'task_id': 'task-001',
                           'changed_paths': ['outside.py'] if outside_write else [],
@@ -179,10 +188,6 @@ class GwAgentRouteTests(unittest.TestCase):
                 result_path = Path(argv[argv.index('--result-file') + 1])
                 self._write_json(result_path, result)
                 result_path.chmod(0o600)
-                audit_path = Path(argv[argv.index('--audit-file') + 1])
-                audit_path.write_text(json.dumps(record, sort_keys=True,
-                                                 separators=(',', ':')) + '\n')
-                audit_path.chmod(0o600)
                 return exit_code, b'', b''
 
             with self.assertRaises(RouteError) as caught:
