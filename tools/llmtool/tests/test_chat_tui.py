@@ -1655,6 +1655,19 @@ class W57ChatTests(Base):
         self.assertEqual([c for c in chat_tui.slash_matches('/', dev=False)
                           if c[0].startswith('/task')], [])
 
+    def test_w60_up_down_with_nothing_to_open_say_why_once(self):
+        os.environ.pop(chat_tui.DEV_ENV, None)
+        hint = 'llmtool: 沒有 Task 面板；/pm connect 連 PM 後 ↓ 看背景 Task'
+
+        def once(ui):
+            self.assertEqual(ui.conversation.text.count(hint), 1)
+            self.assertNotIn('F3', ui.conversation.text)       # F3 exists only with --dev
+            self.assertEqual(ui.input.text, '')
+
+        ui, _ = self.drive(['\x1b[B', once, '\x1b[B', once, '\x1b[A', once,
+                            'hello\r', self.idle, '\x1b[A',
+                            lambda ui: self.assertEqual(ui.input.text, 'hello')])  # history
+
     def test_dev_flag_from_env_or_option(self):
         self.assertTrue(chat_tui.dev_enabled({chat_tui.DEV_ENV: '1'}))
         self.assertFalse(chat_tui.dev_enabled({chat_tui.DEV_ENV: '0'}))
@@ -1935,6 +1948,108 @@ class TaskListTests(Base):
                             '\x1bOR', lambda ui: self.assertFalse(ui.show_list)])
         self.assertEqual(self.pm.complete.call_count, self.calls)
         self.factory.assert_not_called()
+
+    # -- W60 Owner acceptance: F3 list, F4 events and the F2 detail select and copy ------
+    @staticmethod
+    async def w60_drag_row(ui, row, length=12):
+        """Drag over ``length`` cells of the shown pane's ``row``; returns after release."""
+        left, top, _height = ui._pane_geometry()
+        for event in (press(left + 1, top + row + 1), drag(left + length, top + row + 1),
+                      release(left + length, top + row + 1)):
+            ui.app.input.send_text(event)
+            await asyncio.sleep(0.05)
+
+    def w60_copier(self, view):
+        copies = []
+        view._copier = lambda text: copies.append(text) or True
+        return copies
+
+    def test_w60_f3_list_drag_selects_copies_and_shift_c_copies_the_whole_list(self):
+        seen = {}
+
+        def render(ui):
+            ui.app.renderer.render(ui.app, ui.app.layout)
+
+        async def dragged(ui):
+            self.assertIs(ui._mouse_view(), ui.list_view)
+            self.assertIn('拖曳即複製', ui.status_keys())
+            seen['copies'] = copies = self.w60_copier(ui.list_view)
+            await self.w60_drag_row(ui, 2)
+            self.assertTrue(ui.list_view.wait_copy())
+            row = ui.list_view.text.splitlines()[2]
+            self.assertTrue(copies and row.startswith(copies[-1]), (copies, row))
+            self.assertIn('Cmd+V 貼上', ui.status_text())
+            self.assertNotIn('Cmd+C', ui.status_text())
+            ui.app.input.send_text('\x03')                      # Ctrl-C copies it again
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.list_view.wait_copy())
+            self.assertEqual(copies[-1], copies[-2])
+            self.assertFalse(ui.quit_pending)
+            self.assertTrue(ui.show_list)
+
+        async def copied_all(ui):
+            copies = seen['copies']
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.list_view.wait_copy())
+            text = copies[-1]
+            for record in ui.list_records:
+                self.assertIn(record['task_id'], text)          # full IDs, every Task
+            self.assertIn('Stage (derived)', text)
+            self.assertNotIn('\x1b', text)
+            self.assertIn('全文 已複製', ui.status_text())
+            self.assertTrue(ui.show_list)
+
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle,
+                    '/task mode profile first\r', 'second task\r', self.idle,
+                    '/task list\r', self.listed, render, dragged, copied_all])
+
+    def test_w60_detail_opened_from_the_f3_list_drags_and_copies_like_the_panel(self):
+        async def detail(ui):
+            self.assertTrue(ui.show_detail)
+            render = ui.app.renderer.render
+            render(ui.app, ui.app.layout)
+            self.assertIs(ui._mouse_view(), ui.detail_view)
+            copies = self.w60_copier(ui.detail_view)
+            await self.w60_drag_row(ui, 0, 10)
+            self.assertTrue(ui.detail_view.wait_copy())
+            first = ui.detail_view.text.splitlines()[0]
+            self.assertTrue(copies and first.startswith(copies[-1]), (copies, first))
+            self.assertFalse(ui.view.selected_range())          # never the hidden chat
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.detail_view.wait_copy())
+            self.assertEqual(copies[-1], ui.detail_view.text)   # the whole detail
+            self.assertIn('Task detail (llmtool Core task show', copies[-1])
+            self.assertNotIn('\x1b', copies[-1])
+            self.assertEqual(ui.input.text, '')
+
+        async def back(ui):
+            await asyncio.sleep(1.2)
+            self.assertFalse(ui.show_detail)
+            self.assertTrue(ui.show_list)
+            self.assertFalse(ui.detail_view.selected_range())
+
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle,
+                    '/task list\r', self.listed, '\r', self.idle, detail, '\x1b', back])
+
+    def test_w60_f4_events_drag_and_shift_c(self):
+        async def events(ui):
+            await asyncio.sleep(0.2)
+            ui.app.renderer.render(ui.app, ui.app.layout)
+            self.assertIs(ui._mouse_view(), ui.events_view)
+            copies = self.w60_copier(ui.events_view)
+            await self.w60_drag_row(ui, 0, 10)
+            self.assertTrue(ui.events_view.wait_copy())
+            self.assertTrue(copies and ui.events_view.text.startswith(copies[-1]), copies)
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.events_view.wait_copy())
+            self.assertEqual(copies[-1], ui.events_view.text)
+            self.assertIn('Recent events', copies[-1])
+
+        self.drive(['/task mode profile first\r', 'first task\r', self.idle,
+                    '\x1bOS', self.listed, events])
 
     def test_refresh_on_key_and_interval_only(self):
         from llmtool import chat_tui_status
@@ -5045,6 +5160,15 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(ui._mouse_view(), ui.view)
 
         self.w60_open([selected])
+
+    def test_w60_down_in_pm_mode_without_background_rows_says_why(self):
+        def hinted(ui):
+            self.assertFalse(ui.show_background)
+            self.assertIn('llmtool: 沒有背景 Task；PM 派工後 ↓ 可看', ui.conversation.text)
+
+        self.drive([self.connect(), self.connected,
+                    lambda ui: ui.finish_background(self.session_id, ([], None)),
+                    '\x1b[B', hinted])
 
     def test_w60_c_without_a_task_id_copies_nothing_and_says_why(self):
         seen = {}

@@ -58,7 +58,7 @@ class ThemePTYTests(unittest.TestCase):
         self.evidence = os.environ.get("LLMTOOL_TUI_EVIDENCE_DIR")
 
     def open_terminal(self, environ, git_remote=None, items=None, details=None, rows=24,
-                      refresh=None, columns=80):
+                      refresh=None, columns=80, extra_prefix=""):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         root = Path(os.path.realpath(temp.name))
@@ -73,7 +73,7 @@ class ThemePTYTests(unittest.TestCase):
         terminal = driver.Terminal(self.pyte, root, {"*": {"text": REPLY}}, rows, columns, self.slow,
                                    environ=environ, child_prefix=FAKE_BACKGROUND + (
                                        "" if refresh is None else
-                                       "\n_status.REFRESH_SECONDS = %d\n" % refresh))
+                                       "\n_status.REFRESH_SECONDS = %d\n" % refresh) + extra_prefix)
         self.addCleanup(terminal.stop)
         terminal.wait_text("full-screen", "TUI startup")
         return terminal
@@ -428,7 +428,7 @@ class ThemePTYTests(unittest.TestCase):
                   "updated_at": (now - timedelta(minutes=2)).isoformat()}]
         details = {task: {
             "task_id": task, "state": "PM_RESPONDED", "pm_session_id": "pm-test",
-            "request": "W60 反白複製", "created_at": now.isoformat(),
+            "request": "W60 反白複製", "created_at": "2026-11-02T00:00:00Z",   # before S0..S9
             "updated_at": "2026-11-02T01:02:03Z", "developer": {"state": "DEVELOPER_PENDING"},
             "review_dispatch_claim": {"pr": 661, "state": "CLAIMED", "version": 1},
             "completion_events": [{"source": "LOCAL", "state": "S%d" % n,
@@ -477,6 +477,50 @@ class ThemePTYTests(unittest.TestCase):
         self.dump(terminal, "w60-drag-copy-all")
         terminal.esc()
         terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed")
+
+
+    def test_w60_dev_f3_list_drag_select_and_copy_all(self):
+        """[Mac PTY (fake provider)] W60 Owner acceptance (llmtool chat --tui --dev, no /pm connect):
+        Down on the start screen says why nothing opens; the F3 Task list highlights and copies a
+        drag (fake pbcopy), the status names Cmd+V/拖曳即複製 and never Cmd+C, and C copies every
+        listed Task (full IDs) as plain text"""
+        now = datetime.now(timezone.utc)
+        ids = [c * 32 for c in "abc"]
+        details = {task: {"task_id": task, "state": "PM_RESPONDED", "developer": None,
+                          "request": "W60 清單 %d" % n, "created_at": now.isoformat(),
+                          "updated_at": now.isoformat()} for n, task in enumerate(ids)}
+        records = ('\ndef _fake_records(store):\n'
+                   '    with open(_os.environ["FAKE_TASK_DETAIL"], encoding="utf-8") as source:\n'
+                   '        return list(_json.load(source).values()), 0\n'
+                   '_status.load_records = _fake_records\n')
+        terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "Apple_Terminal",
+                                       "LLMTOOL_TUI_DEV": "1"}, items=[], details=details,
+                                      rows=24, extra_prefix=records)
+        terminal.send("\x1b[B")
+        terminal.wait_text("沒有 Task 面板；/pm connect 連 PM 後 ↓ 看背景 Task；F3 看 Task 清單",
+                           "Down hint without a PM")
+        terminal.send("\x1bOR")                                       # F3
+        rows = terminal.wait_text("W60 清單 2", "F3 list")
+        rows = terminal.wait_stable("list drawn")
+        y = next(n for n, row in enumerate(rows) if "W60 清單 0" in row or "W60 清單 1" in row)
+        self.assertIn("拖曳即複製", rows[-1])
+        terminal.press(1, y + 1)
+        terminal.drag(12, y + 1)
+        terminal.wait_for(lambda _rows: terminal.cell(y, 1).reverse
+                          or terminal.cell(y, 1).bg != "default", "selection highlight")
+        terminal.release(12, y + 1)
+        copied = terminal.wait_clipboard()
+        self.assertTrue(rows[y].startswith(copied), (copied, rows[y]))
+        terminal.wait_text("Cmd+V 貼上", "copy result names paste")
+        self.assertNotIn("Cmd+C", terminal.rows()[-1])
+        terminal.send("C")
+        terminal.wait_for(lambda _rows: ids[2] in (terminal.clipboard() or ""), "whole list")
+        whole = terminal.wait_clipboard()
+        for task in ids:
+            self.assertIn(task, whole)
+        self.assertNotIn("\x1b", whole)
+        self.dump(terminal, "w60-dev-f3-list")
+        terminal.esc()
 
 
 if __name__ == "__main__":
