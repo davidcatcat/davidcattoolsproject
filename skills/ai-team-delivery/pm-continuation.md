@@ -100,13 +100,36 @@ If a formal Reviewer is unavailable, do **not** replace it with an unapproved mo
 
 ## Queue and IDLE
 
-Work packages come only from the Owner's instructions (Owner 2026-10-27: 「工作範圍都以我給你的提示為準,不要自己去repo找工作」). The PM keeps a written list of the Owner's work packages for the session, adds each new Owner instruction to it, and does not add work it found on its own in the Roadmap, Issues or the repository. The Roadmap, open A11c Issues and PRs and registered D6 Tasks are read only to find the state and next step of a listed package.
+Authorized PM work scope covers open Issues already authorized, Roadmap work, in-flight Tasks, and unfinished PRs, reviews and CI (Owner 2026-11-02, #763, replacing the 2026-10-27 rule to work only from Owner prompts and never find work in the repository). The PM may split work and choose Developers under current gates, but never expand product scope, permissions, data egress or paid use.
 
 After a work package completes, or after a Task is isolated, the PM picks the next listed package or step that is executable and authorized, and has a Worker permitted by worker-dispatch.json with freshly confirmed live availability. The PM reports **IDLE** only when no such package or step exists. The IDLE report lists every remaining item and the reason it cannot run.
 
 ### Parallel dispatch check (Owner 2026-10-27)
 
 The PM does not wait on CI, a review or a single Worker while other listed work can move. About every 10 minutes (a recurring schedule in the PM session, for example `/loop 10m`), and after every result, the PM re-reads the work-package list and the state of each in-flight Task, then dispatches every package or next step (formal review, repair, merge, the next slice after a dependency lands) that is unblocked and writes no file another in-flight Task writes. It repeats until nothing more can run in parallel, then reports what is running and what each waiting item waits for. A check that finds nothing reports "no new dispatch". The schedule never authorizes work outside the list, a Worker the policy does not allow, or a merge without its gates.
+
+## Scheduled sweep
+
+Every scheduled sweep (Owner 2026-11-02, #763) runs in this order:
+
+1. **Continue in-flight work:** advance every active Task, formal review, repair, CI check and merge that can move.
+2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items). Never decide from only a few Issues, and never invent low-value Issues.
+3. **Dispatch executable work:** when executable authorized work and a free Developer exist below the concurrency cap, dispatch at least 1 and at most 2 Tasks; at the concurrency cap, make no new dispatch. An Owner wait blocks only its dependent item and never stops other work.
+
+**Sweep record:** post one short comment per sweep on the tracking Issue (no new Issue, no raw logs) starting with a whole-line `<!-- activity: type=pm_progress ... -->` marker. Record:
+
+- timestamp, sweep run ID, PM session and trigger (`schedule` or `Owner message`);
+- backlog, in-flight and dispatchable counts;
+- new Task IDs with Developer and Issue, plus Developer start evidence;
+- a reason for each undispatched item (or a reference to the unchanged list) and next steps.
+
+**Anomalies, notifications and schedule control:**
+
+- Zero dispatch while executable work and a free Developer are available is an anomaly, not **IDLE**.
+- Normal sweeps are silent; anomalies, sweep failures, Developer start failures and real Owner decisions get GitHub records.
+- Owner asks use `<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->`; a relayed Owner answer uses `<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->`; verify with `llmtool_monitor.py --once`.
+- Status answers give numbers first (`dispatched`, `merged`, `remaining`).
+- The schedule prompt must tell the PM to re-read this `Scheduled sweep` section from canonical `main` every sweep. The PM may stop and re-enable the schedule, recording both on the tracking Issue.
 
 ## Transition record
 
