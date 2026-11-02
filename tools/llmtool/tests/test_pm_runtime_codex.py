@@ -8,9 +8,11 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from llmtool import pm_runtime
+from llmtool.pm_runtime_codex import CodexRuntime
 from llmtool.errors import LLMToolError
 
 
@@ -33,6 +35,12 @@ class CodexRuntimeTests(unittest.TestCase):
         self.write_fake()
         self.environ = {'HOME': str(self.root), 'PATH': str(self.bin),
                         'FAKE_VALUE': 'FAKE_VALUE'}
+        self.account_dir = self.root / 'codex-account'
+        self.account_dir.mkdir(mode=0o700)
+        config = self.root / '.config/llmtool/config.yaml'
+        config.parent.mkdir(parents=True)
+        config.write_text('accounts:\n  codex-pm:\n    kind: codex\n    config_dir: ' +
+                          str(self.account_dir) + '\n', encoding='utf-8')
 
     def write_fake(self, mode='ok'):
         fake = self.bin / 'codex'
@@ -46,7 +54,8 @@ class CodexRuntimeTests(unittest.TestCase):
                     sys.exit(2)
             with open(__LOG__, 'a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'args': args,
-                    'sentinel_present': 'FAKE_VALUE' in os.environ}) + '\\n')
+                    'sentinel_present': 'FAKE_VALUE' in os.environ,
+                    'env_keys': sorted(os.environ)}) + '\\n')
             home = pathlib.Path(os.environ.get('CODEX_HOME') or os.environ['HOME'] + '/.codex')
             sessions = home / 'sessions'
             sessions.mkdir(parents=True, exist_ok=True)
@@ -82,7 +91,8 @@ class CodexRuntimeTests(unittest.TestCase):
     def make_runtime(self, *, create=True, session=SESSION):
         if create:
             binding = pm_runtime.create_dedicated_pm(
-                str(self.cwd), runtime='codex', state_root=self.state, environ=self.environ)
+                str(self.cwd), runtime='codex', account='codex-pm', state_root=self.state,
+                environ=self.environ)
             session = binding['native_session_id']
         runtime = pm_runtime.PMRuntime(session, cwd=str(self.cwd), state_root=self.state,
                                        environ=self.environ)
@@ -110,6 +120,10 @@ class CodexRuntimeTests(unittest.TestCase):
             'resume', THREAD, '--json', '-c',
             'sandbox_workspace_write.network_access=true', '-'])
         self.assertFalse(any(call['sentinel_present'] for call in calls))
+        allowed_env = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
+                       'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CODEX_HOME'}
+        self.assertTrue(all(set(call['env_keys']) <= allowed_env for call in calls))
+        self.assertTrue(all('CODEX_HOME' in call['env_keys'] for call in calls))
         self.assertTrue(all('--sandbox' in call['args'] and
                             'workspace-write' in call['args'] and
                             '--ask-for-approval' in call['args'] and
@@ -172,6 +186,11 @@ class CodexRuntimeTests(unittest.TestCase):
         finally:
             fcntl.flock(lock, fcntl.LOCK_UN)
             os.close(lock)
+
+    def test_interactive_resume_session_is_live_elsewhere(self):
+        with patch('llmtool.pm_runtime_codex.subprocess.check_output',
+                   return_value=b'123 codex resume ' + THREAD.encode() + b'\n'):
+            self.assertTrue(CodexRuntime._live_elsewhere(THREAD))
 
 
 if __name__ == '__main__':

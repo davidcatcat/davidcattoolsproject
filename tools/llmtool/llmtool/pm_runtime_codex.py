@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import stat
@@ -51,14 +52,14 @@ class CodexRuntime:
         if binding is None or binding.get('runtime') != 'codex':
             raise _error('PM_SESSION_NOT_DEDICATED')
         try:
+            account = self._bound_account_name(binding)
             options = {'environ': owner.environ,
-                       'home': None if owner.environ is None else owner.environ.get('HOME')}
-            if owner.account is not None:
-                options['cli'] = {'account': owner.account}
+                       'home': None if owner.environ is None else owner.environ.get('HOME'),
+                       'cli': {'account': account}}
             resolved = role_config.resolve_role('pm', **options)
             if resolved.get('provider') != 'codex':
                 raise LLMToolError('PM account is not Codex')
-            if binding.get('account') != resolved.get('account'):
+            if account != resolved.get('account') or binding.get('account') != account:
                 raise _error('PM_ACCOUNT_MISMATCH')
         except LLMToolError as exc:
             if getattr(exc, 'pm_runtime_code', None) == 'PM_ACCOUNT_MISMATCH':
@@ -83,7 +84,7 @@ class CodexRuntime:
         try:
             self._read_state()
             owner._history_read()
-            if binding.get('session_started'):
+            if binding.get('session_started') or self._thread_id is not None:
                 if self._thread_id is None:
                     raise _error('PM_SESSION_INVALID')
                 active_pm_inbox.observe_codex_session(self._thread_id, cwd,
@@ -107,12 +108,24 @@ class CodexRuntime:
                     _, command = line.strip().split(None, 1)
                 except ValueError:
                     continue
-                if ('codex' in command and thread_id in command and
-                        ('exec' in command or 'resume' in command)):
+                try:
+                    argv = shlex.split(command)
+                except ValueError:
+                    continue
+                executable = os.path.basename(argv[0]).lower() if argv else ''
+                if (executable == 'codex' and thread_id in argv[1:] and
+                        ('exec' in argv or 'resume' in argv)):
                     return True
         except (OSError, subprocess.SubprocessError):
             pass
         return False
+
+    def _bound_account_name(self, binding):
+        account = self.owner.account if self.owner.account is not None else binding.get('account')
+        if (type(account) is not str or not role_config._name(account) or
+                binding.get('account') != account):
+            raise _error('PM_ACCOUNT_MISMATCH')
+        return account
 
     def _state_path(self):
         from . import pm_runtime
@@ -175,12 +188,19 @@ class CodexRuntime:
         source = os.environ if self.owner.environ is None else self.owner.environ
         env = {key: source[key] for key in _ALLOWED_ENV if key in source}
         env.setdefault('PATH', os.environ.get('PATH', '/usr/bin:/bin'))
+        from . import pm_runtime
+        root_arg = self.owner.state_root or Path.home() / '.local/state/llmtool/pm-runtime'
+        binding = pm_runtime.current_binding(self.owner.pm_session_id, state_root=root_arg,
+                                             environ=self.owner.environ,
+                                             resolve_legacy_account=False)
+        if binding is None or binding.get('runtime') != 'codex':
+            raise _error('PM_SESSION_NOT_DEDICATED')
+        account = self._bound_account_name(binding)
         options = {'environ': self.owner.environ,
-                   'home': None if self.owner.environ is None else self.owner.environ.get('HOME')}
-        if self.owner.account is not None:
-            options['cli'] = {'account': self.owner.account}
+                   'home': None if self.owner.environ is None else self.owner.environ.get('HOME'),
+                   'cli': {'account': account}}
         resolved = role_config.resolve_role('pm', **options)
-        if resolved.get('provider') != 'codex':
+        if resolved.get('provider') != 'codex' or resolved.get('account') != account:
             raise _error('PM_CONFIG_INVALID')
         if resolved.get('config_dir') is not None:
             env['CODEX_HOME'] = resolved['config_dir']

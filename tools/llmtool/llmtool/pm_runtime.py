@@ -514,6 +514,10 @@ def create_dedicated_pm(cwd, runtime='claude-code', account=None, *, state_root=
         if account is not None:
             role_options['cli'] = {'account': account}
         resolved = role_config.resolve_role('pm', **role_options)
+        if (runtime == 'codex' and
+                (resolved.get('provider') != 'codex' or
+                 not role_config._name(resolved.get('account')))):
+            raise LLMToolError('Codex PM binding requires a Codex account')
     except LLMToolError:
         raise _error('PM_CONFIG_INVALID', 'PM account configuration is invalid') from None
     account = resolved.get('account')
