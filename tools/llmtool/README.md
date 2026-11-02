@@ -100,7 +100,7 @@ key input, `api_key`／`api_key_env` support, saving incomplete settings as null
 request during configuration. The live gateway result is recorded in the
 [A1.1 smoke test report](../../reports/llmtool_a1_1_live_smoke_20260929.md).
 
-## A11 native self-development — single product roadmap, interim ai-loop
+## A11 native self-development — single product roadmap
 
 The product goal is **native llmtool-directed Codex CLI development,
 independent Claude CLI review, real tests, bounded repair and safe PR
@@ -111,21 +111,8 @@ milestones for that goal.** Historical C0–C3 are consolidated back into
 in [the original proposal](NATIVE_SELF_DEV_MVP.md). Do not implement
 a second C executor, QA framework or release line.
 
-**Before llmtool can replace it, keep the existing temporary
-`ai-loop` to coordinate Codex and Claude** through required
-tests/reviews and an audited PR handoff. The owner confirms the standard Git-version `.git/ai-loop/run.sh`
-shortcut has been restored; there is no Mac-only custom launcher.
-The tracked control-branch `scripts/ai-loop.sh` fetches the latest
-revision and executes matching cached `scripts/ai_loop.py` with
-its exact control revision. The Git source is inspectable, but
-current local symlink/runtime state requires Mac evidence. AI, not
-the owner, handles controller review and publication: independently
-review and test the candidate on a non-executable staging reference
-before promoting unchanged bytes to the runnable control branch.
-A latest-tip fetch does not replace a release security gate. This is
-a temporary operating workflow, **not a native llmtool feature**.
-Limit runner repairs to essential security/correctness/compatibility,
-not a second permanent product.
+The standalone transitional helper is documented in
+[tools/ai-loop/README.md](../ai-loop/README.md); it is not an llmtool route.
 The requirements owner supplies goals and product acceptance; the AI
 team owns technical management, development and evidence-backed review.
 
@@ -239,7 +226,7 @@ Each developer must use its own verified fixed root, unique task branch and
 dedicated venv; shared Git ref integration and native F1 acceptance remain
 canonical-only. Any uncertain or crashed state means STOP/preserve and fall
 back to single canonical CLAIM/RELEASE. No F2 mutation, additional checkouts,
-automated historical process cleanup or CI/Runner/ai-loop control is granted.
+automated historical process cleanup or CI/Runner control is granted.
 
 Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
@@ -2841,8 +2828,9 @@ snapshot and handoff **preview**. It does not observe live processes, run comman
 call providers, launch agents, fetch/change Git, change PRs or write a journal.
 No config, credentials or stdin are discovered. Regular-file read access can update
 OS atime. S1b later integrates Claude CLI review; S2 execution/repair needs its own
-authority contract. A11b remains incomplete, F2 remains NOT AUTHORIZED, and interim
-ai-loop stays until independent canonical acceptance proves parity.
+authority contract. A11b remains incomplete and F2 remains NOT AUTHORIZED.
+The standalone helper remains outside llmtool; see
+[tools/ai-loop/README.md](../ai-loop/README.md).
 
 The original contract is the unchanged `task_verification.TaskContract` JSON.
 Its existing canonical `digest` and `binding(run_id)` provide the expected task

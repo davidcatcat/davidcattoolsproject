@@ -59,7 +59,8 @@ branch is therefore not linked until it reaches the canonical checkout.
 After adding a **new** skill directory, run the installer again on the Mac to create
 its new links. An existing symlink tracks future repo updates; `git pull` alone
 does not create a link for a newly introduced skill. Check local branch/dirty
-state before syncing, and do not replace the operator-owned ai-loop launcher.
+state before syncing. The standalone transitional helper is documented in
+[tools/ai-loop/README.md](tools/ai-loop/README.md).
 
 ## Recommended workflow
 

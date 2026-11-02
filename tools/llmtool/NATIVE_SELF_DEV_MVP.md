@@ -6,13 +6,8 @@
 > back into the original A architecture and gates**. This file preserves the
 > original C terminology for traceability; all new product task contracts and
 > progress status use **A11b/A11c**, with C only as a legacy measurement alias.
-> **ai-loop remains the temporary AI-reviewed Codex/Claude coordination runner
-> until native llmtool passes real Mac acceptance**, not a second product.
-> The owner confirms the standard `.git/ai-loop/run.sh` Git shortcut has
-> been restored: it points to the tracked `scripts/ai-loop.sh` launcher,
-> which fetches the control revision and runs revision-scoped Python.
-> There is no custom local launcher. The AI team owns technical review,
-> staged CI/Mac evidence and control-branch release governance.
+> The standalone, transitional ai-loop helper is documented in
+> [tools/ai-loop/README.md](../ai-loop/README.md); it is not an llmtool route.
 > No existing permission, security, QA, Mac or provider egress gate is waived.
 
 Status: **PROPOSED / DESIGN ONLY / NO IMPLEMENTATION AUTHORITY** (2026-10-09).
@@ -28,11 +23,9 @@ independent review, deterministic testing, bounded recovery, Git evidence/PR han
 and company-LLM delegation on quality-proven low-risk routes, **including developing
 llmtool itself**, while minimizing premium-model tokens and human prompt relay.
 
-**Transition tool:** `ai-loop` is a disposable bootstrapping runner. Maintain
-critical safety, correctness and compatibility only. Do **not** first build a
-full second orchestration/security/QA product in the temporary runner. Migrate
-its good controls into llmtool's native A11b/A11c contracts. No manual
-Codex↔Claude prompt copy/paste should be required for ordinary iterations.
+The standalone transitional helper's scope is documented in
+[tools/ai-loop/README.md](../ai-loop/README.md). This proposal covers the
+llmtool native A11b/A11c contracts.
 
 ### Truthful present capabilities
 
@@ -80,7 +73,7 @@ are copied into external model contexts.
 
 **Deliverable C1: deterministic real-test-output excerpt selector**, an
 explicit opt-in read-only helper used by the existing llmtool company-provider
-workflow, *not* another LLM agent and *not* an ai-loop-only script.
+workflow, *not* another LLM agent.
 
 Inputs: captured stdout/stderr from an explicit allowed test run (or an
 explicit file), trusted run/exit metadata and a max-byte bound. It MUST NOT
@@ -177,7 +170,7 @@ the A11b safety/approval/containment requirements. A11b.2.2.2 real Git
 ADD, A11b.3–6 policy/repair and A11c integration remain gated separately;
 a reviewed slice contract must enumerate its exact dependencies.
 
-## Priority 3 — cutover: llmtool replaces ai-loop
+## Priority 3 — native llmtool acceptance
 
 Run llmtool on actual canonical-Mac, authorized, isolated *real* repository
 tasks: at least one scoped documentation change, one small bug fix with
@@ -193,10 +186,10 @@ security findings, quality parity and measured savings on at least one
 representative route. If the cost route loses tokens, disable it without
 blocking an otherwise safe native executor; do not claim ROI.
 
-Leave `ai-loop` usable as an emergency fallback during cutover, then
-freeze/deprecate its duplicated orchestration. Do not demand completion
-of optional A2.3 Anthropic HTTP API, A12 Telegram or a general-purpose
-dashboard before this vertical slice.
+The transitional helper remains a separate tool; see
+[tools/ai-loop/README.md](../ai-loop/README.md). Do not demand completion of
+optional A2.3 Anthropic HTTP API, A12 Telegram or a general-purpose dashboard
+before this vertical slice.
 
 ## Decisions and sequencing — current A11 authority (2026-10-09)
 
@@ -228,16 +221,13 @@ acceptance designs above. See the sole A↔C mapping in
    controlled Codex development, independent Claude review, tests,
    bounded repair, approved PR publication and fail-closed STOP. Only
    when llmtool meets equivalent Security/Functional QA and operational
-   evidence can it replace the **currently active temporary ai-loop**
-   collaboration workflow. Until then, use the restored Git-version
-   shortcut and AI-reviewed control-branch releases, with required
-   independent review and native-Mac gates; fix only essential
-   security/stability faults, not another controller product.
+   evidence supports accepting native self-development. The standalone
+   transitional helper is described in [tools/ai-loop/README.md](../ai-loop/README.md).
 5. Do not renumber A milestones or rewrite prior validation reports,
    PR evidence or this proposal's original requirement paragraphs.
-   Controller review/release authority is delegated to AI; do not
+   Technical review/release authority is delegated to AI; do not
    request routine technical signoff from the owner. General Git
-   merge delegation still does **not** authorize unreviewed controller commits,
+   merge delegation still does **not** authorize unreviewed commits,
    model provider export, broader host/network permissions or permission
    to skip required independent/Mac gates.
 
