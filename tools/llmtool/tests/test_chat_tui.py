@@ -5189,13 +5189,17 @@ class PMConversationTests(BoundedPMTest):
         async def dragged(ui, copies):
             left, top, _height = ui._pane_geometry()
             self.assertEqual(ui._mouse_view(), ui.task_view)
-            await self.w60_mouse(ui, press(left + 1, top + 2), drag(left + 16, top + 2))
+            lines = ui.task_view.text.splitlines()
+            row = next(n for n, line in enumerate(lines)
+                       if line.startswith('來源：TaskStore'))
+            y = top + 1 + row
+            await self.w60_mouse(ui, press(left + 1, y), drag(left + 16, y))
             self.assertTrue(ui.task_view.dragging)
             self.assertTrue(ui.task_view.selected_range())          # highlighted while dragging
             self.assertFalse(ui.view.selected_range())               # never the hidden chat
-            await self.w60_mouse(ui, release(left + 16, top + 2))
+            await self.w60_mouse(ui, release(left + 16, y))
             self.assertTrue(ui.task_view.wait_copy())
-            line = ui.task_view.text.splitlines()[1]
+            line = lines[row]
             self.assertTrue(copies and line.startswith(copies[-1]), (copies, line))
             self.assertTrue(copies[-1].startswith('來源：TaskStore'))
             self.assertIn('已複製 %d 字' % len(copies[-1]), ui.status_keys())
