@@ -8,6 +8,7 @@ import unittest
 SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 import ci_path_classes  # noqa: E402
+import ci_mac_modules  # noqa: E402
 
 
 class CIPathClassTests(unittest.TestCase):
@@ -55,7 +56,7 @@ class CIPathClassTests(unittest.TestCase):
              (True, False, False, False)),
             ("#792", [".github/workflows/llmtool-linux-ci.yml",
                        "tools/ai-loop/README.md"], (True, False, False, True)),
-            ("docs-only", ["AGENTS.md", "docs/ci/README.md"],
+            ("docs-only", ["AGENTS.md", "docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md"],
              (False, True, False, False)),
             ("skills-only", ["skills/ai-team-delivery/SKILL.md"],
              (False, True, False, False)),
@@ -63,7 +64,7 @@ class CIPathClassTests(unittest.TestCase):
              (True, False, False, False)),
             ("workflow-only", [".github/workflows/llmtool-linux-ci.yml"],
              (True, False, False, False)),
-            ("mixed", ["docs/ci/README.md", "tools/api-agent-gateway/main.py",
+            ("mixed", ["docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md", "tools/api-agent-gateway/main.py",
                        "tools/ai-loop/helper.py"],
              (True, True, True, True)),
             ("unknown", ["src/unknown.py"], (True, False, False, False)),
@@ -79,6 +80,46 @@ class CIPathClassTests(unittest.TestCase):
                     "ai-loop" in classes,
                 )
                 self.assertEqual(flags, expected)
+
+    def test_historical_and_boundary_path_sets_keep_mac_levels(self):
+        cases = (
+            ("#781", ["tools/llmtool/llmtool/review_repair.py",
+                       "tools/llmtool/llmtool/task_advance.py",
+                       "tools/llmtool/tests/test_review_repair.py",
+                       "tools/llmtool/tests/test_task_advance.py"], "L1"),
+            ("#782", ["tools/llmtool/llmtool/opencode_direct_developer.py",
+                       "tools/llmtool/llmtool/task_store.py",
+                       "tools/llmtool/llmtool/task_submission_cli.py",
+                       "tools/llmtool/tests/test_task_store.py",
+                       "tools/llmtool/tests/test_task_submission_cli.py"], "L3"),
+            ("#787", ["tools/llmtool/llmtool/chat_tui.py",
+                       "tools/llmtool/llmtool/chat_tui_status.py",
+                       "tools/llmtool/tests/test_chat_tui.py"], "L1"),
+            ("#789", ["README.md", "tools/llmtool/llmtool/config.py",
+                       "tools/llmtool/llmtool/role_config.py",
+                       "tools/llmtool/tests/test_role_config.py"], "L3"),
+            ("#790", ["skills/ai-team-delivery/pm-continuation.md"], "L0"),
+            ("#791", ["tools/llmtool/worker-dispatch.json",
+                       "tools/llmtool/tests/test_worker_dispatch.py"], "L1"),
+            ("#792", [".github/workflows/llmtool-linux-ci.yml",
+                       "tools/ai-loop/README.md"], "L3"),
+            ("docs-only", ["AGENTS.md",
+                            "docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md"], "L0"),
+            ("skills-only", ["skills/ai-team-delivery/SKILL.md"], "L0"),
+            ("nested llmtool Markdown", ["tools/llmtool/docs/guide.md"], "L0"),
+            ("workflow-only", [".github/workflows/llmtool-linux-ci.yml"], "L3"),
+            ("mixed", ["docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md",
+                       "tools/api-agent-gateway/main.py", "tools/ai-loop/helper.py"], "L3"),
+        )
+        for label, paths, expected in cases:
+            with self.subTest(paths=label):
+                self.assertEqual(ci_mac_modules.selection_report(paths)["level"], expected)
+
+    def test_ci_documentation_remains_a_conservative_mac_full_run(self):
+        report = ci_mac_modules.selection_report(["docs/ci/README.md"])
+        self.assertEqual(report["level"], "L3")
+        self.assertEqual(report["test_ids"], ["FULL"])
+        self.assertIn("ci_or_dependency_change", report["fallback_reasons"])
 
     def test_runtime_markdown_never_has_docs_class_and_root_readme_is_docs(self):
         self.assertEqual(ci_path_classes.classify_path("tools/llmtool/README.md"), "docs")
