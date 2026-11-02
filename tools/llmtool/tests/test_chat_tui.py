@@ -1139,6 +1139,8 @@ class WidgetTests(Base):
 
         async def streaming(ui):
             await self.until(ui, lambda ui: ui.stream_raw is not None)
+            await self.until(ui, lambda ui: ui.app.timeoutlen == chat_tui.ESC_SEQUENCE_TIMEOUT,
+                             'Esc timeout while streaming')
             self.assertIn('assistant:\nHello', ui.conversation.text)
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
             self.assertIn('working', ui.status_text())
