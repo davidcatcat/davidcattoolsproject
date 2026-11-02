@@ -20,6 +20,7 @@ MAC_REQUIRED = {
     "test_chat_tui_pty.ChatTUIPTYTests",
     "test_chat_tui_theme_pty.ThemePTYTests",
     "test_cli_lifecycle_state.LifecycleStateTests",
+    "test_cli_lifecycle_state.BoundedWorkerLifecycleTests",
     "test_cli_provider_lifecycle.TUISignalOwnershipTests",
     "test_cli_provider_lifecycle.CLIProviderLifecycleTests",
     "test_codex_cli_provider.CodexCLIProviderTests",
@@ -27,11 +28,19 @@ MAC_REQUIRED = {
     "test_opencode_direct_developer.DirectOpenCodeDeveloperTests",
     "test_review_authority_native.NativeProviderTests",
 }
+KNOWN_DARWIN_REGRESSION_CLASSES = {
+    "test_cli_lifecycle_state.BoundedWorkerLifecycleTests",
+    "test_chat_tui_pty.ChatTUIPTYTests",
+    "test_chat_tui_theme_pty.ThemePTYTests",
+    "test_review_authority_native.NativeProviderTests",
+}
 
 
 class MacTestIdSelectionTests(unittest.TestCase):
-    def test_explicit_manifest_selects_both_darwin_only_classes(self):
-        self.assertEqual(ci_mac_modules.required_test_ids(REPO_ROOT), MAC_REQUIRED)
+    def test_explicit_manifest_selects_known_darwin_regression_classes(self):
+        selected = ci_mac_modules.required_test_ids(REPO_ROOT)
+        self.assertEqual(selected, MAC_REQUIRED)
+        self.assertTrue(KNOWN_DARWIN_REGRESSION_CLASSES <= selected)
         self.assertIsNone(ci_mac_modules.select_test_ids([], REPO_ROOT))
         report = ci_mac_modules.selection_report([], REPO_ROOT)
         self.assertEqual(report["level"], "L3")
