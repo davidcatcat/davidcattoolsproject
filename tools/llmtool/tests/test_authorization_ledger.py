@@ -799,6 +799,25 @@ class ProviderLedgerTests(unittest.TestCase):
         else:
             with self.assertRaises(l.LedgerError): self.consume(second,o2)
 
+    def test_layout2_cap_refusal_releases_object_key_for_reissue(self):
+        from test_review_authority import Harness
+        h=Harness(cap=1,provider_layout=2);self.addCleanup(h.close)
+        def issue(tag):
+            call,_=h.binding()
+            call=replace(call,reviewed_object_digest=tag*64,deadline='2026-10-14T00:05:00Z')
+            binding=p.ProviderReviewBinding(call)
+            observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
+            decision=p.decide_provider_review(binding,issuer=h.issuer,observed=observed)
+            receipt=h.ledger.issue_provider(decision,ttl_seconds=120)
+            return receipt,observed
+        first,o1=issue('1'); refused,o2=issue('2')
+        self.assertTrue(h.ledger.consume_provider(first,issuer=h.issuer,observed=o1))
+        self.assertFalse(h.ledger.consume_provider(refused,issuer=h.issuer,observed=o2))
+        self.assertEqual(h.ledger.status(refused.nonce),'DENIED')
+        # The zero-effect refusal no longer holds the unique live key.
+        retry,_=issue('2')
+        self.assertEqual(retry.binding.call.reviewed_object_digest,refused.binding.call.reviewed_object_digest)
+
     def test_day_is_consume_day_not_issue_or_finalize_day(self):
         self.h.fake.utc='2026-10-13T23:59:59Z'
         receipt,o=self.issue('1')
@@ -841,6 +860,21 @@ class ProviderLedgerTests(unittest.TestCase):
         receipt,o=self.issue()
         self.h.hostdata['route_policies'][0]['revoked']=True;self.h.write_host()
         self.assertFalse(self.consume(receipt,o));self.assertEqual(self.h.ledger.status(receipt.nonce),'DENIED')
+
+    def test_layout2_denied_consume_releases_object_key_for_retry(self):
+        from test_review_authority import Harness
+        h=Harness(cap=1,provider_layout=2);self.addCleanup(h.close)
+        call,_=h.binding();call=replace(call,deadline='2026-10-14T00:05:00Z')
+        binding=p.ProviderReviewBinding(call)
+        observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
+        decision=p.decide_provider_review(binding,issuer=h.issuer,observed=observed)
+        receipt=h.ledger.issue_provider(decision,ttl_seconds=120)
+        h.hostdata['route_policies'][0]['revoked']=True;h.write_host()
+        self.assertFalse(h.ledger.consume_provider(receipt,issuer=h.issuer,observed=observed))
+        self.assertEqual(h.ledger.status(receipt.nonce),'DENIED')
+        h.hostdata['route_policies'][0]['revoked']=False;h.write_host()
+        retry=h.ledger.issue_provider(decision,ttl_seconds=120)
+        self.assertEqual(retry.binding.call.reviewed_object_digest,receipt.binding.call.reviewed_object_digest)
 
     def test_wrong_binding_burns_without_consuming_or_charging(self):
         receipt,o=self.issue()
