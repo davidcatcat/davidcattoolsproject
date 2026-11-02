@@ -132,7 +132,7 @@ class CodexRuntimeTests(unittest.TestCase):
 
     def test_malformed_output_and_process_exit_return_runtime_error_then_turn_end(self):
         expected_codes = {
-            'malformed': ['PM_PROCESS_EXITED'],
+            'malformed': ['PM_STREAM_INVALID'],
             'exit': ['PM_PROCESS_EXITED'],
         }
         for mode, expected in expected_codes.items():
