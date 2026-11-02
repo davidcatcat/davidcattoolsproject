@@ -44,7 +44,8 @@ class RoleConfigTests(unittest.TestCase):
         self.assertEqual(alias["config_dir"], str(self.account_dir))
         self.assertEqual(alias["source"], "pm_runtime")
         self.save({"accounts": self.account_config()["accounts"],
-                   "roles": {"pm": {"account": "work", "model": "role-model", "effort": "low"}},
+                   "roles": {"pm": {"account": "work", "model": "role-model", "effort": "low"},
+                             "reviewer": self.account_config()["roles"]["reviewer"]},
                    "pm_runtime": {"claude_config_dir": str(self.account_dir)}})
         loaded = DEFAULTS.copy()
         _apply_user(loaded, _read_yaml(user_config_path(self.home), "user config"))
