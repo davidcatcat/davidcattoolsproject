@@ -757,6 +757,21 @@ def add_task_submission_parsers(actions):
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
                          help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
+    drive = actions.add_parser(
+        'drive', help=('Drive Task advancement in the foreground; stops for attention '
+                       'without waiting if the initial Developer is unfinished'))
+    drive.add_argument('task_id', help='existing durable Task ID')
+    drive.add_argument('--merge', action='store_true',
+                       help='merge only after the workflow reaches integration readiness')
+    drive.add_argument('--max-steps', type=int, default=100,
+                       help='maximum advance calls, including a requested merge (default: 100)')
+    drive.add_argument('--poll-seconds', type=float, default=5,
+                       help='seconds to wait between pending checks (default: 5)')
+    drive.add_argument('--pr', type=int, help='public GitHub pull request number')
+    drive.add_argument('--integration-pr', type=int,
+                       help='merged integration PR containing the reviewed head')
+    drive.add_argument('--reviewer-session-done', action='store_true',
+                       help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
     claude_result = actions.add_parser(
         'claude-result', help='Record the original PM-bound Claude Developer result')
     claude_result.add_argument('task_id', help='existing durable Task ID')
@@ -1032,6 +1047,23 @@ def run_task_advance(args, *, store=None, **adapters):
             integration_pr=getattr(args, 'integration_pr', None),
             merge=getattr(args, 'merge', False),
             reviewer_session_done=getattr(args, 'reviewer_session_done', False), **adapters)
+    _print(result)
+    return 1 if result.get('codes') else 0
+
+
+def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapters):
+    """Drive Task steps; stop without polling if its initial Developer is unfinished."""
+    from .task_drive import drive
+    result = drive(task_id=args.task_id,
+        store=TaskStore() if store is None else store,
+        merge=getattr(args, 'merge', False),
+        max_steps=getattr(args, 'max_steps', 100),
+        poll_seconds=getattr(args, 'poll_seconds', 5),
+        sleep=sleep, advance_call=advance_call,
+        pr_number=getattr(args, 'pr', None),
+        integration_pr=getattr(args, 'integration_pr', None),
+        reviewer_session_done=getattr(args, 'reviewer_session_done', False),
+        **adapters)
     _print(result)
     return 1 if result.get('codes') else 0
 
