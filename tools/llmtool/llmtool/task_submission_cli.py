@@ -33,6 +33,7 @@ from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
+from . import role_config
 from .developer_routes import (AgyRoute, RouteError, capture_snapshot,
                                for_platform, load_route_config, run_route)
 from .developer_routes.agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES
@@ -2507,10 +2508,20 @@ def _codex_developer_profile():
         raise LLMToolError('codex-developer profile is missing or invalid in the llmtool '
                            'user config (~/.config/llmtool/config.yaml)') from None
     options = provider.get('provider_options', {})
-    if (provider.get('type') != 'codex-cli' or type(provider.get('model')) is not str or
-            type(options) is not dict):
+    try:
+        role = role_config.resolve_role('codex-developer')
+    except LLMToolError:
+        raise LLMToolError('codex-developer role configuration is invalid') from None
+    if (provider.get('type') != 'codex-cli' or type(options) is not dict or
+            type(role.get('model') or provider.get('model')) is not str):
         raise LLMToolError('codex-developer profile must be type codex-cli with a model')
-    effort = options.get('reasoning_effort', 'high')
+    if role.get('provider') not in (None, 'codex'):
+        raise LLMToolError('codex-developer role must use a codex account')
+    provider = dict(provider)
+    provider['model'] = role.get('model') or provider['model']
+    provider['account'] = role.get('account')
+    provider['config_dir'] = role.get('config_dir')
+    effort = role.get('effort') or options.get('reasoning_effort', 'high')
     try:
         codex_direct_developer.validate_profile(provider['model'], effort)
     except LLMToolError:
@@ -3028,6 +3039,7 @@ def run_task_codex_delegate(args, *, store):
         'executor_task_id': registration.task_id,
         'state': ('DEVELOPER_DISPATCHING' if recovering_timeout else 'DEVELOPER_PENDING'),
         'provider_profile': 'codex',
+        **({'account': provider['account']} if provider.get('account') is not None else {}),
         'provider_type': ('codex-cli' if recovering_timeout else None),
         'model': (provider['model'] if recovering_timeout else None),
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
@@ -3109,6 +3121,7 @@ def run_task_codex_delegate(args, *, store):
                 'CODEX_IGNORED_BASELINE_UNAVAILABLE') from None
         result = codex_direct_developer.run(root=registration.root, prompt=prompt,
             model=provider['model'], reasoning_effort=reasoning_effort,
+            codex_home=provider.get('config_dir'),
             dispatch_store=store, dispatch_task_id=task['task_id'],
             prelaunch_validate=validate_binding,
             launch_callback=lambda pid, started_at, pgid: (
