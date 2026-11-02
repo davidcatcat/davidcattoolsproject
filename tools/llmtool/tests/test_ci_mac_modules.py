@@ -36,7 +36,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
         report = ci_mac_modules.selection_report([], REPO_ROOT)
         self.assertEqual(report["level"], "L3")
         self.assertEqual(report["test_ids"], ["FULL"])
-        self.assertEqual(report["selection_reason"], "no_changed_paths_requires_full")
+        self.assertIn("no_changed_paths", report["fallback_reasons"])
 
     def test_manifest_rejects_malformed_duplicate_and_missing_ids(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -56,7 +56,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                         report = ci_mac_modules.selection_report([], REPO_ROOT)
                         self.assertEqual(report["level"], "L3")
                         self.assertEqual(report["test_ids"], ["FULL"])
-                        self.assertEqual(report["selection_reason"], "invalid_manifest_requires_full")
+                        self.assertIn("invalid_manifest", report["fallback_reasons"])
 
     def test_shared_impact_map_selects_route_and_submission_test_modules(self):
         agy = ci_mac_modules.selection_report(
@@ -205,7 +205,176 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertEqual(report["level"], "L3")
                 self.assertEqual(report["test_ids"], ["FULL"])
-                self.assertEqual(report["selection_reason"], "selector_change_requires_full")
+                self.assertIn("selector_change", report["fallback_reasons"])
+
+    def test_full_fallback_reports_actual_high_risk_and_unmapped_paths(self):
+        cases = (
+            ("tools/llmtool/llmtool/opencode_direct_developer.py",
+             "high_risk_file"),
+            ("tools/llmtool/worker-dispatch.json", "unmapped_source"),
+        )
+        for path, reason in cases:
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertIn(reason, report["fallback_reasons"])
+                self.assertIn(path, report["fallback_paths"])
+                self.assertIn({"path": path, "reason": reason}, report["fallback_details"])
+                self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
+
+    def test_historical_pr_path_fixtures_preserve_selection_and_rejection_reasons(self):
+        fixtures = (
+            (
+                "#781",
+                [
+                    "tools/llmtool/llmtool/review_repair.py",
+                    "tools/llmtool/llmtool/task_advance.py",
+                    "tools/llmtool/tests/test_review_repair.py",
+                    "tools/llmtool/tests/test_task_advance.py",
+                ],
+                "L1",
+                MAC_REQUIRED | {"test_review_repair", "test_task_advance"},
+                None,
+            ),
+            (
+                "#782",
+                [
+                    "tools/llmtool/llmtool/opencode_direct_developer.py",
+                    "tools/llmtool/llmtool/task_store.py",
+                    "tools/llmtool/llmtool/task_submission_cli.py",
+                    "tools/llmtool/tests/test_task_store.py",
+                    "tools/llmtool/tests/test_task_submission_cli.py",
+                ],
+                "L3",
+                {"FULL"},
+                ("tools/llmtool/llmtool/opencode_direct_developer.py", "high_risk_file"),
+            ),
+            (
+                "#787",
+                [
+                    "tools/llmtool/llmtool/chat_tui.py",
+                    "tools/llmtool/llmtool/chat_tui_status.py",
+                    "tools/llmtool/tests/test_chat_tui.py",
+                ],
+                "L1",
+                MAC_REQUIRED | {
+                    "test_chat_tui", "test_chat_tui_scenarios",
+                    "test_chat_tui_theme", "test_chat_tui_layout",
+                },
+                None,
+            ),
+            (
+                "#789",
+                [
+                    "README.md",
+                    "tools/llmtool/llmtool/config.py",
+                    "tools/llmtool/llmtool/role_config.py",
+                    "tools/llmtool/tests/test_role_config.py",
+                ],
+                "L3",
+                {"FULL"},
+                ("README.md", "unsupported_path"),
+            ),
+            (
+                "#790",
+                ["skills/ai-team-delivery/pm-continuation.md"],
+                "L3",
+                {"FULL"},
+                ("skills/ai-team-delivery/pm-continuation.md", "unsupported_path"),
+            ),
+            (
+                "#791",
+                [
+                    "tools/llmtool/worker-dispatch.json",
+                    "tools/llmtool/tests/test_worker_dispatch.py",
+                ],
+                "L3",
+                {"FULL"},
+                ("tools/llmtool/worker-dispatch.json", "unmapped_source"),
+            ),
+            (
+                "#792",
+                [
+                    ".github/workflows/llmtool-linux-ci.yml",
+                    "tools/ai-loop/README.md",
+                ],
+                "L3",
+                None,
+                (".github/workflows/llmtool-linux-ci.yml", "workflow_change"),
+            ),
+        )
+        for label, paths, level, expected_ids, expected_reason in fixtures:
+            with self.subTest(pr=label):
+                report = ci_mac_modules.selection_report(paths, REPO_ROOT)
+                self.assertEqual(report["level"], level)
+                if expected_ids is not None:
+                    self.assertEqual(set(report["test_ids"]), expected_ids)
+                if expected_reason is not None:
+                    path, reason = expected_reason
+                    self.assertIn(reason, report["fallback_reasons"])
+                    self.assertIn(path, report["fallback_paths"])
+                    self.assertIn({"path": path, "reason": reason}, report["fallback_details"])
+                if level == "L3":
+                    self.assertEqual(report["test_ids"], ["FULL"])
+                    self.assertTrue(all(":" not in reason
+                                        for reason in report["fallback_reasons"]))
+                    self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
+
+    def test_readme_and_candidate_only_role_config_are_evaluated_in_candidate_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            llmtool = root / "tools/llmtool/llmtool"
+            llmtool.mkdir(parents=True)
+            (root / "README.md").write_text("# candidate README\n", encoding="utf-8")
+            (llmtool / "config.py").write_text("# candidate config\n", encoding="utf-8")
+            (llmtool / "role_config.py").write_text("# candidate role config\n", encoding="utf-8")
+            tests = root / "tools/llmtool/tests"
+            tests.mkdir(parents=True)
+            (tests / "test_role_config.py").write_text(
+                "import unittest\n"
+                "from llmtool import config, role_config\n"
+                "class RoleConfigTests(unittest.TestCase): pass\n",
+                encoding="utf-8",
+            )
+            manifest = root / "tools/llmtool/ci/mac-modules.txt"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("test_role_config.RoleConfigTests\n", encoding="utf-8")
+            with patch.object(ci_mac_modules, "MODULE_LIST", manifest):
+                report = ci_mac_modules.selection_report(
+                    [
+                        "tools/llmtool/llmtool/config.py",
+                        "tools/llmtool/llmtool/role_config.py",
+                        "tools/llmtool/tests/test_role_config.py",
+                    ],
+                    root,
+                )
+        self.assertEqual(report["level"], "L1")
+        self.assertEqual(report["test_ids"], ["test_role_config", "test_role_config.RoleConfigTests"])
+        self.assertEqual(report["fallback_reasons"], [])
+        self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
+
+    def test_candidate_only_source_and_test_are_read_from_candidate_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "tools/llmtool/llmtool/candidate_only.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("# candidate-only source\n", encoding="utf-8")
+            tests = root / "tools/llmtool/tests"
+            tests.mkdir(parents=True)
+            (tests / "test_candidate_only.py").write_text(
+                "import unittest\nclass CandidateOnlyTests(unittest.TestCase): pass\n",
+                encoding="utf-8",
+            )
+            manifest = root / "tools/llmtool/ci/mac-modules.txt"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("test_candidate_only.CandidateOnlyTests\n", encoding="utf-8")
+            report = ci_mac_modules.selection_report(
+                ["tools/llmtool/llmtool/candidate_only.py"], root
+            )
+        self.assertEqual(report["level"], "L1")
+        self.assertIn("test_candidate_only", report["test_ids"])
+        self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
     def test_monitor_and_documentation_changes_select_no_subset(self):
         for path in ("scripts/llmtool_monitor.py", "tools/llmtool/docs/guide.md"):
@@ -243,7 +412,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 )
             self.assertEqual(report["level"], "L3")
             self.assertEqual(report["test_ids"], ["FULL"])
-            self.assertEqual(report["selection_reason"], "deleted_mapped_test_requires_full")
+            self.assertIn("missing_mapped_test", report["fallback_reasons"])
 
     def test_cli_json_and_text_output_are_deterministic(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -252,10 +421,12 @@ class MacTestIdSelectionTests(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 self.assertEqual(ci_mac_modules.main([
-                    "--changed-paths", str(changed), "--json-report"
+                    "--changed-paths", str(changed), "--source-head", "candidate-sha",
+                    "--json-report"
                 ]), 0)
             report = json.loads(output.getvalue())
             self.assertEqual(report["level"], "L1")
+            self.assertEqual(report["source_head"], "candidate-sha")
             self.assertIn("test_developer_route_agy", report["test_ids"])
             output = io.StringIO()
             with redirect_stdout(output):
