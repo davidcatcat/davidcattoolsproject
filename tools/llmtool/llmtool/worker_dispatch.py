@@ -163,6 +163,11 @@ def _parse_policy(raw):
                 len({(assignment['task_id'], assignment['owner_assignment_ref'])
                      for assignment in assignments}) != len(assignments)):
             raise ValueError('invalid worker policy')
+        if (key == 'company-gw-agent' and
+                (worker.get('dispatch') != 'PAUSED' or worker.get('decided_by') != 'PM' or
+                 worker.get('evidence') !=
+                 'https://github.com/davidcatcat/davidcattoolsproject/issues/120')):
+            raise ValueError('gw-agent requires the pending Owner decision')
         if date.fromisoformat(worker['decided_at']).isoformat() != worker['decided_at']:
             raise ValueError('invalid decision date')
     return value

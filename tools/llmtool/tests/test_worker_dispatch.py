@@ -54,16 +54,23 @@ class WorkerDispatchTests(unittest.TestCase):
     @staticmethod
     def _fixture_policy():
         evidence = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+        workers = {
+            worker: {
+                'dispatch': 'ALLOWED', 'decided_by': 'Owner',
+                'decided_at': '2026-10-22', 'reason': 'test policy state',
+                'evidence': evidence,
+            }
+            for worker in worker_dispatch.WORKERS
+        }
+        workers['company-gw-agent'] = {
+            'dispatch': 'PAUSED', 'decided_by': 'PM',
+            'decided_at': '2026-11-03',
+            'reason': 'Paused pending the Owner decision tracked by #120',
+            'evidence': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120',
+        }
         return {
             'schema_version': 1,
-            'workers': {
-                worker: {
-                    'dispatch': 'ALLOWED', 'decided_by': 'Owner',
-                    'decided_at': '2026-10-22', 'reason': 'test policy state',
-                    'evidence': evidence,
-                }
-                for worker in worker_dispatch.WORKERS
-            },
+            'workers': workers,
         }
 
     def _task(self):

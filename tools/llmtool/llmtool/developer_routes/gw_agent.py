@@ -88,7 +88,6 @@ class GwAgentRoute(DeveloperRoute):
 
     def __init__(self, config):
         super().__init__(config)
-        cleanup_audit_copies()
         package = config.get('package_path')
         profile = config.get('profile')
         profile_name = config.get('profile_name')

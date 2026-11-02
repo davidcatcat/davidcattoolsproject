@@ -36,6 +36,7 @@ from . import worker_dispatch
 from . import role_config
 from .developer_routes import (AgyRoute, GwAgentRoute, RouteError, capture_snapshot,
                                for_platform, load_route_config, run_route)
+from .developer_routes.gw_agent import cleanup_audit_copies
 from .developer_routes.agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
@@ -3122,12 +3123,15 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         return False
     try:
         execute = run_route if route_runner is None else route_runner
-        result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
-            'expected_branch': registration.branch, 'expected_head': snapshot.head,
-            'write_paths': write_paths, 'executable': sys.executable,
-            'prompt': prompt, 'task': task_input, 'timeout': 600,
-            'state_dirs': ()}, gate=route_gate, boundary=for_platform(),
-            snapshot=capture_snapshot)
+        try:
+            result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
+                'expected_branch': registration.branch, 'expected_head': snapshot.head,
+                'write_paths': write_paths, 'executable': sys.executable,
+                'prompt': prompt, 'task': task_input, 'timeout': 600,
+                'state_dirs': ()}, gate=route_gate, boundary=for_platform(),
+                snapshot=capture_snapshot)
+        finally:
+            cleanup_audit_copies()
         after_registration = task_completion.read_d6_registration(
             registration.task_id, registration.common_dir)
         after = task_completion.collect_git_snapshot(registration.root)

@@ -57,6 +57,7 @@ class GwAgentRouteTests(unittest.TestCase):
                         'timeout_seconds': 5},
             'default_model': 'fake-model', 'default_effort': 'low',
             'authorization_ref': 'pm-task-ref',
+            'allowed_data_classes': ['synthetic'],
         })
 
     def request(self):

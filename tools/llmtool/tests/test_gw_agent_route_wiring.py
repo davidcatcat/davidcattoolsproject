@@ -41,9 +41,16 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             (package / '__init__.py').write_text('', encoding='utf-8')
             config['package_path'] = temp
             route = GwAgentRoute(config)
-        request = {'expected_head': 'a' * 40, 'write_paths': ['src.py'], 'task': {
-            'task_id': 'b' * 32, 'source_sha': 'a' * 40, 'read_paths': ['src.py'],
-            'write_paths': ['src.py'], 'budgets': {'wall_clock_seconds': 30},
+        request = {'root': str(Path.cwd()), 'model': config['default_model'], 'effort': 'low',
+            'expected_branch': 'task-branch', 'expected_head': 'a' * 40,
+            'write_paths': ['src.py'], 'executable': '/usr/bin/python3', 'task': {
+            'schema_version': 1, 'task_id': 'b' * 32, 'source_sha': 'a' * 40,
+            'goal': 'Edit src.py.', 'acceptance': ['record the result'],
+            'read_paths': ['src.py'],
+            'write_paths': ['src.py'], 'budgets': {'max_turns': 4,
+                'max_input_tokens': 10000, 'max_output_tokens': 1000,
+                'max_wall_seconds': 60, 'max_tool_result_bytes': 4096,
+                'max_sent_bytes': 100000},
             'egress_basis': 'Approved internal task context.', 'data_class': 'INTERNAL'}}
         route.validate_request(request)
         request['task']['data_class'] = 'RESTRICTED'
