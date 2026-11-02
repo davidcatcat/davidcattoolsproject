@@ -76,12 +76,13 @@ class Audit:
 
 class GuardedRun:
     def __init__(self, client, audit, request_model, started, max_calls=None, max_tokens=None,
-                 expected_served_model=None):
+                 expected_served_model=None, max_output_tokens=4096, thinking="default"):
         self.client, self.audit, self.request_model = client, audit, request_model
         self.expected_served_model = (request_model if expected_served_model is None
                                       else expected_served_model)
         self.started = started
         self.max_calls, self.max_tokens = max_calls, max_tokens
+        self.max_output_tokens, self.thinking = max_output_tokens, thinking
         self.calls = self.tokens = self.connection_errors = 0
         self.scenarios = []
         self.diagnostics = []
@@ -93,6 +94,13 @@ class GuardedRun:
         return bool(SECRET_RE.search(text) or (key and key in text))
 
     def send(self, body, stream=False):
+        body = dict(body)
+        body["max_tokens"] = self.max_output_tokens
+        thinking = True if self.current == "S5" else self.thinking
+        if thinking == "default":
+            body.pop("chat_template_kwargs", None)
+        else:
+            body["chat_template_kwargs"] = {"enable_thinking": thinking == "on" or thinking is True}
         if self._scan(body):
             self.audit.add({"event": "stop", "reason": "CREDENTIAL_SCAN_HIT"})
             raise StopRun("CREDENTIAL_SCAN_HIT")
@@ -298,6 +306,8 @@ class GuardedRun:
         except Exception:
             passed, detail = False, "SCENARIO_ERROR"
         item = {"id": name, "passed": bool(passed), "detail": detail}
+        if name == "S6":
+            item["informational"] = True
         self.scenarios.append(item)
         self.audit.add({"event": "score", **item})
 
@@ -314,9 +324,15 @@ def _tool_result_matches(call, result):
     return isinstance(call_id, str) and bool(call_id) and result_id == call_id
 
 
+def _is_truncated(result):
+    _, choice, _ = _response(result)
+    return choice.get("finish_reason") == "length"
+
+
 def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
-    body = {"model": run.request_model, "messages": [{"role": "user", "content": run.task_prompt}],
-            "max_tokens": 512, "tools": [TOOL],
+    prompt = run.task_prompt + ("\nScenario S5: thinking with tools." if thinking else "")
+    body = {"model": run.request_model, "messages": [{"role": "user", "content": prompt}],
+            "tools": [TOOL],
             "tool_choice": {"type": "function", "function": {"name": TOOL_NAME}} if forced else "auto"}
     if match_id:
         body["messages"][0]["content"] = (
@@ -329,12 +345,13 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
     used_tool = False
     for _ in range(STEP_COUNT + 2):
         result = run.send({**body, "messages": messages,
-                           "max_tokens": 128 if used_tool else body["max_tokens"],
                            "tool_choice": "auto" if used_tool else body["tool_choice"]})
         run.record_diagnostic(result, _ + 1)
         call = run.tool_call(result)
         if call is None:
             _, _, message = _response(result)
+            if _is_truncated(result):
+                return False, "OUTPUT_TRUNCATED"
             answer = message.get("content")
             passed = used_tool and len([m for m in messages if m.get("role") == "tool"]) >= STEP_COUNT
             response_data = _response(result)[0]
@@ -365,9 +382,11 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
             if not all(_tool_result_matches(item, value) for item, value in zip(calls, results)):
                 return False, "TOOL_CALL_ID_MISMATCH"
             messages.extend([{"role": "assistant", "content": None, "tool_calls": calls}, *results])
-            followup = run.send({**body, "messages": messages, "max_tokens": 128, "tool_choice": "auto"})
+            followup = run.send({**body, "messages": messages, "tool_choice": "auto"})
             run.record_diagnostic(followup, 2)
             _, _, followup_message = _response(followup)
+            if _is_truncated(followup):
+                return False, "OUTPUT_TRUNCATED"
             answer = followup_message.get("content")
             return isinstance(answer, str) and EXPECTED in answer, "S3_MATCHED_RESULTS_ACCEPTED"
         if not run.valid_call(call):
@@ -386,20 +405,35 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
 def _stream_scenario(run):
     body = {"model": run.request_model, "messages": [{"role": "user", "content": run.task_prompt +
             "\nScenario S4: perform one streamed tool round-trip."}],
-            "max_tokens": 512, "tools": [TOOL], "tool_choice": "auto", "stream": True}
+            "tools": [TOOL], "tool_choice": "auto", "stream": True}
     result = run.send(body, stream=True)
     run.record_diagnostic(result, 1)
+    if _is_truncated(result):
+        return False, "OUTPUT_TRUNCATED"
     call = run.tool_call(result)
     if not run.valid_call(call):
         return False, "STREAMED_TOOL_CALL_MISSING_OR_INVALID"
+    if json.loads(call["function"]["arguments"])["step"] != 1:
+        return False, "STREAM_ROUND_TRIP_WRONG_FIRST_STEP"
     messages = body["messages"] + [{"role": "assistant", "content": None, "tool_calls": [call]},
                                    _tool_result(call)]
-    second = run.send({"model": run.request_model, "messages": messages, "max_tokens": 128,
+    second = run.send({"model": run.request_model, "messages": messages,
                        "tools": [TOOL], "tool_choice": "auto"})
     run.record_diagnostic(second, 2)
-    _, _, message = _response(second)
+    _, choice, message = _response(second)
+    if choice.get("finish_reason") == "length":
+        return False, "OUTPUT_TRUNCATED"
+    continued = run.tool_call(second)
+    if continued is not None:
+        if not run.valid_call(continued):
+            return False, "STREAM_ROUND_TRIP_CONTINUED_INVALID_CALL"
+        step = json.loads(continued["function"]["arguments"])["step"]
+        if step != 2:
+            return False, "STREAM_ROUND_TRIP_CONTINUED_WRONG_STEP"
+        return True, "STREAM_ROUND_TRIP_CONTINUED"
     answer = message.get("content")
-    return EXPECTED in answer if isinstance(answer, str) else False, "STREAM_TOOL_ROUND_TRIP_SCORE"
+    return (True, "STREAM_ROUND_TRIP_FINAL") if isinstance(answer, str) and EXPECTED in answer else (
+        False, "STREAM_ROUND_TRIP_FINAL_SCORE")
 
 
 def _text_tool_scenario(run):
@@ -408,12 +442,14 @@ def _text_tool_scenario(run):
     messages = [{"role": "user", "content": prompt}]
     used_tool = False
     for _ in range(STEP_COUNT + 2):
-        result = run.send({"model": run.request_model, "messages": messages, "max_tokens": 256})
+        result = run.send({"model": run.request_model, "messages": messages})
         run.record_diagnostic(result, _ + 1)
         _, _, message = _response(result)
         content = message.get("content")
         match = re.search(r"TOOL_CALL:\s*" + re.escape(TOOL_NAME) + r"\s*(\{[^\n]*\})", content or "")
         if not match:
+            if _is_truncated(result):
+                return False, "OUTPUT_TRUNCATED"
             return (used_tool and len([m for m in messages if m.get("role") == "assistant" and
                                       isinstance(m.get("content"), str) and "TOOL_CALL:" in m["content"]])
                     >= STEP_COUNT and isinstance(content, str) and EXPECTED in content), "TEXT_MULTI_ROUND_FINAL_SCORE"
@@ -430,10 +466,12 @@ def _text_tool_scenario(run):
     return False, "ROUND_CAP"
 
 
-def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, expected_served_model=None):
+def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, expected_served_model=None,
+         max_output_tokens=4096, thinking="default"):
     audit = Audit(audit_path)
     started = time.monotonic()
-    run = GuardedRun(client, audit, request_model, started, max_calls, max_tokens, expected_served_model)
+    run = GuardedRun(client, audit, request_model, started, max_calls, max_tokens, expected_served_model,
+                     max_output_tokens, thinking)
     # The project is generated and isolated. Nothing from the checkout is read.
     synthetic = Path(tempfile.mkdtemp(prefix="gw-probe-mini-"))
     os.chmod(synthetic, 0o700)
@@ -469,6 +507,7 @@ def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, exp
             "scenarios": run.scenarios, "calls": run.calls, "total_tokens": run.tokens,
             "diagnostics": run.diagnostics,
             "caps": {"calls": max_calls, "total_tokens": max_tokens,
+                     "max_output_tokens": max_output_tokens, "thinking": thinking,
                      "wall_seconds": MAX_SECONDS, "call_timeout_seconds": CALL_TIMEOUT},
             "audit_verified": audit_ok, "audit_entries": audit.count}
 
@@ -484,11 +523,17 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path)
     parser.add_argument("--max-calls", type=int, help="optional maximum number of gateway calls")
     parser.add_argument("--max-total-tokens", type=int, help="optional maximum total token usage")
+    parser.add_argument("--max-output-tokens", type=int, default=4096,
+                        help="maximum output tokens per scenario request (default: 4096)")
+    parser.add_argument("--thinking", choices=("default", "off", "on"), default="default",
+                        help="thinking mode for scenarios other than S5")
     args = parser.parse_args(argv)
     if args.max_calls is not None and args.max_calls < 1:
         parser.error("--max-calls must be positive")
     if args.max_total_tokens is not None and args.max_total_tokens < 1:
         parser.error("--max-total-tokens must be positive")
+    if not 1 <= args.max_output_tokens <= 65536:
+        parser.error("--max-output-tokens must be between 1 and 65536")
     if args.base_url and not _local_url(args.base_url):
         parser.error("--base-url must be a loopback URL")
     if args.live and not args.owner_authorization_url:
@@ -517,7 +562,7 @@ def main(argv=None):
     os.chmod(output_dir, 0o700)
     client = ProbeClient(base_url, model, key)
     result = _run(client, output_dir / "audit.jsonl", model, args.max_calls,
-                  args.max_total_tokens, args.expected_served_model)
+                  args.max_total_tokens, args.expected_served_model, args.max_output_tokens, args.thinking)
     result["started_at"] = datetime.now(timezone.utc).isoformat()
     result["audit_path"] = os.fspath(output_dir / "audit.jsonl")
     result = _redact(result, key)
