@@ -1725,6 +1725,78 @@ class TaskSubmissionCLITests(unittest.TestCase):
 
         self.assertEqual(github.call_args.kwargs['changed_paths'], changed_paths)
 
+    def _remote_test_task(self):
+        path = 'tools/llmtool/tests/test_task_submission_cli.py'
+        return {
+            'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'task_binding': {'contract_digest': 'c' * 64},
+            'developer': {'read_paths': [path], 'write_paths': [path]},
+        }
+
+    def _write_remote_test_config(self, value):
+        config_path = self.home / '.config/llmtool/remote-test.json'
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            value if isinstance(value, str) else json.dumps(value), encoding='utf-8')
+        config_path.chmod(0o600)
+
+    def _remote_local_evidence(self):
+        return ({'test_policy': 'LOCAL', 'root': str(self.executor_root),
+                 'source_sha': self.executor_head},
+                {'diff_sha256': 'd' * 64,
+                 'changed_paths': ['tools/llmtool/tests/test_task_submission_cli.py']})
+
+    def test_invalid_remote_test_config_fails_closed_without_local_tests(self):
+        task = self._remote_test_task()
+        self._write_remote_test_config('{invalid json')
+        evidence, result = self._remote_local_evidence()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.task_completion.'
+                      'run_bounded_worktree_tests') as local:
+            with self.assertRaises(LLMToolError) as raised:
+                submission_cli._remote_receipt_test_policy(task)
+            self.assertEqual(str(raised.exception), 'REMOTE_TEST_CONFIG_INVALID')
+            self.assertEqual(raised.exception.completion_code,
+                             'REMOTE_TEST_CONFIG_INVALID')
+            with self.assertRaises(LLMToolError) as blocked:
+                submission_cli._direct_result_tests(
+                    task, evidence, result, task['developer'])
+        local.assert_not_called()
+        self.assertEqual(str(blocked.exception), 'REMOTE_TEST_CONFIG_INVALID')
+        self.assertEqual(blocked.exception.completion_code,
+                         'REMOTE_TEST_CONFIG_INVALID')
+
+    def test_unconfigured_remote_test_keeps_local_test_behaviour(self):
+        task = self._remote_test_task()
+        evidence, result = self._remote_local_evidence()
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.task_completion.'
+                      'run_bounded_worktree_tests', return_value=[]) as local:
+            self.assertEqual(submission_cli._remote_receipt_test_policy(task), 'LOCAL')
+            tests = submission_cli._direct_result_tests(
+                task, evidence, result, task['developer'])
+        self.assertEqual(tests, [])
+        local.assert_called_once()
+
+    def test_valid_remote_test_config_keeps_remote_receipt_behaviour(self):
+        task = self._remote_test_task()
+        self._write_remote_test_config({
+            'host': 'ec2.example', 'user': 'tester',
+            'repo_path': '/srv/repo', 'python': '/usr/bin/python3'})
+        evidence, result = self._remote_local_evidence()
+        evidence['test_policy'] = 'REMOTE_RECEIPT'
+        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                patch('llmtool.task_submission_cli.task_completion.'
+                      'run_bounded_worktree_tests') as local:
+            self.assertEqual(submission_cli._remote_receipt_test_policy(task),
+                             'REMOTE_RECEIPT')
+            tests = submission_cli._direct_result_tests(
+                task, evidence, result, task['developer'])
+        local.assert_not_called()
+        self.assertEqual(tests[0]['status'], 'DEFERRED_REMOTE_RECEIPT')
+        self.assertEqual(tests[0]['path'],
+                         'tools/llmtool/tests/test_task_submission_cli.py')
+
     def test_company_gw_patch_is_persisted_with_separate_logical_session_and_usage(self):
         acceptance = ['new test passes']
         pm_response = json.dumps({
