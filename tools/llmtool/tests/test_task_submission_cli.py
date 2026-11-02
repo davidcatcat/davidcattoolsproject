@@ -2847,7 +2847,10 @@ class CodexChildLivenessTests(unittest.TestCase):
                           return_value=(type('Registration', (), {
                               'task_id': 'executor-one',
                               'trusted_agent_id': 'codex-developer',
-                              'source_sha': 'a' * 40, 'result_sha': 'a' * 40})(), None)), \
+                              'source_sha': 'a' * 40, 'result_sha': 'a' * 40})(),
+                              type('Snapshot', (), {
+                                  'common_dir': '/repo/.git', 'root': '/repo',
+                                  'branch': 'task-branch', 'head': 'a' * 40})())), \
              patch.object(submission_cli, '_assignment_paths',
                           return_value=(['src.py'], ['src.py'])), \
              patch.object(submission_cli, '_codex_developer_profile',
