@@ -809,7 +809,7 @@ class WidgetTests(Base):
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 20)
+            self.assertEqual(ui.menu_index, 23)
             self.assertIn('/pm accounts', rows[chat_tui.MENU_LIMIT - 1])
             self.assertIn('(19 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
