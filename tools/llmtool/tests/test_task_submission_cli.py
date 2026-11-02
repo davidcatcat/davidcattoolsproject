@@ -22,6 +22,7 @@ from llmtool.providers.base import Reply
 from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
 from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
 from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
+from llmtool import remote_test
 from llmtool import task_submission_cli as submission_cli
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
                                          _provider_route_binding, run_task_complete,
@@ -1730,6 +1731,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         return {
             'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'task_binding': {'contract_digest': 'c' * 64},
+            'task_contract': {'test_commands': [{
+                'argv': ['python3', '-m', 'unittest', 'discover', '-s',
+                         'tools/llmtool/tests', '-p',
+                         'test_task_submission_cli.py'],
+                'cwd': '.'}]},
             'developer': {'read_paths': [path], 'write_paths': [path]},
         }
 
@@ -1739,6 +1745,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
         config_path.write_text(
             value if isinstance(value, str) else json.dumps(value), encoding='utf-8')
         config_path.chmod(0o600)
+        return config_path
+
+    def _remote_test_config_loader(self, config_path):
+        """Load exactly this test-owned config; never consult the host HOME."""
+        def load():
+            if not config_path.exists():
+                raise FileNotFoundError
+            return remote_test._config(str(config_path))
+        return load
 
     def _remote_local_evidence(self):
         return ({'test_policy': 'LOCAL', 'root': str(self.executor_root),

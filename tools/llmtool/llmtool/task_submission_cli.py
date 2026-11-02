@@ -1736,10 +1736,10 @@ def _remote_test_config_invalid_error():
     return error
 
 
-def _reject_invalid_remote_test_config(task, read_paths):
+def _reject_invalid_remote_test_config(task, read_paths, config_loader=None):
     """Fail closed before local tests when a remote-test config exists but is invalid."""
     if (not _remote_task_test_paths(task, read_paths=read_paths) or
-            _remote_test_config_state() != 'INVALID'):
+            _remote_test_config_state(config_loader) != 'INVALID'):
         return
     raise _remote_test_config_invalid_error()
 
@@ -1790,13 +1790,14 @@ def _matching_remote_test_receipt(task, *, executor_task, source_sha, paths):
     return None, ('MAC_EVIDENCE_REQUIRED' if skipped else 'REMOTE_TEST_RECEIPT_MISSING')
 
 
-def _direct_result_tests(task, evidence, result, developer):
+def _direct_result_tests(task, evidence, result, developer, *, config_loader=None):
     if evidence.get('test_policy') == 'REMOTE_RECEIPT':
         return [_deferred_remote_test(
             path, evidence['source_sha'], diff_sha256=result['diff_sha256'])
                 for path in _remote_task_test_paths(
                     task, read_paths=developer['read_paths'])]
-    _reject_invalid_remote_test_config(task, developer['read_paths'])
+    _reject_invalid_remote_test_config(task, developer['read_paths'],
+                                       config_loader=config_loader)
     return task_completion.run_bounded_worktree_tests(
         root=evidence['root'], source_sha=evidence['source_sha'],
         diff_sha256=result['diff_sha256'], changed_paths=result['changed_paths'],
