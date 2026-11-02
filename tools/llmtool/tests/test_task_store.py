@@ -513,6 +513,7 @@ class TaskStoreTests(unittest.TestCase):
         store.create(task)
         pending = self._developer_assignment(provider='opencode', max_tokens=4096)
         pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+        pending['execution'] = None
         store.compare_and_update(
             task['task_id'], expected={'developer': None}, developer=pending)
         dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
