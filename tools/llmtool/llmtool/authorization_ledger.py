@@ -574,6 +574,7 @@ class ReceiptLedger:
                 type(ttl_seconds) is not int or not 1 <= ttl_seconds <= MAX_APPROVAL_SECONDS):
             _fail(LedgerCode.NOT_ALLOWED)
         b=decision.binding
+        object_key = b.object_key if self.provider_layout == 2 else b.legacy_object_key
         from .task_lifecycle import utc_time
         deadline=int(utc_time(b.call.deadline).timestamp())
         nonce=secrets.token_hex(32)
@@ -583,10 +584,10 @@ class ReceiptLedger:
             if self.provider_layout == 2:
                 # Zero effect: an ISSUED row past expires_at was never consumed.
                 self._db.execute("UPDATE receipts SET status='EXPIRED' WHERE object_key=? "
-                                 "AND status='ISSUED' AND expires_at <= ?",(b.object_key,now))
+                                 "AND status='ISSUED' AND expires_at <= ?",(object_key,now))
             try:
                 self._db.execute('INSERT INTO receipts VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL, ?, ?)',
-                    (nonce,b.to_json(),now,expires,'ISSUED',b.call.route_digest,b.object_key))
+                    (nonce,b.to_json(),now,expires,'ISSUED',b.call.route_digest,object_key))
             except sqlite3.IntegrityError: _fail(LedgerCode.NOT_ALLOWED)
         return Receipt(b,now,expires,nonce)
 
@@ -595,11 +596,12 @@ class ReceiptLedger:
         if self.kind != 'PROVIDER_REVIEW' or type(receipt) is not Receipt or type(receipt.binding) is not ProviderReviewBinding:
             _fail(LedgerCode.NOT_ALLOWED)
         b=receipt.binding
+        object_key = b.object_key if self.provider_layout == 2 else b.legacy_object_key
         with self._transaction() as now:
             row=self._db.execute('SELECT binding,issued_at,expires_at,status,route_digest,object_key '
                                  'FROM receipts WHERE nonce=?',(receipt.nonce,)).fetchone()
             if row is None or row[3] != 'ISSUED': _fail(LedgerCode.NOT_ALLOWED)
-            if row != (b.to_json(),receipt.issued_at,receipt.expires_at,'ISSUED',b.call.route_digest,b.object_key):
+            if row != (b.to_json(),receipt.issued_at,receipt.expires_at,'ISSUED',b.call.route_digest,object_key):
                 self._set(receipt.nonce,'DENIED','ISSUED'); return False
             if not row[1] <= now < row[2]:
                 self._set(receipt.nonce,'EXPIRED','ISSUED'); return False

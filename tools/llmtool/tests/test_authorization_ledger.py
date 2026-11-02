@@ -760,7 +760,8 @@ class ProviderLedgerTests(unittest.TestCase):
         self.base,_=self.h.binding()
 
     def issue(self,tag='1',ttl=120):
-        call=replace(self.base,packet_digest=tag*64,deadline='2026-10-14T00:05:00Z')
+        call=replace(self.base,packet_digest=tag*64,reviewed_object_digest=tag*64,
+                     deadline='2026-10-14T00:05:00Z')
         binding=p.ProviderReviewBinding(call)
         observed=p.ProviderObservedState(binding.digest,call.source_sha,call.observation_digest,True)
         decision=p.decide_provider_review(binding,issuer=self.issuer,observed=observed)
@@ -1045,6 +1046,12 @@ class ProviderLayout2Tests(ProviderLedgerTests):
         self.assertEqual(b.object_key, first.binding.object_key)
         with self.assertRaises(l.LedgerError):
             self.h.ledger.issue_provider(decision, ttl_seconds=120)
+
+    def test_distinct_reviewed_object_can_be_issued(self):
+        first, _ = self.issue('1')
+        distinct, _ = self.issue('2')
+        self.assertNotEqual(first.binding.object_key, distinct.binding.object_key)
+        self.assertEqual(self.h.ledger.status(distinct.nonce), 'ISSUED')
 
     def test_effect_rows_and_live_issue_hold_the_key(self):
         for status in ('ISSUED', 'CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN'):

@@ -343,8 +343,17 @@ class ProviderReviewBinding(ContractValue):
     def object_key(self):
         # Run/nonce changes cannot buy a second attempt for the same object.
         from .task_review import digest
+        return digest(self.call.reviewed_object_digest,
+                      'llmtool.provider-reviewed-object.v2')
+
+    @property
+    def legacy_object_key(self):
+        """Layout 1's original key, retained without changing its behavior."""
+        from .task_review import digest
         c = self.call
-        return digest(c.reviewed_object_digest, 'llmtool.provider-reviewed-object.v2')
+        return digest((c.route_digest,c.source_sha,c.ready_task.contract_digest,
+                       c.acceptance_task.contract_digest,c.packet_digest),
+                      'llmtool.provider-reviewed-object.v1')
 
 
 @dataclass(frozen=True)
