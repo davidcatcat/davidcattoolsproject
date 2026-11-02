@@ -2725,9 +2725,76 @@ def _codex_developer_report(result):
     return reported
 
 
+def _codex_child_liveness(execution):
+    """Classify a persisted Codex child without guessing for legacy records."""
+    if (type(execution) is not dict or
+            not {'child_pid', 'child_start_time', 'child_pgid'}.issubset(execution)):
+        return 'UNKNOWN'
+    pid, start_time, pgid = (execution.get('child_pid'),
+                             execution.get('child_start_time'),
+                             execution.get('child_pgid'))
+    if (type(pid) is not int or pid <= 0 or type(pgid) is not int or pgid <= 0 or
+            type(start_time) is not str):
+        return 'UNKNOWN'
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return 'DEAD'
+    except PermissionError:
+        pass
+    except OSError:
+        return 'UNKNOWN'
+    current_start = codex_direct_developer.process_start_time(pid)
+    if current_start is None:
+        return 'UNKNOWN'
+    if current_start != start_time:
+        return 'DEAD'
+    try:
+        if os.getpgid(pid) != pgid:
+            return 'DEAD'
+    except (ProcessLookupError, PermissionError, OSError):
+        return 'UNKNOWN'
+    return 'ALIVE'
+
+
 def run_task_codex_delegate(args, *, store):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
+    previous_developer = task.get('developer')
+    if (type(previous_developer) is dict and
+            previous_developer.get('provider_profile') == 'codex' and
+            previous_developer.get('state') == 'DEVELOPER_DISPATCHING'):
+        try:
+            current_snapshot = task_completion.collect_git_snapshot(os.getcwd())
+            current_registration, _ = task_completion.bind_executor_task(
+                args.executor_task, expected_common_dir=current_snapshot.common_dir,
+                root=current_snapshot.root)
+        except Exception:
+            raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
+        if (previous_developer.get('executor_task_id') != current_registration.task_id or
+                current_registration.trusted_agent_id != 'codex-developer'):
+            raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
+        liveness = _codex_child_liveness(previous_developer.get('execution'))
+        if liveness == 'ALIVE':
+            raise LLMToolError('CODEX_CHILD_STILL_RUNNING')
+        if liveness == 'DEAD':
+            outcome = dict(previous_developer)
+            outcome.update(state='DEVELOPER_OUTCOME_UNKNOWN',
+                error_code='CODEX_CHILD_NOT_RUNNING',
+                execution={'status': 'UNKNOWN', 'native_session_id': None,
+                    'process_exit_code': None, 'stdout_sha256': None,
+                    'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                    'usage_source': 'UNKNOWN', 'source_bytes': None,
+                    'source_file_count': None, 'source_manifest_sha256': None})
+            try:
+                store.compare_and_update(args.task_id,
+                    expected={'developer': previous_developer}, developer=outcome)
+            except TaskStoreConflict:
+                raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
+            except Exception:
+                raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
+            raise LLMToolError('CODEX_CHILD_OUTCOME_UNKNOWN') from None
+        raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
     if (task['state'] != 'PM_RESPONDED' or not task['response'] or
             task['schema_version'] != 2):
         raise LLMToolError('task has no successful PM response')
@@ -2888,6 +2955,10 @@ def run_task_codex_delegate(args, *, store):
             model=provider['model'], reasoning_effort=reasoning_effort,
             dispatch_store=store, dispatch_task_id=task['task_id'],
             prelaunch_validate=validate_binding,
+            launch_callback=lambda pid, started_at, pgid: (
+                store.record_codex_launch(task['task_id'],
+                    assignment_id=developer['assignment_id'], pid=pid,
+                    start_time=started_at, pgid=pgid)),
             timeout=effective_timeout,
             dispatch_action=('TIMEOUT_CONTINUATION' if recovering_timeout else 'DISPATCH'))
     except worker_dispatch.WorkerDispatchDenied as exc:

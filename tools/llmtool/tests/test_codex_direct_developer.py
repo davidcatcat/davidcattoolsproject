@@ -146,6 +146,18 @@ class CodexDirectDeveloperTests(unittest.TestCase):
         self.assertIn('shell_environment_policy.set.PYTHONPYCACHEPREFIX="/tmp/codex-direct-cache"',
                       argv)
 
+    def test_launch_callback_receives_child_identity_before_result(self):
+        observed = []
+        self.write_fake(self.events(self.final), delay_after_output=0.2)
+        result = self.run_fake(launch_callback=lambda pid, start, pgid:
+                               observed.append((pid, start, pgid)))
+        self.assertEqual(result.status, 'DONE')
+        self.assertEqual(len(observed), 1)
+        pid, start, pgid = observed[0]
+        self.assertGreater(pid, 0)
+        self.assertTrue(start)
+        self.assertEqual(pgid, pid)
+
     def test_reviewer_argv_remains_ephemeral(self):
         argv = review_dispatch._codex_argv('/fake/codex', self.root)
         self.assertIn('--ephemeral', argv)
