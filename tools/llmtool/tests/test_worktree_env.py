@@ -1061,6 +1061,26 @@ class CacheTest(EnvironmentTempCase):
         self.assertNotIn(secret, stdout.getvalue() + stderr.getvalue())
         self.assertNotIn(fragment, stdout.getvalue() + stderr.getvalue())
 
+    def test_probe_does_not_write_bytecode_into_imported_package(self):
+        package_root = self.tmp / "probe-package"
+        package = package_root / "llmtool"
+        package.mkdir(parents=True)
+        (package / "__init__.py").write_text("VALUE = 'probe'\n", encoding="utf-8")
+
+        probe_venv = self.tmp / "probe-venv"
+        venv.EnvBuilder(with_pip=False).create(str(probe_venv))
+        version = "%d.%d" % sys.version_info[:2]
+        site_packages = probe_venv / "lib" / ("python" + version) / "site-packages"
+        site_packages.mkdir(parents=True, exist_ok=True)
+        (site_packages / "probe-package.pth").write_text(
+            str(package_root) + "\n", encoding="utf-8"
+        )
+
+        result = we._probe_venv(str(probe_venv / "bin" / "python"), [])
+
+        self.assertEqual(result["llmtool_file"], str((package / "__init__.py").resolve()))
+        self.assertFalse((package / "__pycache__").exists())
+
     def test_redactor_strips_arbitrary_query_keys_and_bare_path_fragments(self):
         diagnostic = (
             "urllib3 Retry(total=0): GET /private/wheels/pkg.whl"
