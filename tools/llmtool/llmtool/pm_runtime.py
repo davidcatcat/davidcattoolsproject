@@ -28,7 +28,7 @@ PM_PERMISSION_MODE = 'auto'
 MAX_MESSAGE_BYTES = 16384
 MAX_STREAM_LINE_BYTES = 1024 * 1024
 MAX_HISTORY_TURNS = 200
-_ADAPTERS = {'claude-code': 'claude'}
+_ADAPTERS = {'claude-code': 'claude', 'codex': 'codex'}
 _SUPPORTED_BINDING_RUNTIMES = frozenset(('claude-code', 'codex'))
 _LIVE_WINDOW_SECONDS = 20
 _STDERR_LIMIT = 65536
@@ -513,7 +513,15 @@ def create_dedicated_pm(cwd, runtime='claude-code', account=None, *, state_root=
         role_options = {'environ': environ, 'home': home}
         if account is not None:
             role_options['cli'] = {'account': account}
-        resolved = role_config.resolve_role('pm', **role_options)
+        # A Codex binding records its own account. Resolve that account directly
+        # instead of inheriting roles.pm, which may intentionally remain Claude.
+        role = 'pm-codex-binding' if runtime == 'codex' and account is not None else 'pm'
+        resolved = role_config.resolve_role(role, **role_options)
+        if (runtime == 'codex' and
+                (resolved.get('provider') != 'codex' or
+                 not role_config._name(resolved.get('account')) or
+                 not resolved.get('config_dir'))):
+            raise LLMToolError('Codex PM binding requires a Codex account')
     except LLMToolError:
         raise _error('PM_CONFIG_INVALID', 'PM account configuration is invalid') from None
     account = resolved.get('account')
@@ -859,6 +867,7 @@ class PMRuntime:
         self._has_owned_session = False
         self._was_interrupted = False
         self._unknown_lines = 0
+        self._codex_driver = None
         self._stderr_buffer = bytearray()
         self._stderr_thread = None
         # The child's stdout is read for the whole connection, not only during an Owner
@@ -983,6 +992,11 @@ class PMRuntime:
             if self.runtime != 'claude-code' and self.runtime != binding['runtime']:
                 raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
             self.runtime = binding['runtime']
+        if self.runtime == 'codex':
+            from .pm_runtime_codex import CodexRuntime
+            self._codex_driver = CodexRuntime(self)
+            self._codex_driver.open()
+            return self
         adapter = _ADAPTERS.get(self.runtime)
         if adapter is None:
             raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
@@ -1234,6 +1248,8 @@ class PMRuntime:
         return '[withheld]' if _emitted_sensitive(value) else value
 
     def is_alive(self):
+        if self._codex_driver is not None:
+            return self._codex_driver.is_alive()
         if self._child is None or self._closed:
             return False
         try:
@@ -1242,6 +1258,8 @@ class PMRuntime:
             return False
 
     def send(self, text, idempotency_key=None):
+        if self._codex_driver is not None:
+            return self._codex_driver.send(text, idempotency_key=idempotency_key)
         if (type(text) is not str or not text or
                 any((unicodedata.category(char) == 'Cc' and char not in '\t\n') or
                     unicodedata.category(char) == 'Cf' for char in text)):
@@ -1617,6 +1635,8 @@ class PMRuntime:
         with PM_TURN_ACTIVE until it ends. Raises PM_PROCESS_EXITED once the child's
         stdout has ended between turns.
         """
+        if self._codex_driver is not None:
+            return self._codex_driver.background_turn(timeout=timeout)
         deadline = None if timeout is None else time.monotonic() + timeout
         with self._lines_cond:
             while True:
@@ -1691,10 +1711,14 @@ class PMRuntime:
 
     def turn_active(self):
         """True while an Owner or background turn is running in this driver."""
+        if self._codex_driver is not None:
+            return self._codex_driver.turn_active()
         with self._state_lock:
             return self._turn is not None
 
     def interrupt(self):
+        if self._codex_driver is not None:
+            return self._codex_driver.interrupt()
         with self._state_lock:
             if self._turn is None or self._closed:
                 return
@@ -1729,6 +1753,8 @@ class PMRuntime:
             pass
 
     def close(self, timeout=5):
+        if self._codex_driver is not None:
+            return self._codex_driver.close(timeout=timeout)
         with self._state_lock:
             if (self._closed and self._lock_fd is None and self._child is None and
                     self not in _active_runtimes and self._turn is None):
