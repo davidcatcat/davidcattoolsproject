@@ -31,7 +31,7 @@ from .terminal import terminal_safe_text
 # A template: key_help() fills in the developer-only parts (W57).
 KEY_HELP = """Keys
   Enter                 Send message (or run /command)
-  換行 = Shift+Enter (terminal must send it) / Option+Enter / Ctrl+J
+  換行 = Shift+Enter (terminal must send it) / Option+Enter / Ctrl-J
                         Insert newline; paste keeps newlines
   Up/Down               Move in input; on first/last line recall earlier inputs
   /                     Command picker (existing commands only): type to filter, Up/Down
