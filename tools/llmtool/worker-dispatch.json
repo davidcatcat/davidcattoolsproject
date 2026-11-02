@@ -77,25 +77,7 @@
       "decided_by": "Owner",
       "decided_at": "2026-10-31",
       "reason": "PM-selected AGY Developer route uses gemini-4-argon-medium and formal Codex review; validate auth, quota, session, D6 and scoped safety; no automatic retry or fallback",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665",
-      "owner_assignments": [
-        {
-          "task_id": "d3b1e153cf934e7f81542b17d8e37bf2",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6441807296"
-        },
-        {
-          "task_id": "3f314c20e66e4c3d9e1721feb6de98f1",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6448526950"
-        },
-        {
-          "task_id": "33ca0f6c51f94a08932e7ce52f570ffe",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6448526950"
-        },
-        {
-          "task_id": "e2f8957fd8d3423bab48b879050b57c2",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6448526950"
-        }
-      ]
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "company-gw": {
       "dispatch": "ALLOWED",
