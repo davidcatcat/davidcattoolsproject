@@ -92,9 +92,20 @@ class TaskAdvanceTests(unittest.TestCase):
     def test_cli_route(self):
         parsed = parser_for_cli().parse_args(['task', 'advance', '1' * 32, '--pr', '17'])
         self.assertEqual(parsed.action, 'advance')
+        self.assertFalse(parsed.merge)
         with patch('llmtool.task_submission_cli.run_task_advance', return_value=0) as handler:
             self.assertEqual(main(['task', 'advance', '1' * 32, '--pr', '17']), 0)
         handler.assert_called_once()
+        with patch('llmtool.task_submission_cli.run_task_advance', return_value=0) as handler:
+            self.assertEqual(main(['task', 'advance', '1' * 32, '--pr', '17', '--merge']), 0)
+        self.assertTrue(handler.call_args.args[0].merge)
+        for argv, expected in ((['task', 'advance', '1' * 32], False),
+                               (['task', 'advance', '1' * 32, '--merge'], True)):
+            args = parser_for_cli().parse_args(argv)
+            with patch('llmtool.task_advance.advance', return_value={'codes': []}) as advance, \
+                    redirect_stdout(io.StringIO()):
+                task_submission_cli.run_task_advance(args, store=object())
+            self.assertEqual(advance.call_args.kwargs['merge'], expected)
 
     def test_claude_result_route_and_advance(self):
         parsed = parser_for_cli().parse_args([
@@ -1414,6 +1425,96 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(calls[0], ['pr', 'merge', '17', '--squash',
                                     '--match-head-commit', HEAD])
         self.assertEqual(calls[1][:3], ['pr', 'comment', '17'])
+        replay = task_advance._merge_once(store=store,
+            record=dict(record, merge_attempt=store.attempt), number=17,
+            head=HEAD, pr=pr, events=[event], github_get=github_get,
+            gh_runner=gh_runner, root='/repo')
+        self.assertEqual(replay['codes'], ['MERGE_ALREADY_CLAIMED'])
+        self.assertEqual(len(calls), 2)
+
+    def test_merge_refuses_unqualified_reviews_checks_heads_and_owner_acceptance(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+
+        class Store:
+            def __init__(self):
+                self.attempt = None
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                if self.attempt != expected.get('merge_attempt'):
+                    raise RuntimeError('claim race')
+                self.attempt = dict(merge_attempt)
+
+        def run_case(*, record=None, pr=None, checks=None, second_pr=None, events=None):
+            record = dict(record or {
+                'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                'review_dispatch_claim': [review],
+            })
+            pr = pr or {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+                        'labels': [], 'body': ''}
+            checks = checks if checks is not None else [
+                {'head_sha': HEAD, 'name': 'check (Linux)', 'status': 'completed',
+                 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+                 'conclusion': 'success'},
+            ]
+            calls = []
+            pulls = 0
+            def github_get(path):
+                nonlocal pulls
+                if path.startswith('commits/'):
+                    return {'total_count': len(checks), 'check_runs': checks}
+                if path.endswith('/files?per_page=100'):
+                    return [{'filename': 'src/module.py'}]
+                if path.startswith('pulls/'):
+                    pulls += 1
+                    return second_pr if pulls == 1 and second_pr is not None else pr
+                return []
+            def gh_runner(_root, args):
+                calls.append(args)
+                return type('R', (), {'returncode': 0})()
+            result = task_advance._merge_once(store=Store(), record=record, number=17,
+                head=HEAD, pr=pr, events=[event] if events is None else events,
+                github_get=github_get,
+                gh_runner=gh_runner, root='/repo')
+            return result, calls
+
+        fix_record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+            'review_dispatch_claim': [dict(review, review_result={'verdict': 'FIX'})]}
+        newer_fix = dict(review, version=2, review_result={'verdict': 'FIX'})
+        newer_fix_event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 2,
+                           'outcome': 'REVIEW_FAIL'}
+        moved = {'number': 17, 'head': {'sha': 'b' * 40}, 'mergeable': True,
+                 'labels': [], 'body': ''}
+        tui = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+               'labels': [{'name': 'TUI'}], 'body': ''}
+        cases = [
+            ('FIX', {'record': fix_record}, 'MERGE_REVIEW_NOT_PASS'),
+            ('newer FIX', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                'review_dispatch_claim': [review, newer_fix]},
+                'events': [event, newer_fix_event]}, 'MERGE_REVIEW_NOT_PASS'),
+            ('stale initial head', {'pr': moved}, 'MERGE_STALE_HEAD'),
+            ('moved before merge', {'second_pr': moved}, 'MERGE_STALE_HEAD'),
+            ('conflicting PR', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                'review_dispatch_claim': [review, dict(review, pr=18)]}},
+             'MERGE_CONFLICTING_PR'),
+            ('TUI without Owner marker', {'pr': tui}, 'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
+            ('pending check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux)',
+                'status': 'in_progress', 'conclusion': None}]}, 'MERGE_CHECKS_NOT_GREEN'),
+            ('cancelled check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux)',
+                'status': 'completed', 'conclusion': 'cancelled'}]}, 'MERGE_CHECKS_NOT_GREEN'),
+            ('failed check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux)',
+                'status': 'completed', 'conclusion': 'failure'}]}, 'MERGE_CHECKS_NOT_GREEN'),
+            ('missing required macOS check', {'checks': [{'head_sha': HEAD,
+                'name': 'check (Linux)', 'status': 'completed', 'conclusion': 'success'}]},
+             'MERGE_MACOS_CHECK_REQUIRED'),
+        ]
+        for label, kwargs, code in cases:
+            with self.subTest(label=label):
+                result, calls = run_case(**kwargs)
+                self.assertEqual(result['codes'], [code])
+                self.assertEqual(calls, [])
 
     def test_merge_unknown_is_never_retried_and_failed_checks_refuse(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
