@@ -128,7 +128,14 @@ class WorkerDispatchTests(unittest.TestCase):
 
     def test_real_owner_policy_parses_and_validates(self):
         raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
-        self.assertIsInstance(worker_dispatch._parse_policy(raw), dict)
+        policy = worker_dispatch._parse_policy(raw)
+        self.assertIsInstance(policy, dict)
+        self.assertNotIn('owner_assignments', policy['workers']['agy'])
+        with patch.object(worker_dispatch, '_POLICY_PATH',
+                          Path(worker_dispatch._DEFAULT_POLICY_PATH)):
+            decision = worker_dispatch.evaluate('agy')
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self._set_state('agy', 'ALLOWED')
