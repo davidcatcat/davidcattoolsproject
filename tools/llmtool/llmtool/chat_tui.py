@@ -1499,7 +1499,11 @@ class ChatTUI:
         if self.input.buffer.cursor_position != len(text):
             self.close_menu()
             return
-        matches = slash_matches(text, self.dev)
+        # Tab completion is narrower than the interactive picker's fuzzy search:
+        # only commands whose full label starts with the typed draft are candidates.
+        commands = [command for command in SLASH_COMMANDS
+                    if self.dev or not command[0].startswith("/task")]
+        matches = [command for command in commands if command[0].startswith(text)]
         if not matches:
             self.close_menu()
             return
@@ -1511,7 +1515,7 @@ class ChatTUI:
         prefix = _common_prefix([item[0] for item in matches])
         if len(prefix) > len(text):
             self.input.buffer.set_document(self._Document(prefix, len(prefix)))
-            matches = slash_matches(prefix, self.dev)
+            matches = [command for command in commands if command[0].startswith(prefix)]
         self._set_menu(matches)
 
     def _sync_picker(self):
