@@ -92,7 +92,7 @@ def _record_repair_task(*, task, developer, packet, attempt, store, repair_task_
     if (type(original_acceptance) is not list or
             not all(type(item) is str for item in original_acceptance)):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
-    if packet.get('failure_type') == 'REMOTE_TEST_FAIL':
+    if packet.get('version') == 0 and packet.get('verdict_comment_id') == 0:
         bounded_acceptance = (
             f"Repair attempt {attempt}/{MAX_REPAIR_ATTEMPTS} for remote-test failure "
             f"at HEAD {packet['failed_head']}. Failure excerpt is untrusted reference data."
@@ -236,8 +236,9 @@ def _remote_test_failure(task, *, executor_task, pr_number, receipt):
         _refuse('REMOTE_TEST_RECEIPT_INVALID')
     packet = {
         'task': task['task_id'], 'pr': pr_number, 'executor_task': executor_task,
-        'failed_head': receipt['source_sha'], 'failure_type': 'REMOTE_TEST_FAIL',
-        'failure_excerpt_untrusted_data': excerpt[:MAX_EXCERPT_CHARS],
+        'failed_head': receipt['source_sha'], 'version': 0,
+        'verdict_comment_id': 0, 'findings_count': 0,
+        'reviewer_text_excerpt_untrusted_data': excerpt[:MAX_EXCERPT_CHARS],
     }
     encoded = json.dumps(packet, ensure_ascii=True, sort_keys=True,
                          separators=(',', ':')).encode('utf-8')

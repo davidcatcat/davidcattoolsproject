@@ -167,10 +167,13 @@ class ReviewRepairTests(unittest.TestCase):
             })
         packet = dispatched[0]['packet']
         self.assertEqual(result['next_action'], 'review-dispatch --version 1')
-        self.assertEqual(packet['failure_type'], 'REMOTE_TEST_FAIL')
         self.assertEqual(packet['failed_head'], HEAD)
-        self.assertEqual(packet['failure_excerpt_untrusted_data'],
+        self.assertEqual(packet['version'], 0)
+        self.assertEqual(packet['verdict_comment_id'], 0)
+        self.assertEqual(packet['findings_count'], 0)
+        self.assertEqual(packet['reviewer_text_excerpt_untrusted_data'],
                          'FAIL: test_remote\nAssertionError')
+        self.assertEqual(task_submission_cli._validate_repair_packet(packet), packet)
         self.assertIsNone(self.store.get(TASK)['review_repair_claims'][0]['comment_id'])
 
     def test_replay_after_restart_does_not_dispatch_twice(self):
