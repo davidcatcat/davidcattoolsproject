@@ -2794,7 +2794,7 @@ class CodexChildLivenessTests(unittest.TestCase):
         task['developer'] = developer
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
-        store = TaskStore(Path(tmp.name) / 'tasks')
+        store = TaskStore(Path(tmp.name).resolve() / 'tasks')
         store.create(task)
         with patch.object(submission_cli.worker_dispatch,
                           'authorize_task_store_change', return_value=None):
