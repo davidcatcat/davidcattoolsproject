@@ -31,7 +31,8 @@ from .terminal import terminal_safe_text
 # A template: key_help() fills in the developer-only parts (W57).
 KEY_HELP = """Keys
   Enter                 Send message (or run /command)
-  Ctrl-J, Esc Enter     Insert newline (multiline message); paste keeps newlines
+  換行 = Shift+Enter (terminal must send it) / Option+Enter / Ctrl+J
+                        Insert newline; paste keeps newlines
   Up/Down               Move in input; on first/last line recall earlier inputs
   /                     Command picker (existing commands only): type to filter, Up/Down
                         choose and scroll, Enter completes the draft to the choice without
@@ -549,6 +550,7 @@ class ChatTUI:
         from prompt_toolkit.document import Document
         from prompt_toolkit.filters import Condition, has_focus
         from prompt_toolkit.history import InMemoryHistory
+        from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
         from prompt_toolkit.key_binding import KeyBindings
         from prompt_toolkit.key_binding.bindings.mouse import load_mouse_bindings
         from prompt_toolkit.keys import Keys
@@ -558,6 +560,11 @@ class ChatTUI:
         from prompt_toolkit.styles import DynamicStyle, Style
         from prompt_toolkit.utils import get_cwidth
         from prompt_toolkit.widgets import TextArea
+
+        # prompt_toolkit 3.0.53 does not accept a synthetic "s-enter" binding.
+        # Decode the common terminal encodings into the existing Esc+Enter binding.
+        ANSI_SEQUENCES["\x1b[13;2u"] = (Keys.Escape, Keys.ControlM)
+        ANSI_SEQUENCES["\x1b[27;2;13~"] = (Keys.Escape, Keys.ControlM)
 
         self._Document = Document
         self._Style = Style
@@ -977,11 +984,10 @@ class ChatTUI:
             self._refresh_search()
 
         @keys.add("c-j", filter=input_focused)
-        @keys.add("s-enter", filter=input_focused)
         @keys.add("escape", "enter", filter=input_focused)
         def _newline(event):
-            # Ctrl-J, Shift-Enter and Esc Enter insert in the draft, never send; end
-            # a history search first.
+            # Ctrl-J and Esc+Enter (including decoded Shift+Enter variants) insert in
+            # the draft, never send; end a history search first.
             self.close_menu()
             self.input.buffer.insert_text("\n")
 

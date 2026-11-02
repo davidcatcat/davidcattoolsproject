@@ -296,17 +296,22 @@ class WidgetTests(Base):
         self.assertNotIn('\n', status)
         self.assertLessEqual(get_cwidth(status), 99)
 
-    def test_shift_enter_inserts_and_enter_sends_complete_multiline_draft(self):
-        def shift_enter(ui):
-            with set_app(ui.app):
-                ui.app.key_processor.feed(KeyPress(Keys.ShiftEnter))
-                ui.app.key_processor.process_keys()
+    def test_shift_enter_terminal_sequences_insert_and_enter_sends_full_draft(self):
+        def first_line_inserted(ui):
             self.assertEqual(ui.input.text, 'first\n')
             self.assertEqual(self.client.complete.call_count, 0)
 
-        ui, _ = self.drive(['first', shift_enter, 'second\r', self.idle])
+        def second_line_inserted(ui):
+            self.assertEqual(ui.input.text, 'first\nsecond\n')
+            self.assertEqual(self.client.complete.call_count, 0)
+
+        # CSI-u and modifyOtherKeys are sent by terminals configured to report
+        # Shift+Enter; drive() feeds both encodings through the real input parser.
+        ui, _ = self.drive(['first\x1b[13;2u', first_line_inserted,
+                            'second\x1b[27;2;13~', second_line_inserted,
+                            'third\r', self.idle])
         sent = [call.args[0][-1]['content'] for call in self.client.complete.call_args_list]
-        self.assertEqual(sent, ['first\nsecond'])
+        self.assertEqual(sent, ['first\nsecond\nthird'])
         self.assertEqual(ui.input.text, '')
 
     def test_up_down_move_within_multiline_draft(self):
@@ -1002,6 +1007,10 @@ class WidgetTests(Base):
         def help_shown(ui):
             self.assertTrue(ui.show_help)
             self.assertTrue(ui.app.layout.has_focus(ui.input))
+            self.assertIn('換行 = Shift+Enter', ui.help.text)
+            self.assertIn('Shift+Enter', ui.help.text)
+            self.assertIn('Option+Enter', ui.help.text)
+            self.assertIn('terminal must send it', ui.help.text)
             self.assertIn('Ctrl-J', ui.help.text)
         ui, _ = self.drive(['\t', '\x1bOP', help_shown,
                             '\t', lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.help)),
