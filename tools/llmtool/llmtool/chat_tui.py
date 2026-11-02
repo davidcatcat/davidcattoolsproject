@@ -241,6 +241,18 @@ PM_USAGE = ("usage: /pm new [--runtime claude|codex] [--account NAME] [CWD]\n"
             "       /pm accounts [--check]\n       /pm connect [SESSION [CWD]]\n"
             "       /pm disconnect\n       /pm history\n       /pm queue [clear|send]\n"
             "       /pm\n(a CWD with spaces: quote it or escape the spaces)")
+PM_SUBCOMMAND_USAGE = {
+    "new": "usage: /pm new [--runtime claude|codex] [--account NAME] [CWD]",
+    "list": "usage: /pm list [--all]",
+    "use": "usage: /pm use N|SESSION",
+    "accounts": "usage: /pm accounts [--check]",
+}
+
+
+def _pm_subcommand_usage(command):
+    return PM_SUBCOMMAND_USAGE.get(command, PM_USAGE)
+
+
 PM_ACCOUNTS_GUIDANCE = (
     "Claude and Codex PM accounts are added under accounts in "
     "~/.config/llmtool/config.yaml. Example:\n"
@@ -3099,9 +3111,10 @@ class ChatTUI:
         if parts[1:2] == ["list"]:
             if parts[2:] not in ([], ["--all"]):
                 if parts[2].startswith("-"):
-                    self.append("unknown option " + parts[2] + "\n" + PM_USAGE)
+                    self.append("unknown option " + parts[2] + "\n" +
+                                _pm_subcommand_usage("list"))
                 else:
-                    self.append(PM_USAGE)
+                    self.append(_pm_subcommand_usage("list"))
                 return
             try:
                 bindings = _pm_newest_first(self.pm_api.list_bindings())
@@ -3145,10 +3158,11 @@ class ChatTUI:
         if parts[1:2] == ["use"]:
             unknown = next((part for part in parts[2:] if part.startswith("-")), None)
             if unknown is not None:
-                self.append("unknown option " + unknown + "\n" + PM_USAGE)
+                self.append("unknown option " + unknown + "\n" +
+                            _pm_subcommand_usage("use"))
                 return
             if len(parts) != 3:
-                self.append(PM_USAGE)
+                self.append(_pm_subcommand_usage("use"))
                 return
             try:
                 bindings = _pm_newest_first(self.pm_api.list_bindings())
@@ -3178,9 +3192,10 @@ class ChatTUI:
         if parts[1:2] == ["accounts"]:
             if parts[2:] not in ([], ["--check"]):
                 if parts[2] != "--check" and parts[2].startswith("-"):
-                    self.append("unknown option " + parts[2] + "\n" + PM_USAGE)
+                    self.append("unknown option " + parts[2] + "\n" +
+                                _pm_subcommand_usage("accounts"))
                 else:
-                    self.append(PM_USAGE)
+                    self.append(_pm_subcommand_usage("accounts"))
                 return
             try:
                 if parts[2:] == ["--check"]:
@@ -3241,7 +3256,8 @@ class ChatTUI:
                         account = parts[index + 1]
                         index += 2
                     elif parts[index].startswith("-"):
-                        self.append("unknown option " + parts[index] + "\n" + PM_USAGE)
+                        self.append("unknown option " + parts[index] + "\n" +
+                                    _pm_subcommand_usage("new"))
                         return
                     elif cwd is None:
                         cwd = parts[index]
@@ -3249,7 +3265,7 @@ class ChatTUI:
                     else:
                         raise ValueError()
             except ValueError:
-                self.append(PM_USAGE)
+                self.append(_pm_subcommand_usage("new"))
                 return
             if self.pm_runtime is not None:
                 self.append("llmtool: connected to PM session " + self.pm_target[0]

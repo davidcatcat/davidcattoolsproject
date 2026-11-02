@@ -3934,9 +3934,11 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(ui.pm_target, (created, cwd))
 
     def test_pm_list_is_compact_bounded_and_selectable_by_index_or_prefix(self):
+        repo_root, _slug = chat_tui_theme.repo_info()
+        self.assertIsNotNone(repo_root)
         bindings = [self.binding]
         for _index in range(11):
-            bindings.append(self.api.create_dedicated(os.getcwd()))
+            bindings.append(self.api.create_dedicated(repo_root))
         ui, _ = self.drive(['/pm list\r'])
         lines = [line for line in ui.conversation.text.splitlines() if line.startswith('  ')]
         self.assertEqual(len([line for line in lines if line[2:3].isdigit()]), 10)
@@ -3980,6 +3982,11 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(ui.conversation.text.count('unknown option --acount'), 3)
         self.assertNotIn('unknown option --check', ui.conversation.text)
         self.assertIn('usage: /pm accounts [--check]', ui.conversation.text)
+        self.assertEqual(ui.conversation.text.count('usage: /pm accounts [--check]'), 2)
+        self.assertEqual(ui.conversation.text.count(
+            'usage: /pm new [--runtime claude|codex] [--account NAME] [CWD]'), 1)
+        self.assertEqual(ui.conversation.text.count('usage: /pm use N|SESSION'), 1)
+        self.assertNotIn('       /pm list [--all]', ui.conversation.text)
         self.assertEqual(len(self.fakes), fake_count)
 
     def test_pm_paths_with_spaces_are_quoted_or_escaped_and_bad_quotes_are_explained(self):

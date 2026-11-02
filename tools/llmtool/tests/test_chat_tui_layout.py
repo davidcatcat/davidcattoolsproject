@@ -358,7 +358,8 @@ class PMLayoutTests(Base):
 
     def test_status_bar_states_queue_and_keys(self):
         ui = self.ui
-        self.assertEqual(ui.status_text(), "▸▸ PM 模式 · auto | claude/default | abcdef01 | 待命 | 最新 | F6 滑鼠:開 | F1")
+        ui.app.output.get_size = lambda: Size(rows=24, columns=80)
+        self.assertEqual(ui.status_text(), "▸▸ PM 模式 · auto | claude/default | abcdef01 | 待命 | 最新 | F6 滑鼠:開")
         ui.background_key, ui.background = ui.pm_target[0], [{}, {}]
         ui.app.output.get_size = lambda: Size(rows=24, columns=80)
         idle_status = ui.status_text()
