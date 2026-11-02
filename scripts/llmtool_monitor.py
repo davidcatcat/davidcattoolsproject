@@ -5694,10 +5694,12 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         all_lines = activity_lines(mon.tasks, github=mon.github, background=True)
         header = _activity_screen_lines(all_lines[:1], w - 1)
         for row, line in enumerate(header):
-            put(2 + row, line, colors.get("!", 0) if line.startswith("⚠") else 0)
+            put(3 + row, line, colors.get("!", 0) if line.startswith("⚠") else 0)
         lines = _activity_screen_lines(all_lines[1:], w - 1)
-        start = 2 + len(header)
-        available = max(1, h - 2 - start)
+        start = 3 + len(header)
+        # The final row is reserved for the navigation hint, including on
+        # unusually short terminals.
+        available = max(0, h - 1 - start)
         offset = max(0, min(offset, len(lines) - available))
         end = len(lines) - offset
         for row, line in enumerate(lines[max(0, end - available):end]):

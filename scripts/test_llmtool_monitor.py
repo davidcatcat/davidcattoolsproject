@@ -546,12 +546,44 @@ class ActivityViewTests(unittest.TestCase):
         drawn = {}
         class Screen:
             def getmaxyx(self): return (40, 120)
+            def erase(self): pass
+            def refresh(self): pass
         mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         header_text = "".join(drawn[row] for row in sorted(drawn) if row >= 2)
-        self.assertIn("PM 上次派工", drawn[2])
+        self.assertIn("PM 上次派工", drawn[3])
         self.assertIn("最近 12 小時沒有", header_text)
         self.assertNotIn("目前沒有可顯示", header_text)
+
+        monitor.stale = True
+        drawn.clear()
+        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertIn("監控程式已更新", drawn[2])
+        self.assertIn("PM 上次派工", drawn[3])
+
+    def test_curses_activity_events_do_not_overwrite_hint_on_short_terminal(self):
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            clock = staticmethod(lambda: NOW)
+            events = [mon.ActivityEvent(
+                NOW - i, "github_comment", "", "", "POSTED", f"#{i + 1}")
+                for i in range(20)]
+            def refresh_in_background(self): pass
+
+        monitor = mon.Monitor()
+        monitor.github = Source()
+        drawn = {}
+        class Screen:
+            def getmaxyx(self): return (5, 120)
+            def erase(self): pass
+            def refresh(self): pass
+        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertTrue(any("Tab/1-5" in text for text in drawn.values()))
+        self.assertFalse(any("GitHub #" in text for row, text in drawn.items() if row >= 4))
 
     def test_developer_dispatch_activity_uses_marker_target(self):
         for target in ("Codex", "AGY", "OpenCode", "Developer"):
