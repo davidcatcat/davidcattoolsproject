@@ -201,12 +201,12 @@ class FallbackTests(Base):
 class WidgetTests(Base):
     """Drive the real Application through a pipe input and a dummy output."""
 
-    def drive(self, steps, size=None):
+    def drive(self, steps, size=None, dev=None):
         output = DummyOutput()
         if size is not None:
             output.get_size = lambda: size[0]
         with create_pipe_input() as pipe:
-            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output)
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output, dev=dev)
             self.ui = ui
 
             async def main():
@@ -566,6 +566,52 @@ class WidgetTests(Base):
                             lambda ui: self.assertEqual(ui.input.text, '/task submit --provider '),
                             lambda ui: self.assertNotIn('usage:', ui.conversation.text)])
 
+    def test_tab_completes_unique_slash_command_and_argument_spacing(self):
+        ui, _ = self.drive(['/pm c', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/pm connect'),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            '\x15', '/provider', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/provider ')])
+        self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
+    def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
+        def candidates(ui):
+            self.assertEqual(ui.input.text, '/task ')
+            self.assertEqual([item[0] for item in ui.menu_items],
+                             ['/task submit', '/task show', '/task mode',
+                              '/task list', '/task events'])
+            self.assertEqual(ui.app.output.get_size().columns, 50)
+            self.assertTrue(self.menu_rows(ui))
+
+        self.drive(['/ta', '\t', candidates], size=[Size(rows=24, columns=50)], dev=True)
+        self.factory.assert_not_called()
+
+    def test_tab_does_not_offer_dev_commands_without_dev_mode(self):
+        def unchanged(ui):
+            self.assertEqual(ui.input.text, '/ta')
+            self.assertEqual(ui.menu_items, [])
+
+        self.drive(['/ta', '\t', unchanged], dev=False)
+        self.factory.assert_not_called()
+
+    def test_tab_without_match_keeps_slash_draft_and_non_slash_tab_behavior(self):
+        ui, _ = self.drive(['/nope', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/nope'),
+                            lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+
+        ui, _ = self.drive(['hello', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, 'hello'),
+                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+
+        ui, _ = self.drive(['cat', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, 'cat'),
+                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
     def test_picker_lone_escape_closes_on_key_timeout_flush(self):
         """No wall-clock wait: feed Esc, then the same flush the timeoutlen timer sends."""
         # Private name, imported here so a rename fails this test instead of skipping all.
@@ -697,17 +743,16 @@ class WidgetTests(Base):
         self.assertIn('unknown chat command', ui.conversation.text.lower())
         self.factory.assert_not_called()
 
-    def test_tab_closes_picker_and_restores_esc_timeout(self):
+    def test_tab_completing_unique_command_closes_picker_and_restores_esc_timeout(self):
         def menu_open(ui):
             self.assertTrue(ui.menu_items)
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
 
-        def closed(ui):
-            self.assertFalse(ui.app.layout.has_focus(ui.input))
+        def completed(ui):
+            self.assertEqual(ui.input.text, '/pm connect')
             self.assertEqual(ui.menu_items, [])
             self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
-        ui, _ = self.drive(['/s', menu_open, '\t', closed, '\t',
-                            lambda ui: self.assertEqual(ui.input.text, '/s')])
+        self.drive(['/pm c', menu_open, '\t', completed])
         self.factory.assert_not_called()
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
