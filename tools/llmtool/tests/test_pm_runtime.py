@@ -557,7 +557,7 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertTrue(process.terminated)
         self.assertTrue(process.killed)
 
-    def test_history_paging_and_unsupported_adapter(self):
+    def test_history_paging_and_codex_adapter(self):
         runtime = self.runtime()
         runtime.open()
         list(runtime.send('one'))
@@ -572,9 +572,35 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual([turn['seq'] for turn in first['turns'] + second['turns']], [1, 2])
         latest = pm_runtime.read_history(SESSION, latest=1, state_root=self.root)
         self.assertEqual([turn['seq'] for turn in latest['turns']], [2])
-        with self.assertRaises(LLMToolError) as raised:
-            self.runtime(runtime='codex').open()
-        self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
+        codex_account = Path(self.temp.name) / 'codex-account'
+        codex_account.mkdir(mode=0o700)
+        self.write_user_config('accounts:\n  codex-pm:\n    kind: codex\n    config_dir: ' +
+                               str(codex_account) + '\n')
+        bin_dir = Path(self.temp.name) / 'codex-bin'
+        bin_dir.mkdir()
+        fake = bin_dir / 'codex'
+        fake.write_text(
+            '#!' + sys.executable + '\n'
+            'import json\n'
+            "print(json.dumps({'type':'thread.started',"
+            "'thread_id':'abcdefab-cdef-abcd-efab-cdefabcdefab'}), flush=True)\n"
+            "print(json.dumps({'type':'item.completed','item':{"
+            "'type':'agent_message','text':'Codex answer'}}), flush=True)\n"
+            "print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)\n",
+            encoding='utf-8')
+        fake.chmod(0o700)
+        binding = pm_runtime.create_dedicated_pm(
+            self.cwd, runtime='codex', account='codex-pm', state_root=self.root,
+            environ={'HOME': self.temp.name}, home=self.temp.name)
+        runtime = self.runtime(state_root=self.root)
+        runtime.pm_session_id = binding['native_session_id']
+        with patch.dict(os.environ, {'PATH': str(bin_dir)}):
+            runtime.open()
+            events = list(runtime.send('request'))
+        self.assertEqual([event['type'] for event in events],
+                         ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
+        self.assertEqual(events[-1]['status'], 'COMPLETED')
+        self.assertIsNotNone(runtime._codex_driver)
 
     def test_create_dedicated_binding_starts_no_process(self):
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root,
@@ -586,20 +612,42 @@ class PMRuntimeTests(unittest.TestCase):
         binding_root = Path(self.temp.name) / 'listing-state'
         first = pm_runtime.create_dedicated_pm(self.cwd, state_root=binding_root,
                                                clock=lambda: 1000)
-        second = pm_runtime.create_dedicated_pm(self.cwd, runtime='codex',
-                                                state_root=binding_root, clock=lambda: 1001)
+        codex_account = Path(self.temp.name) / 'codex-account'
+        codex_account.mkdir(mode=0o700)
+        self.write_user_config('accounts:\n  codex-pm:\n    kind: codex\n    config_dir: ' +
+                               str(codex_account) + '\n')
+        second = pm_runtime.create_dedicated_pm(self.cwd, runtime='codex', account='codex-pm',
+                                                state_root=binding_root, clock=lambda: 1001,
+                                                environ={'HOME': self.temp.name},
+                                                home=self.temp.name)
         self.assertEqual([item['native_session_id'] for item in pm_runtime.list_bindings(
             state_root=binding_root)], [second['native_session_id'], first['native_session_id']])
         selected = pm_runtime.select_binding(first['native_session_id'], state_root=binding_root)
         self.assertEqual(selected['native_session_id'], first['native_session_id'])
         self.assertEqual(pm_runtime.current_binding(state_root=binding_root)['native_session_id'],
                          first['native_session_id'])
+        bin_dir = Path(self.temp.name) / 'codex-bin'
+        bin_dir.mkdir()
+        fake = bin_dir / 'codex'
+        fake.write_text(
+            '#!' + sys.executable + '\n'
+            'import json\n'
+            "print(json.dumps({'type':'thread.started',"
+            "'thread_id':'abcdefab-cdef-abcd-efab-cdefabcdefab'}), flush=True)\n"
+            "print(json.dumps({'type':'item.completed','item':{"
+            "'type':'agent_message','text':'Codex answer'}}), flush=True)\n"
+            "print(json.dumps({'type':'turn.completed','usage':{}}), flush=True)\n",
+            encoding='utf-8')
+        fake.chmod(0o700)
         runtime = self.runtime(runtime='claude-code', state_root=binding_root)
         runtime.pm_session_id = second['native_session_id']
-        with self.assertRaises(LLMToolError) as raised:
+        with patch.dict(os.environ, {'PATH': str(bin_dir)}):
             runtime.open()
-        self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
-        self.assertEqual(self.calls, [])
+            events = list(runtime.send('request'))
+        self.assertEqual([event['type'] for event in events],
+                         ['TEXT_DELTA', 'ASSISTANT_TEXT', 'TURN_END'])
+        self.assertEqual(events[-1]['status'], 'COMPLETED')
+        self.assertIsNotNone(runtime._codex_driver)
 
     def test_binding_listing_and_selection_refuse_symlinks_and_malformed_files(self):
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root)
