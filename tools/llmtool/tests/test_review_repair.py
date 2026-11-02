@@ -3,6 +3,9 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from argparse import Namespace
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest.mock import patch
 
 from llmtool import cli, review_repair, run_budget, task_submission_cli
@@ -180,43 +183,34 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(claim['version'], 1)
 
     def test_remote_test_repair_claim_passes_real_task_store_validation(self):
+        # Use the production record-pm path, then attach the same executor
+        # fixture shape used by the active-PM tests before the real store check.
+        from test_active_pm_inbox import ActivePMInboxTests
+
+        fixture = ActivePMInboxTests()
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
         self.store = TaskStore(Path(self.temp.name).resolve())
-        request = 'Bounded non-sensitive remote-test repair fixture.'
-        request_sha = hashlib.sha256(request.encode()).hexdigest()
-        task = task_submission_cli._record(
-            TASK, RUN, 'pm-' + '1' * 32, 'pm-profile', request,
-            state='PM_RESPONDED', provider_type='openai-compatible',
-            model='pm-model', backend='NO_NATIVE_SESSION_ID_EXPOSED',
-            request_sha=request_sha)
-        task.update(
-            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
-                              'base_url': None},
-            response='PM returned a bounded repair fixture.', error_code=None,
-            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
-                           'goal': 'Repair the reported issue.',
-                           'acceptance': ['Repair the reported issue.']},
-            developer={
-                'assignment_id': 'f' * 32, 'selection_source': 'PM',
-                'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex',
-                'provider_type': 'codex-cli', 'model': 'gpt-test',
-                'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
-                'session_id': 'dev-' + '2' * 32, 'source_sha': HEAD,
-                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
-                'read_paths': ['tools/llmtool/llmtool'],
-                'write_paths': ['tools/llmtool/llmtool/review_repair.py'],
-                'acceptance': ['Repair the reported issue.'],
-                'context_sha256': 'b' * 64,
-                'egress_basis': 'Approved non-sensitive test context.',
-                'input_bytes': 10, 'max_tokens': None,
-                'artifact_format': 'unified_diff', 'artifact': None,
-                'artifact_sha256': None, 'usage': None, 'error_code': None,
-                'created_at': '2026-10-27T00:00:00Z',
-            },
-            completion={'executor_task_id': EXECUTOR, 'state': 'PM_EVIDENCE_READY',
-                        'evidence': {'result': {'result_head': HEAD},
-                                     'review_pr_ci': {'stage': 'READY'}}},
-        )
-        self.store.create(task)
+        response = json.dumps({'schema_version': 1, 'summary': 'Active PM plan.',
+            'developer_assignment': {'route': 'codex', 'risk': 'LOW',
+                'goal': 'Repair the reported issue.',
+                'acceptance': ['Repair the reported issue.']}})
+        with redirect_stdout(StringIO()):
+            task = task_submission_cli.run_task_record_pm(
+                Namespace(stdin_json=True, pm_session_id=fixture.session,
+                          pm_runtime='claude-code', pm_cwd=str(fixture.pm_cwd)),
+                store=self.store,
+                input_stream=StringIO(json.dumps({
+                    'request': 'Bounded non-sensitive remote-test repair fixture.',
+                    'response': response})),
+                return_record=True, task_id=TASK)
+        template = fixture._task()
+        completion = json.loads(json.dumps(template['completion']))
+        completion['evidence'].update(
+            task_id=task['task_id'], run_id=task['run_id'],
+            contract_digest=task['task_binding']['contract_digest'])
+        task.update(developer=template['developer'], completion=completion)
+        self.store.update(TASK, developer=task['developer'], completion=completion)
         receipt = {
             'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
             'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_remote'],
