@@ -21,7 +21,7 @@ while (($#)); do
     *) fail "unexpected argument $1" ;;
   esac
 done
-[[ "$account" =~ ^ghrunner([1-9][0-9]*)?$ ]] || fail "invalid runner account"
+[[ "$account" =~ ^(ghrunner|ghrunner[2-9])$ ]] || fail "invalid runner account"
 [[ -n "$account_owner" ]] || account_owner=$account
 [[ -n "$account_group" ]] || account_group=$account
 if [[ -z "$tree" ]]; then
@@ -37,8 +37,11 @@ while IFS= read -r -d '' path; do fail "refusing symlink: $path"; done < <(find 
 while IFS= read -r -d '' path; do
   [[ -d "$path" || -f "$path" ]] || fail "unexpected special file: $path"
 done < <(find -P "$tree" ! -type d ! -type f -print0)
+for directory in _work _tmp _diag; do
+  [[ -d "$tree/$directory" && ! -L "$tree/$directory" ]] || fail "missing runner directory $directory"
+done
 for file in .runner .credentials .env .path; do
-  [[ -f "$tree/$file" ]] || fail "missing required file $file"
+  [[ -f "$tree/$file" && ! -L "$tree/$file" ]] || fail "missing required file $file"
 done
 
 check() {
