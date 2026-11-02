@@ -978,8 +978,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                             candidate.get('state') == 'DEVELOPER_RESPONDED'):
                         raced = True
                         current = store.get(task_id)['developer']
-                        newer = dict(current)
-                        newer.update(
+                        newer = dict(
+                            current,
                             state='DEVELOPER_OUTCOME_UNKNOWN',
                             error_code='OPENCODE_RESULT_EVIDENCE_UNKNOWN',
                             execution={
@@ -1021,6 +1021,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                      return_value=snapshot), \
                         patch.object(submission_cli.task_completion, 'bind_executor_task',
                                      return_value=(registration, snapshot)), \
+                        patch.object(submission_cli, '_bootstrap_registered_d6'), \
+                        patch.object(submission_cli, '_refresh_d6_binding_after_bootstrap',
+                                     return_value=registration), \
                         patch.object(store, 'compare_and_update', side_effect=compare), \
                         patch('llmtool.task_submission_cli.opencode_direct_developer.run',
                               side_effect=execute), \
