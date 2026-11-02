@@ -218,13 +218,17 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
             path == prefix or path.startswith(prefix + "/") for prefix in HIGH_RISK_PREFIXES
         ):
             return None
-        is_runtime_source = (path.startswith(("tools/llmtool/llmtool/", "tools/llmtool/scripts/"))
-                             and path.endswith((".py", ".json")))
+        is_llmtool_module = (path.startswith("tools/llmtool/llmtool/")
+                             and path.endswith(".py"))
         mapped = IMPACT_TEST_MAP.get(path)
         dynamic_module = _source_module(path)
-        if is_runtime_source and not mapped and dynamic_module is None:
+        # Runtime modules are discovered from the test tree, including nested
+        # packages. Other runtime inputs still need an explicit impact mapping.
+        if is_llmtool_module and dynamic_module is None:
             return None
-        if (not mapped and dynamic_module is None) or not (repo_root / path).is_file():
+        if not is_llmtool_module and not mapped:
+            return None
+        if not (repo_root / path).is_file():
             return None
         for test_path in mapped or ():
             module_id = _module_id(test_path, repo_root)
