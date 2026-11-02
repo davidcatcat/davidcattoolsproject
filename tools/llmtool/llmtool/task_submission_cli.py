@@ -757,6 +757,20 @@ def add_task_submission_parsers(actions):
                          help='merged integration PR containing the reviewed head')
     advance.add_argument('--reviewer-session-done', action='store_true',
                          help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
+    drive = actions.add_parser(
+        'drive', help='Drive Task advancement in the foreground until it needs attention')
+    drive.add_argument('task_id', help='existing durable Task ID')
+    drive.add_argument('--merge', action='store_true',
+                       help='merge only after the workflow reaches integration readiness')
+    drive.add_argument('--max-steps', type=int, default=100,
+                       help='maximum advance calls, including a requested merge (default: 100)')
+    drive.add_argument('--poll-seconds', type=float, default=5,
+                       help='seconds to wait between pending checks (default: 5)')
+    drive.add_argument('--pr', type=int, help='public GitHub pull request number')
+    drive.add_argument('--integration-pr', type=int,
+                       help='merged integration PR containing the reviewed head')
+    drive.add_argument('--reviewer-session-done', action='store_true',
+                       help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
     claude_result = actions.add_parser(
         'claude-result', help='Record the original PM-bound Claude Developer result')
     claude_result.add_argument('task_id', help='existing durable Task ID')

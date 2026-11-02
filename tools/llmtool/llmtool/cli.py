@@ -47,6 +47,7 @@ TASK_ACTIONS = {
     'claude-result': ('run_task_claude_result', False),
     'complete': ('run_task_complete', False),
     'delegate': ('run_task_delegate', True),
+    'drive': ('run_task_drive', True),
     'github-events': ('run_task_github_events', False),
     'high-debug': ('run_task_high_debug', True),
     'inbox': ('run_task_inbox', False),
