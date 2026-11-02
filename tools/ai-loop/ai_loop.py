@@ -192,7 +192,7 @@ def load_task(root, control_sha=None, task_dir=None):
     if local_task_dir is not None:
         folder = Path(local_task_dir).resolve()
         metadata = json.loads((folder / 'task.json').read_text(encoding='utf-8'))
-        text = (folder / 'task.md').read_text(encoding='utf-8')
+        text = (folder / 'task.md').read_text(encoding='utf-8').strip()
     elif control_sha:
         metadata = json.loads(git(root, 'show', control_sha + ':' + TASK_DIR + 'task.json'))
         text = git(root, 'show', control_sha + ':' + TASK_DIR + 'task.md')

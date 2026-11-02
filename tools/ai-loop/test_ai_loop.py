@@ -512,7 +512,6 @@ class FailedCodexEditedCandidateResumeTests(unittest.TestCase):
                  patch.object(loop.hashlib,'sha256',side_effect=digest_sha):
                 yield root,logs,contract,files
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_fail_status_exact_modified_bytes_can_only_enter_fresh_validation(self):
         with self.fixture() as (root,logs,task,files):
             original,policy=loop.prepare_failed_codex_candidate_resume(
@@ -534,7 +533,6 @@ class FailedCodexEditedCandidateResumeTests(unittest.TestCase):
             with self.assertRaisesRegex(loop.Stop,'dirty-file scope'):
                 loop.prepare_failed_codex_candidate_resume(root,task,logs.name,{},files[:1])
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_nonfail_codex_cannot_be_promoted_to_pass(self):
         with self.fixture() as (root,logs,task,files):
             saved=logs/'codex-0.json'
@@ -757,7 +755,6 @@ class PostFixSecurityFailTriageTests(unittest.TestCase):
                  patch.object(loop.hashlib,'sha256',side_effect=fake_sha):
                 yield root,logs,task,finding,structured,posts,model_calls
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_single_source_bound_reviewer_publishes_enums_only_and_reuses(self):
         with self.evidence() as (root,logs,task,finding,structured,posts,calls):
             loop.assess_postfix_security_fail(root,logs,task)
@@ -791,7 +788,6 @@ class PostFixSecurityFailTriageTests(unittest.TestCase):
                 loop.assess_postfix_security_fail(root,logs,task)
             self.assertEqual(calls,[])
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_error_envelope_never_posts_or_creates_authority(self):
         with self.evidence(assessor_error=True) as (root,logs,task,finding,structured,posts,calls):
             with self.assertRaisesRegex(loop.Stop,'did not finish successfully'):
@@ -1068,7 +1064,6 @@ class InitialDecisionHandoffTests(unittest.TestCase):
                  patch.object(loop, 'load_task', return_value=(old_task, 'Frozen C1 task')):
                 yield root, task, run_id, logs
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_zero_edit_decision_recovery_reuses_exact_pinned_task_without_pass(self):
         with self.fixture() as (root, task, run_id, logs):
             original, recovery = loop.prepare_initial_decision_resume(
@@ -1079,7 +1074,6 @@ class InitialDecisionHandoffTests(unittest.TestCase):
             self.assertEqual(recovery['inherited_validation'], 'NONE')
             self.assertIn('codex-0.json', recovery['private_evidence_files'])
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_initial_decision_recovery_rejects_bad_sha_and_tampered_evidence(self):
         with self.fixture() as (root, task, run_id, logs):
             task['initial_decision_recovery']['codex_result_sha256'] = 'e' * 64
@@ -1106,7 +1100,6 @@ class InitialDecisionHandoffTests(unittest.TestCase):
                 with self.assertRaisesRegex(loop.Stop, 'candidate changed'):
                     loop.prepare_initial_decision_resume(root, task, run_id, {}, ())
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_initial_decision_recovery_never_reuses_ambiguous_contract(self):
         with self.fixture() as (root, task, run_id, logs):
             task['task_id'] = 'other-task'
@@ -1335,7 +1328,6 @@ class NativeResumeTests(unittest.TestCase):
             command = stack.enter_context(patch.object(loop, 'command', side_effect=fake_command))
             yield root, old, task, inventory, git_mock, run_mock, command
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_exact_committed_failure_continues_without_inheriting_pass(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             original, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
@@ -1350,7 +1342,6 @@ class NativeResumeTests(unittest.TestCase):
                              (old/'mac-containment-0.json').read_bytes())
             self.assertEqual((logs/'recovery-evidence/summary.json').read_bytes(), (old/'summary.json').read_bytes())
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_explicit_hung_failure_recovers_without_inheriting_signal_passes(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             mac = json.loads((old/'mac-containment-0.json').read_text())
@@ -1421,7 +1412,6 @@ class NativeResumeTests(unittest.TestCase):
             repair_files=[test])
         return inventory
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_kqueue_failure_recovery_pins_native_error_and_private_provider(self):
         with self.fixture() as (root, old, task, current, *rest):
             owned = self.setup_kqueue_recovery(root, old, task)
@@ -1501,7 +1491,6 @@ class NativeResumeTests(unittest.TestCase):
             loop.ensure_review_repair_scope(task, rec, 1,
                 ['tools/llmtool/llmtool/_git_process_identity.py'])
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_preflight_harness_failure_can_recover_without_native_pass_or_pid_cleanup(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             tested = json.loads((old/'summary.json').read_text())['history'][0]['tested_sha256']
@@ -1571,7 +1560,6 @@ class NativeResumeTests(unittest.TestCase):
                 with self.assertRaises(loop.Stop):
                     loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_a_previous_native_policy_can_be_followed_without_gate_changes(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             prior = json.loads((old/'task.json').read_text())
@@ -1633,7 +1621,6 @@ class NativeResumeTests(unittest.TestCase):
                 else: recovery['extra'] = True
                 with self.assertRaises(loop.Stop): load(bad)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_new_auto_policy_budget_can_follow_old_failure_without_scope_or_gate_changes(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             task['failure_triage'] = {'max_reviews': 4, 'repeat_limit': 2, 'allow_mac_repair': True}
@@ -1697,7 +1684,6 @@ class NativeResumeTests(unittest.TestCase):
                         loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
                     kill.assert_not_called(); killpg.assert_not_called()
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_snapshot_rechecks_private_evidence_without_export_copy(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             _, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
@@ -1712,7 +1698,6 @@ class NativeResumeTests(unittest.TestCase):
             with self.assertRaises(loop.Stop):
                 loop.snapshot_recovery(root, logs2, recovery)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_snapshot_rechecks_failure_bytes(self):
         with self.fixture() as (root, old, task, inventory, *rest):
             _, recovery = loop.prepare_acceptance_resume(root, task, self.run_id, inventory)
@@ -1859,7 +1844,6 @@ class SandboxDecisionRecoveryTests(unittest.TestCase):
             absence = stack.enter_context(patch.object(loop, 'ensure_probe_inventory_absent'))
             yield root, logs, task, personal, absence, owned
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_no_change_decision_recovers_after_fresh_outer_absence(self):
         with self.fixture() as (root, old, task, personal, absence, owned):
             initial, recovery = loop.prepare_sandbox_decision_resume(
@@ -2002,7 +1986,6 @@ class ReviewFailureRecoveryTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, 'ensure_no_active_runner_codex'))
             yield root, old, task, initial
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_exact_failed_review_authorizes_two_file_repair_not_old_pass(self):
         with self.fixture() as (root, old, task, initial):
             original, recovery = loop.prepare_review_failure_resume(
@@ -2149,7 +2132,6 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, 'ensure_no_active_runner_codex'))
             yield root, old, task, inventory
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_exact_stopped_failure_allows_validate_first_recovery(self):
         with self.fixture() as (root, old, task, inventory):
             original, recovery = loop.prepare_stopped_failure_resume(
@@ -2162,7 +2144,6 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
             self.assertEqual(recovery['upstream_paths'], ['tests/flaky.py'])
             self.assertEqual(recovery['inherited_validation'], 'NONE')
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_out_of_scope_test_bug_can_resume_only_after_exact_upstream_fix(self):
         with self.fixture() as (root, old, task, inventory):
             raw_name = 'failure-2-claude.raw.json'
@@ -2362,7 +2343,6 @@ class StoppedFailureRecoveryTests(unittest.TestCase):
 
 
 class DiagnosticsExportTests(unittest.TestCase):
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_visible_zip_contains_curated_evidence_and_source_but_no_provider_streams(self):
         import zipfile
         with tempfile.TemporaryDirectory() as runtime:
@@ -2381,7 +2361,6 @@ class DiagnosticsExportTests(unittest.TestCase):
                 self.assertIn('captured-sha256.json', archive.namelist())
                 self.assertFalse(any('codex' in p or 'claude' in p for p in archive.namelist()))
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_native_failure_triage_is_local_and_provider_metadata_is_curated(self):
         import zipfile
         with tempfile.TemporaryDirectory() as runtime:
@@ -2453,7 +2432,6 @@ class DiagnosticsExportTests(unittest.TestCase):
                 with self.assertRaises(loop.Stop):
                     loop.validate_public_triage(bad, task, run_id)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_codex_stopped_outcome_publishes_status_and_file_deltas_not_model_text(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
@@ -2492,7 +2470,6 @@ class DiagnosticsExportTests(unittest.TestCase):
                 loop.diagnostic_codex_outcome(root, logs, task)
 
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_new_task_codex_diagnostic_uses_pinned_git_without_recovery_snapshot(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
@@ -2558,7 +2535,6 @@ class DiagnosticsExportTests(unittest.TestCase):
                 with self.assertRaisesRegex(loop.Stop, 'candidate path unsafe'):
                     loop.diagnostic_codex_outcome(root, logs, task)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_new_task_codex_diagnostic_real_git_missing_base_path(self):
         # Regression for the actual Mac STOP: 'git cat-file -e SHA:missing'
         # returns 128; a missing new C1 file must be reported as absent,
@@ -2600,7 +2576,6 @@ class DiagnosticsExportTests(unittest.TestCase):
             with self.assertRaises(loop.Stop):
                 loop.diagnostic_codex_outcome(root, logs, task)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_new_task_codex_diagnostic_never_infers_base_without_pinned_proof(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
@@ -2616,7 +2591,6 @@ class DiagnosticsExportTests(unittest.TestCase):
             with self.assertRaisesRegex(loop.Stop, 'provenance missing'):
                 loop.diagnostic_codex_outcome(root, logs, task)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_private_codex_decision_only_reveals_verified_local_summary(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
@@ -2639,7 +2613,6 @@ class DiagnosticsExportTests(unittest.TestCase):
                 self.assertTrue(got['decision_only'])
                 inspect.assert_called_once()
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_private_codex_decision_fails_closed_on_mismatch_or_false_authority(self):
         with tempfile.TemporaryDirectory() as runtime:
             root = Path(runtime)
@@ -2830,7 +2803,6 @@ class DiagnosticPublicationTests(unittest.TestCase):
             self.assertIn(prefix+'round-0-review/review.json', state['new_rows'])
             self.assertIn(prefix+'index.md', state['new_rows'])
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_bad_batch_arbitrary_file_and_size_fail_before_remote_write(self):
         with self.fixture() as (root, logs, task), patch.object(loop, 'diagnostic_api') as api:
             for files, batch in [({'index.md': b'index', 'failure.json': b'{}'}, '../failure'),
@@ -2840,7 +2812,6 @@ class DiagnosticPublicationTests(unittest.TestCase):
                     loop.publish_diagnostics(root, logs, files=files, batch=batch)
             api.assert_not_called()
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_payload_is_frozen_and_excludes_sources_provider_streams_and_free_summaries(self):
         with self.fixture() as (root, logs, task):
             (root/'source.py').write_text('later source changes\n')
@@ -2856,7 +2827,6 @@ class DiagnosticPublicationTests(unittest.TestCase):
             self.assertIn('tests-0-mandatory-final-0.stdout.log', payload)
             self.assertFalse(json.loads(payload['source-hashes.json'])['source_files_published'])
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_archive_hash_drift_symlink_missing_and_wrong_contract_stop_before_api(self):
         for fault in ('drift', 'symlink', 'missing', 'contract'):
             with self.subTest(fault=fault), self.fixture() as (root, logs, task), \
@@ -2909,7 +2879,6 @@ class DiagnosticPublicationTests(unittest.TestCase):
                     else: loop.publish_diagnostics(root, logs)
                 self.assertFalse(any(m != 'GET' for m, e, p in state['calls']))
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_concurrent_branch_change_and_bad_remote_verification_stop(self):
         for fault in ('race', 'verification'):
             with self.subTest(fault=fault), self.fixture() as (root, logs, task):
@@ -2919,7 +2888,6 @@ class DiagnosticPublicationTests(unittest.TestCase):
                 if fault == 'race': self.assertFalse(any('/refs' in e for m, e, p in state['calls']))
                 self.assertFalse((logs/'published-diagnostics.json').exists())
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_receipt_symlink_does_not_mutate_remote_or_target(self):
         with self.fixture() as (root, logs, task), patch.object(loop, 'diagnostic_api') as api:
             target = root/'user.txt'; target.write_text('preserved')
@@ -2927,7 +2895,6 @@ class DiagnosticPublicationTests(unittest.TestCase):
             with self.assertRaises(loop.Stop): loop.publish_diagnostics(root, logs)
             api.assert_not_called(); self.assertEqual(target.read_text(), 'preserved')
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_missing_ref_is_404_only_and_structured_request_is_cleaned_up(self):
         with self.fixture() as (root, logs, task):
             for code in (404, 403):
@@ -2945,7 +2912,6 @@ class DiagnosticPublicationTests(unittest.TestCase):
                 loop.diagnostic_api(root, logs, 'POST', 'fixed', payload)
             self.assertFalse(list(logs.glob('diagnostic-request-*')))
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_upload_failure_does_not_change_original_stopped_summary_or_zip(self):
         with self.fixture() as (root, logs, task):
             before = (logs/'summary.json').read_bytes()
@@ -3036,7 +3002,6 @@ class QuotaResumeTests(unittest.TestCase):
                  patch.object(loop, 'command', return_value=(1, '', '')) as command:
                 yield root, old, task, inventory, runner, command
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_timeout_recovery_accepts_prior_quota_policy_but_inherits_no_pass(self):
         with self.timeout_fixture() as (root, old, task, inventory, runner, command):
             original, recovery = loop.prepare_initial_resume(root, task, self.run_id, inventory)
@@ -3090,7 +3055,6 @@ class QuotaResumeTests(unittest.TestCase):
                 with self.assertRaises(loop.Stop):
                     loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_allowed_tracked_edit_is_adopted_and_snapshotted(self):
         with self.fixture() as (root, old, task, inventory, runner):
             task['allowed_files'].append('tracked.py')
@@ -3110,7 +3074,6 @@ class QuotaResumeTests(unittest.TestCase):
                 loop.prepare_initial_resume(root, task, self.run_id, inventory, ['user.txt'])
             runner.assert_not_called()
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_partial_files_adopted_unrelated_preserved_and_backed_up(self):
         with self.fixture() as (root, old, task, inventory, runner):
             original, recovery = loop.prepare_initial_resume(root, task, self.run_id, inventory)
@@ -3190,7 +3153,6 @@ class QuotaResumeTests(unittest.TestCase):
                 with self.assertRaises(loop.Stop):
                     loop.prepare_initial_resume(root, task, self.run_id, inventory)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_snapshot_detects_candidate_drift_without_overwriting_user_file(self):
         with self.fixture() as (root, old, task, inventory, runner):
             _, recovery = loop.prepare_initial_resume(root, task, self.run_id, inventory)
@@ -4242,7 +4204,6 @@ class FailureCoordinationTests(unittest.TestCase):
             stack.enter_context(patch.object(loop, 'ensure_failed_probe_pids_absent'))
             yield root, logs, task, obj, publisher, reviewer
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_failure_then_review_then_disposition_are_published_before_repair(self):
         with self.fixture() as (root, logs, task, obj, pub, review):
             order = []
@@ -4255,7 +4216,6 @@ class FailureCoordinationTests(unittest.TestCase):
             self.assertEqual(obj.records[0]['disposition'], 'REPAIR')
             self.assertEqual(json.loads((logs/'failure-0.json').read_text())['status'], 'FAIL')
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_unchanged_code_cannot_retry_and_changed_code_can(self):
         with self.fixture() as (root, logs, task, obj, *rest):
             obj.assess('related', HEAD, {}, 0, 3)
@@ -4264,7 +4224,6 @@ class FailureCoordinationTests(unittest.TestCase):
             obj.require_changed_repair()
             self.assertIsNone(obj.required_change)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_failed_candidate_bytes_are_retained_before_next_writer(self):
         with self.fixture() as (root, logs, task, obj, *rest):
             obj.assess('related', HEAD, {}, 0, 3)
@@ -4273,7 +4232,6 @@ class FailureCoordinationTests(unittest.TestCase):
             row = json.loads((logs/'failure-0.json').read_text())
             self.assertEqual(row['source_sha256']['source.py'], loop.digest(logs/'failure-inputs/0/source.py'))
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_native_log_output_paths_cannot_evade_repeated_failure_bound(self):
         with self.fixture() as (root, logs, task, obj, *rest):
             obj.assess('related', HEAD, {'results': [{'argv': ['test', str(logs/'mac-containment-0.json')], 'exit_code': 1}]}, 0, 3)
@@ -4281,7 +4239,6 @@ class FailureCoordinationTests(unittest.TestCase):
             with self.assertRaisesRegex(loop.Stop, 'STALLED'):
                 obj.assess('related', HEAD, {'results': [{'argv': ['test', str(logs/'mac-containment-1.json')], 'exit_code': 1}]}, 1, 3)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_design_and_environment_decisions_stop_without_codex_instruction(self):
         for action in ('NEEDS_DECISION', 'BLOCKED'):
             with self.subTest(action=action), self.fixture() as (root, logs, task, obj, pub, review):
@@ -4290,7 +4247,6 @@ class FailureCoordinationTests(unittest.TestCase):
                 self.assertEqual(obj.records[0]['disposition'], action)
                 self.assertEqual(pub.call_count, 3)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_budget_and_repeat_limit_remain_non_pass(self):
         with self.fixture() as (root, logs, task, obj, *rest):
             with self.assertRaisesRegex(loop.Stop, 'BUDGET_EXHAUSTED'):
@@ -4316,7 +4272,6 @@ class FailureCoordinationTests(unittest.TestCase):
                 if fault == 'oversize': value['summary'] = 'x'*2001
                 with self.assertRaises(loop.Stop): loop.validate_failure_review(value, task, HEAD, 'a'*64)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_public_report_omits_raw_provider_and_deterministic_logs(self):
         with self.fixture() as (root, logs, task, obj, pub, review):
             (logs/'tests-0-related-0.stderr.log').write_text('PRIVATE_LOG_SENTINEL')
@@ -4326,7 +4281,6 @@ class FailureCoordinationTests(unittest.TestCase):
             self.assertNotIn(b'PRIVATE_PROVIDER_SENTINEL', public)
             self.assertIn('PRIVATE_PROVIDER_SENTINEL', (logs/'failure-0.json').read_text())
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_review_must_not_modify_source_or_failed_evidence(self):
         for which in ('source', 'evidence'):
             with self.subTest(which=which), self.fixture() as (root, logs, task, obj, pub, review):
@@ -4363,7 +4317,6 @@ class FailureCoordinationTests(unittest.TestCase):
                     with self.assertRaises(loop.Stop): obj.assess('mandatory-final', HEAD, {'mac': mac}, 0, 3)
                 kill.assert_not_called(); killpg.assert_not_called()
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_mac_preflight_test_bug_can_repair_without_native_scenario_evidence(self):
         with self.fixture() as (root, logs, task, obj, pub, review):
             test_path = 'tools/llmtool/tests/run_containment_acceptance.py'
@@ -4382,7 +4335,6 @@ class FailureCoordinationTests(unittest.TestCase):
             self.assertIn('Repair only', reason)
             self.assertEqual(obj.records[0]['disposition'], 'REPAIR')
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_mac_preflight_without_test_bug_classification_stays_blocked(self):
         with self.fixture() as (root, logs, task, obj, *rest):
             mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': {}, 'scenarios': {},
@@ -4391,7 +4343,6 @@ class FailureCoordinationTests(unittest.TestCase):
             with self.assertRaisesRegex(loop.Stop, 'MAC_EVIDENCE_INCOMPLETE'):
                 obj.assess('mandatory-final', HEAD, {'mac': mac}, 0, 3)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_mac_proven_clean_failure_can_repair_on_changed_bytes(self):
         with self.fixture() as (root, logs, task, obj, *rest):
             mac = {'platform': 'darwin', 'schema_version': 1, 'tested_sha256': loop.runtime_bytes(obj.source_bytes()),
@@ -4447,7 +4398,6 @@ class ClassificationDiagnosticTests(unittest.TestCase):
             'result': 'PRIVATE_RESULT', 'session_id': 'PRIVATE_SESSION'})
         return sha
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_rejection_identifies_length_without_exporting_text(self):
         with DiagnosticPublicationTests().fixture() as (root, logs, task):
             sha = self.artifacts(logs, task)
@@ -4461,7 +4411,6 @@ class ClassificationDiagnosticTests(unittest.TestCase):
             self.assertFalse(row['recovery_authorized'])
             self.assertNotIn('PRIVATE_', json.dumps(row))
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_head_and_evidence_mismatch_are_separate_and_never_corrected(self):
         value = FailureCoordinationTests().decision('f'*40, 'f'*64)
         with DiagnosticPublicationTests().fixture() as (root, logs, task):
@@ -4510,7 +4459,6 @@ class ClassificationDiagnosticTests(unittest.TestCase):
                 reasons = loop.failure_review_reasons(value, task, HEAD, 'a'*64)
                 self.assertEqual('CATEGORY_DECISION_MISMATCH' not in reasons, valid)
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_malformed_envelope_and_unexpected_fields_do_not_leak(self):
         for raw in ('not JSON PRIVATE_SECRET', json.dumps({'is_error': True, 'result': 'PRIVATE_SECRET'}),
                     json.dumps({'is_error': False, 'subtype': 'success', 'structured_output': {'private': 'PRIVATE_SECRET'}})):
@@ -4521,7 +4469,6 @@ class ClassificationDiagnosticTests(unittest.TestCase):
                 self.assertIn(row['reason_codes'][0], ('CLAUDE_ENVELOPE_NOT_SUCCESS', 'CLASSIFICATION_SCHEMA'))
                 self.assertNotIn('PRIVATE_SECRET', json.dumps(row))
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_valid_review_is_not_a_rejection(self):
         with DiagnosticPublicationTests().fixture() as (root, logs, task):
             self.artifacts(logs, task)
@@ -4532,7 +4479,6 @@ class ClassificationDiagnosticTests(unittest.TestCase):
                                                            'structured_output': value})
             self.assertIsNone(loop.classification_rejection(logs, task, 2))
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_post_stop_upload_uses_original_contract_and_no_model_test_signal(self):
         with DiagnosticPublicationTests().fixture() as (root, logs, task), \
                 patch.object(loop, 'publish_diagnostics') as pub, patch.object(loop, 'run') as run, \
@@ -4547,7 +4493,6 @@ class ClassificationDiagnosticTests(unittest.TestCase):
             self.assertNotIn(b'PRIVATE_', b''.join(pub.call_args.kwargs['files'].values()))
             run.assert_not_called(); kill.assert_not_called(); killpg.assert_not_called()
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_unsafe_oversized_wrong_contract_or_evidence_cannot_publish(self):
         for fault in ('symlink', 'oversize', 'contract', 'run', 'active'):
             with self.subTest(fault=fault), DiagnosticPublicationTests().fixture() as (root, logs, task), \
@@ -4579,7 +4524,6 @@ class ClassificationDiagnosticTests(unittest.TestCase):
                 with self.assertRaisesRegex(loop.Stop, 'never overwrite'):
                     loop.publish_diagnostics(root, logs, files={**files, 'rejection.json': b'changed'}, batch='round-2-rejection')
 
-    @unittest.skip("Retired automation control-ref flow; standalone behavior is covered in test_standalone.py.")
     def test_invalid_model_output_is_published_before_stopping_without_retry(self):
         with FailureCoordinationTests().fixture() as (root, logs, task, obj, pub, review):
             def invalid(*args):
