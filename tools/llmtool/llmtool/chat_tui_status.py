@@ -586,7 +586,7 @@ def task_owner_summary(record):
                 "PM_INTAKE": "PM", PENDING_DISPATCH: "PM", "RUNNING": "Developer",
                 "WAITING_EXECUTOR_EVIDENCE": "Developer", "WAITING_PM": "PM",
                 "WAITING_REVIEW": "Reviewer", "REPAIRING": "Developer", "WAITING_CI": "CI",
-                "BLOCKED": "PM", "UNAVAILABLE": "PM", "FAILED": "Owner",
+                "BLOCKED": "PM", "UNAVAILABLE": "PM", "FAILED": "不明",
                 "DONE": "不明", "ABANDONED": "不明",
             }.get(current, "不明")
             action = "目前不用"

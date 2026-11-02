@@ -5426,6 +5426,12 @@ class TaskOwnerSummaryTests(unittest.TestCase):
         self.assertEqual(self.detail(merged), [
             '狀態：已完成', '下一步輪到誰：不明', '你需要做：目前不用'])
 
+    def test_failed_task_does_not_guess_owner_without_an_owner_field(self):
+        failed = {'task_id': 'h' * 32, 'request': '需求',
+                  'state': 'PM_RESPONSE_REJECTED', 'developer': None}
+        self.assertEqual(self.detail(failed), [
+            '狀態：已失敗', '下一步輪到誰：不明', '你需要做：目前不用'])
+
     def test_missing_record_summary_is_unknown_in_traditional_chinese(self):
         self.assertEqual(self.detail(None), [
             '狀態：不明', '下一步輪到誰：不明', '你需要做：目前不用'])
