@@ -495,10 +495,10 @@ def task_detail_text(record, read_at, reason=None, copy_hint=False):
     """
     from .task_status import derive_state
     from .chat_tui_events import format_event, task_events
-    lines = task_owner_summary(record)
-    lines += ["Task 詳情（唯讀）— Esc 返回 · ↑↓ PgUp/PgDn 捲動"   # one row at 80 columns
-             + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT,
-             "來源：TaskStore（本機）｜讀取於 " + read_at]
+    lines = ["Task 詳情（唯讀）— Esc 返回 · ↑↓ PgUp/PgDn 捲動"   # one row at 80 columns
+             + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT]
+    lines += task_owner_summary(record)
+    lines += ["來源：TaskStore（本機）｜讀取於 " + read_at]
     if type(record) is not dict:
         lines.append("Core 狀態：" + UNKNOWN + "（" + (reason or "沒有 Task 記錄") + "）")
         return "\n".join(lines)

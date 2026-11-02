@@ -5365,7 +5365,18 @@ class TaskOwnerSummaryTests(unittest.TestCase):
     """The three detail orientation lines use only the persisted Task projection."""
 
     def detail(self, record):
-        return chat_tui_status.task_detail_text(record, '12:34:56').splitlines()[:3]
+        return chat_tui_status.task_detail_text(record, '12:34:56').splitlines()[1:4]
+
+    def test_copy_header_stays_first_and_summary_follows_it(self):
+        text = chat_tui_status.task_detail_text(
+            {'task_id': 'a' * 32, 'request': '需求',
+             'developer': {'state': 'DEVELOPER_PENDING'}},
+            '12:34:56', copy_hint=True)
+        lines = text.splitlines()
+        self.assertIn('c 複製 Task ID', lines[0])
+        self.assertIn('C 複製全文', lines[0])
+        self.assertEqual(lines[1:4], [
+            '狀態：Developer 執行中', '下一步輪到誰：Developer', '你需要做：目前不用'])
 
     def test_summary_lines_lead_and_describe_running_and_waiting_stages(self):
         running = {'task_id': 'a' * 32, 'request': '需求',

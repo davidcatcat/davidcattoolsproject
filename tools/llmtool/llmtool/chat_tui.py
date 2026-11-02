@@ -2739,13 +2739,15 @@ class ChatTUI:
         view = self.task_view
         safe_text = terminal_safe_text(text)
         view.set_text(safe_text)
-        if safe_text.startswith("狀態："):
-            view._clip_spans(0)
-            end = 0
-            for _ in range(3):
-                newline = safe_text.find("\n", end)
-                end = len(safe_text) if newline < 0 else newline + 1
-            view._add_segments(0, [(safe_text[:end], "role.pm")])
+        if safe_text.startswith("Task 詳情（唯讀）—"):
+            start = safe_text.find("\n") + 1
+            if safe_text.startswith("狀態：", start):
+                view._clip_spans(0)
+                end = start
+                for _ in range(3):
+                    newline = safe_text.find("\n", end)
+                    end = len(safe_text) if newline < 0 else newline + 1
+                view._add_segments(start, [(safe_text[start:end], "role.pm")])
         view.top = view.top_offset = 0          # a detail is read from its first line
         view.following = view.unseen = False
 
