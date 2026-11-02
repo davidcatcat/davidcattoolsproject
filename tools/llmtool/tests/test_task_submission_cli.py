@@ -3032,69 +3032,40 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
     routes = (('opencode', 'opencode-developer'), ('agy', 'agy-developer'))
 
     def _store(self, profile):
-        tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(tmp.cleanup)
-        store = TaskStore(Path(tmp.name).resolve() / 'tasks')
-        response = json.dumps({
-            'schema_version': 1, 'summary': 'A bounded liveness test task.',
-            'developer_assignment': {
-                'route': profile, 'risk': 'LOW',
-                'goal': 'Record the liveness outcome.',
-                'acceptance': ['the outcome is recorded'],
+        # These tests isolate route recovery and its compare-and-update race.
+        # The shared DEAD transition's real TaskStore schema validation is
+        # covered by the #776 Codex liveness tests.
+        task_id = 'a' * 32
+        task = {
+            'task_id': task_id,
+            'completion': {'state': 'WAITING_EXECUTOR'},
+            'developer': {
+                'assignment_id': 'b' * 32, 'selection_source': 'PM',
+                'executor_task_id': 'executor-one',
+                'state': 'DEVELOPER_DISPATCHING', 'provider_profile': profile,
+                'provider_type': 'opencode-cli' if profile == 'opencode' else 'agy-cli',
+                'execution': {
+                    'child_pid': 321, 'child_start_time': '123456', 'child_pgid': 321,
+                },
             },
-        })
-        task = run_task_record_pm(
-            Namespace(stdin_json=True), store=store,
-            input_stream=io.StringIO(json.dumps({
-                'request': 'Bounded non-sensitive liveness test.',
-                'response': response,
-            })), return_record=True)
-        task_id = task['task_id']
-        task['developer'] = {
-            'assignment_id': new_id(), 'selection_source': 'PM',
-            'executor_task_id': 'executor-one', 'state': 'DEVELOPER_PENDING',
-            'provider_profile': profile,
-            'provider_type': 'opencode-cli' if profile == 'opencode' else 'agy-cli',
-            'model': 'test-model', 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
-            'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
-            'source_sha_binding': 'D6_REGISTRY_OBSERVED', 'read_paths': ['src.py'],
-            'write_paths': ['src.py'], 'acceptance': ['the outcome is recorded'],
-            'context_sha256': 'b' * 64, 'egress_basis': 'Approved non-sensitive test context.',
-            'input_bytes': 10, 'max_tokens': None, 'artifact_format': 'unified_diff',
-            'artifact': None, 'artifact_sha256': None, 'usage': None,
-            'error_code': None, 'execution': None,
-            'created_at': '2026-10-23T00:00:00Z',
         }
-        developer = task['developer']
-        with patch.object(submission_cli.worker_dispatch,
-                          'authorize_task_store_change', return_value=None):
-            store.compare_and_update(task_id,
-                expected={'state': 'PM_RESPONDED', 'developer': None,
-                          'completion': None},
-                developer=developer,
-                completion={
-                    'state': 'WAITING_EXECUTOR', 'executor_task_id': 'executor-one',
-                    'reviewer_task_id': None, 'evidence': {
-                        'task_id': task_id, 'run_id': task['run_id'],
-                        'contract_digest': task['task_binding']['contract_digest'],
-                        'executor_identity': ('opencode-developer' if profile == 'opencode'
-                                              else 'agy-developer'),
-                        'executor_session_ref': None, 'executor_native_session_id': None,
-                        'executor_native_session': 'UNKNOWN', 'execution_mode': 'DIRECT_D6',
-                        'root': '/repo', 'common_dir': '/repo/.git', 'branch': 'task-branch',
-                        'source_sha': 'a' * 40, 'result_head': None,
-                    },
-                    'missing_gates': [], 'pm_dispatch': 'NOT_STARTED',
-                    'pm_response': None, 'pm_recommendation': None,
-                    'pm_usage': None, 'pm_error_code': None,
-                })
-            developer.update(state='DEVELOPER_DISPATCHING',
-                             provider_type='agy-cli' if profile == 'agy' else 'opencode-cli',
-                             model='test-model')
-            store.update(task_id, developer=developer)
-            submission_cli._record_direct_child_launch(
-                store, task_id, developer, 321, '123456', 321)
-        return store, task_id
+
+        class Store:
+            def __init__(self, record):
+                self.task = record
+                self.updates = 0
+
+            def get(self, _task_id):
+                return self.task
+
+            def compare_and_update(self, _task_id, *, expected, **changes):
+                if any(self.task.get(key) != value for key, value in expected.items()):
+                    raise TaskStoreConflict()
+                self.updates += 1
+                self.task.update(changes)
+                return self.task
+
+        return Store(task), task_id
 
     def _recover(self, store, task_id, *, agent, start='123456'):
         args = Namespace(task_id=task_id, executor_task='executor-one')
@@ -3115,6 +3086,32 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                     expected_agent=agent)
         return caught.exception
 
+    def test_agy_launch_persists_the_child_identity(self):
+        store, task_id = self._store('agy')
+        developer = store.get(task_id)['developer']
+
+        class Child:
+            pid = 321
+            returncode = 0
+
+            @staticmethod
+            def communicate(timeout):
+                return b'output', b''
+
+        argv = ['/usr/bin/agy', '-p', 'prompt', '--model', 'test-model',
+                '--output-format', 'json', '--log-file', 'agy.log']
+        with patch.object(submission_cli.subprocess, 'Popen', return_value=Child()), \
+             patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                          return_value='123456'), \
+             patch.object(submission_cli.os, 'getpgid', return_value=321):
+            result = submission_cli._agy_liveness_runner(
+                store, task_id, developer, '/usr/bin/agy')(argv, '/repo', {}, 10)
+
+        self.assertEqual(result, (0, b'output', b''))
+        self.assertEqual(store.get(task_id)['developer']['execution'], {
+            'child_pid': 321, 'child_start_time': '123456', 'child_pgid': 321,
+        })
+
     def test_dead_and_reused_children_transition_once_for_both_routes(self):
         for profile, agent in self.routes:
             with self.subTest(profile=profile):
@@ -3126,6 +3123,7 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                 self.assertEqual(saved['execution']['child_pid'], 321)
                 self.assertEqual(saved['error_code'], 'DIRECT_CHILD_NOT_RUNNING')
                 self.assertEqual(store.get(task_id)['developer'], saved)
+                self.assertEqual(store.updates, 1)
 
                 reused, reused_id = self._store(profile)
                 with patch.object(submission_cli.os, 'kill', return_value=None), \
@@ -3144,6 +3142,9 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                             Namespace(task_id=reused_id, executor_task='executor-one'),
                             reused.get(reused_id), reused.get(reused_id)['developer'], reused,
                             expected_agent=agent)
+                self.assertEqual(reused.get(reused_id)['developer']['state'],
+                                 'DEVELOPER_OUTCOME_UNKNOWN')
+                self.assertEqual(reused.updates, 1)
 
     def test_alive_child_refuses_a_second_writer_for_both_routes(self):
         for profile, agent in self.routes:
@@ -3168,6 +3169,9 @@ class DirectRouteChildLivenessTests(unittest.TestCase):
                             expected_agent=agent)
                 self.assertEqual(store.get(task_id)['developer']['state'],
                                  'DEVELOPER_DISPATCHING')
+                self.assertEqual(store.get(task_id)['completion']['state'],
+                                 'WAITING_EXECUTOR')
+                self.assertEqual(store.updates, 0)
 
     def test_conflict_does_not_overwrite_newer_record_for_both_routes(self):
         for profile, agent in self.routes:
