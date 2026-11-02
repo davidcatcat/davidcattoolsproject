@@ -22,6 +22,7 @@ class FakeHandler(BaseHTTPRequestHandler):
     model_override = None
     drop_count = 0
     response_marker = None
+    call_id_mode = None
 
     def log_message(self, format_string, *args):
         return
@@ -40,39 +41,60 @@ class FakeHandler(BaseHTTPRequestHandler):
         body = json.loads(self.rfile.read(size))
         messages = body.get("messages", [])
         last = messages[-1] if messages else {}
-        if last.get("role") == "user" and str(last.get("content", "")).startswith("Tool result:"):
-            self._json({"model": MODEL, "choices": [{"message": {"content": EXPECTED}}],
-                        "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}})
-            return
-        if last.get("role") == "tool":
-            payload = {"model": MODEL, "choices": [{"message": {"content": EXPECTED}}],
-                       "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}}
-            self._json(payload)
-            return
+        text_steps = sum(1 for item in messages if item.get("role") == "assistant" and
+                         isinstance(item.get("content"), str) and "TOOL_CALL:" in item["content"])
         if not body.get("tools"):
-            content = "TOOL_CALL: " + TOOL_NAME + " " + json.dumps({"summary": EXPECTED})
+            if text_steps >= 10:
+                content = EXPECTED
+            else:
+                step = text_steps + 1
+                content = "TOOL_CALL: " + TOOL_NAME + " " + json.dumps(
+                    {"step": step, "summary": "Inspected synthetic file " + str(step)})
             self._json({"model": MODEL, "choices": [{"message": {"content": content}}],
                         "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}})
             return
-        args = json.dumps({"summary": EXPECTED}, separators=(",", ":"))
-        call_id = "call_local_1"
+        tool_steps = sum(1 for item in messages if item.get("role") == "tool")
+        is_s3 = "Scenario S3:" in str(messages[0].get("content", ""))
+        is_s4 = "Scenario S4:" in str(messages[0].get("content", ""))
+        if last.get("role") == "tool" and (tool_steps >= 10 or (is_s3 and tool_steps >= 2) or is_s4):
+            payload = {"model": MODEL, "choices": [{"message": {"content": EXPECTED}}],
+                       "usage": {"prompt_tokens": 12, "completion_tokens":
+                                 12 if body.get("chat_template_kwargs", {}).get("enable_thinking") else 8,
+                                 "total_tokens": 24}}
+            if body.get("chat_template_kwargs", {}).get("enable_thinking"):
+                payload["choices"][0]["message"]["reasoning_content"] = "inspected files"
+            self._json(payload)
+            return
+        if is_s3 and tool_steps == 0:
+            steps = (1, 2)
+        else:
+            steps = (tool_steps + 1,)
+        calls = []
+        for offset, step in enumerate(steps):
+            args = json.dumps({"step": step, "summary": "Inspected synthetic file " + str(step)},
+                              separators=(",", ":"))
+            call_id = "call_local_" + str(step)
+            if is_s3 and type(self).call_id_mode == "empty" and offset == 0:
+                call_id = ""
+            elif is_s3 and type(self).call_id_mode == "duplicate" and offset == 1:
+                call_id = "call_local_1"
+            calls.append({"id": call_id, "type": "function", "function":
+                          {"name": TOOL_NAME, "arguments": args}})
         if body.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             chunks = [
                 {"model": MODEL, "choices": [{"delta": {"tool_calls": [
-                    {"index": 0, "id": call_id, "type": "function", "function": {"name": TOOL_NAME,
-                     "arguments": args}}]}}]},
+                    {"index": 0, **calls[0]}]}}]},
                 {"model": MODEL, "choices": [{"delta": {}, "finish_reason": "tool_calls"}]},
             ]
             for chunk in chunks:
                 self.wfile.write(b"data: " + json.dumps(chunk).encode() + b"\n\n")
             self.wfile.write(b"data: [DONE]\n\n")
             return
-        self._json({"model": MODEL, "choices": [{"message": {"content": None, "tool_calls": [
-            {"id": call_id, "type": "function", "function": {"name": TOOL_NAME,
-             "arguments": args}}]}}], "usage": {"prompt_tokens": 12, "completion_tokens": 8,
+        self._json({"model": MODEL, "choices": [{"message": {"content": None, "tool_calls": calls}}],
+                    "usage": {"prompt_tokens": 12, "completion_tokens": 8,
                                                       "total_tokens": 20}})
 
     def _json(self, value):
@@ -94,6 +116,7 @@ class MultiTurnFakeServerTests(unittest.TestCase):
         FakeHandler.model_override = None
         FakeHandler.drop_count = 0
         FakeHandler.response_marker = None
+        FakeHandler.call_id_mode = None
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -106,6 +129,7 @@ class MultiTurnFakeServerTests(unittest.TestCase):
         FakeHandler.model_override = None
         FakeHandler.drop_count = 0
         FakeHandler.response_marker = None
+        FakeHandler.call_id_mode = None
 
     def test_scenarios_and_audit_with_loopback_server(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -182,7 +206,7 @@ class MultiTurnFakeServerTests(unittest.TestCase):
 
     def test_tool_result_id_must_match_a_returned_call(self):
         call = {"id": "call_local_1", "type": "function",
-                "function": {"name": TOOL_NAME, "arguments": json.dumps({"summary": EXPECTED})}}
+                "function": {"name": TOOL_NAME, "arguments": json.dumps({"step": 1, "summary": EXPECTED})}}
         result = _tool_result(call)
         self.assertTrue(_tool_result_matches(call, result))
         self.assertFalse(_tool_result_matches(call, {"role": "tool", "tool_call_id": ""}))
@@ -207,6 +231,24 @@ class MultiTurnFakeServerTests(unittest.TestCase):
             self.assertEqual(result["scenarios"][0]["id"], "S1")
             self.assertEqual(result["scenarios"][0]["detail"], "STOPPED_CALL_CAP")
             self.assertTrue(result["audit_verified"])
+
+    def test_native_scenarios_complete_multiple_tool_rounds(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+            result = _run(client, Path(directory) / "audit.jsonl", MODEL)
+            self.assertTrue(result["scenarios"][0]["passed"])
+            self.assertTrue(result["scenarios"][5]["passed"])
+            self.assertGreaterEqual(result["calls"], 30)
+
+    def test_s3_rejects_empty_and_duplicate_call_ids(self):
+        for mode, detail in (("empty", "S3_EMPTY_CALL_ID"), ("duplicate", "S3_DUPLICATE_CALL_ID")):
+            with self.subTest(mode=mode), tempfile.TemporaryDirectory() as directory:
+                FakeHandler.call_id_mode = mode
+                client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+                result = _run(client, Path(directory) / "audit.jsonl", MODEL)
+                scenario = next(item for item in result["scenarios"] if item["id"] == "S3")
+                self.assertFalse(scenario["passed"])
+                self.assertEqual(scenario["detail"], detail)
 
 
 if __name__ == "__main__":

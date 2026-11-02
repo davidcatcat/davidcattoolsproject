@@ -19,14 +19,18 @@ from probe import NoRedirect, ProbeClient, _config, _local_url, _redact, _respon
 
 MAX_SECONDS = 3600
 CALL_TIMEOUT = 300
-TOOL_NAME = "record_project_summary"
+TOOL_NAME = "record_project_step"
 TOOL = {"type": "function", "function": {"name": TOOL_NAME,
-        "description": "Record the synthetic project's summary.",
-        "parameters": {"type": "object", "properties": {"summary": {"type": "string"}},
-                       "required": ["summary"], "additionalProperties": False}}}
+        "description": "Record one inspected synthetic project file.",
+        "parameters": {"type": "object", "properties": {
+            "step": {"type": "integer"}, "summary": {"type": "string"}},
+                       "required": ["step", "summary"], "additionalProperties": False}}}
 EXPECTED = "The demo project contains a greeting function."
-SYNTHETIC_TASK = ("Read the generated mini project below. Use the available tool to record its summary. "
-                  "The summary must be exactly: " + EXPECTED + "\n\n")
+STEP_COUNT = 10
+SYNTHETIC_TASK = ("Inspect the synthetic mini project. For each numbered file step in order, call the tool "
+                  "once with that step number and a concise description of the file. Wait for each tool result "
+                  "before requesting the next step. After all " + str(STEP_COUNT) +
+                  " steps, give a final answer containing this exact summary: " + EXPECTED + "\n\n")
 SECRET_RE = re.compile(r"(?:sk-[A-Za-z0-9_-]{12,}|gh[pousr]_[A-Za-z0-9_]{20,}|"
                        r"github_pat_[A-Za-z0-9_]{20,}|xox[abprs]-[A-Za-z0-9-]{20,})", re.I)
 
@@ -118,8 +122,7 @@ class GuardedRun:
                 raise StopRun("CONNECTION_ERRORS")
         else:
             self.connection_errors = 0
-        if status == 200 and not result.get("error_code") and served is not None and \
-                served != self.expected_served_model:
+        if status == 200 and not result.get("error_code") and served != self.expected_served_model:
             raise StopRun("UNEXPECTED_MODEL")
         if self.max_tokens is not None and self.tokens > self.max_tokens:
             raise StopRun("TOKEN_CAP")
@@ -210,7 +213,10 @@ class GuardedRun:
             return False
         try:
             args = json.loads(call["function"]["arguments"])
-            return args == {"summary": EXPECTED}
+            return (set(args) == {"step", "summary"} and
+                    isinstance(args["step"], int) and not isinstance(args["step"], bool) and
+                    1 <= args["step"] <= STEP_COUNT and isinstance(args["summary"], str) and
+                    bool(args["summary"].strip()))
         except (KeyError, TypeError, ValueError):
             return False
 
@@ -232,7 +238,8 @@ class GuardedRun:
 
 def _tool_result(call):
     return {"role": "tool", "tool_call_id": call["id"],
-            "content": "recorded" if GuardedRun.valid_call(call) else "invalid arguments"}
+            "content": "recorded step " + str(json.loads(call["function"]["arguments"]).get("step"))
+            if GuardedRun.valid_call(call) else "invalid arguments"}
 
 
 def _tool_result_matches(call, result):
@@ -245,11 +252,13 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
     body = {"model": run.request_model, "messages": [{"role": "user", "content": run.task_prompt}],
             "max_tokens": 512, "tools": [TOOL],
             "tool_choice": {"type": "function", "function": {"name": TOOL_NAME}} if forced else "auto"}
+    if match_id:
+        body["messages"][0]["content"] += "\nScenario S3: request two parallel tool calls now."
     if thinking:
         body["chat_template_kwargs"] = {"enable_thinking": True}
     messages = list(body["messages"])
     used_tool = False
-    for _ in range(4):
+    for _ in range(STEP_COUNT + 2):
         result = run.send({**body, "messages": messages,
                            "max_tokens": 128 if used_tool else body["max_tokens"],
                            "tool_choice": "auto" if used_tool else body["tool_choice"]})
@@ -257,19 +266,55 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
         if call is None:
             _, _, message = _response(result)
             answer = message.get("content")
-            return used_tool and isinstance(answer, str) and EXPECTED in answer, "MULTI_ROUND_FINAL_SCORE"
+            passed = used_tool and len([m for m in messages if m.get("role") == "tool"]) >= STEP_COUNT
+            response_data = _response(result)[0]
+            usage_data = response_data.get("usage", {}) if isinstance(response_data, dict) else {}
+            completion = usage_data.get("completion_tokens", 0) if isinstance(usage_data, dict) else 0
+            if not thinking and not match_id and run.current == "S1":
+                run.s1_completion_tokens = completion
+            if thinking:
+                passed = passed and (bool(message.get("reasoning_content")) or
+                                     (isinstance(completion, int) and completion >
+                                      getattr(run, "s1_completion_tokens", -1)))
+            return passed and isinstance(answer, str) and EXPECTED in answer, "MULTI_ROUND_FINAL_SCORE"
+        calls = _response(result)[2].get("tool_calls")
+        if match_id:
+            if not isinstance(calls, list) or len(calls) < 2:
+                return False, "S3_REQUIRES_TWO_CALLS_IN_ONE_TURN"
+            ids = [item.get("id") if isinstance(item, dict) else None for item in calls]
+            if any(not isinstance(call_id, str) or not call_id.strip() for call_id in ids):
+                return False, "S3_EMPTY_CALL_ID"
+            if len(set(ids)) != len(ids):
+                return False, "S3_DUPLICATE_CALL_ID"
+            if not all(run.valid_call(item) for item in calls):
+                return False, "S3_INVALID_CALL"
+            if [json.loads(item["function"]["arguments"])["step"] for item in calls] != [1, 2]:
+                return False, "S3_STEP_ORDER"
+            used_tool = True
+            results = [_tool_result(item) for item in calls]
+            if not all(_tool_result_matches(item, value) for item, value in zip(calls, results)):
+                return False, "TOOL_CALL_ID_MISMATCH"
+            messages.extend([{"role": "assistant", "content": None, "tool_calls": calls}, *results])
+            followup = run.send({**body, "messages": messages, "max_tokens": 128, "tool_choice": "auto"})
+            _, _, followup_message = _response(followup)
+            answer = followup_message.get("content")
+            return isinstance(answer, str) and EXPECTED in answer, "S3_MATCHED_RESULTS_ACCEPTED"
         if not run.valid_call(call):
             return False, "EXPECTED_TOOL_CALL_MISSING_OR_INVALID"
+        expected_step = len([m for m in messages if m.get("role") == "tool"]) + 1
+        if json.loads(call["function"]["arguments"])["step"] != expected_step:
+            return False, "TOOL_STEP_ORDER"
         used_tool = True
         tool_result = _tool_result(call)
         if not _tool_result_matches(call, tool_result):
-            return False, "TOOL_CALL_ID_MISMATCH" if match_id else "TOOL_RESULT_ID_INVALID"
+            return False, "TOOL_RESULT_ID_INVALID"
         messages.extend([{"role": "assistant", "content": None, "tool_calls": [call]}, tool_result])
     return False, "ROUND_CAP"
 
 
 def _stream_scenario(run):
-    body = {"model": run.request_model, "messages": [{"role": "user", "content": run.task_prompt}],
+    body = {"model": run.request_model, "messages": [{"role": "user", "content": run.task_prompt +
+            "\nScenario S4: perform one streamed tool round-trip."}],
             "max_tokens": 512, "tools": [TOOL], "tool_choice": "auto", "stream": True}
     result = run.send(body, stream=True)
     call = run.tool_call(result)
@@ -288,22 +333,25 @@ def _text_tool_scenario(run):
               " {\"summary\":\"...\"}")
     messages = [{"role": "user", "content": prompt}]
     used_tool = False
-    for _ in range(4):
+    for _ in range(STEP_COUNT + 2):
         result = run.send({"model": run.request_model, "messages": messages, "max_tokens": 256})
         _, _, message = _response(result)
         content = message.get("content")
         match = re.search(r"TOOL_CALL:\s*" + re.escape(TOOL_NAME) + r"\s*(\{[^\n]*\})", content or "")
         if not match:
-            return used_tool and isinstance(content, str) and EXPECTED in content, "TEXT_MULTI_ROUND_FINAL_SCORE"
+            return (used_tool and len([m for m in messages if m.get("role") == "assistant" and
+                                      isinstance(m.get("content"), str) and "TOOL_CALL:" in m["content"]])
+                    >= STEP_COUNT and isinstance(content, str) and EXPECTED in content), "TEXT_MULTI_ROUND_FINAL_SCORE"
         try:
             args = json.loads(match.group(1))
         except ValueError:
             return False, "TEXT_TOOL_CALL_INVALID"
-        if args != {"summary": EXPECTED}:
+        if set(args) != {"step", "summary"} or args.get("step") != len(
+                [m for m in messages if m.get("role") == "assistant"] ) + 1 or not args.get("summary"):
             return False, "TEXT_TOOL_ARGUMENT_SCORE"
         used_tool = True
         messages.extend([{"role": "assistant", "content": content},
-                         {"role": "user", "content": "Tool result: recorded. Return the exact summary only: " + EXPECTED}])
+                         {"role": "user", "content": "Tool result: recorded. Continue with the next numbered file step."}])
     return False, "ROUND_CAP"
 
 
@@ -314,10 +362,13 @@ def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, exp
     # The project is generated and isolated. Nothing from the checkout is read.
     synthetic = Path(tempfile.mkdtemp(prefix="gw-probe-mini-"))
     os.chmod(synthetic, 0o700)
-    (synthetic / "README.txt").write_text("Synthetic demo project: a greeting function.\n", encoding="utf-8")
-    (synthetic / "greeting.py").write_text('def greet(name):\n    return "Hello, " + name\n', encoding="utf-8")
-    run.task_prompt = SYNTHETIC_TASK + (synthetic / "README.txt").read_text(encoding="utf-8") + \
-        (synthetic / "greeting.py").read_text(encoding="utf-8")
+    files = []
+    for index in range(1, STEP_COUNT + 1):
+        path = synthetic / ("file_" + str(index) + ".txt")
+        path.write_text("Synthetic project file " + str(index) + ": greeting function notes.\n", encoding="utf-8")
+        files.append(path)
+    run.task_prompt = SYNTHETIC_TASK + "\n".join(path.name + ": " + path.read_text(encoding="utf-8")
+                                                 for path in files)
     audit.add({"event": "start", "scenario_count": 6, "project": "synthetic-mini-project"})
     actions = (("S1", lambda: _native_scenario(run)),
                ("S2", lambda: _native_scenario(run, forced=True)),
@@ -333,8 +384,8 @@ def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, exp
         audit.add({"event": "stop", "reason": run.stop_reason})
     finally:
         try:
-            (synthetic / "README.txt").unlink()
-            (synthetic / "greeting.py").unlink()
+            for path in files:
+                path.unlink()
             synthetic.rmdir()
         except OSError:
             pass
