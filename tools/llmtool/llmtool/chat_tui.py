@@ -977,9 +977,11 @@ class ChatTUI:
             self._refresh_search()
 
         @keys.add("c-j", filter=input_focused)
+        @keys.add("s-enter", filter=input_focused)
         @keys.add("escape", "enter", filter=input_focused)
         def _newline(event):
-            # Always a newline in the draft, never a send; ends a history search first.
+            # Ctrl-J, Shift-Enter and Esc Enter insert in the draft, never send; end
+            # a history search first.
             self.close_menu()
             self.input.buffer.insert_text("\n")
 

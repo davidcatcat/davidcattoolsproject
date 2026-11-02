@@ -290,11 +290,42 @@ class WidgetTests(Base):
     def test_multiline_input_is_capped_and_footer_stays_single_line(self):
         ui, _ = self.drive(['one\ntwo\nthree\nfour\nfive\nsix'],
                            size=(Size(rows=36, columns=99),))
-        self.assertLessEqual(ui.input.window.render_info.window_height, 4)
+        self.assertEqual(ui.input.window.render_info.window_height, 4)
         self.assertEqual(ui.status_window.render_info.window_height, 1)
         status = ui.status_text()
         self.assertNotIn('\n', status)
         self.assertLessEqual(get_cwidth(status), 99)
+
+    def test_shift_enter_inserts_and_enter_sends_complete_multiline_draft(self):
+        def shift_enter(ui):
+            with set_app(ui.app):
+                ui.app.key_processor.feed(KeyPress(Keys.ShiftEnter))
+                ui.app.key_processor.process_keys()
+            self.assertEqual(ui.input.text, 'first\n')
+            self.assertEqual(self.client.complete.call_count, 0)
+
+        ui, _ = self.drive(['first', shift_enter, 'second\r', self.idle])
+        sent = [call.args[0][-1]['content'] for call in self.client.complete.call_args_list]
+        self.assertEqual(sent, ['first\nsecond'])
+        self.assertEqual(ui.input.text, '')
+
+    def test_up_down_move_within_multiline_draft(self):
+        def inspect_movement(ui):
+            buffer = ui.input.buffer
+            buffer.text = 'first line\nsecond line'
+            buffer.cursor_position = len(buffer.text)
+            with set_app(ui.app):
+                ui.app.key_processor.feed(KeyPress(Keys.Up))
+                ui.app.key_processor.process_keys()
+            self.assertEqual(buffer.document.current_line, 'first line')
+            self.assertEqual(buffer.text, 'first line\nsecond line')
+            with set_app(ui.app):
+                ui.app.key_processor.feed(KeyPress(Keys.Down))
+                ui.app.key_processor.process_keys()
+            self.assertEqual(buffer.document.current_line, 'second line')
+            self.assertEqual(buffer.text, 'first line\nsecond line')
+
+        self.drive([inspect_movement])
 
     def test_status_footer_is_compact_and_single_line_at_80_columns(self):
         self.session.config = {
