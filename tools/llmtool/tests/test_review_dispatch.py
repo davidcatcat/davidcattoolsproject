@@ -51,19 +51,36 @@ class ReviewDispatchTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def invoke(self, *, create=None, preflight=None, policy=True, codex_runner=None):
+    def invoke(self, *, create=None, preflight=None, policy=True, codex_runner=None,
+               reviewer_role=None):
         create = create or (lambda **kw: self.created.append(kw))
         send = lambda **kw: (self.sent.append(kw) or 'native-session')
         bind = lambda **kw: self.bound.append(kw)
         gate = SimpleNamespace(allowed=policy, reason_code='PAUSED')
+        selected = preflight[0] if type(preflight) is list else self.preflight
+        existing = self.store.get(TASK).get('review_dispatch_claim', [])
+        creates_claim = not any(
+            type(claim) is dict and
+            claim.get('executor_task') == 'executor-d6' and
+            claim.get('pr') == 42 and claim.get('head_sha') == selected[2] and
+            claim.get('version') == 1
+            for claim in existing)
         with patch.object(review_dispatch, '_preflight', side_effect=preflight or [self.preflight, self.preflight]), \
                 patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
-                patch.object(review_dispatch, '_resolve_github_login', return_value='reviewer-user'):
-            return review_dispatch.dispatch_review(
+                patch.object(review_dispatch, '_resolve_github_login', return_value='reviewer-user'), \
+                patch.object(review_dispatch.role_config, 'resolve_role',
+                             return_value=reviewer_role or {
+                                 'config_dir': None, 'source': 'builtin'}) as resolve_role:
+            result = review_dispatch.dispatch_review(
                 store=self.store, task_id=TASK, executor_task='executor-d6',
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
                 bind_session=bind, prompt_renderer=lambda *_: 'bound prompt',
                 codex_runner=codex_runner)
+            if selected[4] == 'claude-reviewer' and creates_claim:
+                resolve_role.assert_called_once_with('reviewer')
+            else:
+                resolve_role.assert_not_called()
+            return result
 
     def test_happy_path_claims_creates_dispatches_and_binds(self):
         result = self.invoke()
@@ -76,6 +93,24 @@ class ReviewDispatchTests(unittest.TestCase):
         self.assertEqual(len(self.sent), 1)
         self.assertEqual(len(self.bound), 1)
         self.assertEqual(self.bound[0]['session_id'], 'native-session')
+        self.assertEqual(result['account_mode'], 'BUILTIN_DEFAULT')
+
+    def test_reviewer_role_account_overrides_inherited_claude_config_dir(self):
+        account = '/private/reviewer-account'
+        role = {'config_dir': account, 'source': 'roles'}
+        with patch.dict(review_dispatch.os.environ, {
+                'CLAUDE_CONFIG_DIR': '/private/inherited-account',
+                'LLMTOOL_ROLE_PM_ACCOUNT': 'other'}):
+            result = self.invoke(reviewer_role=role)
+        self.assertEqual(result['account_mode'], 'ROLES')
+        self.assertEqual(self.sent[0]['env']['CLAUDE_CONFIG_DIR'], account)
+
+    def test_reviewer_explicit_role_override_is_recorded_and_passed(self):
+        account = '/private/explicit-reviewer-account'
+        result = self.invoke(reviewer_role={
+            'config_dir': account, 'source': 'env'})
+        self.assertEqual(result['account_mode'], 'EXPLICIT')
+        self.assertEqual(self.sent[0]['env']['CLAUDE_CONFIG_DIR'], account)
 
     def test_replay_after_restart_returns_claim_without_redispatch(self):
         first = self.invoke()
@@ -536,6 +571,17 @@ class RealTaskStoreReviewClaimTests(unittest.TestCase):
         dispatched = dict(claimed, state='DISPATCHED', native_session_id='native-1')
         self.update_claims(current, [dispatched])
         self.assertEqual(self.store.get(self.task_id)['review_dispatch_claim'], [dispatched])
+
+    def test_accepts_role_based_account_modes(self):
+        for index, mode in enumerate(('ROLES', 'EXPLICIT', 'LEGACY', 'BUILTIN_DEFAULT')):
+            with self.subTest(mode=mode):
+                store, task_id = _real_store(Path(self.temp.name) / str(index))
+                initial = store.get(task_id)
+                claimed = dict(_claim(), account_mode=mode)
+                store.compare_and_update(
+                    task_id, expected={'record_sha256': initial['record_sha256']},
+                    review_dispatch_claim=[claimed])
+                self.assertEqual(store.get(task_id)['review_dispatch_claim'], [claimed])
 
     def test_claimed_transitions_to_completed_with_bound_codex_result(self):
         initial = self.store.get(self.task_id)
