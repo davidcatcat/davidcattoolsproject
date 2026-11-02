@@ -156,7 +156,7 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertTrue(self.route.quota_exhausted({}, b''))
 
     def test_offline_gateway_subprocess_edits_only_authorized_file(self):
-        gateway_tests = Path(self.route.package_path).parent / 'tests'
+        gateway_tests = Path(self.route.package_path) / 'tests'
         sys.path.insert(0, str(gateway_tests))
         try:
             from helpers import FakeServer, reply, tool_call
