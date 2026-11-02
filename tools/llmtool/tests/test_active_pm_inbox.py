@@ -233,17 +233,16 @@ class ActivePMInboxTests(unittest.TestCase):
 
     def test_adoption_refuses_task_without_session_provenance(self):
         task = self._record_pm()
-        raw = self.store.get(task['task_id'])
-        raw.pop('pm_provenance')
-        raw['record_sha256'] = task_store_module._digest(raw)
-        self.store._write(raw, create=False)
         before = self.store.get(task['task_id'])
+        legacy = dict(before)
+        legacy.pop('pm_provenance')
         old_path = active_pm_inbox.claude_session_file(self.session, str(self.pm_cwd))
         old_path.unlink()
-        with self.assertRaises(LLMToolError) as caught:
-            active_pm_inbox.adopt_pm_session(
-                self.store, 'pm-' + self.session, 'pm-' + str(uuid.uuid4()),
-                old_native_id=self.session, cwd=str(self.pm_cwd))
+        with patch.object(self.store, 'get', return_value=legacy):
+            with self.assertRaises(LLMToolError) as caught:
+                active_pm_inbox.adopt_pm_session(
+                    self.store, 'pm-' + self.session, 'pm-' + str(uuid.uuid4()),
+                    old_native_id=self.session, cwd=str(self.pm_cwd))
         self.assertEqual(caught.exception.task_store_error_code,
                          'PM_SESSION_ADOPTION_PROVENANCE_REQUIRED')
         self.assertEqual(self.store.get(task['task_id']), before)
