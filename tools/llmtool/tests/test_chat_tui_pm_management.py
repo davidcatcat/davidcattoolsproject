@@ -22,6 +22,8 @@ class PMManagementTests(unittest.TestCase):
         self.unsafe_home = self.root / "unsafe-home"
         for folder in (self.claude_home, self.codex_home, self.unsafe_home):
             folder.mkdir(mode=0o700)
+        self.claude_home.chmod(0o700)
+        self.codex_home.chmod(0o700)
         self.unsafe_home.chmod(0o777)
         self.bin = self.root / "bin"
         self.bin.mkdir()
@@ -56,7 +58,7 @@ class PMManagementTests(unittest.TestCase):
                 ("claude-main", "claude", "private"),
                 ("codex-main", "codex", "private"),
                 ("unsafe", "claude", "not private"),
-        ])
+        ], msg="actual account rows: %r" % rows)
 
     def test_check_discards_provider_output_and_rejects_unsafe_folder(self):
         patches = self._accounts()
