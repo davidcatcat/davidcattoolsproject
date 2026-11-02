@@ -46,12 +46,16 @@ def tool_call(name: str, call_id: str = None, **args) -> dict:
             'function': {'name': name, 'arguments': json.dumps(args)}}
 
 
-def reply(*calls: dict, content=None, usage=(10, 5), model='fake-served-model') -> dict:
+def reply(*calls: dict, content=None, usage=(10, 5), model='fake-served-model',
+          finish_reason=None, reasoning_content=None) -> dict:
     msg = {'role': 'assistant', 'content': content}
+    if reasoning_content is not None:
+        msg['reasoning_content'] = reasoning_content
     if calls:
         msg['tool_calls'] = list(calls)
     body = {'id': 'x', 'object': 'chat.completion', 'model': model,
-            'choices': [{'index': 0, 'message': msg, 'finish_reason': 'tool_calls' if calls else 'stop'}]}
+            'choices': [{'index': 0, 'message': msg,
+                         'finish_reason': finish_reason or ('tool_calls' if calls else 'stop')}]}
     if usage is not None:
         body['usage'] = {'prompt_tokens': usage[0], 'completion_tokens': usage[1]}
     return body
