@@ -253,7 +253,10 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
             "max_tokens": 512, "tools": [TOOL],
             "tool_choice": {"type": "function", "function": {"name": TOOL_NAME}} if forced else "auto"}
     if match_id:
-        body["messages"][0]["content"] += "\nScenario S3: request two parallel tool calls now."
+        body["messages"][0]["content"] = (
+            "Inspect the synthetic mini project. Call steps 1 and 2 in parallel, then give a final answer "
+            "containing this exact summary: " + EXPECTED + "\n\n" + run.project_files +
+            "\nScenario S3: request two parallel tool calls now.")
     if thinking:
         body["chat_template_kwargs"] = {"enable_thinking": True}
     messages = list(body["messages"])
@@ -322,7 +325,8 @@ def _stream_scenario(run):
         return False, "STREAMED_TOOL_CALL_MISSING_OR_INVALID"
     messages = body["messages"] + [{"role": "assistant", "content": None, "tool_calls": [call]},
                                    _tool_result(call)]
-    second = run.send({"model": run.request_model, "messages": messages, "max_tokens": 128})
+    second = run.send({"model": run.request_model, "messages": messages, "max_tokens": 128,
+                       "tools": [TOOL], "tool_choice": "auto"})
     _, _, message = _response(second)
     answer = message.get("content")
     return EXPECTED in answer if isinstance(answer, str) else False, "STREAM_TOOL_ROUND_TRIP_SCORE"
@@ -330,7 +334,7 @@ def _stream_scenario(run):
 
 def _text_tool_scenario(run):
     prompt = (run.task_prompt + "\nRespond exactly as TOOL_CALL: " + TOOL_NAME +
-              " {\"summary\":\"...\"}")
+              " {\"step\":<n>,\"summary\":\"...\"}")
     messages = [{"role": "user", "content": prompt}]
     used_tool = False
     for _ in range(STEP_COUNT + 2):
@@ -367,8 +371,8 @@ def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, exp
         path = synthetic / ("file_" + str(index) + ".txt")
         path.write_text("Synthetic project file " + str(index) + ": greeting function notes.\n", encoding="utf-8")
         files.append(path)
-    run.task_prompt = SYNTHETIC_TASK + "\n".join(path.name + ": " + path.read_text(encoding="utf-8")
-                                                 for path in files)
+    run.project_files = "\n".join(path.name + ": " + path.read_text(encoding="utf-8") for path in files)
+    run.task_prompt = SYNTHETIC_TASK + run.project_files
     audit.add({"event": "start", "scenario_count": 6, "project": "synthetic-mini-project"})
     actions = (("S1", lambda: _native_scenario(run)),
                ("S2", lambda: _native_scenario(run, forced=True)),

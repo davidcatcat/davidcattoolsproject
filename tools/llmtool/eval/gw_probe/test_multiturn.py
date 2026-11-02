@@ -23,6 +23,7 @@ class FakeHandler(BaseHTTPRequestHandler):
     drop_count = 0
     response_marker = None
     call_id_mode = None
+    text_step_mode = None
 
     def log_message(self, format_string, *args):
         return
@@ -48,8 +49,10 @@ class FakeHandler(BaseHTTPRequestHandler):
                 content = EXPECTED
             else:
                 step = text_steps + 1
-                content = "TOOL_CALL: " + TOOL_NAME + " " + json.dumps(
-                    {"step": step, "summary": "Inspected synthetic file " + str(step)})
+                arguments = {"summary": "Inspected synthetic file " + str(step)}
+                if type(self).text_step_mode != "missing_step":
+                    arguments["step"] = step
+                content = "TOOL_CALL: " + TOOL_NAME + " " + json.dumps(arguments)
             self._json({"model": MODEL, "choices": [{"message": {"content": content}}],
                         "usage": {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}})
             return
@@ -117,6 +120,7 @@ class MultiTurnFakeServerTests(unittest.TestCase):
         FakeHandler.drop_count = 0
         FakeHandler.response_marker = None
         FakeHandler.call_id_mode = None
+        FakeHandler.text_step_mode = None
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
@@ -130,6 +134,7 @@ class MultiTurnFakeServerTests(unittest.TestCase):
         FakeHandler.drop_count = 0
         FakeHandler.response_marker = None
         FakeHandler.call_id_mode = None
+        FakeHandler.text_step_mode = None
 
     def test_scenarios_and_audit_with_loopback_server(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -142,7 +147,9 @@ class MultiTurnFakeServerTests(unittest.TestCase):
             self.assertTrue(result["audit_verified"])
             self.assertEqual(result["caps"]["calls"], None)
             self.assertEqual(result["caps"]["total_tokens"], None)
-            self.assertTrue(Audit(audit_path).verify())
+            verifier = object.__new__(Audit)
+            verifier.path = audit_path
+            self.assertTrue(verifier.verify())
             audit = audit_path.read_text(encoding="utf-8")
             self.assertNotIn("Authorization", audit)
             self.assertNotIn("127.0.0.1", audit)
@@ -232,6 +239,18 @@ class MultiTurnFakeServerTests(unittest.TestCase):
             self.assertEqual(result["scenarios"][0]["detail"], "STOPPED_CALL_CAP")
             self.assertTrue(result["audit_verified"])
 
+    def test_optional_token_limit_stops_and_scores_active_scenario(self):
+        with tempfile.TemporaryDirectory() as directory:
+            audit_path = Path(directory) / "audit.jsonl"
+            client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+            result = _run(client, audit_path, MODEL, max_tokens=1)
+            self.assertEqual(result["status"], "STOPPED")
+            self.assertEqual(result["stop_reason"], "TOKEN_CAP")
+            self.assertEqual(result["calls"], 1)
+            self.assertEqual(result["scenarios"][0]["id"], "S1")
+            self.assertEqual(result["scenarios"][0]["detail"], "STOPPED_TOKEN_CAP")
+            self.assertTrue(result["audit_verified"])
+
     def test_native_scenarios_complete_multiple_tool_rounds(self):
         with tempfile.TemporaryDirectory() as directory:
             client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
@@ -249,6 +268,15 @@ class MultiTurnFakeServerTests(unittest.TestCase):
                 scenario = next(item for item in result["scenarios"] if item["id"] == "S3")
                 self.assertFalse(scenario["passed"])
                 self.assertEqual(scenario["detail"], detail)
+
+    def test_s6_rejects_text_tool_call_without_step(self):
+        FakeHandler.text_step_mode = "missing_step"
+        with tempfile.TemporaryDirectory() as directory:
+            client = ProbeClient("http://127.0.0.1:" + str(self.server.server_port), MODEL, None)
+            result = _run(client, Path(directory) / "audit.jsonl", MODEL)
+            scenario = next(item for item in result["scenarios"] if item["id"] == "S6")
+            self.assertFalse(scenario["passed"])
+            self.assertEqual(scenario["detail"], "TEXT_TOOL_ARGUMENT_SCORE")
 
 
 if __name__ == "__main__":
