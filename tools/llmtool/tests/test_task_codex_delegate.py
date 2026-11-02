@@ -262,7 +262,10 @@ class CodexDelegateTests(unittest.TestCase):
             status='DONE', summary='Changed src.py.', tests=(), self_review='Reviewed.',
             blocked_reason=None, exit_code=0, thread_id='a' * 36,
             stdout_sha256='b' * 64, elapsed_ms=20, cleanup_status='CONFIRMED',
-            usage=None, final_message='{"status":"DONE"}')
+            usage=None, final_message=json.dumps({'status': 'DONE',
+                'summary': 'Changed src.py.', 'tests': [],
+                'self_review': 'Reviewed.', 'blocked_reason': None},
+                separators=(',', ':')))
         started = time.monotonic()
         code, saved, _callback = self._dispatch(
             task, codex_result=result, background=True)
