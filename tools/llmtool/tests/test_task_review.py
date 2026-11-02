@@ -478,7 +478,7 @@ class FrozenInterfaceTests(unittest.TestCase):
         from dataclasses import fields
         names={f.name for f in fields(r.ReviewCallBinding)}
         self.assertEqual(names,{'task_id','ready_task','acceptance_task','criterion_map','run_id',
-            'epoch','sequence','source_sha','packet_digest','observation_digest','author_agents',
+            'epoch','sequence','source_sha','packet_digest','reviewed_object_digest','observation_digest','author_agents',
             'reviewer_role','reviewer_launch_nonce','route_id','route_version','route_digest',
             'provider','profile','model','export_scope_digest','issuer_class','issuer_capability_id',
             'redeem_run_id','deadline'})
