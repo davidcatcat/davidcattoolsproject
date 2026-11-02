@@ -493,6 +493,7 @@ class ActivityViewTests(unittest.TestCase):
         class Source:
             window = 12 * 3600
             status = "GitHub：讀取完成"
+            successful_read = True
             clock = staticmethod(lambda: now)
             def __init__(self, events):
                 self.events = events
@@ -514,6 +515,43 @@ class ActivityViewTests(unittest.TestCase):
         wrapped = mon._activity_screen_lines([lines[0]], 18)
         self.assertGreater(len(wrapped), 1)
         self.assertTrue(all(mon._width(piece) <= 18 for piece in wrapped))
+
+    def test_pm_last_dispatch_is_unknown_until_github_read_succeeds(self):
+        self.assertIn("未知", mon.activity_lines([], github=None)[0])
+
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：尚未讀取"
+            successful_read = False
+            events = []
+            clock = staticmethod(lambda: NOW)
+            def refresh(self): pass
+
+        self.assertIn("未知", mon.activity_lines([], github=Source())[0])
+
+    def test_curses_activity_header_stays_visible_above_bottom_anchored_events(self):
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            clock = staticmethod(lambda: NOW)
+            def __init__(self):
+                self.events = [mon.ActivityEvent(
+                    NOW - i, "github_comment", "", "", "POSTED", f"#{i + 1}")
+                    for i in range(80)]
+            def refresh_in_background(self): pass
+
+        monitor = mon.Monitor()
+        monitor.github = Source()
+        drawn = {}
+        class Screen:
+            def getmaxyx(self): return (40, 120)
+        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        header_text = "".join(drawn[row] for row in sorted(drawn) if row >= 2)
+        self.assertIn("PM 上次派工", drawn[2])
+        self.assertIn("最近 12 小時沒有", header_text)
+        self.assertNotIn("目前沒有可顯示", header_text)
 
     def test_developer_dispatch_activity_uses_marker_target(self):
         for target in ("Codex", "AGY", "OpenCode", "Developer"):
