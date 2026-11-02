@@ -534,6 +534,9 @@ class ActivityViewTests(unittest.TestCase):
             window = 12 * 3600
             status = "GitHub：讀取完成"
             successful_read = True
+            ci_view = None
+            pending = None
+            scope = ""
             clock = staticmethod(lambda: NOW)
             def __init__(self):
                 self.events = [mon.ActivityEvent(
@@ -567,6 +570,9 @@ class ActivityViewTests(unittest.TestCase):
             window = 12 * 3600
             status = "GitHub：讀取完成"
             successful_read = True
+            ci_view = None
+            pending = None
+            scope = ""
             clock = staticmethod(lambda: NOW)
             events = [mon.ActivityEvent(
                 NOW - i, "github_comment", "", "", "POSTED", f"#{i + 1}")
@@ -577,13 +583,18 @@ class ActivityViewTests(unittest.TestCase):
         monitor.github = Source()
         drawn = {}
         class Screen:
-            def getmaxyx(self): return (5, 120)
+            def __init__(self, height): self.height = height
+            def getmaxyx(self): return (self.height, 120)
             def erase(self): pass
             def refresh(self): pass
-        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
-                          lambda row, text, attr=0: drawn.__setitem__(row, text))
-        self.assertTrue(any("Tab/1-5" in text for text in drawn.values()))
-        self.assertFalse(any("GitHub #" in text for row, text in drawn.items() if row >= 4))
+        for height in (5, 4):
+            drawn.clear()
+            mon._paint_screen(Screen(height), monitor, "activity", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+            self.assertTrue(any("Tab/1-5" in text for text in drawn.values()))
+            self.assertNotIn("PM 上次派工", drawn[height - 1])
+            self.assertFalse(any("GitHub #" in text for row, text in drawn.items()
+                                 if row >= height - 1))
 
     def test_developer_dispatch_activity_uses_marker_target(self):
         for target in ("Codex", "AGY", "OpenCode", "Developer"):

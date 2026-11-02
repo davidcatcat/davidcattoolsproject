@@ -5693,6 +5693,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
     elif view == "activity":
         all_lines = activity_lines(mon.tasks, github=mon.github, background=True)
         header = _activity_screen_lines(all_lines[:1], w - 1)
+        # Keep the header on the first Activity body row, but never on the
+        # navigation hint row on very short terminals.
+        header = header[:max(0, h - 4)]
         for row, line in enumerate(header):
             put(3 + row, line, colors.get("!", 0) if line.startswith("⚠") else 0)
         lines = _activity_screen_lines(all_lines[1:], w - 1)
