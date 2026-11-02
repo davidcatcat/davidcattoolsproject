@@ -571,19 +571,20 @@ class WidgetTests(Base):
 
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
-        self.assertEqual(labels, ['/pm connect', '/pm new', '/pm', '/pm disconnect',
+        self.assertEqual(labels, ['/pm list', '/pm use', '/pm accounts', '/pm connect',
+                                  '/pm new', '/pm', '/pm disconnect',
                                   '/pm history', '/pm queue', '/help', '/status', '/provider', '/skill',
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
-                         ['/pm connect', '/pm new', '/pm'])
+                         ['/pm list', '/pm use', '/pm accounts'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/ory')][:2],
                          ['/pm history', '/history'])
         self.assertIn('/task show', [c[0] for c in chat_tui.slash_matches('/show')])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/', dev=False)][:5],
-                         ['/pm connect', '/pm new', '/pm', '/pm disconnect', '/pm history'])
+                         ['/pm list', '/pm use', '/pm accounts', '/pm connect', '/pm new'])
         self.assertEqual(chat_tui.slash_matches('hello'), [])
         self.assertEqual(chat_tui.slash_matches('/nope'), [])
         self.assertEqual(chat_tui.slash_matches('/s\nx'), [])
@@ -3897,7 +3898,7 @@ class PMConversationTests(BoundedPMTest):
         self.state = self.temp_root.resolve() / 'empty-state'   # no binding saved here
         self.api.state_root = self.state
         ui, _ = self.drive([self.connect(), self.pending_done])
-        self.assertIn('no dedicated PM binding is saved. /pm new [CWD]', ui.conversation.text)
+        self.assertIn('no dedicated PM binding is saved. /pm new', ui.conversation.text)
         self.assertIsNone(ui.pm_runtime)
         cwd = str(self.temp_root)
         ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
@@ -3918,15 +3919,17 @@ class PMConversationTests(BoundedPMTest):
         spaced.mkdir()
         calls = []
         real = self.api.create_dedicated
-        self.api.create_dedicated = lambda cwd: calls.append(cwd) or real(cwd)
+        self.api.create_dedicated = lambda cwd, runtime='claude-code', account=None: (
+            calls.append((cwd, runtime, account)) or real(cwd, runtime, account))
         ui, _ = self.drive(['/pm new "%s"\r' % spaced, self.pending_done,
                             '/pm new %s\r' % str(spaced).replace(' ', '\\ '), self.pending_done,
                             '/pm new "%s\r' % spaced, self.pending_done])
-        self.assertEqual(calls, [str(spaced), str(spaced)])
+        self.assertEqual(calls, [(str(spaced), 'claude-code', None),
+                                 (str(spaced), 'claude-code', None)])
         text = ui.conversation.text
         self.assertEqual(text.count('dedicated binding created (cwd ' + str(spaced)), 2)
         self.assertIn('llmtool: /pm: unbalanced quote or trailing backslash', text)
-        self.assertIn('usage: /pm new [CWD]', text)
+        self.assertIn('usage: /pm new [--runtime claude|codex]', text)
         self.assertNotIn('Traceback', text)
         created = self.api.current_binding()['native_session_id']
         ui, _ = self.drive(['/pm connect %s "%s"\r' % (created, spaced), self.connected])
@@ -3938,7 +3941,7 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive(['/pm connect ' + other + ' ' + str(self.temp_root) + '\r',
                             self.pending_done])
         self.assertIn('PM runtime error PM_SESSION_NOT_DEDICATED', ui.conversation.text)
-        self.assertIn('/pm new [CWD] creates one', ui.conversation.text)
+        self.assertIn('/pm new', ui.conversation.text)
         # A transcript written after the binding, within S2's 20 s window, means live elsewhere.
         from llmtool import active_pm_inbox
         transcript = active_pm_inbox.claude_session_file(
