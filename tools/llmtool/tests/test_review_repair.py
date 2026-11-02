@@ -192,27 +192,39 @@ class ReviewRepairTests(unittest.TestCase):
         self.addCleanup(fixture.tearDown)
         self.store = TaskStore(Path(self.temp.name).resolve())
         response = json.dumps({'schema_version': 1, 'summary': 'Active PM plan.',
-            'developer_assignment': {'route': 'codex', 'risk': 'LOW',
+            'developer_assignment': {'route': 'claude', 'risk': 'LOW',
                 'goal': 'Repair the reported issue.',
                 'acceptance': ['Repair the reported issue.']}})
         with redirect_stdout(StringIO()):
             task = task_submission_cli.run_task_record_pm(
                 Namespace(stdin_json=True, pm_session_id=fixture.session,
                           pm_runtime='claude-code', pm_cwd=str(fixture.pm_cwd)),
-                store=self.store,
+                store=TaskStore(Path(self.temp.name).resolve() / 'record-pm'),
                 input_stream=StringIO(json.dumps({
                     'request': 'Bounded non-sensitive remote-test repair fixture.',
                     'response': response})),
                 return_record=True, task_id=TASK)
+        task.pop('record_sha256')
         template = fixture._task()
+        developer = dict(template['developer'])
+        developer.update(provider_profile='claude', provider_type=None, model=None,
+                         state='DEVELOPER_PENDING', artifact=None,
+                         artifact_sha256=None, usage=None, error_code=None,
+                         owner_assignment_ref=(
+                             'https://github.com/example/repo/issues/1#issuecomment-2'))
+        developer.pop('execution', None)
         completion = json.loads(json.dumps(template['completion']))
+        completion['executor_task_id'] = EXECUTOR
         completion['evidence'].update(
             task_id=task['task_id'], run_id=task['run_id'],
             contract_digest=task['task_binding']['contract_digest'])
-        task.update(developer=template['developer'], completion=completion)
-        self.store.update(TASK, developer=task['developer'], completion=completion)
+        task.update(developer=developer, completion=completion)
+        self.store.create(task)
+        task = self.store.record_claude_result(
+            TASK, pm_session_id=task['pm_session_id'],
+            executor_task_id=EXECUTOR, head_sha=HEAD)
         receipt = {
-            'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
+            'task_id': TASK, 'run_id': task['run_id'], 'executor_task': EXECUTOR,
             'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_remote'],
             'failure_excerpt': 'FAIL: test_remote\nAssertionError',
         }
