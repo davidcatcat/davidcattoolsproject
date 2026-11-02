@@ -25,7 +25,8 @@ class TaskDriveTests(unittest.TestCase):
             {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
              'result': {'outcome': 'REVIEW_PASS'}, 'codes': []},
             {'task_id': 't', 'step': 'RUN_TASK_COMPLETE', 'codes': []},
-            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',
+             'codes': ['WAITING_INTEGRATION']},
             {'task_id': 't', 'step': 'MERGED', 'codes': []},
         ]
         advance, calls = self.adapter(steps)
@@ -54,7 +55,8 @@ class TaskDriveTests(unittest.TestCase):
             {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'codes': []},
             {'task_id': 't', 'step': 'DISPATCH_REVIEW', 'codes': []},
             {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT', 'codes': []},
-            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',
+             'codes': ['WAITING_INTEGRATION']},
         ])
         result = task_drive.drive(task_id='t', advance_call=advance)
         self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
@@ -80,7 +82,8 @@ class TaskDriveTests(unittest.TestCase):
             {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
              'result': {'outcome': 'REVIEW_PASS'}, 'codes': []},
             {'task_id': 't', 'step': 'RUN_TASK_COMPLETE', 'codes': []},
-            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',
+             'codes': ['WAITING_INTEGRATION']},
         ])
         result = task_drive.drive(task_id='t', poll_seconds=0.25,
                                   advance_call=advance, sleep=pauses.append)
@@ -89,19 +92,16 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)
         self.assertEqual(pauses, [0.25])
 
-    def test_pending_integration_waits_on_advance_result_code(self):
-        pauses = []
+    def test_ready_integration_stops_or_merges_on_request(self):
         advance, calls = self.adapter([
             {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',
              'codes': ['WAITING_INTEGRATION']},
-            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
         ])
-        result = task_drive.drive(task_id='t', poll_seconds=0.5,
-                                  advance_call=advance, sleep=pauses.append)
-        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
-        self.assertEqual(result['steps'], 1)
-        self.assertEqual(len(calls), 2)
-        self.assertEqual(pauses, [0.5])
+        result = task_drive.drive(task_id='t', merge=True, advance_call=advance)
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(result['steps'], 2)
+        self.assertEqual([call['merge'] for call in calls], [False, True])
 
     def test_repeated_review_not_ready_stops_at_bounded_poll_attempts(self):
         pauses = []
@@ -184,9 +184,11 @@ class TaskDriveTests(unittest.TestCase):
 
     def test_without_merge_stops_at_integration_ready(self):
         advance, calls = self.adapter([
-            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []}])
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',
+             'codes': ['WAITING_INTEGRATION']}])
         result = task_drive.drive(task_id='t', advance_call=advance)
         self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertEqual(result['codes'], ['WAITING_INTEGRATION'])
         self.assertEqual(len(calls), 1)
 
     def test_waits_for_ci_then_stops_on_unknown_and_owner_acceptance(self):

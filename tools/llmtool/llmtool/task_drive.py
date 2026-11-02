@@ -6,8 +6,9 @@ from . import task_advance
 
 
 # These names and result shapes are emitted by task_advance.advance. Review
-# polling uses RECORD_REVIEW_RESULT with result.state NOT_READY; integration
-# polling uses READY_FOR_INTEGRATION with the WAITING_INTEGRATION code.
+# polling uses RECORD_REVIEW_RESULT with result.state NOT_READY. A ready PR
+# carries WAITING_INTEGRATION until merged, but that is a stop/merge decision,
+# not a reason to poll here.
 _WAITING_STEPS = {'WAITING_CI', 'WAITING_EXECUTOR', 'WAITING_REPAIR'}
 _UNKNOWN = {
     'UNKNOWN', 'OUTCOME_UNKNOWN', 'REVIEW_OUTCOME_UNKNOWN',
@@ -18,7 +19,7 @@ _TERMINAL = {'CLOSED', 'MERGED', 'MERGE_REFUSED', 'REFUSED'}
 
 def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
           advance_call=None, sleep=None, **adapters):
-    """Drive foreground steps; stop for attention if the initial Developer is unfinished."""
+    """Drive foreground steps; stop without polling if the initial Developer is unfinished."""
     if type(max_steps) is not int or max_steps < 1:
         raise ValueError('max_steps must be a positive integer')
     if type(poll_seconds) not in (int, float) or poll_seconds < 0:
@@ -57,9 +58,7 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             step in _WAITING_STEPS or
             (step == 'RECORD_REVIEW_RESULT' and
              type(result.get('result')) is dict and
-             result['result'].get('state') == 'NOT_READY') or
-            (step == 'READY_FOR_INTEGRATION' and
-             'WAITING_INTEGRATION' in codes)
+             result['result'].get('state') == 'NOT_READY')
         )
         if waiting:
             if attempts >= max_steps:
