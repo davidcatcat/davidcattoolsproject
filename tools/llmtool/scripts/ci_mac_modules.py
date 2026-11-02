@@ -223,7 +223,8 @@ def select_test_ids(
             continue
         if path in MONITOR_PATHS:
             continue
-        if path.startswith("tools/llmtool/") and path.endswith(".md"):
+        if ((path.startswith("tools/llmtool/") and path.endswith(".md"))
+                or path == "README.md"):
             continue
         if (path.startswith(".github/workflows/") or path == "tools/llmtool/ci/mac-modules.txt"
                 or path in {"tools/llmtool/scripts/ci_mac_modules.py",
