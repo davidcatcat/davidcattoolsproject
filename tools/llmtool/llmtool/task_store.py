@@ -239,6 +239,10 @@ _DIRECT_EXECUTION_FIELDS = frozenset((
 _DIRECT_EXECUTION_BINDING_FIELDS = _DIRECT_EXECUTION_FIELDS | frozenset((
     'native_session_binding',
 ))
+_DIRECT_EXECUTION_CHILD_FIELDS = frozenset((
+    'child_pid', 'child_start_time', 'child_pgid',
+))
+_DIRECT_EXECUTION_LAUNCH_FIELDS = _DIRECT_EXECUTION_FIELDS | _DIRECT_EXECUTION_CHILD_FIELDS
 _DEVELOPER_EXECUTION_DIFF_FIELDS = frozenset(('diff_sha256', 'diff_base_sha'))
 _DEVELOPER_EXECUTION_DIFF_SHAPES = (
     _DIRECT_EXECUTION_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
@@ -1245,7 +1249,18 @@ def _validate(record):
                             type(execution) is not dict or
                             set(execution) not in (
                                 _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,
+                                _DIRECT_EXECUTION_LAUNCH_FIELDS,
                                 *_DEVELOPER_EXECUTION_DIFF_SHAPES) or
+                            (set(execution) == _DIRECT_EXECUTION_LAUNCH_FIELDS and
+                             (developer['provider_profile'] != 'codex' or
+                              execution['status'] != 'RUNNING' or
+                              type(execution['child_pid']) is not int or
+                              execution['child_pid'] <= 0 or
+                              type(execution['child_pgid']) is not int or
+                              execution['child_pgid'] <= 0 or
+                              type(execution['child_start_time']) is not str or
+                              re.fullmatch(r'[A-Za-z0-9 :_-]{1,64}',
+                                           execution['child_start_time']) is None)) or
                             ('native_session_binding' in execution and
                              (developer['provider_profile'] != 'codex' or
                               type(execution['native_session_binding']) is not str or
@@ -1254,7 +1269,12 @@ def _validate(record):
                             execution['status'] not in (
                                 ('SUCCEEDED', 'FAILED', 'UNKNOWN')
                                 if developer['provider_profile'] == 'opencode' else
-                                ('DONE', 'FAILED', 'UNKNOWN', 'BLOCKED', 'TIMEOUT')) or
+                                ('DONE', 'FAILED', 'UNKNOWN', 'BLOCKED', 'TIMEOUT',
+                                 'RUNNING')) or
+                            ((execution['status'] == 'RUNNING') !=
+                             (set(execution) == _DIRECT_EXECUTION_LAUNCH_FIELDS)) or
+                            (execution['status'] == 'RUNNING' and
+                             developer['state'] != 'DEVELOPER_DISPATCHING') or
                             (execution['native_session_id'] is not None and
                              (type(execution['native_session_id']) is not str or
                               re.fullmatch(
@@ -2077,6 +2097,32 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
+    def record_codex_launch(self, task_id, *, assignment_id, pid, start_time, pgid):
+        """Persist the direct Codex child identity through the trusted launch path."""
+        if (not _safe_identifier(assignment_id, TASK_ID) or type(pid) is not int or
+                pid <= 0 or type(pgid) is not int or pgid <= 0 or
+                type(start_time) is not str or not 1 <= len(start_time) <= 64 or
+                re.fullmatch(r'[A-Za-z0-9 :_-]+', start_time) is None):
+            _fail('CODEX_LAUNCH_IDENTITY_INVALID')
+        current = self.get(task_id)
+        developer = current.get('developer')
+        if (type(developer) is not dict or developer.get('assignment_id') != assignment_id or
+                developer.get('provider_profile') != 'codex' or
+                developer.get('state') != 'DEVELOPER_DISPATCHING' or
+                developer.get('execution') is not None):
+            _fail('CODEX_LAUNCH_IDENTITY_INVALID')
+        execution = {
+            'status': 'RUNNING', 'native_session_id': None,
+            'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+            'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'child_pid': pid,
+            'child_start_time': start_time, 'child_pgid': pgid,
+        }
+        developer = dict(developer, execution=execution)
+        return self._update(task_id, expected={'record_sha256': current['record_sha256']},
+                            changes={'developer': developer}, trusted_codex_launch=True)
+
     def adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
                          expected_record_sha256):
         """Library-internal: atomically move one PM binding, inbox and audit entry."""
@@ -2703,7 +2749,16 @@ class TaskStore:
 
     def _update(self, task_id, *, expected, changes, trusted_dispatch_audit=False,
                 trusted_completion_events=False, trusted_abandonment=False,
-                abandonment_pm_session_id=None, trusted_pm_session_adoption=False):
+                abandonment_pm_session_id=None, trusted_pm_session_adoption=False,
+                trusted_codex_launch=False):
+        if ('developer' in changes and type(changes['developer']) is dict and
+                'execution' in changes['developer'] and
+                type(changes['developer'].get('execution')) is dict and
+                'child_pid' in changes['developer']['execution'] and
+                not trusted_codex_launch):
+            _fail('CODEX_LAUNCH_IDENTITY_FORBIDDEN')
+        if trusted_codex_launch and set(changes) != {'developer'}:
+            _fail('CODEX_LAUNCH_IDENTITY_INVALID')
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
         if (('completion_events' in changes or 'completion_event_tombstones' in changes)
@@ -2781,6 +2836,21 @@ class TaskStore:
             if expected is not None and any(current.get(key) != value
                                             for key, value in expected.items()):
                 raise TaskStoreConflict() from None
+            if trusted_codex_launch:
+                proposed = changes.get('developer')
+                old = current.get('developer')
+                execution = (proposed.get('execution')
+                             if type(proposed) is dict else None)
+                if (type(old) is not dict or old.get('provider_profile') != 'codex' or
+                        old.get('state') != 'DEVELOPER_DISPATCHING' or
+                        type(proposed) is not dict or
+                        proposed.get('assignment_id') != old.get('assignment_id') or
+                        proposed.get('state') != 'DEVELOPER_DISPATCHING' or
+                        type(execution) is not dict or
+                        set(execution) != _DIRECT_EXECUTION_LAUNCH_FIELDS or
+                        execution.get('status') != 'RUNNING' or
+                        old.get('execution') is not None):
+                    _fail('CODEX_LAUNCH_IDENTITY_INVALID')
             if trusted_abandonment:
                 item = changes['abandonment']
                 if (current.get('pm_session_id') != abandonment_pm_session_id or

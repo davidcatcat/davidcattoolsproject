@@ -2717,6 +2717,76 @@ class ModeMetadataRejectionTests(unittest.TestCase):
             'DEVELOPER_OUTPUT_INVALID_DIFF')
 
 
+class CodexChildLivenessTests(unittest.TestCase):
+    def _delegate(self, developer, *, kill_result=None, start='123456', pgid=321):
+        task = {'task_id': 'a' * 32, 'state': 'PM_RESPONDED', 'response': 'response',
+                'schema_version': 2, 'developer': developer}
+
+        class Store:
+            def __init__(self):
+                self.task = task
+                self.updates = 0
+
+            def get(self, _task_id):
+                return self.task
+
+            def update(self, _task_id, **changes):
+                self.updates += 1
+                self.task.update(changes)
+                return self.task
+
+        store = Store()
+        args = Namespace(executor_task='executor-one')
+        snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
+        registration = type('Registration', (), {
+            'task_id': 'executor-one', 'trusted_agent_id': 'codex-developer'})()
+        with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                          return_value=snapshot), \
+             patch.object(submission_cli.task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(submission_cli.os, 'kill', side_effect=kill_result), \
+             patch.object(submission_cli.codex_direct_developer, 'process_start_time',
+                          return_value=start), \
+             patch.object(submission_cli.os, 'getpgid', return_value=pgid):
+            with self.assertRaises(LLMToolError) as caught:
+                submission_cli.run_task_codex_delegate(args, store=store)
+        return caught.exception, store
+
+    @staticmethod
+    def _running_developer(execution=None):
+        developer = {'state': 'DEVELOPER_DISPATCHING', 'provider_profile': 'codex',
+                     'executor_task_id': 'executor-one', 'assignment_id': 'b' * 32}
+        if execution is not None:
+            developer['execution'] = execution
+        return developer
+
+    def test_dead_child_is_marked_unknown_once_and_not_replayed(self):
+        execution = {'child_pid': 321, 'child_start_time': '123456', 'child_pgid': 321}
+        error, store = self._delegate(self._running_developer(execution),
+                                      kill_result=ProcessLookupError())
+        self.assertEqual(str(error), 'CODEX_CHILD_OUTCOME_UNKNOWN')
+        self.assertEqual(store.updates, 1)
+        self.assertEqual(store.task['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(store.task['developer']['error_code'], 'CODEX_CHILD_NOT_RUNNING')
+
+    def test_matching_live_child_refuses_second_writer(self):
+        execution = {'child_pid': 321, 'child_start_time': '123456', 'child_pgid': 321}
+        error, store = self._delegate(self._running_developer(execution), kill_result=None)
+        self.assertEqual(str(error), 'CODEX_CHILD_STILL_RUNNING')
+        self.assertEqual(store.updates, 0)
+
+    def test_reused_pid_is_dead_and_legacy_execution_remains_unknown(self):
+        execution = {'child_pid': 321, 'child_start_time': 'old-start', 'child_pgid': 321}
+        error, store = self._delegate(self._running_developer(execution),
+                                      kill_result=None, start='new-start')
+        self.assertEqual(str(error), 'CODEX_CHILD_OUTCOME_UNKNOWN')
+        self.assertEqual(store.task['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        error, store = self._delegate(self._running_developer(), kill_result=None)
+        self.assertEqual(str(error), 'CODEX_LIVENESS_UNKNOWN')
+        self.assertEqual(store.updates, 0)
+        self.assertEqual(store.task['developer']['state'], 'DEVELOPER_DISPATCHING')
+
+
 class DispatcherGitTimeoutTests(unittest.TestCase):
     def test_dispatcher_git_preflight_timeout_is_a_preflight_failure(self):
         def timeout(*args, **kwargs):
