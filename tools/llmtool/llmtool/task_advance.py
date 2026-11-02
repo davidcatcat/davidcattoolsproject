@@ -121,8 +121,10 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
     canonical_root = str(Path(common_dir).parent)
     actual_root = _publish_command(git_runner, root, ['rev-parse', '--show-toplevel'])
     actual_branch = _publish_command(git_runner, root, ['branch', '--show-current'])
-    if actual_root.strip() != root or actual_branch.strip() != branch:
+    if os.path.realpath(actual_root.strip()) != os.path.realpath(root) or actual_branch.strip() != branch:
         raise _PublishRefusal('PUBLISH_D6_MISMATCH')
+    if branch in ('main', 'master', 'default'):
+        raise _PublishRefusal('PUBLISH_PROTECTED_BRANCH')
 
     ignored = _publish_command(git_runner, root,
         ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])
@@ -132,7 +134,7 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
         raise _PublishRefusal('PUBLISH_IGNORED_STRAY')
 
     tracked = _publish_command(git_runner, root,
-        ['diff', '--name-only', '-z', 'HEAD'])
+        ['diff', '--no-renames', '--name-only', '-z', 'HEAD'])
     untracked = _publish_command(git_runner, root,
         ['ls-files', '--others', '--exclude-standard', '-z'])
     changed = sorted({path for raw in (tracked, untracked)
@@ -159,7 +161,7 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
     if changed:
         _publish_command(git_runner, root, ['add', '--', *changed])
         staged = _publish_command(git_runner, root,
-            ['diff', '--cached', '--name-only', '-z'])
+            ['diff', '--cached', '--no-renames', '--name-only', '-z', 'HEAD'])
         staged_paths = [path for path in staged.split('\0') if path]
         if not staged_paths or any(path not in write_paths for path in staged_paths):
             raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')

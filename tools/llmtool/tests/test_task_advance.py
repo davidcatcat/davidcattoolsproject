@@ -941,7 +941,7 @@ class TaskAdvancePublishTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
-        self.root = os.path.join(self.tmp.name, 'task')
+        self.root = os.path.realpath(os.path.join(self.tmp.name, 'task'))
         self.bare = os.path.join(self.tmp.name, 'remote.git')
         os.mkdir(self.root)
         self.git(['init', '--bare', self.bare], cwd=self.tmp.name)
@@ -1031,6 +1031,42 @@ class TaskAdvancePublishTests(unittest.TestCase):
             self.publish()
         self.assertEqual(caught.exception.code, 'PUBLISH_OUT_OF_SCOPE')
         self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), self.initial_head)
+
+    def test_staged_rename_from_outside_scope_is_refused_without_commit(self):
+        os.mkdir(os.path.join(self.root, 'outside'))
+        with open(os.path.join(self.root, 'outside', 'source.py'), 'w', encoding='utf-8') as stream:
+            stream.write('value = 1\n')
+        self.git(['add', '--', 'outside/source.py'], cwd=self.root)
+        self.git(['commit', '-m', 'add outside source'], cwd=self.root)
+        self.initial_head = self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
+        os.mkdir(os.path.join(self.root, 'inside'))
+        self.git(['mv', 'outside/source.py', 'inside/source.py'], cwd=self.root)
+
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish(write_paths=['inside/source.py'])
+
+        self.assertEqual(caught.exception.code, 'PUBLISH_OUT_OF_SCOPE')
+        self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), self.initial_head)
+
+    def test_main_master_and_default_branches_are_refused(self):
+        for branch in ('main', 'master', 'default'):
+            with self.subTest(branch=branch):
+                current = self.git(['branch', '--show-current'], cwd=self.root).strip()
+                self.git(['branch', '-m', branch], cwd=self.root)
+                d6_binding = {'root': self.root,
+                    'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
+                    'branch': branch, 'task_id': self.EXECUTOR_TASK,
+                    'recorded_result_head': self.initial_head}
+                with self.assertRaises(task_advance._PublishRefusal) as caught:
+                    task_advance._publish_task(
+                        {'task_id': self.TASK_ID,
+                         'developer': {'write_paths': self.WRITE_PATHS}},
+                        d6_binding, self.EXECUTOR_TASK, git_runner=self.git_runner,
+                        gh_runner=self.gh, record_result_call=self.record_result)
+                self.assertEqual(caught.exception.code, 'PUBLISH_PROTECTED_BRANCH')
+                self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(),
+                                 self.initial_head)
+                self.git(['branch', '-m', current], cwd=self.root)
 
     def test_ignored_python_cache_is_refused_without_commit(self):
         os.mkdir(os.path.join(self.root, '__pycache__'))
