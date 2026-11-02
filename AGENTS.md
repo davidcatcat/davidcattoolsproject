@@ -10,7 +10,7 @@
   - Codex Developer (`gpt-6-luna`, high reasoning effort) remains a Developer route and self-reviews and self-repairs before hand-back.
   - OpenCode Developer remains a normal Developer route; the PM selects it from currently available Workers.
   - Claude Developer / UI Agent (`claude-developer`) is a normal Developer route the PM may dispatch (Owner 2026-10-28), under the same gates.
-  - OpenCode and AGY direct CLI work are PM-selected routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; AGY is `ALLOWED` since 2026-10-31. Neither requires Host D4/G3/M2. Both require a verified D6 task worktree and actual provider CLI, model, session and permission checks.
+  - OpenCode and AGY direct CLI work are PM-selected routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; AGY is `ALLOWED` since 2026-10-31 and needs no individual Owner assignment. Neither requires Host D4/G3/M2. Both require a verified D6 task worktree and actual provider CLI, model, session and permission checks.
   - The first Mac OpenCode CLI launch may require the Owner to start the prepared session once; the Owner does not handle routine dispatch.
 
 - **Worker dispatch:**
