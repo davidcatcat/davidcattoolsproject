@@ -32,7 +32,7 @@ class CodexRuntimeTests(unittest.TestCase):
         self.log = self.root / 'calls.jsonl'
         self.write_fake()
         self.environ = {'HOME': str(self.root), 'PATH': str(self.bin),
-                        'PRIVATE_TEST_SECRET': 'must-not-reach-child'}
+                        'FAKE_VALUE': 'FAKE_VALUE'}
 
     def write_fake(self, mode='ok'):
         fake = self.bin / 'codex'
@@ -42,7 +42,7 @@ class CodexRuntimeTests(unittest.TestCase):
             args = sys.argv[1:]
             with open(__LOG__, 'a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'args': args,
-                    'secret': 'PRIVATE_TEST_SECRET' in os.environ}) + '\\n')
+                    'sentinel_present': 'FAKE_VALUE' in os.environ}) + '\\n')
             home = pathlib.Path(os.environ.get('CODEX_HOME') or os.environ['HOME'] + '/.codex')
             sessions = home / 'sessions'
             sessions.mkdir(parents=True, exist_ok=True)
@@ -60,7 +60,7 @@ class CodexRuntimeTests(unittest.TestCase):
             else:
                 print(json.dumps({'type':'thread.started','thread_id':__THREAD__}), flush=True)
                 print(json.dumps({'type':'item.started','item':{'id':'tool-1',
-                    'type':'command_execution','command':'secret command'}}), flush=True)
+                    'type':'command_execution','command':'FAKE_VALUE'}}), flush=True)
                 print(json.dumps({'type':'item.completed','item':{'id':'tool-1',
                     'type':'command_execution'}}), flush=True)
                 print(json.dumps({'type':'item.completed','item':{'type':'agent_message',
@@ -97,7 +97,7 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertNotIn('resume', calls[0]['args'])
         self.assertIn('resume', calls[1]['args'])
         self.assertIn(THREAD, calls[1]['args'])
-        self.assertFalse(any(call['secret'] for call in calls))
+        self.assertFalse(any(call['sentinel_present'] for call in calls))
         self.assertTrue(all('--sandbox' in call['args'] and
                             'workspace-write' in call['args'] and
                             '--ask-for-approval' in call['args'] and
