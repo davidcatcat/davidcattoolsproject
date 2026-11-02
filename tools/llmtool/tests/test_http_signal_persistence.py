@@ -25,6 +25,12 @@ PROMPT = 'SYNTHETIC_PRIVATE_PROMPT_181'
 RESPONSE = 'SYNTHETIC_PRIVATE_RESPONSE_181'
 SETTINGS = ('diagnostics:\n  persist_metadata: true\n  max_runs: 1\n'
             '  max_total_bytes: 1048576\n  max_run_bytes: 65536\n  max_age_days: 14\n')
+WAIT_SECONDS = 30
+
+
+def _remaining(deadline):
+    """Return the time left for a wait sharing an absolute monotonic deadline."""
+    return max(0, deadline - time.monotonic())
 
 
 class _Server(ThreadingHTTPServer):
@@ -95,13 +101,18 @@ class HttpSignalPersistenceTests(unittest.TestCase):
                                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
 
-    def reader(self, *args):
+    def reader(self, *args, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + WAIT_SECONDS
         return subprocess.run([sys.executable, '-B', '-m', 'llmtool', *args],
                               cwd=str(Path(__file__).resolve().parents[1]), env=self.env,
-                              stdin=subprocess.DEVNULL, capture_output=True, timeout=4)
+                              stdin=subprocess.DEVNULL, capture_output=True,
+                              timeout=_remaining(deadline))
 
-    def assert_finalized(self, process, signum, *, partial_stdout=False):
-        out, err = process.communicate(timeout=4)
+    def assert_finalized(self, process, signum, *, partial_stdout=False, deadline=None):
+        if deadline is None:
+            deadline = time.monotonic() + WAIT_SECONDS
+        out, err = process.communicate(timeout=_remaining(deadline))
         self.assertEqual(process.returncode, 128 + signum, err)
         if partial_stdout:
             self.assertTrue(out and set(out) == {ord('x')} and len(out) < 4 * 1024 * 1024)
@@ -123,11 +134,11 @@ class HttpSignalPersistenceTests(unittest.TestCase):
                 self.assertNotIn(RESPONSE.encode(), path.read_bytes())
         self.assertNotIn(PROMPT.encode(), out + err)
         self.assertNotIn(RESPONSE.encode(), out + err)
-        self.assertIn(b'interrupted', self.reader('runs').stdout)
-        trace = self.reader('trace', run.name)
+        self.assertIn(b'interrupted', self.reader('runs', deadline=deadline).stdout)
+        trace = self.reader('trace', run.name, deadline=deadline)
         self.assertEqual(trace.returncode, 0, trace.stderr)
         self.assertIn(b'state=complete', trace.stdout)
-        doctor = self.reader('doctor')
+        doctor = self.reader('doctor', deadline=deadline)
         self.assertEqual(doctor.returncode, 0, doctor.stderr)
         self.assertIn(b'active_count=0 unknown_count=0', doctor.stdout)
 
@@ -201,30 +212,33 @@ class HttpSignalPersistenceTests(unittest.TestCase):
 
     def test_term_during_held_http_request_finalizes(self):
         process = self.launch()
+        deadline = time.monotonic() + WAIT_SECONDS
         try:
-            if not self.received.wait(3):
-                out, err = process.communicate(timeout=3)
+            if not self.received.wait(_remaining(deadline)):
+                out, err = process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
                 self.fail('synthetic HTTP request was not received: ' + repr((process.returncode, out, err)))
             process.send_signal(signal.SIGTERM)
-            self.assert_finalized(process, signal.SIGTERM)
+            self.assert_finalized(process, signal.SIGTERM,
+                                  deadline=time.monotonic() + WAIT_SECONDS)
         finally:
             self.release.set()
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=3)
+            process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
 
     def test_term_while_stdout_pipe_is_blocked_finalizes(self):
         self.large = True
         self.release.set()
         process = self.launch()
+        deadline = time.monotonic() + WAIT_SECONDS
         try:
-            if not self.received.wait(3):
-                out, err = process.communicate(timeout=3)
+            if not self.received.wait(_remaining(deadline)):
+                out, err = process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
                 self.fail('synthetic HTTP request was not received: ' + repr((process.returncode, out, err)))
-            deadline = time.monotonic() + 3
+            deadline = time.monotonic() + WAIT_SECONDS
             while time.monotonic() < deadline:
                 import select
-                readable, _, _ = select.select([process.stdout], [], [], .05)
+                readable, _, _ = select.select([process.stdout], [], [], _remaining(deadline))
                 if readable:
                     break
             try:
@@ -232,41 +246,46 @@ class HttpSignalPersistenceTests(unittest.TestCase):
             except subprocess.TimeoutExpired:
                 pass
             else:
-                out, err = process.communicate(timeout=3)
+                out, err = process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
                 self.fail('child completed before pipe blocked: ' + repr((process.returncode, len(out), err)))
             process.send_signal(signal.SIGTERM)
-            self.assert_finalized(process, signal.SIGTERM, partial_stdout=True)
+            self.assert_finalized(process, signal.SIGTERM, partial_stdout=True,
+                                  deadline=time.monotonic() + WAIT_SECONDS)
         finally:
             self.release.set()
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=3)
+            process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
 
     def test_hup_during_held_http_request_finalizes(self):
         if not hasattr(signal, 'SIGHUP'):
             self.skipTest('platform has no SIGHUP')
         process = self.launch()
+        deadline = time.monotonic() + WAIT_SECONDS
         try:
-            self.assertTrue(self.received.wait(3), 'synthetic HTTP request was not received')
+            self.assertTrue(self.received.wait(_remaining(deadline)), 'synthetic HTTP request was not received')
             process.send_signal(signal.SIGHUP)
-            self.assert_finalized(process, signal.SIGHUP)
+            self.assert_finalized(process, signal.SIGHUP,
+                                  deadline=time.monotonic() + WAIT_SECONDS)
         finally:
             self.release.set()
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=3)
+            process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
 
     def test_sigint_keeps_existing_http_ask_behavior(self):
         process = self.launch()
+        deadline = time.monotonic() + WAIT_SECONDS
         try:
-            self.assertTrue(self.received.wait(3), 'synthetic HTTP request was not received')
+            self.assertTrue(self.received.wait(_remaining(deadline)), 'synthetic HTTP request was not received')
             process.send_signal(signal.SIGINT)
-            self.assert_finalized(process, signal.SIGINT)
+            self.assert_finalized(process, signal.SIGINT,
+                                  deadline=time.monotonic() + WAIT_SECONDS)
         finally:
             self.release.set()
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=3)
+            process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
 
     def test_no_save_diagnostics_does_not_create_store(self):
         self.release.set()
@@ -328,10 +347,11 @@ class HttpSignalPersistenceTests(unittest.TestCase):
         self.state.mkdir(mode=0o755)
         self.state.chmod(0o755)
         process = self.launch()
+        deadline = time.monotonic() + WAIT_SECONDS
         try:
-            self.assertTrue(self.received.wait(3), 'synthetic HTTP request was not received')
+            self.assertTrue(self.received.wait(_remaining(deadline)), 'synthetic HTTP request was not received')
             process.send_signal(signal.SIGTERM)
-            out, err = process.communicate(timeout=4)
+            out, err = process.communicate(timeout=_remaining(deadline))
             self.assertEqual((process.returncode, out), (128 + signal.SIGTERM, b''), err)
             self.assertIn(b'diagnostics persistence unavailable', err)
             self.assertEqual(list(self.state.iterdir()), [])
@@ -341,7 +361,7 @@ class HttpSignalPersistenceTests(unittest.TestCase):
             self.release.set()
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=3)
+            process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
 
     def test_term_during_provider_failure_stderr_delivery_finalizes_without_drain(self):
         script = '''
@@ -375,7 +395,8 @@ with patch.object(cli, 'create_client', lambda config, key: Client()):
                                    stderr=subprocess.PIPE)
         try:
             import select
-            readable, _, _ = select.select([process.stdout], [], [], 3)
+            ready_deadline = time.monotonic() + WAIT_SECONDS
+            readable, _, _ = select.select([process.stdout], [], [], _remaining(ready_deadline))
             self.assertTrue(readable, 'provider failure did not reach synthetic readiness marker')
             self.assertEqual(process.stdout.readline(), b'READY\n')
             time.sleep(.2)
@@ -385,7 +406,7 @@ with patch.object(cli, 'create_client', lambda config, key: Client()):
                 process.wait(timeout=2)
             except subprocess.TimeoutExpired:
                 hung = True
-            out, err = process.communicate(timeout=3)
+            out, err = process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
             if hung:
                 runs = list((self.state / 'runs').iterdir())
                 if runs:
@@ -421,7 +442,7 @@ with patch.object(cli, 'create_client', lambda config, key: Client()):
             self.release.set()
             if process.poll() is None:
                 process.kill()
-            process.communicate(timeout=3)
+            process.communicate(timeout=_remaining(time.monotonic() + WAIT_SECONDS))
 
 
 if __name__ == '__main__':

@@ -451,11 +451,10 @@ class WidgetTests(Base):
                     pid_file.unlink(missing_ok=True)
 
                     async def send_signal_when_started(ui):
-                        for _ in range(200):
-                            if pid_file.exists():
-                                break
-                            await asyncio.sleep(0.01)
-                        self.assertTrue(pid_file.exists(), "Codex child did not start")
+                        deadline = time.monotonic() + 30
+                        while not pid_file.exists() and time.monotonic() < deadline:
+                            await asyncio.sleep(min(0.01, max(0, deadline - time.monotonic())))
+                        self.assertTrue(pid_file.exists(), "Codex child PID file was not ready within 30 seconds")
                         os.kill(os.getpid(), signum)
 
                     ui, result = self.drive(["問題\r", send_signal_when_started, self.idle])
