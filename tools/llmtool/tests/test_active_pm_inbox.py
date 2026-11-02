@@ -252,7 +252,7 @@ class ActivePMInboxTests(unittest.TestCase):
         conflicted = self._record_pm()
         movable = self._record_pm()
         old_key = 'pm-' + self.session
-        new_key = 'pm-' + str(uuid.uuid4())
+        new_key = 'pm-' + self._claude_session()
         self.store.get(conflicted['task_id'])
         original_adopt = self.store.adopt_pm_session
 
