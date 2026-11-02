@@ -224,7 +224,7 @@ STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usag
 STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
-PM_STATUS_DROP_ORDER = ("help", "identity", "scroll", "session", "mouse", "keys")
+PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "identity", "keys")
 STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
 STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
@@ -1272,8 +1272,13 @@ class ChatTUI:
             fields.update(self.pm_status_fields(compact))
             shown = ["mode", "identity", "session", "state", "keys", "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
-        pm_drop_order = (PM_STATUS_DROP_ORDER if not (self.busy or self.pm_turn_active) else
-                         ("identity", "help", "scroll", "session", "mouse", "keys"))
+        if self.busy or self.pm_turn_active or self.task_view_visible():
+            # Keep identity ahead of optional context while busy or in the Task detail;
+            # Task detail key hints remain last so the copy/return actions stay visible.
+            pm_drop_order = ("help", "identity", "scroll", "session", "mouse", "keys")
+        else:
+            # At idle, preserve the PM runtime/account identity at narrow widths.
+            pm_drop_order = PM_STATUS_DROP_ORDER
         for name in pm_drop_order if self.pm_mode else STATUS_DROP_ORDER:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
