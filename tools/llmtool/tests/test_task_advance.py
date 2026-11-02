@@ -1519,7 +1519,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
              'MERGE_OWNER_ACCEPTANCE_MANUAL'),
             ('negative tui_markdown path', {'files': [
                 {'filename': 'tools/llmtool/llmtool/tui_markdown.py'}]},
-             'MERGED'),
+             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
             ('pending check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
                 'status': 'in_progress', 'conclusion': None}]}, 'MERGE_CHECKS_NOT_GREEN'),
             ('cancelled check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
