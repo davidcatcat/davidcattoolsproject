@@ -49,12 +49,12 @@ class RoleConfigTests(unittest.TestCase):
                    "pm_runtime": {"claude_config_dir": str(self.account_dir)}})
         loaded = DEFAULTS.copy()
         _apply_user(loaded, _read_yaml(user_config_path(self.home), "user config"))
-        self.assertEqual(loaded["roles"]["pm"]["model"], "role-model")
-        self.assertEqual(loaded["accounts"]["work"]["config_dir"], str(self.account_dir))
+        self.assertNotIn("roles", loaded)
+        self.assertNotIn("accounts", loaded)
         role_only = resolve_role("pm", environ={}, home=self.home)
         self.assertEqual((role_only["account"], role_only["model"], role_only["source"]),
                          ("work", "role-model", "roles"))
-        env = {"LLMTOOL_ROLE_MODEL": "env-model", "LLMTOOL_ROLE_EFFORT": "medium"}
+        env = {"LLMTOOL_ROLE_PM_MODEL": "env-model", "LLMTOOL_ROLE_PM_EFFORT": "medium"}
         cli = {"model": "cli-model", "effort": "max"}
         before = self.user.read_bytes()
         resolved = resolve_role("pm", cli=cli, environ=env, home=self.home)
@@ -133,6 +133,46 @@ class RoleConfigTests(unittest.TestCase):
         self.assertEqual(inspect_config(environ={}, cwd=self.cwd, home=self.home), {
             "settings": ANY, "provider_type": "openai-compatible",
             "readiness": "not-configured", "credential": "not-configured"})
+
+    def test_role_environment_overrides_are_scoped_to_the_named_role(self):
+        self.save(self.account_config())
+        env = {"LLMTOOL_ROLE_PM_MODEL": "pm-model"}
+        reviewer = resolve_role("reviewer", environ=env, home=self.home)
+        self.assertEqual((reviewer["model"], reviewer["source"]), ("sonnet", "roles"))
+        pm = resolve_role("pm", environ=env, home=self.home)
+        self.assertEqual((pm["model"], pm["source"]), ("pm-model", "env"))
+
+    def test_account_and_provider_overrides_are_order_independent(self):
+        self.save(self.account_config())
+        for cli in (
+                {"account": "work", "provider": "claude"},
+                {"provider": "claude", "account": "work"}):
+            with self.subTest(cli=cli):
+                resolved = resolve_role("coder", cli=cli, environ={}, home=self.home)
+                self.assertEqual((resolved["account"], resolved["provider"], resolved["source"]),
+                                 ("work", "claude", "cli"))
+
+    def test_provider_override_cannot_mismatch_legacy_account_directory(self):
+        self.save({"pm_runtime": {"claude_config_dir": str(self.account_dir)}})
+        with self.assertRaises(LLMToolError) as caught:
+            resolve_role("pm", cli={"provider": "codex"}, environ={}, home=self.home)
+        self.assertEqual(caught.exception.role_config_code, "ROLE_CONFIG_OVERRIDE_INVALID")
+
+    def test_general_config_hides_roles_and_defers_unused_account_dir_checks(self):
+        missing = self.root / "missing-unused-account"
+        self.save({
+            "accounts": {
+                "unused": {"kind": "claude", "config_dir": str(missing)},
+                "work": self.account_config()["accounts"]["work"],
+            },
+            "roles": {"reviewer": self.account_config()["roles"]["reviewer"]},
+        })
+        config = resolve_config(environ={}, cwd=self.cwd, home=self.home)
+        from llmtool.config import show_config
+        rendered = show_config(config)
+        self.assertNotIn("accounts:", rendered)
+        self.assertNotIn("roles:", rendered)
+        self.assertEqual(resolve_role("reviewer", environ={}, home=self.home)["account"], "work")
 
 
 if __name__ == "__main__":

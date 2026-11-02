@@ -9,11 +9,11 @@ from .errors import LLMToolError
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _ROLE_FIELDS = {"provider", "provider_profile", "account", "model", "effort"}
 _ENV_FIELDS = {
-    "LLMTOOL_ROLE_PROVIDER": "provider",
-    "LLMTOOL_ROLE_PROVIDER_PROFILE": "provider_profile",
-    "LLMTOOL_ROLE_ACCOUNT": "account",
-    "LLMTOOL_ROLE_MODEL": "model",
-    "LLMTOOL_ROLE_EFFORT": "effort",
+    "PROVIDER": "provider",
+    "PROVIDER_PROFILE": "provider_profile",
+    "ACCOUNT": "account",
+    "MODEL": "model",
+    "EFFORT": "effort",
 }
 
 
@@ -59,7 +59,6 @@ def validate_role_config(user):
             _fail()
         if account["kind"] not in ("claude", "codex"):
             _fail()
-        _validate_account_dir(account["config_dir"])
     for role, settings in roles.items():
         if not _name(role) or type(settings) is not dict or set(settings) - _ROLE_FIELDS:
             _fail()
@@ -111,12 +110,11 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
     user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
     loaded = copy.deepcopy(DEFAULTS)
     _apply_user(loaded, user)
-    # _apply_user retains validated accounts/roles in this user-config view;
-    # read from it so role resolution follows the same loader path as the
-    # ordinary llmtool configuration.
-    accounts = loaded.get("accounts", {})
-    roles = loaded.get("roles", {})
-    validate_role_config({**user, "accounts": accounts, "roles": roles})
+    # Reuse the ordinary user-config validation path, then resolve the
+    # user-only role data from that explicit user file.
+    # Role data is intentionally not part of the general provider config
+    # projection. Validate it directly from the trusted user-config load.
+    accounts, roles = validate_role_config(user)
     legacy = user.get("pm_runtime", {}).get("claude_config_dir")
     configured = roles.get(role, {})
     settings = {"role": role, "provider": None, "provider_profile": None,
@@ -133,17 +131,25 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
     if settings["account"] is not None:
         account = accounts[settings["account"]]
         settings["provider"] = settings["provider"] or account["kind"]
-        settings["config_dir"] = account["config_dir"]
+        settings["config_dir"] = _validate_account_dir(account["config_dir"])
+    elif settings["config_dir"] is not None:
+        settings["config_dir"] = _validate_account_dir(settings["config_dir"])
     env = os.environ if environ is None else environ
-    for source_name, values in (("env", {field: env[name] for name, field in _ENV_FIELDS.items()
-                                             if name in env}),
+    env_prefix = "LLMTOOL_ROLE_" + role.upper() + "_"
+    for source_name, values in (("env", {field: env[env_prefix + suffix]
+                                             for suffix, field in _ENV_FIELDS.items()
+                                             if env_prefix + suffix in env}),
                                 ("cli", cli or {})):
         if source_name == "cli":
             values = {key: value for key, value in values.items()
                       if key in _ROLE_FIELDS and value is not None}
         if values:
             source = source_name
-        for key, value in values.items():
+        # Resolve account before provider so a matching pair is independent of
+        # mapping insertion order.
+        ordered = sorted(values.items(), key=lambda item: (item[0] != "account", item[0]))
+        layer_has_account = any(key == "account" for key, _ in ordered)
+        for key, value in ordered:
             if key not in _ROLE_FIELDS:
                 continue
             _override_value(key, value)
@@ -152,9 +158,13 @@ def resolve_role(role, cli=None, environ=None, *, home=None):
                 if value not in accounts:
                     _fail("role override names an unknown account", "ROLE_CONFIG_OVERRIDE_INVALID")
                 settings["provider"] = accounts[value]["kind"]
-                settings["config_dir"] = accounts[value]["config_dir"]
-            elif key == "provider" and settings["account"] is not None:
-                if accounts[settings["account"]]["kind"] != value:
+                settings["config_dir"] = _validate_account_dir(accounts[value]["config_dir"])
+            elif key == "provider":
+                if settings["account"] is not None and accounts[settings["account"]]["kind"] != value:
                     _fail("role override conflicts with account kind", "ROLE_CONFIG_OVERRIDE_INVALID")
+                if (not layer_has_account and settings["config_dir"] is not None and
+                        settings["provider"] != value):
+                    _fail("role override conflicts with account directory", "ROLE_CONFIG_OVERRIDE_INVALID")
+                settings["provider"] = value
     settings["source"] = source
     return settings

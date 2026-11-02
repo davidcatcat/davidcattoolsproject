@@ -614,11 +614,14 @@ roles:
 ```
 
 `resolve_role(role, cli=None, environ=None)` resolves one role with one-shot CLI
-overrides above `LLMTOOL_ROLE_*` environment overrides, saved role settings,
+overrides above role-scoped environment overrides such as
+`LLMTOOL_ROLE_REVIEWER_ACCOUNT` and `LLMTOOL_ROLE_REVIEWER_MODEL`, saved role settings,
 the legacy `pm_runtime.claude_config_dir` mapping for `pm`, and neutral built-in
 defaults. Overrides are returned in memory and never saved. Existing
 `pm_runtime.claude_config_dir` remains supported; when both it and `roles.pm`
-select account directories, they must agree.
+select account directories, they must agree. Account directory metadata is checked
+when the selected role uses the account. General `llmtool config` output does not
+include account or role configuration.
 
 ### Project config 的低信任邊界
 
