@@ -362,7 +362,7 @@ class PMLayoutTests(Base):
         self.start()
         ui.pm_outbox.append("next")
         status = ui.status_text()
-        self.assertRegex(status, "^▸▸ PM 模式 · auto · 佇列 1 \\| claude/default \\| abcdef01 \\| 回答中 [0-9.]+s \\| Esc 中斷 \\| ")
+        self.assertRegex(status, "^▸▸ PM 模式 · auto · 佇列 1 \\| abcdef01 \\| 回答中 [0-9.]+s \\| Esc 中斷 \\| ")
         ui.pm_state = "thinking"
         self.assertIn("思考中", ui.status_text())
         ui.pm_outbox.clear()
