@@ -24,6 +24,29 @@ class CIPathClassTests(unittest.TestCase):
         self.assertEqual(ci_path_classes.classify_paths(b"bad-\xff.py\0"), ["other"])
         self.assertEqual(ci_path_classes.classify_paths(b""), [])
 
+    def test_workflow_linux_flags_preserve_class_mapping_and_markdown_docs(self):
+        cases = (
+            ("docs", b"docs/guide.md\0", (False, True, False, False)),
+            ("runtime", b"tools/llmtool/llmtool/app.py\0", (True, False, False, False)),
+            ("gateway", b"tools/api-agent-gateway/app.py\0", (True, False, True, False)),
+            ("ai-loop", b"tools/ai-loop/helper.py\0", (False, False, False, True)),
+            ("workflow", b".github/workflows/ci.yml\0", (True, False, False, False)),
+            ("other", b"src/unknown.py\0", (True, False, False, False)),
+            ("runtime Markdown", b"tools/llmtool/docs/guide.md\0",
+             (True, True, False, False)),
+        )
+        for label, paths, expected in cases:
+            with self.subTest(paths=label):
+                self.assertEqual(ci_path_classes.linux_flags(paths), expected)
+
+        workflow = (Path(__file__).resolve().parents[3] / ".github" / "workflows"
+                    / "llmtool-linux-ci.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "flags=$(python3 -I -B tools/llmtool/scripts/ci_path_classes.py --linux-flags \"$paths\")",
+            workflow,
+        )
+        self.assertIn("read -r code docs gateway ai_loop <<< \"$flags\"", workflow)
+
     def test_historical_and_boundary_path_sets_keep_linux_job_flags(self):
         cases = (
             ("#781", [
@@ -55,13 +78,13 @@ class CIPathClassTests(unittest.TestCase):
                        "tools/llmtool/tests/test_worker_dispatch.py"],
              (True, False, False, False)),
             ("#792", [".github/workflows/llmtool-linux-ci.yml",
-                       "tools/ai-loop/README.md"], (True, False, False, True)),
+                       "tools/ai-loop/README.md"], (True, True, False, True)),
             ("docs-only", ["AGENTS.md", "docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md"],
              (False, True, False, False)),
             ("skills-only", ["skills/ai-team-delivery/SKILL.md"],
              (False, True, False, False)),
             ("nested llmtool Markdown", ["tools/llmtool/docs/guide.md"],
-             (True, False, False, False)),
+             (True, True, False, False)),
             ("workflow-only", [".github/workflows/llmtool-linux-ci.yml"],
              (True, False, False, False)),
             ("mixed", ["docs/meetings/2026-11-02-llmtool-governance-and-ai-team-decisions.md", "tools/api-agent-gateway/main.py",
@@ -71,15 +94,8 @@ class CIPathClassTests(unittest.TestCase):
         )
         for label, paths, expected in cases:
             with self.subTest(paths=label):
-                classes = [ci_path_classes.classify_path(path) for path in paths]
-                flags = (
-                    any(item in ("runtime", "gateway", "workflow", "other")
-                        for item in classes),
-                    "docs" in classes,
-                    "gateway" in classes,
-                    "ai-loop" in classes,
-                )
-                self.assertEqual(flags, expected)
+                path_bytes = b"\0".join(path.encode() for path in paths) + b"\0"
+                self.assertEqual(ci_path_classes.linux_flags(path_bytes), expected)
 
     def test_historical_and_boundary_path_sets_keep_mac_levels(self):
         cases = (
