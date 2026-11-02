@@ -33,7 +33,7 @@ from pathlib import Path
 
 from .errors import LLMToolError
 from .task_index import TaskStatusIndex
-from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID
+from .task_store import PM_NATIVE_SESSION_ID, SESSION_ID, TaskStoreConflict
 
 DEFAULT_WAIT_SECONDS = 540
 MAX_WAIT_SECONDS = 3600
@@ -425,6 +425,51 @@ def _inbox(store, session_key, *, reconcile):
 def read_inbox(store, session_key):
     """Reconcile READY Tasks, then return every unacknowledged event of this PM."""
     return _inbox(store, session_key, reconcile=True)
+
+
+def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
+                     cwd, environ=None):
+    """Move open Tasks to a replacement PM session after its old transcript is gone.
+
+    Per-Task compare-and-swap conflicts are skipped and returned in ``skipped``;
+    remaining eligible Tasks are still adopted.
+    """
+    def refuse(code):
+        error = LLMToolError('PM session adoption refused')
+        error.task_store_error_code = code
+        raise error
+
+    if (type(old_native_id) is not str or
+            PM_NATIVE_SESSION_ID.fullmatch(old_native_id) is None or
+            type(old_session_key) is not str or
+            SESSION_ID.fullmatch(old_session_key) is None or
+            old_session_key != 'pm-' + old_native_id or
+            type(new_session_key) is not str or
+            SESSION_ID.fullmatch(new_session_key) is None or
+            PM_NATIVE_SESSION_ID.fullmatch(new_session_key[3:]) is None):
+        refuse('PM_SESSION_ADOPTION_KEY_INVALID')
+    if old_session_key == new_session_key:
+        refuse('PM_SESSION_ADOPTION_KEYS_EQUAL')
+    if claude_session_present(old_native_id, cwd, environ):
+        refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
+
+    at = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    moved, skipped = [], []
+    for task_id in store.task_ids():
+        record = store.get(task_id)
+        if (record.get('pm_session_id') != old_session_key or
+                record.get('abandonment') is not None):
+            continue
+        try:
+            store.adopt_pm_session(
+                task_id, old_session_key=old_session_key,
+                new_session_key=new_session_key, at=at,
+                expected_record_sha256=record['record_sha256'])
+        except TaskStoreConflict:
+            skipped.append(task_id)
+        else:
+            moved.append(task_id)
+    return {'moved': moved, 'skipped': skipped}
 
 
 def peek_inbox(store, session_key):
