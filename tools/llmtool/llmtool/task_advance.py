@@ -305,7 +305,7 @@ def decide(record, d6, pr, related):
     if type(pr_head) is not dict or pr_head.get('sha') != result_head:
         return 'PUBLISH'
 
-    remote_status, _ = _remote_test_status(record, d6, related)
+    remote_status, _ = _remote_test_status(record, d6)
     if remote_status == 'FAIL':
         repairs = related.get('repair_claims', []) if type(related) is dict else []
         current_repair = next((item for item in reversed(repairs)
