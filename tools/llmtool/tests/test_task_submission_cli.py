@@ -2736,7 +2736,10 @@ class CodexChildLivenessTests(unittest.TestCase):
                 return self.task
 
         store = Store()
-        args = Namespace(executor_task='executor-one')
+        # The delegate resolves the durable Task before checking child
+        # liveness, so provide the same task binding fields as other delegate
+        # tests even though this path returns before reading the rest.
+        args = Namespace(task_id='a' * 32, executor_task='executor-one')
         snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
         registration = type('Registration', (), {
             'task_id': 'executor-one', 'trusted_agent_id': 'codex-developer'})()
