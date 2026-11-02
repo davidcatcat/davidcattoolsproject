@@ -979,11 +979,10 @@ class PMRuntime:
         root = _ensure_state_dir(Path(root_arg))
         binding = current_binding(self.pm_session_id, state_root=root, environ=self.environ,
                                   resolve_legacy_account=False)
-        if binding is None:
-            raise _error('PM_SESSION_INVALID', 'PM session binding could not be validated')
-        if self.runtime != 'claude-code' and self.runtime != binding['runtime']:
-            raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
-        self.runtime = binding['runtime']
+        if binding is not None:
+            if self.runtime != 'claude-code' and self.runtime != binding['runtime']:
+                raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
+            self.runtime = binding['runtime']
         adapter = _ADAPTERS.get(self.runtime)
         if adapter is None:
             raise _error('PM_RUNTIME_UNSUPPORTED', 'PM runtime is unsupported')
@@ -997,9 +996,11 @@ class PMRuntime:
             if self.account is not None:
                 role_options['cli'] = {'account': self.account}
             resolved_role = role_config.resolve_role('pm', **role_options)
-            bound_account = binding.get('account', resolved_role.get('account'))
-            if bound_account != resolved_role.get('account'):
-                raise _error('PM_ACCOUNT_MISMATCH', 'PM binding account does not match configuration')
+            if binding is not None:
+                bound_account = binding.get('account', resolved_role.get('account'))
+                if bound_account != resolved_role.get('account'):
+                    raise _error('PM_ACCOUNT_MISMATCH',
+                                 'PM binding account does not match configuration')
             if resolved_role.get('provider') not in (None, 'claude'):
                 raise LLMToolError('roles.pm must use a Claude account')
             config_dir = resolved_role['config_dir']
