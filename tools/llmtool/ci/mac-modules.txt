@@ -1,5 +1,8 @@
-# Explicit Mac-required unittest IDs; module IDs run the complete test module.
-# PTY terminal behavior depends on Darwin TTY and process signal semantics.
-test_chat_tui_pty.ChatTUIPTYTests
-# Native provider and restricted-environment checks cover Mac sandbox boundaries.
-test_review_authority_native.NativeProviderTests
+# Explicit Mac-required unittest IDs; each class exercises native process or TTY behavior.
+test_chat_tui_pty.ChatTUIPTYTests # Darwin PTY, terminal resize, and signal behavior.
+test_cli_lifecycle_state.LifecycleStateTests # Process-group ownership and Darwin killpg lifecycle semantics.
+test_cli_provider_lifecycle.CLIProviderLifecycleTests # CLI signal forwarding, descendant cleanup, and process groups.
+test_codex_cli_provider.CodexCLIProviderTests # CLI sandbox contract, signals, and owned process-group cleanup.
+test_codex_direct_developer.CodexDirectDeveloperTests # Direct CLI interruption, sandbox setup, and process-tree cleanup.
+test_opencode_direct_developer.DirectOpenCodeDeveloperTests # Direct CLI signal handling and descendant process cleanup.
+test_review_authority_native.NativeProviderTests # Native provider checks under Mac sandbox restrictions.

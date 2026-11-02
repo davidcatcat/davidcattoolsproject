@@ -18,6 +18,11 @@ import ci_mac_modules  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MAC_REQUIRED = {
     "test_chat_tui_pty.ChatTUIPTYTests",
+    "test_cli_lifecycle_state.LifecycleStateTests",
+    "test_cli_provider_lifecycle.CLIProviderLifecycleTests",
+    "test_codex_cli_provider.CodexCLIProviderTests",
+    "test_codex_direct_developer.CodexDirectDeveloperTests",
+    "test_opencode_direct_developer.DirectOpenCodeDeveloperTests",
     "test_review_authority_native.NativeProviderTests",
 }
 
@@ -123,6 +128,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
             "tools/llmtool/llmtool/providers/agy.py",
             "tools/llmtool/llmtool/authorization_policy.py",
             ".github/workflows/llmtool-mac-ci.yml",
+            "tools/mac-runner/setup.sh",
             "tools/llmtool/ci/mac-modules.txt",
         ):
             with self.subTest(path=path):
