@@ -566,6 +566,39 @@ class WidgetTests(Base):
                             lambda ui: self.assertEqual(ui.input.text, '/task submit --provider '),
                             lambda ui: self.assertNotIn('usage:', ui.conversation.text)])
 
+    def test_tab_completes_unique_slash_command_and_argument_spacing(self):
+        ui, _ = self.drive(['/pm c', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/pm connect'),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            '\x15', '/provider', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/provider ')])
+        self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
+    def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
+        def candidates(ui):
+            self.assertEqual(ui.input.text, '/task ')
+            self.assertEqual([item[0] for item in ui.menu_items],
+                             ['/task submit', '/task show', '/task mode',
+                              '/task list', '/task events'])
+            self.assertEqual(ui.app.output.get_size().columns, 50)
+            self.assertTrue(self.menu_rows(ui))
+
+        self.drive(['/ta', '\t', candidates], size=[Size(rows=24, columns=50)])
+        self.factory.assert_not_called()
+
+    def test_tab_without_match_keeps_slash_draft_and_non_slash_tab_behavior(self):
+        ui, _ = self.drive(['/nope', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/nope'),
+                            lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
+                            '\x15', 'hello', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, 'hello'),
+                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input)),
+                            '\t', 'cat', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, 'cat')])
+        self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
     def test_picker_lone_escape_closes_on_key_timeout_flush(self):
         """No wall-clock wait: feed Esc, then the same flush the timeoutlen timer sends."""
         # Private name, imported here so a rename fails this test instead of skipping all.

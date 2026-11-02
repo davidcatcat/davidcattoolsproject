@@ -284,6 +284,23 @@ def slash_matches(text, dev=True):
     return prefix + inside
 
 
+def _common_prefix(values):
+    """Return the longest case-sensitive common prefix of command labels."""
+    if not values:
+        return ""
+    prefix = values[0]
+    for value in values[1:]:
+        length = 0
+        for left, right in zip(prefix, value):
+            if left != right:
+                break
+            length += 1
+        prefix = prefix[:length]
+        if not prefix:
+            break
+    return prefix
+
+
 def history_matches(entries, query):
     """Earlier inputs (oldest first) containing query, case-insensitive; newest first, once each."""
     needle = query.lower()
@@ -965,7 +982,36 @@ class ChatTUI:
             self.close_menu()
             self.input.buffer.insert_text("\n")
 
-        @keys.add("tab")
+        @keys.add("tab", eager=True)
+        def _tab(event):
+            if not input_focused():
+                self.toggle_focus()
+                return
+            if self.searching:
+                self.toggle_focus()
+                return
+            text = self.input.text
+            if not text.startswith("/"):
+                self.toggle_focus()
+                return
+            if self.input.buffer.cursor_position != len(text):
+                self.close_menu()
+                return
+            matches = slash_matches(text, self.dev)
+            if not matches:
+                self.close_menu()
+                return
+            if len(matches) == 1:
+                self.close_menu()
+                fill = matches[0][1]
+                self.input.buffer.set_document(self._Document(fill, len(fill)))
+                return
+            prefix = _common_prefix([item[0] for item in matches])
+            if len(prefix) > len(text):
+                self.input.buffer.set_document(self._Document(prefix, len(prefix)))
+                matches = slash_matches(prefix, self.dev)
+            self._set_menu(matches)
+
         @keys.add("s-tab")
         def _focus(event):
             self.toggle_focus()
