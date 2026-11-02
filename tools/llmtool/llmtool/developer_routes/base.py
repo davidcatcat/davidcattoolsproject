@@ -203,6 +203,13 @@ def _snapshot_value(value):
 def capture_snapshot(root):
     """Fingerprint worktree files and read-only Git identity/state."""
     root = Path(root).resolve(strict=True)
+
+    def git(*args, limit):
+        try:
+            return task_completion._git(root, args, limit=limit)
+        except LLMToolError:
+            raise RouteError('ROUTE_GIT_INSPECTION_FAILED') from None
+
     files = {}
     for base, dirs, names in os.walk(root, topdown=True, followlinks=False):
         if Path(base) == root:
@@ -227,28 +234,26 @@ def capture_snapshot(root):
                     files[rel] = ('unsupported', stat.S_IFMT(info.st_mode))
             except OSError:
                 files[rel] = ('unavailable',)
-    branch = task_completion._git(root, ('branch', '--show-current'), limit=4096).decode().strip()
-    branch_ref = (task_completion._git(
-        root, ('rev-parse', '--verify', f'refs/heads/{branch}'), limit=4096).decode().strip()
+    branch = git('branch', '--show-current', limit=4096).decode().strip()
+    branch_ref = (git(
+        'rev-parse', '--verify', f'refs/heads/{branch}', limit=4096).decode().strip()
                   if branch else '')
-    git_dir = Path(task_completion._git(
-        root, ('rev-parse', '--path-format=absolute', '--git-dir'),
-        limit=4096).decode().strip())
-    common_dir = Path(task_completion._git(
-        root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
-        limit=4096).decode().strip())
-    refs_raw = task_completion._git(
-        root, ('for-each-ref',
-              '--format=%(refname) %(objectname) %(*objectname) %(objecttype)'),
+    git_dir = Path(git(
+        'rev-parse', '--path-format=absolute', '--git-dir', limit=4096).decode().strip())
+    common_dir = Path(git(
+        'rev-parse', '--path-format=absolute', '--git-common-dir', limit=4096).decode().strip())
+    refs_raw = git(
+        'for-each-ref',
+        '--format=%(refname) %(objectname) %(*objectname) %(objecttype)',
         limit=1024 * 1024)
     refs = {}
     for line in refs_raw.decode().splitlines():
         name, object_id, peeled_id, object_type = line.split(' ', 3)
         commit_id = peeled_id or (object_id if object_type == 'commit' else '')
         refs[name] = (object_id, commit_id)
-    head = task_completion._git(root, ('rev-parse', '--verify', 'HEAD'), limit=4096).decode().strip()
-    head_commits = frozenset(task_completion._git(
-        root, ('rev-list', '--topo-order', 'HEAD'), limit=1024 * 1024).decode().splitlines())
+    head = git('rev-parse', '--verify', 'HEAD', limit=4096).decode().strip()
+    head_commits = frozenset(git(
+        'rev-list', '--topo-order', 'HEAD', limit=1024 * 1024).decode().splitlines())
 
     def file_digest(path):
         try:
@@ -256,18 +261,84 @@ def capture_snapshot(root):
         except FileNotFoundError:
             return None
 
+    def common_config_digest(path, current_branch, existing_branches, default_branches):
+        """Fingerprint common config except another existing branch's tracking data."""
+        try:
+            raw = task_completion._git(
+                root, ('config', '--no-includes', '--null', '--list', '--file', str(path)),
+                limit=1024 * 1024)
+        except Exception:
+            # Preserve a marker so _git_state_changed can reject an invalid
+            # config even when both snapshots see the same malformed bytes.
+            try:
+                raw = path.read_bytes()
+            except OSError:
+                raw = b''
+            return 'INVALID:' + hashlib.sha256(raw).hexdigest()
+        entries = []
+        for record in raw.split(b'\0'):
+            if not record:
+                continue
+            key, separator, value = record.partition(b'\n')
+            if not separator:
+                # In --null --list output a key without a value separator is
+                # Git's valueless boolean key, equivalent to an explicit true.
+                value = b'true'
+            # Git writes remote/merge when another Task pushes an existing
+            # non-default branch. Keep all other branch variables significant.
+            if key.startswith(b'branch.'):
+                subsection, dot, variable = key[len(b'branch.'):].rpartition(b'.')
+                if (dot and subsection != os.fsencode(current_branch) and
+                        subsection in existing_branches and
+                        subsection not in default_branches and
+                        variable in (b'remote', b'merge')):
+                    continue
+            entries.append((key, value))
+        digest = hashlib.sha256()
+        for key, value in entries:
+            digest.update(len(key).to_bytes(8, 'big'))
+            digest.update(key)
+            digest.update(len(value).to_bytes(8, 'big'))
+            digest.update(value)
+        return digest.hexdigest()
+
+    # Only tracking values for branches that already exist can be concurrent
+    # push -u bookkeeping. Protect conventional and configured default branches.
+    existing_branches = {
+        os.fsencode(name[len('refs/heads/'):]) for name in refs
+        if name.startswith('refs/heads/')
+    }
+    default_branches = {b'main', b'master', b'default'}
+    try:
+        configured_default = task_completion._git(
+            root, ('config', '--no-includes', '--get', 'init.defaultBranch'),
+            limit=4096).decode().strip()
+        if configured_default:
+            default_branches.add(os.fsencode(configured_default))
+    except LLMToolError:
+        pass
+    try:
+        remote_head = task_completion._git(
+            root, ('symbolic-ref', '--quiet', 'refs/remotes/origin/HEAD'),
+            limit=4096).decode().strip()
+        if remote_head.startswith('refs/remotes/origin/'):
+            default_branches.add(os.fsencode(remote_head[len('refs/remotes/origin/'):]))
+    except LLMToolError:
+        pass
+
     git = {
         'head': head,
         'branch': branch,
         'branch_ref': branch_ref,
         'git_dir': str(git_dir),
-        'index': task_completion._git(root, ('ls-files', '--stage', '-z'), limit=1024 * 1024),
-        'stash': task_completion._git(root, ('for-each-ref', '--format=%(objectname)',
-                                             'refs/stash'), limit=4096).strip(),
+        'index': git('ls-files', '--stage', '-z', limit=1024 * 1024),
+        'stash': git('for-each-ref', '--format=%(objectname)',
+                     'refs/stash', limit=4096).strip(),
         'refs': refs,
         'head_commits': head_commits,
         'config_worktree': file_digest(git_dir / 'config.worktree'),
-        'config_common': file_digest(common_dir / 'config'),
+        'config_common': common_config_digest(
+            common_dir / 'config', branch, existing_branches, default_branches),
     }
     pointer = root / '.git'
     if pointer.is_symlink():
@@ -313,6 +384,10 @@ def _git_state_changed(before, after):
         return _git_signature(before) != _git_signature(after)
     for key in ('head', 'branch', 'branch_ref', 'git_dir', 'index', 'stash',
                 'pointer', 'config_worktree', 'config_common'):
+        if (key == 'config_common' and
+                (str(a.get(key, '')).startswith('INVALID:') or
+                 str(b.get(key, '')).startswith('INVALID:'))):
+            return True
         if a.get(key) != b.get(key):
             return True
     before_refs, after_refs = a.get('refs', {}), b.get('refs', {})
