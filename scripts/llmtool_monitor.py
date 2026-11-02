@@ -4766,6 +4766,7 @@ WORKER_ROSTER = (   # (display name, worker-dispatch.json key, sort order)
     ("opencode developer", "opencode-developer", 50),
     ("agy", "agy", 60),
     ("公司 gw", "company-gw", 70),
+    ("公司 gw agent", "company-gw-agent", 75),
 )
 # Owner dispatch switches (Owner 2026-10-23): one record per Worker, kept apart
 # from live technical state. A PAUSED switch holds until the Owner changes it,
@@ -4779,7 +4780,13 @@ DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 # Worker. The monitor applies the same rules so it never shows a switch the
 # gate would refuse; a test checks both agree.
 DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-developer", "agy",
-                              "company-gw", "claude-reviewer", "codex-reviewer"})
+                              "company-gw", "company-gw-agent", "claude-reviewer",
+                              "codex-reviewer"})
+# The gw Agent route (#120 WP3b) is the one switch the gate accepts without an
+# Owner decision, and only while it stays PAUSED by the PM with exactly this
+# evidence, pending the Owner's decision. Every other key still needs Owner.
+DISPATCH_PENDING_OWNER = {"company-gw-agent": (
+    "PAUSED", "PM", "https://github.com/davidcatcat/davidcattoolsproject/issues/120")}
 DISPATCH_FIELDS = (frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence"}),
                    frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence",
                               "owner_assignments"}))
@@ -4860,15 +4867,22 @@ def _unique_keys(pairs):
     return found
 
 
-def _dispatch_entry_ok(item) -> bool:
+def _dispatch_entry_ok(key, item) -> bool:
     if type(item) is not dict or frozenset(item) not in DISPATCH_FIELDS:
         return False
     assignments = item.get("owner_assignments", [])
     reason, evidence, when = item.get("reason"), item.get("evidence"), item.get("decided_at")
-    if (item.get("decided_by") != "Owner" or type(item.get("dispatch")) is not str or
+    pending = DISPATCH_PENDING_OWNER.get(key)
+    if pending is not None:
+        authority_ok = (type(item.get("dispatch")) is str and type(item.get("decided_by")) is str and
+                        type(evidence) is str and
+                        (item["dispatch"], item["decided_by"], evidence) == pending)
+    else:
+        authority_ok = (item.get("decided_by") == "Owner" and type(evidence) is str and
+                        DISPATCH_EVIDENCE.fullmatch(evidence) is not None)
+    if (not authority_ok or type(item.get("dispatch")) is not str or
             item.get("dispatch") not in DISPATCH_VALUES or
             type(when) is not str or type(reason) is not str or not reason or len(reason) > 512 or
-            type(evidence) is not str or DISPATCH_EVIDENCE.fullmatch(evidence) is None or
             type(assignments) is not list):
         return False
     seen = set()
@@ -4907,7 +4921,7 @@ def worker_dispatch(raw: bytes | None) -> tuple[dict, str]:
         ok = (type(data) is dict and set(data) == {"schema_version", "workers"} and
               type(data["schema_version"]) is int and data["schema_version"] == 1 and
               type(workers) is dict and set(workers) == DISPATCH_WORKERS and
-              all(_dispatch_entry_ok(item) for item in workers.values()))
+              all(_dispatch_entry_ok(key, item) for key, item in workers.items()))
     except (TypeError, ValueError):   # e.g. an unhashable value where a name belongs
         ok = False
     if not ok:
