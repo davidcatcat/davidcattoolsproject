@@ -509,14 +509,15 @@ class TaskStoreTests(unittest.TestCase):
         self._allow_codex_dispatch()
         task = self._codex_dispatch_task()
         task['pm_assignment']['route'] = 'opencode'
-        self.store.create(task)
+        store = TaskStore(Path(self.temp.name).resolve() / 'opencode-tasks')
+        store.create(task)
         pending = self._developer_assignment(provider='opencode', max_tokens=4096)
         pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
-        self.store.compare_and_update(
+        store.compare_and_update(
             task['task_id'], expected={'developer': None}, developer=pending)
         dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
                        'provider_type': 'opencode-cli', 'model': 'opencode/test-free'}
-        self.store.update(task['task_id'], developer=dispatching)
+        store.update(task['task_id'], developer=dispatching)
         launch = {**dispatching, 'execution': {
             'status': 'RUNNING', 'native_session_id': None,
             'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
@@ -525,14 +526,14 @@ class TaskStoreTests(unittest.TestCase):
             'source_manifest_sha256': None, 'child_pid': 123,
             'child_start_time': '123456', 'child_pgid': 123}}
         with self.assertRaises(LLMToolError):
-            self.store.update(task['task_id'], developer=launch)
+            store.update(task['task_id'], developer=launch)
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
-            saved = self.store.record_opencode_launch(
+            saved = store.record_opencode_launch(
                 task['task_id'], assignment_id=pending['assignment_id'], pid=123,
                 start_time='123456', pgid=123)
         self.assertEqual(saved['developer']['execution'], launch['execution'])
         with self.assertRaises(LLMToolError):
-            self.store.record_opencode_launch(
+            store.record_opencode_launch(
                 task['task_id'], assignment_id=pending['assignment_id'], pid=124,
                 start_time='123457', pgid=124)
 

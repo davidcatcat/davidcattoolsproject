@@ -2748,6 +2748,7 @@ def _direct_child_liveness(execution):
 
 
 def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
+    previous_developer = developer
     if (developer.get('provider_profile') != 'opencode' or
             developer.get('state') != 'DEVELOPER_DISPATCHING'):
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
@@ -2777,7 +2778,8 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
     outcome.update(state='DEVELOPER_OUTCOME_UNKNOWN',
                    error_code='DIRECT_CHILD_NOT_RUNNING', execution=execution)
     try:
-        store.compare_and_update(args.task_id, expected={'developer': developer},
+        store.compare_and_update(args.task_id,
+                                 expected={'developer': previous_developer},
                                  developer=outcome)
     except Exception:
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
