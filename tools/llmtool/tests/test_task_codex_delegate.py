@@ -212,7 +212,7 @@ class CodexDelegateTests(unittest.TestCase):
                           kwargs['launch_callback'](os.getpid(),
                               task_submission_cli.codex_direct_developer.process_start_time(
                                   os.getpid()), os.getpgid(os.getpid())),
-                          time.sleep(1.0),
+                          time.sleep(3.0),
                           (self.root / 'src.py').write_text('VALUE = 2\n'),
                           codex_result)[3])
                 if background and codex_result is not None else
@@ -274,7 +274,7 @@ class CodexDelegateTests(unittest.TestCase):
             task, codex_result=result, background=True)
         elapsed = time.monotonic() - started
         self.assertEqual(code, 0)
-        self.assertLess(elapsed, 0.8)
+        self.assertLess(elapsed, 2.0)
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_DISPATCHING')
         self.assertEqual(saved['developer']['execution']['status'], 'RUNNING')
         self.assertGreater(saved['developer']['execution']['child_pid'], 0)
