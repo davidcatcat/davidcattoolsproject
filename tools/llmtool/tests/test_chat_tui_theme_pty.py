@@ -225,6 +225,7 @@ class ThemePTYTests(unittest.TestCase):
         terminal.wait_text("PR: #661", "PR line scrolled into view")
         self.assertIn(";" + "https://github.com/davidcatcat/davidcattoolsproject/pull/661\x1b\\",
                       terminal.raw_text())
+        terminal.send("\t")                                         # W60: Tab to the input
         terminal.send("草稿 W59")
         terminal.wait_text("草稿 W59", "draft typed while the detail is open")
         # The PM turn keeps going and ends while the detail is shown.
@@ -271,6 +272,7 @@ class ThemePTYTests(unittest.TestCase):
         terminal.wait_text("Core 狀態：UNKNOWN（選中的 Task bbbbbbbb 已不在背景清單",
                            "UNKNOWN detail")
         self.assertNotIn("aaaaaaaa", terminal.text())
+        terminal.send("\t")                                         # W60: Tab to the input
         terminal.send("草稿 W59")
         terminal.wait_text("草稿 W59", "draft typed in the detail")
         self.dump(terminal, "w59-empty-refresh-unknown")
@@ -475,7 +477,15 @@ class ThemePTYTests(unittest.TestCase):
         terminal.wait_text("全文 已複製", "copy-all result")
         self.assertFalse(any(row.startswith("pm> C") for row in terminal.rows()))
         self.dump(terminal, "w60-drag-copy-all")
+        # Owner 3rd acceptance (HIGH): on the input line c and C are typed, never keys.
+        terminal.send("\t")
+        terminal.send("cat Cat")
+        terminal.wait_text("pm> cat Cat", "cat typed on the input line")
+        time.sleep(0.4)
+        self.assertEqual(terminal.clipboard(), whole)                 # nothing copied
         terminal.esc()
+        terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed")
+        self.assertTrue(any(row.startswith("pm> cat Cat") for row in terminal.rows()))
         terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed")
 
 
@@ -485,7 +495,7 @@ class ThemePTYTests(unittest.TestCase):
         drag (fake pbcopy), the status names Cmd+V/拖曳即複製 and never Cmd+C, and C copies every
         listed Task (full IDs) as plain text"""
         now = datetime.now(timezone.utc)
-        ids = [c * 32 for c in "abc"]
+        ids = [("%02d" % n) * 16 for n in range(40)]                  # more rows than the screen
         details = {task: {"task_id": task, "state": "PM_RESPONDED", "developer": None,
                           "request": "W60 清單 %d" % n, "created_at": now.isoformat(),
                           "updated_at": now.isoformat()} for n, task in enumerate(ids)}
@@ -501,6 +511,7 @@ class ThemePTYTests(unittest.TestCase):
                            "Down hint without a PM")
         terminal.send("\x1bOR")                                       # F3
         rows = terminal.wait_text("W60 清單 2", "F3 list")
+        self.assertNotIn("W60 清單 39", terminal.text())             # beyond the first screen
         rows = terminal.wait_stable("list drawn")
         y = next(n for n, row in enumerate(rows) if "W60 清單 0" in row or "W60 清單 1" in row)
         self.assertIn("拖曳即複製", rows[-1])
@@ -514,10 +525,15 @@ class ThemePTYTests(unittest.TestCase):
         terminal.wait_text("Cmd+V 貼上", "copy result names paste")
         self.assertNotIn("Cmd+C", terminal.rows()[-1])
         terminal.send("C")
-        terminal.wait_for(lambda _rows: ids[2] in (terminal.clipboard() or ""), "whole list")
+        terminal.wait_for(lambda _rows: ids[39] in (terminal.clipboard() or ""), "whole list")
         whole = terminal.wait_clipboard()
         for task in ids:
-            self.assertIn(task, whole)
+            self.assertIn(task, whole)                                # all 40, full IDs
+        terminal.send("\x1b[B" * 39)                                  # Down past the edge
+        terminal.wait_text("▶ 39393939", "list scrolled to the last row")
+        terminal.send("\x1b[5~")                                      # PgUp
+        terminal.wait_for(lambda rows: "▶ 39393939" not in "\n".join(rows)
+                          and any(row.startswith("▶ ") for row in rows), "PgUp moved a page")
         self.assertNotIn("\x1b", whole)
         self.dump(terminal, "w60-dev-f3-list")
         terminal.esc()

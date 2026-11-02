@@ -1972,7 +1972,7 @@ class TaskListTests(Base):
 
         async def dragged(ui):
             self.assertIs(ui._mouse_view(), ui.list_view)
-            self.assertIn('拖曳即複製', ui.status_keys())
+            self.assertIn('拖曳即複製', ui.status_text())
             seen['copies'] = copies = self.w60_copier(ui.list_view)
             await self.w60_drag_row(ui, 2)
             self.assertTrue(ui.list_view.wait_copy())
@@ -2050,6 +2050,74 @@ class TaskListTests(Base):
 
         self.drive(['/task mode profile first\r', 'first task\r', self.idle,
                     '\x1bOS', self.listed, events])
+
+    def test_w60_f3_list_longer_than_the_screen_scrolls_and_shift_c_copies_every_row(self):
+        """Owner 3rd acceptance: C copied only the first page; the list must scroll."""
+        ids = [('%02d' % n) * 16 for n in range(40)]          # distinct first 8 characters
+        records = [_record(task_id=task, request='W60 第%02d列' % n,
+                           updated_at='2026-11-02T%02d:%02d:00Z' % (n // 60, n % 60))
+                   for n, task in enumerate(ids)]
+        size = [Size(rows=24, columns=80)]
+        seen = {}
+
+        def render(ui):
+            ui.app.renderer.render(ui.app, ui.app.layout)
+
+        def shown(ui):
+            _left, _top, height = ui._pane_geometry()
+            view = ui.list_view
+            return [ui.list_view.text.splitlines()[row] for row in
+                    range(view.top, min(view.top + height, len(view.text.splitlines())))]
+
+        async def first(ui):
+            render(ui)
+            self.assertTrue(ui.app.layout.has_focus(ui.list_window))
+            self.assertEqual(len(ui.list_view.text.splitlines()), 2 + 40)   # every row
+            self.assertNotIn(ids[39][:8], '\n'.join(shown(ui)))         # beyond the screen
+            seen['copies'] = self.w60_copier(ui.list_view)
+
+        async def down_past_edge(ui):
+            for _ in range(30):
+                ui.app.input.send_text('\x1b[B')
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.1)
+            render(ui)
+            self.assertEqual(ui.list_index, 30)
+            self.assertGreater(ui.list_view.top, 0)                      # scrolled
+            self.assertIn('▶ ' + ids[30][:8], '\n'.join(shown(ui)))     # selection on screen
+
+        async def page_down(ui):
+            before = ui.list_index
+            ui.app.input.send_text('\x1b[6~')                            # PgDn
+            await asyncio.sleep(0.1)
+            render(ui)
+            self.assertGreater(ui.list_index, before)
+            self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
+            ui.app.input.send_text('\x1b[5~')                            # PgUp
+            await asyncio.sleep(0.1)
+            render(ui)
+            self.assertLess(ui.list_index, 39)
+            self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
+
+        async def wheel(ui):
+            top = ui.list_view.top
+            ui.app.input.send_text(WHEEL_UP * 3)
+            await asyncio.sleep(0.1)
+            self.assertLess(ui.list_view.top, top)
+
+        async def copy_all(ui):
+            ui.app.input.send_text('C')
+            await asyncio.sleep(0.1)
+            self.assertTrue(ui.list_view.wait_copy())
+            text = seen['copies'][-1]
+            for task in ids:
+                self.assertIn(task, text)                                # all 40, full IDs
+            self.assertEqual(len(text.splitlines()), 2 + 40)
+            self.assertNotIn('\x1b', text)
+
+        with patch('llmtool.chat_tui_status.load_records', return_value=(records, 0)):
+            self.drive(['/task list\r', self.listed, first, down_past_edge, page_down, wheel,
+                        copy_all], size=size)
 
     def test_refresh_on_key_and_interval_only(self):
         from llmtool import chat_tui_status
@@ -4453,7 +4521,7 @@ class PMConversationTests(BoundedPMTest):
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
             ui, _ = self.drive([self.connect(), self.connected, self.w59_listed, scrolled, back,
-                                '\x1b[B', '\r', opened, '草稿 不見不行',
+                                '\x1b[B', '\r', opened, '\t', '草稿 不見不行',
                                 '\x1b[A', '\x1b[B', '\x1b[6~', '\r', kept,
                                 '\x1b', lambda ui: asyncio.sleep(0.6), closed])
         self.assertEqual(self.fakes[0].users(), [])          # Enter in the detail sent nothing
@@ -4797,7 +4865,7 @@ class PMConversationTests(BoundedPMTest):
             self.drive([self.connect(), self.connected, counting, self.w59_listed,
                         '請問進度？\r', streaming,
                         # search -> detail -> PM, with an empty refresh under the detail
-                        '\x1b[B', '\r', self.w59_refresh([]), '\x12',
+                        '\x1b[B', '\r', self.w59_refresh([]), '\t', '\x12',
                         layer(detail=True, searching=True),
                         self.w59_esc, layer(detail=True, searching=False),
                         self.w59_esc, layer(False, detail=False),
@@ -4888,7 +4956,7 @@ class PMConversationTests(BoundedPMTest):
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
             self.drive([self.connect(), self.connected, self.w59_listed,
-                        '請問進度？\r', streaming, '\x1b[B', '\r', opened, '草稿', same,
+                        '請問進度？\r', streaming, '\x1b[B', '\r', opened, '\t', '草稿', same,
                         self.w59_refresh([]), same, self.w59_refresh([], self.W59_ERROR), same,
                         self.w59_refresh(self.w59_items()), same, stale, same,
                         streamed, same, self.w59_esc, closed_stale])
@@ -4946,26 +5014,44 @@ class PMConversationTests(BoundedPMTest):
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
             self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened,
-                        '草', 'c', drafted, self.w59_esc, closed, 'c', typed])
+                        '\t', '草', 'c', drafted, self.w59_esc, closed, 'c', typed])
 
-    def test_w60_c_first_in_an_empty_draft_copies_and_the_rest_types(self):
-        """Documented trade-off: with an empty draft c is the copy key, never typed."""
+    def test_w60_c_and_shift_c_type_on_the_input_line_and_act_only_in_the_detail(self):
+        """Owner 3rd acceptance (HIGH): "cat" after pm> must stay "cat"; c/C act only while the
+        detail pane has focus (it has focus when it opens; Tab goes to the input and back)."""
         seen = {}
+
+        def typed_cat(ui):
+            self.assertEqual(ui.input.text, 'cat')               # no detail open: plain typing
+            ui.input.text = ''
 
         async def opened(ui):
             await self.until(ui, lambda ui: self.W59_TASK_A in self.w59_text(ui), 'detail read')
+            self.assertTrue(ui.app.layout.has_focus(ui.task_pane))
             seen['copies'] = self.w60_copies(ui)
 
-        async def typed(ui):
+        def on_input(ui):
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+            self.assertIn('Tab 回詳情', ui.status_keys())
+
+        async def drafted(ui):
+            await asyncio.sleep(0.1)
+            self.assertEqual(ui.input.text, 'cat Cat')            # typed, never copied
+            self.assertEqual(seen['copies'], [])
+            self.assertTrue(ui.show_task_view)
+
+        async def copied(ui):
             await self.until(ui, lambda ui: seen['copies'], 'Task ID copied')
             ui.task_view.wait_copy()
             self.assertEqual(seen['copies'], [self.W59_TASK_A])
-            self.assertEqual(ui.input.text, 'heck')
+            self.assertEqual(ui.input.text, 'cat Cat')            # the draft is untouched
 
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
-            self.drive([self.connect(), self.connected, self.w59_listed, '\x1b[B', '\r', opened,
-                        'c', 'heck', typed])
+            self.drive([self.connect(), self.connected, 'cat', typed_cat, self.w59_listed,
+                        '\x1b[B', '\r', opened, '\t', on_input, 'cat Cat', drafted,
+                        '\t', lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.task_pane)),
+                        'c', copied])
         self.assertEqual(self.w59_sent(), 0)
 
     def test_w60_slow_copy_still_reports_its_result(self):
@@ -5169,6 +5255,27 @@ class PMConversationTests(BoundedPMTest):
         self.drive([self.connect(), self.connected,
                     lambda ui: ui.finish_background(self.session_id, ([], None)),
                     '\x1b[B', hinted])
+
+    def test_w60_down_right_after_pm_connect_says_loading_not_no_tasks(self):
+        """Owner 3rd acceptance: before the first background read finishes, ↓ says 讀取中…"""
+        def unread(ui):
+            ui.background_key, ui.background_loaded = None, None
+            ui.background_reader = object()          # a read is still running
+
+        def loading(ui):
+            self.assertIn('背景 Task 讀取中…', ui.conversation.text)
+            self.assertNotIn('沒有背景 Task', ui.conversation.text)
+
+        def finished(ui):
+            ui.background_reader = None
+            ui.finish_background(self.session_id, ([], None))
+            ui.background_reader = object()          # no further read during the test
+
+        def empty(ui):
+            self.assertIn('llmtool: 沒有背景 Task；PM 派工後 ↓ 可看', ui.conversation.text)
+
+        self.drive([self.connect(), self.connected, unread, '\x1b[B', loading,
+                    finished, '\x1b[B', empty])
 
     def test_w60_c_without_a_task_id_copies_nothing_and_says_why(self):
         seen = {}
