@@ -487,6 +487,125 @@ class MonitorTaskBaselineTests(unittest.TestCase):
 
 
 class ActivityViewTests(unittest.TestCase):
+    def test_pm_last_dispatch_header_recent_stale_absent_and_wrapped(self):
+        now = NOW
+
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            clock = staticmethod(lambda: now)
+            def __init__(self, events):
+                self.events = events
+            def refresh(self):
+                pass
+
+        recent = mon.ActivityEvent(now - 12 * 60, "developer_dispatch", "", "",
+                                   "ASSIGNED", "#763", actor="PM", target="AGY")
+        lines = mon.activity_lines([], github=Source([recent]))
+        self.assertEqual(lines[0], "PM 上次派工：12 分鐘前（→ AGY，#763）")
+
+        stale = replace(recent, occurred_at=now - 31 * 60)
+        lines = mon.activity_lines([], github=Source([stale]))
+        self.assertEqual(lines[0], "⚠ PM 上次派工：31 分鐘前；超過 30 分鐘沒有派工（→ AGY，#763）")
+
+        lines = mon.activity_lines([], github=Source([]))
+        self.assertEqual(lines[0], "⚠ PM 上次派工：最近 12 小時沒有")
+
+        wrapped = mon._activity_screen_lines([lines[0]], 18)
+        self.assertGreater(len(wrapped), 1)
+        self.assertTrue(all(mon._width(piece) <= 18 for piece in wrapped))
+
+    def test_pm_last_dispatch_is_unknown_until_github_read_succeeds(self):
+        self.assertIn("未知", mon.activity_lines([], github=None)[0])
+
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：尚未讀取"
+            successful_read = False
+            events = []
+            clock = staticmethod(lambda: NOW)
+            def refresh(self): pass
+
+        self.assertIn("未知", mon.activity_lines([], github=Source())[0])
+
+    def test_curses_activity_header_stays_visible_above_bottom_anchored_events(self):
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            ci_view = None
+            pending = None
+            scope = ""
+            clock = staticmethod(lambda: NOW)
+            def __init__(self):
+                self.events = [mon.ActivityEvent(
+                    NOW - i, "github_comment", "", "", "POSTED", f"#{i + 1}")
+                    for i in range(80)]
+            def refresh_in_background(self): pass
+
+        monitor = mon.Monitor()
+        monitor.github = Source()
+        drawn = {}
+        class Screen:
+            def getmaxyx(self): return (40, 120)
+            def erase(self): pass
+            def refresh(self): pass
+        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        header_text = "".join(drawn[row] for row in sorted(drawn) if row >= 2)
+        self.assertIn("PM 上次派工", drawn[3])
+        self.assertIn("最近 12 小時沒有", header_text)
+        self.assertNotIn("目前沒有可顯示", header_text)
+
+        monitor.stale = True
+        drawn.clear()
+        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertIn("監控程式已更新", drawn[2])
+        self.assertIn("PM 上次派工", drawn[3])
+
+    def test_curses_activity_events_do_not_overwrite_hint_on_short_terminal(self):
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            ci_view = None
+            pending = None
+            scope = ""
+            clock = staticmethod(lambda: NOW)
+            events = [mon.ActivityEvent(
+                NOW - i, "github_comment", "", "", "POSTED", f"#{i + 1}")
+                for i in range(20)]
+            def refresh_in_background(self): pass
+
+        monitor = mon.Monitor()
+        monitor.github = Source()
+        drawn = {}
+        class Screen:
+            def __init__(self, height): self.height = height
+            def getmaxyx(self): return (self.height, 120)
+            def erase(self): pass
+            def refresh(self): pass
+        for height in (5, 4):
+            drawn.clear()
+            mon._paint_screen(Screen(height), monitor, "activity", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+            self.assertTrue(any("Tab/1-5" in text for text in drawn.values()))
+            self.assertNotIn("PM 上次派工", drawn[height - 1])
+            self.assertFalse(any("GitHub #" in text for row, text in drawn.items()
+                                 if row >= height - 1))
+
+    def test_developer_dispatch_activity_uses_marker_target(self):
+        for target in ("Codex", "AGY", "OpenCode", "Developer"):
+            body = (f"<!-- activity: type=developer_dispatch actor=PM target={target} "
+                    "status=ASSIGNED -->\nTask")
+            events = mon.github_events([comment(763, NOW, body)], [], NOW - 60)
+            self.assertEqual([event.event_type for event in events], ["developer_dispatch"])
+            line = mon._activity_line(events[0])
+            self.assertIn(f"PM → {target}：", line)
+            self.assertNotIn("→ Codex", line if target != "Codex" else "")
+
     def test_five_issue_event_classes_render_in_time_order(self):
         events = [
             mon.ActivityEvent(5, "worker_result", "task-1", "stage-1",
@@ -964,7 +1083,7 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("每 30 秒", source.status)
         lines = mon.activity_lines([], github=source, background=True)   # not due yet
         self.assertEqual(len(run.calls), 3)
-        self.assertIn("GitHub #6：新留言 — bg", lines[0])
+        self.assertIn("GitHub #6：新留言 — bg", lines[1])
 
     def test_missing_gh_and_bad_repo_fail_closed(self):
         with patch.object(mon.shutil, "which", return_value=None):

@@ -1304,7 +1304,7 @@ MARKER_ACTOR_TARGETS = {
     "waiting_owner": (frozenset({"Integrator", "PM", "Owner"}),
                       frozenset({"Owner", "PM", "Integrator"})),
     "developer_dispatch": (frozenset({"PM", "Integrator"}),
-                           frozenset({"Codex", "OpenCode", "CompanyGW"})),
+                           frozenset({"Codex", "AGY", "OpenCode", "Developer", "CompanyGW"})),
     "developer_progress": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
                             frozenset({"PM", "Integrator", "Reviewer", "Owner", "CI"})),
     "test_result": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
@@ -1629,6 +1629,7 @@ class GitHubSource:
         self._direct_paused = -math.inf   # monotonic time until which reads use gh (_pause)
         self.connect = lambda: http.client.HTTPSConnection(GITHUB_API_HOST, timeout=GITHUB_TIMEOUT)
         self.events: list[ActivityEvent] = []
+        self.successful_read = False
         self.pending: list[OwnerPending] = []
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
@@ -1795,6 +1796,7 @@ class GitHubSource:
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
+            self.successful_read = True
             failed = False
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             # Keep the previous events; say plainly that they may be stale.
@@ -1881,7 +1883,7 @@ def _activity_line(event: ActivityEvent) -> str:
         "waiting_owner": ("Integrator", "Owner", {"BLOCKED": "卡住，等你決定", "WAITING": "等你決定",
                                                   "UNKNOWN": "狀態未知",
                                                   "ANSWERED": "已回覆，這項決定不再等你"}),
-        "developer_dispatch": ("PM", "Codex", {"ASSIGNED": "自述已指派 Developer 任務",
+        "developer_dispatch": ("PM", "Developer", {"ASSIGNED": "自述已指派 Developer 任務",
                                                   "UNKNOWN": "任務指派狀態未知"}),
         "developer_progress": ("Codex", "PM", {"ACTIVE": "回報進度：處理中（不代表模型正在生成）",
                                                   "WAITING": "等待下一步",
@@ -1962,7 +1964,35 @@ def activity_lines(tasks: list[Task], limit: int = 60,
                    github: "GitHubSource | None" = None, background: bool = False) -> list[str]:
     if github is not None:
         github.refresh_in_background() if background else github.refresh()
-    return render_activity(activity_events(tasks), limit, github)
+    lines = render_activity(activity_events(tasks), limit, github)
+    window_hours = int(github.window // 3600) if github is not None else 12
+    now = github.clock() if github is not None else time.time()
+    successful_read = bool(github is not None and getattr(github, "successful_read", False))
+    dispatches = ([event for event in github.events
+                   if type(event) is ActivityEvent and event.event_type == "developer_dispatch"
+                   and event.actor == "PM"] if successful_read else [])
+    if dispatches:
+        event = max(dispatches, key=lambda item: item.occurred_at)
+        age = max(0.0, now - event.occurred_at)
+        line = f"PM 上次派工：{_ago(age)}"
+        if age > 30 * 60:
+            line += "；超過 30 分鐘沒有派工"
+            line = "⚠ " + line
+        if event.target:
+            line += f"（→ {MARKER_NAMES.get(event.target, event.target)}"
+            if re.fullmatch(r"#\d{1,7}", event.reference or ""):
+                line += f"，{event.reference}"
+            line += "）"
+    elif successful_read:
+        line = f"⚠ PM 上次派工：最近 {window_hours} 小時沒有"
+    else:
+        line = "⚠ PM 上次派工：未知（GitHub 尚未成功讀取）"
+    return [line, *lines]
+
+
+def _activity_screen_lines(lines: list[str], width: int) -> list[str]:
+    """Wrap Activity text to the terminal's display width."""
+    return [piece for line in lines for piece in _wrap(line, max(1, width))]
 
 
 # ---------------------------------------------------------------- office view
@@ -5661,12 +5691,23 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
             put(3 + row, line, attr)
         hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
     elif view == "activity":
-        lines = activity_lines(mon.tasks, github=mon.github, background=True)
-        offset = max(0, min(offset, len(lines) - body))
+        all_lines = activity_lines(mon.tasks, github=mon.github, background=True)
+        header = _activity_screen_lines(all_lines[:1], w - 1)
+        # Keep the header on the first Activity body row, but never on the
+        # navigation hint row on very short terminals.
+        header = header[:max(0, h - 4)]
+        for row, line in enumerate(header):
+            put(3 + row, line, colors.get("!", 0) if line.startswith("⚠") else 0)
+        lines = _activity_screen_lines(all_lines[1:], w - 1)
+        start = 3 + len(header)
+        # The final row is reserved for the navigation hint, including on
+        # unusually short terminals.
+        available = max(0, h - 1 - start)
+        offset = max(0, min(offset, len(lines) - available))
         end = len(lines) - offset
-        for row, line in enumerate(lines[max(0, end - body):end]):
+        for row, line in enumerate(lines[max(0, end - available):end]):
             attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
-            put(3 + row, line, attr)
+            put(start + row, line, attr)
         hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
