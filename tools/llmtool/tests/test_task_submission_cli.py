@@ -1750,7 +1750,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         task = self._remote_test_task()
         self._write_remote_test_config('{invalid json')
         evidence, result = self._remote_local_evidence()
-        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+        with patch.object(Path, 'home', return_value=self.home), \
                 patch('llmtool.task_submission_cli.task_completion.'
                       'run_bounded_worktree_tests') as local:
             with self.assertRaises(LLMToolError) as raised:
@@ -1769,7 +1769,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
     def test_unconfigured_remote_test_keeps_local_test_behaviour(self):
         task = self._remote_test_task()
         evidence, result = self._remote_local_evidence()
-        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+        with patch.object(Path, 'home', return_value=self.home), \
                 patch('llmtool.task_submission_cli.task_completion.'
                       'run_bounded_worktree_tests', return_value=[]) as local:
             self.assertEqual(submission_cli._remote_receipt_test_policy(task), 'LOCAL')
@@ -1785,7 +1785,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             'repo_path': '/srv/repo', 'python': '/usr/bin/python3'})
         evidence, result = self._remote_local_evidence()
         evidence['test_policy'] = 'REMOTE_RECEIPT'
-        with patch.dict(os.environ, {'HOME': str(self.home)}), \
+        with patch.object(Path, 'home', return_value=self.home), \
                 patch('llmtool.task_submission_cli.task_completion.'
                       'run_bounded_worktree_tests') as local:
             self.assertEqual(submission_cli._remote_receipt_test_policy(task),
