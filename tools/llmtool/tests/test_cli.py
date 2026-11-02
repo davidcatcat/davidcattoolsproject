@@ -104,7 +104,7 @@ class CLITests(unittest.TestCase):
             self.assertTrue(callable(getattr(task_submission_cli, function_name)))
 
         expected_freshness = {
-            'delegate', 'review-dispatch', 'high-debug', 'repair', 'remote-test',
+            'delegate', 'review-dispatch', 'high-debug', 'repair', 'remote-test', 'drive',
         }
         self.assertEqual(
             {action for action, (_function_name, fresh) in TASK_ACTIONS.items() if fresh},
