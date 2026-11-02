@@ -9,6 +9,7 @@ are labelled as derived wherever they are shown.
 
 import json
 import re
+import unicodedata
 from datetime import datetime, timezone
 
 from .chat_tui_task import NOT_AVAILABLE, PENDING_DISPATCH, UNKNOWN, retry_condition, value
@@ -33,6 +34,7 @@ _NEXT = {
     "BLOCKED": "PM (resolve the block)",
     "UNAVAILABLE": "PM / Owner (provider unavailable)",
     "FAILED": "Owner (resubmit)",
+    "ABANDONED": "none",
 }
 
 
@@ -88,6 +90,12 @@ def stage(record):
     """(stage, reason) derived only from recognised persisted values."""
     if type(record) is not dict:
         return UNKNOWN, "record unreadable"
+    if "abandonment" in record:
+        # W60: Core's derive_state puts an abandonment before every other field, so the TUI
+        # never shows an abandoned Task as running work (detail, ↓ panel, dev list).
+        abandonment = _dict(record["abandonment"]) or {}
+        return "ABANDONED", ("abandonment recorded at " + value(abandonment, "abandoned_at")
+                             + ": " + value(abandonment, "reason"))
     developer = _dict(record.get("developer"))
     state = record.get("state")
     if developer is None:
@@ -473,14 +481,22 @@ def read_task_detail(task_id, store=None):
     return store.get(task_id)
 
 
-def task_detail_text(record, read_at, reason=None):
+COPY_HINT = " · c 複製 Task ID"   # W60: the detail's header names the key (any width)
+COPY_ALL_KEY = "C 複製全文"        # W60: Shift-C copies the whole detail text
+COPY_ALL_HINT = " · " + COPY_ALL_KEY
+COPY_ALL_STATUS = "C 全文"         # the same key, short enough for the 80-column status bar
+
+
+def task_detail_text(record, read_at, reason=None, copy_hint=False):
     """Compact detail: source and read time, Core state, the TUI summary, newest events.
 
     ``record`` None shows Core state UNKNOWN with ``reason``; nothing is guessed.
+    ``copy_hint``: the detail has a Task ID that c copies (W60).
     """
     from .task_status import derive_state
     from .chat_tui_events import format_event, task_events
-    lines = ["Task 詳情（唯讀）— Esc 返回對話 · ↑↓ PageUp/PageDown 捲動",
+    lines = ["Task 詳情（唯讀）— Esc 返回 · ↑↓ PgUp/PgDn 捲動"   # one row at 80 columns
+             + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT,
              "來源：TaskStore（本機）｜讀取於 " + read_at]
     if type(record) is not dict:
         lines.append("Core 狀態：" + UNKNOWN + "（" + (reason or "沒有 Task 記錄") + "）")
@@ -490,7 +506,8 @@ def task_detail_text(record, read_at, reason=None):
     except Exception:
         core = UNKNOWN + "（Core 無法從記錄推導狀態）"
     lines.append("Core 狀態：" + str(core) + "（task_status.derive_state）")
-    lines += ["", summary_text(record), "",
+    # The summary names the Task first; the W60 evidence rows follow it.
+    lines += ["", summary_text(record), "", evidence_text(record, read_at), "",
               "最近事件（最多 %d 筆，新的在前；只讀 TaskStore 記錄，不確認、不輪詢）" % DETAIL_EVENTS]
     try:
         events = task_events(record)[:DETAIL_EVENTS]
@@ -503,3 +520,118 @@ def task_detail_text(record, read_at, reason=None):
     else:
         lines += ["  " + format_event(event) for event in events]
     return "\n".join(lines)
+
+
+# W60: evidence and provenance rows of that detail, from values TaskStore already holds.
+EVIDENCE_HEADER = "證據與出處（只列 TaskStore 已記錄的值；TUI 不查 GitHub、不輪詢）"
+EVIDENCE_LABELS = ("PR", "PR 狀態", "CI head SHA", "Reviewer 來源", "讀取時間")
+_SHA = re.compile(r"[0-9a-f]{7,64}")
+
+
+def _cells(text):
+    """Terminal columns of ``text`` (East Asian wide/full-width characters take two)."""
+    return sum(2 if unicodedata.east_asian_width(char) in "WF" else 1 for char in text)
+
+
+def _label(text):
+    """``text`` padded so every evidence value starts in the same display column."""
+    width = max(_cells(label) for label in EVIDENCE_LABELS)
+    return "  " + text + " " * (width - _cells(text)) + "："
+
+
+def _unknown(reason):
+    return UNKNOWN + "（" + reason + "）"
+
+
+def _pr_numbers(record):
+    """PR numbers in first-seen order, each with the Core fields that name it."""
+    found = {}
+    for number, label in _pr_sources(record):
+        labels = found.setdefault(number, [])
+        if label not in labels:
+            labels.append(label)
+    return found
+
+
+def _pr_evidence(record, review_ci):
+    found = _pr_numbers(record)
+    if not found:
+        return _unknown("Core 沒有記錄這個 Task 的 PR")
+    shown = ["#%d（來源 %s）" % (number, "、".join(labels)) for number, labels in found.items()]
+    if len(shown) == 1:
+        return shown[0]
+    # Only wide or narrow characters (no East Asian "ambiguous" ones such as ≠ or —), so the
+    # rows keep their width on terminals that draw ambiguous characters wide.
+    return "CONFLICT：" + " vs ".join(shown) + "；各來源的 PR 編號不同，照實列出，TUI 不選其一"
+
+
+def _pr_state_evidence(record, review_ci):
+    stored = None
+    if review_ci is not None and review_ci.get("stage") != "EXECUTOR_RESULT":
+        state, number = review_ci.get("pr_state"), review_ci.get("pr_number")
+        if state in ("OPEN", "MERGED") and type(number) is int and 1 <= number <= 999999999:
+            stored = "#%d 為 %s（completion review_pr_ci.pr_state，Core 收集證據時的狀態）" % (
+                number, state)
+    if len(_pr_numbers(record)) > 1:
+        return ("CONFLICT（PR 編號不一致，無法判定單一 PR 的狀態）"
+                + ("；review_pr_ci 記錄 " + stored if stored else ""))
+    events = record.get("completion_events")
+    if type(events) is list and any(
+            type(event) is dict and event.get("source") == "GITHUB"
+            and event.get("marker_type") == "merge" and event.get("marker_status") == "MERGED"
+            for event in events):
+        # The merge event is newer than evidence collected while the PR was open (Core's
+        # derive_state also reads it as COMPLETED), so it comes first.
+        return ("MERGED（GitHub merge 事件，completion_events）"
+                + ("；review_pr_ci 收集時記錄 " + stored if stored else ""))
+    if stored is not None:
+        return stored.split(" 為 ", 1)[1]
+    return _unknown("Core 只在 review／CI 證據或 GitHub merge 事件中記錄 PR 狀態；這個 Task 還沒有")
+
+
+def _ci_head_evidence(review_ci):
+    if review_ci is None:
+        return _unknown("Core 沒有這個 Task 的 CI 記錄")
+    if review_ci.get("stage") == "EXECUTOR_RESULT" or review_ci.get("ci_state") == "NOT_STARTED":
+        return _unknown("CI 尚未開始：Core 記錄 NOT_STARTED")
+    head = review_ci.get("ci_head_sha")
+    if type(head) is not str or not _SHA.fullmatch(head):
+        return _unknown("CI 記錄中沒有可辨識的 ci_head_sha")
+    return head + "（completion review_pr_ci.ci_head_sha）"
+
+
+def _reviewer_evidence(record, review_ci):
+    _callback, handoff, _returned = _review_handoff(record)
+    receipt = _dict((handoff or {}).get("receipt"))
+    if receipt is not None:
+        return ("review receipt（provenance " + value(receipt, "provenance") + "）；reviewer "
+                + value(receipt, "reviewer_identity"))
+    if review_ci is not None and review_ci.get("stage") != "EXECUTOR_RESULT":
+        source = review_ci.get("review_source")
+        if source not in ("PR_REVIEW", "PR_COMMENT"):
+            return _unknown("CI 記錄中沒有 review_source")
+        return ("GitHub " + source + "；actor " + value(review_ci, "review_actor")
+                + "（completion review_pr_ci.review_source）")
+    if _latest(record.get("review_dispatch_claim")) is not None:
+        return _unknown("只有 review claim，沒有 review receipt；claim 不等於 PASS")
+    if handoff is not None:
+        return _unknown("只有 review handoff，沒有 review receipt")
+    return _unknown("Core 沒有 Reviewer 記錄")
+
+
+def evidence_text(record, read_at):
+    """W60 rows: PR (CONFLICT as stored), PR state, CI head, Reviewer source, read time.
+
+    Every value names the Core field it came from; a missing one is UNKNOWN with the reason.
+    Never raises: a record shape the TUI does not recognise is UNKNOWN as a whole.
+    """
+    try:
+        _completion, review_ci = _review_ci(record)
+        values = (_pr_evidence(record, review_ci), _pr_state_evidence(record, review_ci),
+                  _ci_head_evidence(review_ci), _reviewer_evidence(record, review_ci))
+    except Exception:
+        values = (_unknown("記錄格式 TUI 無法辨識"),) * 4
+    values += (read_at + "（本機時間，只讀一次、不自動更新）；記錄更新於 "
+               + value(record, "updated_at"),)
+    return "\n".join([EVIDENCE_HEADER] + [_label(label) + text
+                                          for label, text in zip(EVIDENCE_LABELS, values)])

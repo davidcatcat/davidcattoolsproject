@@ -46,7 +46,8 @@ KEY_HELP = """Keys
   Mouse wheel           Scroll conversation one row per wheel step (trackpad works the same);
                         the view stays where you read it while output arrives, and scrolling
                         back to the bottom follows new output again (status shows 最新)
-  Drag                  Select conversation text; dragging past the top/bottom edge keeps
+  Drag                  Select text in the conversation or a read-only pane (Task detail,
+                        lists); dragging past the top/bottom edge keeps
                         scrolling and extends the selection. The selection is copied to the
                         system clipboard while you drag and again on release (pbcopy; status
                         shows 已複製), so Cmd+V pastes exactly it; no Cmd+C is needed.
@@ -118,6 +119,12 @@ this PM session with a Developer or Reviewer at work, read from TaskStore every 
 age); Esc closes it. In that list Up/Down choose a row and Enter opens its read-only Task
 detail (Core state, PR link, recent events, read once from TaskStore); PM replies keep
 arriving meanwhile, and Esc returns to the chat at the same place with the draft kept.
+The detail lists its evidence and where each value comes from (PR, CONFLICT when TaskStore
+names different PRs, PR state, CI head SHA, Reviewer source, read time; UNKNOWN with the
+reason when Core has none). The detail has focus when it opens: c copies the Task ID it
+shows and C (Shift-C) copies the whole detail (or a whole developer list) as plain text.
+Tab moves to the input line, where c and C are typed as usual; Tab again returns. A drag in the detail selects and
+copies like the conversation (double-click: a word; Ctrl-C copies the selection again).
 
 A chat reply is never a Task: to dispatch work, /pm connect and tell the PM.%s"""
 
@@ -645,6 +652,15 @@ class ChatTUI:
         self.show_task_view = False
         self.task_view_seq = 0
         self._task_view_linker = (None, None)   # (base Linker, wrapper) last handed out
+        # W60: the Task ID the open detail shows (c copies it; None when the detail has no
+        # Task record), fixed when the detail opens, and when c was last pressed.
+        self.task_view_task_id = None
+        self.task_copy_at = None
+        # W60: what the detail's last copy was ("Task ID", "全文", None for a selection).
+        self.task_copy_label = None
+        self.copy_labels = {}    # W60: id(view) -> "全文" after C in a developer pane
+        self._list_header_rows = 2       # W60: header rows above the first listed Task
+        self._list_shown_index = None    # list_index the list view last scrolled to
         # W52 F2: drafts sent during a turn wait here (FIFO) and go one turn at a time after
         # a COMPLETED turn. Esc (W55), a failed/refused turn, Ctrl-C or a disconnect pauses
         # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
@@ -713,8 +729,12 @@ class ChatTUI:
         self.help = TextArea(text=self.help_text(), read_only=True, scrollbar=True,
                              wrap_lines=True, style="class:help",
                              height=Dimension(min=1, weight=1))
-        self.detail = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True,
-                               height=Dimension(min=1, weight=1))
+        # W60: the developer panes (F2 detail, F3 list, F4 events) are read-only views like
+        # the conversation, so drag-select, double-click, Ctrl-C and C copy work the same.
+        self.detail_view = self._read_view()
+        self.detail = chat_tui_view.make_pane(self.detail_view, colour=self.colour,
+                                              styler=self._style)
+        detail_focused = has_focus(self.detail)
         showing_help = Condition(lambda: self.show_help)
         showing_detail = Condition(lambda: self.show_detail and not self.show_help)
         showing_list = Condition(lambda: self.show_list and not self.show_detail
@@ -724,12 +744,17 @@ class ChatTUI:
         showing_task_view = Condition(lambda: self.task_view_visible())
         task_view_open = Condition(lambda: self.show_task_view)   # also under help/dev panes
         task_view_focused = has_focus(self.task_pane)
-        self.events = TextArea(text="", read_only=True, scrollbar=True, wrap_lines=True,
-                               height=Dimension(min=1, weight=1))
+        self.events_view = self._read_view()
+        self.events = chat_tui_view.make_pane(self.events_view, colour=self.colour,
+                                              styler=self._style)
         events_focused = has_focus(self.events)
-        self.list_window = Window(FormattedTextControl(self.list_text, focusable=True),
-                                  wrap_lines=False, height=Dimension(min=1, weight=1))
+        self.list_view = self._read_view()
+        self.list_window = chat_tui_view.make_pane(self.list_view, colour=self.colour,
+                                                   styler=self._style)
         list_focused = has_focus(self.list_window)
+        # The developer pane on screen (layout and keys), if any.
+        dev_pane_shown = Condition(lambda: self._mouse_view() in (
+            self.detail_view, self.list_view, self.events_view))
         picker_shown = Condition(lambda: sum(self.picker_layout()) > 0)
         menu_shown = picker_shown & Condition(lambda: not self.searching)
         searching = Condition(lambda: self.searching)
@@ -858,6 +883,50 @@ class ChatTUI:
             if menu_shown():
                 self.accept_menu()
 
+        # W60: c copies the detail's Task ID; with a draft it types into the draft as before.
+        # W60: c and C act only while the detail pane has focus (it takes focus when it
+        # opens; Tab goes to the input and back), never on the input line, so a draft such
+        # as "cat" is always typed as it is.
+        @keys.add("c", filter=showing_task_view & task_view_focused & ~picker_shown
+                  & ~searching)
+        def _task_view_copy(event):
+            self.copy_task_id()
+
+        # W60: C (Shift-C) copies the whole detail text, every line, as plain text.
+        @keys.add("C", filter=showing_task_view & task_view_focused & ~picker_shown
+                  & ~searching)
+        def _task_view_copy_all(event):
+            self.copy_task_detail()
+
+        # W60: the same C in the developer panes (F2 detail, F3 whole list, F4 events).
+        @keys.add("C", filter=dev_pane_shown & ~picker_shown & ~searching
+                  & (detail_focused | list_focused | events_focused))
+        def _dev_pane_copy_all(event):
+            self.copy_pane_all()
+
+        @keys.add("up", filter=(detail_focused | events_focused) & dev_pane_shown)
+        def _dev_pane_up(event):
+            self._mouse_view().scroll_rows(-1)
+
+        @keys.add("down", filter=(detail_focused | events_focused) & dev_pane_shown)
+        def _dev_pane_down(event):
+            self._mouse_view().scroll_rows(1)
+
+        # W60: Up/Down on an empty input with nothing to open or recall say why, once.
+        nothing_to_open = Condition(lambda: not self.input.text and not self.background_open()
+                                    and not (self.pm_mode and self.background_all()))
+
+        @keys.add("down", filter=input_focused & nothing_to_open & ~picker_shown & ~searching
+                  & ~showing_task_view & ~dev_pane_shown)
+        def _nothing_down(event):
+            self.hint_no_panel()
+
+        @keys.add("up", filter=input_focused & nothing_to_open & ~picker_shown & ~searching
+                  & ~showing_task_view & ~dev_pane_shown
+                  & Condition(lambda: not self.input.buffer.history.get_strings()))
+        def _nothing_up(event):
+            self.hint_no_panel()
+
         @keys.add("up", filter=(input_focused | task_view_focused) & showing_task_view
                   & ~menu_shown & ~searching, eager=True)
         def _task_view_up(event):
@@ -983,10 +1052,12 @@ class ChatTUI:
             # With a selection, Ctrl-C copies it again and clears it instead of interrupting
             # or exiting (a second Ctrl-C then acts as usual). Cmd+C never arrives here:
             # Warp and Terminal.app keep it for their own copy (W52 F3, Warp log).
-            if self.view.selected_range() and self.conversation_visible():
-                self.view.copy_selection()
-                self.view.clear_selection()
-                self.view.copy_note = "選取已清除，再按 Ctrl-C 中斷/離開"
+            view = self._mouse_view()
+            if view is not None and view.selected_range():
+                self._forget_copy_label(view)
+                view.copy_selection()
+                view.clear_selection()
+                view.copy_note = "選取已清除，再按 Ctrl-C 中斷/離開"
                 return
             self.request_quit()
 
@@ -1007,6 +1078,7 @@ class ChatTUI:
         self.app.before_render += lambda _app: self._sync_picker()
         # A shown list re-reads TaskStore when stale; redraws never read more often.
         self.app.before_render += lambda _app: self._list_tick()
+        self.app.before_render += lambda _app: self._sync_list_view()   # W60
         # The connected PM's background work: at most one TaskStore read per interval.
         self.app.before_render += lambda _app: self._background_tick()
         self._default_mouse_binding = load_mouse_bindings().bindings[0]
@@ -1014,6 +1086,7 @@ class ChatTUI:
         if self.links_supported:
             chat_tui_theme.install_osc8_guard(self.app.output)
         self.view.on_copied = self.app.invalidate   # thread-safe: shows 已複製 when pbcopy is done
+        self.task_view.on_copied = self.app.invalidate   # W60: the Task ID copy result
 
     # -- rendering -----------------------------------------------------------------
     def status_fragments(self):
@@ -1049,7 +1122,7 @@ class ChatTUI:
             "state": compact(state, 14),
             "usage": "t:" + compact(_tokens(session.last_usage), 14),
             "keys": self.status_keys(),
-            "scroll": self.view.status(),
+            "scroll": self._scroll_status(),
             "mouse": "F6 滑鼠:" + ("開" if self.mouse_enabled else "關"),
             "help": "F1",
         }
@@ -1065,6 +1138,17 @@ class ChatTUI:
         for name in PM_STATUS_DROP_ORDER if self.pm_mode else STATUS_DROP_ORDER:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
+            if name == "keys" and "keys" in shown and self.task_view_visible():
+                # W60: in the detail the optional key hints go first (from the end), so
+                # "Esc 返回" stays as long as anything fits.
+                items = fields["keys"].split(" · ")
+                while len(items) > 1 and self._get_cwidth(STATUS_SEPARATOR.join(
+                        fields[key] for key in shown)) > width:
+                    items.pop()
+                    fields["keys"] = " · ".join(items)
+                if self._get_cwidth(STATUS_SEPARATOR.join(
+                        fields[key] for key in shown)) <= width:
+                    break
             if name in shown:
                 shown.remove(name)
         if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) > width:
@@ -1087,6 +1171,16 @@ class ChatTUI:
         keys = []
         if self.task_view_visible():
             keys.append("Esc 返回")   # W59: Esc closes the detail; it never interrupts here
+            copied = self._task_copy_status()
+            if copied:
+                keys.append(copied)
+            elif self.app.layout.has_focus(self.task_pane):
+                if self.task_view_task_id:
+                    keys.append("c 複製 Task ID")
+                keys.append(chat_tui_status.COPY_ALL_STATUS)
+                keys.append("拖曳即複製")
+            else:
+                keys.append("Tab 回詳情（c/C 複製）")
         elif self.pm_turn_active:
             keys.append("Esc 中斷")
         elif self.busy and self.worker_kind == "chat" and not self.send_interrupted:
@@ -1096,6 +1190,26 @@ class ChatTUI:
         if self.pm_mode and self._tool_block_valid():
             keys.append("F7 工具")
         return " · ".join(keys)
+
+    def _scroll_status(self):
+        """Status field of the pane on screen: a developer pane reports its own copy and
+        position (W60); otherwise the conversation's, as before."""
+        view = self._mouse_view()
+        if view in (self.detail_view, self.list_view, self.events_view):
+            # The copy result, else what copies here (kept where the bar has room for it).
+            return (self._pane_copy_status(view, self.copy_labels.get(id(view)))
+                    or "拖曳即複製 · " + chat_tui_status.COPY_ALL_STATUS)
+        return self._copy_hint(self.view.status())
+
+    @staticmethod
+    def _copy_hint(status):
+        """W60: say what the copy is for. With mouse reporting on, the terminal's Cmd+C has
+        no selection of its own, so the hints name Cmd+V (paste) and Ctrl-C, never Cmd+C."""
+        if status.startswith("已複製") and "；" not in status:
+            return status + " · Cmd+V 貼上"
+        if status.startswith("已選"):
+            return status + " · Ctrl-C 複製"
+        return status
 
     def _style(self, token):
         return chat_tui_view.token_style(token, self.colour, self.theme)
@@ -1576,7 +1690,10 @@ class ChatTUI:
 
     def scroll(self, direction):
         """PageUp/PageDown: one screen of rows; the pane keeps or resumes following itself."""
-        (self.task_view if self.task_view_visible() else self.view).page(direction)
+        if self._mouse_view() is self.list_view:
+            self.move_list_page(direction)
+            return
+        (self._mouse_view() or self.view).page(direction)
 
     # -- mouse: wheel, drag selection, edge auto-scroll, copy ------------------------------
     def mouse_event(self, event):
@@ -1588,26 +1705,40 @@ class ChatTUI:
         picker, status) go to prompt_toolkit's own handler.
         """
         parsed = chat_tui_view.parse_mouse(event.data)
-        if parsed is not None and self.task_view_visible():
-            from prompt_toolkit.mouse_events import MouseEventType
-            if parsed[0] in (MouseEventType.SCROLL_UP, MouseEventType.SCROLL_DOWN):
-                rows = chat_tui_view.WHEEL_ROWS
-                self.task_view.scroll_rows(rows if parsed[0] == MouseEventType.SCROLL_DOWN
-                                           else -rows)
-                return None
-        if parsed is None or not self.conversation_visible() or not self._pane_mouse(*parsed):
+        if parsed is None or self._mouse_pane() is None or not self._pane_mouse(*parsed):
             return self._default_mouse_binding.call(event)
         return None
 
+    def _mouse_pane(self):
+        """(view, pane) that the wheel and drag selection act on: the W59 Task detail when it
+        is shown (W60: same selection and copy as the conversation), else the conversation
+        when it is shown, else None."""
+        if self.task_view_visible():
+            return self.task_view, self.task_pane
+        if self.show_detail and not self.show_help:
+            return self.detail_view, self.detail       # F2, also opened from the F3 list
+        if self.list_visible():
+            return self.list_view, self.list_window
+        if self.events_visible():
+            return self.events_view, self.events
+        if self.conversation_visible():
+            return self.view, self.conversation
+        return None
+
+    def _mouse_view(self):
+        shown = self._mouse_pane()
+        return None if shown is None else shown[0]
+
     def _pane_geometry(self):
-        info = self.conversation.window.render_info
+        shown = self._mouse_pane()
+        info = None if shown is None else shown[1].window.render_info
         if info is None:
             return None
         return info._x_offset, info._y_offset, info.window_height
 
     def _pane_mouse(self, kind, button, x, y):
         from prompt_toolkit.mouse_events import MouseButton, MouseEventType
-        view = self.view
+        view = self._mouse_view()
         geometry = self._pane_geometry()
         if geometry is None:
             return False
@@ -1640,6 +1771,7 @@ class ChatTUI:
         if kind == MouseEventType.MOUSE_DOWN and button == MouseButton.LEFT:
             self._autoscroll_stop()
             self._drag_copy_stop()   # a drag whose release never came is replaced
+            self._forget_copy_label(view)   # W60: a drag copy is reported as plain 已複製
             view.begin_drag(view.offset_at(view.top + y - top, x - left))
             self._drag_pointer = self._drag_origin = (x, y)
             self._drag_moved = False
@@ -1654,7 +1786,7 @@ class ChatTUI:
         if geometry is None:
             return
         left, top, height = geometry
-        view = self.view
+        view = self._mouse_view()
         row = max(view.top, min(view.top + height - 1, view.top + y - top))
         view.extend_drag(view.offset_at(row, max(0, x - left)))
         self.app.invalidate()
@@ -1665,7 +1797,7 @@ class ChatTUI:
         Only reached after the pointer left the press cell. The pane's first and last rows
         count as the edge because Terminal.app clamps drags that leave the window to them.
         """
-        view = self.view
+        view = self._mouse_view()
         geometry = self._pane_geometry()
         if geometry is None:
             return
@@ -1701,8 +1833,9 @@ class ChatTUI:
         request, so the clipboard ends with the selection as it was last drawn.
         """
         self._drag_copy_handle = None
-        if self.view.dragging and self._drag_moved and self.conversation_visible():
-            self.view.copy_selection()
+        view = self._mouse_view()
+        if view is not None and view.dragging and self._drag_moved:
+            view.copy_selection()
             self.app.invalidate()
 
     def _drag_copy_stop(self):
@@ -1712,7 +1845,8 @@ class ChatTUI:
 
     def _autoscroll_tick(self):
         self._autoscroll_handle = None
-        if self.view.dragging and self._drag_pointer is not None and self.conversation_visible():
+        view = self._mouse_view()
+        if view is not None and view.dragging and self._drag_pointer is not None:
             self._drag_to(*self._drag_pointer)
 
     def _autoscroll_stop(self):
@@ -1734,7 +1868,8 @@ class ChatTUI:
         terminal's own drag-select and copy; the wheel no longer reaches the pane)."""
         self.mouse_enabled = not self.mouse_enabled
         self._autoscroll_stop()
-        self.view.clear_selection()
+        for view in self._read_views():
+            view.clear_selection()
         if self.mouse_enabled:
             self.append("llmtool: mouse on; the wheel scrolls the conversation and a drag selects"
                         " and copies text. F6 turns it off to select with the terminal instead")
@@ -1748,7 +1883,8 @@ class ChatTUI:
         self._autoscroll_stop()
         self._drag_copy_stop()
         self._drag_pointer = None
-        self.view.clear_selection()
+        for view in self._read_views():   # W60: every read-only pane's selection
+            view.clear_selection()
 
     def toggle_help(self):
         self.show_help = not self.show_help
@@ -1767,14 +1903,18 @@ class ChatTUI:
             show = False
         self._leave_conversation()
         self.show_detail = show
-        # Closing a detail opened from the list goes back to the list.
-        self.app.layout.focus(self.list_window if self.show_list and not show else self.input)
+        # Closing a detail opened from the list goes back to the list. A detail opened from
+        # the list has focus (W60: C and ↑↓ act on it); one shown after a Task mode request
+        # leaves focus on the input (Tab reaches it), so typing continues there.
+        self.app.layout.focus((self.detail if self.show_list else self.input) if show else
+                              self.list_window if self.show_list else self.input)
         self._sync_picker()
 
     # -- Task list (TaskStore reads only; never a provider or network call) ----------
     def toggle_list(self, show):
         self._leave_conversation()
         self.show_list = show
+        self._list_shown_index = None   # W60: scroll to the selection when shown
         if show:
             self.show_detail = False
             self.show_help = False
@@ -1811,10 +1951,7 @@ class ChatTUI:
                                                self.list_loaded[1])
         if self.unseen_output:
             text = "new conversation output — Esc shows it\n" + text
-        buffer = self.events.buffer
-        position = min(buffer.cursor_position, len(text))
-        buffer.set_document(self._Document(terminal_safe_text(text), position),
-                            bypass_readonly=True)
+        self._set_read_text(self.events_view, terminal_safe_text(text))
 
     def refresh_list(self):
         """Start one TaskStore read unless one is already running."""
@@ -1888,6 +2025,11 @@ class ChatTUI:
         self.start_task("show", task_id, None)
 
     def list_text(self):
+        """The rows that fit the list pane (selected row in view)."""
+        return self._list_fragments(full=False)
+
+    def _list_fragments(self, full):
+        """List fragments; ``full``: every listed Task (W60: the scrollable list view)."""
         width = max(1, self.app.output.get_size().columns)
         cut = lambda text: fit_width(terminal_safe_text(text).replace("\n", " "), width,
                                      self._get_cwidth)
@@ -1907,10 +2049,13 @@ class ChatTUI:
             rows.append(("", cut(" llmtool: " + self.list_error)))
         elif self.list_loaded is not None and not self.list_records:
             rows.append(("", cut(" no Tasks in TaskStore")))
-        info = self.list_window.render_info
+        info = self.list_window.window.render_info
         space = max(1, (info.window_height if info is not None else 20) - len(rows))
         top = max(0, min(self.list_index - space + 1, len(self.list_records) - space))
         top = min(top, self.list_index)
+        if full:
+            self._list_header_rows = len(rows)
+            top, space = 0, len(self.list_records)
         for index in range(top, min(len(self.list_records), top + space)):
             item = chat_tui_status.row(self.list_records[index])
             stage = item["stage"] + " " * max(0, 26 - self._get_cwidth(item["stage"]))
@@ -1922,9 +2067,62 @@ class ChatTUI:
             result.extend([row, ("", "\n")])
         return result[:-1]
 
+    _LIST_TOKENS = {"class:menu.header": "ui.menu.header", "class:menu.current": "ui.menu.current"}
+
+    def _sync_list_view(self):
+        """W60: the whole list in the list's read view, so it scrolls (wheel, PgUp/PgDn,
+        Up/Down past the edge), a drag selects across pages and C copies every row."""
+        if not self.list_visible():
+            return
+        view = self.list_view
+        segments = [(text, self._LIST_TOKENS.get(style, "text"))
+                    for style, text in self._list_fragments(full=True)]
+        text = "".join(part for part, _token in segments)
+        if text != view.text or not view.spans:
+            view.set_tail(0, segments)
+            # A short first draw ("reading TaskStore…") fits the pane and turns following
+            # on; the list never follows its end, it keeps the selection in view instead.
+            view.following = view.unseen = False
+        if self._list_shown_index != self.list_index:
+            self._list_shown_index = self.list_index
+            self._list_scroll_to(self._list_header_rows + self.list_index
+                                 if self.list_index else 0)
+
+    def _list_scroll_to(self, line):
+        """Keep text line ``line`` of the list view on screen (rows are one line each)."""
+        view = self.list_view
+        info = self.list_window.window.render_info
+        height = max(1, info.window_height if info is not None else 20)
+        top = view.top
+        if line < top:
+            top = line
+        elif line >= top + height:
+            top = line - height + 1
+        if top == view.top and not view.following:
+            return
+        starts = [0] + [index + 1 for index, char in enumerate(view.text) if char == "\n"]
+        top = max(0, min(top, len(starts) - 1))
+        view.top, view.top_offset, view.following = top, starts[top], False
+
+    def move_list_page(self, direction):
+        """W60 PgUp/PgDn in F3: the selection moves a screen; the view keeps it shown."""
+        info = self.list_window.window.render_info
+        height = max(1, (info.window_height if info is not None else 20) - 1)
+        self.move_list(direction * height)
+
+    def list_plain_text(self):
+        """W60 C in F3: every listed Task as plain text (not only the rows on screen)."""
+        fragments = [text for _style, text in self._list_fragments(full=True)]
+        lines = "".join(fragments).split("\n")[:self._list_header_rows]
+        for index, record in enumerate(self.list_records):
+            item = chat_tui_status.row(record)
+            stage = item["stage"] + " " * max(0, 26 - self._get_cwidth(item["stage"]))
+            lines.append(("▶ " if index == self.list_index else "  ") + item["task_id"] + "  "
+                         + stage + item["updated"][:20] + "  " + item["name"])
+        return terminal_safe_text("\n".join(lines))
+
     def set_detail(self, text):
-        self.detail.buffer.set_document(self._Document(terminal_safe_text(text), 0),
-                                        bypass_readonly=True)
+        self._set_read_text(self.detail_view, terminal_safe_text(text), keep=False)
         self.show_help = False
         self.toggle_detail(True)
 
@@ -2371,6 +2569,11 @@ class ChatTUI:
         # W59: a refresh changes the data, never whether the Owner's panel is open.
         self.app.invalidate()
 
+    def background_loading(self):
+        """W60: the connected PM's first background read has not finished yet."""
+        key = self.pm_target[0] if self.pm_target else None
+        return key is not None and (self.background_key != key or self.background_loaded is None)
+
     def background_open(self):
         """The Owner opened the ↓ panel and has not closed it (keys follow this)."""
         return self.show_background and self.pm_mode
@@ -2505,31 +2708,42 @@ class ChatTUI:
             self._show_task_view(chat_tui_status.task_detail_text(
                 None, now, "背景清單的 Task ID 無法辨識"))
         else:
-            self._show_task_view("Task 詳情（唯讀）— Esc 返回對話\n讀取中…（TaskStore，本機）Task "
-                                 + task_id)
+            self._show_task_view("Task 詳情（唯讀）— Esc 返回對話" + chat_tui_status.COPY_HINT
+                                 + chat_tui_status.COPY_ALL_HINT + "\n讀取中…（TaskStore，本機）Task " + task_id, task_id)
             self._loop = asyncio.get_running_loop()
             threading.Thread(target=self._read_task_view,
                              args=(self._loop, self.task_view_seq, task_id),
                              name="llmtool-chat-task-detail", daemon=True).start()
 
-    def _show_task_view(self, text):
-        """Replace the conversation by the detail; its reading position and the draft stay."""
+    def _show_task_view(self, text, task_id=None):
+        """Replace the conversation by the detail; its reading position and the draft stay.
+
+        ``task_id`` is the validated Task the detail reads (what c copies); a refresh of the
+        ↓ panel never changes it.
+        """
+        self.task_view_task_id = task_id
+        self.task_copy_at = None
+        self.task_copy_label = None
+        self.task_view.copied = None   # a new detail starts without the last copy's status
         self.show_background = False
         self._leave_conversation()
         self.task_view_seq += 1
         self.show_task_view = True
         self._set_task_view(text)
-        self.app.layout.focus(self.input)
+        # W60: the detail has focus, so c/C/↑↓ act on it; Tab goes to the draft (kept).
+        self.app.layout.focus(self.task_pane)
         self._sync_picker()
         self.app.invalidate()
 
     def _read_task_view(self, loop, seq, task_id):
         try:
             record = chat_tui_status.read_task_detail(task_id)
-            text = chat_tui_status.task_detail_text(record, time.strftime("%H:%M:%S"))
+            text = chat_tui_status.task_detail_text(record, time.strftime("%H:%M:%S"),
+                                                    copy_hint=True)
         except Exception:
             text = chat_tui_status.task_detail_text(
-                None, time.strftime("%H:%M:%S"), "TaskStore 讀取失敗（找不到或無法讀取）；細節省略")
+                None, time.strftime("%H:%M:%S"), "TaskStore 讀取失敗（找不到或無法讀取）；細節省略",
+                copy_hint=True)
         self._post(loop, self.finish_task_view, seq, text)
 
     def finish_task_view(self, seq, text):
@@ -2538,8 +2752,101 @@ class ChatTUI:
         self._set_task_view(text)
         self.app.invalidate()
 
+    def copy_task_id(self):
+        """W60 c: the open detail's Task ID to the clipboard (the pane's clipboard worker)."""
+        self.task_copy_at = time.monotonic()
+        self.task_copy_label = "Task ID"
+        if self.task_view_task_id:
+            self.task_view.copy(self.task_view_task_id)
+        self.app.invalidate()
+
+    def copy_task_detail(self):
+        """W60 C: the whole detail (every line, not only the screen) as the plain text shown.
+
+        The detail text was made terminal-safe when it was set, so the copy carries no live
+        escape sequence; links are drawn around the text and are not part of it.
+        """
+        view = self.task_view
+        self.task_copy_at = time.monotonic()
+        self.task_copy_label = "全文"
+        view.clear_selection()
+        view.copy_range(0, len(view.text))
+        self.app.invalidate()
+
+    def _task_copy_status(self):
+        """Status text of the detail's last copy while it is recent, else None."""
+        now = time.monotonic()
+        if (self.task_copy_at is not None and self.task_copy_label == "Task ID"
+                and not self.task_view_task_id):
+            return ("沒有 Task ID 可複製"
+                    if now - self.task_copy_at < chat_tui_view.COPIED_SECONDS else None)
+        return self._pane_copy_status(self.task_view, self.task_copy_label)
+
+    def _pane_copy_status(self, view, label):
+        """A read pane's copy result while it is recent (or a selection), else None."""
+        # The worker stamps ``copied`` when pbcopy returns, so a slow copy still reports.
+        finished = (view.copied is not None
+                    and time.monotonic() - view.copied[1] < chat_tui_view.COPIED_SECONDS)
+        if not (finished or view.copy_pending() or view.selected_range()):
+            return None
+        return (label + " " if label and not view.selected_range() else "") + self._copy_hint(
+            view.status())
+
+    def _read_view(self):
+        """A read-only ConversationView for a developer pane (starts at the top, no follow)."""
+        view = chat_tui_view.ConversationView(self._get_cwidth)
+        view.following = False
+        return view
+
+    def _read_views(self):
+        return (self.view, self.task_view, self.detail_view, self.list_view, self.events_view)
+
+    def _forget_copy_label(self, view):
+        if view is self.task_view:
+            self.task_copy_label = None
+        self.copy_labels.pop(id(view), None)
+
+    def _set_read_text(self, view, text, keep=True):
+        """Replace a developer pane's text (already terminal-safe); ``keep`` the place."""
+        top_offset = view.top_offset
+        view.set_tail(0, [(text, "text")])
+        if not keep:
+            view.top = view.top_offset = 0
+        else:
+            view.top_offset = min(top_offset, len(text))
+        view.following = view.unseen = False
+
+    def copy_pane_all(self):
+        """W60 C in F2/F3/F4: the whole pane (for F3 every listed Task, not only the rows
+        shown) as plain terminal-safe text, through the pane's clipboard worker."""
+        view = self._mouse_view()
+        if view not in (self.detail_view, self.list_view, self.events_view):
+            return
+        text = self.list_plain_text() if view is self.list_view else view.text
+        view.clear_selection()
+        self.copy_labels[id(view)] = "全文"
+        view.copy(text)
+        self.app.invalidate()
+
+    def hint_no_panel(self):
+        """W60: Up/Down with nothing to open say what to do instead (one line, not repeated)."""
+        if self.pm_mode and self.background_loading():
+            hint = "llmtool: 背景 Task 讀取中…（TaskStore，本機）；讀完後 ↓ 可看"
+        elif self.pm_mode:
+            hint = "llmtool: 沒有背景 Task；PM 派工後 ↓ 可看"
+        else:
+            hint = "llmtool: 沒有 Task 面板；/pm connect 連 PM 後 ↓ 看背景 Task"
+        if self.dev:
+            hint += "；F3 看 Task 清單"
+        if not self.conversation.text.rstrip("\n").endswith(hint):
+            self.append(hint)
+
     def close_task_view(self):
         """Esc: back to the chat; its reading position and the draft were never touched."""
+        self.task_view_task_id = None
+        self.task_copy_at = None
+        self.task_copy_label = None
+        self._leave_conversation()   # ends a drag in the detail and its selection
         self.show_task_view = False
         self.task_view_seq += 1
         self.app.layout.focus(self.input)
