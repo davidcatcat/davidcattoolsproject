@@ -44,7 +44,7 @@ These checks prevent refusals that cost a dispatch round (2026-11-02):
 
 The main PM may use sub-agent PMs proactively. Mode A is read-only and returns text only. Mode B owns exactly one named work package (WP) and dispatches its Developer, formal Reviewer, EC2 remote-test and repairs through the normal gates: cross-family review, one writer per D6 and required remote tests.
 
-Before Mode B starts, post a `subpm-lease` claim comment on the WP Issue with `wp`, `holder`, `pm session`, `paths` and `status=HELD`. Lease paths must not overlap any in-flight Task's `write_paths`. Register the sub-agent PM's D6 with `--lease-ref subpm:<wp>:<agent>`. After hand-back, the main PM marks the lease `RELEASED`.
+Before Mode B starts, post a `subpm-lease` claim comment on the WP Issue with `wp`, `holder`, `pm`, `paths` and `status=HELD`. Lease paths must not overlap any in-flight Task's `write_paths`. Register the sub-agent PM's D6 with `--lease-ref subpm:<wp>:<agent>`. After hand-back, the main PM marks the lease `RELEASED`.
 
 Only the main PM merges, adopts Tasks, edits the #763 inventory or asks the Owner. A Mode B hand-back records: WP; Task IDs; D6 and lease-ref; Developer route and start receipt; PR; HEAD SHA; verdict comment URL; CI conclusion; open findings; lease state.
 
@@ -60,7 +60,7 @@ Only the main PM merges, adopts Tasks, edits the #763 inventory or asks the Owne
 
    Before parking a difficult unresolved Task, record a Debug escalation disposition in its existing Issue/Task record: the qualified model/Worker route considered and, if selected, its result; or the concrete gate/refusal reason (dispatch, availability, data permission or budget) and recovery condition. This record is required for continuation, but it does not require a high-model call for every `BLOCKED` Task.
 
-   For substantial technical uncertainty, proactively consider a suitable high-capability Debug Developer when an authorized route and budget permit. PM analysis, a generic sub-agent or a formal Reviewer is not that Developer assignment. Follow the [High Debug procedure and report requirements](pm-continuation-reference.md#high-debug); diagnosis does not grant implementation or acceptance authority.
+   For substantial technical uncertainty, proactively select a suitable high-capability Debug Developer when an authorized Worker route and the existing budget permit. Follow the [High Debug procedure and report requirements](pm-continuation-reference.md#high-debug); diagnosis does not grant implementation or acceptance authority.
 
    **Mandatory High Debug after two failed corrections (Owner 2026-10-27):** After two corrections fail in the same confirmed root-cause/finding family, stop ordinary repeated repairs and assign a separate bounded Codex CLI `gpt-6.1-sol` Debug Developer Task when all existing gates permit. This uses `codex-developer`, does not change the normal Codex model or grant another repair. Severe uncertainty may justify earlier use with recorded evidence. See the [High Debug procedure](pm-continuation-reference.md#high-debug).
 
@@ -101,7 +101,7 @@ After a work package completes, or after a Task is isolated, the PM runs the [Sc
 
 ## Scheduled sweep
 
-This single recurring schedule (about every 10 minutes in the PM session, for example `/loop 10m`, and after every result) is the `Parallel dispatch check` (Owner 2026-11-02, #763). The PM does not wait on CI, a review or a single Worker while other authorized work in the #763 inventory can move. The schedule never authorizes work outside the authorized #763 scope, a Worker the policy does not allow, or a merge without its gates. Every sweep runs in this order:
+This single recurring schedule (about every 10 minutes in the PM session, for example `/loop 10m`, and after every result) (Owner 2026-11-02, #763). The PM does not wait on CI, a review or a single Worker while other authorized work in the #763 inventory can move. The schedule never authorizes work outside the authorized #763 scope, a Worker the policy does not allow, or a merge without its gates. Every sweep runs in this order:
 
 1. **Continue in-flight work (uncapped):** advance every active Task, formal review, bounded repair, CI check and merge that can move. The per-sweep cap of 2 applies only to new Developer Tasks in step 3; reviews, repairs, CI checks and merges have no per-sweep cap.
 2. **Check the backlog list:** reconcile the #763 inventory with GitHub deltas (new, reopened and unblocked items) within authorized scope. Never decide from only a few Issues, and never invent low-value Issues.
@@ -148,7 +148,7 @@ For other GitHub activity posts, begin the post with whole-line `<!-- activity: 
 - OpenCode or AGY direct: Task developer state `DEVELOPER_DISPATCHING` with provider `opencode-cli` or `agy-cli`, plus a running delegate process, or a result;
 - company `gw`: the recorded result.
 
-Confirm the receipt within 2 minutes of dispatch. Until then record only `DISPATCHED` / `UNKNOWN`, and never report the Worker as delivered, started or working. For background Claude dispatches, set the model explicitly until central role config (D1) lands. While waiting for a result, watch Worker state (`claude_bg_dispatch.py watch` for Claude); a blocked, waiting or gone Worker is handled under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
+Confirm the receipt within 2 minutes of dispatch. Until then record only `DISPATCHED` / `UNKNOWN`, and never report the Worker as delivered, started or working. While waiting for a result, watch Worker state (`claude_bg_dispatch.py watch` for Claude); a blocked, waiting or gone Worker is handled under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
 
 Formal verdicts are posted with `gh pr comment`, never `gh pr review`, because Task advance scans issue comments. Merge only when every exact-head check is `SUCCESS` or `SKIPPED`, with macOS `SUCCESS` where required; `CANCELLED` or pending checks block the merge.
 
