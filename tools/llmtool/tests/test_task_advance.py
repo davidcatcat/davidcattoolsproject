@@ -1477,11 +1477,10 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             def gh_runner(_root, args):
                 calls.append(args)
                 return type('R', (), {'returncode': 0})()
-            with patch.dict(os.environ, {'LLMTOOL_OWNER_GITHUB_LOGIN': 'owner-login'}):
-                result = task_advance._merge_once(store=Store(), record=record, number=17,
-                    head=HEAD, pr=pr, events=[event] if events is None else events,
-                    github_get=github_get,
-                    gh_runner=gh_runner, root='/repo')
+            result = task_advance._merge_once(store=Store(), record=record, number=17,
+                head=HEAD, pr=pr, events=[event] if events is None else events,
+                github_get=github_get,
+                gh_runner=gh_runner, root='/repo')
             return result, calls
 
         fix_record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
@@ -1503,22 +1502,24 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             ('conflicting PR', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
                 'review_dispatch_claim': [review, dict(review, pr=18)]}},
              'MERGE_CONFLICTING_PR'),
-            ('unlabeled TUI path', {'pr': tui, 'files': [
+            ('unlabeled chat TUI path', {'pr': tui, 'files': [
                 {'filename': 'tools/llmtool/llmtool/chat_tui.py'}]},
-             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
-            ('forged body marker', {'pr': tui, 'files': [
-                {'filename': 'tools/llmtool/llmtool/chat_tui.py'}]},
-             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
-            ('PM-authored marker', {'files': [
-                {'filename': 'tools/llmtool/llmtool/chat_tui.py'}],
-                'comments': [{'user': {'login': 'pm-login'},
-                    'body': f'<!-- llmtool-owner-accepted head={HEAD} -->'}]},
-             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
-            ('stale-head marker', {'files': [
-                {'filename': 'tools/llmtool/llmtool/chat_tui.py'}],
-                'comments': [{'user': {'login': 'owner-login'},
-                    'body': f'<!-- llmtool-owner-accepted head={"b" * 40} -->'}]},
-             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
+             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
+            ('unlabeled TUI module path', {'files': [
+                {'filename': 'tools/llmtool/llmtool/tui_markdown_editor.py'}]},
+             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
+            ('TUI test path', {'files': [
+                {'filename': 'tools/llmtool/tests/test_tui_markdown.py'}]},
+             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
+            ('chat TUI test path', {'files': [
+                {'filename': 'tools/llmtool/tests/test_chat_tui.py'}]},
+             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
+            ('TUI PTY driver path', {'files': [
+                {'filename': 'tools/llmtool/tests/tui_pty_driver.py'}]},
+             'MERGE_OWNER_ACCEPTANCE_MANUAL'),
+            ('negative tui_markdown path', {'files': [
+                {'filename': 'tools/llmtool/llmtool/tui_markdown.py'}]},
+             'MERGED'),
             ('pending check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
                 'status': 'in_progress', 'conclusion': None}]}, 'MERGE_CHECKS_NOT_GREEN'),
             ('cancelled check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
@@ -1544,15 +1545,12 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         for label, kwargs, code in cases:
             with self.subTest(label=label):
                 result, calls = run_case(**kwargs)
-                self.assertEqual(result['codes'], [code])
-                self.assertEqual(calls, [])
-
-        owner_marker = {'user': {'login': 'owner-login'},
-                        'body': f'<!-- llmtool-owner-accepted head={HEAD} -->'}
-        with patch.dict(os.environ, {'LLMTOOL_OWNER_GITHUB_LOGIN': 'owner-login'}):
-            self.assertTrue(task_advance._owner_accepted(17, HEAD, lambda path: (
-                [{'filename': 'tools/llmtool/tests/test_chat_tui.py'}]
-                if path.endswith('/files?per_page=100') else [owner_marker])))
+                if code == 'MERGED':
+                    self.assertEqual(result['step'], 'MERGED')
+                    self.assertEqual(sum(call[1] == 'merge' for call in calls), 1)
+                else:
+                    self.assertEqual(result['codes'], [code])
+                    self.assertEqual(calls, [])
 
     def test_merge_unknown_is_never_retried_and_failed_checks_refuse(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
@@ -1647,10 +1645,9 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         def gh_runner(_root, args):
             gh_calls.append(args)
             return type('R', (), {'returncode': 0 if args[1] == 'merge' else 1})()
-        with patch.dict(os.environ, {'LLMTOOL_OWNER_GITHUB_LOGIN': 'owner-login'}):
-            result = task_advance._merge_once(store=store, record=record, number=17,
-                head=HEAD, pr=pr, events=[event], github_get=github_get,
-                gh_runner=gh_runner, root='/repo')
+        result = task_advance._merge_once(store=store, record=record, number=17,
+            head=HEAD, pr=pr, events=[event], github_get=github_get,
+            gh_runner=gh_runner, root='/repo')
         self.assertEqual(result['step'], 'MERGED')
         self.assertEqual(result['codes'], [
             'MERGE_RESULT_RECORD_FAILED', 'MERGE_PROVENANCE_COMMENT_FAILED'])

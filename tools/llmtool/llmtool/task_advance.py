@@ -102,34 +102,12 @@ def _owner_acceptance_required(files):
         if type(path) is not str:
             return True
         if (re.fullmatch(r'tools/llmtool/llmtool/chat_tui[^/]*\.py', path) or
+                re.fullmatch(r'tools/llmtool/llmtool/tui_[^/]*\.py', path) or
                 re.fullmatch(r'tools/llmtool/tests/test_chat_tui[^/]*', path) or
-                path == 'tui_pty_driver.py' or path.endswith('/tui_pty_driver.py')):
+                re.fullmatch(r'tools/llmtool/tests/test_tui_[^/]*', path) or
+                path == 'tools/llmtool/tests/tui_pty_driver.py'):
             return True
     return False
-
-
-def _owner_accepted(number, head, github_get):
-    # The configured Owner login is deliberately external to source code. A
-    # body marker is forgeable by every PR author and is never acceptance.
-    owner_login = os.environ.get('LLMTOOL_OWNER_GITHUB_LOGIN')
-    if (type(owner_login) is not str or not owner_login.strip() or
-            owner_login != owner_login.strip()):
-        return False
-    try:
-        files = github_get(f'pulls/{number}/files?per_page=100')
-        if not _owner_acceptance_required(files):
-            return True
-        comments = github_get(f'issues/{number}/comments?per_page=100')
-    except Exception:
-        return False
-    if type(comments) is not list or len(comments) >= 100:
-        return False
-    marker = re.compile(r'<!--\s*llmtool-owner-accepted\s+head=([0-9a-f]{40})\s*-->')
-    return any(type(item) is dict and type(item.get('user')) is dict and
-               item['user'].get('login') == owner_login and
-               type(item.get('body')) is str and
-               any(match.group(1) == head for match in marker.finditer(item['body']))
-               for item in comments)
 
 
 def _merge_checks(record, number, head, pr, github_get):
@@ -169,6 +147,8 @@ def _merge_checks(record, number, head, pr, github_get):
         mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
         if any(item.get('conclusion') != 'success' for item in mac_runs):
             return 'MERGE_MACOS_CHECK_REQUIRED'
+    if _owner_acceptance_required(files):
+        return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     return None
 
 
@@ -219,15 +199,6 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     code = _merge_checks(record, number, head, pr, github_get)
     if code:
         return _merge_refusal(code)
-    if not _owner_accepted(number, head, github_get):
-        # Non-TUI PRs need no Owner acceptance. The helper returns true for
-        # those, and fails closed for TUI paths or unavailable evidence.
-        try:
-            files = github_get(f'pulls/{number}/files?per_page=100')
-        except Exception:
-            files = None
-        if _owner_acceptance_required(files):
-            return _merge_refusal('MERGE_OWNER_ACCEPTANCE_REQUIRED')
     try:
         current_pr = github_get(f'pulls/{number}')
     except Exception:
@@ -236,13 +207,6 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if (type(current_head) is not dict or current_head.get('sha') != head or
             current_pr.get('number', number) != number):
         return _merge_refusal('MERGE_STALE_HEAD')
-    if not _owner_accepted(number, head, github_get):
-        try:
-            files = github_get(f'pulls/{number}/files?per_page=100')
-        except Exception:
-            files = None
-        if _owner_acceptance_required(files):
-            return _merge_refusal('MERGE_OWNER_ACCEPTANCE_REQUIRED')
     if current_pr.get('state') not in (None, 'open') or current_pr.get('merged') is True:
         return _merge_refusal('MERGE_PR_NOT_OPEN')
     if current_pr.get('mergeable') is not True:
