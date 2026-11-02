@@ -19,11 +19,11 @@ import sys
 from types import MappingProxyType
 
 MAX_TRUST_BYTES = 16 * 1024
+MAX_JSON_NESTING = 32
 _TRUST_CACHE = None
 _HAS_DIR_FD_SUPPORT = (
-    hasattr(os, "O_DIRECTORY") and hasattr(os, "O_NOFOLLOW") and
-    os.open in getattr(os, "supports_dir_fd", ()) and
-    os.stat in getattr(os, "supports_dir_fd", ())
+    os.name == "posix" and hasattr(os, "O_DIRECTORY") and
+    hasattr(os, "O_NOFOLLOW")
 )
 _SLUG = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}\Z")
 _WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9._-]{1,100}\.ya?ml\Z")
@@ -66,6 +66,29 @@ def _pairs(pairs):
 
 def _constant(_value):
     raise ValueError("invalid constant")
+
+
+def _check_json_nesting(text):
+    """Reject excessive structural nesting independently of json's recursion limit."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                raise ValueError("excessive nesting")
+        elif char in "]}":
+            depth = max(0, depth - 1)
 
 
 def _exact(obj, keys):
@@ -271,6 +294,10 @@ def _read_trust_bytes(home, uid):
         return raw
     except TrustError:
         raise
+    except (TypeError, NotImplementedError):
+        # POSIX platforms without dir_fd support must fail closed with a
+        # sanitized platform code, even if their function identities differ.
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
     except OSError:
         _fail("TRUST_ANCESTOR_INVALID")
     finally:
@@ -410,7 +437,9 @@ def load_trust(home=None, *, _allow_root=False):
     if raw.startswith(b"\xef\xbb\xbf"):
         _fail("TRUST_MALFORMED")
     try:
-        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
+        text = raw.decode("utf-8")
+        _check_json_nesting(text)
+        value = json.loads(text, object_pairs_hook=_pairs, parse_constant=_constant)
     except (UnicodeError, ValueError, RecursionError):
         _fail("TRUST_MALFORMED")
     _validate_schema(value)
