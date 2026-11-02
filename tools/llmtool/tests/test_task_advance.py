@@ -184,7 +184,7 @@ class TaskAdvanceTests(unittest.TestCase):
                          'DEVELOPER_ATTENTION')
         related['repair_claims'][0]['repair_state'] = 'RESPONDED'
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
-                         'REPAIR_RESULT_NOT_PUBLISHED')
+                         'PUBLISH')
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(False), PR, related),
                          'PUBLISH')
         new_head = 'b' * 40
@@ -233,6 +233,66 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls, [(HEAD, 'executor-1', 'refs/pull/17/head')])
         self.assertEqual(len(dispatched), 1)
+
+    def test_review_repair_advances_from_registered_d6_without_changing_cwd(self):
+        new_head = 'b' * 40
+        record = base_record(
+            review_dispatch_claim=[{'pr': 17, 'head_sha': HEAD, 'version': 1,
+                                    'state': 'DISPATCHED'}],
+            completion_events=[{'source': 'REVIEWER', 'source_sha': HEAD,
+                                'version': 1, 'outcome': 'REVIEW_FAIL'}])
+        class Store:
+            def __init__(self):
+                self.record = record
+            def get(self, _task_id):
+                return self.record
+
+        store = Store()
+        snapshot = {'root': '/registered/d6', 'result_head': HEAD,
+                    'recorded_result_head': HEAD, 'registered_result_head': HEAD,
+                    'dirty': False}
+        published, dispatched = [], []
+        def repair(**_kwargs):
+            snapshot['dirty'] = True
+            return {'repair_task_id': 'repair-task'}
+        def publish(*_args, **_kwargs):
+            published.append(snapshot['root'])
+            snapshot.update(result_head=new_head, recorded_result_head=new_head,
+                            registered_result_head=new_head, dirty=False)
+            return {'pr': 17, 'head': new_head}
+        def remote_test(_args, *, store):
+            store.record.setdefault('remote_test_receipts', []).append(
+                remote_receipt(store.record, source_sha=new_head))
+            return 0
+        def dispatch(**kwargs):
+            dispatched.append((kwargs, snapshot['result_head']))
+            return {'state': 'DISPATCHED'}
+
+        initial_cwd = os.getcwd()
+        with patch.object(task_advance, '_d6_snapshot', side_effect=lambda *_args: dict(snapshot)), \
+             patch.object(task_advance, '_pr_snapshot', side_effect=lambda *_args: {
+                 'number': 17, 'head': {'sha': snapshot['result_head']}, 'merged': False}), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance, '_publish_task', side_effect=publish), \
+             patch.object(task_submission_cli, 'run_task_remote_test', side_effect=remote_test):
+            repaired = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, repair_review_call=repair, github_get=lambda _path: [])
+            published_result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, github_get=lambda _path: [])
+            tested = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, github_get=lambda _path: [])
+            reviewed = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, github_get=lambda _path: [], dispatch_review_call=dispatch)
+
+        self.assertEqual(repaired['step'], 'REPAIR_REVIEW')
+        self.assertEqual(published_result, {'task_id': record['task_id'], 'codes': [],
+                                             'pr': 17, 'head': new_head})
+        self.assertEqual([tested['step'], reviewed['step']],
+                         ['RUN_REMOTE_TEST', 'DISPATCH_REVIEW'])
+        self.assertEqual(published, ['/registered/d6'])
+        self.assertEqual(dispatched[0][0]['version'], 2)
+        self.assertEqual(dispatched[0][1], new_head)
+        self.assertEqual(os.getcwd(), initial_cwd)
 
     def test_old_head_remote_test_receipt_does_not_satisfy_gate(self):
         record = base_record(remote_test_receipts=[remote_receipt(
@@ -357,7 +417,7 @@ class TaskAdvanceTests(unittest.TestCase):
             ({'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN'}}, 'UNKNOWN',
              'REPAIR_OUTCOME_UNKNOWN'),
             ({'developer': {'state': 'DEVELOPER_RESPONDED'}}, 'RESPONDED',
-             'REPAIR_RESULT_NOT_PUBLISHED'),
+             'PUBLISH'),
             ({'developer': {'state': 'DEVELOPER_OUTPUT_REJECTED'}},
              'OUTPUT_REJECTED', 'REPAIR_RETRY'),
         )
