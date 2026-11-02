@@ -575,7 +575,7 @@ class WidgetTests(Base):
                                   '/pm history', '/pm queue', '/help', '/status', '/provider', '/skill',
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
-                                  '/theme', '/links'])
+                                  '/theme', '/links', '/pm list', '/pm use', '/pm accounts'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:2], ['/status', '/skill'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
                          ['/pm connect', '/pm new', '/pm'])
@@ -794,24 +794,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 21)
+            self.assertEqual(len(ui.menu_items), 24)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/pm connect', rows[0])
-            self.assertIn('16 more (0 above, 16 below)', rows[-1])
+            self.assertIn('19 more (0 above, 19 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
             self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('16 more (2 above, 14 below)', rows[-1])
+            self.assertIn('19 more (2 above, 17 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 20)
-            self.assertIn('/links', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(16 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 23)
+            self.assertIn('/pm accounts', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(19 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -3256,7 +3256,7 @@ class PMConversationTests(BoundedPMTest):
 
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
-            self.assertEqual(ui.status_text(), '▸▸ PM 模式 · auto | ' + self.session_id[:8]
+            self.assertEqual(ui.status_text(), '▸▸ PM 模式 · auto | claude/default | ' + self.session_id[:8]
                          + ' | 暖機中… | 最新 | F6 滑鼠:開 | F1')   # no chat fields
             self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
@@ -3897,7 +3897,7 @@ class PMConversationTests(BoundedPMTest):
         self.state = self.temp_root.resolve() / 'empty-state'   # no binding saved here
         self.api.state_root = self.state
         ui, _ = self.drive([self.connect(), self.pending_done])
-        self.assertIn('no dedicated PM binding is saved. /pm new [CWD]', ui.conversation.text)
+        self.assertIn('no dedicated PM binding is saved. /pm new', ui.conversation.text)
         self.assertIsNone(ui.pm_runtime)
         cwd = str(self.temp_root)
         ui, _ = self.drive(['/pm new ' + cwd + '\r', self.pending_done,
@@ -3918,15 +3918,17 @@ class PMConversationTests(BoundedPMTest):
         spaced.mkdir()
         calls = []
         real = self.api.create_dedicated
-        self.api.create_dedicated = lambda cwd: calls.append(cwd) or real(cwd)
+        self.api.create_dedicated = lambda cwd, runtime='claude-code', account=None: (
+            calls.append((cwd, runtime, account)) or real(cwd, runtime, account))
         ui, _ = self.drive(['/pm new "%s"\r' % spaced, self.pending_done,
                             '/pm new %s\r' % str(spaced).replace(' ', '\\ '), self.pending_done,
                             '/pm new "%s\r' % spaced, self.pending_done])
-        self.assertEqual(calls, [str(spaced), str(spaced)])
+        self.assertEqual(calls, [(str(spaced), 'claude-code', None),
+                                 (str(spaced), 'claude-code', None)])
         text = ui.conversation.text
         self.assertEqual(text.count('dedicated binding created (cwd ' + str(spaced)), 2)
         self.assertIn('llmtool: /pm: unbalanced quote or trailing backslash', text)
-        self.assertIn('usage: /pm new [CWD]', text)
+        self.assertIn('usage: /pm new [--runtime claude|codex]', text)
         self.assertNotIn('Traceback', text)
         created = self.api.current_binding()['native_session_id']
         ui, _ = self.drive(['/pm connect %s "%s"\r' % (created, spaced), self.connected])
@@ -3938,7 +3940,7 @@ class PMConversationTests(BoundedPMTest):
         ui, _ = self.drive(['/pm connect ' + other + ' ' + str(self.temp_root) + '\r',
                             self.pending_done])
         self.assertIn('PM runtime error PM_SESSION_NOT_DEDICATED', ui.conversation.text)
-        self.assertIn('/pm new [CWD] creates one', ui.conversation.text)
+        self.assertIn('/pm new', ui.conversation.text)
         # A transcript written after the binding, within S2's 20 s window, means live elsewhere.
         from llmtool import active_pm_inbox
         transcript = active_pm_inbox.claude_session_file(

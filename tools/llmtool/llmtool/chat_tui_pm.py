@@ -12,6 +12,10 @@ What S2 still does not provide is shown as UNKNOWN.
 """
 
 import re
+import os
+import shutil
+import stat
+import subprocess
 from datetime import datetime
 
 from .chat_tui_task import UNKNOWN
@@ -89,16 +93,89 @@ class PMRuntimeAPI:
 
     def runtime(self, session_id, cwd):
         from .pm_runtime import PMRuntime
+        binding = self.current_binding(session_id)
         return PMRuntime(session_id, cwd=cwd, runner=self.runner, state_root=self.state_root,
-                         environ=self.environ)
+                         environ=self.environ,
+                         runtime=(binding or {}).get('runtime', 'claude-code'),
+                         account=(binding or {}).get('account'))
 
     def current_binding(self, session_id=None):
         from .pm_runtime import current_binding
-        return current_binding(session_id, state_root=self.state_root)
+        return current_binding(session_id, state_root=self.state_root, environ=self.environ,
+                               home=None if self.environ is None else self.environ.get('HOME'))
 
-    def create_dedicated(self, cwd):
+    def create_dedicated(self, cwd, runtime='claude-code', account=None):
         from .pm_runtime import create_dedicated_pm
-        return create_dedicated_pm(cwd, state_root=self.state_root)
+        if account is not None:
+            kind = next((row['kind'] for row in self.accounts() if row['name'] == account), None)
+            expected = 'codex' if runtime == 'codex' else 'claude'
+            if kind != expected:
+                from .errors import LLMToolError
+                error = LLMToolError('PM runtime and account kind do not match')
+                error.pm_runtime_code = 'PM_CONFIG_INVALID'
+                raise error
+        return create_dedicated_pm(cwd, runtime=runtime, account=account,
+                                   state_root=self.state_root, environ=self.environ,
+                                   home=None if self.environ is None else self.environ.get('HOME'))
+
+    def list_bindings(self):
+        from .pm_runtime import list_bindings
+        return list_bindings(state_root=self.state_root, environ=self.environ,
+                             home=None if self.environ is None else self.environ.get('HOME'))
+
+    def select_binding(self, session_id):
+        from .pm_runtime import select_binding
+        return select_binding(session_id, state_root=self.state_root)
+
+    def accounts(self):
+        """Return only account metadata needed by the TUI, never config contents."""
+        from . import config, role_config
+        home = None if self.environ is None else self.environ.get('HOME')
+        path = config.user_config_path(home)
+        user = config._read_yaml(path, 'user config') if os.path.lexists(path) else {}
+        accounts, _ = role_config.validate_role_config(user)
+        rows = []
+        for name, value in sorted(accounts.items()):
+            folder = value['config_dir']
+            try:
+                info = os.lstat(folder)
+                private = (stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and
+                           not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH))
+                status = 'private' if private else 'not private'
+            except OSError:
+                private, status = False, 'unavailable'
+            rows.append({'name': name, 'kind': value['kind'], 'status': status,
+                         'config_dir': folder if private else None})
+        return rows
+
+    def account_checks(self):
+        """Run provider login status probes, discarding all provider output."""
+        results = []
+        source = os.environ if self.environ is None else self.environ
+        for account in self.accounts():
+            if account['status'] != 'private':
+                results.append(False)
+                continue
+            kind = account['kind']
+            executable = shutil.which(kind, path=source.get('PATH'))
+            if not executable:
+                results.append(False)
+                continue
+            env = dict(source)
+            if kind == 'claude':
+                env['CLAUDE_CONFIG_DIR'] = account['config_dir']
+                argv = [executable, 'auth', 'status']
+            else:
+                env['CODEX_HOME'] = account['config_dir']
+                argv = [executable, 'login', 'status']
+            try:
+                result = subprocess.run(argv, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        env=env, timeout=10, check=False)
+                results.append(result.returncode == 0)
+            except (OSError, subprocess.SubprocessError):
+                results.append(False)
+        return results
 
     def read_history(self, session_id):
         from .pm_runtime import read_history
@@ -113,9 +190,12 @@ def binding_text(binding):
             + ")" if binding.get("dedicated") is True else "NOT dedicated")
 
 
-def account_text(runtime):
-    """The Claude account directory the connected PM runs under."""
-    return "Claude account " + safe_text(getattr(runtime, "claude_config_dir", None))
+def account_text(runtime, binding=None):
+    """Display the selected provider and configured account name, never its directory."""
+    provider = (binding.get('runtime') if type(binding) is dict else None) or \
+        getattr(runtime, 'runtime', 'claude-code')
+    account = binding.get('account') if type(binding) is dict else None
+    return safe_text(provider) + " account " + safe_text(account or "default")
 
 
 def event_ids(event):

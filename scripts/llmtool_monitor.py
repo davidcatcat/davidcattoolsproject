@@ -45,6 +45,7 @@ from datetime import date, datetime, timezone
 import math
 import os
 import re
+import select
 import shutil
 import stat
 import struct
@@ -730,6 +731,7 @@ class Monitor:
         self.task_map: dict = {}
         self.task_baseline = False   # a successful task scan has adopted the starting point
         self.github = None   # GitHubSource for the Activity view; None means no network at all
+        self.agents = None   # ClaudeAgents: `claude agents` per account; None asks no CLI
         self.office: list = []
         self.office_state: dict = {}
         self.office_error: str | None = None   # why the office view could not be built
@@ -830,7 +832,9 @@ class Monitor:
                                      verdicts=self.github.verdicts if self.github else None,
                                      ci=self.github.ci_runs if self.github else None,
                                      ci_view=self.github.ci_view if self.github else None,
-                                     runner_root=runner_roots())
+                                     runner_root=runner_roots(),
+                                     agents=None if self.agents is None
+                                     else self.agents.sessions(claude_config_dirs()))
             except Exception as exc:  # never break process monitoring, but never show stale rows
                 message = type(exc).__name__
                 if message != self.office_error:
@@ -3489,6 +3493,9 @@ def _claude_state(entry: dict, who: str, task: str, detail: str, age: float | No
         # is still with the model, not idle.
         state = WORKING if quiet <= OFFICE_STALL else STALLED
         detail = "等模型回覆" + ("超過 15 分鐘" if state == STALLED else "") + suffix
+    clis = entry.get("clis")
+    if type(clis) is int and clis > 1:
+        detail += f"（同一 session 有 {clis} 個 CLI）"
     return state, detail, age
 
 
@@ -3749,6 +3756,8 @@ def claude_rows(now: float, root=None,
         # A session with no recent session file (e.g. a `--bg --resume` stopped
         # at a menu before writing one) is listed only when it needs a person.
         place = _place(entry.get("cwd"), canonical)
+        if place is None and entry.get("listed") and "cwd" not in entry:
+            place = ("unknown", "")   # the listing names no folder: still a person's to answer
         if sid in seen or place is None:
             continue
         task = f"task {place[1]}" if place[0] == "task" else ""
@@ -5045,6 +5054,164 @@ def _job_state(sessions: str, entry: dict) -> str | None:
     return state if type(state) is str else None
 
 
+# `claude agents --json` per account (#364): a `claude --bg --resume` stopped at
+# a menu can wait for a person without a transcript or a registry entry the
+# process table ties to it. The listing is asked at most every AGENTS_EVERY
+# seconds per monitor, off the UI thread, with a short timeout; a failing or
+# slow call leaves no rows. Only the session id, state words, cwd and launcher
+# name are kept: never the prompt, transcript, argv or environment.
+AGENTS_EVERY = 60.0
+AGENTS_TIMEOUT = 5.0
+AGENTS_OUTPUT = 1 << 20
+AGENTS_WAITING = frozenset({"blocked", "waiting"})
+SESSION_ID = re.compile(r"[0-9A-Za-z][0-9A-Za-z-]{7,63}")
+
+
+def claude_config_dirs(root=None) -> list[str]:
+    """Each local Claude account's config directory (CLAUDE_CONFIG_DIR)."""
+    return [os.path.dirname(top) for top in claude_roots(root)]
+
+
+def parse_claude_agents(text) -> dict[str, dict]:
+    """{session id: minimal registry-like entry} of the sessions a
+    `claude agents --json` listing reports as blocked or waiting for a person.
+    Anything else (busy, working, done, idle, malformed) is left out."""
+    try:
+        data = json.loads(text)
+    except (TypeError, ValueError, RecursionError):
+        return {}
+    if type(data) is dict:
+        data = next((data[key] for key in ("agents", "sessions", "jobs")
+                     if type(data.get(key)) is list), [])
+    if type(data) is not list:
+        return {}
+    found = {}
+    for item in data[:500]:
+        if type(item) is not dict:
+            continue
+        sid = next((item[key] for key in ("sessionId", "session_id", "id")
+                    if type(item.get(key)) is str), None)
+        if sid is None or not SESSION_ID.fullmatch(sid):
+            continue
+        words = {item.get(key) for key in ("state", "status", "jobState")}
+        words = {word for word in words if type(word) is str}
+        if not words & AGENTS_WAITING:
+            continue
+        entry = {"sessionId": sid, "kind": "bg", "listed": True}
+        if "waiting" in words:
+            entry["status"] = "waiting"
+        else:
+            entry["status"], entry["jobState"] = "busy", "blocked"
+        cwd = item.get("cwd")
+        if type(cwd) is str and cwd.startswith(os.sep) and len(cwd) <= 4096:
+            entry["cwd"] = cwd
+        name = item.get("name")
+        if type(name) is str and SESSION_NAME.fullmatch(name):
+            entry["name"] = name
+        found[sid] = entry
+    return found
+
+
+def _run_claude_agents(claude: str, config_dir: str, timeout: float) -> str | None:
+    env = dict(os.environ)
+    if os.path.realpath(config_dir) == os.path.realpath(os.path.dirname(CLAUDE_PROJECTS)):
+        env.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        env["CLAUDE_CONFIG_DIR"] = config_dir
+    try:
+        child = subprocess.Popen([claude, "agents", "--json"], stdin=subprocess.DEVNULL,
+                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    # Read with a size cap and a deadline: a noisy or stuck CLI is killed as
+    # soon as it passes AGENTS_OUTPUT bytes or the timeout, never buffered whole.
+    chunks, size, ok = [], 0, False
+    deadline = time.monotonic() + timeout
+    try:
+        fd = child.stdout.fileno()
+        while True:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            ready, _, _ = select.select([fd], [], [], left)
+            if not ready:
+                break
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                ok = True
+                break
+            size += len(chunk)
+            if size > AGENTS_OUTPUT:
+                break
+            chunks.append(chunk)
+        if ok:
+            left = max(0.0, deadline - time.monotonic())
+            ok = child.wait(timeout=left) == 0
+    except (OSError, ValueError, subprocess.SubprocessError):
+        ok = False
+    finally:
+        if child.poll() is None:
+            try:
+                child.kill()
+            except OSError:
+                pass
+        try:
+            child.wait(timeout=1.0)
+        except subprocess.SubprocessError:
+            pass
+        try:
+            child.stdout.close()
+        except OSError:
+            pass
+    if not ok:
+        return None
+    return b"".join(chunks).decode("utf-8", "replace")
+
+
+class ClaudeAgents:
+    """The last `claude agents --json` answer of each account, refreshed at most
+    every `every` seconds in a background thread (inline when background is
+    False). runner(config_dir) returns the listing text or None."""
+
+    def __init__(self, runner=None, clock=time.monotonic, background: bool = True,
+                 every: float = AGENTS_EVERY, timeout: float = AGENTS_TIMEOUT) -> None:
+        self.runner, self.clock, self.background = runner, clock, background
+        self.every, self.timeout = every, timeout
+        self.found: dict[str, dict] = {}
+        self.due = 0.0
+        self.thread: threading.Thread | None = None
+
+    def _default_runner(self, config_dir: str) -> str | None:
+        claude = shutil.which("claude")
+        return None if claude is None else _run_claude_agents(claude, config_dir, self.timeout)
+
+    def _refresh(self, config_dirs: list[str]) -> None:
+        runner = self.runner or self._default_runner
+        found = {}
+        for config_dir in config_dirs:
+            # An account that never ran a background session has nothing to list.
+            if not any(os.path.isdir(os.path.join(config_dir, name)) for name in ("jobs", "sessions")):
+                continue
+            try:
+                found.update(parse_claude_agents(runner(config_dir)))
+            except Exception:   # one account's failure never hides another's or the office
+                continue
+        self.found = found
+
+    def sessions(self, config_dirs: list[str]) -> dict[str, dict]:
+        now = self.clock()
+        busy = self.thread is not None and self.thread.is_alive()
+        if now >= self.due and not busy:
+            self.due = now + self.every
+            dirs = list(config_dirs)
+            if self.background:
+                self.thread = threading.Thread(target=self._refresh, args=(dirs,), daemon=True)
+                self.thread.start()
+            else:
+                self._refresh(dirs)
+        return dict(self.found)
+
+
 def _claude_live_sessions(sessions, processes: list[Process]) -> tuple[set, int] | None:
     """Session ids of running Claude CLIs, from the CLI's own <pid>.json
     registry, plus how many running CLIs have no readable entry. None when
@@ -5066,17 +5233,17 @@ def _one_shot_runs(processes: list[Process], sessions) -> list[Process]:
 
 
 def _closed_claude_cli(rows: list[OfficeRow], sessions,
-                       processes: list[Process]) -> list[OfficeRow]:
+                       processes: list[Process], keep=frozenset()) -> list[OfficeRow]:
     """An interactive CLI session whose process has exited still leaves its
     record behind. Each running CLI names its session in the registry; a CLI
     without a readable entry keeps the most recently active unnamed session.
     Any other CLI session shows as closed for a while, then leaves with its
-    subagents."""
+    subagents. keep: keys of sessions `claude agents` still lists."""
     found = _claude_live_sessions(sessions, processes)
     if found is None:
         return rows
     live, unnamed = found
-    keys = {f"claude:{sid}.jsonl" for sid in live}
+    keys = {f"claude:{sid}.jsonl" for sid in live} | set(keep)
     rest = sorted((row for row in rows if row.cli and row.key not in keys),
                   key=lambda row: row.age if row.age is not None else 1e12)
     keys |= {row.key for row in rest[:unnamed]}
@@ -5126,6 +5293,38 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
     return out
 
 
+def _live_rank(entry: dict) -> int:
+    """How urgent a live session's status words are: 0 waits for a person,
+    1 works, 2 sits idle, 3 anything else."""
+    status, job = entry.get("status"), entry.get("jobState")
+    if status == "waiting" or job == "blocked":
+        return 0
+    if status == "busy" or job == "working":
+        return 1
+    return 2 if status == "idle" else 3
+
+
+def _live_by_session(registered: dict | None) -> dict[str, dict]:
+    """{session id: entry} of running CLIs. When several CLIs name one session
+    the most urgent wins (waiting/blocked > busy/working > idle > other), then
+    the newest statusUpdatedAt, then the higher PID; `clis` counts them."""
+    groups: dict[str, list] = {}
+    for pid, entry in (registered or {}).items():
+        groups.setdefault(entry["sessionId"], []).append((pid, entry))
+
+    def order(item):
+        pid, entry = item
+        since = entry.get("statusUpdatedAt")
+        since = since if type(since) in (int, float) else float("-inf")
+        return (_live_rank(entry), -since, -pid)
+
+    out = {}
+    for sid, items in groups.items():
+        pid, entry = min(items, key=order)
+        out[sid] = dict(entry, pid=pid, clis=len(items))
+    return out
+
+
 def office_rows(processes: list[Process], now: float | None = None, *,
                 codex_root: str | None = None, claude_root=None,
                 canonical: str | None = None,
@@ -5136,7 +5335,10 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                 finished_runs: list | None = None,
                 verdicts: dict | None = None,
                 runner_root: str | None = None, ci: list | None = None,
-                ci_view: CiView | None = None) -> list[OfficeRow]:
+                ci_view: CiView | None = None,
+                agents: dict | None = None) -> list[OfficeRow]:
+    """agents: {session id: entry} of background sessions `claude agents`
+    reports blocked or waiting (see ClaudeAgents); None reads none."""
     now = time.time() if now is None else now
     canonical = canonical or canonical_root()
     sessions = claude_sessions(claude_root)
@@ -5149,8 +5351,20 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             return "PM（Codex）"
         return "你" if not owner or owner.startswith("Claude Code daemon") else f"啟動它的 {family(owner)}"
 
-    live = {entry["sessionId"]: (entry, answerer(owners.get(pid, "")))
-            for pid, entry in (_claude_registered(sessions, processes) or {}).items()}
+    live = {sid: (entry, answerer(owners.get(entry.get("pid"), "")))
+            for sid, entry in _live_by_session(_claude_registered(sessions, processes)).items()}
+    for sid, listed in (agents or {}).items():
+        # What `claude agents` says beats the registry's own status word unless
+        # the registry is more urgent; a session it lists but no running CLI
+        # names waits for you.
+        entry, who = live.get(sid, ({}, "你"))
+        if entry and _live_rank(entry) < _live_rank(listed):
+            listed = {key: value for key, value in listed.items()
+                      if key not in ("status", "jobState")}
+        merged = {**entry, **listed}
+        if "cwd" in entry:
+            merged["cwd"] = entry["cwd"]
+        live[sid] = (merged, who)
     # Monitor.poll builds the office only after the process table was read,
     # so an empty list means nothing is running, not "unknown".
     running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
@@ -5162,7 +5376,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     # Each running CLI is attached to one thread.
     clis = agent_clis(processes, sessions)
     rows = _closed_codex_cli(rows, sum(family(p.role) == "Codex" for p in clis))
-    rows = _closed_claude_cli(rows, sessions, processes)
+    rows = _closed_claude_cli(rows, sessions, processes,
+                              keep={f"claude:{sid}.jsonl" for sid in agents or {}})
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)
@@ -5544,6 +5759,7 @@ def record_lines(records: list[str]) -> list[str]:
 
 def run_once(github: "GitHubSource | None" = None) -> int:
     mon = Monitor()
+    mon.agents = ClaudeAgents(background=False)   # a single poll: ask before it, not after
     if github is not None:
         github.refresh()   # before the poll, so the D6 list can see PR states
         mon.github = github
@@ -5760,6 +5976,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.once:
         return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
+    mon.agents = ClaudeAgents()
     mon.github = github
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and os.environ.get("TERM", "dumb") != "dumb"
     if args.plain or not interactive:

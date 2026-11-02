@@ -340,11 +340,12 @@ class PMLayoutTests(Base):
 
     def test_account_text_is_a_system_notice(self):
         ui = self.ui
-        ui.pm_runtime = type("Runtime", (), {"claude_config_dir": "/Users/x/.claude-account2"})()
+        ui.pm_runtime = type("Runtime", (), {"runtime": "claude-code"})()
+        ui.pm_binding = {"runtime": "claude-code", "account": "work"}
         ui._append_account("PM mode: …; ", ". Esc interrupts a turn.")
         self.assertTrue(ui.conversation.text.endswith(
-            "PM mode: …; Claude account /Users/x/.claude-account2. Esc interrupts a turn."))
-        self.assertEqual(self.tokens("Claude account /Users/x/.claude-account2"), {"role.system"})
+            "PM mode: …; claude-code account work. Esc interrupts a turn."))
+        self.assertEqual(self.tokens("claude-code account work"), {"role.system"})
         self.assertEqual(self.tokens("PM mode: …; "), {"text"})
 
     def test_queued_owner_note_and_system_notice_styles(self):
@@ -357,7 +358,7 @@ class PMLayoutTests(Base):
 
     def test_status_bar_states_queue_and_keys(self):
         ui = self.ui
-        self.assertEqual(ui.status_text(), "▸▸ PM 模式 · auto | abcdef01 | 待命 | 最新 | F6 滑鼠:開 | F1")
+        self.assertEqual(ui.status_text(), "▸▸ PM 模式 · auto | claude/default | abcdef01 | 待命 | 最新 | F6 滑鼠:開 | F1")
         self.start()
         ui.pm_outbox.append("next")
         status = ui.status_text()
