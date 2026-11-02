@@ -2638,6 +2638,110 @@ class OfficeViewTests(unittest.TestCase):
         # A job id is a name under jobs/, never a path.
         self.assertIsNone(mon._job_state(str(self.claude.parent / "sessions"), {"jobId": "../j1"}))
 
+    AGENTS_LISTING = json.dumps([
+        {"sessionId": "aaaaaaaa-0001", "state": "blocked", "kind": "bg", "name": "claude-developer",
+         "cwd": "{task}", "prompt": "PROMPT-SECRET", "argv": ["claude", "--bg", "ARGV-SECRET"]},
+        {"sessionId": "bbbbbbbb-0002", "status": "waiting", "kind": "bg"},   # no folder named
+        {"sessionId": "cccccccc-0003", "state": "working", "cwd": "{canonical}"},
+        {"sessionId": "dddddddd-0004", "state": "done", "cwd": "{canonical}"},
+        {"sessionId": "eeeeeeee-0005", "state": "busy", "cwd": "{canonical}"},
+        {"sessionId": "ffffffff-0006", "state": "blocked", "cwd": "/elsewhere"},   # not this repo
+        {"sessionId": "../x", "state": "blocked"}, "junk"])
+
+    def _listing(self):
+        return (self.AGENTS_LISTING.replace("{task}", str(self.task))
+                .replace("{canonical}", self.canonical))
+
+    def test_claude_agents_blocked_or_waiting_without_transcript_need_a_person(self):
+        self._register("wp-1", str(self.task), trusted_agent_id="claude-developer")
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        asked = []
+        def runner(config_dir):
+            asked.append(config_dir)
+            return self._listing()
+        agents = mon.ClaudeAgents(runner=runner, background=False)
+        listed = agents.sessions(mon.claude_config_dirs(str(self.claude)))
+        self.assertEqual(asked, [str(self.claude.parent)])
+        self.assertEqual(sorted(listed), ["aaaaaaaa-0001", "bbbbbbbb-0002", "ffffffff-0006"])
+        rows = [row for row in mon.office_rows(
+            [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+            canonical=self.canonical, agents=listed) if row.kind != "worker"]
+        got = {row.sid: (row.name, row.state, row.detail) for row in rows}
+        self.assertEqual(got, {
+            "aaaaaaaa": ("claude developer（背景）", mon.ATTENTION,
+                         "等人操作，要你回（task wp-1）（還沒有對話紀錄）｜claude-developer"),
+            "bbbbbbbb": ("claude 背景", mon.ATTENTION, "等人回覆，要你回（還沒有對話紀錄）")})
+        text = "\n".join(mon.office_lines(rows))
+        self.assertIn("需注意", text)
+        for secret in SECRETS + ("ARGV-SECRET", "--bg"):
+            self.assertNotIn(secret, text)
+        for entry in listed.values():
+            self.assertLessEqual(set(entry), {"sessionId", "kind", "listed", "status",
+                                              "jobState", "cwd", "name"})
+        # Asked again only after the cadence, never on every office rebuild.
+        agents.sessions(mon.claude_config_dirs(str(self.claude)))
+        self.assertEqual(len(asked), 1)
+
+    def test_claude_agents_blocked_session_with_a_transcript_is_not_closed(self):
+        self._write(self.claude / "proj" / "aaaaaaaa-0001.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "title a"}], age=600)
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)   # registry readable, no CLI in it
+        listed = mon.parse_claude_agents(json.dumps(
+            [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "cwd": self.canonical}]))
+        rows = [row for row in mon.office_rows(
+            [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+            canonical=self.canonical, agents=listed) if row.kind != "worker"]
+        self.assertEqual([(row.sid, row.state, row.detail) for row in rows],
+                         [("aaaaaaaa", mon.ATTENTION, "等人操作，要你回")])
+
+    def test_claude_agents_failure_or_timeout_degrades_to_no_rows(self):
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        dirs = mon.claude_config_dirs(str(self.claude))
+        def boom(config_dir):
+            raise subprocess.TimeoutExpired(["claude", "agents", "--json"], 5)
+        for runner in (lambda config_dir: None, lambda config_dir: "not json",
+                       lambda config_dir: '{"agents": "x"}', boom):
+            self.assertEqual(mon.ClaudeAgents(runner=runner, background=False).sessions(dirs), {})
+        # An account that never ran a background session is not asked at all.
+        asked = []
+        empty = Path(self.tmp.name) / "fresh-account"
+        empty.mkdir()
+        mon.ClaudeAgents(runner=asked.append, background=False).sessions([str(empty)])
+        self.assertEqual(asked, [])
+        # The real call: a non-zero exit, a missing binary and a slow CLI all give None.
+        fake = Path(self.tmp.name) / "fake-claude"
+        fake.write_text("#!/bin/sh\nsleep 5\n", encoding="utf-8")
+        fake.chmod(0o700)
+        self.assertIsNone(mon._run_claude_agents(str(fake), str(self.claude.parent), 0.2))
+        self.assertIsNone(mon._run_claude_agents("/nonexistent/claude", str(self.claude.parent), 1))
+        fake.write_text("#!/bin/sh\necho '[]'\nexit 3\n", encoding="utf-8")
+        self.assertIsNone(mon._run_claude_agents(str(fake), str(self.claude.parent), 2))
+        fake.write_text('#!/bin/sh\necho "[{\\"sessionId\\": \\"aaaaaaaa-0001\\", '
+                        '\\"state\\": \\"blocked\\", \\"dir\\": \\"$CLAUDE_CONFIG_DIR\\"}]"\n',
+                        encoding="utf-8")
+        out = mon._run_claude_agents(str(fake), str(self.claude.parent), 2)
+        self.assertEqual(json.loads(out)[0]["dir"], str(self.claude.parent))
+        # The office still builds with no listing.
+        self.assertEqual([row for row in mon.office_rows(
+            [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+            canonical=self.canonical, agents={}) if row.kind != "worker"], [])
+
+    def test_claude_agents_refresh_runs_in_the_background(self):
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        clock = [100.0]
+        agents = mon.ClaudeAgents(runner=lambda config_dir: self._listing(),
+                                  clock=lambda: clock[0], every=60.0)
+        dirs = mon.claude_config_dirs(str(self.claude))
+        self.assertEqual(agents.sessions(dirs), {})   # nothing yet: the call runs off the UI thread
+        agents.thread.join(5)
+        self.assertIn("aaaaaaaa-0001", agents.sessions(dirs))
+        first = agents.thread
+        clock[0] += 61
+        agents.sessions(dirs)
+        self.assertIsNot(agents.thread, first)
+        agents.thread.join(5)
+
     def test_d6_developer_binding_preserves_explicit_ui_session_label(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-" + "developer")
         ui_name = "claude-" + "developer-" + "ui"
