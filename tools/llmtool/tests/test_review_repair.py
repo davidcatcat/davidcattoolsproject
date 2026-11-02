@@ -6,6 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from llmtool import cli, review_repair, run_budget, task_submission_cli
+from llmtool.task_store import TaskStore
 
 TASK, RUN, HEAD, CONTRACT = 'a' * 32, 'b' * 32, 'c' * 40, 'd' * 64
 EXECUTOR, PR, EVENT_ID = 'executor-d6', 42, 'e' * 32
@@ -174,7 +175,31 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(packet['reviewer_text_excerpt_untrusted_data'],
                          'FAIL: test_remote\nAssertionError')
         self.assertEqual(task_submission_cli._validate_repair_packet(packet), packet)
-        self.assertIsNone(self.store.get(TASK)['review_repair_claims'][0]['comment_id'])
+        claim = self.store.get(TASK)['review_repair_claims'][0]
+        self.assertIsNone(claim['comment_id'])
+        self.assertEqual(claim['version'], 1)
+
+    def test_remote_test_repair_claim_passes_real_task_store_validation(self):
+        self.store = TaskStore(self.temp.name)
+        self.store.create(_record())
+        receipt = {
+            'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
+            'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_remote'],
+            'failure_excerpt': 'FAIL: test_remote\nAssertionError',
+        }
+        receipt['receipt_digest'] = hashlib.sha256(json.dumps(
+            receipt, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+        result = self.dispatch(
+            remote_test_receipt=receipt,
+            repair_task_recorder=lambda **request: {
+                'task_id': request['repair_task_id'],
+                'pm_assignment': {'acceptance': ['Repair the reported issue.']},
+            })
+        claim = self.store.get(TASK)['review_repair_claims'][0]
+        self.assertEqual(claim['version'], 1)
+        self.assertIsNone(claim['comment_id'])
+        self.assertEqual(result['claim']['state'], 'DISPATCHED')
 
     def test_replay_after_restart_does_not_dispatch_twice(self):
         self.dispatch()

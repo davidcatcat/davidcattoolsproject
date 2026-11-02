@@ -295,11 +295,26 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
         _refuse('REPAIR_CLAIM_UNAVAILABLE')
     attempts = [claim for claim in claims if _claim_family(claim) == family]
     packet_version = packet.get('version', 0)
-    existing = next((claim for claim in attempts
-                     if claim.get('pr') == pr_number and
-                     claim.get('head_sha') == packet['failed_head'] and
-                     claim.get('version') == packet_version and
-                     claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')), None)
+    packet_sha = hashlib.sha256(json.dumps(
+        packet, ensure_ascii=True, sort_keys=True,
+        separators=(',', ':')).encode('utf-8')).hexdigest()
+    if packet_version == 0:
+        existing = next((claim for claim in attempts
+                         if claim.get('pr') == pr_number and
+                         claim.get('head_sha') == packet['failed_head'] and
+                         claim.get('packet_sha256') == packet_sha and
+                         claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')), None)
+        claim_version = max((claim.get('version', 0) for claim in claims
+                             if claim.get('pr') == pr_number and
+                             claim.get('head_sha') == packet['failed_head'] and
+                             type(claim.get('version')) is int), default=0) + 1
+    else:
+        existing = next((claim for claim in attempts
+                         if claim.get('pr') == pr_number and
+                         claim.get('head_sha') == packet['failed_head'] and
+                         claim.get('version') == packet_version and
+                         claim.get('state') in ('CLAIMED', 'DISPATCHED', 'UNKNOWN')), None)
+        claim_version = packet_version
     retry_claim = next((claim for claim in attempts
                         if retry_claim_id is not None and
                         claim.get('repair_task_id') == retry_claim_id and
@@ -319,13 +334,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if attempt > MAX_REPAIR_ATTEMPTS:
         # Stop after two failed corrections; continue through High Debug or reassignment.
         _refuse('REPAIR_LIMIT_REACHED')
-    packet_sha = hashlib.sha256(json.dumps(
-        packet, ensure_ascii=True, sort_keys=True,
-        separators=(',', ':')).encode('utf-8')).hexdigest()
     repair_task_id = new_id()
     claim = {
         'executor_task': executor_task, 'pr': pr_number,
-        'head_sha': packet['failed_head'], 'version': packet_version,
+        'head_sha': packet['failed_head'], 'version': claim_version,
         'attempt': attempt, 'family': family, 'state': 'CLAIMED',
         'repair_task_id': repair_task_id,
         'comment_id': (None if packet_version == 0 else packet.get('verdict_comment_id')),
