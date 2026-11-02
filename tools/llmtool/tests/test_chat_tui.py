@@ -590,12 +590,17 @@ class WidgetTests(Base):
     def test_tab_without_match_keeps_slash_draft_and_non_slash_tab_behavior(self):
         ui, _ = self.drive(['/nope', '\t',
                             lambda ui: self.assertEqual(ui.input.text, '/nope'),
-                            lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
-                            '\x15', 'hello', '\t',
+                            lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+
+        ui, _ = self.drive(['hello', '\t',
                             lambda ui: self.assertEqual(ui.input.text, 'hello'),
-                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input)),
-                            '\t', '\x15', 'cat', '\t',
-                            lambda ui: self.assertEqual(ui.input.text, 'cat')])
+                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+
+        ui, _ = self.drive(['cat', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, 'cat'),
+                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input))])
         self.assertEqual(ui.menu_items, [])
         self.factory.assert_not_called()
 

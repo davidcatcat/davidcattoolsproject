@@ -995,23 +995,13 @@ class ChatTUI:
             if not text.startswith("/"):
                 self.toggle_focus()
                 return
-            if self.input.buffer.cursor_position != len(text):
-                self.close_menu()
-                return
-            matches = slash_matches(text, self.dev)
-            if not matches:
-                self.close_menu()
-                return
-            if len(matches) == 1:
-                self.close_menu()
-                fill = matches[0][1]
-                self.input.buffer.set_document(self._Document(fill, len(fill)))
-                return
-            prefix = _common_prefix([item[0] for item in matches])
-            if len(prefix) > len(text):
-                self.input.buffer.set_document(self._Document(prefix, len(prefix)))
-                matches = slash_matches(prefix, self.dev)
-            self._set_menu(matches)
+            self._complete_slash_tab()
+
+        @keys.add("tab", filter=input_focused & menu_shown, eager=True)
+        def _tab_complete(event):
+            # A visible picker must not consume Tab before slash completion. Esc
+            # remains the explicit way to dismiss it without changing the draft.
+            self._complete_slash_tab()
 
         @keys.add("s-tab")
         def _focus(event):
@@ -1502,6 +1492,27 @@ class ChatTUI:
             self.menu_offset = 0
         self.menu_items = items
         self._sync_picker()
+
+    def _complete_slash_tab(self):
+        """Complete the slash draft or extend it to its candidates' common prefix."""
+        text = self.input.text
+        if self.input.buffer.cursor_position != len(text):
+            self.close_menu()
+            return
+        matches = slash_matches(text, self.dev)
+        if not matches:
+            self.close_menu()
+            return
+        if len(matches) == 1:
+            self.close_menu()
+            fill = matches[0][1]
+            self.input.buffer.set_document(self._Document(fill, len(fill)))
+            return
+        prefix = _common_prefix([item[0] for item in matches])
+        if len(prefix) > len(text):
+            self.input.buffer.set_document(self._Document(prefix, len(prefix)))
+            matches = slash_matches(prefix, self.dev)
+        self._set_menu(matches)
 
     def _sync_picker(self):
         """Match picker state to what is on screen.
