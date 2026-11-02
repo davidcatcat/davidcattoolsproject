@@ -1304,7 +1304,7 @@ MARKER_ACTOR_TARGETS = {
     "waiting_owner": (frozenset({"Integrator", "PM", "Owner"}),
                       frozenset({"Owner", "PM", "Integrator"})),
     "developer_dispatch": (frozenset({"PM", "Integrator"}),
-                           frozenset({"Codex", "OpenCode", "CompanyGW"})),
+                           frozenset({"Codex", "AGY", "OpenCode", "Developer", "CompanyGW"})),
     "developer_progress": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
                             frozenset({"PM", "Integrator", "Reviewer", "Owner", "CI"})),
     "test_result": (frozenset({"Codex", "OpenCode", "CompanyGW"}),
@@ -1962,7 +1962,32 @@ def activity_lines(tasks: list[Task], limit: int = 60,
                    github: "GitHubSource | None" = None, background: bool = False) -> list[str]:
     if github is not None:
         github.refresh_in_background() if background else github.refresh()
-    return render_activity(activity_events(tasks), limit, github)
+    lines = render_activity(activity_events(tasks), limit, github)
+    window_hours = int(github.window // 3600) if github is not None else 12
+    now = github.clock() if github is not None else time.time()
+    dispatches = ([event for event in github.events
+                   if type(event) is ActivityEvent and event.event_type == "developer_dispatch"
+                   and event.actor == "PM"] if github is not None else [])
+    if dispatches:
+        event = max(dispatches, key=lambda item: item.occurred_at)
+        age = max(0.0, now - event.occurred_at)
+        line = f"PM 上次派工：{_ago(age)}"
+        if age > 30 * 60:
+            line += "；超過 30 分鐘沒有派工"
+            line = "⚠ " + line
+        if event.target:
+            line += f"（→ {MARKER_NAMES.get(event.target, event.target)}"
+            if re.fullmatch(r"#\d{1,7}", event.reference or ""):
+                line += f"，{event.reference}"
+            line += "）"
+    else:
+        line = f"⚠ PM 上次派工：最近 {window_hours} 小時沒有"
+    return [line, *lines]
+
+
+def _activity_screen_lines(lines: list[str], width: int) -> list[str]:
+    """Wrap Activity text to the terminal's display width."""
+    return [piece for line in lines for piece in _wrap(line, max(1, width))]
 
 
 # ---------------------------------------------------------------- office view
@@ -5661,7 +5686,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
             put(3 + row, line, attr)
         hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
     elif view == "activity":
-        lines = activity_lines(mon.tasks, github=mon.github, background=True)
+        lines = _activity_screen_lines(
+            activity_lines(mon.tasks, github=mon.github, background=True), w - 1)
         offset = max(0, min(offset, len(lines) - body))
         end = len(lines) - offset
         for row, line in enumerate(lines[max(0, end - body):end]):

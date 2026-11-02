@@ -487,6 +487,44 @@ class MonitorTaskBaselineTests(unittest.TestCase):
 
 
 class ActivityViewTests(unittest.TestCase):
+    def test_pm_last_dispatch_header_recent_stale_absent_and_wrapped(self):
+        now = NOW
+
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            clock = staticmethod(lambda: now)
+            def __init__(self, events):
+                self.events = events
+            def refresh(self):
+                pass
+
+        recent = mon.ActivityEvent(now - 12 * 60, "developer_dispatch", "", "",
+                                   "ASSIGNED", "#763", actor="PM", target="AGY")
+        lines = mon.activity_lines([], github=Source([recent]))
+        self.assertEqual(lines[0], "PM 上次派工：12 分鐘前（→ AGY，#763）")
+
+        stale = replace(recent, occurred_at=now - 31 * 60)
+        lines = mon.activity_lines([], github=Source([stale]))
+        self.assertEqual(lines[0], "⚠ PM 上次派工：31 分鐘前；超過 30 分鐘沒有派工（→ AGY，#763）")
+
+        lines = mon.activity_lines([], github=Source([]))
+        self.assertEqual(lines[0], "⚠ PM 上次派工：最近 12 小時沒有")
+
+        wrapped = mon._activity_screen_lines([lines[0]], 18)
+        self.assertGreater(len(wrapped), 1)
+        self.assertTrue(all(mon._width(piece) <= 18 for piece in wrapped))
+
+    def test_developer_dispatch_activity_uses_marker_target(self):
+        for target in ("Codex", "AGY", "OpenCode", "Developer"):
+            body = (f"<!-- activity: type=developer_dispatch actor=PM target={target} "
+                    "status=ASSIGNED -->\nTask")
+            events = mon.github_events([comment(763, NOW, body)], [], NOW - 60)
+            self.assertEqual([event.event_type for event in events], ["developer_dispatch"])
+            line = mon._activity_line(events[0])
+            self.assertIn(f"PM → {target}：", line)
+            self.assertNotIn("→ Codex", line if target != "Codex" else "")
+
     def test_five_issue_event_classes_render_in_time_order(self):
         events = [
             mon.ActivityEvent(5, "worker_result", "task-1", "stage-1",
@@ -964,7 +1002,7 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertIn("每 30 秒", source.status)
         lines = mon.activity_lines([], github=source, background=True)   # not due yet
         self.assertEqual(len(run.calls), 3)
-        self.assertIn("GitHub #6：新留言 — bg", lines[0])
+        self.assertIn("GitHub #6：新留言 — bg", lines[1])
 
     def test_missing_gh_and_bad_repo_fail_closed(self):
         with patch.object(mon.shutil, "which", return_value=None):
