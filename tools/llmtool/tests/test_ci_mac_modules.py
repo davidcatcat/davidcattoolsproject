@@ -183,7 +183,13 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertNotEqual(report["level"], "L3")
                 self.assertIn(direct_id, report["test_ids"])
-                self.assertTrue(MAC_REQUIRED <= set(report["test_ids"]))
+                selected_ids = set(report["test_ids"])
+                normalized_mac_required = {
+                    test_id.partition(".")[0]
+                    if test_id.partition(".")[0] in selected_ids else test_id
+                    for test_id in MAC_REQUIRED
+                }
+                self.assertTrue(normalized_mac_required <= selected_ids)
                 for importer_id in importer_ids:
                     self.assertIn(importer_id, report["test_ids"])
 
@@ -408,7 +414,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     root,
                 )
         self.assertEqual(report["level"], "L1")
-        self.assertEqual(report["test_ids"], ["test_role_config", "test_role_config.RoleConfigTests"])
+        self.assertEqual(report["test_ids"], ["test_role_config"])
         self.assertEqual(report["fallback_reasons"], [])
         self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
