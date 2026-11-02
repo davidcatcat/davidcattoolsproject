@@ -1456,10 +1456,11 @@ def _probe_venv(python_executable, names):
         if key not in ("PYTHONPATH", "PYTHONHOME")
     }
     env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
     try:
         try:
             proc = subprocess.run(
-                [python_executable, "-I", "-c", script],
+                [python_executable, "-I", "-B", "-c", script],
                 capture_output=True,
                 text=True,
                 timeout=300,
