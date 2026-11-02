@@ -134,7 +134,7 @@ class ActivePMInboxTests(unittest.TestCase):
         self._complete(first)
         self._complete(second)
         third_native = self._claude_session()
-        third = self._ready_task(session='pm-' + third_native)
+        third = self._ready_task(session=third_native)
         self._complete(third)
         closed = self._record_pm()
         self.store.abandon(closed['task_id'], pm_session_id='pm-' + self.session,
