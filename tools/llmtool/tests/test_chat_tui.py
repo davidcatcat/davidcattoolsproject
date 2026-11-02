@@ -3257,7 +3257,7 @@ class PMConversationTests(BoundedPMTest):
 
         def connected_view(ui):
             self.assertTrue(ui.pm_mode)
-            self.assertEqual(ui.status_text(), '▸▸ PM 模式 · auto | ' + self.session_id[:8]
+            self.assertEqual(ui.status_text(), '▸▸ PM 模式 · auto | claude/default | ' + self.session_id[:8]
                          + ' | 暖機中… | 最新 | F6 滑鼠:開 | F1')   # no chat fields
             self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)

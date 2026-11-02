@@ -224,7 +224,7 @@ STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usag
 STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
-PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "keys")
+PM_STATUS_DROP_ORDER = ("identity", "help", "scroll", "session", "mouse", "keys")
 STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
 STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
@@ -236,8 +236,8 @@ ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Es
 PM_TICK_SECONDS = 0.03
 PM_CHARS_PER_TICK = 2
 PM_MAX_LAG_TICKS = 33
-PM_USAGE = ("usage: /pm list\n       /pm use N|SESSION\n"
-            "       /pm new [--runtime claude|codex] [--account NAME] [CWD]\n"
+PM_USAGE = ("usage: /pm new [--runtime claude|codex] [--account NAME] [CWD]\n"
+            "       /pm list\n       /pm use N|SESSION\n"
             "       /pm accounts [--check]\n       /pm connect [SESSION [CWD]]\n"
             "       /pm disconnect\n       /pm history\n       /pm queue [clear|send]\n"
             "       /pm\n(a CWD with spaces: quote it or escape the spaces)")
@@ -1197,7 +1197,7 @@ class ChatTUI:
         if self.pm_mode:
             # Chat provider/model/usage are not the PM's; in PM mode only PM fields show.
             fields.update(self.pm_status_fields(compact))
-            shown = ["mode", "session", "state", "keys", "scroll", "mouse", "help"]
+            shown = ["mode", "identity", "session", "state", "keys", "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
         for name in PM_STATUS_DROP_ORDER if self.pm_mode else STATUS_DROP_ORDER:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
@@ -2606,12 +2606,13 @@ class ChatTUI:
             state = "錯誤 " + state[len("error("):-1]
         else:
             state = PM_STATE_LABELS.get(state, state)
-        # W56d lead: ▸▸ PM 模式 · permission mode · 背景 N · ↓ 查看 · 佇列 N
+        # Keep the PM mode and permission state in the lead; runtime/account can drop first.
         binding = self.pm_binding if type(self.pm_binding) is dict else {}
         runtime = binding.get('runtime', getattr(self.pm_runtime, 'runtime', 'claude-code'))
+        if runtime == 'claude-code':
+            runtime = 'claude'
         account = binding.get('account') or 'default'
-        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.safe_text(runtime),
-                chat_tui_pm.safe_text(account), chat_tui_pm.permission_mode()]
+        lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_mode()]
         count = self.background_count()
         if count is not None:
             lead.append("背景 %s" % count)
@@ -2619,7 +2620,10 @@ class ChatTUI:
                 lead.append("↓ 查看")
         if self.pm_outbox:
             lead.append("佇列 %d" % len(self.pm_outbox) + (" 暫停" if self.pm_outbox_paused else ""))
-        return {"mode": " · ".join(lead), "session": compact(session_id, 8),
+        return {"mode": " · ".join(lead),
+                "identity": compact(chat_tui_pm.safe_text(runtime) + "/"
+                                     + chat_tui_pm.safe_text(account), 20),
+                "session": compact(session_id, 8),
                 "state": compact(state, 18)}
 
     # -- PM background work (W56d) ---------------------------------------------------
