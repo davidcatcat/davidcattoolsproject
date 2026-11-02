@@ -276,9 +276,11 @@ class PMRuntimeTests(unittest.TestCase):
             return self.process
 
         kwargs.setdefault('clock', lambda: 1000)
+        kwargs.setdefault('state_root', self.root)
+        state_root = kwargs.pop('state_root')
         runtime = pm_runtime.PMRuntime(SESSION, cwd=self.cwd, runner=runner,
-                                       state_root=self.root, environ={'HOME': self.temp.name},
-                                       **kwargs)
+                                       state_root=state_root,
+                                       environ={'HOME': self.temp.name}, **kwargs)
         self.runtimes.add(runtime)
         self.addCleanup(runtime.close)
         return runtime
@@ -580,6 +582,67 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertFalse(binding['session_started'])
         self.assertEqual(pm_runtime.current_binding(state_root=self.root), binding)
 
+    def test_binding_listing_selection_and_codex_runtime(self):
+        binding_root = Path(self.temp.name) / 'listing-state'
+        first = pm_runtime.create_dedicated_pm(self.cwd, state_root=binding_root,
+                                               clock=lambda: 1000)
+        second = pm_runtime.create_dedicated_pm(self.cwd, runtime='codex',
+                                                state_root=binding_root, clock=lambda: 1001)
+        self.assertEqual([item['native_session_id'] for item in pm_runtime.list_bindings(
+            state_root=binding_root)], [second['native_session_id'], first['native_session_id']])
+        selected = pm_runtime.select_binding(first['native_session_id'], state_root=binding_root)
+        self.assertEqual(selected['native_session_id'], first['native_session_id'])
+        self.assertEqual(pm_runtime.current_binding(state_root=binding_root)['native_session_id'],
+                         first['native_session_id'])
+        runtime = self.runtime(runtime='claude-code', state_root=binding_root)
+        runtime.pm_session_id = second['native_session_id']
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_RUNTIME_UNSUPPORTED')
+        self.assertEqual(self.calls, [])
+
+    def test_binding_listing_and_selection_refuse_symlinks_and_malformed_files(self):
+        binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root)
+        symlink_id = '11234567-89ab-cdef-0123-456789abcdef'
+        (self.root / (symlink_id + '.binding.json')).symlink_to(
+            self.root / (binding['native_session_id'] + '.binding.json'))
+        with self.assertRaises(LLMToolError):
+            pm_runtime.list_bindings(state_root=self.root)
+        with self.assertRaises(LLMToolError):
+            pm_runtime.select_binding(symlink_id, state_root=self.root)
+        (self.root / (symlink_id + '.binding.json')).unlink()
+        malformed_id = '21234567-89ab-cdef-0123-456789abcdef'
+        (self.root / (malformed_id + '.binding.json')).write_text('{', encoding='utf-8')
+        with self.assertRaises(LLMToolError):
+            pm_runtime.list_bindings(state_root=self.root)
+
+    def test_binding_account_mismatch_and_one_shot_override(self):
+        account_a = Path(self.temp.name) / 'account-a'
+        account_b = Path(self.temp.name) / 'account-b'
+        account_a.mkdir(mode=0o700)
+        account_b.mkdir(mode=0o700)
+        config = ('accounts:\n  A:\n    kind: claude\n    config_dir: ' + str(account_a) +
+                  '\n  B:\n    kind: claude\n    config_dir: ' + str(account_b) +
+                  '\nroles:\n  pm:\n    account: B\n')
+        self.write_user_config(config)
+        binding = pm_runtime.current_binding(SESSION, state_root=self.root)
+        binding['account'] = 'A'
+        pm_runtime._write_json_atomic(self.root, pm_runtime._binding_path(self.root, SESSION),
+                                      binding)
+        config_path = Path(self.temp.name) / '.config/llmtool/config.yaml'
+        original_config = config_path.read_bytes()
+        runtime = self.runtime()
+        with self.assertRaises(LLMToolError) as raised:
+            runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_ACCOUNT_MISMATCH')
+        self.assertEqual(self.calls, [])
+        runtime = self.runtime(account='A')
+        with patch.object(pm_runtime.active_pm_inbox, 'observe_claude_session',
+                          return_value=self.cwd):
+            runtime.open()
+        self.assertEqual(self.calls[0][2]['CLAUDE_CONFIG_DIR'], str(account_a))
+        self.assertEqual(config_path.read_bytes(), original_config)
+
     def test_completed_first_turn_marks_binding_for_resume_on_next_open(self):
         process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
         runtime = self.runtime(process, clock=time.time)
@@ -600,6 +663,27 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertIn('--resume', argv)
         self.assertNotIn('--session-id', argv)
         later.close()
+
+    def test_completed_turn_does_not_persist_legacy_account_override(self):
+        account = os.path.join(self.temp.name, 'legacy-account')
+        os.mkdir(account, 0o700)
+        self.write_user_config('accounts:\n  A:\n    kind: claude\n    config_dir: ' +
+                               account + '\n')
+        binding_path = pm_runtime._binding_path(self.root, SESSION)
+        binding = pm_runtime.current_binding(SESSION, state_root=self.root,
+                                             resolve_legacy_account=False)
+        binding.pop('account', None)
+        pm_runtime._write_json_atomic(self.root, binding_path, binding)
+        process = FakeProcess(encoded({'type': 'result', 'result': 'Done'}))
+        runtime = self.runtime(process, clock=time.time)
+        runtime.environ['LLMTOOL_ROLE_PM_ACCOUNT'] = 'A'
+        runtime.open()
+        list(runtime.send('first request'))
+        runtime.close()
+        persisted = pm_runtime.current_binding(SESSION, state_root=self.root,
+                                               resolve_legacy_account=False)
+        self.assertNotIn('account', persisted)
+        self.assertTrue(persisted['session_started'])
 
     def test_create_then_connect_does_not_treat_creator_as_live_session(self):
         binding = pm_runtime.create_dedicated_pm(self.cwd, state_root=self.root)
