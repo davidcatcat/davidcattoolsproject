@@ -769,7 +769,9 @@ def _validate(record):
                       any(ord(c) < 0x20 or ord(c) == 0x7f for c in item['native_session_id']))) or
                     item.get('account_mode') not in ('EXPLICIT_CLAUDE_CONFIG_DIR',
                                                       'DEFAULT_SECOND_ACCOUNT',
-                                                      'CODEX_CLI') or
+                                                      'CODEX_CLI', 'ROLES',
+                                                      'EXPLICIT', 'LEGACY',
+                                                      'BUILTIN_DEFAULT') or
                     type(item.get('claimed_at')) is not str or
                     type(item.get('updated_at')) is not str or
                     (item['state'] == 'CLAIMED' and

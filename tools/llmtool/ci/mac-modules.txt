@@ -1,7 +1,8 @@
-# Explicit Mac-required unittest IDs; each class exercises native process or TTY behavior.
+# Explicit unittest classes selected for the Mac CI baseline.
 test_chat_tui_pty.ChatTUIPTYTests # Darwin PTY, terminal resize, and signal behavior.
 test_chat_tui_theme_pty.ThemePTYTests # Darwin PTY rendering, terminal input, and clipboard interactions.
-test_cli_lifecycle_state.LifecycleStateTests # Process-group ownership and Darwin killpg lifecycle semantics.
+test_cli_lifecycle_state.LifecycleStateTests # POSIX signal-handler ownership, restoration, and reaper safeguards.
+test_cli_lifecycle_state.BoundedWorkerLifecycleTests # Bounded process-group teardown and the Darwin zombie-only EPERM regression.
 test_cli_provider_lifecycle.TUISignalOwnershipTests # TUI signal ownership, reentrant handling, and shutdown behavior.
 test_cli_provider_lifecycle.CLIProviderLifecycleTests # CLI signal forwarding, descendant cleanup, and process groups.
 test_codex_cli_provider.CodexCLIProviderTests # CLI sandbox contract, signals, and owned process-group cleanup.
