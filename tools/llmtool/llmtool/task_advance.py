@@ -4,14 +4,187 @@ import os
 import re
 import contextlib
 import io
+import importlib.util
 import json
 import shutil
+import subprocess
+from pathlib import Path
 from argparse import Namespace
 
 from . import active_pm_inbox, github_events, review_dispatch, review_repair, review_result
 from . import task_completion, task_submission_cli
 from .errors import LLMToolError
 from .task_store import TaskStore
+
+
+class _PublishRefusal(Exception):
+    def __init__(self, code):
+        self.code = code
+
+
+def _publish_run_git(root, args):
+    return subprocess.run(['git', *args], cwd=root, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          check=False, timeout=30)
+
+
+def _publish_run_gh(root, args):
+    return subprocess.run(['gh', *args], cwd=root, stdin=subprocess.DEVNULL,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                          check=False, timeout=30)
+
+
+def _publish_output(result):
+    if type(getattr(result, 'stdout', None)) is bytes:
+        try:
+            return result.stdout.decode('utf-8')
+        except UnicodeDecodeError:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+    if type(getattr(result, 'stdout', None)) is str:
+        return result.stdout
+    raise _PublishRefusal('PUBLISH_COMMAND_FAILED')
+
+
+def _publish_command(runner, root, args, *, code='PUBLISH_COMMAND_FAILED'):
+    try:
+        result = runner(root, args)
+    except Exception:
+        raise _PublishRefusal(code) from None
+    if getattr(result, 'returncode', 1) != 0:
+        raise _PublishRefusal(code)
+    return _publish_output(result)
+
+
+def _publish_pr(gh_runner, root, branch, task_id, expected_head):
+    output = _publish_command(gh_runner, root,
+        ['pr', 'list', '--head', branch, '--state', 'open',
+         '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+    try:
+        pulls = json.loads(output)
+    except (ValueError, TypeError):
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
+    if type(pulls) is not list:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    if not pulls:
+        _publish_command(gh_runner, root,
+            ['pr', 'create', '--head', branch,
+             '--title', f'llmtool Task {task_id}',
+             '--body', f'Automated publication for llmtool Task {task_id}.'],
+            code='PUBLISH_GITHUB_FAILED')
+        output = _publish_command(gh_runner, root,
+            ['pr', 'list', '--head', branch, '--state', 'open',
+             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+        try:
+            pulls = json.loads(output)
+        except (ValueError, TypeError):
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
+    if type(pulls) is not list or not pulls:
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    pull = pulls[0]
+    number = pull.get('number') if type(pull) is dict else None
+    head = pull.get('headRefOid') if type(pull) is dict else None
+    if (type(number) is not int or number < 1 or type(head) is not str or
+            head != expected_head):
+        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+    return number
+
+
+def _record_d6_result(*, task_id, canonical_root, root):
+    lifecycle_path = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
+    spec = importlib.util.spec_from_file_location('_llmtool_d6_worktree_lifecycle', lifecycle_path)
+    if spec is None or spec.loader is None:
+        raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.record_result(task_id=task_id, canonical_root=canonical_root, root=root)
+
+
+def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
+                  record_result_call=None):
+    """Commit scoped D6 changes, record the result, push, and ensure an open PR."""
+    git_runner = _publish_run_git if git_runner is None else git_runner
+    gh_runner = _publish_run_gh if gh_runner is None else gh_runner
+    task_id = record.get('task_id')
+    root = d6.get('root') if type(d6) is dict else None
+    branch = d6.get('branch') if type(d6) is dict else None
+    common_dir = d6.get('common_dir') if type(d6) is dict else None
+    developer = record.get('developer')
+    write_paths = developer.get('write_paths') if type(developer) is dict else None
+    if (type(task_id) is not str or type(root) is not str or type(branch) is not str or
+            type(common_dir) is not str or type(executor_task) is not str or
+            d6.get('task_id') != executor_task or
+            type(write_paths) is not list or not write_paths or
+            any(type(path) is not str or not path or path.startswith('/') or
+                '\\' in path or any(part in ('', '.', '..') for part in path.split('/'))
+                for path in write_paths)):
+        raise _PublishRefusal('PUBLISH_BINDING_UNAVAILABLE')
+    canonical_root = str(Path(common_dir).parent)
+    actual_root = _publish_command(git_runner, root, ['rev-parse', '--show-toplevel'])
+    actual_branch = _publish_command(git_runner, root, ['branch', '--show-current'])
+    if os.path.realpath(actual_root.strip()) != os.path.realpath(root) or actual_branch.strip() != branch:
+        raise _PublishRefusal('PUBLISH_D6_MISMATCH')
+    if branch in ('main', 'master', 'default'):
+        raise _PublishRefusal('PUBLISH_PROTECTED_BRANCH')
+
+    ignored = _publish_command(git_runner, root,
+        ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])
+    ignored_paths = [path for path in ignored.split('\0') if path]
+    if any(path == '__pycache__' or '/__pycache__/' in '/' + path + '/' or
+           path.endswith('.pyc') for path in ignored_paths):
+        raise _PublishRefusal('PUBLISH_IGNORED_STRAY')
+
+    tracked = _publish_command(git_runner, root,
+        ['diff', '--no-renames', '--name-only', '-z', 'HEAD'])
+    untracked = _publish_command(git_runner, root,
+        ['ls-files', '--others', '--exclude-standard', '-z'])
+    changed = sorted({path for raw in (tracked, untracked)
+                      for path in raw.split('\0') if path})
+    if any(path not in write_paths for path in changed):
+        raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+
+    remote_sha = _publish_command(git_runner, root,
+        ['ls-remote', '--heads', 'origin', f'refs/heads/{branch}']).strip()
+    local_head = _publish_command(git_runner, root, ['rev-parse', '--verify', 'HEAD']).strip()
+    remote_head = None
+    if remote_sha:
+        remote_parts = remote_sha.split()
+        if len(remote_parts) != 2 or not re.fullmatch(r'[0-9a-f]{40}', remote_parts[0]):
+            raise _PublishRefusal('PUBLISH_REMOTE_UNAVAILABLE')
+        remote_head = remote_parts[0]
+        try:
+            ancestor = git_runner(root, ['merge-base', '--is-ancestor', remote_head, 'HEAD'])
+        except Exception:
+            raise _PublishRefusal('PUBLISH_COMMAND_FAILED') from None
+        if getattr(ancestor, 'returncode', 1) != 0:
+            raise _PublishRefusal('PUBLISH_NON_FAST_FORWARD')
+
+    if changed:
+        _publish_command(git_runner, root, ['add', '--', *changed])
+        staged = _publish_command(git_runner, root,
+            ['diff', '--cached', '--no-renames', '--name-only', '-z', 'HEAD'])
+        staged_paths = [path for path in staged.split('\0') if path]
+        if not staged_paths or any(path not in write_paths for path in staged_paths):
+            raise _PublishRefusal('PUBLISH_OUT_OF_SCOPE')
+        _publish_command(git_runner, root,
+            ['commit', '-m', f'llmtool Task {task_id}'])
+        local_head = _publish_command(git_runner, root,
+            ['rev-parse', '--verify', 'HEAD']).strip()
+    if changed or d6.get('recorded_result_head') != local_head:
+        try:
+            record_result_call = _record_d6_result if record_result_call is None else record_result_call
+            recorded = record_result_call(task_id=executor_task, canonical_root=canonical_root,
+                                          root=root)
+        except Exception:
+            raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED') from None
+        if recorded not in (None, local_head):
+            raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED')
+
+    if remote_head != local_head:
+        _publish_command(git_runner, root,
+            ['push', 'origin', f'HEAD:refs/heads/{branch}'],
+            code='PUBLISH_PUSH_FAILED')
+    number = _publish_pr(gh_runner, root, branch, task_id, local_head)
+    return {'pr': number, 'head': local_head}
 
 
 def _claims(record):
@@ -66,20 +239,20 @@ def decide(record, d6, pr, related):
     if developer.get('state') != 'DEVELOPER_RESPONDED':
         return 'DEVELOPER_ATTENTION'
     if type(d6) is not dict or d6.get('dirty') is True or d6.get('state') == 'DIRTY':
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
     result_head = d6.get('result_head')
     if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
             d6.get('recorded_result_head') != result_head):
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
     claims = _claims(record)
     chosen_pr = (pr.get('number') if type(pr) is dict else None)
     if chosen_pr is None and claims:
         chosen_pr = claims[-1].get('pr') if type(claims[-1]) is dict else None
     if type(chosen_pr) is not int or chosen_pr < 1:
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
     pr_head = pr.get('head') if type(pr) is dict else None
     if type(pr_head) is not dict or pr_head.get('sha') != result_head:
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
 
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
@@ -163,6 +336,7 @@ def _d6_snapshot(record, executor_task):
     clean = bool(getattr(snapshot, 'clean', False))
     recorded = registration.result_sha
     return {'root': registration.root, 'common_dir': registration.common_dir,
+            'task_id': registration.task_id,
             'branch': registration.branch, 'result_head': snapshot.head,
             'recorded_result_head': recorded,
             'registered_result_head': registration.result_sha, 'dirty': not clean,
@@ -336,7 +510,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None,
             run_task_complete_call=None, record_github_event_call=None,
-            github_get=None, cwd=None):
+            github_get=None, cwd=None, publish_git_runner=None,
+            publish_gh_runner=None, record_result_call=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
     store = TaskStore() if store is None else store
     try:
@@ -548,8 +723,17 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             codes.append('REVIEWER_ATTENTION')
     elif step == 'REVIEW_NOT_POSTED':
         pass
-    elif step == 'NEEDS_PUBLISH':
-        codes.append('NEEDS_PUBLISH')
+    elif step == 'PUBLISH':
+        try:
+            result = _publish_task(record, d6, executor_task,
+                git_runner=publish_git_runner, gh_runner=publish_gh_runner,
+                record_result_call=record_result_call)
+            return {'task_id': task_id, 'codes': [], 'pr': result['pr'],
+                    'head': result['head']}
+        except _PublishRefusal as exc:
+            return {'task_id': task_id, 'codes': [exc.code]}
+        except Exception:
+            return {'task_id': task_id, 'codes': ['PUBLISH_FAILED']}
     elif step == 'DEVELOPER_ATTENTION':
         active_repair = next((item for item in reversed(related['repair_claims'])
                               if type(item) is dict and item.get('head_sha') ==
