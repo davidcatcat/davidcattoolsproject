@@ -338,33 +338,38 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertIsNone(receipt['first_action'])
         self.assertEqual(self.stops(), [])
 
-    def test_short_id_resolves_to_the_full_uuid(self):
+    def test_exact_name_resolves_to_the_full_uuid(self):
         self.scenario(
-            all=[row(TARGET, status='done', started='OLD', cwd=self.cwd),
+            all=[row(TARGET, name='pr365-dev', status='done', started='OLD', cwd=self.cwd),
                  row(OTHER, name='someone-else', status='done', started='OLD', cwd=self.cwd)],
             after=[[row(TARGET, cwd=self.cwd)]],
             transcripts=[{'session': TARGET, 'new_action': True}])
-        code, receipt = self.dispatch(TARGET[:8])
+        code, receipt = self.dispatch('pr365-dev')
         self.assertEqual(code, 0, receipt)
         self.assertEqual(receipt['resolved_session_id'], TARGET)
         argv = self.launches()[0]['argv']
         self.assertEqual(argv[argv.index('--resume') + 1], TARGET)
 
-    def test_short_id_of_a_stopped_session_resolves_from_its_transcript(self):
+    def test_short_id_prefix_or_miscased_uuid_is_refused_before_launch(self):
+        # Even when the short id uniquely matches a live row and a transcript.
         folder = self.config / 'projects' / 'p'
         folder.mkdir(parents=True)
         (folder / (TARGET + '.jsonl')).write_text(json.dumps(
             {'type': 'user', 'cwd': self.cwd, 'timestamp': '2026-01-01T00:00:00.000Z'}) + '\n')
-        self.scenario(after=[[row(TARGET, cwd=self.cwd)]],
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, cwd=self.cwd)]],
                       transcripts=[{'session': TARGET, 'new_action': True}])
-        code, receipt = self.dispatch(TARGET[:8])
-        self.assertEqual(code, 0, receipt)
-        self.assertEqual(receipt['resolved_session_id'], TARGET)
+        for target in (TARGET[:8], TARGET[:13], TARGET[:-1], TARGET.upper()):
+            with self.subTest(target=target):
+                code, result = self.dispatch(target)
+                self.assertEqual((code, result['reason']), (2, 'SESSION_ID_NOT_FULL'))
+        self.assertEqual(self.launches(), [])
+        self.assertEqual(self.stops(), [])
 
     def test_unknown_or_ambiguous_session_is_rejected_before_launch(self):
         self.scenario(all=[row(TARGET, status='done', started='OLD'),
                            row(OTHER, status='done', started='OLD')])
-        for target, reason in (('ffffffff', 'SESSION_NOT_FOUND'),
+        for target, reason in (('ffffffff', 'SESSION_ID_NOT_FULL'),
                                ('no-such-name', 'SESSION_NOT_FOUND'),
                                ('aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', 'SESSION_NOT_FOUND'),
                                ('claude-developer', 'SESSION_AMBIGUOUS')):
@@ -483,6 +488,21 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1')
         self.assertEqual((code, result['reason']), (1, 'SESSION_GONE'))
+
+    def test_watch_stops_a_session_that_vanishes_while_waiting(self):
+        report = self.home / 'report.md'
+        (self.home / 'state.json').write_text(json.dumps({'polls': 0, 'launch_ms': 1}))
+        # Healthy for two polls, then gone before any report is written.
+        self.scenario(after=[[row(TARGET)], [row(TARGET)], []])
+        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+                                     str(report), '--timeout', '5')
+        self.assertEqual((code, result['result'], result['reason']),
+                         (1, 'FAILED', 'SESSION_GONE'))
+        self.assertEqual(result['status'], 'busy')  # last healthy state seen
+        self.assertEqual(result['stop']['session'], TARGET)
+        self.assertEqual(self.stops(), [TARGET])
+        polls = [call for call in self.calls() if call['argv'][:2] == ['agents', '--json']]
+        self.assertEqual(len(polls), 3)
 
     def test_resumed_session_keeping_its_old_start_time_is_still_identified(self):
         # Not active before the launch, active after it: that is this launch.

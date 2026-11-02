@@ -4,8 +4,9 @@
 `claude --bg` exits 0 and prints "backgrounded" even when the session then
 stops at a picker, so a CLI exit is not delivery. This helper:
 
-* resolves the target to one full session UUID (exact name, short id or UUID;
-  no CLI fuzzy match) and refuses one that is busy right now;
+* resolves the target to one full session UUID (exact full UUID or exact
+  session name; short ids, prefixes and CLI fuzzy matches are refused) and
+  refuses one that is busy right now;
 * always passes ``-n ROLE`` and ``--add-dir`` with the registered D6 root,
   then ``--`` so the variadic ``--add-dir`` cannot swallow the prompt;
 * polls ``claude agents --json`` for a bounded time until the started session
@@ -49,7 +50,8 @@ from llmtool.task_completion import read_d6_registration  # noqa: E402
 from llmtool import worker_dispatch  # noqa: E402
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
-SHORT_RE = re.compile(r"[0-9a-f]{8}\Z")
+# Looks like a (partial or mis-cased) session id rather than a session name.
+ID_SHAPED_RE = re.compile(r"[0-9a-fA-F-]{1,36}\Z")
 ROLE_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,63}\Z")
 CLAUDE_DEVELOPER_ROLE_RE = re.compile(
     r"claude-developer(?:-[a-z0-9]+(?:-[a-z0-9]+)*)?\Z")
@@ -123,18 +125,19 @@ def transcript_paths(session_id):
 
 
 def resolve_session(target, rows):
-    """One full UUID for an exact UUID, short id or session name; never a guess."""
+    """One full UUID for an exact full UUID or exact session name; never a guess.
+
+    Short ids, UUID prefixes and any other id-shaped value (hex digits and
+    dashes, any case) that is not a full lowercase UUID are refused: a prefix
+    can match a different session than the one the PM meant.
+    """
     if UUID_RE.fullmatch(target):
         if any(row["sessionId"] == target for row in rows) or transcript_paths(target):
             return target
         raise DispatchError("SESSION_NOT_FOUND", target)
-    matches = {row["sessionId"] for row in rows
-               if target in (row.get("name"), row.get("id"))}
-    if not matches and SHORT_RE.fullmatch(target):
-        pattern = os.path.join(glob.escape(str(config_dir() / "projects")), "*",
-                               glob.escape(target) + "*.jsonl")
-        matches = {Path(path).stem for path in glob.glob(pattern)
-                   if UUID_RE.fullmatch(Path(path).stem)}
+    if ID_SHAPED_RE.fullmatch(target):
+        raise DispatchError("SESSION_ID_NOT_FULL", target)
+    matches = {row["sessionId"] for row in rows if row.get("name") == target}
     if len(matches) > 1:
         raise DispatchError("SESSION_AMBIGUOUS", ",".join(sorted(matches)))
     if not matches:
@@ -447,8 +450,13 @@ def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=N
             if fresh_report():  # it may have written the report and then finished
                 result["result"] = "REPORT_PRESENT"
                 return result
-            result.update(result="FAILED",
-                          reason="SESSION_GONE" if row is None else "SESSION_DONE")
+            if row is None:
+                # Same rule as dispatch: a vanished session is stopped by full id
+                # in case it is still running outside the agents list.
+                result.update(result="FAILED", reason="SESSION_GONE",
+                              stop=stop_session(claude, session_id))
+            else:
+                result.update(result="FAILED", reason="SESSION_DONE")
             return result
         result["status"], result["state"] = row.get("status"), row.get("state")
         reason = _failure_reason(row)
@@ -490,7 +498,7 @@ def _main(argv=None):
     sub = parser.add_subparsers(dest="command", required=True)
     start = sub.add_parser("dispatch")
     target = start.add_mutually_exclusive_group(required=True)
-    target.add_argument("--session", help="full UUID, short id or exact session name")
+    target.add_argument("--session", help="full session UUID or exact session name")
     target.add_argument("--new", action="store_true", help="start a new session")
     start.add_argument("--name", required=True, help="role name passed as -n")
     start.add_argument("--task-id", required=True, help="registered D6 task id")
