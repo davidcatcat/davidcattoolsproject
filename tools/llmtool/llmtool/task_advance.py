@@ -94,13 +94,42 @@ def _merge_refusal(code):
     return {'step': 'MERGE_REFUSED', 'codes': [code], 'result': None}
 
 
-def _owner_accepted(pr):
-    labels = pr.get('labels', []) if type(pr) is dict else []
-    tui = any(type(item) is dict and type(item.get('name')) is str and
-              'tui' in item['name'].lower() for item in labels) if type(labels) is list else False
-    body = pr.get('body') if type(pr) is dict else None
-    return (not tui or (type(body) is str and
-            '<!-- llmtool-owner-accepted -->' in body))
+def _owner_acceptance_required(files):
+    if type(files) is not list:
+        return True
+    for item in files:
+        path = item.get('filename') if type(item) is dict else None
+        if type(path) is not str:
+            return True
+        if (re.fullmatch(r'tools/llmtool/llmtool/chat_tui[^/]*\.py', path) or
+                re.fullmatch(r'tools/llmtool/tests/test_chat_tui[^/]*', path) or
+                path == 'tui_pty_driver.py' or path.endswith('/tui_pty_driver.py')):
+            return True
+    return False
+
+
+def _owner_accepted(number, head, github_get):
+    # The configured Owner login is deliberately external to source code. A
+    # body marker is forgeable by every PR author and is never acceptance.
+    owner_login = os.environ.get('LLMTOOL_OWNER_GITHUB_LOGIN')
+    if (type(owner_login) is not str or not owner_login.strip() or
+            owner_login != owner_login.strip()):
+        return False
+    try:
+        files = github_get(f'pulls/{number}/files?per_page=100')
+        if not _owner_acceptance_required(files):
+            return True
+        comments = github_get(f'issues/{number}/comments?per_page=100')
+    except Exception:
+        return False
+    if type(comments) is not list or len(comments) >= 100:
+        return False
+    marker = re.compile(r'<!--\s*llmtool-owner-accepted\s+head=([0-9a-f]{40})\s*-->')
+    return any(type(item) is dict and type(item.get('user')) is dict and
+               item['user'].get('login') == owner_login and
+               type(item.get('body')) is str and
+               any(match.group(1) == head for match in marker.finditer(item['body']))
+               for item in comments)
 
 
 def _merge_checks(record, number, head, pr, github_get):
@@ -129,14 +158,17 @@ def _merge_checks(record, number, head, pr, github_get):
     paths = [item.get('filename') for item in files if type(item) is dict]
     if len(paths) != len(files) or any(type(path) is not str for path in paths):
         return 'MERGE_CHECKS_UNAVAILABLE'
-    docs_or_tests = all(path.endswith('.md') or '/tests/' in '/' + path or
-                        path.startswith('tests/') or
-                        re.search(r'(^|/)test_[^/]+\.py$', path) for path in paths)
-    mac_runs = [item for item in check_runs if
-                any(token in item.get('name', '').lower() for token in ('macos', 'mac os'))]
-    if not docs_or_tests and (not mac_runs or any(item.get('conclusion') not in
-                                                   ('success', 'skipped') for item in mac_runs)):
-        return 'MERGE_MACOS_CHECK_REQUIRED'
+    docs_only = bool(paths) and all(path.endswith('.md') for path in paths)
+    required_checks = ['check (docs)'] if docs_only else ['check (Linux 3.14)']
+    if not docs_only:
+        required_checks.append('check (macOS 3.13)')
+    names = {item['name'] for item in check_runs}
+    if any(name not in names for name in required_checks):
+        return 'MERGE_REQUIRED_CHECK_MISSING'
+    if not docs_only:
+        mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
+        if any(item.get('conclusion') != 'success' for item in mac_runs):
+            return 'MERGE_MACOS_CHECK_REQUIRED'
     return None
 
 
@@ -184,11 +216,18 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     review_version = _merge_pass_claim(record, number, head, events)
     if type(review_version) is not int:
         return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
-    if not _owner_accepted(pr):
-        return _merge_refusal('MERGE_OWNER_ACCEPTANCE_REQUIRED')
     code = _merge_checks(record, number, head, pr, github_get)
     if code:
         return _merge_refusal(code)
+    if not _owner_accepted(number, head, github_get):
+        # Non-TUI PRs need no Owner acceptance. The helper returns true for
+        # those, and fails closed for TUI paths or unavailable evidence.
+        try:
+            files = github_get(f'pulls/{number}/files?per_page=100')
+        except Exception:
+            files = None
+        if _owner_acceptance_required(files):
+            return _merge_refusal('MERGE_OWNER_ACCEPTANCE_REQUIRED')
     try:
         current_pr = github_get(f'pulls/{number}')
     except Exception:
@@ -197,8 +236,13 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     if (type(current_head) is not dict or current_head.get('sha') != head or
             current_pr.get('number', number) != number):
         return _merge_refusal('MERGE_STALE_HEAD')
-    if not _owner_accepted(current_pr):
-        return _merge_refusal('MERGE_OWNER_ACCEPTANCE_REQUIRED')
+    if not _owner_accepted(number, head, github_get):
+        try:
+            files = github_get(f'pulls/{number}/files?per_page=100')
+        except Exception:
+            files = None
+        if _owner_acceptance_required(files):
+            return _merge_refusal('MERGE_OWNER_ACCEPTANCE_REQUIRED')
     if current_pr.get('state') not in (None, 'open') or current_pr.get('merged') is True:
         return _merge_refusal('MERGE_PR_NOT_OPEN')
     if current_pr.get('mergeable') is not True:
@@ -229,20 +273,28 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
             pass
         return _merge_refusal('MERGE_OUTCOME_UNKNOWN')
     claim['state'] = 'MERGED'
+    warning_codes = []
     try:
         store.compare_and_update(record['task_id'], expected={'merge_attempt':
             dict(claim, state='CLAIMED')}, merge_attempt=claim)
     except Exception:
-        return _merge_refusal('MERGE_RESULT_RECORD_FAILED')
+        # The remote merge succeeded. A bounded state-record retry cannot
+        # repeat the merge and avoids leaving a transient failure as CLAIMED.
+        try:
+            store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                dict(claim, state='CLAIMED')}, merge_attempt=claim)
+        except Exception:
+            pass
+        warning_codes.append('MERGE_RESULT_RECORD_FAILED')
     body = (f'llmtool task advance merge provenance: task={record["task_id"]} '
             f'head={head} review_version={review_version} checks=exact-head-success-or-skipped')
     try:
         comment = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
         if getattr(comment, 'returncode', 1) != 0:
-            return _merge_refusal('MERGE_PROVENANCE_COMMENT_FAILED')
+            warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
     except Exception:
-        return _merge_refusal('MERGE_PROVENANCE_COMMENT_FAILED')
-    return {'step': 'MERGED', 'codes': [], 'result': {'pr': number, 'head': head}}
+        warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
+    return {'step': 'MERGED', 'codes': warning_codes, 'result': {'pr': number, 'head': head}}
 
 
 def _record_d6_result(*, task_id, canonical_root, root):

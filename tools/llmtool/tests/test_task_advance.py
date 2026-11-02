@@ -1403,10 +1403,10 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         def github_get(path):
             if path.startswith('commits/'):
                 return {'total_count': 2, 'check_runs': [
-                    {'head_sha': HEAD, 'name': 'check (Linux)', 'status': 'completed',
+                    {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
                      'conclusion': 'success'},
                     {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
-                     'conclusion': 'skipped'}]}
+                     'conclusion': 'success'}]}
             if path.startswith('pulls/') and path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
             if path.startswith('pulls/'):
@@ -1446,7 +1446,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                     raise RuntimeError('claim race')
                 self.attempt = dict(merge_attempt)
 
-        def run_case(*, record=None, pr=None, checks=None, second_pr=None, events=None):
+        def run_case(*, record=None, pr=None, checks=None, second_pr=None, events=None,
+                     files=None, comments=None):
             record = dict(record or {
                 'task_id': '1' * 32, 'record_sha256': 'r' * 64,
                 'review_dispatch_claim': [review],
@@ -1454,7 +1455,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             pr = pr or {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
                         'labels': [], 'body': ''}
             checks = checks if checks is not None else [
-                {'head_sha': HEAD, 'name': 'check (Linux)', 'status': 'completed',
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
                  'conclusion': 'success'},
                 {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
                  'conclusion': 'success'},
@@ -1466,7 +1467,9 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 if path.startswith('commits/'):
                     return {'total_count': len(checks), 'check_runs': checks}
                 if path.endswith('/files?per_page=100'):
-                    return [{'filename': 'src/module.py'}]
+                    return files if files is not None else [{'filename': 'src/module.py'}]
+                if path.endswith('/comments?per_page=100'):
+                    return comments if comments is not None else []
                 if path.startswith('pulls/'):
                     pulls += 1
                     return second_pr if pulls == 1 and second_pr is not None else pr
@@ -1474,10 +1477,11 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             def gh_runner(_root, args):
                 calls.append(args)
                 return type('R', (), {'returncode': 0})()
-            result = task_advance._merge_once(store=Store(), record=record, number=17,
-                head=HEAD, pr=pr, events=[event] if events is None else events,
-                github_get=github_get,
-                gh_runner=gh_runner, root='/repo')
+            with patch.dict(os.environ, {'LLMTOOL_OWNER_GITHUB_LOGIN': 'owner-login'}):
+                result = task_advance._merge_once(store=Store(), record=record, number=17,
+                    head=HEAD, pr=pr, events=[event] if events is None else events,
+                    github_get=github_get,
+                    gh_runner=gh_runner, root='/repo')
             return result, calls
 
         fix_record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
@@ -1488,7 +1492,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         moved = {'number': 17, 'head': {'sha': 'b' * 40}, 'mergeable': True,
                  'labels': [], 'body': ''}
         tui = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
-               'labels': [{'name': 'TUI'}], 'body': ''}
+               'labels': [], 'body': '<!-- llmtool-owner-accepted -->'}
         cases = [
             ('FIX', {'record': fix_record}, 'MERGE_REVIEW_NOT_PASS'),
             ('newer FIX', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
@@ -1499,23 +1503,56 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             ('conflicting PR', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
                 'review_dispatch_claim': [review, dict(review, pr=18)]}},
              'MERGE_CONFLICTING_PR'),
-            ('TUI without Owner marker', {'pr': tui}, 'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
-            ('pending check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux)',
+            ('unlabeled TUI path', {'pr': tui, 'files': [
+                {'filename': 'tools/llmtool/llmtool/chat_tui.py'}]},
+             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
+            ('forged body marker', {'pr': tui, 'files': [
+                {'filename': 'tools/llmtool/llmtool/chat_tui.py'}]},
+             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
+            ('PM-authored marker', {'files': [
+                {'filename': 'tools/llmtool/llmtool/chat_tui.py'}],
+                'comments': [{'user': {'login': 'pm-login'},
+                    'body': f'<!-- llmtool-owner-accepted head={HEAD} -->'}]},
+             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
+            ('stale-head marker', {'files': [
+                {'filename': 'tools/llmtool/llmtool/chat_tui.py'}],
+                'comments': [{'user': {'login': 'owner-login'},
+                    'body': f'<!-- llmtool-owner-accepted head={"b" * 40} -->'}]},
+             'MERGE_OWNER_ACCEPTANCE_REQUIRED'),
+            ('pending check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
                 'status': 'in_progress', 'conclusion': None}]}, 'MERGE_CHECKS_NOT_GREEN'),
-            ('cancelled check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux)',
+            ('cancelled check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
                 'status': 'completed', 'conclusion': 'cancelled'}]}, 'MERGE_CHECKS_NOT_GREEN'),
-            ('failed check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux)',
+            ('failed check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
                 'status': 'completed', 'conclusion': 'failure'}]}, 'MERGE_CHECKS_NOT_GREEN'),
             ('missing checks', {'checks': []}, 'MERGE_CHECKS_MISSING'),
-            ('missing required macOS check', {'checks': [{'head_sha': HEAD,
-                'name': 'check (Linux)', 'status': 'completed', 'conclusion': 'success'}]},
-             'MERGE_MACOS_CHECK_REQUIRED'),
+            ('missing required macOS check', {'files': [{'filename': 'src/module.py'}],
+                'checks': [{'head_sha': HEAD,
+                'name': 'check (Linux 3.14)', 'status': 'completed', 'conclusion': 'success'}]},
+             'MERGE_REQUIRED_CHECK_MISSING'),
+            ('skipped required macOS check', {'checks': [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+                 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+                 'conclusion': 'skipped'}]}, 'MERGE_MACOS_CHECK_REQUIRED'),
+            ('tests still require macOS', {'files': [
+                {'filename': 'tools/llmtool/tests/test_task_advance.py'}],
+                'checks': [{'head_sha': HEAD, 'name': 'check (Linux 3.14)',
+                    'status': 'completed', 'conclusion': 'success'}]},
+             'MERGE_REQUIRED_CHECK_MISSING'),
         ]
         for label, kwargs, code in cases:
             with self.subTest(label=label):
                 result, calls = run_case(**kwargs)
                 self.assertEqual(result['codes'], [code])
                 self.assertEqual(calls, [])
+
+        owner_marker = {'user': {'login': 'owner-login'},
+                        'body': f'<!-- llmtool-owner-accepted head={HEAD} -->'}
+        with patch.dict(os.environ, {'LLMTOOL_OWNER_GITHUB_LOGIN': 'owner-login'}):
+            self.assertTrue(task_advance._owner_accepted(17, HEAD, lambda path: (
+                [{'filename': 'tools/llmtool/tests/test_chat_tui.py'}]
+                if path.endswith('/files?per_page=100') else [owner_marker])))
 
     def test_merge_unknown_is_never_retried_and_failed_checks_refuse(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
@@ -1536,7 +1573,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         def github_get(path):
             if path.startswith('commits/'):
                 return {'total_count': 1, 'check_runs': [
-                    {'head_sha': HEAD, 'name': 'check (Linux)', 'status': 'completed',
+                    {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
                      'conclusion': 'failure'}]}
             if path.endswith('/files?per_page=100'):
                 return [{'filename': 'src/module.py'}]
@@ -1570,6 +1607,55 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             gh_runner=ambiguous, root='/repo')
         self.assertEqual(result['codes'], ['MERGE_ALREADY_CLAIMED'])
         self.assertEqual(len(calls), 1)
+
+    def test_successful_merge_keeps_merged_state_when_record_or_comment_warns(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                  'review_dispatch_claim': [review]}
+
+        class Store:
+            def __init__(self):
+                self.attempt = None
+                self.fail_record_once = True
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                if 'record_sha256' in expected:
+                    self.attempt = dict(merge_attempt)
+                    return
+                if self.attempt != expected.get('merge_attempt'):
+                    raise RuntimeError('claim changed')
+                if merge_attempt['state'] == 'MERGED' and self.fail_record_once:
+                    self.fail_record_once = False
+                    raise RuntimeError('temporary record error')
+                self.attempt = dict(merge_attempt)
+
+        store, gh_calls = Store(), []
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True}
+        checks = {'total_count': 2, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'},
+            {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+             'conclusion': 'success'}]}
+        def github_get(path):
+            if path.startswith('commits/'):
+                return checks
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            return pr
+        def gh_runner(_root, args):
+            gh_calls.append(args)
+            return type('R', (), {'returncode': 0 if args[1] == 'merge' else 1})()
+        with patch.dict(os.environ, {'LLMTOOL_OWNER_GITHUB_LOGIN': 'owner-login'}):
+            result = task_advance._merge_once(store=store, record=record, number=17,
+                head=HEAD, pr=pr, events=[event], github_get=github_get,
+                gh_runner=gh_runner, root='/repo')
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(result['codes'], [
+            'MERGE_RESULT_RECORD_FAILED', 'MERGE_PROVENANCE_COMMENT_FAILED'])
+        self.assertEqual(store.attempt['state'], 'MERGED')
+        self.assertEqual(sum(call[1] == 'merge' for call in gh_calls), 1)
 
 
 if __name__ == '__main__':
