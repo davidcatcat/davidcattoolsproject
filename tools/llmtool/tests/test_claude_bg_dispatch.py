@@ -11,10 +11,12 @@ import tempfile
 import time
 import unittest
 from contextlib import redirect_stdout
+from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
+import test_developer_assignment_inbox as assignment_fixtures
 import test_task_completion as fixtures
 
 _SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'claude_bg_dispatch.py'
@@ -634,6 +636,195 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(other)}):
             self.assertEqual(dispatch_tool.transcript_paths(TARGET),
                              [str(other / 'projects' / 'p' / (TARGET + '.jsonl'))])
+
+    # -- #367 slice 2: no launch under another account ----------------------
+
+    def test_cross_account_launch_is_refused_before_gate_or_cli(self):
+        other = self.home / 'other-account'
+        other.mkdir()
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, cwd=self.cwd)]],
+                      transcripts=[{'session': TARGET, 'new_action': True}])
+        for value in (str(other), 'relative/dir'):
+            with self.subTest(value=value), \
+                    patch.object(dispatch_tool.worker_dispatch, 'evaluate') as gate:
+                code, result = self.run_tool(
+                    'dispatch', '--session', TARGET, '--name', 'claude-developer',
+                    '--task-id', 'executor-task', '--prompt', 'work',
+                    '--worker-config-dir', value)
+                self.assertEqual((code, result['result'], result['reason']),
+                                 (2, 'REJECTED', 'CROSS_ACCOUNT_LAUNCH_REFUSED'))
+                gate.assert_not_called()
+        self.assertEqual(self.calls(), [])  # no agents listing, no launch
+        self.assertEqual(list(other.iterdir()), [])
+
+    def test_same_account_worker_config_dir_keeps_dispatch_unchanged(self):
+        self.scenario(all=[row(TARGET, status='done', started='OLD', cwd=self.cwd)],
+                      after=[[row(TARGET, cwd=self.cwd)]],
+                      transcripts=[{'session': TARGET, 'new_action': True}])
+        code, receipt = self.run_tool(
+            'dispatch', '--session', TARGET, '--name', 'claude-developer',
+            '--task-id', 'executor-task', '--prompt', 'work',
+            '--worker-config-dir', str(self.config) + '/')
+        self.assertEqual((code, receipt['result']), (0, 'DELIVERED'), receipt)
+        self.assertEqual(receipt['first_action']['tool'], 'Bash')
+        self.assertEqual(len(self.launches()), 1)
+
+
+SESSION_B = '4d34a82a-0000-4000-8000-0000000000b2'
+SESSION_A = '4d34a82a-0000-4000-8000-0000000000a1'
+
+
+class CrossAccountDeliveryReceiptTests(unittest.TestCase):
+    """``receipt``: slice-1 claim evidence read from an explicit worker account dir.
+
+    PM is account A (the caller's CLAUDE_CONFIG_DIR), the Developer is
+    account B. A fake ``claude`` on PATH records any invocation; none may happen.
+    """
+
+    def setUp(self):
+        self.fx = assignment_fixtures.DeveloperAssignmentInboxTests(
+            'test_1_assign_then_cross_account_claim_is_visible_to_pm')
+        self.fx.setUp()
+        self.addCleanup(self.fx.doCleanups)
+        for account in (self.fx.account_a, self.fx.account_b):
+            os.makedirs(account, mode=0o700, exist_ok=True)
+        bin_dir = self.fx.base / 'bin'
+        bin_dir.mkdir()
+        self.claude_log = self.fx.base / 'claude-called'
+        self.claude = bin_dir / 'claude'
+        self.claude.write_text('#!/bin/sh\necho "$@" >> "%s"\nexit 9\n' % self.claude_log)
+        self.claude.chmod(0o700)
+        env = patch.dict(os.environ, {'PATH': str(bin_dir) + os.pathsep +
+                                      os.environ.get('PATH', '')})
+        env.start()
+        self.addCleanup(env.stop)
+        store = patch.object(dispatch_tool, 'TaskStore', lambda: self.fx.store)
+        store.start()
+        self.addCleanup(store.stop)
+
+    def receipt(self, assignment_id, worker_dir=None, *extra):
+        out = StringIO()
+        argv = ['--claude', str(self.claude), '--poll-interval', '0.01', 'receipt',
+                '--assignment-id', assignment_id,
+                '--worker-config-dir', worker_dir or self.fx.account_b] + list(extra)
+        with redirect_stdout(out):
+            code = dispatch_tool._main(argv)
+        return code, json.loads(out.getvalue())
+
+    def claimed(self):
+        aid = self.fx.assign()['assignment_id']
+        path = self.fx.transcript(SESSION_B, self.fx.account_b)
+        self.fx.claim(aid, session=SESSION_B)
+        return aid, path
+
+    def snapshot(self, account):
+        return sorted((str(path), path.lstat().st_mtime_ns, path.lstat().st_size)
+                      for path in Path(account).rglob('*'))
+
+    def tearDown(self):
+        self.assertFalse(self.claude_log.exists(), 'claude must never be invoked')
+
+    def test_claimed_by_worker_account_is_delivered_read_only(self):
+        aid, path = self.claimed()
+        later = time.strftime('%Y-%m-%dT%H:%M:%S.000Z', time.gmtime(time.time() + 3600))
+        with open(path, 'a') as stream:
+            stream.write(json.dumps({'type': 'assistant', 'timestamp': later, 'message': {
+                'content': [{'type': 'tool_use', 'name': 'Read'}]}}) + '\n')
+        before = self.snapshot(self.fx.account_b)
+        code, result = self.receipt(aid)
+        self.assertEqual((code, result['result'], result['reason']), (0, 'DELIVERED', None))
+        self.assertEqual(result['claim']['session_id'], SESSION_B)
+        self.assertTrue(result['account_match'])
+        self.assertTrue(result['transcript_verified'])
+        self.assertFalse(result['launched'])
+        self.assertEqual(result['first_action'], {'tool': 'Read', 'timestamp': later})
+        self.assertEqual(result['d6_task_id'], assignment_fixtures.D6)
+        self.assertEqual(self.snapshot(self.fx.account_b), before)
+        self.assertEqual(list(Path(self.fx.account_a).iterdir()), [])
+
+    def test_unclaimed_live_assignment_is_not_delivered_even_after_bounded_wait(self):
+        aid = self.fx.assign()['assignment_id']
+        self.fx.transcript(SESSION_B, self.fx.account_b)  # a transcript alone is no claim
+        for extra in ((), ('--wait', '--timeout', '0.2')):
+            with self.subTest(extra=extra):
+                started = time.monotonic()
+                code, result = self.receipt(aid, None, *extra)
+                self.assertLess(time.monotonic() - started, 5)
+                self.assertEqual((code, result['result'], result['reason']),
+                                 (1, 'NOT_DELIVERED', 'ASSIGNMENT_NOT_CLAIMED'))
+                self.assertIsNone(result['claim'])
+
+    def test_wait_returns_delivered_once_the_worker_claims(self):
+        aid = self.fx.assign()['assignment_id']
+        self.fx.transcript(SESSION_B, self.fx.account_b)
+        real = dispatch_tool._assignment
+        calls = []
+
+        def claim_on_second_poll(store, assignment_id):
+            calls.append(assignment_id)
+            if len(calls) == 2:
+                self.fx.claim(aid, session=SESSION_B)
+            return real(store, assignment_id)
+
+        with patch.object(dispatch_tool, '_assignment', side_effect=claim_on_second_poll):
+            code, result = self.receipt(aid, None, '--wait', '--timeout', '5')
+        self.assertEqual((code, result['result']), (0, 'DELIVERED'), result)
+        self.assertEqual(len(calls), 2)
+
+    def test_expired_without_claim_is_unclaimed(self):
+        past = datetime.now(timezone.utc) - timedelta(minutes=20)
+        aid = self.fx.assign(now=past)['assignment_id']
+        code, result = self.receipt(aid)
+        self.assertEqual((code, result['result'], result['reason']),
+                         (1, 'UNCLAIMED', 'ASSIGNMENT_UNCLAIMED'))
+
+    def test_pm_account_dir_does_not_match_the_worker_claim(self):
+        aid, _ = self.claimed()
+        self.fx.transcript(SESSION_B, self.fx.account_a)  # same session id under the PM account
+        code, result = self.receipt(aid, self.fx.account_a)
+        self.assertEqual((code, result['result'], result['reason']),
+                         (1, 'NOT_DELIVERED', 'WORKER_ACCOUNT_MISMATCH'))
+        self.assertFalse(result['account_match'])
+        self.assertFalse(result['transcript_verified'])
+
+    def test_missing_or_symlinked_worker_transcript_is_refused(self):
+        aid, path = self.claimed()
+        real = self.fx.base / 'elsewhere.jsonl'
+        real.write_text('{}\n')
+        path.unlink()
+        code, result = self.receipt(aid)
+        self.assertEqual((code, result['reason']), (1, 'WORKER_TRANSCRIPT_INVALID'))
+        os.symlink(real, path)
+        code, result = self.receipt(aid)
+        self.assertEqual((code, result['reason']), (1, 'WORKER_TRANSCRIPT_INVALID'))
+        self.assertFalse(result['transcript_verified'])
+        path.unlink()
+        project = path.parent
+        moved = self.fx.base / 'moved-project'
+        os.rename(project, moved)
+        os.symlink(moved, project)  # a symlinked project directory is refused too
+        (moved / path.name).write_text('{}\n')
+        code, result = self.receipt(aid)
+        self.assertEqual((code, result['reason']), (1, 'WORKER_TRANSCRIPT_INVALID'))
+
+    def test_invalid_worker_dir_or_assignment_is_rejected(self):
+        aid, _ = self.claimed()
+        link = self.fx.base / 'account-link'
+        os.symlink(self.fx.account_b, link)
+        for worker_dir in (str(link), 'relative/account', str(self.fx.base / 'absent')):
+            with self.subTest(worker_dir=worker_dir):
+                code, result = self.receipt(aid, worker_dir)
+                self.assertEqual((code, result['result'], result['reason']),
+                                 (2, 'REJECTED', 'WORKER_CONFIG_DIR_INVALID'))
+        for bad, reason in (('f' * 32, 'ASSIGNMENT_NOT_FOUND'),
+                            (aid.upper(), 'ASSIGNMENT_ID_INVALID'),
+                            (aid[:8], 'ASSIGNMENT_ID_INVALID')):
+            with self.subTest(assignment_id=bad):
+                code, result = self.receipt(bad)
+                self.assertEqual((code, result['reason']), (2, reason))
+        code, result = self.receipt(aid, None, '--wait', '--timeout', '601')
+        self.assertEqual((code, result['reason']), (2, 'ARGUMENT_INVALID'))
 
 
 if __name__ == '__main__':

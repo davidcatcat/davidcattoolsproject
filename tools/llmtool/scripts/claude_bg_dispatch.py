@@ -25,8 +25,20 @@ stops at a picker, so a CLI exit is not delivery. This helper:
 The account is ``CLAUDE_CONFIG_DIR`` (default ``~/.claude``); only transcript
 files under its ``projects`` directory are read, never credentials.
 
+Cross-account delivery (#367 slice 2) never launches anything. ``dispatch``
+launches only under the caller's own account: a ``--worker-config-dir`` that
+is not the caller's ``CLAUDE_CONFIG_DIR`` is refused with
+``CROSS_ACCOUNT_LAUNCH_REFUSED`` before any gate or CLI call. Instead the PM
+runs ``llmtool task assign`` and then ``receipt --assignment-id ID
+--worker-config-dir DIR``, which reads the shared TaskStore and reports
+DELIVERED only when the slice-1 claim receipt exists, its account label is
+that directory's, and the claiming session's transcript for the D6 root is a
+plain, unlinked file under that directory (read-only; transcript files only).
+This is accountability bookkeeping, not authentication: every account runs as
+the same OS user.
+
 Exit codes: 0 delivered (or report present), 1 not delivered / session
-failed, 2 invalid input or target.
+failed / unclaimed, 2 invalid input or target.
 """
 import argparse
 import glob
@@ -34,6 +46,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import time
@@ -48,7 +61,11 @@ if str(_PACKAGE_ROOT) not in sys.path:
 from llmtool.errors import LLMToolError  # noqa: E402
 from llmtool.task_completion import read_d6_registration  # noqa: E402
 from llmtool import worker_dispatch  # noqa: E402
+from llmtool import active_pm_inbox, developer_assignment_inbox  # noqa: E402
+from llmtool.task_store import TaskStore  # noqa: E402
 
+ASSIGNMENT_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
+RECEIPT_WAIT_MAX = 600
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z")
 # Looks like a (partial or mis-cased) session id rather than a session name.
 ID_SHAPED_RE = re.compile(r"[0-9a-fA-F-]{1,36}\Z")
@@ -205,13 +222,15 @@ def _new_entries(path, offsets):
             yield entry
 
 
-def first_action_since(session_id, since_ms, offsets=None):
+def first_action_since(session_id, since_ms, offsets=None, paths=None):
     """The first tool call the session made at or after ``since_ms``, else None.
 
     Pass the same ``offsets`` dict on each poll to read only appended lines.
+    ``paths`` replaces the caller-account transcript lookup (used read-only for
+    an explicit worker account directory).
     """
     offsets = {} if offsets is None else offsets
-    for path in transcript_paths(session_id):
+    for path in (transcript_paths(session_id) if paths is None else paths):
         for entry in _new_entries(path, offsets):
             if entry.get("type") != "assistant":
                 continue
@@ -286,8 +305,35 @@ def _failure_reason(row):
     return None
 
 
+def worker_config_dir(value):
+    """An explicit worker account directory: absolute, this user's, not a symlink.
+
+    Only ``lstat`` is used here; nothing inside the directory is opened.
+    """
+    if type(value) is not str or not value or not os.path.isabs(value):
+        raise DispatchError("WORKER_CONFIG_DIR_INVALID")
+    path = os.path.normpath(value)
+    try:
+        info = os.lstat(path)
+    except OSError:
+        raise DispatchError("WORKER_CONFIG_DIR_INVALID")
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        raise DispatchError("WORKER_CONFIG_DIR_INVALID")
+    return path
+
+
+def refuse_cross_account_launch(worker_dir):
+    """A launch acts as the account it runs under, so only the caller's own is allowed."""
+    if worker_dir is None:
+        return
+    if not os.path.isabs(worker_dir) or (
+            os.path.normpath(worker_dir) != os.path.normpath(str(config_dir()))):
+        raise DispatchError("CROSS_ACCOUNT_LAUNCH_REFUSED")
+
+
 def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_interval,
-             new_session=False, owner_assignment_ref=None):
+             new_session=False, owner_assignment_ref=None, worker_dir=None):
+    refuse_cross_account_launch(worker_dir)
     is_claude_developer_role = (type(role) is str and
                                 CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role) is not None)
     if not is_claude_developer_role and not ROLE_RE.fullmatch(role or ""):
@@ -469,6 +515,79 @@ def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=N
         time.sleep(poll_interval)
 
 
+def _utc_now():
+    return datetime.now(timezone.utc)
+
+
+def _assignment(store, assignment_id):
+    try:
+        items = store.get_developer_assignments()
+    except LLMToolError as exc:
+        raise DispatchError("ASSIGNMENTS_UNAVAILABLE",
+                            developer_assignment_inbox.refusal_code(exc) or "")
+    item = next((item for item in items if item["assignment_id"] == assignment_id), None)
+    if item is None:
+        raise DispatchError("ASSIGNMENT_NOT_FOUND", assignment_id)
+    return item
+
+
+def delivery_receipt(*, assignment_id, worker_dir, store=None, wait=False, timeout=0,
+                     poll_interval=2.0, clock=_utc_now):
+    """Account-aware delivery evidence for a ``task assign`` assignment; never launches.
+
+    DELIVERED needs all of: the slice-1 claim receipt (state CLAIMED), its
+    ``account_dir_label`` equal to ``worker_dir``'s, and the claiming
+    session's transcript for the D6 root as a plain, unlinked file of this
+    user under ``worker_dir``. ``first_action`` (a tool call at or after the
+    claim) is reported when present but is not required.
+    """
+    if type(assignment_id) is not str or not ASSIGNMENT_ID_RE.fullmatch(assignment_id):
+        raise DispatchError("ASSIGNMENT_ID_INVALID")
+    worker_dir = worker_config_dir(worker_dir)
+    environ = {"CLAUDE_CONFIG_DIR": worker_dir}
+    label = developer_assignment_inbox.account_dir_label(environ)
+    store = TaskStore() if store is None else store
+    deadline = time.monotonic() + timeout
+    while True:
+        item = _assignment(store, assignment_id)
+        result = {
+            "schema_version": 1, "result": "NOT_DELIVERED", "reason": None,
+            "assignment_id": assignment_id, "worker": item["worker"],
+            "d6_task_id": item["d6_task_id"], "d6_root": item["d6_root"],
+            "source_sha": item["source_sha"], "expires_at": item["expires_at"],
+            "state": item["state"], "claim": item["claim"], "account_match": None,
+            "transcript_verified": False, "first_action": None, "launched": False,
+        }
+        if item["state"] == "CLAIMED":
+            break
+        expired = item["state"] == "EXPIRED" or clock() >= datetime.strptime(
+            item["expires_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        if expired:
+            result.update(result="UNCLAIMED", reason="ASSIGNMENT_UNCLAIMED")
+            return result
+        if not wait or time.monotonic() >= deadline:
+            result["reason"] = "ASSIGNMENT_NOT_CLAIMED"
+            return result
+        time.sleep(max(0.0, min(poll_interval, deadline - time.monotonic())))
+    claim = item["claim"]
+    result["account_match"] = claim["account_dir_label"] == label
+    if not result["account_match"]:
+        result["reason"] = "WORKER_ACCOUNT_MISMATCH"
+        return result
+    try:
+        active_pm_inbox.observe_claude_session(claim["session_id"], item["d6_root"], environ)
+    except LLMToolError:
+        result["reason"] = "WORKER_TRANSCRIPT_INVALID"
+        return result
+    result["transcript_verified"] = True
+    path = active_pm_inbox.claude_session_file(claim["session_id"], item["d6_root"], environ)
+    since_ms = _entry_ms({"timestamp": claim["claimed_at"]})
+    result["first_action"] = first_action_since(claim["session_id"], since_ms,
+                                                paths=[str(path)])
+    result["result"] = "DELIVERED"
+    return result
+
+
 def _registration(task_id, repo_root):
     try:
         common = subprocess.run(
@@ -508,6 +627,15 @@ def _main(argv=None):
     prompt.add_argument("--prompt-file")
     start.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[3]))
     start.add_argument("--timeout", type=float, default=120.0)
+    start.add_argument("--worker-config-dir",
+                       help="must be the caller's own CLAUDE_CONFIG_DIR; another "
+                            "account is refused (use task assign + receipt)")
+    proof = sub.add_parser("receipt", help="cross-account delivery evidence; never launches")
+    proof.add_argument("--assignment-id", required=True, help="id printed by task assign")
+    proof.add_argument("--worker-config-dir", required=True,
+                       help="the Developer account's Claude config directory (read-only)")
+    proof.add_argument("--wait", action="store_true", help="wait for the claim (bounded)")
+    proof.add_argument("--timeout", type=float, default=540.0)
     wait = sub.add_parser("watch")
     wait.add_argument("--session-id", required=True)
     wait.add_argument("--report-file", required=True)
@@ -528,7 +656,15 @@ def _main(argv=None):
                 claude=args.claude, target=args.session, role=args.name,
                 task_id=args.task_id, prompt=text, repo_root=args.repo_root,
                 timeout=_bounded(args.timeout, 1, 600, "--timeout"), poll_interval=poll,
-                new_session=args.new, owner_assignment_ref=args.owner_assignment_ref)
+                new_session=args.new, owner_assignment_ref=args.owner_assignment_ref,
+                worker_dir=args.worker_config_dir)
+            ok = result["result"] == "DELIVERED"
+        elif args.command == "receipt":
+            result = delivery_receipt(
+                assignment_id=args.assignment_id, worker_dir=args.worker_config_dir,
+                wait=args.wait,
+                timeout=_bounded(args.timeout, 0, RECEIPT_WAIT_MAX, "--timeout"),
+                poll_interval=poll)
             ok = result["result"] == "DELIVERED"
         else:
             since_ms = None
