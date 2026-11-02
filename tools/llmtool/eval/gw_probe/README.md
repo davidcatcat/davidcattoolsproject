@@ -22,3 +22,17 @@ The probes measure:
 - `quality`: 20 synthetic arithmetic, logic, and code-reading questions with thinking off and on, both with a 2048-token output budget, including each answer, finish reason, completion-token count, accuracy, latency, and token usage.
 
 An HTTP or transport error is represented in that probe's result and does not stop later probes. The reported context size is approximate; gateway-reported token usage is recorded separately when available. This is a bounded deployment measurement, not a general model evaluation.
+
+## Multi-turn tools probe
+
+`multiturn.py` runs six synthetic scenarios: native tool round-trip (S1), forced tool selection (S2), matching `tool_call_id` round-trip (S3), streamed tool calls (S4), thinking with tools (S5), and a text-tools redo of S1 (S6). It creates a small synthetic project in a mode-0700 temporary directory and does not read repository source.
+
+Loopback fake-server runs need no live authorization:
+
+```sh
+python -B tools/llmtool/eval/gw_probe/multiturn.py --base-url http://127.0.0.1:8123 --model fake-model --out-dir /private/tmp/gw-probe-multiturn
+```
+
+Configured non-loopback runs require both `--live` and `--owner-authorization-url` with an Owner GitHub issue comment URL. The existing `company-gw` user configuration is read without printing it. The run is serial, has a 16-call, 10,000-token, 60-minute, and 300-second-per-call cap, and stops on authorization failures, two consecutive connection errors, model mismatch, or credential-scan hits. `audit.jsonl` is a hash-chained record of sanitized event metadata; it omits prompts, response bodies, credentials, headers, and endpoint values. Results and audit verification are written under the mode-0700 output directory.
+
+Offline fake-server coverage is in `test_multiturn.py`; input-screening helper coverage is in `test_gw_probe.py`.
