@@ -29,6 +29,10 @@ Includes changes to `/System`, `/Library`, `/usr` except `/usr/local`, system La
 
 A remote controller or persistent background agent is a separate technical threat boundary. It requires source and permission review, exact-SHA CI, applicable native tests and fail-closed operation before installation; not every such change creates a new Owner-escalation category.
 
+## Owner channel
+
+The Owner never edits anything on GitHub (Owner 2026-11-02). Never ask the Owner to post, comment, label, approve, review, merge or edit on GitHub. Ask in the PM chat. Before asking, post a `waiting_owner` marker (`actor=PM target=Owner status=WAITING`) on the Issue/PR so the monitor shows the open decision. Record the answer as a PM-relayed comment (`actor=PM`) that quotes the Owner's words and says it is relayed. Never create an Owner-authored GitHub event, and never treat a PM summary as Owner words. An Owner assignment reference or authorization link in [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) or a Task points to that relayed record.
+
 ## Decision record and continuation
 
 For every reserved choice, PM presents the exact decision, alternatives, user impact, estimated cost/risk (or UNKNOWN), recommendation and HOLD-until-approved disposition. Record the Owner authorization on the Task/Issue; for dispatch switches, update [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) with the binding under its strict schema. Do not treat a comment, proposal or silence as implicit approval. Only the blocked dependency waits. Unrelated already-authorized work must continue under [PM Continuation](pm-continuation.md).
