@@ -204,12 +204,12 @@ def _events(related):
 
 
 def _remote_test_status(record, d6):
-    """Return the exact-head remote-test state and its bounded failure excerpt."""
+    """Return exact-head remote-test state, bounded excerpt, and validated receipt."""
     head = d6.get('result_head') if type(d6) is dict else None
     completion = record.get('completion') if type(record) is dict else None
     executor_task = completion.get('executor_task_id') if type(completion) is dict else None
     if type(head) is not str or type(executor_task) is not str:
-        return None, None
+        return None, None, None
     receipts = record.get('remote_test_receipts', [])
     if type(receipts) is not list:
         receipts = []
@@ -230,7 +230,9 @@ def _remote_test_status(record, d6):
         if type(claimed) is not str or claimed != digest:
             continue
         if receipt['result'] == 'PASS':
-            return 'PASS', None
+            return 'PASS', None, receipt
+        if receipt['result'] in ('TIMEOUT', 'SHA_MISMATCH'):
+            return receipt['result'], None, receipt
         if receipt['result'] == 'FAIL':
             excerpt = receipt.get('failure_excerpt')
             try:
@@ -240,17 +242,22 @@ def _remote_test_status(record, d6):
             except UnicodeError:
                 valid_excerpt = False
             if valid_excerpt:
-                return 'FAIL', excerpt
-            return 'FAIL', ''
+                return 'FAIL', excerpt, receipt
+            return 'FAIL', '', receipt
     outcomes = record.get('remote_test_outcomes', [])
     if type(outcomes) is not list:
         outcomes = []
     for outcome in reversed(outcomes):
-        if (type(outcome) is dict and outcome.get('executor_task') == executor_task and
-                outcome.get('sha') == head and outcome.get('result') == 'ADMISSION_DENIED' and
-                outcome.get('code') == 'MODULE_NOT_ADMITTED' and outcome.get('modules') == []):
-            return 'ADMISSION_DENIED', None
-    return None, None
+        if (type(outcome) is not dict or outcome.get('executor_task') != executor_task or
+                outcome.get('sha') != head):
+            continue
+        if outcome.get('result') == 'TIMEOUT':
+            return 'TIMEOUT', None, None
+        if (outcome.get('result') == 'ADMISSION_DENIED' and
+                outcome.get('code') == 'MODULE_NOT_ADMITTED' and
+                outcome.get('modules') == []):
+            return 'ADMISSION_DENIED', None, None
+    return None, None, None
 
 
 def derive_repair_state(repair_record):
@@ -308,7 +315,9 @@ def decide(record, d6, pr, related):
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
     if not matching:
-        remote_status, _ = _remote_test_status(record, d6)
+        remote_status, _, _ = _remote_test_status(record, d6)
+        if remote_status in ('TIMEOUT', 'SHA_MISMATCH'):
+            return 'NEEDS_ATTENTION'
         if remote_status == 'FAIL':
             repairs = related.get('repair_claims', []) if type(related) is dict else []
             current_repair = next((item for item in reversed(repairs)
@@ -728,9 +737,9 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
                             retry_claim_id=(repair_claim.get('repair_task_id')
                                             if step == 'REPAIR_RETRY' and
                                             type(repair_claim) is dict else None))
-                        remote_status, failure_excerpt = _remote_test_status(record, d6)
+                        remote_status, _, failure_receipt = _remote_test_status(record, d6)
                         if remote_status == 'FAIL':
-                            repair_args['failure_excerpt'] = failure_excerpt
+                            repair_args['remote_test_receipt'] = failure_receipt
                         with contextlib.redirect_stdout(captured):
                             result_value = invoke(**repair_args)
                         emitted = captured.getvalue().strip()
@@ -840,6 +849,10 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             codes.append('DEVELOPER_ATTENTION')
     elif step in ('REPAIR_OUTCOME_UNKNOWN', 'REPAIR_RESULT_NOT_PUBLISHED'):
         codes.append(step)
+    elif step == 'NEEDS_ATTENTION':
+        remote_status, _, _ = _remote_test_status(record, d6)
+        codes.append('REMOTE_TEST_' + remote_status if remote_status in
+                     ('TIMEOUT', 'SHA_MISMATCH') else 'NEEDS_ATTENTION')
     elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR',
                   'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
         codes.append(step)

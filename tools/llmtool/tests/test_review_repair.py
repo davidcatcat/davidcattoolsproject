@@ -146,6 +146,33 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(self.store.get(TASK)['review_repair_claims'][0]['repair_task_id'],
                          self.calls[0]['task']['task_id'])
 
+    def test_remote_test_fail_receipt_enters_real_repair_path(self):
+        receipt = {
+            'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
+            'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_remote'],
+            'failure_excerpt': 'FAIL: test_remote\nAssertionError',
+        }
+        receipt['receipt_digest'] = hashlib.sha256(json.dumps(
+            receipt, ensure_ascii=True, sort_keys=True,
+            separators=(',', ':')).encode('utf-8')).hexdigest()
+        dispatched = []
+        def adapter(**request):
+            dispatched.append(request)
+            return {'status': 'DISPATCHED', 'head': HEAD}
+        result = self.dispatch(
+            remote_test_receipt=receipt, dispatch_adapter=adapter,
+            repair_task_recorder=lambda **request: {
+                'task_id': request['repair_task_id'],
+                'pm_assignment': {'acceptance': ['Repair the reported issue.']},
+            })
+        packet = dispatched[0]['packet']
+        self.assertEqual(result['next_action'], 'review-dispatch --version 1')
+        self.assertEqual(packet['failure_type'], 'REMOTE_TEST_FAIL')
+        self.assertEqual(packet['failed_head'], HEAD)
+        self.assertEqual(packet['failure_excerpt_untrusted_data'],
+                         'FAIL: test_remote\nAssertionError')
+        self.assertIsNone(self.store.get(TASK)['review_repair_claims'][0]['comment_id'])
+
     def test_replay_after_restart_does_not_dispatch_twice(self):
         self.dispatch()
         restarted = TempTaskStore(self.temp.name, self.store.get(TASK))
