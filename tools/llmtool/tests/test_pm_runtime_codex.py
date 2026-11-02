@@ -104,13 +104,19 @@ class CodexRuntimeTests(unittest.TestCase):
                             'never' in call['args'] for call in calls))
 
     def test_malformed_output_and_process_exit_return_runtime_error_then_turn_end(self):
-        for mode, code in (('malformed', 'PM_STREAM_INVALID'), ('exit', 'PM_PROCESS_EXITED')):
+        expected_codes = {
+            'malformed': ['PM_STREAM_INVALID'],
+            'exit': ['PM_PROCESS_EXITED'],
+        }
+        for mode, expected in expected_codes.items():
             with self.subTest(mode=mode):
                 self.write_fake(mode)
                 runtime = self.make_runtime()
                 events = list(runtime.send('request'))
+                errors = [event['code'] for event in events
+                          if event['type'] == 'RUNTIME_ERROR']
+                self.assertEqual(errors, expected)
                 self.assertEqual(events[-2]['type'], 'RUNTIME_ERROR')
-                self.assertEqual(events[-2]['code'], code)
                 self.assertEqual(events[-1]['type'], 'TURN_END')
                 runtime.close()
                 self.log.unlink(missing_ok=True)

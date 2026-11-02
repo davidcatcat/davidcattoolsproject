@@ -343,10 +343,19 @@ class CodexRuntime:
                 elif kind in ('error', 'turn.failed'):
                     error = 'PM_PROCESS_EXITED'
                     break
-            if error is None and process.poll() not in (0, None):
-                error = 'PM_PROCESS_EXITED'
             if error is None:
-                error = 'PM_STREAM_INVALID'
+                # EOF can become readable just before poll() observes the child's
+                # exit status. Wait for that status so a truncated stream caused
+                # by a failed process has the same process-exit classification as
+                # the Claude runtime's EOF path.
+                try:
+                    exit_code = process.wait(timeout=5)
+                except Exception:
+                    exit_code = process.poll()
+                if exit_code not in (0, None):
+                    error = 'PM_PROCESS_EXITED'
+                else:
+                    error = 'PM_STREAM_INVALID'
         finally:
             if process.poll() is None:
                 try:
