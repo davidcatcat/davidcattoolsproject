@@ -87,7 +87,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
     'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
     'review_repair_claims', 'high_debug', 'abandonment', 'pm_session_adoptions',
-    'pm_provenance'))
+    'pm_provenance', 'merge_attempt'))
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
@@ -640,6 +640,8 @@ def _validate_remote_test_outcomes(record):
 
 def _validate(record):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
+    merge_attempt = record.get('merge_attempt') if type(record) is dict else None
+    keys.discard('merge_attempt')
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -671,6 +673,16 @@ def _validate(record):
              *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
+    if merge_attempt is not None:
+        if (type(merge_attempt) is not dict or
+                set(merge_attempt) != frozenset(('pr', 'head_sha', 'state', 'claimed_at')) or
+                type(merge_attempt.get('pr')) is not int or
+                not 1 <= merge_attempt['pr'] <= 9999999 or
+                type(merge_attempt.get('head_sha')) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', merge_attempt['head_sha']) is None or
+                merge_attempt.get('state') not in ('CLAIMED', 'UNKNOWN', 'MERGED') or
+                type(merge_attempt.get('claimed_at')) is not str):
+            _fail('TASK_MERGE_ATTEMPT_INVALID')
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
             not _safe_identifier(record['task_id'], TASK_ID) or
             not _safe_identifier(record['run_id'], TASK_ID) or
@@ -2763,6 +2775,10 @@ class TaskStore:
             _fail('CODEX_LAUNCH_IDENTITY_INVALID')
         if 'dispatch_audit' in changes and not trusted_dispatch_audit:
             _fail()
+        if 'merge_attempt' in changes:
+            proposed = changes['merge_attempt']
+            if type(proposed) is not dict:
+                _fail('TASK_MERGE_ATTEMPT_INVALID')
         if (('completion_events' in changes or 'completion_event_tombstones' in changes)
                 and not trusted_completion_events):
             _fail('COMPLETION_EVENT_MUTATION_FORBIDDEN')
@@ -2853,6 +2869,17 @@ class TaskStore:
                         execution.get('status') != 'RUNNING' or
                         old.get('execution') is not None):
                     _fail('CODEX_LAUNCH_IDENTITY_INVALID')
+            if 'merge_attempt' in changes:
+                old_attempt = current.get('merge_attempt')
+                new_attempt = changes['merge_attempt']
+                valid = (old_attempt is None and new_attempt.get('state') == 'CLAIMED')
+                if type(old_attempt) is dict:
+                    valid = (old_attempt.get('state') == 'CLAIMED' and
+                        new_attempt.get('state') in ('UNKNOWN', 'MERGED') and
+                        all(old_attempt.get(key) == new_attempt.get(key)
+                            for key in ('pr', 'head_sha', 'claimed_at')))
+                if not valid:
+                    _fail('TASK_MERGE_ATTEMPT_TRANSITION_INVALID')
             if trusted_abandonment:
                 item = changes['abandonment']
                 if (current.get('pm_session_id') != abandonment_pm_session_id or
