@@ -2,6 +2,7 @@
 
 import dataclasses
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -2226,12 +2227,12 @@ def run_task_opencode_delegate(args, *, store):
         raise LLMToolError(
             'developer assignment already exists; duplicate dispatch refused') from None
     try:
-        expected_developer = store.get(task['task_id'])['developer']
+        expected_developer = copy.deepcopy(store.get(task['task_id'])['developer'])
         developer.update(state='DEVELOPER_DISPATCHING', provider_type='opencode-cli',
                          model=model,
                          max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS)
         dispatching_record = store.update(task['task_id'], developer=developer)
-        expected_developer = dispatching_record['developer']
+        expected_developer = copy.deepcopy(dispatching_record['developer'])
 
         def validate_prelaunch_d6_binding():
             current_registration, current_snapshot = task_completion.bind_executor_task(
@@ -2259,7 +2260,7 @@ def run_task_opencode_delegate(args, *, store):
             saved = store.record_opencode_launch(
                 task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
                 start_time=started_at, pgid=pgid)
-            expected_developer = saved['developer']
+            expected_developer = copy.deepcopy(saved['developer'])
             return saved
 
         result = opencode_direct_developer.run(
@@ -2344,7 +2345,7 @@ def run_task_opencode_delegate(args, *, store):
                 provider_type='opencode-cli', model=model,
                 max_tokens=opencode_direct_developer.MAX_OUTPUT_TOKENS,
                 execution=execution, expected_developer=expected_developer)
-            expected_developer = saved['developer']
+            expected_developer = copy.deepcopy(saved['developer'])
         else:
             developer.update(state='DEVELOPER_RESPONDED',
                 provider_type='opencode-cli', model=model,

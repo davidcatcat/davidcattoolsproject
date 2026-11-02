@@ -924,6 +924,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(kwargs['read_paths'], ['sample.py'])
             self.assertEqual(kwargs['write_paths'], ['sample.py'])
             self.assertIn(task['task_id'], kwargs['prompt'])
+            kwargs['launch_callback'](321, '123456', 321)
             (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
             return DirectResult(0, 'ses_Abc123', 'Updated fixture.',
                 {'prompt_tokens': 18, 'completion_tokens': 9, 'total_tokens': 27},
@@ -957,6 +958,53 @@ class TaskSubmissionCLITests(unittest.TestCase):
                       developer['direct_result_callback']['missing_gates'])
         stored = TaskStore(Path(self.home) / '.local/state/llmtool/tasks').get(task['task_id'])
         self.assertEqual(stored['developer']['artifact'], developer['artifact'])
+
+    def test_opencode_completion_cas_succeeds_and_preserves_newer_record(self):
+        result = DirectResult(0, 'ses_Abc123', 'Updated fixture.', None,
+                              'UNKNOWN', 'a' * 64, 32, 'CONFIRMED',
+                              'opencode v2.0.32', 10, 1, 'b' * 64)
+        for introduce_race in (False, True):
+            with self.subTest(introduce_race=introduce_race):
+                task = self._pm_task_with_opencode_assignment()
+                args = self._opencode_delegate_args(task)
+                store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+                original_compare = store.compare_and_update
+                raced = False
+
+                def compare(task_id, *, expected, **changes):
+                    nonlocal raced
+                    candidate = changes.get('developer')
+                    if (introduce_race and not raced and type(candidate) is dict and
+                            candidate.get('state') == 'DEVELOPER_RESPONDED'):
+                        raced = True
+                        current = store.get(task_id)['developer']
+                        newer = dict(current, context_sha256='c' * 64)
+                        original_compare(task_id, expected={'developer': current},
+                                         developer=newer)
+                    return original_compare(task_id, expected=expected, **changes)
+
+                def execute(**kwargs):
+                    kwargs['launch_callback'](321, '123456', 321)
+                    (self.executor_root / 'sample.py').write_text('VALUE = 2\n')
+                    return result
+
+                output = io.StringIO()
+                with patch.dict(os.environ, {'HOME': str(self.home)}), \
+                        patch.object(store, 'compare_and_update', side_effect=compare), \
+                        patch('llmtool.task_submission_cli.opencode_direct_developer.run',
+                              side_effect=execute), \
+                        patch('llmtool.task_submission_cli._developer_output_rejection',
+                              return_value=None), redirect_stdout(output):
+                    if introduce_race:
+                        with self.assertRaises(TaskStoreConflict):
+                            run_task_opencode_delegate(args, store=store)
+                        self.assertTrue(raced)
+                        self.assertEqual(store.get(task['task_id'])['developer']['context_sha256'],
+                                         'c' * 64)
+                    else:
+                        run_task_opencode_delegate(args, store=store)
+                        self.assertEqual(store.get(task['task_id'])['developer']['state'],
+                                         'DEVELOPER_RESPONDED')
 
     def test_opencode_direct_callback_accepts_docs_only_and_blocks_mixed_unregistered(self):
         for mixed in (False, True):
