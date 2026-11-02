@@ -115,6 +115,8 @@ def _merge_checks(record, number, head, pr, github_get):
             len(checks['check_runs']) > 100 or type(files) is not list or len(files) >= 100):
         return 'MERGE_CHECKS_UNAVAILABLE'
     check_runs = checks['check_runs']
+    if not check_runs:
+        return 'MERGE_CHECKS_MISSING'
     if any(type(item) is not dict or type(item.get('name')) is not str or
            item.get('head_sha') != head or
            item.get('status') != 'completed' or

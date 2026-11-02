@@ -1506,6 +1506,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 'status': 'completed', 'conclusion': 'cancelled'}]}, 'MERGE_CHECKS_NOT_GREEN'),
             ('failed check', {'checks': [{'head_sha': HEAD, 'name': 'check (Linux)',
                 'status': 'completed', 'conclusion': 'failure'}]}, 'MERGE_CHECKS_NOT_GREEN'),
+            ('missing checks', {'checks': []}, 'MERGE_CHECKS_MISSING'),
             ('missing required macOS check', {'checks': [{'head_sha': HEAD,
                 'name': 'check (Linux)', 'status': 'completed', 'conclusion': 'success'}]},
              'MERGE_MACOS_CHECK_REQUIRED'),
@@ -1551,7 +1552,11 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(result['codes'], ['MERGE_CHECKS_NOT_GREEN'])
         self.assertEqual(calls, [])
         github_get_green = lambda path: (
-            {'total_count': 0, 'check_runs': []} if path.startswith('commits/') else
+            {'total_count': 2, 'check_runs': [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+                 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+                 'conclusion': 'success'}]} if path.startswith('commits/') else
             [{'filename': 'src/module.py'}] if path.endswith('/files?per_page=100') else
             pr)
         result = task_advance._merge_once(store=store, record=record, number=17,
