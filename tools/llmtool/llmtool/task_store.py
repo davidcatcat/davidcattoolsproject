@@ -2079,7 +2079,7 @@ class TaskStore:
 
     def adopt_pm_session(self, task_id, *, old_session_key, new_session_key, at,
                          expected_record_sha256):
-        """Move one PM binding and its inbox events atomically with an audit entry."""
+        """Library-internal: atomically move one PM binding, inbox and audit entry."""
         current = self.get(task_id)
         if current.get('pm_session_id') != old_session_key:
             raise TaskStoreConflict() from None

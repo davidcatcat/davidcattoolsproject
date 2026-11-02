@@ -231,6 +231,24 @@ class ActivePMInboxTests(unittest.TestCase):
         self.assertEqual(moved['pm_provenance']['pm_runtime'], 'codex')
         self.assertEqual(moved['pm_provenance']['pm_native_session_id'], new_native)
 
+    def test_codex_adoption_refuses_ambiguous_old_session_transcripts(self):
+        old_native, old_path = self._codex_session()
+        task = self._record_pm(session=old_native, runtime='codex')
+        duplicate = old_path.parent / ('rollout-20261030-120001-' + old_native + '.jsonl')
+        duplicate.write_text(old_path.read_text())
+        new_native, _ = self._codex_session()
+        old_path.unlink()
+        before = self.store.get(task['task_id'])
+
+        with self.assertRaises(LLMToolError) as caught:
+            active_pm_inbox.adopt_pm_session(
+                self.store, 'pm-' + old_native, 'pm-' + new_native,
+                old_native_id=old_native, cwd=str(self.pm_cwd))
+
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'PM_SESSION_ADOPTION_OLD_SESSION_AMBIGUOUS')
+        self.assertEqual(self.store.get(task['task_id']), before)
+
     def test_adoption_refuses_task_without_session_provenance(self):
         task = self._record_pm()
         before = self.store.get(task['task_id'])

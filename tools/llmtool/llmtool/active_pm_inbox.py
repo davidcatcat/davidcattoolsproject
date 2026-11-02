@@ -150,8 +150,10 @@ def observe_codex_session(native_session_id, cwd, environ=None):
                 raise LLMToolError(
                     'Codex PM session is malformed or bound to another directory') from None
             matches.append(candidate)
-    if len(matches) != 1:
-        raise LLMToolError('Codex PM session was not found uniquely for this directory')
+    if not matches:
+        raise LLMToolError('Codex PM session was not found for this directory')
+    if len(matches) > 1:
+        raise LLMToolError('Codex PM session was found multiple times for this directory')
     return cwd
 
 
@@ -482,7 +484,9 @@ def adopt_pm_session(store, old_session_key, new_session_key, *, old_native_id,
             try:
                 observe_codex_session(old_native_id, recorded_cwd, environ)
             except LLMToolError as exc:
-                if str(exc) != 'Codex PM session was not found uniquely for this directory':
+                if str(exc) == 'Codex PM session was found multiple times for this directory':
+                    refuse('PM_SESSION_ADOPTION_OLD_SESSION_AMBIGUOUS')
+                if str(exc) != 'Codex PM session was not found for this directory':
                     raise
             else:
                 refuse('PM_SESSION_ADOPTION_OLD_SESSION_PRESENT')
