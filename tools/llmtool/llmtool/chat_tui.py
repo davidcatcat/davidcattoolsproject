@@ -2853,7 +2853,7 @@ class ChatTUI:
             task_id = getattr(self, "detail_task_id", None)
         else:
             return
-        if not task_id:
+        if not task_id or task_id in (chat_tui_task.UNKNOWN, chat_tui_task.NOT_AVAILABLE):
             return
         view.clear_selection()
         self.copy_labels[id(view)] = "Task ID"

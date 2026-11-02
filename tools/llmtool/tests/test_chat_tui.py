@@ -14,7 +14,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmtool import chat_tui, chat_tui_pm, chat_tui_status, chat_tui_theme, chat_tui_view
+from llmtool import (chat_tui, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
+                     chat_tui_view)
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
 from llmtool.providers.base import ProviderCapabilities, Reply
@@ -1969,6 +1970,8 @@ class TaskListTests(Base):
             self.assertEqual(sum('已建立／待派工' in row for row in rows), 1)
             self.assertEqual(sum('UNAVAILABLE' in row for row in rows), 1)
             self.assertTrue(rows[2].startswith('▶ '))
+            ui.list_index = next(index for index, record in enumerate(ui.list_records)
+                                 if chat_tui_status.row(record)['stage'] == '已建立／待派工')
 
             seen['list_copies'] = []
             ui.list_view._copier = lambda text: seen['list_copies'].append(text) or True
@@ -2002,7 +2005,9 @@ class TaskListTests(Base):
                             '/task mode profile missing\r', 'second task\r', self.idle,
                             lambda ui: setattr(self, 'calls', self.pm.complete.call_count),
                             '/task list\r', self.listed, list_open,
-                            '\x1b[B', lambda ui: self.assertEqual(ui.list_index, 1),
+                            lambda ui: self.assertEqual(
+                                chat_tui_status.row(ui.list_records[ui.list_index])['stage'],
+                                '已建立／待派工'),
                             'c', list_copied, '\r', self.idle, detail_open, 'c', detail_copied,
                             '\x1b', self.esc_settled, back_to_list,
                             '\x1b', self.esc_settled, lambda ui: self.assertFalse(ui.show_list),
@@ -2011,6 +2016,21 @@ class TaskListTests(Base):
                             '\x1bOR', lambda ui: self.assertFalse(ui.show_list)])
         self.assertEqual(self.pm.complete.call_count, self.calls)
         self.factory.assert_not_called()
+
+    def test_copy_dev_task_id_ignores_placeholder_rows(self):
+        async def placeholders(ui):
+            ui.show_list = True
+            ui.list_records = [{'task_id': chat_tui_task.UNKNOWN},
+                               {'task_id': chat_tui_task.NOT_AVAILABLE}]
+            ui.list_index = 0
+            ui.list_view.copy = Mock()
+            ui.copy_dev_task_id()
+            ui.list_view.copy.assert_not_called()
+            ui.list_index = 1
+            ui.copy_dev_task_id()
+            ui.list_view.copy.assert_not_called()
+
+        self.drive([placeholders])
 
     # -- W60 Owner acceptance: F3 list, F4 events and the F2 detail select and copy ------
     @staticmethod
