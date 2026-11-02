@@ -417,26 +417,28 @@ def _inbox(store, session_key, *, reconcile):
                 'pm_recovery': recovery(record),
             })
     events.sort(key=lambda event: (event['received_at'], event['task_id'], event['sequence']))
-    unclaimed, assignments_code = _unclaimed_assignments(store, session_key)
+    unclaimed, claimed, assignments_code = _developer_assignments(store, session_key)
     return {'pm_session_id': session_key,
             'status': ('ATTENTION' if blocked or unreadable or unclaimed or assignments_code
                        else 'OK'),
             'events': events, 'blocked': blocked,
             'unreadable_task_count': unreadable,
             'unclaimed_assignments': unclaimed,
+            'claimed_assignments': claimed,
             **({'assignments_error_code': assignments_code} if assignments_code else {}),
             **({'pending': pending} if not reconcile else {})}
 
 
-def _unclaimed_assignments(store, session_key):
-    """#367: this PM's Developer assignments past their claim timeout (read-only)."""
-    from .developer_assignment_inbox import unclaimed_for_pm
+def _developer_assignments(store, session_key):
+    """#367: this PM's UNCLAIMED and CLAIMED Developer assignments (read-only view)."""
+    from .developer_assignment_inbox import pm_assignments, refusal_code
 
     try:
-        return unclaimed_for_pm(store, session_key), None
+        unclaimed, claimed = pm_assignments(store, session_key)
+        return unclaimed, claimed, None
     except LLMToolError as exc:
         # A damaged assignment sidecar must not hide completion events.
-        return [], getattr(exc, 'task_store_error_code', None) or 'ASSIGNMENTS_UNAVAILABLE'
+        return [], [], refusal_code(exc) or 'ASSIGNMENTS_UNAVAILABLE'
 
 
 def read_inbox(store, session_key):

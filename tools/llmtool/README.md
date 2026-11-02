@@ -849,23 +849,36 @@ ATTENTION` and a `blocked` entry with `COMPLETION_EVENT_LIMIT` and action
 delivered events and reading again records the new result. Other failures to record an
 event are listed under `blocked` with action `RETRY_INBOX`.
 
-Developer assignment inbox (#367). `llmtool task assign --worker WORKER --d6-task D6
---pm-session SESSION [--task-id ID] [--owner-ref URL] [--claim-timeout N]` writes one
-ASSIGNED event, only after the worker-dispatch gate allows that worker (a refusal prints
-`{"code": ...}`, exits 1 and writes nothing). An open assignment for the same worker and
-D6 task is refused as `ASSIGNMENT_DUPLICATE`. The Developer runs `llmtool task
-assignments --worker WORKER [--wait] [--timeout N]` (same bounded sleep-poll as `task
-inbox`) and then `llmtool task claim ASSIGNMENT_ID --session SESSION_UUID [--worker
-WORKER]`. A claim succeeds once; a second claim is refused with
-`ASSIGNMENT_ALREADY_CLAIMED`. The claim stores a receipt (claimer session id, a digest of
-the claimer's `CLAUDE_CONFIG_DIR` (or `~/.claude`) path as the account identity, UTC time,
-and `late` when it came after the claim timeout); that receipt is the PM's delivery
-evidence. Assignments still unclaimed after their claim timeout (default 120 s) appear in
-the assigning PM's `task inbox` under `unclaimed_assignments` with state UNCLAIMED and
-`status: ATTENTION`; `--wait` returns when an assignment newly becomes UNCLAIMED. All
-assignments live in one locked, atomically replaced `.developer-assignments.json` in the
-TaskStore root, so accounts that share the store share the inbox. At most 128 are kept;
-the oldest claimed receipt is compacted first and open assignments are never dropped.
+Developer assignment inbox (#367 slice 1). `llmtool task assign --worker WORKER --d6 D6
+--pm-session SESSION [--common-dir GIT_COMMON_DIR] [--task-id ID] [--owner-ref URL]
+[--expires-in N]` re-runs the worker-dispatch gate, reads the D6 registration (it must be
+ACTIVE; `--common-dir` defaults to the current repository's) and writes one ASSIGNED
+event bound to that D6, its root and its HEAD (`source_sha`), expiring after N seconds
+(1-900, default 600). A refusal prints `{"code": ...}`, exits 1 and writes nothing. A
+second live assignment for the same D6 (any worker: an unexpired ASSIGNED, or a CLAIMED
+at the same HEAD) is refused as `ASSIGNMENT_DUPLICATE`, so one D6 has one writer. The
+Developer's resident session runs `llmtool task assignments --worker WORKER [--wait]
+[--timeout N]` (ids only; bounded wait, N at most 600) and then `llmtool task claim
+ASSIGNMENT_ID --worker WORKER --d6 D6 --session SESSION_UUID`. Before the one-shot
+ASSIGNED -> CLAIMED write the claim re-runs the dispatch gate (the result is appended to
+the assignment's audit; a PAUSED or unmatched OWNER_ASSIGNMENT_ONLY worker is refused with
+its gate code), checks the worker (`ASSIGNMENT_WORKER_MISMATCH`), the D6
+(`ASSIGNMENT_D6_MISMATCH`; no longer ACTIVE: `ASSIGNMENT_D6_NOT_ACTIVE`; HEAD moved:
+`ASSIGNMENT_SOURCE_STALE`), the expiry (`ASSIGNMENT_EXPIRED`, and the assignment becomes
+EXPIRED) and that this session's Claude Code transcript exists under the claimer's own
+`CLAUDE_CONFIG_DIR` for cwd equal to the D6 root, as plain owned files with no symlinks
+(`ASSIGNMENT_SESSION_NOT_FOUND`). A repeated claim by the same session returns the same
+receipt; any other claim is refused with `ASSIGNMENT_ALREADY_CLAIMED`. The receipt holds
+the session id, the claim time and `account_dir_label` (a digest of the claimer's
+configuration directory path). It is accountability and fail-closed bookkeeping, not
+authentication (every account runs as the same OS user), and never test, review or
+completion evidence. The assigning PM's `task inbox` lists expired, unclaimed
+assignments under `unclaimed_assignments` (state UNCLAIMED, `status: ATTENTION`; `--wait`
+returns when one newly appears) and claimed ones with their receipt under
+`claimed_assignments`. All assignments live in one locked (bounded wait, then
+`ASSIGNMENTS_BUSY`), atomically replaced `.developer-assignments.json` in the TaskStore
+root, so accounts that share the store share the inbox. At most 128 are kept; the oldest
+finished record is compacted first and live assignments are never dropped.
 
 The direct OpenCode worktree-result-to-original-PM handoff is automatic after the
 verified process exit and bounded test gate. Later independent review, PR and CI

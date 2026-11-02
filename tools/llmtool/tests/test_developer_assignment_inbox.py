@@ -1,9 +1,13 @@
-"""PM -> Developer assignment inbox and claim receipts (#367). Offline only.
+"""PM -> Developer assignment inbox and claim receipts (#367 slice 1). Offline only.
 
-The worker-dispatch gate is replaced by a fixed decision so tests do not
-depend on the live Owner policy file; no provider, network or model is used.
+Isolated TaskStore, a fake D6 registration and two temporary Claude
+configuration directories (PM account A, Developer account B). The
+worker-dispatch gate is replaced by a fixed decision so tests do not depend
+on the live Owner policy file; no provider, network, session or model is used.
+Matrix numbers refer to the #367 Task Contract offline test matrix.
 """
 
+import fcntl
 import json
 import os
 import tempfile
@@ -28,14 +32,20 @@ from llmtool.worker_dispatch import PolicyDecision
 POLICY = 'a' * 64
 PM = 'pm-' + '11111111-2222-4333-8444-555555555555'
 D6 = 'claude-dev-367-assignment-inbox-20261103'
+HEAD = '1' * 40
+WORKER = 'claude-developer'
 
 
 def allow(worker_key, owner_assignment_ref=None, task_id=None):
     return PolicyDecision(worker_key, True, 'OWNER_POLICY_ALLOWED', POLICY)
 
 
-def deny(worker_key, owner_assignment_ref=None, task_id=None):
+def paused(worker_key, owner_assignment_ref=None, task_id=None):
     return PolicyDecision(worker_key, False, 'OWNER_PAUSED', POLICY)
+
+
+def owner_only(worker_key, owner_assignment_ref=None, task_id=None):
+    return PolicyDecision(worker_key, False, 'OWNER_ASSIGNMENT_REQUIRED', POLICY)
 
 
 class DeveloperAssignmentInboxTests(unittest.TestCase):
@@ -43,10 +53,13 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
         self.base = Path(temp.name).resolve()
-        self.root = self.base / 'tasks'
-        self.store = TaskStore(self.root)
+        self.store_root = self.base / 'tasks'
+        self.store = TaskStore(self.store_root)
         self.account_a = str(self.base / 'claude-account-a')
         self.account_b = str(self.base / 'claude-account-b')
+        self.common_dir = self.base / 'repo' / '.git'
+        (self.common_dir / 'llmtool-worktrees').mkdir(parents=True, mode=0o700)
+        os.chmod(self.common_dir / 'llmtool-worktrees', 0o700)
         env = patch.dict(os.environ, {'HOME': str(self.base / 'home'),
                                       'CLAUDE_CONFIG_DIR': self.account_a})
         env.start()
@@ -54,191 +67,356 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
         self.gate_patch = patch('llmtool.worker_dispatch.evaluate', side_effect=allow)
         self.gate = self.gate_patch.start()
         self.addCleanup(self.gate_patch.stop)
+        self.roots = {}
+        self.register(D6)
 
-    def _assign(self, *, worker='claude-developer', d6=D6, now=None, **kwargs):
-        return inbox.assign(self.store, worker=worker, d6_task_id=d6, pm_session_key=PM,
+    # -- fixtures ---------------------------------------------------------
+
+    def register(self, task_id, *, head=HEAD, state='ACTIVE'):
+        root = self.roots.get(task_id)
+        if root is None:
+            root = self.base / 'worktrees' / task_id
+            root.mkdir(parents=True, mode=0o700)
+            os.chmod(root, 0o700)
+            self.roots[task_id] = root
+        info = root.lstat()
+        record = {
+            'schema_version': 1, 'task_id': task_id, 'state': state,
+            'lock_state': 'LOCKED', 'git_common_dir': str(self.common_dir),
+            'trusted_agent_id': 'claude-developer', 'session_ref': 'session-ref',
+            'root_realpath': str(root), 'branch': 'feat/' + task_id,
+            'base_sha': '0' * 40, 'head_sha': head,
+            'physical_identity': {'device': info.st_dev, 'inode': info.st_ino,
+                                  'uid': info.st_uid, 'mode': '0o700'},
+        }
+        path = self.common_dir / 'llmtool-worktrees' / (task_id + '.json')
+        temporary = path.with_suffix('.tmp')
+        temporary.write_text(json.dumps(record))
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, path)
+        return root
+
+    def transcript(self, session, account, task_id=D6):
+        path = active_pm_inbox.claude_session_file(
+            session, str(self.roots[task_id]), {'CLAUDE_CONFIG_DIR': account})
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('{}\n')
+        return path
+
+    def assign(self, *, worker=WORKER, d6=D6, now=None, **kwargs):
+        return inbox.assign(self.store, worker=worker, d6_task_id=d6,
+                            common_dir=str(self.common_dir), pm_session_key=PM,
                             now=now, **kwargs)
 
-    def _claim(self, assignment_id, *, account=None, session=None, store=None, worker=None):
-        environ = {'CLAUDE_CONFIG_DIR': account or self.account_a}
-        return inbox.claim(store or self.store, assignment_id,
-                           claimer_session_id=session or str(uuid.uuid4()),
-                           worker=worker, environ=environ)
+    def claim(self, assignment_id, *, session, account=None, worker=WORKER, d6=D6,
+              store=None, now=None):
+        return inbox.claim(store or self.store, assignment_id, worker=worker, d6_task_id=d6,
+                           session_id=session,
+                           environ={'CLAUDE_CONFIG_DIR': account or self.account_b},
+                           now=now)
 
-    def test_assign_lists_pending_for_the_named_worker_only(self):
-        assigned = self._assign()
-        self.assertEqual(assigned['event'], 'ASSIGNED')
-        self.assertEqual(assigned['state'], 'ASSIGNED')
-        self.assertEqual((assigned['worker'], assigned['d6_task_id'], assigned['pm_session_id']),
-                         ('claude-developer', D6, PM))
+    def assert_refused(self, code, call, *args, **kwargs):
+        with self.assertRaises(LLMToolError) as raised:
+            call(*args, **kwargs)
+        self.assertEqual(inbox.refusal_code(raised.exception), code)
+
+    def stored(self, assignment_id):
+        (item,) = [item for item in TaskStore(self.store_root).get_developer_assignments()
+                   if item['assignment_id'] == assignment_id]
+        return item
+
+    # -- matrix 1 ---------------------------------------------------------
+
+    def test_1_assign_then_cross_account_claim_is_visible_to_pm(self):
+        before = datetime.now(timezone.utc).replace(microsecond=0)
+        assigned = self.assign()
+        self.assertEqual((assigned['state'], assigned['source_sha'], assigned['d6_root']),
+                         ('ASSIGNED', HEAD, str(self.roots[D6])))
+        expires = (datetime.strptime(assigned['expires_at'], '%Y-%m-%dT%H:%M:%SZ')
+                   .replace(tzinfo=timezone.utc))
+        self.assertLessEqual(expires - before, timedelta(seconds=601))
         self.assertEqual(assigned['dispatch'], {'decision': 'ALLOWED',
                                                 'reason_code': 'OWNER_POLICY_ALLOWED',
                                                 'policy_sha256': POLICY})
-        self.assertEqual(assigned['claim_timeout_seconds'], 120)
-        self.gate.assert_called_once_with('claude-developer', owner_assignment_ref=None,
-                                          task_id=None)
-        pending = inbox.pending_assignments(self.store, 'claude-developer')
-        self.assertEqual([item['assignment_id'] for item in pending],
-                         [assigned['assignment_id']])
+        self.gate.assert_called_once_with(WORKER, owner_assignment_ref=None, task_id=None)
+        listed = inbox.pending_assignments(self.store, WORKER)
+        self.assertEqual(listed, [{'assignment_id': assigned['assignment_id'],
+                                   'd6_task_id': D6, 'task_id': None, 'source_sha': HEAD,
+                                   'expires_at': assigned['expires_at']}])
         self.assertEqual(inbox.pending_assignments(self.store, 'codex-developer'), [])
-        # The sidecar never appears as a Task.
-        self.assertEqual(self.store.task_ids(), [])
 
-    def test_claim_once_writes_receipt_and_second_claim_is_refused(self):
-        assigned = self._assign()
         session = str(uuid.uuid4())
-        claimed = self._claim(assigned['assignment_id'], session=session,
-                              worker='claude-developer')
+        self.transcript(session, self.account_b)
+        claimed = self.claim(assigned['assignment_id'], session=session,
+                             store=TaskStore(self.store_root))
         self.assertEqual(claimed['state'], 'CLAIMED')
         receipt = claimed['claim']
-        self.assertEqual(receipt['claimer_session_id'], session)
-        self.assertEqual(receipt['claimer_account'], inbox.claimer_account(
-            {'CLAUDE_CONFIG_DIR': self.account_a}))
-        self.assertTrue(receipt['claimed_at'].endswith('Z'))
-        self.assertIs(receipt['late'], False)
-        self.assertEqual(inbox.pending_assignments(self.store, 'claude-developer'), [])
+        self.assertEqual(set(receipt), {'session_id', 'claimed_at', 'account_dir_label'})
+        self.assertEqual(receipt['session_id'], session)
+        self.assertEqual(receipt['account_dir_label'],
+                         inbox.account_dir_label({'CLAUDE_CONFIG_DIR': self.account_b}))
+        self.assertNotEqual(receipt['account_dir_label'],
+                            inbox.account_dir_label({'CLAUDE_CONFIG_DIR': self.account_a}))
+        self.assertEqual([entry['action'] for entry in claimed['audit']], ['ASSIGN', 'CLAIM'])
+        # The PM (account A, its own process view) sees the receipt.
+        view = active_pm_inbox.peek_inbox(TaskStore(self.store_root), PM)
+        self.assertEqual(view['unclaimed_assignments'], [])
+        (seen,) = view['claimed_assignments']
+        self.assertEqual((seen['state'], seen['claim']), ('CLAIMED', receipt))
+        self.assertEqual(view['status'], 'OK')
+        self.assertEqual(self.store.task_ids(), [])
 
-        with self.assertRaises(LLMToolError) as raised:
-            self._claim(assigned['assignment_id'])
-        self.assertEqual(raised.exception.task_store_error_code, 'ASSIGNMENT_ALREADY_CLAIMED')
-        # The first receipt is unchanged.
-        (stored,) = self.store.get_developer_assignments()
-        self.assertEqual(stored['claim'], receipt)
+    # -- matrix 2 ---------------------------------------------------------
 
-    def test_claim_refuses_unknown_id_wrong_worker_and_bad_session(self):
-        assigned = self._assign()
-        with self.assertRaises(LLMToolError) as raised:
-            self._claim(uuid.uuid4().hex)
-        self.assertEqual(raised.exception.task_store_error_code, 'ASSIGNMENT_NOT_FOUND')
-        with self.assertRaises(LLMToolError) as raised:
-            self._claim(assigned['assignment_id'], worker='codex-developer')
-        self.assertEqual(raised.exception.task_store_error_code, 'ASSIGNMENT_WORKER_MISMATCH')
-        with self.assertRaises(LLMToolError):
-            self._claim(assigned['assignment_id'], session='not-a-session')
-        self.assertEqual(self.store.get_developer_assignments()[0]['state'], 'ASSIGNED')
+    def test_2_same_session_reclaim_returns_receipt_other_session_refused(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        first = self.claim(assigned['assignment_id'], session=session)
+        path = self.store_root / task_store_module.ASSIGNMENTS_NAME
+        raw = path.read_bytes()
+        later = datetime.now(timezone.utc) + timedelta(seconds=5)
+        again = self.claim(assigned['assignment_id'], session=session, now=later)
+        self.assertEqual(again['claim'], first['claim'])
+        self.assertEqual(path.read_bytes(), raw)
+        other = str(uuid.uuid4())
+        self.transcript(other, self.account_b)
+        self.assert_refused('ASSIGNMENT_ALREADY_CLAIMED', self.claim,
+                            assigned['assignment_id'], session=other)
+        # Same session id from another account is a different claimer.
+        self.transcript(session, self.account_a)
+        self.assert_refused('ASSIGNMENT_ALREADY_CLAIMED', self.claim,
+                            assigned['assignment_id'], session=session,
+                            account=self.account_a)
+        self.assertEqual(self.stored(assigned['assignment_id'])['claim'], first['claim'])
 
-    def test_cross_account_claims_share_the_store_with_distinct_identities(self):
-        first = self._assign(d6='claude-dev-367-a')
-        second = self._assign(d6='claude-dev-367-b')
-        # Each account uses its own process view of the same shared store root.
-        receipt_a = self._claim(first['assignment_id'], account=self.account_a,
-                                store=TaskStore(self.root))['claim']
-        receipt_b = self._claim(second['assignment_id'], account=self.account_b,
-                                store=TaskStore(self.root))['claim']
-        self.assertNotEqual(receipt_a['claimer_account'], receipt_b['claimer_account'])
-        with self.assertRaises(LLMToolError) as raised:
-            self._claim(first['assignment_id'], account=self.account_b,
-                        store=TaskStore(self.root))
-        self.assertEqual(raised.exception.task_store_error_code, 'ASSIGNMENT_ALREADY_CLAIMED')
-        stored = {item['assignment_id']: item['claim']
-                  for item in TaskStore(self.root).get_developer_assignments()}
-        self.assertEqual(stored, {first['assignment_id']: receipt_a,
-                                  second['assignment_id']: receipt_b})
-        # Through the CLI handler, CLAUDE_CONFIG_DIR selects the claimer account.
-        third = self._assign(d6='claude-dev-367-c')
-        out = StringIO()
-        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': self.account_b}):
-            code = run_task_claim(Namespace(assignment_id=third['assignment_id'],
-                                            session=str(uuid.uuid4()), worker=None),
-                                  store=self.store, stdout=out)
-        self.assertEqual(code, 0)
-        self.assertEqual(json.loads(out.getvalue())['claim']['claimer_account'],
-                         receipt_b['claimer_account'])
+    # -- matrix 3 ---------------------------------------------------------
 
-    def test_unclaimed_after_timeout_is_listed_in_pm_inbox(self):
-        past = datetime.now(timezone.utc) - timedelta(seconds=300)
-        overdue = self._assign(d6='claude-dev-367-old', now=past)
-        fresh = self._assign(d6='claude-dev-367-new')
-        custom = self._assign(d6='claude-dev-367-long', now=past, claim_timeout=3600)
-        claimed = self._assign(d6='claude-dev-367-done', now=past)
-        late = self._claim(claimed['assignment_id'])
-        self.assertIs(late['claim']['late'], True)
-
-        result = active_pm_inbox.peek_inbox(self.store, PM)
-        self.assertEqual([item['assignment_id'] for item in result['unclaimed_assignments']],
-                         [overdue['assignment_id']])
-        self.assertEqual(result['unclaimed_assignments'][0]['state'], 'UNCLAIMED')
-        self.assertEqual(result['status'], 'ATTENTION')
+    def test_3_crash_before_claim_expires_to_unclaimed_and_claim_refused(self):
+        past = datetime.now(timezone.utc) - timedelta(seconds=700)
+        assigned = self.assign(now=past)
+        self.assertEqual(inbox.pending_assignments(self.store, WORKER), [])
+        view = active_pm_inbox.peek_inbox(self.store, PM)
+        self.assertEqual([(item['assignment_id'], item['state'])
+                          for item in view['unclaimed_assignments']],
+                         [(assigned['assignment_id'], 'UNCLAIMED')])
+        self.assertEqual(view['status'], 'ATTENTION')
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        self.assert_refused('ASSIGNMENT_EXPIRED', self.claim,
+                            assigned['assignment_id'], session=session)
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'EXPIRED')
+        self.assert_refused('ASSIGNMENT_EXPIRED', self.claim,
+                            assigned['assignment_id'], session=session)
+        self.assertEqual(len(active_pm_inbox.peek_inbox(self.store, PM)
+                             ['unclaimed_assignments']), 1)
         self.assertEqual(active_pm_inbox.peek_inbox(self.store, 'pm-other')
                          ['unclaimed_assignments'], [])
-        # Still claimable by the Developer, and flagged overdue for it.
-        pending = {item['assignment_id']: item['overdue']
-                   for item in inbox.pending_assignments(self.store, 'claude-developer')}
-        self.assertEqual(pending, {overdue['assignment_id']: True,
-                                   fresh['assignment_id']: False,
-                                   custom['assignment_id']: False})
-        later = datetime.now(timezone.utc) + timedelta(seconds=121)
-        self.assertEqual({item['assignment_id'] for item in
-                          inbox.unclaimed_for_pm(self.store, PM, now=later)},
-                         {overdue['assignment_id'], fresh['assignment_id']})
 
-    def test_worker_dispatch_refusal_writes_no_event(self):
-        self.gate.side_effect = deny
-        with self.assertRaises(LLMToolError) as raised:
-            self._assign()
-        self.assertEqual(raised.exception.dispatch_code, 'OWNER_PAUSED')
-        self.assertFalse((self.root / task_store_module.ASSIGNMENTS_NAME).exists())
-        self.assertEqual(self.store.get_developer_assignments(), [])
-        # An existing sidecar is left byte-identical by a later refusal.
+    # -- matrix 4 ---------------------------------------------------------
+
+    def test_4_crash_after_claim_keeps_claimed_and_wait_does_not_relist(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        self.claim(assigned['assignment_id'], session=session)
+        restarted = TaskStore(self.store_root)
+        clock = iter(range(0, 1000, 5))
+        result = inbox.wait_assignments(restarted, WORKER, wait=True, timeout=12,
+                                        clock=lambda: next(clock), sleep=lambda _: None)
+        self.assertEqual((result['assignments'], result['timed_out']), ([], True))
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'CLAIMED')
+
+    # -- matrix 5 ---------------------------------------------------------
+
+    def test_5_d6_head_moved_or_inactive_refuses_claim(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        self.register(D6, head='2' * 40)
+        self.assert_refused('ASSIGNMENT_SOURCE_STALE', self.claim,
+                            assigned['assignment_id'], session=session)
+        self.register(D6, head=HEAD, state='RETIRED')
+        self.assert_refused('ASSIGNMENT_D6_NOT_ACTIVE', self.claim,
+                            assigned['assignment_id'], session=session)
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'ASSIGNED')
+        # Assign refuses a D6 that is not ACTIVE or not registered, writing nothing.
+        self.assert_refused('ASSIGNMENT_D6_NOT_ACTIVE', self.assign, d6='claude-dev-other')
+        self.assertEqual(len(self.store.get_developer_assignments()), 1)
+
+    # -- matrix 6 ---------------------------------------------------------
+
+    def test_6_paused_or_owner_only_worker_at_claim_is_refused_and_audited(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        for decision, code in ((paused, 'OWNER_PAUSED'),
+                               (owner_only, 'OWNER_ASSIGNMENT_REQUIRED')):
+            self.gate.side_effect = decision
+            self.assert_refused(code, self.claim, assigned['assignment_id'], session=session)
+            item = self.stored(assigned['assignment_id'])
+            self.assertEqual(item['state'], 'ASSIGNED')
+            self.assertEqual({key: item['audit'][-1][key]
+                              for key in ('action', 'decision', 'reason_code')},
+                             {'action': 'CLAIM', 'decision': 'BLOCKED', 'reason_code': code})
+        self.assertEqual([entry['action'] for entry in item['audit']],
+                         ['ASSIGN', 'CLAIM', 'CLAIM'])
+        # Assign is refused by the gate as well, and writes nothing.
+        path = self.store_root / task_store_module.ASSIGNMENTS_NAME
+        raw = path.read_bytes()
+        self.register('claude-dev-367-b')
+        self.gate.side_effect = paused
+        self.assert_refused('OWNER_PAUSED', self.assign, d6='claude-dev-367-b')
+        self.assertEqual(path.read_bytes(), raw)
+        # Re-allowed: the claim now succeeds, with an ALLOWED CLAIM audit entry.
         self.gate.side_effect = allow
-        self._assign()
-        before = (self.root / task_store_module.ASSIGNMENTS_NAME).read_bytes()
-        self.gate.side_effect = deny
-        with self.assertRaises(LLMToolError):
-            self._assign(d6='claude-dev-367-other')
-        self.assertEqual((self.root / task_store_module.ASSIGNMENTS_NAME).read_bytes(), before)
+        claimed = self.claim(assigned['assignment_id'], session=session)
+        self.assertEqual(claimed['audit'][-1]['decision'], 'ALLOWED')
 
-    def test_real_gate_refuses_unknown_worker(self):
+    def test_6_real_gate_refuses_unknown_worker(self):
         self.gate_patch.stop()
         try:
             with self.assertRaises(LLMToolError):
-                self._assign(worker='no-such-worker')
+                self.assign(worker='no-such-worker')
             self.assertEqual(self.store.get_developer_assignments(), [])
         finally:
             self.gate = self.gate_patch.start()
 
-    def test_duplicate_open_assignment_is_refused(self):
-        self._assign()
-        with self.assertRaises(LLMToolError) as raised:
-            self._assign()
-        self.assertEqual(raised.exception.task_store_error_code, 'ASSIGNMENT_DUPLICATE')
-        self.assertEqual(len(self.store.get_developer_assignments()), 1)
+    # -- matrix 7 ---------------------------------------------------------
 
-    def test_wait_sleeps_until_assignment_arrives_and_times_out(self):
+    def test_7_wrong_worker_wrong_d6_or_pm_account_transcript_refused(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_a)  # only under the PM's account
+        self.assert_refused('ASSIGNMENT_WORKER_MISMATCH', self.claim,
+                            assigned['assignment_id'], session=session,
+                            worker='codex-developer')
+        self.assert_refused('ASSIGNMENT_D6_MISMATCH', self.claim,
+                            assigned['assignment_id'], session=session,
+                            d6='claude-dev-other')
+        self.assert_refused('ASSIGNMENT_SESSION_NOT_FOUND', self.claim,
+                            assigned['assignment_id'], session=session)
+        # A transcript for another cwd under the claimer's account does not count.
+        other_root = self.register('claude-dev-367-b')
+        self.transcript(session, self.account_b, task_id='claude-dev-367-b')
+        self.assertTrue(other_root.is_dir())
+        self.assert_refused('ASSIGNMENT_SESSION_NOT_FOUND', self.claim,
+                            assigned['assignment_id'], session=session)
+        self.assert_refused('ASSIGNMENT_NOT_FOUND', self.claim, uuid.uuid4().hex,
+                            session=session)
+        self.assert_refused('ASSIGNMENT_SESSION_INVALID', self.claim,
+                            assigned['assignment_id'], session='not-a-session')
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'ASSIGNED')
+
+    # -- matrix 8 ---------------------------------------------------------
+
+    def test_8_second_live_assignment_for_same_d6_refused(self):
+        first = self.assign()
+        self.assert_refused('ASSIGNMENT_DUPLICATE', self.assign, worker='codex-developer')
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        self.claim(first['assignment_id'], session=session)
+        # Claimed at the same HEAD: the claimer is still the writer.
+        self.assert_refused('ASSIGNMENT_DUPLICATE', self.assign)
+        self.assertEqual(len(self.store.get_developer_assignments()), 1)
+        # After the D6 HEAD moved (e.g. a repair round) a new assignment is allowed.
+        self.register(D6, head='3' * 40)
+        second = self.assign()
+        self.assertEqual(second['source_sha'], '3' * 40)
+        # An expired assignment does not block the D6 either.
+        self.register('claude-dev-367-b')
+        past = datetime.now(timezone.utc) - timedelta(seconds=700)
+        self.assign(d6='claude-dev-367-b', now=past)
+        self.assign(d6='claude-dev-367-b')
+
+    # -- matrix 9 ---------------------------------------------------------
+
+    def test_9_symlinked_or_missing_transcript_refused(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.assert_refused('ASSIGNMENT_SESSION_NOT_FOUND', self.claim,
+                            assigned['assignment_id'], session=session)
+        real = self.base / 'elsewhere.jsonl'
+        real.write_text('{}\n')
+        path = active_pm_inbox.claude_session_file(
+            session, str(self.roots[D6]), {'CLAUDE_CONFIG_DIR': self.account_b})
+        path.parent.mkdir(parents=True)
+        path.symlink_to(real)
+        self.assert_refused('ASSIGNMENT_SESSION_NOT_FOUND', self.claim,
+                            assigned['assignment_id'], session=session)
+        # A symlinked project directory is refused as well.
+        path.unlink()
+        project = path.parent
+        project.rmdir()
+        target = self.base / 'project-target'
+        target.mkdir()
+        (target / path.name).write_text('{}\n')
+        project.symlink_to(target, target_is_directory=True)
+        self.assert_refused('ASSIGNMENT_SESSION_NOT_FOUND', self.claim,
+                            assigned['assignment_id'], session=session)
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'ASSIGNED')
+
+    # -- matrix 10 --------------------------------------------------------
+
+    def test_10_wait_returns_within_bound_with_no_events(self):
+        ticks = []
+        clock = iter(range(0, 1000, 5))
+
+        def fake_clock():
+            value = next(clock)
+            ticks.append(value)
+            return value
+
+        empty = inbox.wait_assignments(self.store, WORKER, wait=True, timeout=12,
+                                       clock=fake_clock, sleep=lambda _: None)
+        self.assertEqual((empty['assignments'], empty['timed_out']), ([], True))
+        self.assertLessEqual(ticks[-1] - ticks[0], 12 + 5)
+        self.assert_refused('ASSIGNMENT_WAIT_TIMEOUT_INVALID', inbox.wait_assignments,
+                            self.store, WORKER, timeout=601)
+        # It wakes as soon as an assignment arrives.
         calls = []
 
         def sleep(seconds):
             calls.append(seconds)
             if len(calls) == 1:
-                self._assign()
+                self.assign()
 
         out = StringIO()
         self.assertEqual(run_task_assignments(
-            Namespace(worker='claude-developer', wait=True, timeout=30),
+            Namespace(worker=WORKER, wait=True, timeout=30),
             store=self.store, stdout=out, sleep=sleep), 0)
         result = json.loads(out.getvalue())
-        self.assertEqual(calls, [inbox.POLL_SECONDS])
-        self.assertEqual(len(result['assignments']), 1)
-        self.assertIs(result['timed_out'], False)
+        self.assertEqual((calls, len(result['assignments']), result['timed_out']),
+                         ([inbox.POLL_SECONDS], 1, False))
 
-        clock = iter(range(0, 1000, 5))
-        empty = inbox.wait_assignments(self.store, 'codex-developer', wait=True, timeout=12,
-                                       clock=lambda: next(clock), sleep=lambda _: None)
-        self.assertEqual(empty['assignments'], [])
-        self.assertIs(empty['timed_out'], True)
-        with self.assertRaises(LLMToolError):
-            inbox.wait_assignments(self.store, 'codex-developer', timeout=3601)
+    # -- supporting checks ------------------------------------------------
+
+    def test_expiry_is_bounded_to_fifteen_minutes(self):
+        for value in (0, 901, '60'):
+            self.assert_refused('ASSIGNMENT_EXPIRY_INVALID', self.assign, expires_in=value)
+        self.assertEqual(self.assign(expires_in=900)['state'], 'ASSIGNED')
+
+    def test_lock_wait_is_bounded_with_busy_code(self):
+        self.assign()
+        lock = os.open(self.store_root / task_store_module.ASSIGNMENTS_LOCK_NAME, os.O_RDWR)
+        self.addCleanup(os.close, lock)
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        with patch.object(task_store_module, 'TASK_UPDATE_LOCK_TIMEOUT_SECONDS', 0.2):
+            self.assert_refused('ASSIGNMENTS_BUSY', self.store.get_developer_assignments)
+            self.assert_refused('ASSIGNMENTS_BUSY', self.assign, d6='claude-dev-x')
+        fcntl.flock(lock, fcntl.LOCK_UN)
+        self.assertEqual(len(self.store.get_developer_assignments()), 1)
 
     def test_pm_wait_wakes_when_an_assignment_becomes_unclaimed(self):
-        # Already-unclaimed assignments do not end the wait; a new one does.
-        past = datetime.now(timezone.utc) - timedelta(seconds=300)
-        self._assign(d6='claude-dev-367-old', now=past)
+        past = datetime.now(timezone.utc) - timedelta(seconds=700)
+        self.assign(now=past)
+        self.register('claude-dev-367-b')
         calls = []
 
         def sleep(seconds):
             calls.append(seconds)
             if len(calls) == 2:
-                self._assign(d6='claude-dev-367-new', now=past)
+                self.assign(d6='claude-dev-367-b', now=past)
 
         result = active_pm_inbox.wait_inbox(self.store, PM, wait=True, timeout=60,
                                             sleep=sleep)
@@ -246,46 +424,60 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
         self.assertEqual(len(result['unclaimed_assignments']), 2)
 
     def test_damaged_sidecar_fails_closed_without_hiding_pm_inbox(self):
-        self._assign()
-        path = self.root / task_store_module.ASSIGNMENTS_NAME
+        self.assign()
+        path = self.store_root / task_store_module.ASSIGNMENTS_NAME
         value = json.loads(path.read_text())
-        value['assignments'][0]['worker'] = 'codex-developer'
+        value['assignments'][0]['source_sha'] = '9' * 40
         path.write_text(json.dumps(value))
-        with self.assertRaises(LLMToolError) as raised:
-            self.store.get_developer_assignments()
-        self.assertEqual(raised.exception.task_store_error_code, 'ASSIGNMENTS_INVALID')
+        self.assert_refused('ASSIGNMENTS_INVALID', self.store.get_developer_assignments)
         result = active_pm_inbox.peek_inbox(self.store, PM)
         self.assertEqual(result['assignments_error_code'], 'ASSIGNMENTS_INVALID')
         self.assertEqual(result['status'], 'ATTENTION')
 
-    def test_cli_assign_claim_round_trip_and_refusal_code(self):
-        home = self.base / 'home'
+    def test_cli_assign_assignments_claim_round_trip(self):
         native = PM[3:]
 
-        def run(*argv):
+        def run(*argv, account=self.account_a):
             out = StringIO()
-            with redirect_stdout(out):
+            with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': account}), redirect_stdout(out):
                 code = main(['task', *argv])
             return code, json.loads(out.getvalue())
 
-        code, assigned = run('assign', '--worker', 'claude-developer', '--d6-task', D6,
-                             '--pm-session', native, '--claim-timeout', '60')
-        self.assertEqual(code, 0)
-        self.assertEqual(assigned['claim_timeout_seconds'], 60)
-        self.assertTrue((home / '.local' / 'state' / 'llmtool' / 'tasks' /
+        code, assigned = run('assign', '--worker', WORKER, '--d6', D6,
+                             '--common-dir', str(self.common_dir), '--pm-session', native,
+                             '--expires-in', '60')
+        self.assertEqual((code, assigned['state']), (0, 'ASSIGNED'))
+        self.assertTrue((self.base / 'home' / '.local' / 'state' / 'llmtool' / 'tasks' /
                          task_store_module.ASSIGNMENTS_NAME).exists())
-        code, listed = run('assignments', '--worker', 'claude-developer')
+        code, listed = run('assignments', '--worker', WORKER)
         self.assertEqual([item['assignment_id'] for item in listed['assignments']],
                          [assigned['assignment_id']])
         session = str(uuid.uuid4())
-        code, claimed = run('claim', assigned['assignment_id'], '--session', session)
-        self.assertEqual((code, claimed['claim']['claimer_session_id']), (0, session))
-        code, refused = run('claim', assigned['assignment_id'], '--session', session)
+        self.transcript(session, self.account_b)
+        claim = ('claim', assigned['assignment_id'], '--worker', WORKER, '--d6', D6,
+                 '--session', session)
+        code, claimed = run(*claim, account=self.account_b)
+        self.assertEqual((code, claimed['claim']['session_id']), (0, session))
+        code, again = run(*claim, account=self.account_b)
+        self.assertEqual((code, again['claim']), (0, claimed['claim']))
+        code, refused = run(*claim, account=self.account_a)
         self.assertEqual((code, refused), (1, {'code': 'ASSIGNMENT_ALREADY_CLAIMED'}))
-        self.gate.side_effect = deny
-        code, refused = run('assign', '--worker', 'claude-developer', '--d6-task', D6,
-                            '--pm-session', native)
+        code, refused = run('assignments', '--worker', WORKER, '--wait', '--timeout', '601')
+        self.assertEqual((code, refused), (1, {'code': 'ASSIGNMENT_WAIT_TIMEOUT_INVALID'}))
+        self.gate.side_effect = paused
+        self.register('claude-dev-367-b')
+        code, refused = run('assign', '--worker', WORKER, '--d6', 'claude-dev-367-b',
+                            '--common-dir', str(self.common_dir), '--pm-session', native)
         self.assertEqual((code, refused), (1, {'code': 'OWNER_PAUSED'}))
+        # run_task_claim honours CLAUDE_CONFIG_DIR for the claimer account.
+        self.gate.side_effect = allow
+        out = StringIO()
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': self.account_b}):
+            code = run_task_claim(Namespace(assignment_id=assigned['assignment_id'],
+                                            worker=WORKER, d6=D6, session=session),
+                                  store=TaskStore(self.base / 'home' / '.local' / 'state' /
+                                                  'llmtool' / 'tasks'), stdout=out)
+        self.assertEqual(code, 0)
 
 
 if __name__ == '__main__':

@@ -325,22 +325,27 @@ _WORKER_AVAILABILITY_FIELDS = frozenset((
 
 # #367 Developer assignment inbox: PM -> Developer ASSIGNED events and their
 # one-time claim receipts, in one locked sidecar inside the TaskStore root so
-# every account that shares the store sees the same assignments.
+# every account that shares the store sees the same assignments. Each one is
+# bound to a registered ACTIVE D6 task and its HEAD (``source_sha``) and
+# expires within ASSIGNMENT_EXPIRY_MAX_SECONDS. Only ASSIGNED -> CLAIMED and
+# ASSIGNED -> EXPIRED transitions exist.
 ASSIGNMENTS_SCHEMA_VERSION = 1
 ASSIGNMENTS_NAME = '.developer-assignments.json'
 ASSIGNMENTS_LOCK_NAME = '.developer-assignments.lock'
 ASSIGNMENTS_MAX_BYTES = 256 * 1024
 MAX_ASSIGNMENTS = 128
-ASSIGNMENT_CLAIM_TIMEOUT_MAX_SECONDS = 86400
+MAX_ASSIGNMENT_AUDIT = 16
+ASSIGNMENT_EXPIRY_MAX_SECONDS = 900
 _ASSIGNMENTS_FIELDS = frozenset(('schema_version', 'assignments', 'record_sha256'))
 _ASSIGNMENT_FIELDS = frozenset((
-    'assignment_id', 'event', 'worker', 'd6_task_id', 'pm_session_id', 'task_id',
-    'owner_assignment_ref', 'assigned_at', 'claim_timeout_seconds', 'dispatch',
-    'state', 'claim',
+    'assignment_id', 'event', 'worker', 'd6_task_id', 'common_dir', 'd6_root',
+    'source_sha', 'pm_session_id', 'task_id', 'owner_assignment_ref', 'assigned_at',
+    'expires_at', 'dispatch', 'state', 'claim', 'audit',
 ))
 _ASSIGNMENT_DISPATCH_FIELDS = frozenset(('decision', 'reason_code', 'policy_sha256'))
-_ASSIGNMENT_CLAIM_FIELDS = frozenset((
-    'claimer_session_id', 'claimer_account', 'claimed_at', 'late',
+_ASSIGNMENT_CLAIM_FIELDS = frozenset(('session_id', 'claimed_at', 'account_dir_label'))
+_ASSIGNMENT_AUDIT_FIELDS = frozenset((
+    'action', 'decision', 'reason_code', 'policy_sha256', 'at',
 ))
 _UTC_SECONDS = '%Y-%m-%dT%H:%M:%SZ'
 
@@ -354,42 +359,80 @@ def _valid_utc_seconds(value):
         return False
 
 
+def _utc_seconds(value):
+    return datetime.strptime(value, _UTC_SECONDS).replace(tzinfo=timezone.utc)
+
+
+def _plain_absolute_path(value):
+    return (type(value) is str and 1 < len(value) <= 1024 and value.startswith('/') and
+            os.path.normpath(value) == value and
+            not any(ord(char) < 0x20 or ord(char) == 0x7f for char in value))
+
+
+def _reason_code(value):
+    return type(value) is str and re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', value) is not None
+
+
+def _policy_digest(value):
+    return type(value) is str and re.fullmatch(r'[0-9a-f]{64}', value) is not None
+
+
+def _validate_assignment_audit(entry):
+    if (type(entry) is not dict or set(entry) != _ASSIGNMENT_AUDIT_FIELDS or
+            entry['action'] not in ('ASSIGN', 'CLAIM') or
+            entry['decision'] not in ('ALLOWED', 'BLOCKED') or
+            not _reason_code(entry['reason_code']) or
+            (entry['policy_sha256'] is not None and
+             not _policy_digest(entry['policy_sha256'])) or
+            not _valid_utc_seconds(entry['at'])):
+        _fail('ASSIGNMENTS_INVALID')
+    return entry
+
+
 def _validate_assignment(item):
     if type(item) is not dict or set(item) != _ASSIGNMENT_FIELDS:
         _fail('ASSIGNMENTS_INVALID')
     dispatch = item['dispatch']
     claim = item['claim']
     ref = item['owner_assignment_ref']
-    timeout = item['claim_timeout_seconds']
+    audit = item['audit']
     if (not _safe_identifier(item['assignment_id'], TASK_ID) or
             item['event'] != 'ASSIGNED' or
             type(item['worker']) is not str or
             re.fullmatch(r'[a-z][a-z0-9-]{0,63}', item['worker']) is None or
             not _safe_identifier(item['d6_task_id'], D6_TASK_ID) or
+            not _plain_absolute_path(item['common_dir']) or
+            not item['common_dir'].endswith('/.git') or
+            not _plain_absolute_path(item['d6_root']) or
+            type(item['source_sha']) is not str or
+            re.fullmatch(r'[0-9a-f]{40}', item['source_sha']) is None or
             not _safe_identifier(item['pm_session_id'], SESSION_ID) or
             (item['task_id'] is not None and not _safe_identifier(item['task_id'], TASK_ID)) or
             (ref is not None and (type(ref) is not str or not 0 < len(ref) <= 512 or
                                   any(ord(char) <= 0x20 or ord(char) >= 0x7f
                                       for char in ref))) or
             not _valid_utc_seconds(item['assigned_at']) or
-            type(timeout) is not int or
-            not 1 <= timeout <= ASSIGNMENT_CLAIM_TIMEOUT_MAX_SECONDS or
+            not _valid_utc_seconds(item['expires_at']) or
+            not 0 < (_utc_seconds(item['expires_at']) -
+                     _utc_seconds(item['assigned_at'])).total_seconds()
+            <= ASSIGNMENT_EXPIRY_MAX_SECONDS or
             type(dispatch) is not dict or set(dispatch) != _ASSIGNMENT_DISPATCH_FIELDS or
             dispatch['decision'] != 'ALLOWED' or
-            type(dispatch['reason_code']) is not str or
-            re.fullmatch(r'[A-Z][A-Z0-9_]{0,63}', dispatch['reason_code']) is None or
-            type(dispatch['policy_sha256']) is not str or
-            re.fullmatch(r'[0-9a-f]{64}', dispatch['policy_sha256']) is None or
-            item['state'] not in ('ASSIGNED', 'CLAIMED') or
-            (item['state'] == 'ASSIGNED') != (claim is None)):
+            not _reason_code(dispatch['reason_code']) or
+            not _policy_digest(dispatch['policy_sha256']) or
+            item['state'] not in ('ASSIGNED', 'CLAIMED', 'EXPIRED') or
+            (item['state'] == 'CLAIMED') != (claim is not None) or
+            type(audit) is not list or not 0 < len(audit) <= MAX_ASSIGNMENT_AUDIT):
         _fail('ASSIGNMENTS_INVALID')
+    for entry in audit:
+        _validate_assignment_audit(entry)
     if claim is not None and (
             type(claim) is not dict or set(claim) != _ASSIGNMENT_CLAIM_FIELDS or
-            not _safe_identifier(claim['claimer_session_id'], PM_NATIVE_SESSION_ID) or
-            type(claim['claimer_account']) is not str or
-            re.fullmatch(r'[0-9a-f]{16}', claim['claimer_account']) is None or
+            not _safe_identifier(claim['session_id'], PM_NATIVE_SESSION_ID) or
+            type(claim['account_dir_label']) is not str or
+            re.fullmatch(r'[0-9a-f]{16}', claim['account_dir_label']) is None or
             not _valid_utc_seconds(claim['claimed_at']) or
-            type(claim['late']) is not bool):
+            _utc_seconds(claim['claimed_at']) >= _utc_seconds(item['expires_at'])):
         _fail('ASSIGNMENTS_INVALID')
     return item
 
@@ -2727,8 +2770,13 @@ class TaskStore:
 
     @staticmethod
     def _lock_sidecar(directory, lock_name, *, exclusive, code):
-        """Take a shared or exclusive flock on a sidecar lock file in the store root."""
+        """Take a shared or exclusive flock on a sidecar lock file in the store root.
+
+        Both the open and the flock are bounded by the TaskStore update-lock
+        deadline; a holder past it fails closed with ``<code>_BUSY``.
+        """
         deadline = time.monotonic() + TASK_UPDATE_LOCK_TIMEOUT_SECONDS
+        lock_fd = None
         try:
             while True:
                 try:
@@ -2748,13 +2796,23 @@ class TaskStore:
             if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or
                     stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
                 os.close(lock_fd)
+                lock_fd = None
                 _fail(code + '_INVALID')
-            fcntl.flock(lock_fd, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
-            return lock_fd
+            mode = (fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH) | fcntl.LOCK_NB
+            while True:
+                try:
+                    fcntl.flock(lock_fd, mode)
+                    return lock_fd
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        os.close(lock_fd)
+                        lock_fd = None
+                        _fail(code + '_BUSY')
+                    time.sleep(TASK_UPDATE_LOCK_POLL_SECONDS)
         except LLMToolError:
             raise
         except OSError:
-            if 'lock_fd' in locals():
+            if lock_fd is not None:
                 os.close(lock_fd)
             _fail(code + '_UNAVAILABLE')
 
@@ -2915,92 +2973,135 @@ class TaskStore:
                                          exclusive=exclusive, code='ASSIGNMENTS')
             assignments = self._read_assignments_at(directory)
             if change is None:
-                return [dict(item) for item in assignments]
-            updated, result = change([dict(item) for item in assignments])
-            self._write_assignments_at(directory, updated)
+                return json.loads(json.dumps(assignments))
+            # ``change`` returns (updated or None, result, error or None): a
+            # None update writes nothing; an error is raised after the write so
+            # a refusal can still persist its audit or an EXPIRED transition.
+            updated, result, error = change(json.loads(json.dumps(assignments)))
+            if updated is not None:
+                self._write_assignments_at(directory, updated)
+            if error is not None:
+                raise error
             return result
         finally:
             self._unlock_sidecar(lock_fd)
             os.close(directory)
 
     def get_developer_assignments(self):
-        """Read every stored Developer assignment (ASSIGNED and CLAIMED)."""
+        """Read every stored Developer assignment (ASSIGNED, CLAIMED and EXPIRED)."""
         return self._with_assignments(exclusive=False)
 
-    def record_developer_assignment(self, *, worker, d6_task_id, pm_session_id,
-                                    assigned_at, claim_timeout_seconds, task_id=None,
+    @staticmethod
+    def _assignment_live(item, now, source_sha=None):
+        """One writer per D6: an unexpired ASSIGNED, or a CLAIMED at the same HEAD."""
+        return ((item['state'] == 'ASSIGNED' and now < _utc_seconds(item['expires_at'])) or
+                (item['state'] == 'CLAIMED' and item['source_sha'] == source_sha))
+
+    def record_developer_assignment(self, *, worker, d6_task_id, common_dir, pm_session_id,
+                                    assigned_at, expires_at, gate, task_id=None,
                                     owner_assignment_ref=None):
-        """Write one ASSIGNED event, only after the worker-dispatch gate allows ``worker``.
+        """Write one ASSIGNED event bound to a D6 task, only after ``gate`` allows it.
 
-        The gate is evaluated under the exclusive assignment lock; a refusal
-        raises ``WorkerDispatchDenied`` and writes nothing. An unclaimed
-        assignment for the same worker and D6 task is a duplicate dispatch.
+        ``gate()`` runs under the exclusive assignment lock. It raises on a
+        dispatch-gate or D6 refusal (nothing is written) and otherwise returns
+        ``{'dispatch': {...}, 'd6_root': str, 'source_sha': str}``. A live
+        assignment for the same D6 task (any worker) is refused, so one D6
+        has one writer.
         """
-        from . import worker_dispatch
-
+        placeholder = {'decision': 'ALLOWED', 'reason_code': 'OWNER_POLICY_ALLOWED',
+                       'policy_sha256': '0' * 64}
         candidate = {
             'assignment_id': new_id(), 'event': 'ASSIGNED', 'worker': worker,
-            'd6_task_id': d6_task_id, 'pm_session_id': pm_session_id, 'task_id': task_id,
+            'd6_task_id': d6_task_id, 'common_dir': common_dir, 'd6_root': '/placeholder',
+            'source_sha': '0' * 40, 'pm_session_id': pm_session_id, 'task_id': task_id,
             'owner_assignment_ref': owner_assignment_ref, 'assigned_at': assigned_at,
-            'claim_timeout_seconds': claim_timeout_seconds,
-            'dispatch': {'decision': 'ALLOWED', 'reason_code': 'OWNER_POLICY_ALLOWED',
-                         'policy_sha256': '0' * 64},
-            'state': 'ASSIGNED', 'claim': None,
+            'expires_at': expires_at, 'dispatch': placeholder, 'state': 'ASSIGNED',
+            'claim': None,
+            'audit': [dict(placeholder, action='ASSIGN', at=assigned_at)],
         }
         # Validate the caller's input shape before taking the lock or the gate.
         _validate_assignment(candidate)
+        now = _utc_seconds(assigned_at)
 
         def change(assignments):
-            decision = worker_dispatch.evaluate(
-                worker, owner_assignment_ref=owner_assignment_ref, task_id=task_id)
-            if not decision.allowed:
-                raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
-            if any(item['state'] == 'ASSIGNED' and item['worker'] == worker and
-                   item['d6_task_id'] == d6_task_id for item in assignments):
+            bound = gate()
+            if type(bound) is not dict or set(bound) != {'dispatch', 'd6_root', 'source_sha'}:
+                _fail('ASSIGNMENTS_INVALID')
+            if any(item['d6_task_id'] == d6_task_id and item['common_dir'] == common_dir and
+                   self._assignment_live(item, now, bound['source_sha'])
+                   for item in assignments):
                 _fail('ASSIGNMENT_DUPLICATE')
-            candidate['dispatch'] = {'decision': 'ALLOWED',
-                                     'reason_code': decision.reason_code,
-                                     'policy_sha256': decision.policy_sha256}
+            candidate.update(bound)
+            candidate['audit'] = [dict(bound['dispatch'], action='ASSIGN', at=assigned_at)]
             _validate_assignment(candidate)
             if len(assignments) >= MAX_ASSIGNMENTS:
-                # Compact the oldest claimed receipt; never drop an open assignment.
-                oldest = next((item for item in assignments if item['state'] == 'CLAIMED'),
-                              None)
+                # Compact the oldest finished record; never drop a live assignment.
+                oldest = next((item for item in assignments
+                               if not self._assignment_live(item, now)), None)
                 if oldest is None:
                     _fail('ASSIGNMENT_LIMIT')
                 assignments.remove(oldest)
-            return assignments + [candidate], dict(candidate)
+            return assignments + [candidate], json.loads(json.dumps(candidate)), None
 
         return self._with_assignments(exclusive=True, change=change)
 
-    def claim_developer_assignment(self, assignment_id, *, claimer_session_id,
-                                   claimer_account, claimed_at, worker=None):
-        """Claim an assignment exactly once and persist the claim receipt."""
+    def claim_developer_assignment(self, assignment_id, *, worker, d6_task_id, session_id,
+                                   account_dir_label, claimed_at, gate):
+        """One-shot ASSIGNED -> CLAIMED with a receipt; ASSIGNED -> EXPIRED when late.
+
+        ``gate(item)`` runs under the exclusive lock and returns
+        ``(audit_entry, error)``: the dispatch-gate result is appended to the
+        assignment's bounded audit either way, and ``error`` (dispatch, D6 or
+        transcript refusal) is raised after that write. A repeated claim by the
+        same session and account returns the stored receipt unchanged.
+        """
         if not _safe_identifier(assignment_id, TASK_ID):
             _fail('ASSIGNMENT_ID_INVALID')
+        if (not _safe_identifier(session_id, PM_NATIVE_SESSION_ID) or
+                type(account_dir_label) is not str or
+                re.fullmatch(r'[0-9a-f]{16}', account_dir_label) is None or
+                not _valid_utc_seconds(claimed_at)):
+            _fail('ASSIGNMENT_CLAIM_INVALID')
+        now = _utc_seconds(claimed_at)
+
+        def refused(code):
+            try:
+                _fail(code)
+            except LLMToolError as error:
+                return error
 
         def change(assignments):
             item = next((item for item in assignments
                          if item['assignment_id'] == assignment_id), None)
             if item is None:
-                _fail('ASSIGNMENT_NOT_FOUND')
-            if worker is not None and item['worker'] != worker:
-                _fail('ASSIGNMENT_WORKER_MISMATCH')
-            if item['state'] != 'ASSIGNED':
-                _fail('ASSIGNMENT_ALREADY_CLAIMED')
-            assigned = datetime.strptime(item['assigned_at'], _UTC_SECONDS)
-            claimed = datetime.strptime(claimed_at, _UTC_SECONDS) \
-                if _valid_utc_seconds(claimed_at) else None
-            if claimed is None:
-                _fail('ASSIGNMENTS_INVALID')
-            item['state'] = 'CLAIMED'
-            item['claim'] = {
-                'claimer_session_id': claimer_session_id,
-                'claimer_account': claimer_account, 'claimed_at': claimed_at,
-                'late': (claimed - assigned).total_seconds() >= item['claim_timeout_seconds'],
-            }
+                return None, None, refused('ASSIGNMENT_NOT_FOUND')
+            if item['worker'] != worker:
+                return None, None, refused('ASSIGNMENT_WORKER_MISMATCH')
+            if item['d6_task_id'] != d6_task_id:
+                return None, None, refused('ASSIGNMENT_D6_MISMATCH')
+            if item['state'] == 'CLAIMED':
+                claim = item['claim']
+                if (claim['session_id'] == session_id and
+                        claim['account_dir_label'] == account_dir_label):
+                    return None, item, None
+                return None, None, refused('ASSIGNMENT_ALREADY_CLAIMED')
+            if item['state'] == 'EXPIRED':
+                return None, None, refused('ASSIGNMENT_EXPIRED')
+            if now >= _utc_seconds(item['expires_at']):
+                item['state'] = 'EXPIRED'
+                _validate_assignment(item)
+                return assignments, None, refused('ASSIGNMENT_EXPIRED')
+            entry, error = gate(json.loads(json.dumps(item)))
+            item['audit'] = (item['audit'] + [_validate_assignment_audit(dict(
+                entry, action='CLAIM', at=claimed_at))])[-MAX_ASSIGNMENT_AUDIT:]
+            if error is None and entry['decision'] != 'ALLOWED':
+                error = refused('ASSIGNMENT_DISPATCH_BLOCKED')
+            if error is None:
+                item['state'] = 'CLAIMED'
+                item['claim'] = {'session_id': session_id, 'claimed_at': claimed_at,
+                                 'account_dir_label': account_dir_label}
             _validate_assignment(item)
-            return assignments, dict(item)
+            return assignments, (None if error else json.loads(json.dumps(item))), error
 
         return self._with_assignments(exclusive=True, change=change)
 
