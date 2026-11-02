@@ -5361,6 +5361,61 @@ class W59DetailTextTests(unittest.TestCase):
         self.assertNotIn('最近事件', text)
 
 
+class TaskOwnerSummaryTests(unittest.TestCase):
+    """The three detail orientation lines use only the persisted Task projection."""
+
+    def detail(self, record):
+        return chat_tui_status.task_detail_text(record, '12:34:56').splitlines()[:3]
+
+    def test_summary_lines_lead_and_describe_running_and_waiting_stages(self):
+        running = {'task_id': 'a' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_PENDING'}}
+        waiting = {'task_id': 'b' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_RESPONDED'},
+                   'completion': {'state': 'WAITING_EXECUTOR'}}
+        self.assertEqual(self.detail(running), [
+            '狀態：Developer 執行中', '下一步輪到誰：Developer', '你需要做：目前不用'])
+        self.assertEqual(self.detail(waiting), [
+            '狀態：等待執行證據', '下一步輪到誰：Developer', '你需要做：目前不用'])
+
+    def test_blocked_and_unknown_developer_outcome_do_not_guess(self):
+        blocked = {'task_id': 'c' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_PENDING',
+                                 'blocked_reason': 'needs Owner decision'}}
+        unknown = {'task_id': 'd' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                                 'error_code': 'CODEX_BLOCKED'}}
+        self.assertEqual(self.detail(blocked), [
+            '狀態：已阻塞', '下一步輪到誰：PM', '你需要做：目前不用'])
+        self.assertEqual(self.detail(unknown), [
+            '狀態：Developer 結果不明', '下一步輪到誰：PM', '你需要做：目前不用'])
+
+    def test_owner_decision_is_explicit_and_completed_task_has_no_guessed_actor(self):
+        waiting_owner = {'task_id': 'e' * 32, 'request': '需求',
+                         'developer': {'state': 'DEVELOPER_PENDING',
+                                       'waiting_owner': True}}
+        completed = {'task_id': 'f' * 32, 'request': '需求',
+                     'developer': {'state': 'DEVELOPER_RESPONDED'},
+                     'completion': {'state': 'PM_RETURNED',
+                                    'pm_recommendation': {'decision': 'ACCEPT'}}}
+        self.assertEqual(self.detail(waiting_owner), [
+            '狀態：Developer 執行中', '下一步輪到誰：Owner', '你需要做：請 Owner 提供決定'])
+        self.assertEqual(self.detail(completed), [
+            '狀態：已完成', '下一步輪到誰：不明', '你需要做：目前不用'])
+
+    def test_recorded_merge_does_not_look_like_running_work(self):
+        merged = {'task_id': 'g' * 32, 'request': '需求',
+                  'developer': {'state': 'DEVELOPER_PENDING'},
+                  'completion_events': [{'source': 'GITHUB', 'marker_type': 'merge',
+                                         'marker_status': 'MERGED', 'state': 'MERGED'}]}
+        self.assertEqual(self.detail(merged), [
+            '狀態：已完成', '下一步輪到誰：不明', '你需要做：目前不用'])
+
+    def test_missing_record_summary_is_unknown_in_traditional_chinese(self):
+        self.assertEqual(self.detail(None), [
+            '狀態：不明', '下一步輪到誰：不明', '你需要做：目前不用'])
+
+
 class W60EvidenceTextTests(unittest.TestCase):
     """chat_tui_status.task_detail_text: the W60 evidence and provenance rows."""
 
