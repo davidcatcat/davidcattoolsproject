@@ -89,6 +89,20 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(len(calls), 4)
         self.assertEqual(pauses, [0.25])
 
+    def test_pending_integration_waits_on_advance_result_code(self):
+        pauses = []
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION',
+             'codes': ['WAITING_INTEGRATION']},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+        ])
+        result = task_drive.drive(task_id='t', poll_seconds=0.5,
+                                  advance_call=advance, sleep=pauses.append)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertEqual(result['steps'], 1)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(pauses, [0.5])
+
     def test_repeated_review_not_ready_stops_at_bounded_poll_attempts(self):
         pauses = []
         advance, calls = self.adapter([

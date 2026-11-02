@@ -5,12 +5,10 @@ import time
 from . import task_advance
 
 
-# These are the waiting steps emitted by task_advance.advance. In particular,
-# review polling is represented by RECORD_REVIEW_RESULT with result.state
-# NOT_READY rather than a dedicated WAITING_REVIEW step.
-_WAITING = {
-    'WAITING_CI', 'WAITING_EXECUTOR', 'WAITING_REPAIR', 'WAITING_INTEGRATION',
-}
+# These names and result shapes are emitted by task_advance.advance. Review
+# polling uses RECORD_REVIEW_RESULT with result.state NOT_READY; integration
+# polling uses READY_FOR_INTEGRATION with the WAITING_INTEGRATION code.
+_WAITING_STEPS = {'WAITING_CI', 'WAITING_EXECUTOR', 'WAITING_REPAIR'}
 _UNKNOWN = {
     'UNKNOWN', 'OUTCOME_UNKNOWN', 'REVIEW_OUTCOME_UNKNOWN',
     'REPAIR_OUTCOME_UNKNOWN', 'MERGE_OUTCOME_UNKNOWN',
@@ -55,10 +53,14 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         if type(step) is not str:
             return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
                     'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
-        waiting = (step in _WAITING or
-                   (step == 'RECORD_REVIEW_RESULT' and
-                    type(result.get('result')) is dict and
-                    result['result'].get('state') == 'NOT_READY'))
+        waiting = (
+            step in _WAITING_STEPS or
+            (step == 'RECORD_REVIEW_RESULT' and
+             type(result.get('result')) is dict and
+             result['result'].get('state') == 'NOT_READY') or
+            (step == 'READY_FOR_INTEGRATION' and
+             'WAITING_INTEGRATION' in codes)
+        )
         if waiting:
             if attempts >= max_steps:
                 break
@@ -83,7 +85,7 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             return dict(merged, steps=completed)
         if step == 'MERGE_OWNER_ACCEPTANCE_MANUAL' or 'MERGE_OWNER_ACCEPTANCE_MANUAL' in codes:
             return dict(result, steps=completed)
-        if codes and step not in _WAITING:
+        if codes and step not in _WAITING_STEPS:
             return dict(result, steps=completed)
         if step in ('REVIEWER_ATTENTION', 'DEVELOPER_ATTENTION', 'NEEDS_ATTENTION',
                     'REVIEW_NOT_POSTED', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
