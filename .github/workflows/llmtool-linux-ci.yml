@@ -92,17 +92,19 @@ jobs:
           if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
             paths="$RUNNER_TEMP/changed-paths"
             git diff --no-ext-diff --no-renames --name-only -z "$BASE_SHA" "$EXPECTED_SHA" -- > "$paths"
-            while IFS= read -r -d '' path; do
-              case "$path" in
-                tools/ai-loop/*) ai_loop=true ;;
-                tools/api-agent-gateway/*) code=true; gateway=true ;;
-                tools/llmtool/*/*.md) code=true; docs=true ;;
-                tools/llmtool/*.md) docs=true ;;
-                tools/llmtool/*) code=true ;;
-                *.md|AGENTS.md|CLAUDE.md|skills/*|docs/*|tools/llmtool/*.md) docs=true ;;
-                *) code=true ;;
-              esac
-            done < "$paths"
+            classes=$(python3 -I -B tools/llmtool/scripts/ci_path_classes.py "$paths")
+            if [ -n "$classes" ]; then
+              while IFS= read -r path_class; do
+                case "$path_class" in
+                  docs) docs=true ;;
+                  runtime) code=true ;;
+                  gateway) code=true; gateway=true ;;
+                  ai-loop) ai_loop=true ;;
+                  workflow|other) code=true ;;
+                  *) echo "::error::unknown changed-path class: $path_class"; exit 1 ;;
+                esac
+              done <<< "$classes"
+            fi
           else
             code=true
             docs=true

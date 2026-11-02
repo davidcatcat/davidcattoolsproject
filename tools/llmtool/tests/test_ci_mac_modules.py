@@ -340,9 +340,9 @@ class MacTestIdSelectionTests(unittest.TestCase):
             (
                 "#790",
                 ["skills/ai-team-delivery/pm-continuation.md"],
-                "L3",
-                {"FULL"},
-                ("skills/ai-team-delivery/pm-continuation.md", "unsupported_path"),
+                "L0",
+                set(),
+                None,
             ),
             (
                 "#791",
@@ -441,11 +441,42 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
     def test_monitor_and_documentation_changes_select_no_subset(self):
-        for path in ("scripts/llmtool_monitor.py", "tools/llmtool/docs/guide.md"):
+        for path in (
+            "scripts/llmtool_monitor.py",
+            "tools/llmtool/docs/guide.md",
+            "AGENTS.md",
+            "CLAUDE.md",
+            "skills/ai-team-delivery/pm-continuation.md",
+            "docs/ci/README.md",
+            "tools/llmtool/README.md",
+        ):
             with self.subTest(path=path):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertEqual(report["level"], "L0")
                 self.assertEqual(report["test_ids"], [])
+
+    def test_repo_readme_stays_unsupported_and_runtime_markdown_is_not_docs(self):
+        readme = ci_mac_modules.selection_report(["README.md"], REPO_ROOT)
+        self.assertEqual(readme["level"], "L3")
+        self.assertIn("unsupported_path", readme["fallback_reasons"])
+
+        for path in (
+            "tools/llmtool/llmtool/guide.md",
+            "tools/llmtool/nested/README.md",
+        ):
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L0")
+                self.assertEqual(report["test_ids"], [])
+
+    def test_repo_docs_can_mix_with_runtime_without_becoming_fallbacks(self):
+        report = ci_mac_modules.selection_report(
+            ["docs/ci/README.md", "tools/llmtool/tests/test_worker_dispatch.py"],
+            REPO_ROOT,
+        )
+        self.assertEqual(report["level"], "L1")
+        self.assertEqual(report["fallback_reasons"], [])
+        self.assertIn("test_worker_dispatch", report["test_ids"])
 
     def test_missing_mapped_test_is_full(self):
         with tempfile.TemporaryDirectory() as temporary:
