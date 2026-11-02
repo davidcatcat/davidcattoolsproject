@@ -1,6 +1,9 @@
 import hashlib
 import io
 import json
+import os
+import subprocess
+import tempfile
 import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
@@ -99,11 +102,30 @@ class TaskAdvanceTests(unittest.TestCase):
     def test_developer_attention_and_publish_gates(self):
         blocked = base_record(developer={'state': 'DEVELOPER_OUTCOME_UNKNOWN'})
         self.assertEqual(task_advance.decide(blocked, d6(), PR, {}), 'DEVELOPER_ATTENTION')
-        self.assertEqual(task_advance.decide(base_record(), d6(False), PR, {}), 'NEEDS_PUBLISH')
-        self.assertEqual(task_advance.decide(base_record(), d6(recorded=None), PR, {}), 'NEEDS_PUBLISH')
-        self.assertEqual(task_advance.decide(base_record(), d6(), None, {}), 'NEEDS_PUBLISH')
+        self.assertEqual(task_advance.decide(base_record(), d6(False), PR, {}), 'PUBLISH')
+        self.assertEqual(task_advance.decide(base_record(), d6(recorded=None), PR, {}), 'PUBLISH')
+        self.assertEqual(task_advance.decide(base_record(), d6(), None, {}), 'PUBLISH')
         self.assertEqual(task_advance.decide(base_record(), d6(),
-            {'number': 17, 'head': {'sha': 'b' * 40}}, {}), 'NEEDS_PUBLISH')
+            {'number': 17, 'head': {'sha': 'b' * 40}}, {}), 'PUBLISH')
+
+    def test_advance_executes_publish_and_returns_only_bounded_fields(self):
+        record = base_record(developer={'state': 'DEVELOPER_RESPONDED',
+                                        'write_paths': ['allowed.txt']})
+        store = type('S', (), {'get': lambda self, _id: record})()
+        binding = {'root': '/d6', 'common_dir': '/canonical/.git',
+                   'branch': 'feat/task', 'task_id': '3' * 32, 'result_head': HEAD,
+                   'recorded_result_head': None, 'dirty': True, 'state': 'DIRTY'}
+        published = {'pr': 17, 'head': HEAD}
+        with patch.object(task_advance, '_d6_snapshot', return_value=binding), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]), \
+             patch.object(task_advance, '_publish_task', return_value=published) as publish:
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                publish_git_runner=lambda *_args: None,
+                publish_gh_runner=lambda *_args: None,
+                record_result_call=lambda **_kwargs: None)
+        publish.assert_called_once()
+        self.assertEqual(result, {'task_id': record['task_id'], 'codes': [],
+                                  'pr': 17, 'head': HEAD})
 
     def test_dispatch_unknown_result_and_review_outcomes(self):
         self.assertEqual(task_advance.decide(base_record(), d6(), PR, {}), 'DISPATCH_REVIEW')
@@ -146,7 +168,7 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(), PR, related),
                          'REPAIR_RESULT_NOT_PUBLISHED')
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(False), PR, related),
-                         'NEEDS_PUBLISH')
+                         'PUBLISH')
         new_head = 'b' * 40
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]),
             {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
@@ -908,6 +930,136 @@ class TaskAdvanceTests(unittest.TestCase):
                 self.assertEqual(result['step'], expected_step)
                 self.assertIn('next', result)
                 self.assertIn('codes', result)
+
+
+class TaskAdvancePublishTests(unittest.TestCase):
+    TASK_ID = '1' * 32
+    EXECUTOR_TASK = '3' * 32
+    BRANCH = 'feat/task-publish'
+    WRITE_PATHS = ['allowed.txt']
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = os.path.join(self.tmp.name, 'task')
+        self.bare = os.path.join(self.tmp.name, 'remote.git')
+        os.mkdir(self.root)
+        self.git(['init', '--bare', self.bare], cwd=self.tmp.name)
+        self.git(['init', '-b', self.BRANCH], cwd=self.root)
+        self.git(['config', 'user.name', 'Task Test'], cwd=self.root)
+        self.git(['config', 'user.email', 'task-test@example.invalid'], cwd=self.root)
+        with open(os.path.join(self.root, 'allowed.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('base\n')
+        self.git(['add', '--', 'allowed.txt'], cwd=self.root)
+        self.git(['commit', '-m', 'base'], cwd=self.root)
+        self.git(['remote', 'add', 'origin', self.bare], cwd=self.root)
+        self.git(['push', '-u', 'origin', self.BRANCH], cwd=self.root)
+        self.initial_head = self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
+        self.recorded = []
+        self.gh_calls = []
+        self.pr_exists = False
+
+    @staticmethod
+    def git(args, *, cwd):
+        return subprocess.run(['git', *args], cwd=cwd, check=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True).stdout
+
+    @staticmethod
+    def git_runner(root, args):
+        return subprocess.run(['git', *args], cwd=root, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+
+    def record_result(self, **kwargs):
+        self.recorded.append(kwargs)
+        return self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()
+
+    def gh(self, _root, args):
+        self.gh_calls.append(list(args))
+        if args[:2] == ['pr', 'list']:
+            pulls = []
+            if self.pr_exists:
+                pulls = [{'number': 23,
+                          'headRefOid': self.git(['rev-parse', 'HEAD'], cwd=self.root).strip()}]
+            return subprocess.CompletedProcess(['gh', *args], 0,
+                json.dumps(pulls).encode(), b'')
+        if args[:2] == ['pr', 'create']:
+            self.pr_exists = True
+            return subprocess.CompletedProcess(['gh', *args], 0, b'', b'')
+        raise AssertionError('unexpected fake gh command')
+
+    def publish(self, *, write_paths=None):
+        record = {'task_id': self.TASK_ID,
+                  'developer': {'write_paths': self.WRITE_PATHS if write_paths is None else write_paths}}
+        d6_binding = {'root': self.root, 'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
+                      'branch': self.BRANCH, 'task_id': self.EXECUTOR_TASK,
+                      'recorded_result_head': self.initial_head}
+        return task_advance._publish_task(record, d6_binding, self.EXECUTOR_TASK,
+            git_runner=self.git_runner, gh_runner=self.gh,
+            record_result_call=self.record_result)
+
+    def test_publish_commits_records_pushes_and_returns_matching_pr_head(self):
+        with open(os.path.join(self.root, 'allowed.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('published\n')
+        result = self.publish()
+        self.assertEqual(result['pr'], 23)
+        self.assertEqual(result['head'], self.git(['rev-parse', 'HEAD'], cwd=self.root).strip())
+        self.assertEqual(self.recorded[0]['task_id'], self.EXECUTOR_TASK)
+        self.assertEqual(self.git(['show', '-s', '--format=%s', 'HEAD'], cwd=self.root).strip(),
+                         f'llmtool Task {self.TASK_ID}')
+        self.assertEqual(self.git(['ls-remote', 'origin', f'refs/heads/{self.BRANCH}'],
+                                  cwd=self.root).split()[0], result['head'])
+
+    def test_second_publish_is_noop_and_reports_existing_pr_head(self):
+        with open(os.path.join(self.root, 'allowed.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('published\n')
+        first = self.publish()
+        d6_binding = {'root': self.root, 'common_dir': os.path.join(self.tmp.name, 'canonical', '.git'),
+                      'branch': self.BRANCH, 'task_id': self.EXECUTOR_TASK,
+                      'recorded_result_head': first['head']}
+        second = task_advance._publish_task(
+            {'task_id': self.TASK_ID, 'developer': {'write_paths': self.WRITE_PATHS}},
+            d6_binding, self.EXECUTOR_TASK, git_runner=self.git_runner, gh_runner=self.gh,
+            record_result_call=self.record_result)
+        self.assertEqual(second, first)
+        self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), first['head'])
+        self.assertEqual(len(self.recorded), 1)
+
+    def test_out_of_scope_change_is_refused_without_commit(self):
+        with open(os.path.join(self.root, 'outside.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('outside\n')
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish()
+        self.assertEqual(caught.exception.code, 'PUBLISH_OUT_OF_SCOPE')
+        self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), self.initial_head)
+
+    def test_ignored_python_cache_is_refused_without_commit(self):
+        os.mkdir(os.path.join(self.root, '__pycache__'))
+        with open(os.path.join(self.root, '__pycache__', 'stray.pyc'), 'wb') as stream:
+            stream.write(b'ignored')
+        self.git(['config', 'core.excludesfile', os.path.join(self.tmp.name, 'ignore')], cwd=self.root)
+        with open(os.path.join(self.tmp.name, 'ignore'), 'w', encoding='utf-8') as stream:
+            stream.write('__pycache__/\n')
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish()
+        self.assertEqual(caught.exception.code, 'PUBLISH_IGNORED_STRAY')
+        self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), self.initial_head)
+
+    def test_non_fast_forward_remote_is_refused_without_commit(self):
+        peer = os.path.join(self.tmp.name, 'peer')
+        self.git(['clone', '--branch', self.BRANCH, self.bare, peer], cwd=self.tmp.name)
+        self.git(['config', 'user.name', 'Peer'], cwd=peer)
+        self.git(['config', 'user.email', 'peer@example.invalid'], cwd=peer)
+        with open(os.path.join(peer, 'allowed.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('remote moved\n')
+        self.git(['add', '--', 'allowed.txt'], cwd=peer)
+        self.git(['commit', '-m', 'remote move'], cwd=peer)
+        self.git(['push', 'origin', self.BRANCH], cwd=peer)
+        with open(os.path.join(self.root, 'allowed.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('local change\n')
+        with self.assertRaises(task_advance._PublishRefusal) as caught:
+            self.publish()
+        self.assertEqual(caught.exception.code, 'PUBLISH_NON_FAST_FORWARD')
+        self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), self.initial_head)
 
 
 class RetiredD6MergeClosureTests(unittest.TestCase):

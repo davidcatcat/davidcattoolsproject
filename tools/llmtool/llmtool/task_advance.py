@@ -4,6 +4,7 @@ import os
 import re
 import contextlib
 import io
+import importlib.util
 import json
 import shutil
 import subprocess
@@ -54,7 +55,7 @@ def _publish_command(runner, root, args, *, code='PUBLISH_COMMAND_FAILED'):
     return _publish_output(result)
 
 
-def _publish_pr(gh_runner, root, branch, task_id):
+def _publish_pr(gh_runner, root, branch, task_id, expected_head):
     output = _publish_command(gh_runner, root,
         ['pr', 'list', '--head', branch, '--state', 'open',
          '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
@@ -81,12 +82,24 @@ def _publish_pr(gh_runner, root, branch, task_id):
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
     pull = pulls[0]
     number = pull.get('number') if type(pull) is dict else None
-    if type(number) is not int or number < 1:
+    head = pull.get('headRefOid') if type(pull) is dict else None
+    if (type(number) is not int or number < 1 or type(head) is not str or
+            head != expected_head):
         raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
     return number
 
 
-def _publish_task(record, d6, *, git_runner=None, gh_runner=None,
+def _record_d6_result(*, task_id, canonical_root, root):
+    lifecycle_path = Path(__file__).resolve().parents[1] / 'scripts' / 'd6_worktree_lifecycle.py'
+    spec = importlib.util.spec_from_file_location('_llmtool_d6_worktree_lifecycle', lifecycle_path)
+    if spec is None or spec.loader is None:
+        raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED')
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.record_result(task_id=task_id, canonical_root=canonical_root, root=root)
+
+
+def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
                   record_result_call=None):
     """Commit scoped D6 changes, record the result, push, and ensure an open PR."""
     git_runner = _publish_run_git if git_runner is None else git_runner
@@ -98,7 +111,9 @@ def _publish_task(record, d6, *, git_runner=None, gh_runner=None,
     developer = record.get('developer')
     write_paths = developer.get('write_paths') if type(developer) is dict else None
     if (type(task_id) is not str or type(root) is not str or type(branch) is not str or
-            type(common_dir) is not str or type(write_paths) is not list or not write_paths or
+            type(common_dir) is not str or type(executor_task) is not str or
+            d6.get('task_id') != executor_task or
+            type(write_paths) is not list or not write_paths or
             any(type(path) is not str or not path or path.startswith('/') or
                 '\\' in path or any(part in ('', '.', '..') for part in path.split('/'))
                 for path in write_paths)):
@@ -152,10 +167,10 @@ def _publish_task(record, d6, *, git_runner=None, gh_runner=None,
             ['commit', '-m', f'llmtool Task {task_id}'])
         local_head = _publish_command(git_runner, root,
             ['rev-parse', '--verify', 'HEAD']).strip()
-        if record_result_call is None:
-            raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED')
+    if changed or d6.get('recorded_result_head') != local_head:
         try:
-            recorded = record_result_call(task_id=task_id, canonical_root=canonical_root,
+            record_result_call = _record_d6_result if record_result_call is None else record_result_call
+            recorded = record_result_call(task_id=executor_task, canonical_root=canonical_root,
                                           root=root)
         except Exception:
             raise _PublishRefusal('PUBLISH_RESULT_RECORD_FAILED') from None
@@ -166,7 +181,7 @@ def _publish_task(record, d6, *, git_runner=None, gh_runner=None,
         _publish_command(git_runner, root,
             ['push', 'origin', f'HEAD:refs/heads/{branch}'],
             code='PUBLISH_PUSH_FAILED')
-    number = _publish_pr(gh_runner, root, branch, task_id)
+    number = _publish_pr(gh_runner, root, branch, task_id, local_head)
     return {'pr': number, 'head': local_head}
 
 
@@ -222,20 +237,20 @@ def decide(record, d6, pr, related):
     if developer.get('state') != 'DEVELOPER_RESPONDED':
         return 'DEVELOPER_ATTENTION'
     if type(d6) is not dict or d6.get('dirty') is True or d6.get('state') == 'DIRTY':
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
     result_head = d6.get('result_head')
     if (type(result_head) is not str or re.fullmatch(r'[0-9a-f]{40}', result_head) is None or
             d6.get('recorded_result_head') != result_head):
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
     claims = _claims(record)
     chosen_pr = (pr.get('number') if type(pr) is dict else None)
     if chosen_pr is None and claims:
         chosen_pr = claims[-1].get('pr') if type(claims[-1]) is dict else None
     if type(chosen_pr) is not int or chosen_pr < 1:
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
     pr_head = pr.get('head') if type(pr) is dict else None
     if type(pr_head) is not dict or pr_head.get('sha') != result_head:
-        return 'NEEDS_PUBLISH'
+        return 'PUBLISH'
 
     matching = [claim for claim in claims if type(claim) is dict and
                 claim.get('pr') == chosen_pr and claim.get('head_sha') == result_head]
@@ -319,6 +334,7 @@ def _d6_snapshot(record, executor_task):
     clean = bool(getattr(snapshot, 'clean', False))
     recorded = registration.result_sha
     return {'root': registration.root, 'common_dir': registration.common_dir,
+            'task_id': registration.task_id,
             'branch': registration.branch, 'result_head': snapshot.head,
             'recorded_result_head': recorded,
             'registered_result_head': registration.result_sha, 'dirty': not clean,
@@ -492,7 +508,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             reviewer_session_done=False, dispatch_review_call=None,
             record_review_result_call=None, repair_review_call=None,
             run_task_complete_call=None, record_github_event_call=None,
-            github_get=None, cwd=None):
+            github_get=None, cwd=None, publish_git_runner=None,
+            publish_gh_runner=None, record_result_call=None):
     """Perform one selected action and return a bounded JSON-ready summary."""
     store = TaskStore() if store is None else store
     try:
@@ -704,8 +721,17 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None,
             codes.append('REVIEWER_ATTENTION')
     elif step == 'REVIEW_NOT_POSTED':
         pass
-    elif step == 'NEEDS_PUBLISH':
-        codes.append('NEEDS_PUBLISH')
+    elif step == 'PUBLISH':
+        try:
+            result = _publish_task(record, d6, executor_task,
+                git_runner=publish_git_runner, gh_runner=publish_gh_runner,
+                record_result_call=record_result_call)
+            return {'task_id': task_id, 'codes': [], 'pr': result['pr'],
+                    'head': result['head']}
+        except _PublishRefusal as exc:
+            return {'task_id': task_id, 'codes': [exc.code]}
+        except Exception:
+            return {'task_id': task_id, 'codes': ['PUBLISH_FAILED']}
     elif step == 'DEVELOPER_ATTENTION':
         active_repair = next((item for item in reversed(related['repair_claims'])
                               if type(item) is dict and item.get('head_sha') ==
