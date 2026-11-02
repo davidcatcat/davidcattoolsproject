@@ -212,7 +212,9 @@ class CodexDelegateTests(unittest.TestCase):
                           kwargs['launch_callback'](os.getpid(),
                               task_submission_cli.codex_direct_developer.process_start_time(
                                   os.getpid()), os.getpgid(os.getpid())),
-                          time.sleep(1.0), codex_result)[2])
+                          time.sleep(1.0),
+                          (self.root / 'src.py').write_text('VALUE = 2\n'),
+                          codex_result)[3])
                 if background and codex_result is not None else
                 patch('llmtool.task_submission_cli.codex_direct_developer.run',
                       return_value=codex_result) if codex_result is not None else
@@ -260,12 +262,13 @@ class CodexDelegateTests(unittest.TestCase):
         task = self._task()
         result = task_submission_cli.codex_direct_developer.DirectResult(
             status='DONE', summary='Changed src.py.', tests=(), self_review='Reviewed.',
-            blocked_reason=None, exit_code=0, thread_id='a' * 36,
+            blocked_reason=None, exit_code=0,
             stdout_sha256='b' * 64, elapsed_ms=20, cleanup_status='CONFIRMED',
             usage=None, final_message=json.dumps({'status': 'DONE',
                 'summary': 'Changed src.py.', 'tests': [],
                 'self_review': 'Reviewed.', 'blocked_reason': None},
-                separators=(',', ':')))
+                separators=(',', ':')),
+            thread_id='12345678-1234-4234-8234-123456789abc')
         started = time.monotonic()
         code, saved, _callback = self._dispatch(
             task, codex_result=result, background=True)
