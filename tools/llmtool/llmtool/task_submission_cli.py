@@ -2787,7 +2787,10 @@ def run_task_codex_delegate(args, *, store):
                     'usage_source': 'UNKNOWN', 'source_bytes': None,
                     'source_file_count': None, 'source_manifest_sha256': None})
             try:
-                store.update(args.task_id, developer=outcome)
+                store.compare_and_update(args.task_id,
+                    expected={'developer': previous_developer}, developer=outcome)
+            except TaskStoreConflict:
+                raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
             except Exception:
                 raise LLMToolError('CODEX_LIVENESS_UNKNOWN') from None
             raise LLMToolError('CODEX_CHILD_OUTCOME_UNKNOWN') from None

@@ -20,11 +20,11 @@ from llmtool import opencode_direct_developer
 from llmtool.providers import get_provider_capabilities
 from llmtool.providers.base import Reply
 from llmtool.providers.codex_cli import CodexCLIProvider, OUTPUT_LIMIT
-from llmtool.task_store import MAX_RECORD_BYTES, TaskStore
+from llmtool.task_store import MAX_RECORD_BYTES, TaskStore, TaskStoreConflict, new_id
 from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
 from llmtool import remote_test
 from llmtool import task_submission_cli as submission_cli
-from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT,
+from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT, _record,
                                          _provider_route_binding, run_task_complete,
                                          run_task_delegate,
                                          run_task_opencode_delegate,
@@ -2735,11 +2735,21 @@ class CodexChildLivenessTests(unittest.TestCase):
                 self.task.update(changes)
                 return self.task
 
+            def compare_and_update(self, _task_id, *, expected, **changes):
+                if any(self.task.get(key) != value for key, value in expected.items()):
+                    raise TaskStoreConflict()
+                self.updates += 1
+                self.task.update(changes)
+                return self.task
+
         store = Store()
         # The delegate resolves the durable Task before checking child
         # liveness, so provide the same task binding fields as other delegate
         # tests even though this path returns before reading the rest.
-        args = Namespace(task_id='a' * 32, executor_task='executor-one')
+        args = Namespace(task_id='a' * 32, executor_task='executor-one',
+            selection_source='USER', context_stdin=False,
+            acceptance=['the outcome is recorded'], read_path=['src.py'],
+            write_path=['src.py'], egress_basis='Approved non-sensitive test context.')
         snapshot = type('Snapshot', (), {'common_dir': '/repo/.git', 'root': '/repo'})()
         registration = type('Registration', (), {
             'task_id': 'executor-one', 'trusted_agent_id': 'codex-developer'})()
@@ -2754,6 +2764,44 @@ class CodexChildLivenessTests(unittest.TestCase):
             with self.assertRaises(LLMToolError) as caught:
                 submission_cli.run_task_codex_delegate(args, store=store)
         return caught.exception, store
+
+    def _real_store(self):
+        task_id, run_id = new_id(), new_id()
+        request = 'Bounded non-sensitive liveness test.'
+        task = _record(task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED',
+            request_sha=hashlib.sha256(request.encode()).hexdigest())
+        task.update(response='PM returned a bounded task.',
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            pm_assignment={'schema_version': 1, 'route': 'codex', 'risk': 'LOW',
+                           'goal': 'Record the liveness outcome.',
+                           'acceptance': ['the outcome is recorded']})
+        developer = {
+            'assignment_id': new_id(), 'selection_source': 'PM',
+            'executor_task_id': 'executor-one', 'state': 'DEVELOPER_DISPATCHING',
+            'provider_profile': 'codex', 'provider_type': 'codex-cli',
+            'model': 'gpt-6-luna', 'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED', 'read_paths': ['src.py'],
+            'write_paths': ['src.py'], 'acceptance': ['the outcome is recorded'],
+            'context_sha256': 'b' * 64, 'egress_basis': 'Approved non-sensitive test context.',
+            'input_bytes': 10, 'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'execution': None, 'created_at': '2026-10-23T00:00:00Z',
+        }
+        task['developer'] = developer
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        store = TaskStore(Path(tmp.name) / 'tasks')
+        store.create(task)
+        with patch.object(submission_cli.worker_dispatch,
+                          'authorize_task_store_change', return_value=None):
+            store.record_codex_launch(task_id,
+                assignment_id=developer['assignment_id'], pid=321,
+                start_time='123456', pgid=321)
+        return store, task_id
 
     @staticmethod
     def _running_developer(execution=None):
@@ -2771,6 +2819,91 @@ class CodexChildLivenessTests(unittest.TestCase):
         self.assertEqual(store.updates, 1)
         self.assertEqual(store.task['developer']['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
         self.assertEqual(store.task['developer']['error_code'], 'CODEX_CHILD_NOT_RUNNING')
+
+    def test_dead_child_transition_is_validated_by_real_task_store(self):
+        store, task_id = self._real_store()
+        args = Namespace(task_id=task_id, executor_task='executor-one',
+            selection_source='USER', context_stdin=False,
+            acceptance=['the outcome is recorded'], read_path=['src.py'],
+            write_path=['src.py'], egress_basis='Approved non-sensitive test context.')
+        with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                          return_value=type('Snapshot', (), {
+                              'common_dir': '/repo/.git', 'root': '/repo'})()), \
+             patch.object(submission_cli.task_completion, 'bind_executor_task',
+                          return_value=(type('Registration', (), {
+                              'task_id': 'executor-one',
+                              'trusted_agent_id': 'codex-developer'})(), None)), \
+             patch.object(submission_cli.os, 'kill', side_effect=ProcessLookupError()):
+            with self.assertRaisesRegex(LLMToolError, 'CODEX_CHILD_OUTCOME_UNKNOWN'):
+                submission_cli.run_task_codex_delegate(args, store=store)
+        saved = store.get(task_id)['developer']
+        self.assertEqual(saved['state'], 'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(saved['error_code'], 'CODEX_CHILD_NOT_RUNNING')
+        with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                          return_value=type('Snapshot', (), {
+                              'common_dir': '/repo/.git', 'root': '/repo',
+                              'branch': 'task-branch', 'head': 'a' * 40})()), \
+             patch.object(submission_cli.task_completion, 'bind_executor_task',
+                          return_value=(type('Registration', (), {
+                              'task_id': 'executor-one',
+                              'trusted_agent_id': 'codex-developer',
+                              'source_sha': 'a' * 40, 'result_sha': 'a' * 40})(), None)), \
+             patch.object(submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])), \
+             patch.object(submission_cli, '_codex_developer_profile',
+                          return_value=({'model': 'gpt-6-luna'}, 'high')), \
+             patch.object(submission_cli, 'codex_direct_timeout', return_value=10), \
+             patch.object(submission_cli, '_codex_timeout_recovery', return_value=False), \
+             patch.object(submission_cli.codex_direct_developer, 'run') as run:
+            with self.assertRaisesRegex(LLMToolError, 'developer assignment already exists'):
+                submission_cli.run_task_codex_delegate(args, store=store)
+        run.assert_not_called()
+        self.assertEqual(store.get(task_id)['developer'], saved)
+
+    def test_dead_child_compare_conflict_preserves_newer_responded_record(self):
+        store, task_id = self._real_store()
+        args = Namespace(task_id=task_id, executor_task='executor-one',
+            selection_source='USER', context_stdin=False,
+            acceptance=['the outcome is recorded'], read_path=['src.py'],
+            write_path=['src.py'], egress_basis='Approved non-sensitive test context.')
+        original_compare_and_update = store.compare_and_update
+        newer = dict(store.get(task_id)['developer'])
+        artifact = ('diff --git a/src.py b/src.py\n--- a/src.py\n+++ b/src.py\n'
+                    '@@ -1 +1 @@\n-x=1\n+x=2\n')
+        newer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+            execution={'status': 'DONE',
+                'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0, 'stdout_sha256': 'c' * 64,
+                'elapsed_ms': 12, 'cleanup_status': 'CONFIRMED',
+                'usage_source': 'UNKNOWN', 'source_bytes': None,
+                'source_file_count': None, 'source_manifest_sha256': None,
+                'native_session_binding': 'BOUND'})
+        raced = False
+
+        def advance_then_compare(_task_id, *, expected, **changes):
+            nonlocal raced
+            if not raced:
+                raced = True
+                current = store.get(task_id)['developer']
+                with patch.object(submission_cli.worker_dispatch,
+                                  'authorize_task_store_change', return_value=None):
+                    original_compare_and_update(task_id,
+                        expected={'developer': current}, developer=newer)
+            return original_compare_and_update(_task_id, expected=expected, **changes)
+
+        with patch.object(submission_cli.task_completion, 'collect_git_snapshot',
+                          return_value=type('Snapshot', (), {
+                              'common_dir': '/repo/.git', 'root': '/repo'})()), \
+             patch.object(submission_cli.task_completion, 'bind_executor_task',
+                          return_value=(type('Registration', (), {
+                              'task_id': 'executor-one',
+                              'trusted_agent_id': 'codex-developer'})(), None)), \
+             patch.object(submission_cli.os, 'kill', side_effect=ProcessLookupError()), \
+             patch.object(store, 'compare_and_update', side_effect=advance_then_compare):
+            with self.assertRaisesRegex(LLMToolError, 'CODEX_LIVENESS_UNKNOWN'):
+                submission_cli.run_task_codex_delegate(args, store=store)
+        self.assertEqual(store.get(task_id)['developer'], newer)
 
     def test_matching_live_child_refuses_second_writer(self):
         execution = {'child_pid': 321, 'child_start_time': '123456', 'child_pgid': 321}
