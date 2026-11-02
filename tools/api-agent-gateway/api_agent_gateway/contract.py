@@ -169,6 +169,34 @@ def _loopback(host: str) -> bool:
         return False
 
 
+def _private_or_link_local(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    networks = (
+        (ipaddress.ip_network('10.0.0.0/8'), ipaddress.ip_network('172.16.0.0/12'),
+         ipaddress.ip_network('192.168.0.0/16'), ipaddress.ip_network('169.254.0.0/16'))
+        if address.version == 4 else
+        (ipaddress.ip_network('fc00::/7'), ipaddress.ip_network('fe80::/10'))
+    )
+    return any(address in network for network in networks)
+
+
+def _valid_http_allow_host(host: str) -> bool:
+    try:
+        ipaddress.ip_address(host)
+        return True
+    except ValueError:
+        pass
+    if len(host) > 253 or host.endswith('.'):
+        return False
+    labels = host.split('.')
+    return all(1 <= len(label) <= 63 and
+               re.fullmatch(r'[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?', label)
+               for label in labels)
+
+
 @dataclass
 class Profile:
     name: str
@@ -202,11 +230,21 @@ def parse_profile(profiles: Any, name: str) -> Profile:
             raise ValueError
         base_url = p['base_url']
         parts = urlsplit(base_url)
-        if (parts.scheme not in ('https', 'http') or not parts.hostname or parts.username
-                or parts.password or parts.query or parts.fragment):
+        if (parts.scheme not in ('https', 'http') or not parts.hostname
+                or parts.username is not None or parts.password is not None
+                or '?' in base_url or '#' in base_url):
+            raise ValueError
+        http_allow_hosts = _strs(p.get('http_allow_hosts', []), max_items=100, max_len=253)
+        if any(not _valid_http_allow_host(host) for host in http_allow_hosts):
             raise ValueError
         if parts.scheme == 'http' and not _loopback(parts.hostname):
-            raise ValueError
+            try:
+                ipaddress.ip_address(parts.hostname)
+                allowed_ip = _private_or_link_local(parts.hostname)
+            except ValueError:
+                allowed_ip = True  # An explicitly listed hostname may resolve on the VPN.
+            if parts.hostname not in http_allow_hosts or not allowed_ip:
+                raise ValueError
         model = p['model']
         if not isinstance(model, str) or not model or len(model) > 200:
             raise ValueError

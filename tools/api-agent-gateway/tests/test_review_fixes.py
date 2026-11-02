@@ -10,6 +10,7 @@ from unittest import mock
 
 from helpers import GatewayCase, reply, tool_call
 from api_agent_gateway.confine import ConfinementError, Scope, Workspace
+from api_agent_gateway.contract import Refusal, parse_profile
 from api_agent_gateway.sessions import Store
 from api_agent_gateway.tools import ToolExecutor
 
@@ -21,6 +22,46 @@ def _case_insensitive(path: str) -> bool:
         return os.path.exists(os.path.join(path, 'caseprobe'))
     finally:
         os.unlink(probe)
+
+
+class ProfileHttpAllowlistTests(unittest.TestCase):
+    def profile(self, base_url, **extra):
+        profile = {
+            'adapter': 'openai-chat-tools', 'base_url': base_url, 'model': 'test-model',
+            'context_cap_tokens': 4096, 'max_output_tokens': 1024,
+            'allowed_data_classes': ['synthetic'],
+        }
+        profile.update(extra)
+        return {'schema_version': 1, 'profiles': {'test': profile}}
+
+    def parse(self, base_url, **extra):
+        return parse_profile(self.profile(base_url, **extra), 'test')
+
+    def test_allowlisted_private_ip_http_is_accepted(self):
+        self.parse('http://10.20.30.40/v1', http_allow_hosts=['10.20.30.40'])
+
+    def test_unlisted_private_ip_and_public_ip_are_refused(self):
+        with self.assertRaises(Refusal) as unlisted:
+            self.parse('http://10.20.30.40/v1', http_allow_hosts=['10.20.30.41'])
+        self.assertEqual(unlisted.exception.code, 'PROFILE_INVALID')
+        with self.assertRaises(Refusal) as public:
+            self.parse('http://8.8.8.8/v1', http_allow_hosts=['8.8.8.8'])
+        self.assertEqual(public.exception.code, 'PROFILE_INVALID')
+
+    def test_allowlisted_hostname_http_is_accepted(self):
+        self.parse('http://gateway.corp.example/v1', http_allow_hosts=['gateway.corp.example'])
+
+    def test_absent_list_preserves_loopback_and_https_rules(self):
+        self.parse('http://127.0.0.1/v1')
+        self.parse('https://gateway.example/v1')
+        with self.assertRaises(Refusal):
+            self.parse('http://gateway.example/v1')
+
+    def test_userinfo_query_and_fragment_are_refused(self):
+        for url in ('http://user@gateway.example/v1', 'http://@gateway.example/v1',
+                    'https://gateway.example/v1?', 'https://gateway.example/v1#'):
+            with self.subTest(url=url), self.assertRaises(Refusal):
+                self.parse(url, http_allow_hosts=['gateway.example'])
 
 
 class NameMatchTests(unittest.TestCase):
