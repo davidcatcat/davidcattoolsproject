@@ -373,10 +373,17 @@ class DeveloperRouteContractTests(unittest.TestCase):
             root.mkdir()
             request = self._real_git_request(root)
             config = root / '.git' / 'config'
+            hooks = root / 'hooks'
+            hooks.mkdir()
+            include = root / 'included.conf'
+            include.write_text('[route-test]\nvalue = included\n')
+            conditional_include = root / 'conditional.conf'
+            conditional_include.write_text('[route-test]\nconditional = included\n')
             mutations = (
-                ('core.hooksPath', 'hooks'),
-                ('include.path', 'included.conf'),
-                ('includeIf.onbranch:main.path', 'conditional.conf'),
+                ('core.hooksPath', str(hooks)),
+                ('include.path', str(include)),
+                (f"includeIf.onbranch:{request['expected_branch']}.path",
+                 str(conditional_include)),
                 ('filter.test.clean', 'clean-command'),
                 ('alias.test', '!custom-command'),
                 ('remote.origin.url', 'https://example.invalid/repo'),
@@ -393,8 +400,11 @@ class DeveloperRouteContractTests(unittest.TestCase):
                     self.assertTrue(_git_state_changed(before, after))
             before = capture_snapshot(root)
             config.write_text('[broken\n')
-            after = capture_snapshot(root)
-            self.assertTrue(_git_state_changed(before, after))
+            # An unparsable common config can make even read-only Git identity
+            # commands fail before a second snapshot is available. That is a
+            # fail-closed outcome and is the expected behavior here.
+            with self.assertRaises(RouteError):
+                capture_snapshot(root)
 
     def test_preexisting_ignored_directory_and_in_scope_edit_succeed(self):
         with tempfile.TemporaryDirectory() as temp:
