@@ -594,7 +594,7 @@ class WidgetTests(Base):
                             '\x15', 'hello', '\t',
                             lambda ui: self.assertEqual(ui.input.text, 'hello'),
                             lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input)),
-                            '\t', 'cat', '\t',
+                            '\t', '\x15', 'cat', '\t',
                             lambda ui: self.assertEqual(ui.input.text, 'cat')])
         self.assertEqual(ui.menu_items, [])
         self.factory.assert_not_called()
@@ -730,17 +730,16 @@ class WidgetTests(Base):
         self.assertIn('unknown chat command', ui.conversation.text.lower())
         self.factory.assert_not_called()
 
-    def test_tab_closes_picker_and_restores_esc_timeout(self):
+    def test_tab_completing_unique_command_closes_picker_and_restores_esc_timeout(self):
         def menu_open(ui):
             self.assertTrue(ui.menu_items)
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
 
-        def closed(ui):
-            self.assertFalse(ui.app.layout.has_focus(ui.input))
+        def completed(ui):
+            self.assertEqual(ui.input.text, '/pm connect')
             self.assertEqual(ui.menu_items, [])
             self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
-        ui, _ = self.drive(['/s', menu_open, '\t', closed, '\t',
-                            lambda ui: self.assertEqual(ui.input.text, '/s')])
+        self.drive(['/pm c', menu_open, '\t', completed])
         self.factory.assert_not_called()
 
     def test_picker_scrolls_and_counts_hidden_entries(self):

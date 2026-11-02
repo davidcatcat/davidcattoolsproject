@@ -40,7 +40,8 @@ KEY_HELP = """Keys
   Ctrl-R                Search this session's earlier inputs: type to filter, Ctrl-R/Up/Down
                         choose, Enter puts the entry in the draft without running it,
                         Esc cancels and leaves the draft unchanged
-  Tab, Shift-Tab        Switch focus between input and conversation
+  Tab                   Complete a slash command; elsewhere switch focus to/from the conversation
+  Shift-Tab             Switch focus between input and conversation
   PageUp/PageDown       Scroll conversation one screen (Fn+↑/↓ on a Mac keyboard); when it is
                         focused Up/Down scroll one row, Home/End go to the top/bottom
   Mouse wheel           Scroll conversation one row per wheel step (trackpad works the same);
