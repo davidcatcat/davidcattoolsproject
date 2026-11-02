@@ -78,9 +78,13 @@ KEY_HELP = """Keys
                         Esc works with focus in the input or in the conversation pane
   Ctrl-C, Ctrl-D        Exit (Ctrl-D only with empty input)
 %s
-Talk to the PM: the dedicated Claude Code PM (/pm …) is the product entry
-  /pm new [CWD]         Create a dedicated PM session (pm_runtime create_dedicated_pm; CWD
-                        defaults to the current directory) and save it as the binding
+Talk to the PM: the dedicated PM (/pm …) is the product entry
+  /pm list              List saved PM sessions; /pm use selects one without connecting
+  /pm use N|SESSION     Select a saved session; then /pm connect to connect
+  /pm new [--runtime claude|codex] [--account NAME] [CWD]
+                        Create a dedicated PM session (CWD defaults to the current directory)
+  /pm accounts [--check]  Show configured account names and folder status; --check prints
+                        only login yes/no results, never provider output
   /pm connect [SESSION [CWD]]  Connect to the dedicated PM session: the saved binding when
                         no SESSION is given; "pm>" prompt, Enter sends
   /pm disconnect        End the connection and return to chat mode
@@ -206,6 +210,9 @@ SLASH_COMMANDS = (
     ("/task events", "/task events", "Recent Task events from TaskStore"),
     ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
     ("/links", "/links ", "Clickable file and #PR links: on or off (saved)"),
+    ("/pm list", "/pm list", "List dedicated PM sessions"),
+    ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
+    ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
@@ -217,7 +224,7 @@ STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usag
 STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
-PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "keys")
+PM_STATUS_DROP_ORDER = ("identity", "help", "scroll", "session", "mouse", "keys")
 STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
 STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
@@ -229,7 +236,9 @@ ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Es
 PM_TICK_SECONDS = 0.03
 PM_CHARS_PER_TICK = 2
 PM_MAX_LAG_TICKS = 33
-PM_USAGE = ("usage: /pm new [CWD]\n       /pm connect [SESSION [CWD]]\n"
+PM_USAGE = ("usage: /pm new [--runtime claude|codex] [--account NAME] [CWD]\n"
+            "       /pm list\n       /pm use N|SESSION\n"
+            "       /pm accounts [--check]\n       /pm connect [SESSION [CWD]]\n"
             "       /pm disconnect\n       /pm history\n       /pm queue [clear|send]\n"
             "       /pm\n(a CWD with spaces: quote it or escape the spaces)")
 # The pane's PM working line (W52 F1): redrawn this often while a turn has no text showing.
@@ -281,9 +290,9 @@ def slash_matches(text, dev=True):
         return []
     query = text.lower()
     commands = [c for c in SLASH_COMMANDS if dev or not c[0].startswith("/task")]
-    pm = [c for c in commands if c[0] == "/pm" or c[0].startswith("/pm ")]
-    other = [c for c in commands if c not in pm]
-    ordered = pm + other
+    # Keep the command table's order: new commands are appended there so they do
+    # not move existing picker entries when they happen to share a prefix.
+    ordered = commands
     prefix = [c for c in ordered if c[0].startswith(query)]
     inside = [c for c in ordered if c not in prefix and len(query) > 2 and query[1:] in c[0]]
     return prefix + inside
@@ -1188,7 +1197,7 @@ class ChatTUI:
         if self.pm_mode:
             # Chat provider/model/usage are not the PM's; in PM mode only PM fields show.
             fields.update(self.pm_status_fields(compact))
-            shown = ["mode", "session", "state", "keys", "scroll", "mouse", "help"]
+            shown = ["mode", "identity", "session", "state", "keys", "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
         for name in PM_STATUS_DROP_ORDER if self.pm_mode else STATUS_DROP_ORDER:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
@@ -1328,8 +1337,11 @@ class ChatTUI:
         """Short, PM-first help for /help; F1 retains the full interaction guide."""
         lines = [
             "Talk to the PM",
+            "  /pm list               List saved PM sessions",
+            "  /pm use N|SESSION      Select a session without connecting",
+            "  /pm accounts [--check] Show account names and folder status",
             "  /pm connect             Connect to your PM session",
-            "  /pm new [CWD]           Start a PM session",
+            "  /pm new [--runtime claude|codex] [--account NAME] [CWD]",
             "  /pm                    Show the PM connection",
             "  /pm history             Show recent PM turns",
             "  /pm queue               List, clear, or resume queued messages",
@@ -1654,8 +1666,8 @@ class ChatTUI:
         return [(text, "text")]
 
     def _append_account(self, before, after):
-        """A PM notice with the #657 account text (``Claude account <dir>``) as role.system."""
-        account = chat_tui_pm.account_text(self.pm_runtime)
+        """A PM notice with the provider and account name, never its config directory."""
+        account = chat_tui_pm.account_text(self.pm_runtime, self.pm_binding)
         self.append(before + account + after,
                     segments=[(before, "text"), (account, "role.system"), (after, "text")])
 
@@ -2594,7 +2606,12 @@ class ChatTUI:
             state = "錯誤 " + state[len("error("):-1]
         else:
             state = PM_STATE_LABELS.get(state, state)
-        # W56d lead: ▸▸ PM 模式 · permission mode · 背景 N · ↓ 查看 · 佇列 N
+        # Keep the PM mode and permission state in the lead; runtime/account can drop first.
+        binding = self.pm_binding if type(self.pm_binding) is dict else {}
+        runtime = binding.get('runtime', getattr(self.pm_runtime, 'runtime', 'claude-code'))
+        if runtime == 'claude-code':
+            runtime = 'claude'
+        account = binding.get('account') or 'default'
         lead = ["▸▸ " + PM_LABEL + " 模式", chat_tui_pm.permission_mode()]
         count = self.background_count()
         if count is not None:
@@ -2603,7 +2620,10 @@ class ChatTUI:
                 lead.append("↓ 查看")
         if self.pm_outbox:
             lead.append("佇列 %d" % len(self.pm_outbox) + (" 暫停" if self.pm_outbox_paused else ""))
-        return {"mode": " · ".join(lead), "session": compact(session_id, 8),
+        return {"mode": " · ".join(lead),
+                "identity": compact(chat_tui_pm.safe_text(runtime) + "/"
+                                     + chat_tui_pm.safe_text(account), 20),
+                "session": compact(session_id, 8),
                 "state": compact(state, 18)}
 
     # -- PM background work (W56d) ---------------------------------------------------
@@ -2981,15 +3001,79 @@ class ChatTUI:
             return
         if parts == ["/pm"]:
             if self.pm_runtime is None:
-                self.append("PM: not connected. /pm connect uses the saved dedicated PM binding; "
-                            "/pm new [CWD] creates one.")
+                binding = self.pm_api.current_binding()
+                if binding:
+                    self.append("PM: not connected. selected "
+                                + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
+                                + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
+                                + "; /pm connect to connect.")
+                else:
+                    self.append("PM: not connected. /pm connect uses the saved dedicated PM binding; "
+                                "/pm new creates one.")
             else:
+                binding = self.pm_binding if type(self.pm_binding) is dict else {}
                 self._append_account(
-                    "PM: claude-code session " + self.pm_target[0] + " (cwd "
+                    "PM: " + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
+                    + " session " + self.pm_target[0] + " (cwd "
                     + chat_tui_pm.safe_text(str(self.pm_target[1])) + "), "
                     + chat_tui_pm.binding_text(self.pm_binding) + ", ",
                     ", state " + (self.pm_state or chat_tui_task.UNKNOWN)
                     + ("; PM mode" if self.pm_mode else "; not in PM mode"))
+            return
+        if parts == ["/pm", "list"]:
+            try:
+                bindings = self.pm_api.list_bindings()
+                current = self.pm_api.current_binding()
+            except Exception:
+                self.append("llmtool: PM sessions unavailable")
+                return
+            if not bindings:
+                self.append("PM sessions: none")
+                return
+            current_id = current.get('native_session_id') if type(current) is dict else None
+            lines = ["PM sessions:"]
+            for number, binding in enumerate(bindings, 1):
+                lines.append("  %d. %s · %s · account %s · cwd %s · created %s%s" % (
+                    number, chat_tui_pm.safe_text(binding.get('runtime', 'claude-code')),
+                    chat_tui_pm.safe_text(binding.get('native_session_id')),
+                    chat_tui_pm.safe_text(binding.get('account') or 'default'),
+                    chat_tui_pm.safe_text(binding.get('cwd')),
+                    chat_tui_pm.safe_text(binding.get('created_at')),
+                    " · current" if binding.get('native_session_id') == current_id else ""))
+            self.append("\n".join(lines))
+            return
+        if parts[1:2] == ["use"] and len(parts) == 3:
+            try:
+                bindings = self.pm_api.list_bindings()
+                number = int(parts[2]) - 1 if parts[2].isdigit() else None
+                session_id = (bindings[number]['native_session_id']
+                              if number is not None and 0 <= number < len(bindings)
+                              else parts[2] if number is None else None)
+                if session_id is None:
+                    raise ValueError()
+                binding = self.pm_api.select_binding(session_id)
+            except Exception:
+                self.append("llmtool: PM session not selected; use /pm list and /pm use N|SESSION")
+                return
+            self.append("PM selected: " + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
+                        + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
+                        + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))
+                        + "; /pm connect to connect")
+            return
+        if parts[1:2] == ["accounts"] and parts[2:] in ([], ["--check"]):
+            try:
+                if parts[2:] == ["--check"]:
+                    checks = self.pm_api.account_checks()
+                    self.append("\n".join("yes" if checked else "no" for checked in checks)
+                                if checks else "no")
+                else:
+                    accounts = self.pm_api.accounts()
+                    lines = ["  %s · %s · folder %s" % (
+                        chat_tui_pm.safe_text(row['name']), chat_tui_pm.safe_text(row['kind']),
+                        chat_tui_pm.safe_text(row['status'])) for row in accounts]
+                    self.append("PM accounts:\n" + ("\n".join(lines) if lines else "  none"))
+            except Exception:
+                self.append("llmtool: PM accounts unavailable")
             return
         if parts[1:2] == ["queue"] and len(parts) <= 3:
             self.run_queue_command(parts[2] if len(parts) == 3 else None)
@@ -3010,12 +3094,36 @@ class ChatTUI:
             self.pm_state = "connecting"
             self._pm_worker(self._pm_connect, session_id, parts[3] if len(parts) == 4 else None)
             return
-        if parts[1:2] == ["new"] and len(parts) <= 3:
+        if parts[1:2] == ["new"]:
             if self.pm_runtime is not None:
                 self.append("llmtool: connected to PM session " + self.pm_target[0]
                             + "; /pm disconnect before creating another")
                 return
-            self._pm_worker(self._pm_new, parts[2] if len(parts) == 3 else os.getcwd())
+            runtime, account, cwd = "claude-code", None, None
+            try:
+                index = 2
+                while index < len(parts):
+                    if parts[index] == "--runtime":
+                        if index + 1 >= len(parts):
+                            raise ValueError()
+                        value = parts[index + 1]
+                        if value not in ("claude", "codex"):
+                            raise ValueError()
+                        runtime = "claude-code" if value == "claude" else "codex"
+                        index += 2
+                    elif parts[index] == "--account":
+                        if index + 1 >= len(parts):
+                            raise ValueError()
+                        account = parts[index + 1]
+                        index += 2
+                    elif cwd is None:
+                        cwd = parts[index]
+                        index += 1
+                    else:
+                        raise ValueError()
+                self._pm_worker(self._pm_new, cwd or os.getcwd(), runtime, account)
+            except ValueError:
+                self.append(PM_USAGE)
             return
         if parts == ["/pm", "disconnect"]:
             if self.pm_runtime is None:
@@ -3131,9 +3239,9 @@ class ChatTUI:
             return None
         return self._queue_text("llmtool: 離開時 PM 佇列仍有未送出的訊息（沒有送出）")
 
-    def _pm_new(self, cwd, loop):
+    def _pm_new(self, cwd, runtime, account, loop):
         try:
-            outcome = {"binding": self.pm_api.create_dedicated(cwd)}
+            outcome = {"binding": self.pm_api.create_dedicated(cwd, runtime, account)}
         except LLMToolError as exc:
             outcome = {"error": chat_tui_pm.error_code(exc)}
         except Exception:

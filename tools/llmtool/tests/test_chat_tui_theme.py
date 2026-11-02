@@ -335,7 +335,7 @@ class StatusLineTests(Base):
 
     def test_status_line_lead(self):
         ui = self.ui
-        self.assertTrue(ui.status_text().startswith("▸▸ PM 模式 · auto | abcdef01 | 待命"))
+        self.assertTrue(ui.status_text().startswith("▸▸ PM 模式 · auto | claude/default | abcdef01 | 待命"))
         self.loaded([])
         self.assertTrue(ui.status_text().startswith("▸▸ PM 模式 · auto · 背景 0 | "))
         items = chat_tui_status.background_items([_record("t1"), _record("t2")])
