@@ -36,7 +36,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
         report = ci_mac_modules.selection_report([], REPO_ROOT)
         self.assertEqual(report["level"], "L3")
         self.assertEqual(report["test_ids"], ["FULL"])
-        self.assertEqual(report["selection_reason"], "no_changed_paths_requires_full")
+        self.assertIn("no_changed_paths", report["fallback_reasons"])
 
     def test_manifest_rejects_malformed_duplicate_and_missing_ids(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -56,7 +56,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                         report = ci_mac_modules.selection_report([], REPO_ROOT)
                         self.assertEqual(report["level"], "L3")
                         self.assertEqual(report["test_ids"], ["FULL"])
-                        self.assertEqual(report["selection_reason"], "invalid_manifest_requires_full")
+                        self.assertIn("invalid_manifest", report["fallback_reasons"])
 
     def test_shared_impact_map_selects_route_and_submission_test_modules(self):
         agy = ci_mac_modules.selection_report(
@@ -205,7 +205,43 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertEqual(report["level"], "L3")
                 self.assertEqual(report["test_ids"], ["FULL"])
-                self.assertEqual(report["selection_reason"], "selector_change_requires_full")
+                self.assertIn("selector_change", report["fallback_reasons"][0])
+
+    def test_full_fallback_reports_actual_high_risk_and_unmapped_paths(self):
+        cases = (
+            ("tools/llmtool/llmtool/opencode_direct_developer.py",
+             "high_risk_file"),
+            ("tools/llmtool/worker-dispatch.json", "unmapped_source"),
+        )
+        for path, reason in cases:
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertEqual(report["level"], "L3")
+                self.assertEqual(report["test_ids"], ["FULL"])
+                self.assertIn(f"{path}:{reason}", report["fallback_reasons"])
+                self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
+
+    def test_candidate_only_source_and_test_are_read_from_candidate_tree(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "tools/llmtool/llmtool/candidate_only.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("# candidate-only source\n", encoding="utf-8")
+            tests = root / "tools/llmtool/tests"
+            tests.mkdir(parents=True)
+            (tests / "test_candidate_only.py").write_text(
+                "import unittest\nclass CandidateOnlyTests(unittest.TestCase): pass\n",
+                encoding="utf-8",
+            )
+            manifest = root / "tools/llmtool/ci/mac-modules.txt"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text("test_candidate_only.CandidateOnlyTests\n", encoding="utf-8")
+            report = ci_mac_modules.selection_report(
+                ["tools/llmtool/llmtool/candidate_only.py"], root
+            )
+        self.assertEqual(report["level"], "L1")
+        self.assertIn("test_candidate_only", report["test_ids"])
+        self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
     def test_monitor_and_documentation_changes_select_no_subset(self):
         for path in ("scripts/llmtool_monitor.py", "tools/llmtool/docs/guide.md"):
@@ -243,7 +279,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 )
             self.assertEqual(report["level"], "L3")
             self.assertEqual(report["test_ids"], ["FULL"])
-            self.assertEqual(report["selection_reason"], "deleted_mapped_test_requires_full")
+            self.assertIn("missing_mapped_test", report["fallback_reasons"][0])
 
     def test_cli_json_and_text_output_are_deterministic(self):
         with tempfile.TemporaryDirectory() as temporary:

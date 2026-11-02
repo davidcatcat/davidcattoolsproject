@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -177,23 +178,49 @@ def _importing_test_ids(target: str, repo_root: Path) -> set[str] | None:
     return selected
 
 
-def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> set[str] | None:
+def select_test_ids(
+    changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT,
+    rejection_reasons: list[str] | None = None,
+) -> set[str] | None:
     """Return required plus impacted test IDs, or None when L3 FULL is needed.
 
     Import discovery sees direct static imports only; it does not find transitive,
     subprocess, or patch-string importers.
     """
+    rejected = False
+    rejection_count = 0
+
+    def reject(path: str, reason: str) -> None:
+        nonlocal rejected, rejection_count
+        rejected = True
+        rejection_count += 1
+        if rejection_reasons is not None:
+            entry = f"{path}:{reason}" if path else reason
+            if entry not in rejection_reasons:
+                rejection_reasons.append(entry)
+
     try:
         selected = required_test_ids(repo_root)
     except InvalidManifest:
+        manifest_path = "tools/llmtool/ci/mac-modules.txt"
+        if changed_paths and any(
+            raw.strip().replace("\\", "/").removeprefix("./") == manifest_path
+            for raw in changed_paths
+        ):
+            reject(manifest_path, "manifest_change")
+        else:
+            reject(manifest_path, "invalid_manifest")
         return None
     if not changed_paths:
+        reject("", "no_changed_paths")
         return None
     has_relevant_change = False
     for raw_path in changed_paths:
+        rejections_before_path = rejection_count
         path = raw_path.strip().replace("\\", "/").removeprefix("./")
         if not path or "\0" in path:
-            return None
+            reject(path, "unsupported_path")
+            continue
         if path in MONITOR_PATHS:
             continue
         if path.startswith("tools/llmtool/") and path.endswith(".md"):
@@ -203,25 +230,38 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
                             "tools/llmtool/llmtool/test_selection.py"}
                 or "/ci/" in path or path == "tools/llmtool/Makefile"
                 or "requirements" in Path(path).name):
-            return None
+            reason = "workflow_change" if path.startswith(".github/workflows/") else (
+                "selector_change" if path in {
+                    "tools/llmtool/scripts/ci_mac_modules.py",
+                    "tools/llmtool/llmtool/test_selection.py",
+                } else "ci_or_dependency_change" if (
+                    "/ci/" in path or path == "tools/llmtool/Makefile"
+                    or "requirements" in Path(path).name
+                ) else "manifest_change")
+            reject(path, reason)
+            continue
         if not path.startswith("tools/llmtool/"):
-            return None
+            reject(path, "unsupported_path")
+            continue
 
         if path.startswith(TEST_ROOT) and path.endswith(".py"):
             changed_id = _module_id(path, repo_root)
             if changed_id is None:
-                return None
+                reject(path, "missing_or_invalid_test_module")
+                continue
             selected.add(changed_id)
             has_relevant_change = True
             continue
 
         relative = path[len("tools/llmtool/"):]
         if relative == "llmtool/__init__.py":
-            return None
+            reject(path, "high_risk_file")
+            continue
         if path in HIGH_RISK_FILES or any(
             path == prefix or path.startswith(prefix + "/") for prefix in HIGH_RISK_PREFIXES
         ):
-            return None
+            reject(path, "high_risk_file")
+            continue
         is_llmtool_module = (path.startswith("tools/llmtool/llmtool/")
                              and path.endswith(".py"))
         mapped = IMPACT_TEST_MAP.get(path)
@@ -229,16 +269,22 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
         # Runtime modules are discovered from the test tree, including nested
         # packages. Other runtime inputs still need an explicit impact mapping.
         if is_llmtool_module and dynamic_module is None:
-            return None
+            reject(path, "unsupported_source_path")
+            continue
         if not is_llmtool_module and not mapped:
-            return None
+            reject(path, "unmapped_source")
+            continue
         if not (repo_root / path).is_file():
-            return None
+            reject(path, "missing_file")
+            continue
         for test_path in mapped or ():
             module_id = _module_id(test_path, repo_root)
             if module_id is None:
-                return None
+                reject(test_path, "missing_mapped_test")
+                break
             selected.add(module_id)
+        if rejection_count > rejections_before_path:
+            continue
         if dynamic_module is not None:
             dynamic_ids: set[str] = set()
             direct_id = "test_" + Path(path).stem
@@ -246,11 +292,15 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
             if (repo_root / direct_path).is_file():
                 module_id = _module_id(direct_path, repo_root)
                 if module_id is None:
-                    return None
+                    reject(direct_path, "missing_direct_test")
+                    break
                 dynamic_ids.add(module_id)
+            if rejection_count > rejections_before_path:
+                continue
             importing = _importing_test_ids(dynamic_module, repo_root)
             if importing is None:
-                return None
+                reject(path, "test_import_scan_failed")
+                continue
             dynamic_ids.update(importing)
             if (Path(path).name.startswith("chat_tui")
                     or Path(path).name == "tui_markdown.py"):
@@ -258,61 +308,53 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
                 # source dependency is not visible to the static import scan.
                 scenario_id = "test_chat_tui_scenarios"
                 if _module_id(f"{TEST_ROOT}{scenario_id}.py", repo_root) is None:
-                    return None
+                    reject(f"{TEST_ROOT}{scenario_id}.py", "missing_scenario_test")
+                    continue
                 dynamic_ids.add(scenario_id)
             if not dynamic_ids and not mapped:
-                return None
+                reject(path, "no_discoverable_tests")
+                continue
             selected.update(dynamic_ids)
         has_relevant_change = True
 
+    if rejected:
+        return None
     return selected if has_relevant_change else set()
 
 
 def selection_report(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> dict:
     normalized = sorted(path.strip().replace("\\", "/").removeprefix("./")
                        for path in changed_paths if path.strip())
-    ids = select_test_ids(changed_paths, repo_root)
+    rejection_reasons: list[str] = []
+    ids = select_test_ids(changed_paths, repo_root, rejection_reasons)
     if ids is None:
-        try:
-            required_test_ids(repo_root)
-            manifest_valid = True
-        except InvalidManifest:
-            manifest_valid = False
-        if not manifest_valid:
-            reason = "invalid_manifest_requires_full"
-        elif any(path == "tools/llmtool/ci/mac-modules.txt" for path in normalized):
-            reason = "manifest_change_requires_full"
-        elif not normalized:
-            reason = "no_changed_paths_requires_full"
-        elif any(path.startswith(".github/workflows/") for path in normalized):
-            reason = "workflow_change_requires_full"
-        elif any(path in {"tools/llmtool/scripts/ci_mac_modules.py",
-                          "tools/llmtool/llmtool/test_selection.py"} for path in normalized):
-            reason = "selector_change_requires_full"
-        elif any("requirements" in Path(path).name or "/ci/" in path for path in normalized):
-            reason = "dependency_or_ci_change_requires_full"
-        elif any(path not in IMPACT_TEST_MAP and path.endswith((".py", ".json"))
-                 and path.startswith("tools/llmtool/") for path in normalized):
-            reason = "unmapped_or_nested_source_requires_full"
-        elif any(test_path and _module_id(test_path, repo_root) is None
-                 for path in normalized for test_path in IMPACT_TEST_MAP.get(path, ())):
-            reason = "deleted_mapped_test_requires_full"
-        else:
-            reason = "unsupported_or_high_risk_or_invalid_manifest_requires_full"
+        reasons = rejection_reasons or ["selector_rejected_without_reason"]
+        reason = "selector_rejections_require_full"
         return {"changed_paths": normalized, "level": "L3", "test_ids": ["FULL"],
-                "selection_reason": reason, "fallback_reasons": [reason],
-                "test_id_count": "full-suite"}
+                "selection_reason": reason, "fallback_reasons": reasons,
+                "test_id_count": "full-suite", "selector_revision": _selector_revision()}
 
     if not ids:
         return {"changed_paths": normalized, "level": "L0", "test_ids": [],
                 "selection_reason": "monitor or documentation-only change",
-                "fallback_reasons": [], "test_id_count": 0}
+                "fallback_reasons": [], "test_id_count": 0,
+                "selector_revision": _selector_revision()}
 
     output = sorted(ids)
     has_submission = any(test_id.endswith("test_task_submission_cli") for test_id in output)
     return {"changed_paths": normalized, "level": "L2" if has_submission else "L1",
             "test_ids": output, "selection_reason": "explicit Mac manifest plus shared-map impacted tests",
-            "fallback_reasons": [], "test_id_count": len(output)}
+            "fallback_reasons": [], "test_id_count": len(output),
+            "selector_revision": _selector_revision()}
+
+
+def _selector_revision() -> str:
+    """Identify the exact selector source evaluated for this report."""
+    try:
+        source = Path(__file__).read_bytes()
+    except OSError:
+        return "unavailable"
+    return hashlib.sha256(source).hexdigest()
 
 
 def full_fallback_report(changed_paths: list[str], reason: str) -> dict:
@@ -320,7 +362,8 @@ def full_fallback_report(changed_paths: list[str], reason: str) -> dict:
                        for path in changed_paths if path.strip())
     return {"changed_paths": normalized, "level": "L3", "test_ids": ["FULL"],
             "selection_reason": "selector_failure_requires_full",
-            "fallback_reasons": [reason], "test_id_count": "full-suite"}
+            "fallback_reasons": [reason], "test_id_count": "full-suite",
+            "selector_revision": _selector_revision()}
 
 
 def _read_changed_paths(path: str) -> list[str]:
