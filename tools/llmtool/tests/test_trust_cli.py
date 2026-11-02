@@ -1,6 +1,7 @@
 """CLI tests for owner trust configuration commands."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -94,7 +95,9 @@ class TrustCliTest(unittest.TestCase):
         config_dir = self.home / ".config" / "llmtool"
         config_dir.mkdir(mode=0o700, parents=True)
         target = config_dir / "trust.json"
-        target.write_text("old trust", encoding="utf-8")
+        old_raw = b'{"schema_version":1}\n'
+        target.write_bytes(old_raw)
+        old_sha256 = hashlib.sha256(old_raw).hexdigest()
         checkout = self.home / "checkout"
         checkout.mkdir(mode=0o700)
         workspace = self.home / "workspaces" / "project"
@@ -109,7 +112,7 @@ class TrustCliTest(unittest.TestCase):
             "mode": "self-hosted", "github_actions_app_id": 15368,
             "workflows": list(trust_cli._WORKFLOWS),
             "not_run_checks": trust_cli._NOT_RUN_CHECKS}}), encoding="utf-8")
-        old = mock.Mock(sha256="a" * 64)
+        old = mock.Mock(sha256=old_sha256)
         args = argparse.Namespace(input=str(draft), import_config=False,
                                   replace=True, confirm_rotation="b" * 64)
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
@@ -119,7 +122,7 @@ class TrustCliTest(unittest.TestCase):
                 trust_cli._init(args)
         self.assertEqual(caught.exception.code, "TRUST_ROTATION_UNCONFIRMED")
 
-        args.confirm_rotation = "a" * 64
+        args.confirm_rotation = old_sha256
         output = __import__("io").StringIO()
         with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
              mock.patch.object(trust_cli, "load_trust", return_value=old), \
