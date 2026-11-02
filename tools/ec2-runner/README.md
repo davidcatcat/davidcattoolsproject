@@ -20,6 +20,55 @@ Each account is non-admin, in its own group only, with a `700` home; accounts
 cannot read another runner's folder or credentials. Python 3.14 is the distro package
 `python3.14` (AppStream) beside the system 3.9; jobs build their own venv.
 
+## Root-owned runner install
+
+Run the permission installer on the EC2 host after a runner has been configured.
+Stop its service first. The installer also refuses to run while the service is
+active or any process remains under its account. It operates on one runner
+directory at a time and does not change the systemd units or their existing
+drop-ins:
+
+```sh
+sudo systemctl stop actions.runner.davidcatcat-davidcattoolsproject.ec2-self-runner.service
+sudo bash tools/ec2-runner/install.sh --account ghrunner
+sudo bash tools/ec2-runner/selftest.sh --account ghrunner
+sudo systemctl start actions.runner.davidcatcat-davidcattoolsproject.ec2-self-runner.service
+```
+
+For runner 2 or 3, substitute the matching account and service name in all
+commands. Review the read-only plan first with
+`sudo bash tools/ec2-runner/install.sh --account ghrunner2 --dry-run` (or
+`ghrunner3`). The plan does not change files.
+The install root and its ordinary files/directories
+become `root:root`; executable files are `0755`, other files `0644`, and
+directories `0755`. `_work` and `_tmp` stay owned by the runner account with
+`0700` directories. `_diag` stays account-owned with `0750` directories.
+Contents under those writable directories remain runner-managed. `.runner` and credential files are account-owned
+`0600`; `.env` and `.path` are root-owned `0644`. The installer refuses
+symlinks, special files, and any account/path outside the fixed
+`/home/ghrunnerN/actions-runner` layout.
+
+The runner account still owns `/home/ghrunnerN` and can rename or replace its
+`actions-runner` directory. This known limitation remains; ephemeral/JIT
+runners are the actual fix. Configure every runner with `--disableupdate`,
+because its install files are root-owned.
+
+To roll back one runner, stop that runner's service, restore its account
+ownership, then start it again. For runner 1:
+
+```sh
+sudo systemctl stop actions.runner.davidcatcat-davidcattoolsproject.ec2-self-runner.service
+sudo chown -R ghrunner:ghrunner /home/ghrunner/actions-runner
+sudo chmod -R u+rwX,go-rwx /home/ghrunner/actions-runner
+sudo systemctl start actions.runner.davidcatcat-davidcattoolsproject.ec2-self-runner.service
+```
+
+For runners 2 and 3, substitute `ghrunner2`/`ghrunner3`, the matching
+`/home/ghrunnerN/actions-runner` path, and the matching service name ending in
+`ec2-self-runner-2.service` or `ec2-self-runner-3.service`. This restores
+account-only ownership and access. The existing systemd drop-ins remain
+installed.
+
 ## Host files
 
 Each service `actions.runner.davidcatcat-davidcattoolsproject.<runner>.service`
