@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -178,14 +179,15 @@ class CodexDelegateTests(unittest.TestCase):
                   overwrite_ignored=None, malformed_diff=None, callback_handler=None,
                   registration=None, bound_registration=None, codex_error=None,
                   codex_result=None, codex_timeout=600, run_observer=None,
-                  empty_diff=False, large_diff=False):
+                  empty_diff=False, large_diff=False, background=False):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored,
                          empty_diff=empty_diff, large_diff=large_diff)
         args = Namespace(task_id=task['task_id'], selection_source='PM',
             acceptance=['src.py is changed'], executor_task='executor-task-1',
             read_path=['src.py'], write_path=['src.py'],
-            egress_basis='approved bounded fixture')
+            egress_basis='approved bounded fixture', mode='direct',
+            provider='codex', background=background)
         snapshot = (SimpleNamespace(root=registration.root,
             common_dir=registration.common_dir, branch=registration.branch,
             head=getattr(registration, 'result_sha', registration.source_sha))
@@ -205,6 +207,15 @@ class CodexDelegateTests(unittest.TestCase):
             run_patch = (
                 patch('llmtool.task_submission_cli.codex_direct_developer.run',
                       side_effect=codex_error) if codex_error is not None else
+                patch('llmtool.task_submission_cli.codex_direct_developer.run',
+                      side_effect=lambda **kwargs: (
+                          kwargs['launch_callback'](os.getpid(),
+                              task_submission_cli.codex_direct_developer.process_start_time(
+                                  os.getpid()), os.getpgid(os.getpid())),
+                          time.sleep(3.0),
+                          (self.root / 'src.py').write_text('VALUE = 2\n'),
+                          codex_result)[3])
+                if background and codex_result is not None else
                 patch('llmtool.task_submission_cli.codex_direct_developer.run',
                       return_value=codex_result) if codex_result is not None else
                 patch('llmtool.task_submission_cli.codex_direct_developer.run',
@@ -238,12 +249,56 @@ class CodexDelegateTests(unittest.TestCase):
                     run_patch as codex_run, \
                     patch('llmtool.task_submission_cli.run_task_direct_result_event',
                           side_effect=callback_handler, return_value=0) as callback:
-                result = run_task_codex_delegate(args, store=self.store)
+                result = (task_submission_cli.run_task_delegate(args, store=self.store)
+                          if background else
+                          run_task_codex_delegate(args, store=self.store))
                 if run_observer is not None:
                     run_observer(codex_run.call_args)
         finally:
             os.chdir(original_cwd)
         return result, self.store.get(task['task_id']), callback
+
+    def test_background_returns_at_child_launch_then_persists_foreground_result(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='DONE', summary='Changed src.py.', tests=(), self_review='Reviewed.',
+            blocked_reason=None, exit_code=0,
+            stdout_sha256='b' * 64, elapsed_ms=20, cleanup_status='CONFIRMED',
+            usage=None, final_message=json.dumps({'status': 'DONE',
+                'summary': 'Changed src.py.', 'tests': [],
+                'self_review': 'Reviewed.', 'blocked_reason': None},
+                separators=(',', ':')),
+            thread_id='12345678-1234-4234-8234-123456789abc')
+        started = time.monotonic()
+        code, saved, _callback = self._dispatch(
+            task, codex_result=result, background=True)
+        elapsed = time.monotonic() - started
+        self.assertEqual(code, 0)
+        self.assertLess(elapsed, 2.0)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_DISPATCHING')
+        self.assertEqual(saved['developer']['execution']['status'], 'RUNNING')
+        self.assertGreater(saved['developer']['execution']['child_pid'], 0)
+        self.assertEqual(task_submission_cli._codex_child_liveness(
+            saved['developer']['execution']), 'ALIVE')
+        duplicate = Namespace(task_id=task['task_id'], provider='codex', mode='direct',
+            background=True, selection_source='PM', acceptance=['src.py is changed'],
+            executor_task='executor-task-1', read_path=['src.py'], write_path=['src.py'],
+            egress_basis='approved bounded fixture')
+        original_cwd = os.getcwd()
+        try:
+            os.chdir(self.root)
+            with self.assertRaises(Exception) as raised:
+                task_submission_cli.run_task_delegate(duplicate, store=self.store)
+        finally:
+            os.chdir(original_cwd)
+        self.assertIn('CODEX_CHILD_STILL_RUNNING', str(raised.exception))
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            saved = self.store.get(task['task_id'])
+            if saved['developer']['state'] != 'DEVELOPER_DISPATCHING':
+                break
+            time.sleep(0.02)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
 
     def test_configured_timeout_matches_packet_and_runner(self):
         task = self._task()
