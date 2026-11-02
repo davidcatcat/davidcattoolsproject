@@ -50,11 +50,18 @@ class RemoteTestGateTests(unittest.TestCase):
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
             task, read_paths=[PATH], config_loader=lambda: {}), 'REMOTE_RECEIPT')
 
-        def unavailable():
-            raise LLMToolError('unavailable')
+        def unconfigured():
+            raise FileNotFoundError
 
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
-            task, read_paths=[PATH], config_loader=unavailable), 'LOCAL')
+            task, read_paths=[PATH], config_loader=unconfigured), 'LOCAL')
+        with self.assertRaises(LLMToolError) as invalid:
+            task_submission_cli._remote_receipt_test_policy(
+                task, read_paths=[PATH],
+                config_loader=lambda: (_ for _ in ()).throw(
+                    LLMToolError('REMOTE_TEST_CONFIG_INVALID')))
+        self.assertEqual(invalid.exception.completion_code,
+                         'REMOTE_TEST_CONFIG_INVALID')
         outside = task_with_tests()
         outside['task_contract']['test_commands'][0]['argv'][-1] = 'test_other.py'
         self.assertEqual(task_submission_cli._remote_receipt_test_policy(
@@ -88,10 +95,10 @@ class RemoteTestGateTests(unittest.TestCase):
         self.assertNotIn('Run only listed test_commands', remote)
         self.assertNotIn('Run only listed test_commands;', remote)
 
-        def unavailable():
-            raise LLMToolError('unavailable')
+        def unconfigured():
+            raise FileNotFoundError
 
-        with patch.object(remote_test, '_config', side_effect=unavailable):
+        with patch.object(remote_test, '_config', side_effect=unconfigured):
             local = task_submission_cli._codex_direct_prompt(task, **common)
         self.assertIn('Run only listed test_commands;', local)
         self.assertIn('"test_policy":"LOCAL"', local)
