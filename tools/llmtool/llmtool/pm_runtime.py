@@ -893,7 +893,10 @@ class PMRuntime:
             resolved_role = role_config.resolve_role(
                 'pm', environ=self.environ,
                 home=None if self.environ is None else self.environ.get('HOME'))
+            if resolved_role.get('provider') not in (None, 'claude'):
+                raise LLMToolError('roles.pm must use a Claude account')
             config_dir = resolved_role['config_dir']
+            model = resolved_role.get('model')
         except LLMToolError:
             raise _error('PM_CONFIG_INVALID',
                          'pm_runtime.claude_config_dir in the user config is invalid') from None
@@ -972,6 +975,8 @@ class PMRuntime:
                     '--permission-mode', PM_PERMISSION_MODE,
                     '--strict-mcp-config', '--mcp-config', PM_MCP_CONFIG,
                     '--append-system-prompt', PM_SESSION_INSTRUCTION]
+            if model is not None:
+                argv.extend(('--model', model))
             runner = self.runner
             if runner is None:
                 import subprocess

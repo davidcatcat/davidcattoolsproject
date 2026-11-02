@@ -437,6 +437,25 @@ class PMRuntimeTests(unittest.TestCase):
         self.assertEqual(self.calls[0][2]['CLAUDE_CONFIG_DIR'], account)
         self.assertEqual(runtime.claude_config_dir, account)
 
+    def test_pm_role_model_is_passed_and_codex_account_is_refused_before_start(self):
+        runtime = self.runtime()
+        with patch.object(pm_runtime.role_config, 'resolve_role', return_value={
+                'provider': 'claude', 'config_dir': None, 'model': 'claude-model',
+                'source': 'roles'}):
+            runtime.open()
+        self.assertEqual(self.calls[0][0][-2:], ['--model', 'claude-model'])
+        runtime.close()
+
+        self.calls.clear()
+        runtime = self.runtime()
+        with patch.object(pm_runtime.role_config, 'resolve_role', return_value={
+                'provider': 'codex', 'config_dir': '/private/codex', 'model': None,
+                'source': 'roles'}):
+            with self.assertRaises(LLMToolError) as raised:
+                runtime.open()
+        self.assertEqual(raised.exception.pm_runtime_code, 'PM_CONFIG_INVALID')
+        self.assertEqual(self.calls, [])
+
     def test_unset_claude_account_keeps_inherited_environment(self):
         runtime = self.runtime()
         runtime.open()

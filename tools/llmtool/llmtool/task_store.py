@@ -24,6 +24,7 @@ from .action_contract import TaskBinding
 from .diagnostics import validate_provider_usage
 from .errors import LLMToolError
 from .opencode_direct_developer import is_free_model
+from .role_config import _NAME
 from .task_verification import parse_task_contract
 from .test_output_excerpts import _emitted_sensitive
 from .task_completion import validate_host_worker_receipt
@@ -91,6 +92,8 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
+_REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS = (
+    _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('account',)))
 _REVIEW_DISPATCH_RESULT_FIELDS = frozenset((
     'task_id', 'run_id', 'contract_digest', 'head', 'verdict', 'review_text'))
 _REVIEW_REPAIR_CLAIM_FIELDS = frozenset((
@@ -194,6 +197,12 @@ _DEVELOPER_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
+    *(_shape | frozenset(('account',)) for _shape in (
+        _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
+        _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+        _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+        _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
+    )),
 )
 _DEVELOPER_TASK_ID_SHAPES = tuple(
     shape | _DEVELOPER_EXECUTOR_TASK_FIELDS for shape in _DEVELOPER_SHAPES
@@ -762,9 +771,15 @@ def _validate(record):
         identities = set()
         for item in claims:
             if (type(item) is not dict or
-                    set(item) not in (_REVIEW_DISPATCH_CLAIM_FIELDS,
-                                      _REVIEW_DISPATCH_CLAIM_FIELDS |
-                                      frozenset(('review_result',))) or
+                    set(item) not in (
+                        _REVIEW_DISPATCH_CLAIM_FIELDS,
+                        _REVIEW_DISPATCH_CLAIM_FIELDS | frozenset(('review_result',)),
+                        _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS,
+                        _REVIEW_DISPATCH_CLAIM_ACCOUNT_FIELDS |
+                        frozenset(('review_result',))) or
+                    ('account' in item and
+                     (type(item['account']) is not str or
+                      _NAME.fullmatch(item['account']) is None)) or
                     type(item.get('executor_task')) is not str or
                     not re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', item['executor_task']) or
                     type(item.get('pr')) is not int or not 1 <= item['pr'] <= 999999999 or
@@ -1111,6 +1126,10 @@ def _validate(record):
                                  *_DEVELOPER_INVALID_FINAL_SHAPES,
                                  *_DEVELOPER_REPORTED_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
+                _fail()
+            if ('account' in developer and
+                    (type(developer['account']) is not str or
+                     _NAME.fullmatch(developer['account']) is None)):
                 _fail()
             if ('executor_task_id' in developer and
                     not _safe_identifier(developer['executor_task_id'], D6_TASK_ID)):
@@ -2927,7 +2946,8 @@ class TaskStore:
                                 after.get('state') in ('UNKNOWN', 'DISPATCHED', 'COMPLETED') and
                                 all(before.get(key) == after.get(key) for key in (
                                     'executor_task', 'pr', 'head_sha', 'version',
-                                    'account_mode', 'claimed_at', 'reviewer_task')) and
+                                    'account_mode', 'account', 'claimed_at',
+                                    'reviewer_task')) and
                                 (before.get('state') == 'CLAIMED' and
                                  (after.get('state') == 'COMPLETED' or
                                   ('review_result' not in after))) and
