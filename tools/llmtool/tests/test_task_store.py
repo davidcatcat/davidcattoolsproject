@@ -263,6 +263,80 @@ class TaskStoreTests(unittest.TestCase):
             'error_code': None, 'created_at': '2026-10-23T00:00:00Z',
         }
 
+    def test_codex_delegate_developer_account_is_stored_as_name(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = self._developer_assignment()
+        developer['account'] = 'codex-developer'
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertEqual(saved['developer']['account'], 'codex-developer')
+        self.assertNotIn('/private', repr(saved['developer']))
+
+    def test_developer_account_rejects_path_like_and_invalid_names(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        for account in ('/private/codex-account', 'codex.account'):
+            with self.subTest(account=account):
+                developer = self._developer_assignment()
+                developer['account'] = account
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'], expected={'developer': None},
+                        developer=developer)
+
+    def test_real_store_accepts_reviewer_accounts_and_preserves_them_on_transition(self):
+        for account in ('claude-reviewer', 'codex-reviewer'):
+            with self.subTest(account=account):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                claimed = {
+                    'executor_task': 'executor-d6', 'pr': 42,
+                    'head_sha': 'a' * 40, 'version': 1, 'state': 'CLAIMED',
+                    'reviewer_task': 'reviewer-d6', 'native_session_id': None,
+                    'account_mode': 'ROLES', 'account': account,
+                    'claimed_at': '2026-10-27T00:00:00Z',
+                    'updated_at': '2026-10-27T00:00:00Z',
+                }
+                initial = self.store.get(task['task_id'])
+                self.store.compare_and_update(
+                    task['task_id'], expected={'record_sha256': initial['record_sha256']},
+                    review_dispatch_claim=[claimed])
+                current = self.store.get(task['task_id'])
+                dispatched = dict(claimed, state='DISPATCHED',
+                                  native_session_id='native-' + account)
+                changed_account = dict(dispatched, account='other-reviewer')
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'],
+                        expected={'record_sha256': current['record_sha256']},
+                        review_dispatch_claim=[changed_account])
+                self.store.compare_and_update(
+                    task['task_id'], expected={'record_sha256': current['record_sha256']},
+                    review_dispatch_claim=[dispatched])
+                self.assertEqual(
+                    self.store.get(task['task_id'])['review_dispatch_claim'], [dispatched])
+
+    def test_task_store_rejects_invalid_account_names(self):
+        for account in ('/private/codex-account', 'codex.account'):
+            with self.subTest(account=account):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                initial = self.store.get(task['task_id'])
+                claim = {
+                    'executor_task': 'executor-d6', 'pr': 42,
+                    'head_sha': 'a' * 40, 'version': 1, 'state': 'CLAIMED',
+                    'reviewer_task': 'reviewer-d6', 'native_session_id': None,
+                    'account_mode': 'ROLES', 'account': account,
+                    'claimed_at': '2026-10-27T00:00:00Z',
+                    'updated_at': '2026-10-27T00:00:00Z',
+                }
+                with self.assertRaises(LLMToolError):
+                    self.store.compare_and_update(
+                        task['task_id'],
+                        expected={'record_sha256': initial['record_sha256']},
+                        review_dispatch_claim=[claim])
+
     def _claude_result_task(self, pm_session_id=None):
         task = self._codex_dispatch_task()
         if pm_session_id is not None:
