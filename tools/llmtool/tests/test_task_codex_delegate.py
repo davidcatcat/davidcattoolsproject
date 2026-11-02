@@ -272,6 +272,8 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_DISPATCHING')
         self.assertEqual(saved['developer']['execution']['status'], 'RUNNING')
         self.assertGreater(saved['developer']['execution']['child_pid'], 0)
+        self.assertEqual(task_submission_cli._codex_child_liveness(
+            saved['developer']['execution']), 'ALIVE')
         duplicate = Namespace(task_id=task['task_id'], provider='codex', mode='direct',
             background=True, selection_source='PM', acceptance=['src.py is changed'],
             executor_task='executor-task-1', read_path=['src.py'], write_path=['src.py'],

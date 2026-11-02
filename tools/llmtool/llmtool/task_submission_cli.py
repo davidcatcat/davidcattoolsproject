@@ -3123,6 +3123,18 @@ def run_task_codex_delegate(args, *, store):
             raise codex_direct_developer.DirectCodexError(
                 'CODEX_IGNORED_BASELINE_UNAVAILABLE') from None
         def record_launch(pid, started_at, pgid):
+            # In background mode the provider CLI can exit before the detached
+            # delegate has persisted its result. Track the process that owns
+            # that full completion path instead, so a second delegate sees
+            # the writer as live for the whole operation. Read its start
+            # marker with the same platform-aware helper used by liveness.
+            if _background_launch_notifier is not None:
+                pid = os.getpid()
+                started_at = codex_direct_developer.process_start_time(pid)
+                try:
+                    pgid = os.getpgid(pid)
+                except OSError:
+                    pgid = None
             store.record_codex_launch(task['task_id'],
                 assignment_id=developer['assignment_id'], pid=pid,
                 start_time=started_at, pgid=pgid)
