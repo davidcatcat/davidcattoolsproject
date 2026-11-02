@@ -1,0 +1,94 @@
+{
+  "task_id": "A11b3-D1-OfflineAuthorization-20261011",
+  "mode": "implement_new_pr",
+  "pr_number": null,
+  "expected_head": "7c6f955f1ab8b03bc5f5ba4a7c42ba35b793745a",
+  "base_sha": "7c6f955f1ab8b03bc5f5ba4a7c42ba35b793745a",
+  "branch": "feat/a11b3-d1-offline-authorization-20261011",
+  "allowed_files": [
+    "tools/llmtool/llmtool/authorization_policy.py",
+    "tools/llmtool/llmtool/authorization_ledger.py",
+    "tools/llmtool/tests/test_authorization_policy.py",
+    "tools/llmtool/tests/test_authorization_ledger.py",
+    "tools/llmtool/tests/test_action_contract.py",
+    "tools/llmtool/README.md"
+  ],
+  "required_files": [
+    "tools/llmtool/llmtool/authorization_policy.py",
+    "tools/llmtool/llmtool/authorization_ledger.py",
+    "tools/llmtool/tests/test_authorization_policy.py",
+    "tools/llmtool/tests/test_authorization_ledger.py"
+  ],
+  "pr_title": "feat(llmtool): A11b.3 D1 offline trusted policy and one-use receipts",
+  "default_test_mode": "related",
+  "max_repairs": 2,
+  "timeout_seconds": 3600,
+  "codex_timeout_seconds": 3000,
+  "claude_timeout_seconds": 2400,
+  "ci_workflow": "llmtool-ci.yml",
+  "require_local_full": false,
+  "related_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "syntax",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_authorization_policy.py",
+      "-v"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_authorization_ledger.py",
+      "-v"
+    ],
+    [
+      "env",
+      "PYTHONPATH=tools/llmtool",
+      "tools/llmtool/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tools/llmtool/tests",
+      "-p",
+      "test_action_contract.py",
+      "-v"
+    ]
+  ],
+  "full_tests": [
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=.venv/bin/python"
+    ],
+    [
+      "make",
+      "-C",
+      "tools/llmtool",
+      "check",
+      "PYTHON=/usr/bin/python3"
+    ]
+  ]
+}

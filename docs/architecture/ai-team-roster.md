@@ -11,7 +11,7 @@ Status: Owner-approved **role / resource inventory**, 2026-10-27. This is not li
 | Developer | `codex-developer` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | Normal authorized Developer; high reasoning model route defined in AGENTS. |
 | Developer | `opencode-developer` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | **ALLOWED** (Owner 2026-11-02); PM-selected direct route, free model only; registered D6, task-local permissions and independent review required; no paid fallback. |
 | Developer | `agy` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | **ALLOWED** (Owner 2026-10-31); PM-selected direct route, no individual Owner assignment or Host D4/G3/M2; verified D6 and auth/model/session/permission/quota checks, independent cross-family review and no automatic retry or paid fallback. |
-| Developer | `claude-developer` | Worker dispatch | **ALLOWED** (Owner 2026-10-28); per-Task Owner assignments remain recorded in `worker-dispatch.json`. |
+| Developer | `claude-developer` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | **OWNER_ASSIGNMENT_ONLY**; dispatch only Task IDs registered in `worker-dispatch.json` owner assignments. |
 | Developer proposal route | `company-gw` | Worker dispatch + [company delegation](../../skills/company-llm-delegation/SKILL.md) | Low-risk via llmtool only; no shell/filesystem/Git authority; external input screened. |
 | Formal reviewer | `claude-reviewer` | Worker dispatch + [formal verdict](../../skills/ai-team-delivery/formal-verdict.md) | Separate read-only D6 reviewer for eligible cross-family Developer Tasks. |
 | Formal reviewer | `codex-reviewer` | Worker dispatch | Separate read-only D6 reviewer for Claude Developer / Claude PM changes. |
@@ -25,7 +25,7 @@ Machine-readable **informational** inventory: [execution-resources.json](../../t
 | Host | Reported hardware / OS | Registered runners (name) | Existing purpose |
 | --- | --- | --- | --- |
 | Local Mac | Intel macOS, limited 8 GiB memory | `davidproject-self-action`, `davidproject-self-action-2` | `llmtool Mac CI`, macOS 3.13 check/native gates. |
-| AWS EC2 | CentOS Stream 9, x86_64, 4 vCPU / 8 GiB | `ec2-self-runner`, `ec2-self-runner-2` | `llmtool Linux CI`, Python 3.14 PR/main checks; Python 3.9 manually started before release. |
+| AWS EC2 | CentOS Stream 9, x86_64, 4 vCPU / 8 GiB | See [execution-resources.json](../../tools/llmtool/execution-resources.json) | `llmtool Linux CI`, Python 3.14 PR/main checks; Python 3.9 manually started before release. |
 
 See [execution-resources.json](../../tools/llmtool/execution-resources.json) for the current host and runner inventory. Runner names, installation accounts and platform capabilities reflect committed documentation, not a live online/busy probe. [Mac runner guide](../../tools/mac-runner/README.md) and [EC2 runner guide](../../tools/ec2-runner/README.md) contain isolation and admission requirements.
 

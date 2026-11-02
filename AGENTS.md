@@ -1,6 +1,6 @@
 # Repository AI collaboration guidance
 
-## Current authority (Owner decisions through 2026-10-28; restructured per Owner decision 010 step 2)
+## Current authority (restructured per Owner decision 010 step 2)
 
 - **Roles and PM:**
   - Permanent role rules, Owner-controlled dispatch authority and live technical state are separate. Dispatch switches are in [worker-dispatch.json](tools/llmtool/worker-dispatch.json); live availability comes from the [local monitor](scripts/llmtool_monitor.py).
@@ -8,8 +8,8 @@
   - The PM and Developers may split their work across sub-agents they start; one writer per D6 task still holds.
   - When an llmtool step fails, the PM records the defect and schedules its repair. Making the core llmtool flow work end to end is the priority.
   - Codex Developer (`gpt-6-luna`, high reasoning effort) remains a Developer route and self-reviews and self-repairs before hand-back.
-  - OpenCode Developer remains a normal Developer route; the PM selects it from currently available Workers.
-  - Claude Developer / UI Agent (`claude-developer`) is a normal Developer route the PM may dispatch (Owner 2026-10-28), under the same gates.
+  - OpenCode Developer remains a normal Developer route; the PM selects it from currently available Workers. Pause dispatch on a free-limit refusal or two consecutive route failures; no paid fallback.
+  - Claude Developer / UI Agent (`claude-developer`) is `OWNER_ASSIGNMENT_ONLY`; dispatch only Task IDs registered in its `worker-dispatch.json` owner assignments.
   - OpenCode and AGY direct CLI work are PM-selected routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; AGY is `ALLOWED` since 2026-10-31 and needs no individual Owner assignment. Neither requires Host D4/G3/M2. Both require a verified D6 task worktree and actual provider CLI, model, session and permission checks.
   - The first Mac OpenCode CLI launch may require the Owner to start the prepared session once; the Owner does not handle routine dispatch.
 
@@ -25,7 +25,7 @@
   - Codex advisory output from PM analysis is not an independent pre-review. A separately dispatched Codex advisory/pre-review Worker needs an Owner-authorized entry; if it is missing, refuse.
 
 - **OpenCode Developer:**
-  - Use a registered D6 task worktree, task-local OpenCode permissions, a free DeepSeek model, an exact writable-file allowlist, bounded task budget and repair policy, no paid fallback, tests, self-review, PR and independent review/CI.
+  - Use a registered D6 task worktree, task-local OpenCode permissions, a free DeepSeek model, an exact writable-file allowlist, bounded task budget and repair policy, no paid fallback, self-review, PR and independent review/CI. The PM runs tests through `llmtool task remote-test` on EC2; Developers do not run tests in the D6.
   - The former separate direct-session output-cap/retry-hook launcher requirement is superseded by the Owner's 2026-10-21 decision for normal direct Developer sessions.
   - D8 Host/Worker provider caps, retry stop, timeouts and cleanup still apply to llmtool-owned Worker invocations.
   - Keep credential, secret, personal/customer-data and restricted-log protection unchanged. Do not infer containment from prompt text or a resident TUI PID.
@@ -38,7 +38,6 @@
 
 - **Company LLM Developer:**
   - Company `gw` is a third, low-cost Developer route for small, low-risk, clearly testable tasks, selected by the PM and called only through llmtool.
-  - Merged PR #420 enables the active PM assignment route; do not infer that live end-to-end dispatch, patch application or task closure passed without exact-run evidence.
   - `gw` may propose code, tests and self-review, but has no shell, filesystem, Git, credential or approval authority. An authorized execution environment applies accepted patches and runs tests.
   - Before each call, record the exact non-sensitive input/egress basis and bounded budget. Do not send secrets, private/customer data or restricted logs.
   - Allow at most one evidence-guided repair within the existing task budget; no hidden paid fallback. Record actual usage, retries, repairs and outcome, or UNKNOWN.
@@ -48,11 +47,10 @@
   - The formal Security/Functional/QA Reviewer is from the other model family than the Developer (Owner 2026-10-25, #289 comment 6397242605): an independent Claude Reviewer reviews Codex Developer changes; an independent Codex Reviewer agent (`codex-reviewer`) reviews Claude Developer changes, including Claude PM changes.
   - Each formal review uses a separate, read-only Reviewer Session/context with its own D6 reviewer record, distinct from Developer and PM; nobody formally reviews their own change.
   - All agents post as the same GitHub login, so login identity never proves independence. Publish the verdict under the [Transition record](skills/ai-team-delivery/pm-continuation.md#transition-record) rule.
-  - llmtool PM assignment may select Codex, OpenCode or company `gw` (PR #420), but `gw` proposes patches without file/Git authority.
+  - llmtool PM assignment may select Codex, OpenCode, AGY, company `gw`, or `none`; `gw` proposes patches without file/Git authority. The PM should prefer `gw` for eligible small, low-risk, bounded Tasks.
   - Under Owner decision 035:A (#525, c6468216854), `task complete` accepts a Codex PASS for a Claude-authored Task only if the independent D6 Reviewer is `codex-reviewer`, the persisted Task classifies the comment as `REVIEW_PASS`, and exactly one matching `COMPLETED` review dispatch claim binds its PASS and identical non-empty review text to the PR, HEAD and Reviewer Task. See the [formal verdict format](skills/ai-team-delivery/formal-verdict.md).
   - Claude PASS handling is unchanged. For each Task, confirm the actual authoring/execution model family differs from the designated formal Reviewer, and prove the Task route and completion gates on the exact run. Unsupported `gw`/other routes cannot be declared formally complete merely because the PM chose them.
   - Do not accept Codex PASS comments that lack those bindings or come from other Task authoring families.
-  - Claude-developed changes do not run as llmtool Tasks today. Their formal Codex review is recorded under the Transition record rule on the PR and gates the merge.
   - When its environment allows, the Reviewer posts its own verdict. Otherwise the PM relays the Reviewer's unedited output, labelled with the Reviewer's `actor`, and checks the D6 reviewer record before merge.
   - This pairing is the default (Owner 2026-10-27). When a family's token 5-hour or weekly limit makes its Reviewer unavailable, only the Owner may approve a different eligible formal pairing.
   - The PM records an affected review as waiting, continues independent authorized Tasks, and never substitutes a same-family or self-review verdict. Quota exhaustion alone does not stop the whole team.
@@ -110,7 +108,7 @@
 
 ### Merge gates (Owner decision #425, issuecomment-6434005860)
 
-- For llmtool PRs, require successful `check (macOS 3.13)` in `llmtool Mac CI` on an Owner self-hosted runner (`davidproject-self-action` or `davidproject-self-action-2`) for the exact PR head; the PR Mac job runs only Mac-relevant modules selected by `ci_mac_modules.py` (Owner decision 004:A: [decision sheet](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6467792563), [Owner answer](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854)). Also require `check (Linux 3.14)` (full suite, sharded on EC2 runners `ec2-self-runner`, `ec2-self-runner-2` and `ec2-self-runner-3`).
+- For llmtool PRs, require exact-head `check (macOS 3.13)` SUCCESS in `llmtool Mac CI` on an Owner self-hosted runner (`davidproject-self-action` or `davidproject-self-action-2`) as a merge gate; the PM adds `mac-ci` after formal PASS, and the PR Mac job runs only Mac-relevant modules selected by `ci_mac_modules.py` (Owner decision 004:A: [decision sheet](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6467792563), [Owner answer](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854)). Also require `check (Linux 3.14)` (full suite, sharded on EC2 runners `ec2-self-runner`, `ec2-self-runner-2` and `ec2-self-runner-3`).
 - The PM manually dispatches the full Mac suite after each merge train; the workflow has no schedule (Owner decision 004:A: [decision sheet](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6467792563), [Owner answer](https://github.com/davidcatcat/davidcattoolsproject/issues/525#issuecomment-6468216854); Owner decision #425). Triage failures immediately. Disabled GitHub-hosted workflows are not waited for and are never re-enabled.
 - `llmtool Linux CI` on Owner EC2 runners adds `check (Linux 3.14)` on every PR and main push. Python 3.9 runs only as a pre-release check started manually on main (Owner 2026-10-25), so a PR reports Linux 3.9 NOT_RUN. Windows is reported NOT_RUN, never PASS. A skipped job is NOT_RUN.
 - A documentation-only PR, where workflow classification marks every changed path as documentation, needs `check (docs)` instead of Mac and Linux code jobs; those code jobs report NOT_RUN.

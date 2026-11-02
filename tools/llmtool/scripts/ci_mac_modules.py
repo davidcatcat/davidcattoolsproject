@@ -121,8 +121,68 @@ def _module_id(path: str, repo_root: Path) -> str | None:
     return module
 
 
+def _source_module(path: str) -> str | None:
+    """Return the import name for a Python module under llmtool/llmtool."""
+    prefix = "tools/llmtool/llmtool/"
+    if not path.startswith(prefix) or not path.endswith(".py"):
+        return None
+    relative = path[len(prefix):-3]
+    parts = relative.split("/")
+    if parts[-1] == "__init__":
+        parts.pop()
+    if not parts or not all(part.isidentifier() for part in parts):
+        return None
+    return ".".join(("llmtool", *parts))
+
+
+def _imports_module(tree: ast.Module, target: str) -> bool:
+    """Check imports for an exact module, including ``from parent import child``."""
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            if any(alias.name == target for alias in node.names):
+                return True
+        elif isinstance(node, ast.ImportFrom) and node.level == 0:
+            parent = node.module or ""
+            if parent == target:
+                return True
+            if parent and any(f"{parent}.{alias.name}" == target for alias in node.names):
+                return True
+    return False
+
+
+def _importing_test_ids(target: str, repo_root: Path) -> set[str] | None:
+    """Find test modules that import a changed llmtool module; fail closed on I/O errors."""
+    test_dir = repo_root / TEST_ROOT
+    try:
+        paths = sorted(test_dir.glob("test_*.py"))
+    except OSError:
+        return None
+    selected: set[str] = set()
+    for test_path in paths:
+        relative = test_path.relative_to(repo_root).as_posix()
+        module_id = _module_id(relative, repo_root)
+        if module_id is None:
+            # Non-test helper files are ignored; malformed test modules fail closed.
+            try:
+                tree = ast.parse(test_path.read_text(encoding="utf-8"), filename=str(test_path))
+            except (OSError, UnicodeDecodeError, SyntaxError):
+                return None
+            continue
+        try:
+            tree = ast.parse(test_path.read_text(encoding="utf-8"), filename=str(test_path))
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            return None
+        if _imports_module(tree, target):
+            selected.add(module_id)
+    return selected
+
+
 def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> set[str] | None:
-    """Return required plus impacted test IDs, or None when L3 FULL is needed."""
+    """Return required plus impacted test IDs, or None when L3 FULL is needed.
+
+    Import discovery sees direct static imports only; it does not find transitive,
+    subprocess, or patch-string importers.
+    """
     try:
         selected = required_test_ids(repo_root)
     except InvalidManifest:
@@ -162,18 +222,47 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
             path == prefix or path.startswith(prefix + "/") for prefix in HIGH_RISK_PREFIXES
         ):
             return None
-        is_runtime_source = (path.startswith(("tools/llmtool/llmtool/", "tools/llmtool/scripts/"))
-                             and path.endswith((".py", ".json")))
-        if is_runtime_source and path not in IMPACT_TEST_MAP:
-            return None
+        is_llmtool_module = (path.startswith("tools/llmtool/llmtool/")
+                             and path.endswith(".py"))
         mapped = IMPACT_TEST_MAP.get(path)
-        if not mapped or not (repo_root / path).is_file():
+        dynamic_module = _source_module(path)
+        # Runtime modules are discovered from the test tree, including nested
+        # packages. Other runtime inputs still need an explicit impact mapping.
+        if is_llmtool_module and dynamic_module is None:
             return None
-        for test_path in mapped:
+        if not is_llmtool_module and not mapped:
+            return None
+        if not (repo_root / path).is_file():
+            return None
+        for test_path in mapped or ():
             module_id = _module_id(test_path, repo_root)
             if module_id is None:
                 return None
             selected.add(module_id)
+        if dynamic_module is not None:
+            dynamic_ids: set[str] = set()
+            direct_id = "test_" + Path(path).stem
+            direct_path = f"{TEST_ROOT}{direct_id}.py"
+            if (repo_root / direct_path).is_file():
+                module_id = _module_id(direct_path, repo_root)
+                if module_id is None:
+                    return None
+                dynamic_ids.add(module_id)
+            importing = _importing_test_ids(dynamic_module, repo_root)
+            if importing is None:
+                return None
+            dynamic_ids.update(importing)
+            if (Path(path).name.startswith("chat_tui")
+                    or Path(path).name == "tui_markdown.py"):
+                # The PTY scenario suite loads the TUI in a subprocess, so its
+                # source dependency is not visible to the static import scan.
+                scenario_id = "test_chat_tui_scenarios"
+                if _module_id(f"{TEST_ROOT}{scenario_id}.py", repo_root) is None:
+                    return None
+                dynamic_ids.add(scenario_id)
+            if not dynamic_ids and not mapped:
+                return None
+            selected.update(dynamic_ids)
         has_relevant_change = True
 
     return selected if has_relevant_change else set()

@@ -128,7 +128,14 @@ class WorkerDispatchTests(unittest.TestCase):
 
     def test_real_owner_policy_parses_and_validates(self):
         raw = Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes()
-        self.assertIsInstance(worker_dispatch._parse_policy(raw), dict)
+        policy = worker_dispatch._parse_policy(raw)
+        self.assertIsInstance(policy, dict)
+        self.assertNotIn('owner_assignments', policy['workers']['agy'])
+        with patch.object(worker_dispatch, '_POLICY_PATH',
+                          Path(worker_dispatch._DEFAULT_POLICY_PATH)):
+            decision = worker_dispatch.evaluate('agy')
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_POLICY_ALLOWED')
 
     def test_owner_policy_states_are_read_from_the_exact_schema(self):
         self._set_state('agy', 'ALLOWED')
@@ -204,6 +211,25 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(
             worker_dispatch.evaluate('agy', None, task_id).reason_code,
             'OWNER_ASSIGNMENT_REQUIRED')
+
+    def test_registered_claude_assignments_allow_only_the_listed_task_ids(self):
+        ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+               'issues/289#issuecomment-6572045734')
+        task_ids = (
+            '0c1d294c20aa4b70a9c72af21263169b',
+            'c87152007ee4494683a7e60444b7cb63',
+            '366abbf20d334cd0a52837bd64ce525f',
+        )
+        with patch.object(worker_dispatch, '_POLICY_PATH',
+                          Path(worker_dispatch._DEFAULT_POLICY_PATH)):
+            for task_id in task_ids:
+                decision = worker_dispatch.evaluate('claude-developer', ref, task_id)
+                self.assertTrue(decision.allowed, task_id)
+                self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_MATCHED')
+            unregistered = worker_dispatch.evaluate(
+                'claude-developer', ref, '11111111111111111111111111111111')
+            self.assertFalse(unregistered.allowed)
+            self.assertEqual(unregistered.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
 
     def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'

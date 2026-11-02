@@ -40,7 +40,8 @@ KEY_HELP = """Keys
   Ctrl-R                Search this session's earlier inputs: type to filter, Ctrl-R/Up/Down
                         choose, Enter puts the entry in the draft without running it,
                         Esc cancels and leaves the draft unchanged
-  Tab, Shift-Tab        Switch focus between input and conversation
+  Tab                   Complete a slash command; elsewhere switch focus to/from the conversation
+  Shift-Tab             Switch focus between input and conversation
   PageUp/PageDown       Scroll conversation one screen (Fn+↑/↓ on a Mac keyboard); when it is
                         focused Up/Down scroll one row, Home/End go to the top/bottom
   Mouse wheel           Scroll conversation one row per wheel step (trackpad works the same);
@@ -282,6 +283,23 @@ def slash_matches(text, dev=True):
     prefix = [c for c in ordered if c[0].startswith(query)]
     inside = [c for c in ordered if c not in prefix and len(query) > 2 and query[1:] in c[0]]
     return prefix + inside
+
+
+def _common_prefix(values):
+    """Return the longest case-sensitive common prefix of command labels."""
+    if not values:
+        return ""
+    prefix = values[0]
+    for value in values[1:]:
+        length = 0
+        for left, right in zip(prefix, value):
+            if left != right:
+                break
+            length += 1
+        prefix = prefix[:length]
+        if not prefix:
+            break
+    return prefix
 
 
 def history_matches(entries, query):
@@ -581,6 +599,7 @@ class ChatTUI:
         self.last_task_request = None
         self.last_task_id = None
         self.show_detail = False
+        self.detail_task_id = None
         # Task list: rows read from TaskStore on a reader thread (never busy/single-flight).
         self.show_list = False
         self.list_records = []
@@ -904,6 +923,12 @@ class ChatTUI:
         def _dev_pane_copy_all(event):
             self.copy_pane_all()
 
+        # F2's selected Task detail and F3's list/detail copy the full selected Task ID.
+        @keys.add("c", filter=dev_pane_shown & ~picker_shown & ~searching
+                  & (detail_focused | list_focused))
+        def _dev_pane_copy_task_id(event):
+            self.copy_dev_task_id()
+
         @keys.add("up", filter=(detail_focused | events_focused) & dev_pane_shown)
         def _dev_pane_up(event):
             self._mouse_view().scroll_rows(-1)
@@ -965,7 +990,26 @@ class ChatTUI:
             self.close_menu()
             self.input.buffer.insert_text("\n")
 
-        @keys.add("tab")
+        @keys.add("tab", eager=True)
+        def _tab(event):
+            if not input_focused():
+                self.toggle_focus()
+                return
+            if self.searching:
+                self.toggle_focus()
+                return
+            text = self.input.text
+            if not text.startswith("/"):
+                self.toggle_focus()
+                return
+            self._complete_slash_tab()
+
+        @keys.add("tab", filter=input_focused & menu_shown, eager=True)
+        def _tab_complete(event):
+            # A visible picker must not consume Tab before slash completion. Esc
+            # remains the explicit way to dismiss it without changing the draft.
+            self._complete_slash_tab()
+
         @keys.add("s-tab")
         def _focus(event):
             self.toggle_focus()
@@ -1455,6 +1499,31 @@ class ChatTUI:
             self.menu_offset = 0
         self.menu_items = items
         self._sync_picker()
+
+    def _complete_slash_tab(self):
+        """Complete the slash draft or extend it to its candidates' common prefix."""
+        text = self.input.text
+        if self.input.buffer.cursor_position != len(text):
+            self.close_menu()
+            return
+        # Tab completion is narrower than the interactive picker's fuzzy search:
+        # only commands whose full label starts with the typed draft are candidates.
+        commands = [command for command in SLASH_COMMANDS
+                    if self.dev or not command[0].startswith("/task")]
+        matches = [command for command in commands if command[0].startswith(text)]
+        if not matches:
+            self.close_menu()
+            return
+        if len(matches) == 1:
+            self.close_menu()
+            fill = matches[0][1]
+            self.input.buffer.set_document(self._Document(fill, len(fill)))
+            return
+        prefix = _common_prefix([item[0] for item in matches])
+        if len(prefix) > len(text):
+            self.input.buffer.set_document(self._Document(prefix, len(prefix)))
+            matches = [command for command in commands if command[0].startswith(prefix)]
+        self._set_menu(matches)
 
     def _sync_picker(self):
         """Match picker state to what is on screen.
@@ -2121,8 +2190,10 @@ class ChatTUI:
                          + stage + item["updated"][:20] + "  " + item["name"])
         return terminal_safe_text("\n".join(lines))
 
-    def set_detail(self, text):
-        self._set_read_text(self.detail_view, terminal_safe_text(text), keep=False)
+    def set_detail(self, text, task_id=None):
+        self.detail_task_id = task_id
+        safe_text = terminal_safe_text(text)
+        self._set_read_text(self.detail_view, safe_text, keep=False, highlight_lines=3)
         self.show_help = False
         self.toggle_detail(True)
 
@@ -2338,10 +2409,12 @@ class ChatTUI:
         try:
             record = TaskStore().get(view["task_id"])
         except Exception:
-            summary = "Status: " + chat_tui_task.UNKNOWN + " (TaskStore record unreadable)"
+            summary = ("\n".join(chat_tui_status.task_owner_summary(None)) + "\n\n"
+                       + "Status: " + chat_tui_task.UNKNOWN + " (TaskStore record unreadable)")
             extra = ""
         else:
-            summary = (chat_tui_status.summary_text(record) + "\n\n"
+            summary = ("\n".join(chat_tui_status.task_owner_summary(record)) + "\n\n"
+                       + chat_tui_status.summary_text(record) + "\n\n"
                        + chat_tui_events.timeline_text(record))
             extra = chat_tui_status.detail_extra(record)
         text = summary + "\n\n" + chat_tui_task.detail_text(view)
@@ -2414,7 +2487,8 @@ class ChatTUI:
                 self.last_task_id = chat_tui_task.value(view, "task_id")
             self.append(self.task_outcome_text(result))
             if result["detail"] is not None:
-                self.set_detail(result["detail"])
+                task_id = (chat_tui_task.value(view, "task_id") if view is not None else None)
+                self.set_detail(result["detail"], task_id=task_id)
         self._finish(render)
 
     def stream_text(self, text):
@@ -2675,7 +2749,17 @@ class ChatTUI:
 
     def _set_task_view(self, text):
         view = self.task_view
-        view.set_text(terminal_safe_text(text))
+        safe_text = terminal_safe_text(text)
+        view.set_text(safe_text)
+        if safe_text.startswith("Task 詳情（唯讀）—"):
+            start = safe_text.find("\n") + 1
+            if safe_text.startswith("狀態：", start):
+                view._clip_spans(0)
+                end = start
+                for _ in range(3):
+                    newline = safe_text.find("\n", end)
+                    end = len(safe_text) if newline < 0 else newline + 1
+                view._add_segments(start, [(safe_text[start:end], "role.pm")])
         view.top = view.top_offset = 0          # a detail is read from its first line
         view.following = view.unseen = False
 
@@ -2760,6 +2844,22 @@ class ChatTUI:
             self.task_view.copy(self.task_view_task_id)
         self.app.invalidate()
 
+    def copy_dev_task_id(self):
+        """W62 c: copy the selected Task ID in the F2 detail or F3 list/detail pane."""
+        view = self._mouse_view()
+        if view is self.list_view:
+            task_id = self.selected_task_id()
+        elif view is self.detail_view:
+            task_id = getattr(self, "detail_task_id", None)
+        else:
+            return
+        if not task_id or task_id in (chat_tui_task.UNKNOWN, chat_tui_task.NOT_AVAILABLE):
+            return
+        view.clear_selection()
+        self.copy_labels[id(view)] = "Task ID"
+        view.copy(task_id)
+        self.app.invalidate()
+
     def copy_task_detail(self):
         """W60 C: the whole detail (every line, not only the screen) as the plain text shown.
 
@@ -2806,10 +2906,16 @@ class ChatTUI:
             self.task_copy_label = None
         self.copy_labels.pop(id(view), None)
 
-    def _set_read_text(self, view, text, keep=True):
+    def _set_read_text(self, view, text, keep=True, highlight_lines=0):
         """Replace a developer pane's text (already terminal-safe); ``keep`` the place."""
         top_offset = view.top_offset
         view.set_tail(0, [(text, "text")])
+        if highlight_lines:
+            end = 0
+            for _ in range(highlight_lines):
+                newline = text.find("\n", end)
+                end = len(text) if newline < 0 else newline + 1
+            view._add_segments(0, [(text[:end], "role.pm")])
         if not keep:
             view.top = view.top_offset = 0
         else:

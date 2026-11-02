@@ -14,7 +14,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from llmtool import chat_tui, chat_tui_pm, chat_tui_status, chat_tui_theme, chat_tui_view
+from llmtool import (chat_tui, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
+                     chat_tui_view)
 from llmtool.chat import ChatSession
 from llmtool.config import resolve_config
 from llmtool.providers.base import ProviderCapabilities, Reply
@@ -201,12 +202,12 @@ class FallbackTests(Base):
 class WidgetTests(Base):
     """Drive the real Application through a pipe input and a dummy output."""
 
-    def drive(self, steps, size=None):
+    def drive(self, steps, size=None, dev=None):
         output = DummyOutput()
         if size is not None:
             output.get_size = lambda: size[0]
         with create_pipe_input() as pipe:
-            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output)
+            ui = chat_tui.ChatTUI(self.session, input=pipe, output=output, dev=dev)
             self.ui = ui
 
             async def main():
@@ -566,6 +567,52 @@ class WidgetTests(Base):
                             lambda ui: self.assertEqual(ui.input.text, '/task submit --provider '),
                             lambda ui: self.assertNotIn('usage:', ui.conversation.text)])
 
+    def test_tab_completes_unique_slash_command_and_argument_spacing(self):
+        ui, _ = self.drive(['/pm c', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/pm connect'),
+                            lambda ui: self.assertEqual(ui.menu_items, []),
+                            '\x15', '/provider', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/provider ')])
+        self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
+    def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
+        def candidates(ui):
+            self.assertEqual(ui.input.text, '/task ')
+            self.assertEqual([item[0] for item in ui.menu_items],
+                             ['/task submit', '/task show', '/task mode',
+                              '/task list', '/task events'])
+            self.assertEqual(ui.app.output.get_size().columns, 50)
+            self.assertTrue(self.menu_rows(ui))
+
+        self.drive(['/ta', '\t', candidates], size=[Size(rows=24, columns=50)], dev=True)
+        self.factory.assert_not_called()
+
+    def test_tab_does_not_offer_dev_commands_without_dev_mode(self):
+        def unchanged(ui):
+            self.assertEqual(ui.input.text, '/ta')
+            self.assertEqual(ui.menu_items, [])
+
+        self.drive(['/ta', '\t', unchanged], dev=False)
+        self.factory.assert_not_called()
+
+    def test_tab_without_match_keeps_slash_draft_and_non_slash_tab_behavior(self):
+        ui, _ = self.drive(['/nope', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/nope'),
+                            lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+
+        ui, _ = self.drive(['hello', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, 'hello'),
+                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+
+        ui, _ = self.drive(['cat', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, 'cat'),
+                            lambda ui: self.assertFalse(ui.app.layout.has_focus(ui.input))])
+        self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
     def test_picker_lone_escape_closes_on_key_timeout_flush(self):
         """No wall-clock wait: feed Esc, then the same flush the timeoutlen timer sends."""
         # Private name, imported here so a rename fails this test instead of skipping all.
@@ -697,17 +744,16 @@ class WidgetTests(Base):
         self.assertIn('unknown chat command', ui.conversation.text.lower())
         self.factory.assert_not_called()
 
-    def test_tab_closes_picker_and_restores_esc_timeout(self):
+    def test_tab_completing_unique_command_closes_picker_and_restores_esc_timeout(self):
         def menu_open(ui):
             self.assertTrue(ui.menu_items)
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
 
-        def closed(ui):
-            self.assertFalse(ui.app.layout.has_focus(ui.input))
+        def completed(ui):
+            self.assertEqual(ui.input.text, '/pm connect')
             self.assertEqual(ui.menu_items, [])
             self.assertEqual(ui.app.timeoutlen, ui._default_timeoutlen)
-        ui, _ = self.drive(['/s', menu_open, '\t', closed, '\t',
-                            lambda ui: self.assertEqual(ui.input.text, '/s')])
+        self.drive(['/pm c', menu_open, '\t', completed])
         self.factory.assert_not_called()
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
@@ -1909,6 +1955,8 @@ class TaskListTests(Base):
         raise AssertionError('list read did not finish')
 
     def test_list_detail_and_keys(self):
+        seen = {}
+
         def list_open(ui):
             self.assertTrue(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
@@ -1922,12 +1970,30 @@ class TaskListTests(Base):
             self.assertEqual(sum('已建立／待派工' in row for row in rows), 1)
             self.assertEqual(sum('UNAVAILABLE' in row for row in rows), 1)
             self.assertTrue(rows[2].startswith('▶ '))
+            ui.list_index = next(index for index, record in enumerate(ui.list_records)
+                                 if chat_tui_status.row(record)['stage'] == '已建立／待派工')
+
+            seen['list_copies'] = []
+            ui.list_view._copier = lambda text: seen['list_copies'].append(text) or True
+
+        def list_copied(ui):
+            ui.list_view.wait_copy()
+            self.assertEqual(seen['list_copies'], [ui.selected_task_id()])
 
         def detail_open(ui):
             self.assertTrue(ui.show_detail)
+            self.assertEqual(ui.detail_view.text.splitlines()[:3], [
+                '狀態：等待 Developer 派送', '下一步輪到誰：PM', '你需要做：目前不用'])
+            self.assertTrue(ui.detail_view.spans)
             self.assertIn('Status (from TaskStore record', ui.detail.text)
             self.assertIn('Task: ' + ui.selected_task_id(), ui.detail.text)
             self.assertIn('Task detail (llmtool Core task show', ui.detail.text)
+            seen['detail_copies'] = []
+            ui.detail_view._copier = lambda text: seen['detail_copies'].append(text) or True
+
+        def detail_copied(ui):
+            ui.detail_view.wait_copy()
+            self.assertEqual(seen['detail_copies'], [ui.selected_task_id()])
 
         def back_to_list(ui):
             self.assertFalse(ui.show_detail)
@@ -1939,14 +2005,32 @@ class TaskListTests(Base):
                             '/task mode profile missing\r', 'second task\r', self.idle,
                             lambda ui: setattr(self, 'calls', self.pm.complete.call_count),
                             '/task list\r', self.listed, list_open,
-                            '\x1b[B', lambda ui: self.assertEqual(ui.list_index, 1),
-                            '\r', self.idle, detail_open, '\x1b', self.esc_settled, back_to_list,
+                            lambda ui: self.assertEqual(
+                                chat_tui_status.row(ui.list_records[ui.list_index])['stage'],
+                                '已建立／待派工'),
+                            'c', list_copied, '\r', self.idle, detail_open, 'c', detail_copied,
+                            '\x1b', self.esc_settled, back_to_list,
                             '\x1b', self.esc_settled, lambda ui: self.assertFalse(ui.show_list),
                             lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
                             '\x1bOR', self.listed, lambda ui: self.assertTrue(ui.show_list),
                             '\x1bOR', lambda ui: self.assertFalse(ui.show_list)])
         self.assertEqual(self.pm.complete.call_count, self.calls)
         self.factory.assert_not_called()
+
+    def test_copy_dev_task_id_ignores_placeholder_rows(self):
+        async def placeholders(ui):
+            ui.show_list = True
+            ui.list_records = [{'task_id': chat_tui_task.UNKNOWN},
+                               {'task_id': chat_tui_task.NOT_AVAILABLE}]
+            ui.list_index = 0
+            ui.list_view.copy = Mock()
+            ui.copy_dev_task_id()
+            ui.list_view.copy.assert_not_called()
+            ui.list_index = 1
+            ui.copy_dev_task_id()
+            ui.list_view.copy.assert_not_called()
+
+        self.drive([placeholders])
 
     # -- W60 Owner acceptance: F3 list, F4 events and the F2 detail select and copy ------
     @staticmethod
@@ -5144,13 +5228,17 @@ class PMConversationTests(BoundedPMTest):
         async def dragged(ui, copies):
             left, top, _height = ui._pane_geometry()
             self.assertEqual(ui._mouse_view(), ui.task_view)
-            await self.w60_mouse(ui, press(left + 1, top + 2), drag(left + 16, top + 2))
+            lines = ui.task_view.text.splitlines()
+            row = next(n for n, line in enumerate(lines)
+                       if line.startswith('來源：TaskStore'))
+            y = top + 1 + row
+            await self.w60_mouse(ui, press(left + 1, y), drag(left + 16, y))
             self.assertTrue(ui.task_view.dragging)
             self.assertTrue(ui.task_view.selected_range())          # highlighted while dragging
             self.assertFalse(ui.view.selected_range())               # never the hidden chat
-            await self.w60_mouse(ui, release(left + 16, top + 2))
+            await self.w60_mouse(ui, release(left + 16, y))
             self.assertTrue(ui.task_view.wait_copy())
-            line = ui.task_view.text.splitlines()[1]
+            line = lines[row]
             self.assertTrue(copies and line.startswith(copies[-1]), (copies, line))
             self.assertTrue(copies[-1].startswith('來源：TaskStore'))
             self.assertIn('已複製 %d 字' % len(copies[-1]), ui.status_keys())
@@ -5314,6 +5402,78 @@ class W59DetailTextTests(unittest.TestCase):
         text = chat_tui_status.task_detail_text(None, '12:34:56', reason='TaskStore 讀取失敗')
         self.assertIn('Core 狀態：UNKNOWN（TaskStore 讀取失敗）', text)
         self.assertNotIn('最近事件', text)
+
+
+class TaskOwnerSummaryTests(unittest.TestCase):
+    """The three detail orientation lines use only the persisted Task projection."""
+
+    def detail(self, record):
+        return chat_tui_status.task_detail_text(record, '12:34:56').splitlines()[1:4]
+
+    def test_copy_header_stays_first_and_summary_follows_it(self):
+        text = chat_tui_status.task_detail_text(
+            {'task_id': 'a' * 32, 'request': '需求',
+             'developer': {'state': 'DEVELOPER_PENDING'}},
+            '12:34:56', copy_hint=True)
+        lines = text.splitlines()
+        self.assertIn('c 複製 Task ID', lines[0])
+        self.assertIn('C 複製全文', lines[0])
+        self.assertEqual(lines[1:4], [
+            '狀態：Developer 執行中', '下一步輪到誰：Developer', '你需要做：目前不用'])
+
+    def test_summary_lines_lead_and_describe_running_and_waiting_stages(self):
+        running = {'task_id': 'a' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_PENDING'}}
+        waiting = {'task_id': 'b' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_RESPONDED'},
+                   'completion': {'state': 'WAITING_EXECUTOR'}}
+        self.assertEqual(self.detail(running), [
+            '狀態：Developer 執行中', '下一步輪到誰：Developer', '你需要做：目前不用'])
+        self.assertEqual(self.detail(waiting), [
+            '狀態：等待執行證據', '下一步輪到誰：Developer', '你需要做：目前不用'])
+
+    def test_blocked_and_unknown_developer_outcome_do_not_guess(self):
+        blocked = {'task_id': 'c' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_PENDING',
+                                 'blocked_reason': 'needs Owner decision'}}
+        unknown = {'task_id': 'd' * 32, 'request': '需求',
+                   'developer': {'state': 'DEVELOPER_OUTCOME_UNKNOWN',
+                                 'error_code': 'CODEX_BLOCKED'}}
+        self.assertEqual(self.detail(blocked), [
+            '狀態：已阻塞', '下一步輪到誰：PM', '你需要做：目前不用'])
+        self.assertEqual(self.detail(unknown), [
+            '狀態：Developer 結果不明', '下一步輪到誰：PM', '你需要做：目前不用'])
+
+    def test_owner_decision_is_explicit_and_completed_task_has_no_guessed_actor(self):
+        waiting_owner = {'task_id': 'e' * 32, 'request': '需求',
+                         'developer': {'state': 'DEVELOPER_PENDING',
+                                       'waiting_owner': True}}
+        completed = {'task_id': 'f' * 32, 'request': '需求',
+                     'developer': {'state': 'DEVELOPER_RESPONDED'},
+                     'completion': {'state': 'PM_RETURNED',
+                                    'pm_recommendation': {'decision': 'ACCEPT'}}}
+        self.assertEqual(self.detail(waiting_owner), [
+            '狀態：Developer 執行中', '下一步輪到誰：Owner', '你需要做：請 Owner 提供決定'])
+        self.assertEqual(self.detail(completed), [
+            '狀態：已完成', '下一步輪到誰：不明', '你需要做：目前不用'])
+
+    def test_recorded_merge_does_not_look_like_running_work(self):
+        merged = {'task_id': 'g' * 32, 'request': '需求',
+                  'developer': {'state': 'DEVELOPER_PENDING'},
+                  'completion_events': [{'source': 'GITHUB', 'marker_type': 'merge',
+                                         'marker_status': 'MERGED', 'state': 'MERGED'}]}
+        self.assertEqual(self.detail(merged), [
+            '狀態：已完成', '下一步輪到誰：不明', '你需要做：目前不用'])
+
+    def test_failed_task_does_not_guess_owner_without_an_owner_field(self):
+        failed = {'task_id': 'h' * 32, 'request': '需求',
+                  'state': 'PM_RESPONSE_REJECTED', 'developer': None}
+        self.assertEqual(self.detail(failed), [
+            '狀態：已失敗', '下一步輪到誰：不明', '你需要做：目前不用'])
+
+    def test_missing_record_summary_is_unknown_in_traditional_chinese(self):
+        self.assertEqual(self.detail(None), [
+            '狀態：不明', '下一步輪到誰：不明', '你需要做：目前不用'])
 
 
 class W60EvidenceTextTests(unittest.TestCase):
