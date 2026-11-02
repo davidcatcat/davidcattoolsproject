@@ -496,8 +496,9 @@ def task_detail_text(record, read_at, reason=None, copy_hint=False):
     from .task_status import derive_state
     from .chat_tui_events import format_event, task_events
     lines = ["Task 詳情（唯讀）— Esc 返回 · ↑↓ PgUp/PgDn 捲動"   # one row at 80 columns
-             + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT,
-             "來源：TaskStore（本機）｜讀取於 " + read_at]
+             + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT]
+    lines += task_owner_summary(record)
+    lines += ["來源：TaskStore（本機）｜讀取於 " + read_at]
     if type(record) is not dict:
         lines.append("Core 狀態：" + UNKNOWN + "（" + (reason or "沒有 Task 記錄") + "）")
         return "\n".join(lines)
@@ -520,6 +521,78 @@ def task_detail_text(record, read_at, reason=None, copy_hint=False):
     else:
         lines += ["  " + format_event(event) for event in events]
     return "\n".join(lines)
+
+
+_STAGE_MEANING = {
+    "PM_INTAKE": "等待 PM 回覆",
+    PENDING_DISPATCH: "等待 Developer 派送",
+    "RUNNING": "Developer 執行中",
+    "WAITING_EXECUTOR_EVIDENCE": "等待執行證據",
+    "WAITING_PM": "等待 PM 處理",
+    "WAITING_REVIEW": "等待 Reviewer 審查",
+    "REPAIRING": "Developer 修復中",
+    "WAITING_CI": "等待 CI",
+    "DONE": "已完成",
+    "BLOCKED": "已阻塞",
+    "UNAVAILABLE": "目前無法執行",
+    "FAILED": "已失敗",
+    "ABANDONED": "已取消",
+}
+
+
+def _owner_decision(record):
+    """Explicit Owner hand-off/action field, or None when the record has none."""
+    if type(record) is not dict:
+        return None
+    for source in (record, _dict(record.get("developer")) or {},
+                   _dict(record.get("completion")) or {}):
+        if "owner_decision" in source:
+            decision = source.get("owner_decision")
+            if type(decision) is str and decision.strip():
+                return "Owner 決定：" + " ".join(decision.split())
+            return "不明"
+        if source.get("waiting_owner") is True:
+            return "請 Owner 提供決定"
+        if type(source.get("waiting_owner")) is str and source["waiting_owner"].strip():
+            return " ".join(source["waiting_owner"].split())
+    return None
+
+
+def task_owner_summary(record):
+    """Three short, Traditional Chinese orientation lines from shown Task fields."""
+    if type(record) is not dict:
+        current, next_role, action = "不明", "不明", "目前不用"
+    else:
+        try:
+            current, _reason = stage(record)
+        except Exception:
+            current = UNKNOWN
+        try:
+            from .task_status import derive_state
+            if derive_state(record) == "COMPLETED":
+                current = "DONE"
+        except Exception:
+            pass
+        meaning = _STAGE_MEANING.get(current, "不明")
+        if current == "BLOCKED" and type(record.get("developer")) is dict and \
+                record["developer"].get("state") == "DEVELOPER_OUTCOME_UNKNOWN":
+            meaning = "Developer 結果不明"
+        owner_action = _owner_decision(record)
+        if owner_action is not None:
+            next_role = "Owner"
+            action = owner_action
+        else:
+            next_role = {
+                "PM_INTAKE": "PM", PENDING_DISPATCH: "PM", "RUNNING": "Developer",
+                "WAITING_EXECUTOR_EVIDENCE": "Developer", "WAITING_PM": "PM",
+                "WAITING_REVIEW": "Reviewer", "REPAIRING": "Developer", "WAITING_CI": "CI",
+                "BLOCKED": "PM", "UNAVAILABLE": "PM", "FAILED": "不明",
+                "DONE": "不明", "ABANDONED": "不明",
+            }.get(current, "不明")
+            action = "目前不用"
+        current = meaning
+    return ["狀態：" + current, "下一步輪到誰：" + next_role,
+            "你需要做：" + action]
 
 
 # W60: evidence and provenance rows of that detail, from values TaskStore already holds.
