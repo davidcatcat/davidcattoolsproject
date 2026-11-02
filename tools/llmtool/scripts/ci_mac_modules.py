@@ -178,7 +178,11 @@ def _importing_test_ids(target: str, repo_root: Path) -> set[str] | None:
 
 
 def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> set[str] | None:
-    """Return required plus impacted test IDs, or None when L3 FULL is needed."""
+    """Return required plus impacted test IDs, or None when L3 FULL is needed.
+
+    Import discovery sees direct static imports only; it does not find transitive,
+    subprocess, or patch-string importers.
+    """
     try:
         selected = required_test_ids(repo_root)
     except InvalidManifest:
@@ -248,6 +252,14 @@ def select_test_ids(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROO
             if importing is None:
                 return None
             dynamic_ids.update(importing)
+            if (Path(path).name.startswith("chat_tui")
+                    or Path(path).name == "tui_markdown.py"):
+                # The PTY scenario suite loads the TUI in a subprocess, so its
+                # source dependency is not visible to the static import scan.
+                scenario_id = "test_chat_tui_scenarios"
+                if _module_id(f"{TEST_ROOT}{scenario_id}.py", repo_root) is None:
+                    return None
+                dynamic_ids.add(scenario_id)
             if not dynamic_ids and not mapped:
                 return None
             selected.update(dynamic_ids)

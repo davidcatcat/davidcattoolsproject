@@ -20,6 +20,7 @@ MAC_REQUIRED = {
     "test_chat_tui_pty.ChatTUIPTYTests",
     "test_chat_tui_theme_pty.ThemePTYTests",
     "test_cli_lifecycle_state.LifecycleStateTests",
+    "test_cli_provider_lifecycle.TUISignalOwnershipTests",
     "test_cli_provider_lifecycle.CLIProviderLifecycleTests",
     "test_codex_cli_provider.CodexCLIProviderTests",
     "test_codex_direct_developer.CodexDirectDeveloperTests",
@@ -129,6 +130,14 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 self.assertTrue(MAC_REQUIRED <= set(report["test_ids"]))
                 for importer_id in importer_ids:
                     self.assertIn(importer_id, report["test_ids"])
+
+    def test_chat_tui_source_selects_subprocess_pty_scenario_suite(self):
+        report = ci_mac_modules.selection_report(
+            ["tools/llmtool/llmtool/chat_tui.py"], REPO_ROOT
+        )
+        self.assertNotEqual(report["level"], "L3")
+        self.assertIn("test_chat_tui_scenarios", report["test_ids"])
+        self.assertTrue(MAC_REQUIRED <= set(report["test_ids"]))
 
     def test_runtime_import_scan_failure_falls_back_to_full(self):
         with tempfile.TemporaryDirectory() as temporary:
