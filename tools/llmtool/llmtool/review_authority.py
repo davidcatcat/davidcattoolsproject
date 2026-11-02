@@ -429,6 +429,7 @@ class ProductionReviewIssuer(HostIssuer):
             call.task_id == c.expect.task.task_id and call.run_id == c.expect.task.run_id and
             call.source_sha == c.expect.source_sha and call.epoch == c.expect.epoch and
             call.sequence == snapshot.last_sequence and call.packet_digest == packet.digest and
+            call.reviewed_object_digest == packet.reviewed_object_digest and
             call.author_agents == tuple(sorted(a.agent_id for a in c.expect.authored_by)) and
             call.reviewer_role == p.reviewer_role == load_host_registration(self.pin).reviewer_role and
             call.reviewer_role not in call.author_agents and

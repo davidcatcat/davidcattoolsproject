@@ -62,7 +62,7 @@ class FixtureLauncher(a.ProductionReviewerLauncher):
 
 
 class Harness:
-    def __init__(self,*,cap=2):
+    def __init__(self,*,cap=2,provider_layout=1):
         self.tmp=tempfile.TemporaryDirectory(prefix='b1-authority-',dir=str(Path(tempfile.gettempdir()).resolve()))
         self.root=Path(self.tmp.name)
         self.author=self.root/'author';self.common=self.root/'common/.git'
@@ -84,7 +84,8 @@ class Harness:
         self.fake.data['route']=self.policy.policy_id
         self.packet_input=self.fake.packet_input
         self.ledger_path=self.hostdir/'provider.sqlite3'
-        self.ledger=l.ReceiptLedger.create(self.ledger_path,clock=self.clock.utc,kind='PROVIDER_REVIEW')
+        self.ledger=l.ReceiptLedger.create(self.ledger_path,clock=self.clock.utc,
+                                           kind='PROVIDER_REVIEW',provider_layout=provider_layout)
         self.exe=self.hostdir/'approved-fake-transport'
         self.exe.write_text(FAKE_SCRIPT.replace('INTERPRETER',sys.executable));self.exe.chmod(0o700)
         ast=self.author.stat();lst=self.ledger_path.stat()
@@ -130,7 +131,8 @@ class Harness:
         values=dict(task_id=self.expect.task.task_id,ready_task=self.expect.task,
             acceptance_task=self.fake.approval.acceptance_task,criterion_map=self.fake.approval.criterion_map,
             run_id=self.expect.task.run_id,epoch=self.expect.epoch,sequence=4,source_sha=self.expect.source_sha,
-            packet_digest=packet.digest,observation_digest=o.digest,author_agents=(self.expect.authored_by[0].agent_id,),
+            packet_digest=packet.digest,reviewed_object_digest=packet.reviewed_object_digest,
+            observation_digest=o.digest,author_agents=(self.expect.authored_by[0].agent_id,),
             reviewer_role='llmtool-review/claude-cli',reviewer_launch_nonce=self.issuer.reviewer_launch_nonce,route_id=self.policy.policy_id,
             route_version=1,route_digest=self.policy.digest,provider='claude-cli',profile=self.policy.profile,
             model=self.policy.model,export_scope_digest=scope,issuer_class='PRODUCTION_REVIEW',
@@ -228,11 +230,38 @@ class AuthorityTests(unittest.TestCase):
         b2=replace(b,reviewer_launch_nonce='e'*32,redeem_run_id='d'*32)
         self.assertFalse(self.h.authority.admit(b2).admitted)
         self.assertEqual(self.h.ledger.status(ad.grant_ref),'CONSUMED')
+
+    def test_same_object_retry_with_new_issuer_is_refused_before_provider_call(self):
+        h=Harness(provider_layout=2);self.addCleanup(h.close)
+        first=h.run()
+        self.assertEqual(first['provider_calls'],1)
+        self.assertEqual(first['code'],'REVIEW_FAKE_APPROVED')
+        h.fake.utc='2026-10-13T00:00:11Z'
+        h.issuer=a.ProductionReviewIssuer(h.pin,h.clock,h.observer,h.context)
+        h.authority=FixtureAuthority(h.issuer,h.ledger)
+        h.launcher=FixtureLauncher(h.authority)
+        second=h.run()
+        self.assertEqual(second['provider_calls'],0)
+        self.assertEqual(second['code'],'REVIEW_NOT_ALLOWED')
+        self.assertEqual(first['provider_calls'] + second['provider_calls'],1)
+    def test_reviewed_object_digest_omits_only_observation_and_sequence(self):
+        b,packet=self.h.binding()
+        payload=packet.to_dict()
+        payload['observation_digest']='9'*64
+        payload['sequence']+=1
+        refreshed=r.ReviewPacket(r.canonical(payload))
+        self.assertNotEqual(packet.digest,refreshed.digest)
+        self.assertEqual(packet.reviewed_object_digest,refreshed.reviewed_object_digest)
+        payload['ci']['run_id']='ci-other-run'
+        distinct=r.ReviewPacket(r.canonical(payload))
+        self.assertNotEqual(packet.reviewed_object_digest,distinct.reviewed_object_digest)
+        self.assertEqual(b.reviewed_object_digest,packet.reviewed_object_digest)
     def test_forged_every_authority_binding_field(self):
         b,_=self.h.binding()
         for changes in ({'source_sha':'9'*40},{'author_agents':('forged-author',)},
             {'route_digest':'9'*64},{'model':'other-model'},{'export_scope_digest':'9'*64},
-            {'observation_digest':'9'*64},{'criterion_map':(('tests','security'),)},
+            {'observation_digest':'9'*64},{'reviewed_object_digest':'9'*64},
+            {'criterion_map':(('tests','security'),)},
             {'packet_digest':'9'*64},{'epoch':8},{'issuer_capability_id':'forged-issuer'}):
             with self.subTest(changes=changes):
                 self.assertFalse(self.h.authority.admit(replace(b,**changes)).admitted)
@@ -630,11 +659,13 @@ class WorkerJobIntegrationTests(unittest.TestCase):
             return h.run()
 
     def test_post_call_check_survives_a_review_longer_than_five_seconds(self):
-        # D2: inject >5 s of review time; leave room for shared-runner process startup.
-        h=self.harness(timeout=120)
-        result=self.run_with_long_call(h,30)
-        self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
-        self.assertEqual(result['provider_calls'],1)
+        # D2: elapsed review time does not turn an admitted object into a replay.
+        for seconds in (6,60):
+            with self.subTest(seconds=seconds):
+                h=self.harness(timeout=120)
+                result=self.run_with_long_call(h,seconds)
+                self.assertEqual(result['code'],'REVIEW_FAKE_APPROVED',result)
+                self.assertEqual(result['provider_calls'],1)
 
     def test_post_call_still_rejects_drift_and_calls_past_the_deadline(self):
         h=self.harness()

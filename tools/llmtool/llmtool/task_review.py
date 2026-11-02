@@ -154,6 +154,7 @@ class ReviewCallBinding:
     sequence: int
     source_sha: str
     packet_digest: str
+    reviewed_object_digest: str
     observation_digest: str
     author_agents: tuple
     reviewer_role: str
@@ -180,7 +181,8 @@ class ReviewCallBinding:
             reject('REVIEW_BINDING_INVALID')
         for value in (self.task_id,self.route_id,self.issuer_capability_id): safe_id(value)
         for value in (self.profile,self.model): safe_diagnostic_text(value,1024)
-        for value in (self.packet_digest,self.observation_digest,self.route_digest,self.export_scope_digest): _hex(value)
+        for value in (self.packet_digest,self.reviewed_object_digest,self.observation_digest,
+                      self.route_digest,self.export_scope_digest): _hex(value)
         _hex(self.source_sha,(40,64));_hex(self.run_id,(32,));_hex(self.redeem_run_id,(32,))
         _hex(self.reviewer_launch_nonce,(32,))
         for value in (self.epoch,self.sequence,self.route_version): _integer(value,minimum=1)
@@ -381,6 +383,13 @@ class ReviewPacket:
     @property
     def digest(self):
         return hashlib.sha256(b'llmtool.review-packet.v1\0' + self.data).hexdigest()
+
+    @property
+    def reviewed_object_digest(self):
+        payload = self.to_dict()
+        payload.pop('observation_digest', None)
+        payload.pop('sequence', None)
+        return digest(payload, 'llmtool.reviewed-object.v1')
 
     def to_dict(self):
         return load_json(self.data.decode('utf-8'), PACKET_LIMIT)
@@ -640,7 +649,7 @@ def run_review(ready, final, expect, events, fixture):
         route=fixture.route
         binding=ReviewCallBinding(approval.ready_task.task_id,approval.ready_task,approval.acceptance_task,
             approval.criterion_map,approval.ready_task.run_id,expect.epoch,snapshot.last_sequence,
-            expect.source_sha,packet.digest,before.digest,
+            expect.source_sha,packet.digest,packet.reviewed_object_digest,before.digest,
             tuple(sorted({a.agent_id for a in expect.authored_by})),
             fixture.reviewer_role if type(fixture) is HostServices else REVIEWER_ROLES[0],fixture.reviewer_launch_nonce,
             route['id'],route['version'],route['digest'],'claude-cli',route['profile'],route['model'],
