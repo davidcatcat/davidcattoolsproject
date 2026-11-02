@@ -2956,14 +2956,6 @@ def run_task_codex_delegate(args, *, store):
             dispatch_store=store, dispatch_task_id=task['task_id'],
             prelaunch_validate=validate_binding,
             launch_callback=lambda pid, started_at, pgid: (
-                developer.update(execution={
-                    'status': 'RUNNING', 'native_session_id': None,
-                    'process_exit_code': None, 'stdout_sha256': None,
-                    'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
-                    'usage_source': 'UNKNOWN', 'source_bytes': None,
-                    'source_file_count': None, 'source_manifest_sha256': None,
-                    'child_pid': pid, 'child_start_time': started_at,
-                    'child_pgid': pgid}),
                 store.record_codex_launch(task['task_id'],
                     assignment_id=developer['assignment_id'], pid=pid,
                     start_time=started_at, pgid=pgid)),
