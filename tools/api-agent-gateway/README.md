@@ -84,8 +84,14 @@ Unknown keys are refused (`TASK_INVALID`).
   "timeout_seconds": 120, "tool_choice": "auto", "request_extra": {}}}}
 ```
 
-- **`base_url`:** HTTPS is required, except plain HTTP to a loopback host. The
-  client uses no proxies and follows no redirects.
+- **`base_url`:** HTTPS is required, except plain HTTP to a loopback host or
+  to a host explicitly named in the profile's optional `http_allow_hosts`
+  list. Use `http_allow_hosts` only for company VPN endpoints: listed IP
+  addresses must be private or link-local, while listed hostnames are allowed
+  for VPN DNS names. Plain HTTP traffic is unencrypted and can be observed or
+  changed by parties able to reach the network path. Public IP addresses are
+  refused even when listed. The client uses no proxies and follows no
+  redirects.
 - **`auth_env`:** names the environment variable that holds the API key. The
   key is read at run time and never stored. It is also screened as a literal.
 - **`session_expiry_hours`:** at most 72.
