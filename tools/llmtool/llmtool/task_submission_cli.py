@@ -1036,6 +1036,23 @@ def run_task_advance(args, *, store=None, **adapters):
     return 1 if result.get('codes') else 0
 
 
+def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapters):
+    """Drive successive durable Task steps in this foreground process."""
+    from .task_drive import drive
+    result = drive(task_id=args.task_id,
+        store=TaskStore() if store is None else store,
+        merge=getattr(args, 'merge', False),
+        max_steps=getattr(args, 'max_steps', 100),
+        poll_seconds=getattr(args, 'poll_seconds', 5),
+        sleep=sleep, advance_call=advance_call,
+        pr_number=getattr(args, 'pr', None),
+        integration_pr=getattr(args, 'integration_pr', None),
+        reviewer_session_done=getattr(args, 'reviewer_session_done', False),
+        **adapters)
+    _print(result)
+    return 1 if result.get('codes') else 0
+
+
 def run_task_claude_result(args, *, store=None, stdout=None):
     """Persist the one Claude Developer result against its original PM session."""
     store = TaskStore() if store is None else store
