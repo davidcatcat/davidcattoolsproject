@@ -277,6 +277,8 @@ class ReplayTests(unittest.TestCase):
         self.assertIn('AUTHORSHIP_INCOMPLETE', result.findings)
         with self.assertRaises(LLMToolError):
             replace(self.expect.agents[0], branch='main')
+        self.assertEqual(replace(self.expect.agents[0], branch='automation/ai-loop').branch,
+                         'automation/ai-loop')
 
 
 if __name__ == '__main__':
