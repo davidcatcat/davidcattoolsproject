@@ -800,6 +800,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
                          '513 bytes (max 512)')
         self.assertNotIn(secretish, str(raised.exception))
 
+    def test_background_rejects_codex_proposal_before_fork(self):
+        args = Namespace(task_id='a' * 32, provider='codex', mode='proposal',
+            background=True, acceptance=['bounded'])
+        with patch.object(os, 'fork') as fork, self.assertRaises(LLMToolError) as raised:
+            run_task_delegate(args, store=object())
+        self.assertEqual(str(raised.exception),
+                         '--background requires --mode direct for the Codex Developer route')
+        fork.assert_not_called()
+
     def test_record_pm_rejects_malformed_or_sensitive_input_without_task(self):
         good_response = json.dumps({
             'schema_version': 1, 'summary': 'Bounded.',

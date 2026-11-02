@@ -912,6 +912,14 @@ The prompt carries the PM-selected Developer goal separately from the digest-bou
 For a Codex `BLOCKED` result, the durable Developer record and `task show` include
 only its sensitive-screened `blocked_reason` (up to 2 KiB); DONE and ambiguous outcomes retain no such explanation.
 
+`task delegate ... --provider codex --mode direct --background` and
+`task delegate ... --provider opencode --background` detach the direct Developer
+after the assignment is claimed and its provider process is owned. The command returns a single
+JSON receipt containing `task_id`, `state` (`DEVELOPER_DISPATCHING`) and the
+provider child PID; the child continues through the same result persistence and
+original-PM callback path as foreground delegation. Pre-launch refusals remain
+synchronous. Without `--background`, delegation remains foreground.
+
 The workspace-write sandbox controls writes, not reads: `allowed_read_paths` is
 prompt scope only, and Codex may read other files available to its process.
 

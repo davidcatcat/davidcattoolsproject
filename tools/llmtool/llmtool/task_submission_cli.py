@@ -57,6 +57,7 @@ _active_review_dispatches = set()
 _active_review_dispatches_lock = threading.Lock()
 _active_review_pm_returns = set()
 _active_review_pm_returns_lock = threading.Lock()
+_background_launch_notifier = None
 _SYSTEM = (
     'You are the user-selected llmtool Integrator/PM AI. Respond directly to the '
     'submitted development request with a concise understanding, proposed next '
@@ -111,6 +112,133 @@ _REVIEW_RESULT_SYSTEM = (
 
 def _timestamp():
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace('+00:00', 'Z')
+
+
+def _background_send(fd, value):
+    raw = json.dumps(value, ensure_ascii=True, separators=(',', ':')).encode('utf-8')
+    packet = len(raw).to_bytes(4, 'big') + raw
+    offset = 0
+    while offset < len(packet):
+        offset += os.write(fd, packet[offset:])
+
+
+def _background_read(fd):
+    header = bytearray()
+    while len(header) < 4:
+        chunk = os.read(fd, 4 - len(header))
+        if not chunk:
+            raise LLMToolError('background Developer exited before its launch receipt')
+        header.extend(chunk)
+    size = int.from_bytes(header, 'big')
+    if size > 1024 * 1024:
+        raise LLMToolError('background Developer startup result exceeded its limit')
+    raw = bytearray()
+    while len(raw) < size:
+        chunk = os.read(fd, size - len(raw))
+        if not chunk:
+            raise LLMToolError('background Developer startup result was incomplete')
+        raw.extend(chunk)
+    try:
+        value = json.loads(raw.decode('utf-8'))
+    except (UnicodeError, ValueError):
+        raise LLMToolError('background Developer startup result was invalid') from None
+    if type(value) is not dict:
+        raise LLMToolError('background Developer startup result was invalid')
+    return value
+
+
+def _run_background_delegate(args, *, provider, store):
+    """Run the existing direct delegate path in a detached, double-forked child."""
+    if not hasattr(os, 'fork') or not hasattr(os, 'setsid'):
+        raise LLMToolError('background Developer execution is unavailable on this platform')
+    read_fd, write_fd = os.pipe()
+    try:
+        launcher_pid = os.fork()
+    except OSError:
+        os.close(read_fd)
+        os.close(write_fd)
+        raise LLMToolError('background Developer process could not be started') from None
+    if launcher_pid == 0:
+        os.close(read_fd)
+        try:
+            worker_pid = os.fork()
+        except OSError:
+            _background_send(write_fd, {'kind': 'error',
+                                        'message': 'background Developer process could not be started'})
+            os._exit(1)
+        if worker_pid:
+            os.close(write_fd)
+            os._exit(0)
+        try:
+            os.setsid()
+            null_fd = os.open(os.devnull, os.O_RDWR)
+            os.dup2(null_fd, 0)
+            os.dup2(null_fd, 1)
+            os.dup2(null_fd, 2)
+            if null_fd > 2:
+                os.close(null_fd)
+            output = io.StringIO()
+            global _background_launch_notifier
+            _background_launch_notifier = lambda pid: _background_send(
+                write_fd, {'kind': 'launched', 'pid': pid})
+            original_popen = subprocess.Popen
+            lifecycle_class = opencode_direct_developer.CLIProcessLifecycle
+            original_own = lifecycle_class.own
+            launched_pids = set()
+            if provider == 'opencode':
+                def observed_popen(argv, *popen_args, **popen_kwargs):
+                    process = original_popen(argv, *popen_args, **popen_kwargs)
+                    if (type(argv) in (list, tuple) and len(argv) > 1 and
+                            argv[1] == 'run'):
+                        launched_pids.add(process.pid)
+                    return process
+                def observed_own(lifecycle, process):
+                    result = original_own(lifecycle, process)
+                    if process.pid in launched_pids:
+                        _background_launch_notifier(process.pid)
+                    return result
+                subprocess.Popen = observed_popen
+                lifecycle_class.own = observed_own
+            try:
+                with contextlib.redirect_stdout(output), contextlib.redirect_stderr(output):
+                    result = (run_task_codex_delegate(args, store=store)
+                              if provider == 'codex' else
+                              run_task_opencode_delegate(args, store=store))
+                _background_send(write_fd, {'kind': 'finished', 'return_code': result,
+                                            'output': output.getvalue()})
+            except BaseException as exc:
+                _background_send(write_fd, {'kind': 'error', 'message': str(exc),
+                    'error_type': type(exc).__name__, 'output': output.getvalue()})
+            finally:
+                subprocess.Popen = original_popen
+                lifecycle_class.own = original_own
+        except BaseException:
+            try:
+                _background_send(write_fd, {'kind': 'error',
+                    'message': 'background Developer setup failed'})
+            except Exception:
+                pass
+        os.close(write_fd)
+        os._exit(0)
+    os.close(write_fd)
+    try:
+        os.waitpid(launcher_pid, 0)
+        result = _background_read(read_fd)
+    finally:
+        os.close(read_fd)
+    if result.get('kind') == 'launched':
+        pid = result.get('pid')
+        if type(pid) is not int or pid <= 0:
+            raise LLMToolError('background Developer launch receipt was invalid')
+        _print({'task_id': args.task_id, 'state': 'DEVELOPER_DISPATCHING',
+                'child_pid': pid})
+        return 0
+    output = result.get('output')
+    if type(output) is str and output:
+        sys.stdout.write(output)
+    if result.get('kind') == 'error':
+        raise LLMToolError(result.get('message') or 'background Developer setup failed')
+    return result.get('return_code', 1)
 
 
 def _screen_text(value, limit):
@@ -618,6 +746,8 @@ def add_task_submission_parsers(actions):
                           help='explicit Developer route')
     delegate.add_argument('--mode', choices=('proposal', 'direct'), default='proposal',
                           help='Codex: text proposal (default) or direct D6 development')
+    delegate.add_argument('--background', action='store_true',
+                          help='run a direct Codex or OpenCode Developer in a detached child')
     delegate.add_argument('--selection-source', required=True, choices=('PM', 'USER'))
     delegate.add_argument('--executor-task', required=True,
                           help='registered D6 Executor task id; root/source/identity are read from its record')
@@ -2992,14 +3122,17 @@ def run_task_codex_delegate(args, *, store):
         except Exception:
             raise codex_direct_developer.DirectCodexError(
                 'CODEX_IGNORED_BASELINE_UNAVAILABLE') from None
+        def record_launch(pid, started_at, pgid):
+            store.record_codex_launch(task['task_id'],
+                assignment_id=developer['assignment_id'], pid=pid,
+                start_time=started_at, pgid=pgid)
+            if _background_launch_notifier is not None:
+                _background_launch_notifier(pid)
         result = codex_direct_developer.run(root=registration.root, prompt=prompt,
             model=provider['model'], reasoning_effort=reasoning_effort,
             dispatch_store=store, dispatch_task_id=task['task_id'],
             prelaunch_validate=validate_binding,
-            launch_callback=lambda pid, started_at, pgid: (
-                store.record_codex_launch(task['task_id'],
-                    assignment_id=developer['assignment_id'], pid=pid,
-                    start_time=started_at, pgid=pgid)),
+            launch_callback=record_launch,
             timeout=effective_timeout,
             dispatch_action=('TIMEOUT_CONTINUATION' if recovering_timeout else 'DISPATCH'))
     except worker_dispatch.WorkerDispatchDenied as exc:
@@ -3235,6 +3368,14 @@ def run_task_codex_delegate(args, *, store):
 
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
+    if getattr(args, 'background', False):
+        provider = getattr(args, 'provider', None)
+        if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
+            raise LLMToolError('--background requires --mode direct for the Codex Developer route')
+        if provider not in ('codex', 'opencode'):
+            raise LLMToolError('--background is supported only for direct Codex and OpenCode Developers')
+        _validate_acceptance_scope(getattr(args, 'acceptance', None))
+        return _run_background_delegate(args, provider=provider, store=store)
     if args.provider == 'agy':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider agy requires --mode direct')
