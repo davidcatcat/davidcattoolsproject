@@ -171,25 +171,9 @@ class GwAgentRouteTests(unittest.TestCase):
         self.addCleanup(server.close)
         self.route.profile['base_url'] = f'http://127.0.0.1:{server.port}/v1'
 
-        def apply_from_schema(body):
-            tools = body.get('tools', [])
-            schema = next(tool['function']['parameters'] for tool in tools
-                          if tool.get('function', {}).get('name') == 'apply_edit')
-            properties = schema.get('properties', {})
-            values = {}
-            for name in schema.get('required', properties.keys()):
-                lowered = name.lower()
-                if 'path' in lowered or lowered in ('file', 'filename'):
-                    values[name] = 'source.py'
-                elif any(part in lowered for part in ('old', 'before', 'match', 'search')):
-                    values[name] = 'original\n'
-                elif any(part in lowered for part in ('new', 'after', 'replace', 'content', 'text')):
-                    values[name] = 'changed\n'
-                else:
-                    values[name] = 'source.py'
-            return reply(tool_call('apply_edit', **values), model='fake-model')
-
-        server.script.extend((apply_from_schema,
+        server.script.extend((reply(tool_call('apply_edit', path='source.py',
+                                             old='original\n', new='changed\n'),
+                                    model='fake-model'),
                               reply(tool_call('finish', summary='done'), model='fake-model')))
         request = self.request()
         request['task']['goal'] = 'Change source.py from original to changed.'
@@ -200,7 +184,11 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(result.changed_files, ('source.py',))
         self.assertEqual((self.root / 'source.py').read_text(), 'changed\n')
         self.assertEqual(len(server.requests), 2)
-        self.assertTrue(self.route.audit_copy_path)
+        audit_records = [json.loads(line) for line in Path(self.route.audit_copy_path).read_text().splitlines()]
+        self.assertTrue(any(record.get('type') == 'tool'
+                            and record.get('tool') == 'apply_edit'
+                            and record.get('ok') is True
+                            for record in audit_records))
 
 
 if __name__ == '__main__':
