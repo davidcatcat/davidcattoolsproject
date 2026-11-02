@@ -413,6 +413,8 @@ class NearLimitUnicodeJwtTests(CaptureFixture):
 
     def child_select(self, raw):
         self.path.write_bytes(raw)
+        os.chmod(self.path, 0o440)
+        before = os.stat(self.path)
         program = ('import json, sys, time\n'
                    'from llmtool.errors import LLMToolError\n'
                    'from llmtool.test_output_excerpts import select_test_excerpts\n'
@@ -428,9 +430,16 @@ class NearLimitUnicodeJwtTests(CaptureFixture):
                               stdin=subprocess.DEVNULL, capture_output=True, text=True, env=env,
                               cwd=self.root, timeout=CHILD_TIMEOUT_SECONDS, check=True)
         self.assertEqual(done.stderr, '')
+        after = os.stat(self.path)
+        self.assertEqual((before.st_mtime_ns, before.st_size, before.st_mode, before.st_ino),
+                         (after.st_mtime_ns, after.st_size, after.st_mode, after.st_ino))
         self.assertEqual(self.path.read_bytes(), raw)
         outcome, elapsed = json.loads(done.stdout)
-        self.assertNotIn(str(self.root), done.stdout)
+        # Same confidentiality checks as outcome(): no workspace/capture path
+        # and no synthetic private marker in the child's output.
+        for private in (str(self.root), str(self.path), PRIVATE):
+            self.assertNotIn(private, done.stdout)
+        os.chmod(self.path, 0o640)
         return outcome, elapsed
 
     def fill(self, prefix, unit, suffix):
