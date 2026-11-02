@@ -60,7 +60,87 @@ class TrustCliTest(unittest.TestCase):
              mock.patch("sys.stdin.isatty", return_value=False):
             with self.assertRaises(trust_cli.TrustError) as caught:
                 trust_cli._init(argparse.Namespace(input=None, import_config=False))
-            self.assertEqual(caught.exception.code, "TRUST_INIT_INPUT_INVALID")
+            self.assertEqual(caught.exception.code, "TRUST_INIT_INPUT_REQUIRED")
+
+    def test_import_config_overrides_dispatch_references(self):
+        checkout = self.home / "checkout"
+        checkout.mkdir(mode=0o700)
+        workspace = self.home / "workspaces" / "project"
+        values = {
+            "canonical_root": str(checkout), "workspace_root": str(workspace),
+            "tasks_root": str(workspace / "tasks"),
+            "repository": {"slug": "davidcatcat/davidcattoolsproject",
+                           "allowed_origins": list(trust_cli._ORIGINS)},
+        }
+        draft = self.home / "draft.json"
+        draft.write_text(json.dumps({"ci_trust": {
+            "mode": "self-hosted", "github_actions_app_id": 15368,
+            "workflows": list(trust_cli._WORKFLOWS),
+            "not_run_checks": trust_cli._NOT_RUN_CHECKS}}), encoding="utf-8")
+        output = __import__("io").StringIO()
+        with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
+             mock.patch.object(trust_cli, "_checkout_values", return_value=values), \
+             mock.patch.object(trust_cli, "_import_config_refs", return_value=(410, 411)), \
+             mock.patch.object(trust_cli, "load_trust", return_value=mock.Mock(sha256="d" * 64)), \
+             mock.patch.object(trust_cli, "verify_repository", return_value=True), \
+             mock.patch("sys.stdout", output):
+            self.assertEqual(trust_cli._init(argparse.Namespace(input=str(draft), import_config=True)), 0)
+        document = json.loads((self.home / ".config/llmtool/trust.json").read_text(encoding="utf-8"))
+        refs = document["repository"]["approval_refs"]
+        self.assertEqual(refs["worker_dispatch_issue"], 410)
+        self.assertEqual(refs["worker_dispatch_evidence_pr"], 411)
+
+    def test_replace_requires_matching_digest_and_reports_only_affected_count(self):
+        config_dir = self.home / ".config" / "llmtool"
+        config_dir.mkdir(mode=0o700, parents=True)
+        target = config_dir / "trust.json"
+        target.write_text("old trust", encoding="utf-8")
+        checkout = self.home / "checkout"
+        checkout.mkdir(mode=0o700)
+        workspace = self.home / "workspaces" / "project"
+        values = {
+            "canonical_root": str(checkout), "workspace_root": str(workspace),
+            "tasks_root": str(workspace / "tasks"),
+            "repository": {"slug": "davidcatcat/davidcattoolsproject",
+                           "allowed_origins": list(trust_cli._ORIGINS)},
+        }
+        draft = self.home / "draft.json"
+        draft.write_text(json.dumps({"ci_trust": {
+            "mode": "self-hosted", "github_actions_app_id": 15368,
+            "workflows": list(trust_cli._WORKFLOWS),
+            "not_run_checks": trust_cli._NOT_RUN_CHECKS}}), encoding="utf-8")
+        old = mock.Mock(sha256="a" * 64)
+        args = argparse.Namespace(input=str(draft), import_config=False,
+                                  replace=True, confirm_rotation="b" * 64)
+        with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
+             mock.patch.object(trust_cli, "load_trust", return_value=old), \
+             mock.patch.object(trust_cli, "_checkout_values", return_value=values):
+            with self.assertRaises(trust_cli.TrustError) as caught:
+                trust_cli._init(args)
+        self.assertEqual(caught.exception.code, "TRUST_ROTATION_UNCONFIRMED")
+
+        args.confirm_rotation = "a" * 64
+        output = __import__("io").StringIO()
+        with mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
+             mock.patch.object(trust_cli, "load_trust", return_value=old), \
+             mock.patch.object(trust_cli, "_checkout_values", return_value=values), \
+             mock.patch.object(trust_cli, "_affected_active_records", return_value=3), \
+             mock.patch.object(trust_cli, "verify_repository", return_value=True), \
+             mock.patch("sys.stdout", output):
+            self.assertEqual(trust_cli._init(args), 0)
+        self.assertIn("affected_active_records: 3", output.getvalue())
+        self.assertNotIn(str(self.home), output.getvalue())
+
+    def test_affected_active_record_count_ignores_non_active_and_matching_records(self):
+        registry = self.home / ".config" / "llmtool" / "d6-registry.json"
+        registry.parent.mkdir(mode=0o700, parents=True)
+        registry.write_text(json.dumps({"records": [
+            {"state": "ACTIVE", "trust_binding_sha256": "old"},
+            {"state": "ACTIVE", "trust_binding_sha256": "new"},
+            {"state": "REMOVED", "trust_binding_sha256": "old"},
+        ]}), encoding="utf-8")
+        registry.chmod(0o600)
+        self.assertEqual(trust_cli._affected_active_records(self.home, "new"), 1)
 
     def test_show_masks_all_paths_and_reports_sanitized_failure(self):
         config = mock.Mock(schema_version=1, sha256="b" * 64, binding_sha256="c" * 64,

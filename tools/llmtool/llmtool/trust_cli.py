@@ -42,6 +42,8 @@ def add_trust_parser(sub):
     init = actions.add_parser("init", help="Create the private trust.json for this checkout")
     init.add_argument("--input", help="JSON draft containing approval_refs and ci_trust")
     init.add_argument("--import-config", action="store_true")
+    init.add_argument("--replace", action="store_true", help="replace trust.json after confirming its current digest")
+    init.add_argument("--confirm-rotation", metavar="OLD_SHA256")
     show = actions.add_parser("show", help="Show sanitized trust configuration")
     show.add_argument("--reveal-paths", action="store_true")
     actions.add_parser("verify-legacy", help="Compare trust fields with legacy repository values")
@@ -159,6 +161,61 @@ def _atomic_create(path, raw):
             pass
 
 
+def _import_config_refs(home):
+    """Import only the two repository dispatch references from config.yaml."""
+    config_path = home / ".config" / "llmtool" / "config.yaml"
+    try:
+        import yaml
+        with config_path.open("r", encoding="utf-8") as stream:
+            value = yaml.safe_load(stream)
+        repository = value.get("repository") if type(value) is dict else None
+        if type(repository) is not dict:
+            raise ValueError
+        issue = repository.get("dispatch_issue")
+        evidence_pr = repository.get("dispatch_evidence_pr")
+        if (type(issue) is not int or not 1 <= issue <= 10**9 or
+                type(evidence_pr) is not int or not 1 <= evidence_pr <= 10**9):
+            raise ValueError
+        return issue, evidence_pr
+    except Exception:
+        raise TrustError("TRUST_INIT_INPUT_INVALID") from None
+
+
+def _binding_sha256(document):
+    from .trust import _binding
+    return _binding(document)
+
+
+def _affected_active_records(home, new_binding):
+    """Count active D6 registrations whose trust binding would rotate."""
+    # D6 keeps its registry beside trust.json. Accept the established registry
+    # filename and fail closed if present data is malformed.
+    registry = home / ".config" / "llmtool" / "d6-registry.json"
+    try:
+        info = registry.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or
+                not 1 <= info.st_size <= 1024 * 1024):
+            raise TrustError("TRUST_INIT_INPUT_INVALID")
+        raw = registry.read_bytes()
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        raise TrustError("TRUST_INIT_INPUT_INVALID") from None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+        records = value.get("records", value) if type(value) is dict else value
+        if type(records) is not list:
+            raise ValueError
+        return sum(1 for record in records
+                   if type(record) is dict and record.get("state") == "ACTIVE" and
+                   record.get("trust_binding_sha256") != new_binding)
+    except TrustError:
+        raise
+    except (ValueError, UnicodeError, json.JSONDecodeError):
+        raise TrustError("TRUST_INIT_INPUT_INVALID") from None
+
+
 def _init(args):
     if os.name != "posix" or sys.platform.startswith("win"):
         raise TrustError("TRUST_UNSUPPORTED_PLATFORM")
@@ -166,15 +223,35 @@ def _init(args):
         raise TrustError("TRUST_IDENTITY_INVALID")
     home = _owner_home()
     target = home / ".config" / "llmtool" / "trust.json"
-    if target.exists() or target.is_symlink():
+    replacing = bool(getattr(args, "replace", False))
+    confirm = getattr(args, "confirm_rotation", None)
+    previous_raw = None
+    if replacing:
+        if not confirm:
+            raise TrustError("TRUST_ROTATION_UNCONFIRMED")
+        try:
+            current = load_trust(home=str(home))
+        except TrustError:
+            raise TrustError("TRUST_ROTATION_UNCONFIRMED") from None
+        if not re.fullmatch(r"[0-9a-f]{64}", confirm) or current.sha256 != confirm:
+            raise TrustError("TRUST_ROTATION_UNCONFIRMED")
+        try:
+            previous_raw = target.read_bytes()
+        except OSError:
+            raise TrustError("TRUST_ROTATION_UNCONFIRMED") from None
+        if hashlib.sha256(previous_raw).hexdigest() != current.sha256:
+            raise TrustError("TRUST_ROTATION_UNCONFIRMED")
+    elif confirm is not None:
+        raise TrustError("TRUST_ROTATION_UNCONFIRMED")
+    if not replacing and (target.exists() or target.is_symlink()):
         raise TrustError("TRUST_EXISTS")
     inferred = _checkout_values(home)
     if args.input:
         draft = _read_draft(args.input)
     elif sys.stdin.isatty():
-        raise TrustError("TRUST_INIT_INPUT_INVALID")
+        raise TrustError("TRUST_INIT_INPUT_REQUIRED")
     else:
-        raise TrustError("TRUST_INIT_INPUT_INVALID")
+        raise TrustError("TRUST_INIT_INPUT_REQUIRED")
 
     document = {
         "schema_version": 1,
@@ -204,7 +281,9 @@ def _init(args):
     if "tools" in draft:
         document["tools"] = draft["tools"]
     if args.import_config:
-        raise TrustError("TRUST_INIT_INPUT_INVALID")
+        issue, evidence_pr = _import_config_refs(home)
+        document["repository"]["approval_refs"]["worker_dispatch_issue"] = issue
+        document["repository"]["approval_refs"]["worker_dispatch_evidence_pr"] = evidence_pr
     # Validate the complete document before touching the destination.
     from .trust import _validate_schema
     _validate_schema(document)
@@ -216,17 +295,62 @@ def _init(args):
         if not root.exists():
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             os.chmod(root, 0o700)
-    _atomic_create(target, (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8"))
+    raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    affected = _affected_active_records(home, _binding_sha256(document)) if replacing else 0
+    if replacing:
+        # Install via same-directory atomic replacement after the old digest gate.
+        temporary = target.parent / (".trust.json." + secrets.token_hex(12))
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+        try:
+            descriptor = os.open(temporary, flags, 0o600)
+            with os.fdopen(descriptor, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o600)
+                stream.write(raw)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, target)
+            directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+            raise TrustError("TRUST_INIT_WRITE_FAILED") from None
+    else:
+        _atomic_create(target, raw)
     try:
         loaded = load_trust(home=str(home))
         verify_repository(loaded)
     except TrustError:
-        try:
-            target.unlink()
-        except OSError:
-            pass
+        if replacing and previous_raw is not None:
+            restore = target.parent / (".trust.json." + secrets.token_hex(12))
+            try:
+                descriptor = os.open(restore, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                                     getattr(os, "O_NOFOLLOW", 0), 0o600)
+                with os.fdopen(descriptor, "wb") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write(previous_raw)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(restore, target)
+            except OSError:
+                try:
+                    restore.unlink()
+                except OSError:
+                    pass
+        else:
+            try:
+                target.unlink()
+            except OSError:
+                pass
         raise
     print("trust_sha256: " + loaded.sha256)
+    if replacing:
+        print(f"affected_active_records: {affected}")
     return 0
 
 
