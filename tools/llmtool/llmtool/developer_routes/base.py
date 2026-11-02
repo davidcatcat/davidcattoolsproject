@@ -102,6 +102,15 @@ class DeveloperRoute(ABC):
     @abstractmethod
     def quota_exhausted(self, parsed: Mapping[str, Any], stderr: bytes) -> bool: ...
 
+    def prepare_files(self, tmpdir: str, request: Mapping[str, Any]) -> None:
+        """Create route-owned input files before argv is built, when needed."""
+
+    def collect(self, tmpdir: str, request: Mapping[str, Any]) -> None:
+        """Collect route outputs while its private temporary directory exists."""
+
+    def validate_exit(self, exit_code: int, parsed: Mapping[str, Any]) -> None:
+        """Validate provider-specific status and process exit consistency."""
+
     def validate_request(self, request: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(request, Mapping):
             raise RouteError(f'{self.name.upper()}_REQUEST_INVALID')
@@ -504,6 +513,8 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise RouteError('BLOCKED_WRITE_ISOLATION', blocked_reason='BOUNDARY_UNVERIFIED')
     try:
+        value['_route_tmpdir'] = private_tmp
+        route.prepare_files(private_tmp, value)
         env = route.build_env(private_tmp)
         argv = list(prefix) + route.build_argv(value['executable'], value)
     except Exception:
@@ -527,6 +538,14 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
     except BaseException:
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise
+    try:
+        route.collect(private_tmp, value)
+    except RouteError:
+        shutil.rmtree(private_tmp, ignore_errors=True)
+        raise
+    except Exception:
+        shutil.rmtree(private_tmp, ignore_errors=True)
+        raise RouteError(_route_code(route, 'COLLECT_FAILED')) from None
     log_text = ''
     log_path = value.get('log_path')
     if log_path is not None:
@@ -573,6 +592,12 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
     if not isinstance(parsed, Mapping):
         raise RouteError(_route_code(route, 'OUTPUT_INVALID'))
+    try:
+        route.validate_exit(code, parsed)
+    except RouteError:
+        raise
+    except Exception:
+        raise RouteError(_route_code(route, 'OUTPUT_INVALID')) from None
     try:
         quota = route.quota_exhausted(parsed, stderr)
     except Exception:

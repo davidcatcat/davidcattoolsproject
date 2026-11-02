@@ -9,6 +9,7 @@ from abc import ABC, abstractmethod
 import hashlib
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 import tempfile
@@ -50,10 +51,13 @@ class SandboxExecBoundary(WriteBoundary):
     """macOS sandbox-exec wrapper restricted to configured writable paths."""
 
     def __init__(self, *, executable='/usr/bin/sandbox-exec', denied_dirs=(),
-                 tmpdir=None):
+                 tmpdir=None, allow_gw_agent_tmp=False):
         self.executable = executable
         self.denied_dirs = tuple(denied_dirs)
         self.tmpdir = tmpdir
+        if type(allow_gw_agent_tmp) is not bool:
+            raise ValueError('invalid gw-agent temporary allowance')
+        self.allow_gw_agent_tmp = allow_gw_agent_tmp
         self._prepared = None
 
     def _policy(self, root, write_paths, state_dirs):
@@ -126,7 +130,7 @@ class SandboxExecBoundary(WriteBoundary):
         return root, sorted(set(allowed)), sorted(set(states))
 
     @staticmethod
-    def _profile(paths, state_paths=()):
+    def _profile(paths, state_paths=(), gw_tmp_parents=()):
         rows = [
             '(version 1)',
             '(deny default)',
@@ -142,15 +146,26 @@ class SandboxExecBoundary(WriteBoundary):
         rows.extend('(allow file-write* (literal ' + _sbpl_quote(path) + '))' for path in paths)
         rows.extend('(allow file-write* (subpath ' + _sbpl_quote(path) + '))'
                     for path in state_paths)
+        for parent in gw_tmp_parents:
+            pattern = '^' + re.escape(parent.rstrip('/') + '/') + r'\.gw-agent-tmp-[0-9a-f]{16}$'
+            rows.append('(allow file-write* (regex #' + _sbpl_quote(pattern) + '))')
         rows.extend('(allow file-write* (literal ' + _sbpl_quote(path) + '))'
                     for path in ('/dev/null', '/dev/tty'))
         return '\n'.join(rows)
+
+    @staticmethod
+    def _gw_tmp_parents(root, write_paths):
+        root = Path(root).resolve(strict=True)
+        return sorted({str((root / Path(path).parent).resolve(strict=False))
+                       for path in write_paths})
 
     def prepare(self, root, write_paths, state_dirs=()):
         if not os.path.isfile(self.executable) or not os.access(self.executable, os.X_OK):
             raise OSError('sandbox-exec unavailable')
         root, paths, states = self._policy(root, write_paths, state_dirs)
-        profile = self._profile(paths, states)
+        gw_tmp_parents = (self._gw_tmp_parents(root, write_paths)
+                          if self.allow_gw_agent_tmp else ())
+        profile = self._profile(paths, states, gw_tmp_parents)
         digest = hashlib.sha256(profile.encode('utf-8')).hexdigest()
         self._prepared = (str(root), tuple(write_paths), tuple(state_dirs), paths, states, profile, digest)
         return [self.executable, '-p', profile], digest
@@ -166,6 +181,8 @@ class SandboxExecBoundary(WriteBoundary):
         if (str(current_root), tuple(write_paths), tuple(state_dirs), current_paths,
                 current_states) != (prepared_root, prepared_paths, prepared_states, paths, states):
             return {'verified': False, 'policy_sha256': digest, 'probes': []}
+        gw_tmp_parents = (self._gw_tmp_parents(root, write_paths)
+                          if self.allow_gw_agent_tmp else ())
         # The same kernel wrapper must allow a write at an authorized target
         # and deny root, Git, sibling-task, configured denied locations, and
         # hard links from outside the boundary into an allowed literal path.
@@ -200,6 +217,25 @@ class SandboxExecBoundary(WriteBoundary):
                 continue
             passed = (type(rc) is int and ((rc == 0) if expected else (rc != 0)))
             probes.append({'expected_write': expected, 'passed': passed})
+        if gw_tmp_parents:
+            for parent in gw_tmp_parents:
+                allowed_tmp = str(Path(parent) / '.gw-agent-tmp-0123456789abcdef')
+                denied_tmp = str(Path(parent) / '.gw-agent-tmp-not-hex')
+                for path, expected in ((allowed_tmp, True), (denied_tmp, False)):
+                    code = ('from pathlib import Path\n'
+                            'p=Path(' + repr(path) + ')\n'
+                            'p.write_bytes(b"probe")\n'
+                            'p.unlink()\n')
+                    try:
+                        rc, out, err = runner(
+                            [self.executable, '-p', profile, python, '-c', code],
+                            str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
+                                        'PYTHONDONTWRITEBYTECODE': '1'}, 10)
+                        passed = type(rc) is int and ((rc == 0) if expected else (rc != 0))
+                    except Exception:
+                        passed = False
+                    probes.append({'expected_write': expected, 'operation': 'gw_agent_tmp',
+                                   'passed': passed})
         if targets:
             target = targets[0]
             source = None

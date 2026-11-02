@@ -1,5 +1,6 @@
 """Policy construction and verification tests for direct route boundaries."""
 
+import hashlib
 import unittest
 import tempfile
 from pathlib import Path
@@ -112,6 +113,45 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
         self.assertEqual(len(hardlink_probes), 1)
         self.assertTrue(hardlink_probes[0]['passed'])
         self.assertTrue(any('os.link' in argv[-1] for argv in calls))
+
+    def test_opt_in_gw_agent_temp_allowance_is_narrow_and_probed(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            root.mkdir()
+            subprocess.run(['/usr/bin/git', 'init', str(root)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            boundary = SandboxExecBoundary(executable='/bin/true', tmpdir=temp,
+                                           allow_gw_agent_tmp=True)
+            policy_root, paths, states = boundary._policy(root, ['src/file.py'], [])
+            profile = boundary._profile(paths, states,
+                                        boundary._gw_tmp_parents(policy_root, ['src/file.py']))
+            self.assertIn(r'\.gw-agent-tmp-[0-9a-f]{16}', profile)
+            digest = hashlib.sha256(profile.encode()).hexdigest()
+            boundary._prepared = (str(policy_root), ('src/file.py',), (), paths, states,
+                                  profile, digest)
+            calls = []
+
+            def runner(argv, cwd, env, timeout):
+                calls.append(argv[-1])
+                program = argv[-1]
+                if 'gw-agent-tmp-not-hex' in program:
+                    return 1, b'', b''
+                if 'gw-agent-tmp-0123456789abcdef' in program:
+                    return 0, b'', b''
+                if 'llmtool-task-parent-probe' in program or 'llmtool-boundary-probe' in program:
+                    return 1, b'', b''
+                if 'llmtool-hardlink-probe' in program or 'os.link' in program:
+                    return 0, b'', b''
+                return 0, b'', b''
+
+            result = boundary.verify(root, ['src/file.py'], (), runner=runner)
+            self.assertTrue(result['verified'])
+            probes = [probe for probe in result['probes']
+                      if probe.get('operation') == 'gw_agent_tmp']
+            self.assertEqual(len(probes), 2)
+            self.assertTrue(all(probe['passed'] for probe in probes))
+            self.assertTrue(any('gw-agent-tmp-not-hex' in code for code in calls))
+            self.assertTrue(any('llmtool-task-parent-probe' in code for code in calls))
 
     def test_non_darwin_platform_is_unsupported(self):
         self.assertIsInstance(for_platform('linux'), UnsupportedBoundary)
