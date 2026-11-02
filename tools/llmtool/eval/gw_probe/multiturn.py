@@ -84,6 +84,7 @@ class GuardedRun:
         self.max_calls, self.max_tokens = max_calls, max_tokens
         self.calls = self.tokens = self.connection_errors = 0
         self.scenarios = []
+        self.diagnostics = []
         self.stop_reason = None
 
     def _scan(self, value):
@@ -130,6 +131,68 @@ class GuardedRun:
             raise StopRun("TIME_CAP")
         return result
 
+    def record_diagnostic(self, result, round_number):
+        response, choice, message = _response(result)
+        calls = message.get("tool_calls")
+        call_diagnostics = []
+        if isinstance(calls, list):
+            for call in calls:
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function") if isinstance(call.get("function"), dict) else {}
+                name = function.get("name")
+                name = self._diagnostic_string(name, 80)
+                call_id = call.get("id")
+                call_id = self._diagnostic_string(call_id, 120)
+                step = None
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    try:
+                        parsed = json.loads(arguments)
+                        candidate = parsed.get("step") if isinstance(parsed, dict) else None
+                        step = candidate if isinstance(candidate, int) and not isinstance(candidate, bool) else None
+                    except (ValueError, TypeError):
+                        pass
+                call_diagnostics.append({"tool_name": name, "step": step, "id": call_id})
+        content = message.get("content")
+        if self.current == "S6" and isinstance(content, str):
+            match = re.search(r"TOOL_CALL:\s*([A-Za-z0-9_.-]{1,80})\s*(\{[^\n]*\})", content)
+            if match:
+                try:
+                    arguments = json.loads(match.group(2))
+                except ValueError:
+                    arguments = {}
+                step = arguments.get("step") if isinstance(arguments, dict) else None
+                if not isinstance(step, int) or isinstance(step, bool):
+                    step = None
+                call_diagnostics.append({"tool_name": self._diagnostic_string(match.group(1), 80),
+                                         "step": step, "id": None})
+        final = None
+        if isinstance(content, str) and not call_diagnostics:
+            if self._scan(content):
+                self.audit.add({"event": "stop", "reason": "CREDENTIAL_SCAN_HIT"})
+                raise StopRun("CREDENTIAL_SCAN_HIT")
+            excerpt = self._diagnostic_string(content, 300)
+            final = {"expected_marker_found": EXPECTED in content, "excerpt": excerpt}
+        self.diagnostics.append({"scenario": self.current, "round": round_number,
+                                 "finish_reason": self._diagnostic_string(choice.get("finish_reason"), 80),
+                                 "tool_calls": call_diagnostics, "final_answer": final})
+
+    def _diagnostic_string(self, value, limit):
+        if not isinstance(value, str):
+            return None
+        if self._scan(value):
+            self.audit.add({"event": "stop", "reason": "CREDENTIAL_SCAN_HIT"})
+            raise StopRun("CREDENTIAL_SCAN_HIT")
+        value = value[:limit]
+        if self.client.key:
+            value = value.replace(self.client.key, "[redacted]")
+        value = re.sub(r"(?i)\b(?:https?|ftp)://[^\s\"'<>]+", "[redacted-url]", value)
+        value = re.sub(r"(?i)\bBearer\s+\S+", "[redacted-header]", value)
+        value = re.sub(r"(?im)\b(?:authorization|x-api-key|api-key)\s*:\s*[^\r\n]+",
+                       "[redacted-header]", value)
+        return value
+
     def _send_stream(self, body):
         """Consume OpenAI SSE chunks and assemble tool-call deltas in memory."""
         payload = json.dumps({**body, "stream": True}, ensure_ascii=True, allow_nan=False).encode("utf-8")
@@ -142,7 +205,7 @@ class GuardedRun:
         started = time.monotonic()
         try:
             with opener.open(req, timeout=CALL_TIMEOUT) as response:
-                model, usage, content, calls = None, None, "", {}
+                model, usage, content, calls, finish_reason = None, None, "", {}, None
                 total = 0
                 while True:
                     line = response.readline(1024 * 1024)
@@ -167,6 +230,8 @@ class GuardedRun:
                     model, usage = chunk.get("model", model), chunk.get("usage", usage)
                     choices = chunk.get("choices")
                     delta = choices[0].get("delta", {}) if isinstance(choices, list) and choices else {}
+                    if choices and isinstance(choices[0], dict):
+                        finish_reason = choices[0].get("finish_reason", finish_reason)
                     if isinstance(delta.get("content"), str):
                         content += delta["content"]
                     fragments = delta.get("tool_calls", [])
@@ -185,7 +250,8 @@ class GuardedRun:
                                     item["function"][field] += function[field]
                 parsed = {"model": model, "choices": [{"message": {
                     "content": content or None,
-                    "tool_calls": [calls[index] for index in sorted(calls)] or None}}], "usage": usage}
+                    "tool_calls": [calls[index] for index in sorted(calls)] or None},
+                    "finish_reason": finish_reason}], "usage": usage}
                 return {"status": response.status, "response": parsed,
                         "latency_seconds": round(time.monotonic() - started, 3)}
         except error.HTTPError as exc:
@@ -265,6 +331,7 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
         result = run.send({**body, "messages": messages,
                            "max_tokens": 128 if used_tool else body["max_tokens"],
                            "tool_choice": "auto" if used_tool else body["tool_choice"]})
+        run.record_diagnostic(result, _ + 1)
         call = run.tool_call(result)
         if call is None:
             _, _, message = _response(result)
@@ -299,6 +366,7 @@ def _native_scenario(run, *, forced=False, thinking=False, match_id=False):
                 return False, "TOOL_CALL_ID_MISMATCH"
             messages.extend([{"role": "assistant", "content": None, "tool_calls": calls}, *results])
             followup = run.send({**body, "messages": messages, "max_tokens": 128, "tool_choice": "auto"})
+            run.record_diagnostic(followup, 2)
             _, _, followup_message = _response(followup)
             answer = followup_message.get("content")
             return isinstance(answer, str) and EXPECTED in answer, "S3_MATCHED_RESULTS_ACCEPTED"
@@ -320,6 +388,7 @@ def _stream_scenario(run):
             "\nScenario S4: perform one streamed tool round-trip."}],
             "max_tokens": 512, "tools": [TOOL], "tool_choice": "auto", "stream": True}
     result = run.send(body, stream=True)
+    run.record_diagnostic(result, 1)
     call = run.tool_call(result)
     if not run.valid_call(call):
         return False, "STREAMED_TOOL_CALL_MISSING_OR_INVALID"
@@ -327,6 +396,7 @@ def _stream_scenario(run):
                                    _tool_result(call)]
     second = run.send({"model": run.request_model, "messages": messages, "max_tokens": 128,
                        "tools": [TOOL], "tool_choice": "auto"})
+    run.record_diagnostic(second, 2)
     _, _, message = _response(second)
     answer = message.get("content")
     return EXPECTED in answer if isinstance(answer, str) else False, "STREAM_TOOL_ROUND_TRIP_SCORE"
@@ -339,6 +409,7 @@ def _text_tool_scenario(run):
     used_tool = False
     for _ in range(STEP_COUNT + 2):
         result = run.send({"model": run.request_model, "messages": messages, "max_tokens": 256})
+        run.record_diagnostic(result, _ + 1)
         _, _, message = _response(result)
         content = message.get("content")
         match = re.search(r"TOOL_CALL:\s*" + re.escape(TOOL_NAME) + r"\s*(\{[^\n]*\})", content or "")
@@ -396,6 +467,7 @@ def _run(client, audit_path, request_model, max_calls=None, max_tokens=None, exp
     audit_ok = audit.verify()
     return {"status": "STOPPED" if run.stop_reason else "DONE", "stop_reason": run.stop_reason,
             "scenarios": run.scenarios, "calls": run.calls, "total_tokens": run.tokens,
+            "diagnostics": run.diagnostics,
             "caps": {"calls": max_calls, "total_tokens": max_tokens,
                      "wall_seconds": MAX_SECONDS, "call_timeout_seconds": CALL_TIMEOUT},
             "audit_verified": audit_ok, "audit_entries": audit.count}
