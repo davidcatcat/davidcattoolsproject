@@ -19,9 +19,10 @@ import time
 import zipfile
 from datetime import datetime, timezone
 
-REPO = Path('/Users/davidsun/git/davidcataiporject/davidcattoolsproject')
+REPO = None
 IDENTITY = 'davidcatcat/davidcattoolsproject'
 TASK_DIR = 'automation/ai-loop/'
+LOCAL_TASK_DIR = None
 MAX_MODEL_TIMEOUT = 3 * 60 * 60
 DIAGNOSTICS_BRANCH = 'automation/ai-loop-diagnostics'
 
@@ -186,9 +187,17 @@ def parse_claude(raw, head):
     return validate_result(raw.get('structured_output'), 'review', head)
 
 
-def load_task(root, control_sha):
-    metadata = json.loads(git(root, 'show', control_sha + ':' + TASK_DIR + 'task.json'))
-    text = git(root, 'show', control_sha + ':' + TASK_DIR + 'task.md')
+def load_task(root, control_sha=None, task_dir=None):
+    local_task_dir = task_dir or LOCAL_TASK_DIR
+    if local_task_dir is not None:
+        folder = Path(local_task_dir).resolve()
+        metadata = json.loads((folder / 'task.json').read_text(encoding='utf-8'))
+        text = (folder / 'task.md').read_text(encoding='utf-8')
+    elif control_sha:
+        metadata = json.loads(git(root, 'show', control_sha + ':' + TASK_DIR + 'task.json'))
+        text = git(root, 'show', control_sha + ':' + TASK_DIR + 'task.md')
+    else:
+        raise Stop('a local task directory is required')
     required = {'task_id', 'mode', 'pr_number', 'expected_head', 'base_sha', 'branch',
                 'allowed_files', 'related_tests', 'full_tests', 'default_test_mode',
                 'max_repairs', 'timeout_seconds', 'ci_workflow'}
@@ -533,84 +542,8 @@ def save_json(path, value):
 
 
 def publish_decision_checkpoint(root, logs, task, result, original, head, control_sha, round_no):
-    """Publish only an initial report-only decision; never local source/index/logs."""
-    if not task.get('publish_decision_checkpoint') or task['mode'] != 'implement_new_pr' or round_no != 0:
-        return None
-    if result['status'] != 'NEEDS_DECISION':
-        return None
-    report_rel = task['acceptance_report']
-    if head != task['base_sha'] or check_scope(root, task, original, task['branch'], head) != [report_rel]:
-        raise Stop('decision publication requires unchanged base and report-only work')
-    report = root / report_rel
-    if (not report.is_file() or any(p.is_symlink() for p in [report, *report.parents])
-            or report.stat().st_size > 128 * 1024):
-        raise Stop('decision report is missing, oversized or a symlink')
-    raw = report.read_bytes()
-    if len(raw) > 128 * 1024:
-        raise Stop('decision report grew beyond its publication bound')
-    body = raw.decode('utf-8')
-    if '\0' in body or 'NEEDS_DECISION' not in body or len(result['summary'].encode('utf-8')) > 8192:
-        raise Stop('invalid bounded decision report')
-    run_id = logs.name
-    if not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', run_id):
-        raise Stop('invalid checkpoint run identity')
-    path = 'reports/ai-loop/checkpoints/' + task['task_id'] + '-' + run_id + '.md'
-    content = ('# AI-loop decision checkpoint: ' + task['task_id'] + '\n\n'
-        + 'Status: **NEEDS_DECISION / STOPPED**. This is an unverified feasibility report, '
-        + 'not an implemented candidate, review PASS or merge-ready handoff.\n\n'
-        + '- Run: `' + run_id + '`\n- Pinned control: `' + control_sha + '`\n'
-        + '- Canonical Mac branch: `' + task['branch'] + '`\n- Unchanged starting HEAD: `' + head + '`\n'
-        + '- Source report: `' + report_rel + '`\n- Source report SHA-256: `' + hashlib.sha256(raw).hexdigest() + '`\n'
-        + '- Runner tests, containment probes and independent review: NOT RUN.\n'
-        + '- Implementation and feature PR: not published by this checkpoint.\n'
-        + '- No decision approval or automatic resume. Preserve local work for coordinator recovery.\n\n'
-        + '## Codex decision summary (not independently verified)\n\n' + result['summary']
-        + '\n\n## Codex-authored report (not independently verified)\n\n' + body)
-    api = 'repos/' + IDENTITY + '/git/'
-    ref = json.loads(run(['gh', 'api', api + 'ref/heads/automation/ai-loop'], root))
-    if ref['object']['sha'] != control_sha:
-        raise Stop('control branch changed; decision remains local for coordinator recovery')
-    tree = json.loads(run(['gh', 'api', api + 'trees/' + control_sha + '?recursive=1'], root))
-    if tree.get('truncated') is not False or any(e.get('path') == path for e in tree['tree']):
-        raise Stop('cannot prove checkpoint path is new')
-
-    def write_api(method, endpoint, payload, name):
-        request = logs / ('checkpoint-' + name + '-request.json')
-        save_json(request, payload)
-        return json.loads(run(['gh', 'api', '--method', method, endpoint, '--input', str(request)], root))
-
-    tree_reply = write_api('POST', api + 'trees', {'base_tree': control_sha, 'tree': [
-        {'path': path, 'mode': '100644', 'type': 'blob', 'content': content}]}, 'tree')
-    tree_sha = tree_reply['sha']
-    if not re.fullmatch(r'[0-9a-f]{40}', tree_sha):
-        raise Stop('invalid checkpoint tree identity')
-    commit = write_api('POST', api + 'commits', {'message': 'docs: record stopped ' + task['task_id'],
-        'parents': [control_sha], 'tree': tree_sha}, 'commit')['sha']
-    if not re.fullmatch(r'[0-9a-f]{40}', commit):
-        raise Stop('invalid checkpoint commit identity')
-    # Check again before publication. force=False rejects concurrent divergent updates.
-    latest = json.loads(run(['gh', 'api', api + 'ref/heads/automation/ai-loop'], root))
-    if latest['object']['sha'] != control_sha:
-        raise Stop('control branch changed before checkpoint publication')
-    if report.read_bytes() != raw:
-        raise Stop('decision report changed during publication')
-    if check_scope(root, task, original, task['branch'], head) != [report_rel]:
-        raise Stop('decision work changed during publication')
-    ref_reply = write_api('PATCH', api + 'refs/heads/automation/ai-loop', {'sha': commit, 'force': False}, 'ref')
-    if ref_reply.get('object', {}).get('sha') != commit:
-        raise Stop('checkpoint branch update is unconfirmed')
-    published = {'status': 'NEEDS_DECISION', 'control_sha': commit, 'path': path,
-                 'url': 'https://github.com/' + IDENTITY + '/blob/' + commit + '/' + path,
-                 'source_report_sha256': hashlib.sha256(raw).hexdigest()}
-    save_json(logs / 'published-checkpoint.json', published)
-    remote = json.loads(run(['gh', 'api', 'repos/' + IDENTITY + '/contents/' + path + '?ref=' + commit], root))
-    encoded = content.encode('utf-8')
-    expected_blob = hashlib.sha1(b'blob ' + str(len(encoded)).encode('ascii') + b'\0' + encoded).hexdigest()
-    if remote.get('type') != 'file' or remote.get('sha') != expected_blob:
-        raise Stop('checkpoint remote content verification failed; inspect published-checkpoint.json')
-    print('[Checkpoint] NEEDS_DECISION published: ' + published['url'], flush=True)
-    return published
-
+    """Historical publisher retained as data; publication is disabled."""
+    raise Stop('decision checkpoint publication is disabled in standalone ai-loop')
 
 def codex(root, logs, prompt, round_no, timeout):
     output = logs / ('codex-%d.json' % round_no)
@@ -2308,94 +2241,8 @@ def diagnostic_api(root, logs, method, endpoint, payload=None, allow_missing=Fal
 
 
 def publish_diagnostics(root, logs, files=None, batch=None):
-    """Append an immutable report batch to a separate, reports-only branch."""
-    if not shutil.which('gh'):
-        raise Stop('gh is required to publish diagnostics')
-    if files is None:
-        if batch is not None:
-            raise Stop('diagnostic batch requires explicit curated files')
-        files = diagnostic_payload(root, logs)
-    elif (not re.fullmatch(r'round-[0-9]+-(failure|review|disposition|rejection|triage|codex)', batch or '')
-            or not isinstance(files, dict) or not files or 'index.md' not in files
-            or set(files) != {'index.md', (batch or '').rsplit('-', 1)[-1] + '.json'}
-            or not re.fullmatch(r'[0-9]{8}T[0-9]{6}Z-[0-9]+', logs.name)
-            or logs != root / '.ai-loop' / logs.name
-            or any(p.is_symlink() for p in (logs, *logs.parents))
-            or any(not re.fullmatch(r'[A-Za-z0-9._-]+', n) or not isinstance(b, bytes)
-                   or len(b) > 128 * 1024 or b'\0' in b for n, b in files.items())
-            or sum(len(b) for b in files.values()) > 512 * 1024):
-        raise Stop('invalid bounded coordinator report batch')
-    for raw in files.values():
-        raw.decode('utf-8')
-    receipt = logs / ('published-' + batch + '.json' if batch else 'published-diagnostics.json')
-    if receipt.is_symlink():
-        raise Stop('diagnostic receipt is unsafe; preserved')
-    if receipt.exists():
-        previous_receipt = json.loads(receipt.read_bytes())
-        if previous_receipt.get('status') != 'PUBLISHED' or previous_receipt.get('run_id') != logs.name:
-            raise Stop('existing diagnostic receipt is unrelated; preserved')
-    prefix = 'reports/ai-loop/diagnostics/' + logs.name + '/' + (batch + '/' if batch else '')
-    expected = {prefix + name: hashlib.sha1(b'blob ' + str(len(raw)).encode('ascii')
-                + b'\0' + raw).hexdigest() for name, raw in files.items()}
-    api = 'repos/' + IDENTITY + '/git/'
-    ref_path = api + 'ref/heads/' + DIAGNOSTICS_BRANCH
-    read = lambda endpoint, missing=False: diagnostic_api(root, logs, 'GET', endpoint, allow_missing=missing)
-    ref = read(ref_path, True)
-    previous = ref['object']['sha'] if ref else None
-    if previous is not None and not re.fullmatch(r'[0-9a-f]{40}', previous):
-        raise Stop('invalid diagnostic branch identity')
-
-    def tree_rows(sha):
-        value = read(api + 'trees/' + sha + '?recursive=1')
-        if value.get('truncated') is not False:
-            raise Stop('cannot inspect complete diagnostic tree')
-        return {row['path']: (row['sha'], row['mode'], row['type'])
-                for row in value['tree'] if row.get('type') != 'tree'}
-
-    old_rows, base_tree = {}, None
-    if previous:
-        base_tree = read(api + 'commits/' + previous)['tree']['sha']
-        old_rows = tree_rows(base_tree)
-    existing = {path: row for path, row in old_rows.items() if path.startswith(prefix)
-                and '/' not in path[len(prefix):]}
-    desired = {path: (sha, '100644', 'blob') for path, sha in expected.items()}
-    if existing and existing != desired:
-        raise Stop('diagnostic run already differs remotely; never overwrite it')
-    commit = previous
-    if not existing:
-        payload = {'tree': [{'path': prefix + name, 'mode': '100644', 'type': 'blob',
-                            'content': raw.decode('utf-8')} for name, raw in files.items()]}
-        if base_tree:
-            payload['base_tree'] = base_tree
-        tree = diagnostic_api(root, logs, 'POST', api + 'trees', payload)['sha']
-        if tree_rows(tree) != {**old_rows, **desired}:
-            raise Stop('diagnostic tree changed outside the report batch')
-        commit = diagnostic_api(root, logs, 'POST', api + 'commits', {
-            'message': 'docs: publish AI-loop diagnostics ' + logs.name,
-            'tree': tree, 'parents': [previous] if previous else []})['sha']
-        if not re.fullmatch(r'[0-9a-f]{40}', commit):
-            raise Stop('invalid diagnostic commit identity')
-        latest = read(ref_path, True)
-        if (latest['object']['sha'] if latest else None) != previous:
-            raise Stop('diagnostic branch moved; no automatic upload retry')
-        if previous:
-            diagnostic_api(root, logs, 'PATCH', api + 'refs/heads/' + DIAGNOSTICS_BRANCH,
-                           {'sha': commit, 'force': False})
-        else:
-            diagnostic_api(root, logs, 'POST', api + 'refs',
-                           {'ref': 'refs/heads/' + DIAGNOSTICS_BRANCH, 'sha': commit})
-        if read(ref_path)['object']['sha'] != commit:
-            raise Stop('diagnostic publication unconfirmed')
-        verified = tree_rows(read(api + 'commits/' + commit)['tree']['sha'])
-        if verified != {**old_rows, **desired}:
-            raise Stop('published diagnostic content verification failed')
-    url = 'https://github.com/' + IDENTITY + '/blob/' + commit + '/' + prefix + 'index.md'
-    save_json(receipt, {'status': 'PUBLISHED', 'run_id': logs.name,
-        'branch': DIAGNOSTICS_BRANCH, 'commit': commit, 'url': url,
-        'published_sha256': {name: hashlib.sha256(raw).hexdigest() for name, raw in files.items()}})
-    print('[診斷/Git 已發布] ' + url, flush=True)
-    return url
-
+    """Historical publisher retained as data; publication is disabled."""
+    raise Stop('diagnostics branch publication is disabled in standalone ai-loop')
 
 def finish_diagnostics(root, logs, task):
     """Upload problems must not replace the original test/model STOP."""
@@ -2461,9 +2308,9 @@ def read_pr(root, task, expected_head):
 
 
 def prepare_existing_branch(root, task, check_only=False):
-    """Reuse the PR branch; never recreate it from main or overwrite local commits."""
+    """Historical remote branch preparation is unavailable in standalone mode."""
+    raise Stop('remote branch preparation is disabled in standalone ai-loop')
     branch, remote = task['branch'], 'origin/' + task['branch']
-    git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/' + branch + ':refs/remotes/origin/' + branch)
     if git(root, 'rev-parse', remote) != task['expected_head']:
         raise Stop('remote PR branch moved since task preparation')
     current = git(root, 'rev-parse', 'HEAD')
@@ -3694,7 +3541,9 @@ def verify_pr55_security_fail_repair(root, task):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--control-sha', required=True)
+    parser.add_argument('--repo', default=os.environ.get('AI_LOOP_REPO', str(Path.cwd())))
+    parser.add_argument('--task-dir', default=os.environ.get('AI_LOOP_TASK_DIR'))
+    parser.add_argument('--control-sha', help='legacy pinned source identity; never fetched')
     parser.add_argument('--qa-low', metavar='RUN_ID', help='frozen PR55 six-Low privacy-safe final assessment; no merge')
     parser.add_argument('--qa-low-review-diagnose', metavar='RUN_ID', help='privacy-safe review STOP diagnosis; no source change or QA replay')
     parser.add_argument('--maintenance-issue52', action='store_true',
@@ -3755,11 +3604,24 @@ def main():
         parser.error('--qa-security-fail is standalone frozen-risk triage')
     if args.install_launcher and (args.check or args.test_mode or args.resume):
         parser.error('--install-launcher cannot be combined with task/check/test options')
-    root = REPO.resolve()
-    if Path.cwd().resolve() != root or git(root, 'rev-parse', '--show-toplevel') != str(root):
-        raise Stop('must run in the canonical Mac repository')
-    if not re.fullmatch(r'[0-9a-f]{40}', args.control_sha):
+    root = Path(args.repo).expanduser().resolve()
+    global REPO, LOCAL_TASK_DIR
+    REPO = root
+    if git(root, 'rev-parse', '--show-toplevel') != str(root):
+        raise Stop('repo must be a Git checkout root')
+    if args.task_dir is None:
+        raise Stop('--task-dir or AI_LOOP_TASK_DIR is required')
+    task_directory = Path(args.task_dir).expanduser().resolve()
+    if not task_directory.is_dir():
+        raise Stop('task directory does not exist')
+    LOCAL_TASK_DIR = task_directory
+    if args.control_sha and not re.fullmatch(r'[0-9a-f]{40}', args.control_sha):
         raise Stop('invalid control SHA')
+    args.control_sha = args.control_sha or git(root, 'rev-parse', 'HEAD')
+    if git(root, 'branch', '--show-current') != 'main':
+        raise Stop('standalone ai-loop requires the main branch')
+    if git(root, 'status', '--porcelain', '--untracked-files=all'):
+        raise Stop('standalone ai-loop requires a clean working tree')
     remote = git(root, 'remote', 'get-url', 'origin')
     if remote not in ('git@github.com:' + IDENTITY + '.git', 'https://github.com/' + IDENTITY + '.git',
                        'https://github.com/' + IDENTITY, 'ssh://git@github.com/' + IDENTITY + '.git'):
@@ -3929,7 +3791,7 @@ def main():
                 print('[診斷/Codex 結構化狀態] ' + codex_url, flush=True)
             print('No models/tests/candidate changes. Raw source and provider data remain local.', flush=True)
             return
-        task, text = load_task(root, args.control_sha)
+        task, text = load_task(root, args.control_sha, task_directory)
         if args.qa_security_fail:
             if args.qa_security_fail != '20261008T221753Z-44339':
                 raise Stop('unknown post-fix Security FAIL run identity')
@@ -3956,9 +3818,8 @@ def main():
             raise Stop('the Mac system Python required by this task is missing')
         # Git/GitHub authentication fails before spending model tokens.
         run(['gh', 'auth', 'status'], root)
-        git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main')
-        if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
-            raise Stop('main changed since task was prepared; task.md must be refreshed')
+        if git(root, 'rev-parse', 'HEAD') != task['base_sha']:
+            raise Stop('local main HEAD differs from the task base; refresh the local task')
         tracked_paths = git(root, 'diff', '--name-only', 'HEAD').splitlines()
         if (git(root, 'diff', '--cached', '--name-only') or (tracked_paths and
                 (not args.resume or any(p not in task['allowed_files'] for p in tracked_paths)))):
@@ -4390,9 +4251,8 @@ def main():
                 publication_bytes = {p: digest(root / p) for p in task['allowed_files'] if (root / p).exists()}
                 if publication_bytes != committed_bytes:
                     raise Stop('publication hooks changed reviewed/tested bytes; no push or inferred PASS')
-                git(root, 'fetch', '--no-tags', 'origin', 'refs/heads/main:refs/remotes/origin/main')
-                if git(root, 'rev-parse', 'origin/main') != task['base_sha']:
-                    raise Stop('main changed before publication; refresh/recover without discarding work')
+                if git(root, 'rev-parse', 'HEAD') != task['base_sha']:
+                    raise Stop('local main HEAD changed before publication')
                 if new_task and published_head is None:
                     if run(['git', 'ls-remote', '--heads', 'origin', 'refs/heads/' + branch], root):
                         raise Stop('new branch was concurrently published; files preserved')

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Frozen controller non-PASS review: bounded, private-input safe enum triage only."""
+import argparse
 import hashlib
 import json
 from pathlib import Path
@@ -79,10 +80,11 @@ def validate_classification(value, digest, findings):
 
 
 def main():
-    if (len(sys.argv) != 3 or sys.argv[1] != "--qa-low-review-diagnose"
-            or sys.argv[2] != QA_RUN):
-        raise Stop("requires one frozen qa-low-review-diagnose RUN_ID")
-    check_state()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--repo', default=str(ROOT))
+    parser.add_argument('--task-dir', default=None)
+    parser.parse_args()
+    raise Stop("historical frozen QA diagnosis is data only and is disabled")
     path = ROOT / ".ai-loop" / ("qa-low-disposition-" + QA_RUN)
     if any(p.is_symlink() for p in (path, *path.parents)):
         raise Stop("unsafe frozen reviewer evidence directory")

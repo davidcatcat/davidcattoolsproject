@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read-only Mac QA Low assessment. Never approves a merge, PR mutation or provider egress."""
 import hashlib
+import argparse
 import json
 import os
 from pathlib import Path
@@ -13,7 +14,7 @@ from ai_loop_qa_low_inventory import (
     ALLOWED, DIFF_SHA, PR_HEAD, QA_RUN, EvidenceError, frozen_inventory,
 )
 
-ROOT = Path("/Users/davidsun/git/davidcataiporject/davidcattoolsproject")
+ROOT = Path(os.environ.get("AI_LOOP_REPO", Path.cwd())).expanduser().resolve()
 REPO = "davidcatcat/davidcattoolsproject"
 BASE = "8e29024656f873431f6ad83e45015b57bfe381a9"
 BRANCH = "feat/llmtool-c1-test-excerpts-20261009"
@@ -272,11 +273,11 @@ def code_review(state):
     print("[QA Low] Independent controller code review PASS.")
 
 def main():
-    if len(sys.argv) != 3 or sys.argv[1] != "--qa-low":
-        raise Stop("expected exactly --qa-low " + QA_RUN)
-    if sys.argv[2] != QA_RUN:
-        raise Stop("incorrect QA run")
-    check_state()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--repo', default=os.environ.get('AI_LOOP_REPO', str(Path.cwd())))
+    parser.add_argument('--task-dir', default=os.environ.get('AI_LOOP_TASK_DIR'))
+    parser.parse_args()
+    raise Stop("historical frozen QA route is data only and is disabled")
     private = ROOT / ".ai-loop" / QA_RUN
     for name in ("qa-pr55.json", "provenance.json", "task.json",
                  "claude-201.json", "claude-202.json"):

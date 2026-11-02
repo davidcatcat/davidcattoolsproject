@@ -124,7 +124,7 @@ candidate data. If the Mac checkout has unrelated/unpublished work,
 
 **Operator normal next command** (only once latest helper CI succeeds):
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash .git/ai-loop/run.sh --check && bash .git/ai-loop/run.sh
 ```
 A failing check means STOP and report, not manual prompt relay or
@@ -230,7 +230,7 @@ or native scenarios are inherited; no auto-merge.
 Operator command (only after matching control helper CI SUCCESS):
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261008T100821Z-76644 --check && \
 bash scripts/ai-loop.sh --resume 20261008T100821Z-76644
 ```
@@ -315,7 +315,7 @@ structured JSON until it is examined.
 After helper CI success, use the no-model diagnostic action:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --diagnose 20261008T100821Z-76644
 ```
 
@@ -398,7 +398,7 @@ Bounded repair instruction to Codex:
 First Mac action after helper CI turns green (zero-model precheck):
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261008T064055Z-64433 --check
 ```
 
@@ -444,7 +444,7 @@ For this ALREADY stopped run, use the separately authorized diagnostic-only
 mode (no Codex/Claude, no tests, no candidate/index edits):
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --diagnose 20261008T064055Z-64433
 ```
 
@@ -472,7 +472,7 @@ mandatory. See CURRENT task.md for SHA pins.
 No-token preflight (after helper CI is green):
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261008T052643Z-60914 --check
 ```
 
@@ -495,7 +495,7 @@ No historical test/native PASS is inherited.
 No-token preflight, only after helper CI is green:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261008T035727Z-43467 --check
 ```
 
@@ -522,7 +522,7 @@ after changed bytes.
 Current no-token preflight, only after helper CI is green:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261008T033528Z-35739 --check
 ```
 
@@ -548,7 +548,7 @@ failure->Claude classification->Git recommendation->Codex repair loop.
 Current no-token preflight:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261007T183516Z-7365 --check
 ```
 
@@ -628,7 +628,7 @@ Saved PID numbers do not authorize signals. No reboot is required by the contrac
 After fresh inspection/fixture absence, the only new continuation command is:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261007T162747Z-96025
 ```
 
@@ -673,7 +673,7 @@ on the same unpublished branch. See [the assessment](../../reports/ai-loop/check
 and the CURRENT section of [task.md](task.md).
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261007T123142Z-77009
 ```
 
@@ -724,7 +724,7 @@ The launcher is already versioned on this control branch. To install it on David
 existing Mac checkout using the parent launcher he already has, run once:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject
+cd "$REPO"
 bash ai-loop.sh --install-launcher
 ```
 
@@ -739,7 +739,7 @@ installation does not imply it has been merged into main.
 After the coordinator prepares the F3 decision and safe recovery contract, use:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh
 ```
 
@@ -810,7 +810,7 @@ assessment, without automatic retries or lowering thresholds.
 
 ## Environment, authority and evidence
 
-Only `/Users/davidsun/git/davidcataiporject/davidcattoolsproject` is the project root.
+The project root is selected with `--repo` or `AI_LOOP_REPO`.
 No alternate clone/worktree/checkout. Git/GitHub auth, Codex CLI, Claude Code, make,
 Python >=3.9, tools/llmtool/.venv/bin/python and Mac /usr/bin/python3 are prerequisites.
 The script preserves tracked/index cleanliness and unrelated untracked artifacts,
@@ -870,7 +870,7 @@ The explicit recovery contract accepts only run `20261007T075141Z-70725` on the
 unpublished A11b.2.2.1 F3 recovery branch at the pinned base. From the canonical Mac:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261007T075141Z-70725
 ```
 
@@ -899,7 +899,7 @@ The latest explicit recovery replaces the quota run above. Run from the canonica
 Mac repository:
 
 ```sh
-cd /Users/davidsun/git/davidcataiporject/davidcattoolsproject
+cd "$REPO"
 bash scripts/ai-loop.sh --resume 20261007T113658Z-74880
 ```
 

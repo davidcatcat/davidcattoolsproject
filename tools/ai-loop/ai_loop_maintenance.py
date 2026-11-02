@@ -12,7 +12,7 @@ import sys
 import tempfile
 import time
 
-ROOT = Path('/Users/davidsun/git/davidcataiporject/davidcattoolsproject')
+ROOT = Path(os.environ.get('AI_LOOP_REPO', Path.cwd())).expanduser().resolve()
 REPO = 'davidcatcat/davidcattoolsproject'
 TARGET = 'scripts/test_ai_loop.py'
 BRANCH = 'automation/ai-loop'
@@ -301,8 +301,10 @@ def reconcile_local(data, commit, state):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--control-sha', required=True)
-    args = parser.parse_args()
+    parser.add_argument('--repo', default=os.environ.get('AI_LOOP_REPO', str(Path.cwd())))
+    parser.add_argument('--task-dir', default=os.environ.get('AI_LOOP_TASK_DIR'))
+    parser.parse_args()
+    raise Stop('historical maintenance route is data only and is disabled')
     check_root()
     state = Path(git('rev-parse', '--absolute-git-dir')) / 'ai-loop' / 'maintenance-issue52'
     raw = (ROOT / TARGET).read_bytes()

@@ -1,6 +1,6 @@
 # ACTIVE TASK CANDIDATE — Issue #97 A11b.3 D1 offline trusted authorization (STAGING ONLY)
 
-**This is a bounded new source development task, NOT a new permanent controller.** This task remains on a **non-executable staging ref** until the existing ai-loop controller release gate is satisfied. Do not claim Codex/Claude/Mac has executed from publishing task files. Target product repository is the existing canonical Mac checkout only: `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`. Do not create another checkout/worktree.
+**This is a bounded new source development task, NOT a new permanent controller.** This task remains on a **non-executable staging ref** until the existing ai-loop controller release gate is satisfied. Do not claim Codex/Claude/Mac has executed from publishing task files. Target product repository is the existing canonical Mac checkout only: `the explicitly selected --repo checkout`. Do not create another checkout/worktree.
 
 ## Evidence and exact decisions
 
