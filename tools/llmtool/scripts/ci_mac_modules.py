@@ -181,6 +181,7 @@ def _importing_test_ids(target: str, repo_root: Path) -> set[str] | None:
 def select_test_ids(
     changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT,
     rejection_reasons: list[str] | None = None,
+    rejection_details: list[dict[str, str]] | None = None,
 ) -> set[str] | None:
     """Return required plus impacted test IDs, or None when L3 FULL is needed.
 
@@ -195,9 +196,12 @@ def select_test_ids(
         rejected = True
         rejection_count += 1
         if rejection_reasons is not None:
-            entry = f"{path}:{reason}" if path else reason
-            if entry not in rejection_reasons:
-                rejection_reasons.append(entry)
+            if reason not in rejection_reasons:
+                rejection_reasons.append(reason)
+        if rejection_details is not None:
+            detail = {"path": path, "reason": reason}
+            if detail not in rejection_details:
+                rejection_details.append(detail)
 
     try:
         selected = required_test_ids(repo_root)
@@ -327,25 +331,30 @@ def selection_report(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_RO
     normalized = sorted(path.strip().replace("\\", "/").removeprefix("./")
                        for path in changed_paths if path.strip())
     rejection_reasons: list[str] = []
-    ids = select_test_ids(changed_paths, repo_root, rejection_reasons)
+    rejection_details: list[dict[str, str]] = []
+    ids = select_test_ids(changed_paths, repo_root, rejection_reasons, rejection_details)
     if ids is None:
         reasons = rejection_reasons or ["selector_rejected_without_reason"]
         reason = "selector_rejections_require_full"
         return {"changed_paths": normalized, "level": "L3", "test_ids": ["FULL"],
                 "selection_reason": reason, "fallback_reasons": reasons,
+                "fallback_paths": sorted({item["path"] for item in rejection_details if item["path"]}),
+                "fallback_details": rejection_details,
                 "test_id_count": "full-suite", "selector_revision": _selector_revision()}
 
     if not ids:
         return {"changed_paths": normalized, "level": "L0", "test_ids": [],
                 "selection_reason": "monitor or documentation-only change",
-                "fallback_reasons": [], "test_id_count": 0,
+                "fallback_reasons": [], "fallback_paths": [], "fallback_details": [],
+                "test_id_count": 0,
                 "selector_revision": _selector_revision()}
 
     output = sorted(ids)
     has_submission = any(test_id.endswith("test_task_submission_cli") for test_id in output)
     return {"changed_paths": normalized, "level": "L2" if has_submission else "L1",
             "test_ids": output, "selection_reason": "explicit Mac manifest plus shared-map impacted tests",
-            "fallback_reasons": [], "test_id_count": len(output),
+            "fallback_reasons": [], "fallback_paths": [], "fallback_details": [],
+            "test_id_count": len(output),
             "selector_revision": _selector_revision()}
 
 
@@ -363,7 +372,8 @@ def full_fallback_report(changed_paths: list[str], reason: str) -> dict:
                        for path in changed_paths if path.strip())
     return {"changed_paths": normalized, "level": "L3", "test_ids": ["FULL"],
             "selection_reason": "selector_failure_requires_full",
-            "fallback_reasons": [reason], "test_id_count": "full-suite",
+            "fallback_reasons": [reason], "fallback_paths": [], "fallback_details": [],
+            "test_id_count": "full-suite",
             "selector_revision": _selector_revision()}
 
 

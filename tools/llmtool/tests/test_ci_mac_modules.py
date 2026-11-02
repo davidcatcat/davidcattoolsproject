@@ -218,7 +218,9 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertEqual(report["level"], "L3")
                 self.assertEqual(report["test_ids"], ["FULL"])
-                self.assertIn(f"{path}:{reason}", report["fallback_reasons"])
+                self.assertIn(reason, report["fallback_reasons"])
+                self.assertIn(path, report["fallback_paths"])
+                self.assertIn({"path": path, "reason": reason}, report["fallback_details"])
                 self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
     def test_historical_pr_path_fixtures_preserve_selection_and_rejection_reasons(self):
@@ -246,7 +248,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 ],
                 "L3",
                 {"FULL"},
-                "tools/llmtool/llmtool/opencode_direct_developer.py:high_risk_file",
+                ("tools/llmtool/llmtool/opencode_direct_developer.py", "high_risk_file"),
             ),
             (
                 "#787",
@@ -256,7 +258,10 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     "tools/llmtool/tests/test_chat_tui.py",
                 ],
                 "L1",
-                MAC_REQUIRED | {"test_chat_tui", "test_chat_tui_scenarios"},
+                MAC_REQUIRED | {
+                    "test_chat_tui", "test_chat_tui_scenarios",
+                    "test_chat_tui_theme", "test_chat_tui_layout",
+                },
                 None,
             ),
             (
@@ -264,7 +269,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 ["skills/ai-team-delivery/pm-continuation.md"],
                 "L3",
                 {"FULL"},
-                "skills/ai-team-delivery/pm-continuation.md:unsupported_path",
+                ("skills/ai-team-delivery/pm-continuation.md", "unsupported_path"),
             ),
             (
                 "#791",
@@ -274,7 +279,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 ],
                 "L3",
                 {"FULL"},
-                "tools/llmtool/worker-dispatch.json:unmapped_source",
+                ("tools/llmtool/worker-dispatch.json", "unmapped_source"),
             ),
             (
                 "#792",
@@ -284,7 +289,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 ],
                 "L3",
                 None,
-                ".github/workflows/llmtool-linux-ci.yml:workflow_change",
+                (".github/workflows/llmtool-linux-ci.yml", "workflow_change"),
             ),
         )
         for label, paths, level, expected_ids, expected_reason in fixtures:
@@ -294,9 +299,14 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 if expected_ids is not None:
                     self.assertEqual(set(report["test_ids"]), expected_ids)
                 if expected_reason is not None:
-                    self.assertIn(expected_reason, report["fallback_reasons"])
+                    path, reason = expected_reason
+                    self.assertIn(reason, report["fallback_reasons"])
+                    self.assertIn(path, report["fallback_paths"])
+                    self.assertIn({"path": path, "reason": reason}, report["fallback_details"])
                 if level == "L3":
                     self.assertEqual(report["test_ids"], ["FULL"])
+                    self.assertTrue(all(":" not in reason
+                                        for reason in report["fallback_reasons"]))
                     self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
     def test_readme_and_candidate_only_role_config_are_evaluated_in_candidate_tree(self):
@@ -329,7 +339,9 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     root,
                 )
         self.assertEqual(report["level"], "L1")
-        self.assertEqual(report["test_ids"], ["test_role_config"])
+        self.assertEqual(report["test_ids"], [
+            "test_role_config", "test_role_config.RoleConfigTests",
+        ])
         self.assertEqual(report["fallback_reasons"], [])
         self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
