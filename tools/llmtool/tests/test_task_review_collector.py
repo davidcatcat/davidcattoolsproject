@@ -14,6 +14,17 @@ from test_task_review import fixture,FakeHost,NOW
 
 
 class CollectorTests(unittest.TestCase):
+    def test_observation_allows_automation_branch_but_still_rejects_main(self):
+        ready,final,expect,events=fixture();observation=FakeHost(ready,final,expect,events).observation
+        dev,reviewer=expect.agents
+        automation=replace(dev,branch='automation/ai-loop')
+        automation_expect=replace(expect,agents=(automation,reviewer),authored_by=(automation,))
+        automation_observation=replace(observation,agents=(automation,reviewer),authored_by=(automation,))
+        self.assertIsNone(automation_observation.validate(automation_expect,events,NOW,10))
+        with self.assertRaises(LLMToolError) as raised:
+            replace(dev,branch='main')
+        self.assertEqual(raised.exception.lifecycle_code,'TASK_BINDING_MISMATCH')
+
     def test_fixed_git_reads_reject_arbitrary_argv_before_process(self):
         with patch('subprocess.Popen',side_effect=AssertionError('not allowed')):
             for argv in [('fetch','origin'),('reset','--hard'),('config','--get','arbitrary'),
@@ -141,10 +152,10 @@ class NativeGitDataTests(unittest.TestCase):
 
 
 class LocalFactsOriginTests(unittest.TestCase):
-    def _collect(self, origin):
+    def _collect(self, origin, branch='feat/review-origin'):
         with tempfile.TemporaryDirectory(prefix='review-origin-') as folder:
             root=Path(folder)
-            branch='feat/review-origin';head='1'*40
+            head='1'*40
             common=str(root/'.git');gitdir=str(root/'.git/worktrees/task')
             registration=(f'worktree {root}\nbranch refs/heads/{branch}\nlocked\n').encode()
 
@@ -197,5 +208,12 @@ class LocalFactsOriginTests(unittest.TestCase):
         ):
             with self.subTest(origin=origin), self.assertRaises(LLMToolError):
                 self._collect(origin)
+
+    def test_automation_branch_is_allowed_but_main_remains_rejected(self):
+        facts=self._collect('git@github.com:davidcatcat/davidcattoolsproject.git',
+                            branch='automation/ai-loop')
+        self.assertEqual(facts.branch,'automation/ai-loop')
+        with self.assertRaises(LLMToolError):
+            self._collect('git@github.com:davidcatcat/davidcattoolsproject.git',branch='main')
 
 if __name__=='__main__': unittest.main()
