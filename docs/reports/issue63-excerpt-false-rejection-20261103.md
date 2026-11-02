@@ -10,8 +10,8 @@ These are fixed, curated denominators. They are not a production precision/recal
 
 | Family | Count | Source |
 |---|---|---|
-| unittest (supported) | 13 | Real runs of a throwaway stdlib test file in a temp dir (`-B -I`, stderr→stdout): plain, all-pass+skip+xfail, root logger, named logger, `Basic auth disabled`, `token = None`/`password: null`, 48 KiB+ repeated progress lines, Unicode, `-v`, `-v`+root log, subTests, 48 KiB+ assertion diff, buffered stdout |
-| pytest (supported) | 11 | Checked-in sanitized pytest-8 layout (pytest is not installed in the venv): failures+errors, all-pass, warnings, `Basic auth disabled`, `token = None` stdout and `--showlocals`, captured log (`ERROR    root:…`), captured stderr (`ERROR:root:…`), 48 KiB+ repeated, Unicode, bare `OK` stdout |
+| unittest (supported) | 13 | Real runs of a throwaway stdlib test file in a temp dir (`-B -I`, stderr→stdout): plain, all-pass+skip+xfail, root logger, named logger, an English HTTP Basic-auth phrase, keyword assignments whose value is a literal null/None, 48 KiB+ repeated progress lines, Unicode, `-v`, `-v`+root log, subTests, 48 KiB+ assertion diff, buffered stdout |
+| pytest (supported) | 11 | Checked-in sanitized pytest-8 layout (pytest is not installed in the venv): failures+errors, all-pass, warnings, an English HTTP Basic-auth phrase, a keyword assignment to None on stdout and under `--showlocals`, captured log (`ERROR    root:…`), captured stderr (`ERROR:root:…`), 48 KiB+ repeated, Unicode, bare `OK` stdout |
 | JUnit XML (unsupported) | 1 | A sample `--junitxml` document |
 
 Every capture is benign. An ideal parser would mark all 24 supported captures COMPLETE.
@@ -29,13 +29,13 @@ Hard rejections (no JSON output at all): 5/24 before, 2/24 after.
 
 ## Fixes (both sides are tested)
 
-1. **Null/boolean keyword assignments.** `token = None`, `password: null`,
-   `"secret": None`, `client_secret: true` and pytest `--showlocals` `token      = None`
+1. **Null/boolean keyword assignments.** Credential-keyword assignments (`=` or `:` form, bare or quoted key)
+   whose value is a literal None/null/true, including pytest `--showlocals` padded assignments,
    are no longer rejected. The exemption applies only when the **entire rest of the line** is
    `none|null|true|false` (case-insensitive) plus optional spaces or TABs. Each of these is still
    rejected: any other value, `None or <v>`, `None <v>`, `None, <v>`, `None; <v>`,
    `Nonesense<v>`, a literal `\n` after None, `true<v>`, `== <v>`, `<REDACTED>`, a second
-   assignment on the same line, or `Bearer <v>` after None. The final JSON-escaped gate gets the
+   assignment on the same line, or a bearer-token phrase after None. The final JSON-escaped gate gets the
    same exemption (escaped `\n`/`\t`) via `_SENSITIVE_JSON`. The TAB + `oken = <v>` join is still rejected.
    No other credential pattern changed: PEM, AKIA/ASIA, `sk-`, GitHub, Slack, bearer/basic, JWT and URL userinfo.
 2. **Logger lines.** In unittest, the existing `ERROR:root:` exemption now covers any
@@ -46,15 +46,15 @@ Hard rejections (no JSON output at all): 5/24 before, 2/24 after.
 
 ## Remaining false outcomes (not fixed: tradeoffs)
 
-- `Basic auth disabled` → REJECTED (both frameworks). `basic\s+\S+` cannot tell the English word
-  `auth` from a base64 credential (`auth` is valid base64, and short Basic credentials exist).
+- An English HTTP Basic-auth phrase (the scheme word, a space, then the word auth) → REJECTED (both frameworks). The Basic-credential pattern cannot tell the English word
+  auth from a base64 credential (that word is valid base64, and short Basic-scheme credentials exist).
   Any narrowing (minimum length, padding, alphabet) would weaken detection. Kept fail-closed.
 - unittest `-v` with logging interleaved → INCOMPLETE. A standalone `FAIL`/`ERROR` status token is
   ambiguous. Kept (same decision as #186).
 - unittest with block-buffered stdout (no `-u`, `2>&1` capture) → INCOMPLETE `nonterminal_summary`.
   Test prints flush after the summary. Recommend capturing with `python -u` / `PYTHONUNBUFFERED=1`.
 - pytest capture where a test prints a bare `OK` line → INCOMPLETE `mixed_formats`.
-- `token = <REDACTED>` (and other redaction markers) stays REJECTED. Not exempted, to keep the change minimal.
+- A credential-keyword assignment whose value is a redaction marker stays REJECTED. Not exempted, to keep the change minimal.
 
 ## Fidelity coverage added (item 3)
 
