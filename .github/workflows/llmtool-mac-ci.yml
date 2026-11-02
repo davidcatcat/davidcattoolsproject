@@ -34,7 +34,7 @@ jobs:
     name: check (macOS 3.13)
     if: vars.MAC_CI_ENABLED == 'true'
     runs-on: [self-hosted, macOS, X64, local-mac-ci]
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       # Test the PR's own head commit, not GitHub's temporary merge commit
       # (GITHUB_SHA), so a run is exact evidence for the SHA it reports.
