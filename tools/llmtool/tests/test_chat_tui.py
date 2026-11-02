@@ -291,11 +291,47 @@ class WidgetTests(Base):
     def test_multiline_input_is_capped_and_footer_stays_single_line(self):
         ui, _ = self.drive(['one\ntwo\nthree\nfour\nfive\nsix'],
                            size=(Size(rows=36, columns=99),))
-        self.assertLessEqual(ui.input.window.render_info.window_height, 4)
+        self.assertEqual(ui.input.window.render_info.window_height, 4)
         self.assertEqual(ui.status_window.render_info.window_height, 1)
         status = ui.status_text()
         self.assertNotIn('\n', status)
         self.assertLessEqual(get_cwidth(status), 99)
+
+    def test_shift_enter_terminal_sequences_insert_and_enter_sends_full_draft(self):
+        def first_line_inserted(ui):
+            self.assertEqual(ui.input.text, 'first\n')
+            self.assertEqual(self.client.complete.call_count, 0)
+
+        def second_line_inserted(ui):
+            self.assertEqual(ui.input.text, 'first\nsecond\n')
+            self.assertEqual(self.client.complete.call_count, 0)
+
+        # CSI-u and modifyOtherKeys are sent by terminals configured to report
+        # Shift+Enter; drive() feeds both encodings through the real input parser.
+        ui, _ = self.drive(['first\x1b[13;2u', first_line_inserted,
+                            'second\x1b[27;2;13~', second_line_inserted,
+                            'third\r', self.idle])
+        sent = [call.args[0][-1]['content'] for call in self.client.complete.call_args_list]
+        self.assertEqual(sent, ['first\nsecond\nthird'])
+        self.assertEqual(ui.input.text, '')
+
+    def test_up_down_move_within_multiline_draft(self):
+        def inspect_movement(ui):
+            buffer = ui.input.buffer
+            buffer.text = 'first line\nsecond line'
+            buffer.cursor_position = len(buffer.text)
+            with set_app(ui.app):
+                ui.app.key_processor.feed(KeyPress(Keys.Up))
+                ui.app.key_processor.process_keys()
+            self.assertEqual(buffer.document.current_line, 'first line')
+            self.assertEqual(buffer.text, 'first line\nsecond line')
+            with set_app(ui.app):
+                ui.app.key_processor.feed(KeyPress(Keys.Down))
+                ui.app.key_processor.process_keys()
+            self.assertEqual(buffer.document.current_line, 'second line')
+            self.assertEqual(buffer.text, 'first line\nsecond line')
+
+        self.drive([inspect_movement])
 
     def test_status_footer_is_compact_and_single_line_at_80_columns(self):
         self.session.config = {
@@ -972,7 +1008,13 @@ class WidgetTests(Base):
         def help_shown(ui):
             self.assertTrue(ui.show_help)
             self.assertTrue(ui.app.layout.has_focus(ui.input))
+            self.assertIn('換行 = Shift+Enter', ui.help.text)
+            self.assertIn('Shift+Enter', ui.help.text)
+            self.assertIn('Option+Enter', ui.help.text)
+            self.assertIn('terminal must send it', ui.help.text)
             self.assertIn('Ctrl-J', ui.help.text)
+            self.assertIn('macOS Terminal.app sends plain Enter for Shift+Enter', ui.help.text)
+            self.assertIn(r'Send Text \033[13;2u', ui.help.text)
         ui, _ = self.drive(['\t', '\x1bOP', help_shown,
                             '\t', lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.help)),
                             '\x1bOP', lambda ui: self.assertFalse(ui.show_help),
