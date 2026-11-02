@@ -192,6 +192,15 @@ class TaskAdvanceTests(unittest.TestCase):
             {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
              'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
             {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                         'outcome': 'REVIEW_FAIL'}], 'repair_claims': []}), 'RUN_REMOTE_TEST')
+        repaired_record = base_record(
+            review_dispatch_claim=[claim],
+            remote_test_receipts=[remote_receipt(
+                base_record(), source_sha=new_head)])
+        self.assertEqual(task_advance.decide(repaired_record,
+            {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
+             'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
+            {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
                          'outcome': 'REVIEW_FAIL'}], 'repair_claims': []}), 'DISPATCH_REVIEW')
 
     def test_advance_requires_exact_head_remote_test_then_dispatches_idempotently(self):
