@@ -205,7 +205,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 report = ci_mac_modules.selection_report([path], REPO_ROOT)
                 self.assertEqual(report["level"], "L3")
                 self.assertEqual(report["test_ids"], ["FULL"])
-                self.assertIn("selector_change", report["fallback_reasons"][0])
+                self.assertIn("selector_change", report["fallback_reasons"])
 
     def test_full_fallback_reports_actual_high_risk_and_unmapped_paths(self):
         cases = (
@@ -263,6 +263,18 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     "test_chat_tui_theme", "test_chat_tui_layout",
                 },
                 None,
+            ),
+            (
+                "#789",
+                [
+                    "README.md",
+                    "tools/llmtool/llmtool/config.py",
+                    "tools/llmtool/llmtool/role_config.py",
+                    "tools/llmtool/tests/test_role_config.py",
+                ],
+                "L3",
+                {"FULL"},
+                ("README.md", "unsupported_path"),
             ),
             (
                 "#790",
@@ -331,7 +343,6 @@ class MacTestIdSelectionTests(unittest.TestCase):
             with patch.object(ci_mac_modules, "MODULE_LIST", manifest):
                 report = ci_mac_modules.selection_report(
                     [
-                        "README.md",
                         "tools/llmtool/llmtool/config.py",
                         "tools/llmtool/llmtool/role_config.py",
                         "tools/llmtool/tests/test_role_config.py",
@@ -339,9 +350,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                     root,
                 )
         self.assertEqual(report["level"], "L1")
-        self.assertEqual(report["test_ids"], [
-            "test_role_config", "test_role_config.RoleConfigTests",
-        ])
+        self.assertEqual(report["test_ids"], ["test_role_config", "test_role_config.RoleConfigTests"])
         self.assertEqual(report["fallback_reasons"], [])
         self.assertRegex(report["selector_revision"], r"^[0-9a-f]{64}$")
 
@@ -403,7 +412,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 )
             self.assertEqual(report["level"], "L3")
             self.assertEqual(report["test_ids"], ["FULL"])
-            self.assertIn("missing_mapped_test", report["fallback_reasons"][0])
+            self.assertIn("missing_mapped_test", report["fallback_reasons"])
 
     def test_cli_json_and_text_output_are_deterministic(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -412,10 +421,12 @@ class MacTestIdSelectionTests(unittest.TestCase):
             output = io.StringIO()
             with redirect_stdout(output):
                 self.assertEqual(ci_mac_modules.main([
-                    "--changed-paths", str(changed), "--json-report"
+                    "--changed-paths", str(changed), "--source-head", "candidate-sha",
+                    "--json-report"
                 ]), 0)
             report = json.loads(output.getvalue())
             self.assertEqual(report["level"], "L1")
+            self.assertEqual(report["source_head"], "candidate-sha")
             self.assertIn("test_developer_route_agy", report["test_ids"])
             output = io.StringIO()
             with redirect_stdout(output):

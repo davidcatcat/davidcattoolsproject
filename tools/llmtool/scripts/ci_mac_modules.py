@@ -227,8 +227,7 @@ def select_test_ids(
             continue
         if path in MONITOR_PATHS:
             continue
-        if ((path.startswith("tools/llmtool/") and path.endswith(".md"))
-                or path == "README.md"):
+        if path.startswith("tools/llmtool/") and path.endswith(".md"):
             continue
         if (path.startswith(".github/workflows/") or path == "tools/llmtool/ci/mac-modules.txt"
                 or path in {"tools/llmtool/scripts/ci_mac_modules.py",
@@ -327,7 +326,10 @@ def select_test_ids(
     return selected if has_relevant_change else set()
 
 
-def selection_report(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT) -> dict:
+def selection_report(
+    changed_paths: list[str], repo_root: Path = DEFAULT_REPO_ROOT,
+    source_head: str | None = None,
+) -> dict:
     normalized = sorted(path.strip().replace("\\", "/").removeprefix("./")
                        for path in changed_paths if path.strip())
     rejection_reasons: list[str] = []
@@ -340,14 +342,15 @@ def selection_report(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_RO
                 "selection_reason": reason, "fallback_reasons": reasons,
                 "fallback_paths": sorted({item["path"] for item in rejection_details if item["path"]}),
                 "fallback_details": rejection_details,
-                "test_id_count": "full-suite", "selector_revision": _selector_revision()}
+                "test_id_count": "full-suite", "selector_revision": _selector_revision(),
+                "source_head": source_head}
 
     if not ids:
         return {"changed_paths": normalized, "level": "L0", "test_ids": [],
                 "selection_reason": "monitor or documentation-only change",
                 "fallback_reasons": [], "fallback_paths": [], "fallback_details": [],
                 "test_id_count": 0,
-                "selector_revision": _selector_revision()}
+                "selector_revision": _selector_revision(), "source_head": source_head}
 
     output = sorted(ids)
     has_submission = any(test_id.endswith("test_task_submission_cli") for test_id in output)
@@ -355,7 +358,7 @@ def selection_report(changed_paths: list[str], repo_root: Path = DEFAULT_REPO_RO
             "test_ids": output, "selection_reason": "explicit Mac manifest plus shared-map impacted tests",
             "fallback_reasons": [], "fallback_paths": [], "fallback_details": [],
             "test_id_count": len(output),
-            "selector_revision": _selector_revision()}
+            "selector_revision": _selector_revision(), "source_head": source_head}
 
 
 def _selector_revision() -> str:
@@ -367,14 +370,16 @@ def _selector_revision() -> str:
     return hashlib.sha256(source).hexdigest()
 
 
-def full_fallback_report(changed_paths: list[str], reason: str) -> dict:
+def full_fallback_report(
+    changed_paths: list[str], reason: str, source_head: str | None = None,
+) -> dict:
     normalized = sorted(path.strip().replace("\\", "/").removeprefix("./")
                        for path in changed_paths if path.strip())
     return {"changed_paths": normalized, "level": "L3", "test_ids": ["FULL"],
             "selection_reason": "selector_failure_requires_full",
             "fallback_reasons": [reason], "fallback_paths": [], "fallback_details": [],
             "test_id_count": "full-suite",
-            "selector_revision": _selector_revision()}
+            "selector_revision": _selector_revision(), "source_head": source_head}
 
 
 def _read_changed_paths(path: str) -> list[str]:
@@ -384,18 +389,19 @@ def _read_changed_paths(path: str) -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--changed-paths", required=True, help="NUL-separated changed repository paths")
+    parser.add_argument("--source-head", help="source/candidate HEAD evaluated by the selector")
     parser.add_argument("--json-report", action="store_true", help="emit selection metadata as JSON")
     args = parser.parse_args(argv)
     try:
         changed_paths = _read_changed_paths(args.changed_paths)
     except (OSError, UnicodeDecodeError):
         changed_paths = []
-        report = full_fallback_report(changed_paths, "changed_paths_unreadable")
+        report = full_fallback_report(changed_paths, "changed_paths_unreadable", args.source_head)
     else:
         try:
-            report = selection_report(changed_paths)
+            report = selection_report(changed_paths, source_head=args.source_head)
         except Exception:
-            report = full_fallback_report(changed_paths, "selector_internal_error")
+            report = full_fallback_report(changed_paths, "selector_internal_error", args.source_head)
     if args.json_report:
         print(json.dumps(report, sort_keys=True))
     elif report["level"] == "L3":
