@@ -19,6 +19,12 @@ import sys
 from types import MappingProxyType
 
 MAX_TRUST_BYTES = 16 * 1024
+MAX_JSON_NESTING = 32
+_TRUST_CACHE = None
+_HAS_DIR_FD_SUPPORT = (
+    os.name == "posix" and hasattr(os, "O_DIRECTORY") and
+    hasattr(os, "O_NOFOLLOW")
+)
 _SLUG = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}\Z")
 _WORKFLOW = re.compile(r"\.github/workflows/[A-Za-z0-9._-]{1,100}\.ya?ml\Z")
 _RUNNER = re.compile(r"[A-Za-z0-9._-]{1,64}\Z")
@@ -60,6 +66,29 @@ def _pairs(pairs):
 
 def _constant(_value):
     raise ValueError("invalid constant")
+
+
+def _check_json_nesting(text):
+    """Reject excessive structural nesting independently of json's recursion limit."""
+    depth = 0
+    in_string = False
+    escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_JSON_NESTING:
+                raise ValueError("excessive nesting")
+        elif char in "]}":
+            depth = max(0, depth - 1)
 
 
 def _exact(obj, keys):
@@ -186,6 +215,7 @@ def _validate_schema(value):
         _fail("TRUST_TOOL_INVALID")
 
 
+# BEGIN llmtool-trust-reader v1
 def _check_directory(fd, uid, code, private=False):
     info = os.fstat(fd)
     if not stat.S_ISDIR(info.st_mode):
@@ -201,9 +231,15 @@ def _check_directory(fd, uid, code, private=False):
 
 
 def _read_trust_bytes(home, uid):
-    flags_dir = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    flags_file = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_CLOEXEC", 0)
-    fd = os.open("/", flags_dir)
+    if not _HAS_DIR_FD_SUPPORT:
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
+    flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags_file = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) |
+                  getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open("/", flags_dir)
+    except OSError:
+        _fail("TRUST_ANCESTOR_INVALID")
     open_fds = [fd]
     try:
         _check_directory(fd, uid, "TRUST_ANCESTOR_INVALID")
@@ -258,6 +294,10 @@ def _read_trust_bytes(home, uid):
         return raw
     except TrustError:
         raise
+    except (TypeError, NotImplementedError):
+        # POSIX platforms without dir_fd support must fail closed with a
+        # sanitized platform code, even if their function identities differ.
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
     except OSError:
         _fail("TRUST_ANCESTOR_INVALID")
     finally:
@@ -266,6 +306,7 @@ def _read_trust_bytes(home, uid):
                 os.close(item)
             except OSError:
                 pass
+# END llmtool-trust-reader v1
 
 
 def _validate_roots(value, uid, home):
@@ -367,11 +408,17 @@ def _binding(value):
     return hashlib.sha256(payload).hexdigest()
 
 
-def load_trust(home=None):
+def load_trust(home=None, *, _allow_root=False):
     """Load and validate the current owner's trust.json, failing closed."""
+    global _TRUST_CACHE
+    use_process_cache = home is None
+    # Explicit homes are an internal test seam and never affect the process cache.
+    if use_process_cache and _TRUST_CACHE is not None:
+        return _TRUST_CACHE
     if os.name != "posix" or sys.platform.startswith("win"):
         _fail("TRUST_UNSUPPORTED_PLATFORM")
-    if not hasattr(os, "getuid") or os.getuid() != os.geteuid() or os.geteuid() == 0:
+    if (not hasattr(os, "getuid") or not hasattr(os, "geteuid") or
+            os.getuid() != os.geteuid() or (os.geteuid() == 0 and not _allow_root)):
         _fail("TRUST_IDENTITY_INVALID")
     uid = os.geteuid()
     if home is None:
@@ -390,7 +437,9 @@ def load_trust(home=None):
     if raw.startswith(b"\xef\xbb\xbf"):
         _fail("TRUST_MALFORMED")
     try:
-        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_pairs, parse_constant=_constant)
+        text = raw.decode("utf-8")
+        _check_json_nesting(text)
+        value = json.loads(text, object_pairs_hook=_pairs, parse_constant=_constant)
     except (UnicodeError, ValueError, RecursionError):
         _fail("TRUST_MALFORMED")
     _validate_schema(value)
@@ -399,9 +448,12 @@ def load_trust(home=None):
     if not _origins_consistent(value):
         _fail("TRUST_SCHEMA_INVALID")
     digest = hashlib.sha256(raw).hexdigest()
-    return TrustConfig(1, value["canonical_root"], value["workspace_root"], value["tasks_root"],
-                       _readonly(value["repository"]), _readonly(value["ci_trust"]),
-                       _readonly(value["tools"]), digest, _binding(value))
+    result = TrustConfig(1, value["canonical_root"], value["workspace_root"], value["tasks_root"],
+                         _readonly(value["repository"]), _readonly(value["ci_trust"]),
+                         _readonly(value["tools"]), digest, _binding(value))
+    if use_process_cache:
+        _TRUST_CACHE = result
+    return result
 
 
 def _origins_consistent(value):

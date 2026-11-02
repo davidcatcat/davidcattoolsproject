@@ -722,6 +722,34 @@ def add_task_submission_parsers(actions):
     ack.add_argument('event_id', help='32-character event ID from task inbox')
     ack.add_argument('--pm-session', required=True,
                      help='native PM session UUID (or stored pm- session ID)')
+    assign = actions.add_parser(
+        'assign', help='Record one gated Developer assignment bound to an ACTIVE D6 task')
+    assign.add_argument('--worker', required=True, help='worker-dispatch key, e.g. claude-developer')
+    assign.add_argument('--d6', '--d6-task', dest='d6_task', required=True,
+                        help='registered ACTIVE D6 task id; its HEAD becomes source_sha')
+    assign.add_argument('--common-dir',
+                        help='Git common dir holding the D6 registry (default: from cwd)')
+    assign.add_argument('--pm-session', required=True,
+                        help='native PM session UUID (or stored pm- session ID)')
+    assign.add_argument('--task-id', help='optional 32-character llmtool Task ID')
+    assign.add_argument('--owner-ref',
+                        help='Owner assignment comment URL for OWNER_ASSIGNMENT_ONLY workers')
+    assign.add_argument('--expires-in', type=int, default=600,
+                        help='seconds until an unclaimed assignment expires (1-900, default 600)')
+    assignments = actions.add_parser(
+        'assignments', help='List live Developer assignment ids for one worker')
+    assignments.add_argument('--worker', required=True, help='worker-dispatch key')
+    assignments.add_argument('--wait', action='store_true',
+                             help='block until an assignment exists or the timeout passes')
+    assignments.add_argument('--timeout', type=int, default=540,
+                             help='seconds to wait with --wait (0-600, default 540)')
+    claim = actions.add_parser(
+        'claim', help='Claim one Developer assignment once; writes the claim receipt')
+    claim.add_argument('assignment_id', help='32-character assignment ID')
+    claim.add_argument('--worker', required=True, help='worker-dispatch key of the claimer')
+    claim.add_argument('--d6', required=True, help='D6 task id the claimer works in')
+    claim.add_argument('--session', required=True,
+                       help='native session UUID of the claiming Developer session')
     show = actions.add_parser('show', help='Retrieve one durable task and its PM outcome')
     show.add_argument('task_id', help='32-character task ID returned by task submit')
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
@@ -4013,6 +4041,61 @@ def run_task_ack(args, *, store=None, stdout=None):
     store = TaskStore() if store is None else store
     key = active_pm_inbox.pm_session_key(args.pm_session)
     _print(active_pm_inbox.ack(store, args.event_id, key), stdout=stdout)
+    return 0
+
+
+def _assignment_refusal(exc, stdout):
+    from .developer_assignment_inbox import refusal_code
+    code = refusal_code(exc) or 'ASSIGNMENT_REFUSED'
+    if type(code) is not str or re.fullmatch(r'[A-Z0-9_]{1,64}', code) is None:
+        code = 'ASSIGNMENT_REFUSED'
+    _print({'code': code}, stdout=stdout)
+    return 1
+
+
+def run_task_assign(args, *, store=None, stdout=None):
+    """#367: write one ASSIGNED event bound to an ACTIVE D6 after the dispatch gate."""
+    from . import developer_assignment_inbox
+    store = TaskStore() if store is None else store
+    try:
+        key = active_pm_inbox.pm_session_key(args.pm_session)
+        common_dir = (args.common_dir if args.common_dir is not None
+                      else developer_assignment_inbox.discover_common_dir())
+        result = developer_assignment_inbox.assign(
+            store, worker=args.worker, d6_task_id=args.d6_task, common_dir=common_dir,
+            pm_session_key=key, task_id=args.task_id, owner_assignment_ref=args.owner_ref,
+            expires_in=args.expires_in)
+    except LLMToolError as exc:
+        return _assignment_refusal(exc, stdout)
+    _print(result, stdout=stdout)
+    return 0
+
+
+def run_task_assignments(args, *, store=None, stdout=None, sleep=None):
+    """#367: list this worker's live assignment ids, optionally a bounded wait."""
+    from . import developer_assignment_inbox
+    store = TaskStore() if store is None else store
+    kwargs = {} if sleep is None else {'sleep': sleep}
+    try:
+        result = developer_assignment_inbox.wait_assignments(
+            store, args.worker, wait=args.wait, timeout=args.timeout, **kwargs)
+    except LLMToolError as exc:
+        return _assignment_refusal(exc, stdout)
+    _print(result, stdout=stdout)
+    return 0
+
+
+def run_task_claim(args, *, store=None, stdout=None):
+    """#367: claim an assignment once; a repeat by the same session returns its receipt."""
+    from . import developer_assignment_inbox
+    store = TaskStore() if store is None else store
+    try:
+        result = developer_assignment_inbox.claim(
+            store, args.assignment_id, worker=args.worker, d6_task_id=args.d6,
+            session_id=args.session)
+    except LLMToolError as exc:
+        return _assignment_refusal(exc, stdout)
+    _print(result, stdout=stdout)
     return 0
 
 
