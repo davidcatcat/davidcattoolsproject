@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -17,23 +18,43 @@ import sys
 from .trust import TrustError, load_trust, verify_repository
 
 
-_SLUG = "davidcatcat/davidcattoolsproject"
-_ORIGINS = (f"git@github.com:{_SLUG}.git", f"https://github.com/{_SLUG}.git")
-_WORKFLOWS = (
-    {"path": ".github/workflows/llmtool-mac-ci.yml", "name": "llmtool Mac CI",
-     "runner_names": ["davidproject-self-action", "davidproject-self-action-2"],
-     "runner_labels": None, "code_check": "check (macOS 3.13)", "docs_check": None},
-    {"path": ".github/workflows/llmtool-linux-ci.yml", "name": "llmtool Linux CI",
-     "runner_names": ["ec2-self-runner", "ec2-self-runner-2", "ec2-self-runner-3"],
-     "runner_labels": None, "code_check": "check (Linux 3.14)", "docs_check": "check (docs)"},
-)
-_APPROVAL_REFS = {
-    "reviewer_host_policy_issue": 120,
-    "worker_dispatch_issue": 289,
-    "worker_dispatch_evidence_pr": 283,
-    "retain_release_issues": [289, 352],
-}
-_NOT_RUN_CHECKS = ["Linux Python 3.9", "Windows CI"]
+def _legacy_sources():
+    """Resolve expected values from the pre-trust implementation constants."""
+    from . import config, review_bundle, review_origins, task_completion
+
+    lifecycle_path = Path(__file__).resolve().parents[1] / "scripts" / "d6_worktree_lifecycle.py"
+    spec = importlib.util.spec_from_file_location("_llmtool_d6_legacy", lifecycle_path)
+    if spec is None or spec.loader is None:
+        raise TrustError("TRUST_LEGACY_UNAVAILABLE")
+    try:
+        lifecycle = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lifecycle)
+        repo = config.repository_config(home=str(_owner_home()))
+        retain_match = re.search(r"\(\?:([0-9|]+)\)", lifecycle.OWNER_APPROVAL_RE.pattern)
+        retain_issues = tuple(int(value) for value in retain_match.group(1).split("|")) if retain_match else ()
+        if len(retain_issues) != 2:
+            raise ValueError
+    except Exception:
+        raise TrustError("TRUST_LEGACY_UNAVAILABLE")
+    return {
+        "canonical_root": str(review_bundle.PROTECTED[0]),
+        "workspace_root": str(review_bundle.PROTECTED[1]),
+        "tasks_root": str(lifecycle.TASKS_ROOT),
+        "slug": repo["slug"],
+        "allowed_origins": tuple(sorted(review_origins.REVIEW_ORIGINS)),
+        "worker_dispatch_issue": repo["dispatch_issue"],
+        "worker_dispatch_evidence_pr": repo["dispatch_evidence_pr"],
+        "retain_release_issues": retain_issues,
+        "workflows": (
+            (task_completion._CI_WORKFLOW_PATH, task_completion._CI_WORKFLOW_NAME,
+             tuple(sorted(task_completion._CI_RUNNER_NAMES)), (), task_completion._MAC_CHECK, None),
+            (task_completion._LINUX_CI_WORKFLOW_PATH, task_completion._LINUX_CI_WORKFLOW_NAME,
+             tuple(sorted(task_completion._LINUX_CI_RUNNER_NAMES)), (), task_completion._LINUX_CHECK,
+             task_completion._DOCS_CHECK),
+        ),
+        "not_run_checks": tuple(task_completion._NOT_RUN_CHECKS),
+        "reviewer_host_policy_issue": 120,
+    }
 
 
 def add_trust_parser(sub):
@@ -161,6 +182,32 @@ def _atomic_create(path, raw):
             pass
 
 
+def _atomic_replace(path, raw):
+    """Replace one file with complete owner-only bytes, or leave it untouched."""
+    temporary = path.parent / (".trust.json." + secrets.token_hex(12))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    try:
+        descriptor = os.open(temporary, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    except OSError:
+        raise TrustError("TRUST_INIT_WRITE_FAILED") from None
+    finally:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+
+
 def _import_config_refs(home):
     """Import only the two repository dispatch references from config.yaml."""
     config_path = home / ".config" / "llmtool" / "config.yaml"
@@ -188,32 +235,66 @@ def _binding_sha256(document):
 
 def _affected_active_records(home, new_binding):
     """Count active D6 registrations whose trust binding would rotate."""
-    # D6 keeps its registry beside trust.json. Accept the established registry
-    # filename and fail closed if present data is malformed.
-    registry = home / ".config" / "llmtool" / "d6-registry.json"
     try:
-        info = registry.lstat()
-        if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
-                stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or
-                not 1 <= info.st_size <= 1024 * 1024):
-            raise TrustError("TRUST_INIT_INPUT_INVALID")
-        raw = registry.read_bytes()
+        from . import review_bundle
+        root = Path(review_bundle.PROTECTED[0])
+        common = Path(_git("-C", str(root), "rev-parse", "--path-format=absolute",
+                           "--git-common-dir", cwd=root))
+        registry_dir = common / "llmtool-worktrees"
+    except (OSError, TrustError):
+        raise TrustError("TRUST_REGISTRY_UNAVAILABLE") from None
+    try:
+        directory_info = registry_dir.lstat()
     except FileNotFoundError:
         return 0
     except OSError:
-        raise TrustError("TRUST_INIT_INPUT_INVALID") from None
+        raise TrustError("TRUST_REGISTRY_UNAVAILABLE") from None
     try:
-        value = json.loads(raw.decode("utf-8"))
-        records = value.get("records", value) if type(value) is dict else value
-        if type(records) is not list:
-            raise ValueError
-        return sum(1 for record in records
-                   if type(record) is dict and record.get("state") == "ACTIVE" and
-                   record.get("trust_binding_sha256") != new_binding)
+        if (not stat.S_ISDIR(directory_info.st_mode) or directory_info.st_uid != os.geteuid() or
+                stat.S_IMODE(directory_info.st_mode) != 0o700):
+            raise TrustError("TRUST_REGISTRY_INVALID")
+        paths = tuple(registry_dir.glob("*.json"))
     except TrustError:
         raise
-    except (ValueError, UnicodeError, json.JSONDecodeError):
-        raise TrustError("TRUST_INIT_INPUT_INVALID") from None
+    except OSError:
+        raise TrustError("TRUST_REGISTRY_UNAVAILABLE") from None
+    count = 0
+    for registry in paths:
+        descriptor = None
+        try:
+            descriptor = os.open(registry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK |
+                                 getattr(os, "O_CLOEXEC", 0))
+            info = os.fstat(descriptor)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or
+                    stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1 or
+                    not 1 <= info.st_size <= 64 * 1024):
+                raise TrustError("TRUST_REGISTRY_INVALID")
+            with os.fdopen(descriptor, "rb", closefd=True) as stream:
+                descriptor = None
+                raw = stream.read(64 * 1024 + 1)
+                after = os.fstat(stream.fileno())
+            current = registry.lstat()
+            identity = lambda item: (item.st_dev, item.st_ino, item.st_size,
+                                     item.st_mtime_ns, item.st_ctime_ns)
+            if (len(raw) != info.st_size or len(raw) > 64 * 1024 or
+                    identity(info) != identity(after) or identity(info) != identity(current)):
+                raise TrustError("TRUST_REGISTRY_INVALID")
+            record = json.loads(raw.decode("utf-8"))
+            if type(record) is not dict or type(record.get("state")) is not str:
+                raise ValueError
+        except TrustError:
+            raise
+        except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+            raise TrustError("TRUST_REGISTRY_INVALID") from None
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        if (record["state"] in {"ACTIVE", "REVIEW_PENDING", "REPAIR"} and
+                (record.get("trust_sha256") is None or
+                 record.get("trust_binding_sha256") is None or
+                 record.get("trust_binding_sha256") != new_binding)):
+            count += 1
+    return count
 
 
 def _init(args):
@@ -246,21 +327,29 @@ def _init(args):
     if not replacing and (target.exists() or target.is_symlink()):
         raise TrustError("TRUST_EXISTS")
     inferred = _checkout_values(home)
-    if args.input:
-        draft = _read_draft(args.input)
-    elif sys.stdin.isatty():
-        raise TrustError("TRUST_INIT_INPUT_REQUIRED")
-    else:
-        raise TrustError("TRUST_INIT_INPUT_REQUIRED")
+    if not args.input:
+        raise TrustError("TRUST_INIT_INPUT_INVALID")
+    draft = _read_draft(args.input)
+
+    legacy = _legacy_sources()
+    workflows = [{"path": item[0], "name": item[1], "runner_names": list(item[2]),
+                  "runner_labels": None, "code_check": item[4], "docs_check": item[5]}
+                 for item in legacy["workflows"]]
+    approval_refs = {
+        "reviewer_host_policy_issue": legacy["reviewer_host_policy_issue"],
+        "worker_dispatch_issue": legacy["worker_dispatch_issue"],
+        "worker_dispatch_evidence_pr": legacy["worker_dispatch_evidence_pr"],
+        "retain_release_issues": list(legacy["retain_release_issues"]),
+    }
 
     document = {
         "schema_version": 1,
         "canonical_root": inferred["canonical_root"],
         "workspace_root": inferred["workspace_root"],
         "tasks_root": inferred["tasks_root"],
-        "repository": {**inferred["repository"], "approval_refs": _APPROVAL_REFS},
+        "repository": {**inferred["repository"], "approval_refs": approval_refs},
         "ci_trust": {"mode": "self-hosted", "github_actions_app_id": 15368,
-                     "workflows": list(_WORKFLOWS), "not_run_checks": _NOT_RUN_CHECKS},
+                     "workflows": workflows, "not_run_checks": list(legacy["not_run_checks"])},
         "tools": {"git": None, "gh_path": None, "lsof": None},
     }
     # A draft may supply unresolved fields, but cannot override checkout-derived identity.
@@ -298,28 +387,7 @@ def _init(args):
     raw = (json.dumps(document, sort_keys=True, indent=2) + "\n").encode("utf-8")
     affected = _affected_active_records(home, _binding_sha256(document)) if replacing else 0
     if replacing:
-        # Install via same-directory atomic replacement after the old digest gate.
-        temporary = target.parent / (".trust.json." + secrets.token_hex(12))
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
-        try:
-            descriptor = os.open(temporary, flags, 0o600)
-            with os.fdopen(descriptor, "wb") as stream:
-                os.fchmod(stream.fileno(), 0o600)
-                stream.write(raw)
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temporary, target)
-            directory_fd = os.open(target.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-            try:
-                os.fsync(directory_fd)
-            finally:
-                os.close(directory_fd)
-        except OSError:
-            try:
-                temporary.unlink()
-            except OSError:
-                pass
-            raise TrustError("TRUST_INIT_WRITE_FAILED") from None
+        _atomic_replace(target, raw)
     else:
         _atomic_create(target, raw)
     try:
@@ -327,21 +395,10 @@ def _init(args):
         verify_repository(loaded)
     except TrustError:
         if replacing and previous_raw is not None:
-            restore = target.parent / (".trust.json." + secrets.token_hex(12))
             try:
-                descriptor = os.open(restore, os.O_WRONLY | os.O_CREAT | os.O_EXCL |
-                                     getattr(os, "O_NOFOLLOW", 0), 0o600)
-                with os.fdopen(descriptor, "wb") as stream:
-                    os.fchmod(stream.fileno(), 0o600)
-                    stream.write(previous_raw)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.replace(restore, target)
-            except OSError:
-                try:
-                    restore.unlink()
-                except OSError:
-                    pass
+                _atomic_replace(target, previous_raw)
+            except TrustError:
+                raise TrustError("TRUST_INIT_ROLLBACK_FAILED") from None
         else:
             try:
                 target.unlink()
@@ -390,8 +447,11 @@ def _legacy_fields(trust):
     refs = repository["approval_refs"]
     fields = {
         "tasks_root": trust.tasks_root,
+        "workspace_root": (trust.workspace_root
+                           if Path(trust.tasks_root).parent == Path(trust.workspace_root)
+                           else None),
         "canonical_root": trust.canonical_root,
-        "allowed_origins": tuple(repository["allowed_origins"]),
+        "allowed_origins": tuple(sorted(repository["allowed_origins"])),
         "slug": repository["slug"],
         "reviewer_host_policy_issue": refs["reviewer_host_policy_issue"],
         "worker_dispatch_issue": refs["worker_dispatch_issue"],
@@ -402,20 +462,8 @@ def _legacy_fields(trust):
                            for w in ci["workflows"]),
         "not_run_checks": tuple(ci["not_run_checks"]),
     }
-    workspace_ok = (Path(trust.tasks_root).parent == Path(trust.workspace_root))
-    fields["workspace_root"] = workspace_ok
-    expected = {
-        "tasks_root": str(_owner_home() / ".local/share/llmtool-dev-workspaces" /
-                           Path(trust.canonical_root).name / "tasks"),
-        "canonical_root": str(Path(_git("rev-parse", "--show-toplevel")).resolve()),
-        "allowed_origins": _ORIGINS,
-        "slug": _SLUG,
-        **{**_APPROVAL_REFS, "retain_release_issues": tuple(_APPROVAL_REFS["retain_release_issues"])},
-        "workflows": tuple((w["path"], w["name"], tuple(w["runner_names"]), (),
-                             w["code_check"], w["docs_check"]) for w in _WORKFLOWS),
-        "not_run_checks": tuple(_NOT_RUN_CHECKS),
-    }
-    expected["workspace_root"] = True
+    legacy = _legacy_sources()
+    expected = {key: legacy[key] for key in fields}
     return fields, expected
 
 
