@@ -23,7 +23,7 @@ MAX_REPAIR_PER_ASSIGNMENT = 1
 MAX_RECOVERY_PER_ASSIGNMENT = 1
 WORKERS = frozenset((
     'codex-developer', 'claude-developer', 'opencode-developer', 'agy',
-    'company-gw', 'claude-reviewer', 'codex-reviewer',
+    'company-gw', 'company-gw-agent', 'claude-reviewer', 'codex-reviewer',
 ))
 DISPATCH_STATES = frozenset(('ALLOWED', 'PAUSED', 'OWNER_ASSIGNMENT_ONLY'))
 AUDIT_ACTIONS = frozenset((
@@ -138,13 +138,20 @@ def _parse_policy(raw):
                     {'dispatch', 'decided_by', 'decided_at', 'reason', 'evidence',
                      'owner_assignments'},
                 ) or
-                worker.get('decided_by') != 'Owner' or
+                (worker.get('decided_by') != 'Owner' and not (
+                    key == 'company-gw-agent' and worker.get('decided_by') == 'PM' and
+                    worker.get('dispatch') == 'PAUSED' and
+                    worker.get('evidence') ==
+                    'https://github.com/davidcatcat/davidcattoolsproject/issues/120')) or
                 worker.get('dispatch') not in DISPATCH_STATES or
                 type(worker.get('decided_at')) is not str or
                 type(worker.get('reason')) is not str or
                 not worker['reason'] or len(worker['reason']) > 512 or
                 type(worker.get('evidence')) is not str or
-                _POLICY_EVIDENCE_REF.fullmatch(worker['evidence']) is None or
+                (_POLICY_EVIDENCE_REF.fullmatch(worker['evidence']) is None and not (
+                    key == 'company-gw-agent' and worker.get('dispatch') == 'PAUSED' and
+                    worker['evidence'] ==
+                    'https://github.com/davidcatcat/davidcattoolsproject/issues/120')) or
                 type(assignments) is not list or
                 any(type(assignment) is not dict or
                     set(assignment) != {'task_id', 'owner_assignment_ref'} or
@@ -156,6 +163,11 @@ def _parse_policy(raw):
                 len({(assignment['task_id'], assignment['owner_assignment_ref'])
                      for assignment in assignments}) != len(assignments)):
             raise ValueError('invalid worker policy')
+        if (key == 'company-gw-agent' and
+                (worker.get('dispatch') != 'PAUSED' or worker.get('decided_by') != 'PM' or
+                 worker.get('evidence') !=
+                 'https://github.com/davidcatcat/davidcattoolsproject/issues/120')):
+            raise ValueError('gw-agent requires the pending Owner decision')
         if date.fromisoformat(worker['decided_at']).isoformat() != worker['decided_at']:
             raise ValueError('invalid decision date')
     return value
@@ -463,6 +475,12 @@ def task_store_attempts(current, changes):
         attempts.append(('claude-reviewer', action))
 
     if type(old_developer) is not dict:
+        # Gw Agent's pending record is a durable one-shot claim, not provider
+        # execution. Let it be recorded while the Owner switch is PAUSED; the
+        # transition to DISPATCHING and the adapter launch remain gated.
+        if (new_developer.get('provider_profile') == 'gw-agent' and
+                new_developer.get('state') == 'DEVELOPER_PENDING'):
+            return []
         worker = worker_key_for(new_developer.get('provider_profile'))
         attempts.append((worker or 'unknown', 'DISPATCH'))
         return attempts
@@ -513,6 +531,8 @@ def task_store_attempt(current, changes):
 def worker_key_for(provider_profile):
     if provider_profile == 'company-gw':
         return 'company-gw'
+    if provider_profile == 'gw-agent':
+        return 'company-gw-agent'
     if provider_profile == 'opencode':
         return 'opencode-developer'
     if provider_profile == 'claude-reviewer':

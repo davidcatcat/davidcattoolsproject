@@ -7,6 +7,15 @@
       "default_effort": "medium",
       "denied_dirs": [".gemini"],
       "state_dirs": {"policy": "private-temp-only"}
+    },
+    "gw-agent": {
+      "package_path": "/usr/local/lib/api-agent-gateway",
+      "default_model": "gw-agent-default",
+      "default_effort": "low",
+      "profile_name": "llmtool-direct",
+      "profile": {"auth_env": "GW_AGENT_API_KEY", "model": "gw-agent-default"},
+      "authorization_ref": "Owner decision pending (#120)",
+      "allowed_data_classes": ["PUBLIC", "INTERNAL"]
     }
   }
 }

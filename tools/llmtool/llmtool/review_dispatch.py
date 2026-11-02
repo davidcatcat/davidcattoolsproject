@@ -123,7 +123,7 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
     developer = task.get('developer')
     family = developer.get('provider_profile') if type(developer) is dict else None
-    if family in ('codex', 'opencode', 'company-gw', 'agy'):
+    if family in ('codex', 'opencode', 'company-gw', 'agy', 'gw-agent'):
         reviewer_key = 'claude-reviewer'
     elif family == 'claude':
         reviewer_key = 'codex-reviewer'

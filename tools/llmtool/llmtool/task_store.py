@@ -192,12 +192,20 @@ _DEVELOPER_EXECUTOR_TASK_FIELDS = frozenset(('executor_task_id',))
 _DEVELOPER_INVALID_FINAL_FIELDS = frozenset(('result_status', 'final_answer'))
 _CLAUDE_RESULT_FIELDS = frozenset(('claude_result',))
 _DEVELOPER_CALLBACK_FIELDS = _DEVELOPER_FIELDS | frozenset(('direct_result_callback',))
+_DEVELOPER_GW_AUDIT_FIELDS = frozenset((
+    'audit_sha256', 'audit_copy_path_sha256', 'changed_files'))
 _DEVELOPER_SHAPES = (
     _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
     _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
     _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
     *(_shape | frozenset(('account',)) for _shape in (
+        _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
+        _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+        _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
+        _DEVELOPER_CALLBACK_FIELDS | frozenset(('owner_assignment_ref',)),
+    )),
+    *(_shape | _DEVELOPER_GW_AUDIT_FIELDS for _shape in (
         _LEGACY_DEVELOPER_FIELDS, _DEVELOPER_FIELDS, _DEVELOPER_CALLBACK_FIELDS,
         _LEGACY_DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
         _DEVELOPER_FIELDS | frozenset(('owner_assignment_ref',)),
@@ -1185,7 +1193,7 @@ def _validate(record):
         if assignment is not None:
             if (type(assignment) is not dict or set(assignment) != _PM_ASSIGNMENT_FIELDS or
                     type(assignment['schema_version']) is not int or assignment['schema_version'] != 1 or
-                    assignment['route'] not in ('company-gw', 'codex', 'opencode', 'agy', 'none') or
+                    assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
                     len(assignment['goal'].encode('utf-8')) > 512 or
@@ -1233,7 +1241,7 @@ def _validate(record):
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
                     type(assignment) is not dict or
-                    assignment.get('route') not in ('company-gw', 'opencode', 'codex', 'agy') or
+                    assignment.get('route') not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {
@@ -1295,9 +1303,9 @@ def _validate(record):
                                                'DEVELOPER_RESPONDED',
                                                'DEVELOPER_UNAVAILABLE', 'DEVELOPER_OUTCOME_UNKNOWN',
                                                'DEVELOPER_OUTPUT_REJECTED', 'BLOCKED') or
-                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude', 'agy') or
+                    developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude', 'agy', 'gw-agent') or
                     developer['provider_type'] not in (
-                        None, 'openai-compatible', 'codex-cli', 'opencode-cli', 'agy-cli') or
+                        None, 'openai-compatible', 'codex-cli', 'opencode-cli', 'agy-cli', 'gw-agent-cli') or
                     developer['backend_session_semantics'] not in (
                         'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
@@ -1325,6 +1333,22 @@ def _validate(record):
                         type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
                     _fail()
             if developer['provider_profile'] == 'agy' and 'owner_assignment_ref' not in developer:
+                _fail()
+            if 'audit_sha256' in developer and (
+                    developer['provider_profile'] != 'gw-agent' or
+                    type(developer.get('audit_sha256')) is not str or
+                    re.fullmatch(r'[0-9a-f]{64}', developer['audit_sha256']) is None or
+                    type(developer.get('audit_copy_path_sha256')) is not str or
+                    re.fullmatch(r'[0-9a-f]{64}', developer['audit_copy_path_sha256']) is None):
+                _fail()
+            if 'changed_files' in developer and (
+                    developer['provider_profile'] != 'gw-agent' or
+                    type(developer['changed_files']) is not list or
+                    len(developer['changed_files']) > 200 or
+                    any(type(path) is not str or not path or len(path) > 512 or
+                        path.startswith('/') or '\\' in path or
+                        any(part in ('', '.', '..') for part in path.split('/'))
+                        for path in developer['changed_files'])):
                 _fail()
             if 'normalizations' in developer:
                 tokens = developer['normalizations']
@@ -1379,6 +1403,11 @@ def _validate(record):
                 _fail()
             if (developer['provider_profile'] == 'agy' and
                     (developer['provider_type'] not in (None, 'agy-cli') or
+                     developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
+                     developer['max_tokens'] is not None)):
+                _fail()
+            if (developer['provider_profile'] == 'gw-agent' and
+                    (developer['provider_type'] not in (None, 'gw-agent-cli') or
                      developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
                      developer['max_tokens'] is not None)):
                 _fail()
@@ -1574,10 +1603,11 @@ def _validate(record):
                 'codex': 'codex-cli',
                 'opencode': 'opencode-cli',
                 'agy': 'agy-cli',
+                'gw-agent': 'gw-agent-cli',
             }.get(developer['provider_profile'])
             token_cap_required = not (
-                developer['provider_profile'] in ('codex', 'agy') and
-                developer['provider_type'] in ('codex-cli', 'agy-cli'))
+                developer['provider_profile'] in ('codex', 'agy', 'gw-agent') and
+                developer['provider_type'] in ('codex-cli', 'agy-cli', 'gw-agent-cli'))
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):

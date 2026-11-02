@@ -1225,6 +1225,9 @@ DISPATCH = {   # the Owner's switches as of 2026-10-23
     "company-gw": {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22"},
 }
 POLICY_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/289"
+GW_AGENT_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/120"
+GW_AGENT_ENTRY = {"dispatch": "PAUSED", "decided_by": "PM", "decided_at": "2026-11-03",
+                  "reason": "test", "evidence": GW_AGENT_EVIDENCE}
 
 
 def policy(workers):
@@ -1233,6 +1236,7 @@ def policy(workers):
     entry = {"dispatch": "ALLOWED", "decided_by": "Owner", "decided_at": "2026-10-22",
              "reason": "test", "evidence": POLICY_EVIDENCE}
     full = {key: dict(entry) for key in sorted(mon.DISPATCH_WORKERS)}
+    full["company-gw-agent"] = dict(GW_AGENT_ENTRY)   # pending the Owner decision (#120)
     for key, item in workers.items():
         if item is None:
             full.pop(key, None)
@@ -1317,6 +1321,31 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
             "unhashable switch": {"agy": {"dispatch": []}},
             "object switch": {"agy": {"dispatch": {}}},
             "date not a string": {"agy": {"decided_at": 20261022}},
+            # company-gw-agent: only PAUSED + PM + exactly issues/120 (#120 WP3b)
+            "gw-agent missing": {"company-gw-agent": None},
+            "gw-agent allowed": {"company-gw-agent": {"dispatch": "ALLOWED"}},
+            "gw-agent assignment only": {"company-gw-agent": {"dispatch": "OWNER_ASSIGNMENT_ONLY"}},
+            "gw-agent by Owner": {"company-gw-agent": {"decided_by": "Owner"}},
+            "gw-agent by Owner #289": {"company-gw-agent": {"decided_by": "Owner",
+                                                            "evidence": POLICY_EVIDENCE}},
+            "gw-agent allowed by Owner #289": {"company-gw-agent": {
+                "dispatch": "ALLOWED", "decided_by": "Owner", "evidence": POLICY_EVIDENCE}},
+            "gw-agent PM #289": {"company-gw-agent": {"evidence": POLICY_EVIDENCE}},
+            "gw-agent comment on #120": {"company-gw-agent": {
+                "evidence": GW_AGENT_EVIDENCE + "#issuecomment-1"}},
+            "gw-agent other issue": {"company-gw-agent": {"evidence": GW_AGENT_EVIDENCE + "0"}},
+            "gw-agent decided_by pm": {"company-gw-agent": {"decided_by": "pm"}},
+            "gw-agent empty reason": {"company-gw-agent": {"reason": ""}},
+            "gw-agent bad date": {"company-gw-agent": {"decided_at": "2026-11-31"}},
+            "gw-agent extra field": {"company-gw-agent": {"note": "x"}},
+            "gw-agent assignment ok": {"company-gw-agent": {"owner_assignments": [good]}},
+            "gw-agent assignment bad ref": {"company-gw-agent": {"owner_assignments": [
+                dict(good, owner_assignment_ref=GW_AGENT_EVIDENCE + "#issuecomment-1")]}},
+            "gw-agent unhashable switch": {"company-gw-agent": {"dispatch": []}},
+            "gw-agent evidence not a string": {"company-gw-agent": {"evidence": None}},
+            "other key PM #120 paused": {"company-gw": {"dispatch": "PAUSED", "decided_by": "PM",
+                                                        "evidence": GW_AGENT_EVIDENCE}},
+            "other key Owner #120": {"company-gw": {"evidence": GW_AGENT_EVIDENCE}},
         }
         for label, change in cases.items():
             with self.subTest(label):
@@ -1336,6 +1365,21 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
             with self.subTest(label):
                 self.agree(raw.encode())
         self.assertEqual(mon.worker_dispatch(json.dumps(policy({})).encode())[1], "")
+        for label in ("gw-agent allowed", "gw-agent by Owner", "gw-agent PM #289",
+                      "other key PM #120 paused", "gw-agent missing"):
+            with self.subTest(must_reject=label):
+                self.assertEqual(mon.worker_dispatch(json.dumps(policy(cases[label])).encode())[1],
+                                 "rejected")
+
+    def test_worker_keys_match_the_gate(self):
+        root = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                            "tools", "llmtool")
+        sys.path.insert(0, root)
+        try:
+            from llmtool import worker_dispatch
+        finally:
+            sys.path.remove(root)
+        self.assertEqual(mon.DISPATCH_WORKERS, worker_dispatch.WORKERS)
 
     def test_size_is_checked_on_the_bytes_too(self):
         # The gate's reader refuses > 64 KiB; the local-ref fallback has only
@@ -2996,7 +3040,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((live.name, live.state, live.kind, live.group),
                          ("claude", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows, expand=True)   # gray rows listed, not folded
-        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 8 位")   # incl. the EC2 worker
+        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 9 位")   # incl. the EC2 and gw agent workers
         live = lines.index(f"── {mon.LIVE_SECTION} ──")
         pm = next(i for i, line in enumerate(lines) if "codex 主對話" in line)
         self.assertLess(live, pm)
@@ -3484,6 +3528,9 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("opencode cli #1", rows)
         self.assertEqual(rows["agy"].detail, "Owner 暫停派工（10-22）")
         self.assertEqual((rows["公司 gw"].state, rows["公司 gw"].detail), (mon.IDLE, "可派工"))
+        self.assertEqual((rows["公司 gw agent"].state, rows["公司 gw agent"].detail,
+                          rows["公司 gw agent"].authority),
+                         (mon.PAUSED, "PM 暫停派工（11-03）", "PM"))
         no_cli = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
                                               claude_root=str(self.claude),
                                               canonical=self.canonical,

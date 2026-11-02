@@ -34,8 +34,9 @@ from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
 from . import role_config
-from .developer_routes import (AgyRoute, RouteError, capture_snapshot,
+from .developer_routes import (AgyRoute, GwAgentRoute, RouteError, capture_snapshot,
                                for_platform, load_route_config, run_route)
+from .developer_routes.gw_agent import cleanup_audit_copies
 from .developer_routes.agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
@@ -301,7 +302,7 @@ def _pm_assignment(response):
             return None
         if (type(assignment) is not dict or
                 set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
-                assignment['route'] not in ('company-gw', 'codex', 'opencode', 'agy', 'none') or
+                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
                 type(assignment['acceptance']) is not list or
@@ -324,7 +325,7 @@ def _pm_assignment_limit_error(response):
                 type(value.get('schema_version')) is not int or
                 type(assignment) is not dict or
                 set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
-                assignment['route'] not in ('company-gw', 'codex', 'opencode', 'agy', 'none') or
+                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
                 type(assignment['acceptance']) is not list):
@@ -409,7 +410,7 @@ def _read_pm_record_input(stream=None):
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
     assignment = _pm_assignment(response)
-    if (assignment is None or assignment['route'] not in ('company-gw', 'opencode', 'codex', 'agy') or
+    if (assignment is None or assignment['route'] not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy') or
             assignment['risk'] != 'LOW'):
         limit_error = _pm_assignment_limit_error(response)
         if limit_error is not None:
@@ -755,7 +756,7 @@ def add_task_submission_parsers(actions):
     delegate = actions.add_parser('delegate', help='Dispatch an explicitly selected Developer for an existing task')
     delegate.add_argument('task_id', help='existing durable Task ID')
     delegate.add_argument('--provider', required=True,
-                          choices=('company-gw', 'codex', 'opencode', 'agy'),
+                          choices=('company-gw', 'gw-agent', 'codex', 'opencode', 'agy'),
                           help='explicit Developer route')
     delegate.add_argument('--mode', choices=('proposal', 'direct'), default='proposal',
                           help='Codex: text proposal (default) or direct D6 development')
@@ -768,6 +769,7 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--write-path', action='append', required=True, help='authorized relative target path; repeat as needed')
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
+    delegate.add_argument('--data-class', help='required data classification for gw-agent direct Tasks')
     delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY direct Tasks')
     delegate.add_argument('--context-stdin', action='store_true',
                           help='company-gw/codex only: read bounded, sensitive-screened context from stdin')
@@ -2975,6 +2977,208 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     return 1
 
 
+def run_task_gw_agent_delegate(args, *, store, route_runner=None):
+    """Run the company Gw Agent Gateway route against its registered D6 task."""
+    if getattr(args, 'mode', None) != 'direct':
+        raise LLMToolError('--provider gw-agent requires --mode direct')
+    if getattr(args, 'context_stdin', False):
+        raise LLMToolError('gw-agent direct reads only its registered D6 task scope')
+    egress_basis = _screen_text(getattr(args, 'egress_basis', None), 512)
+    data_class = getattr(args, 'data_class', None)
+    if type(data_class) is not str or not data_class:
+        raise LLMToolError('--provider gw-agent requires --data-class')
+    task = store.get(args.task_id)
+    previous = task.get('developer')
+    if (type(previous) is dict and previous.get('provider_profile') == 'gw-agent' and
+            previous.get('state') == 'DEVELOPER_DISPATCHING'):
+        raise LLMToolError('gw-agent outcome is ambiguous; replay refused')
+    if (task.get('state') != 'PM_RESPONDED' or not task.get('response') or
+            task.get('schema_version') != 2):
+        raise LLMToolError('task has no successful PM response')
+    if task.get('developer') is not None:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused')
+    binding = task.get('task_binding')
+    task_completion.validate_task_binding(
+        stored_binding=binding, task_id=task.get('task_id'), run_id=task.get('run_id'),
+        contract_digest=binding.get('contract_digest') if type(binding) is dict else None)
+    assignment = task.get('pm_assignment')
+    if (type(assignment) is not dict or assignment.get('route') != 'gw-agent' or
+            assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
+        raise LLMToolError('no matching low-risk gw-agent recommendation from the selected PM route')
+    registration, snapshot = _delegate_d6_binding(args)
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
+        raise LLMToolError('developer acceptance scope is invalid')
+    acceptance = [_screen_text(item, 512) for item in args.acceptance]
+    request = _screen_text(task['request'], REQUEST_LIMIT)
+    _screen_text(task['response'], RESPONSE_LIMIT)
+    route_config = load_route_config()['routes'].get('gw-agent')
+    if type(route_config) is not dict or data_class not in route_config['allowed_data_classes']:
+        raise LLMToolError('gw-agent data class is not allowed by its profile')
+    model = route_config['default_model']
+    effort = route_config['default_effort']
+    prompt_packet = {
+        'task_id': task['task_id'], 'run_id': task['run_id'],
+        'task_contract_digest': binding['contract_digest'], 'source_sha': snapshot.head,
+        'goal': assignment['goal'], 'acceptance': acceptance,
+        'read_paths': read_paths, 'write_paths': write_paths,
+        'egress_basis': egress_basis, 'data_class': data_class,
+    }
+    prompt = ('You are the Gw Agent Developer for this bounded llmtool Task. Work only in the '
+              'registered D6 worktree. Read only read_paths and edit only write_paths. '
+              'Do not run tests, use Git writes, commit, push, publish, or use network services. '
+              'Return the required gateway result and audit records.\nTASK_JSON=' +
+              json.dumps(prompt_packet, ensure_ascii=True, sort_keys=True,
+                         separators=(',', ':')))
+    if len(prompt.encode('utf-8')) > 48 * 1024:
+        raise LLMToolError('gw-agent request exceeds the supported size')
+    task_input = {
+        'task_id': task['task_id'], 'source_sha': snapshot.head,
+        'read_paths': read_paths, 'write_paths': write_paths,
+        'budgets': {'wall_clock_seconds': 600, 'stdout_bytes': 1024 * 1024,
+                    'stderr_bytes': 65536},
+        'egress_basis': egress_basis, 'data_class': data_class,
+    }
+    test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
+    developer = {
+        'assignment_id': new_id(), 'selection_source': args.selection_source,
+        'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
+        'provider_type': None, 'model': None,
+        'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+        'session_id': 'dev-' + new_id(), 'source_sha': snapshot.head,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED', 'read_paths': read_paths,
+        'write_paths': write_paths, 'acceptance': acceptance,
+        'context_sha256': hashlib.sha256(prompt.encode('utf-8')).hexdigest(),
+        'egress_basis': egress_basis, 'input_bytes': len(prompt.encode('utf-8')),
+        'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
+        'artifact_sha256': None, 'usage': None, 'error_code': None,
+        'created_at': _timestamp(),
+        'direct_result_callback': _direct_result_callback(
+            task, registration, snapshot.head, test_policy=test_policy),
+    }
+    completion = {
+        'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
+        'reviewer_task_id': None,
+        'evidence': {'task_id': task['task_id'], 'run_id': task['run_id'],
+            'contract_digest': binding['contract_digest'],
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': registration.native_session_id,
+            'executor_native_session': ('VERIFIED' if registration.native_session_id else 'UNKNOWN'),
+            'execution_mode': 'DIRECT_D6', 'root': registration.root,
+            'common_dir': registration.common_dir, 'branch': registration.branch,
+            'source_sha': snapshot.head, 'result_head': None},
+        'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+        'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+    }
+    try:
+        store.compare_and_update(task['task_id'],
+            expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
+                      'completion': None}, developer=developer, completion=completion)
+    except TaskStoreConflict:
+        raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
+
+    def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE'):
+        developer.update(state=state, provider_type='gw-agent-cli', model=model,
+                         error_code=error_code, artifact=None, artifact_sha256=None)
+        try:
+            saved = store.update(task['task_id'], developer=developer)
+        except Exception:
+            raise LLMToolError('gw-agent outcome could not be persisted') from None
+        _print(_task_view(saved))
+        return 1
+
+    developer.update(state='DEVELOPER_DISPATCHING', provider_type='gw-agent-cli', model=model)
+    try:
+        store.update(task['task_id'], developer=developer)
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        return persist_failure('DEVELOPER_' + exc.dispatch_code)
+    try:
+        worker_dispatch.authorize_dispatch(store, task['task_id'], 'company-gw-agent', 'DISPATCH')
+    except worker_dispatch.WorkerDispatchDenied as exc:
+        return persist_failure('DEVELOPER_' + exc.dispatch_code)
+    try:
+        route = GwAgentRoute(route_config)
+        route.validate_profile(model, effort)
+    except RouteError:
+        return persist_failure('DEVELOPER_GW_AGENT_CONFIG_INVALID')
+    def validate_binding():
+        current = store.get(task['task_id'])
+        if (current.get('developer') != developer or current.get('task_binding') != binding or
+                current.get('state') != 'PM_RESPONDED'):
+            raise RouteError('GW_AGENT_D6_BINDING_CHANGED')
+        current_registration, current_snapshot = task_completion.bind_executor_task(
+            registration.task_id, expected_common_dir=registration.common_dir,
+            root=registration.root)
+        if current_registration != registration or current_snapshot != snapshot:
+            raise RouteError('GW_AGENT_D6_BINDING_CHANGED')
+    owner_gate_denied = False
+    def route_gate():
+        nonlocal owner_gate_denied
+        validate_binding()
+        decision = worker_dispatch.evaluate('company-gw-agent', task_id=task['task_id'])
+        if decision.allowed is True and decision.reason_code == 'OWNER_POLICY_ALLOWED':
+            return decision
+        owner_gate_denied = True
+        return False
+    try:
+        execute = run_route if route_runner is None else route_runner
+        try:
+            result = execute(route, {'root': registration.root, 'model': model, 'effort': effort,
+                'expected_branch': registration.branch, 'expected_head': snapshot.head,
+                'write_paths': write_paths, 'executable': sys.executable,
+                'prompt': prompt, 'task': task_input, 'timeout': 600,
+                'state_dirs': ()}, gate=route_gate, boundary=for_platform(),
+                snapshot=capture_snapshot)
+        finally:
+            cleanup_audit_copies()
+        after_registration = task_completion.read_d6_registration(
+            registration.task_id, registration.common_dir)
+        after = task_completion.collect_git_snapshot(registration.root)
+        if (after_registration != registration or after.root != registration.root or
+                after.common_dir != registration.common_dir or after.branch != registration.branch or
+                after.head != snapshot.head):
+            raise RouteError('GW_AGENT_D6_BINDING_CHANGED')
+        changed_paths, raw = task_completion._worktree_diff(registration.root, snapshot.head)
+        if len(raw) > 64 * 1024:
+            raise RouteError('GW_AGENT_OUTPUT_TOO_LARGE')
+        if any(path not in write_paths for path in changed_paths):
+            raise RouteError('GW_AGENT_WRITE_SCOPE_VIOLATION')
+        if not route.audit_copy_path or not route._result:
+            raise RouteError('GW_AGENT_AUDIT_INVALID')
+        artifact = raw.decode('utf-8', 'strict')
+        audit_sha = route._result['audit_sha256']
+        served_model = result.model
+        usage = _normalize_agy_usage(result.usage)
+        if usage is not None:
+            usage['served_model'] = served_model
+        developer.update(state='DEVELOPER_RESPONDED', model=served_model, artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
+            usage=usage, error_code=None,
+            audit_sha256=audit_sha,
+            audit_copy_path_sha256=hashlib.sha256(os.fsencode(route.audit_copy_path)).hexdigest(),
+            changed_files=changed_paths,
+            execution={'status': 'DONE', 'native_session_id': result.session_id,
+                'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
+                'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
+                'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None})
+    except RouteError as exc:
+        code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
+        return persist_failure(code, state='BLOCKED')
+    except Exception:
+        return persist_failure('DEVELOPER_RESULT_UNKNOWN', state='BLOCKED')
+    try:
+        saved = store.update(task['task_id'], developer=developer, completion=completion)
+    except Exception:
+        return persist_failure('DEVELOPER_RESULT_PERSISTENCE_REJECTED', state='DEVELOPER_OUTCOME_UNKNOWN')
+    if developer['state'] == 'DEVELOPER_RESPONDED':
+        return run_task_direct_result_event(task['task_id'], registration.task_id, store=store)
+    _print(_task_view(saved))
+    return 1
+
+
 def _direct_child_liveness(execution):
     if (type(execution) is not dict or
             not {'child_pid', 'child_start_time', 'child_pgid'}.issubset(execution)):
@@ -3665,6 +3869,10 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('--provider agy requires --owner-ref')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
         return run_task_agy_delegate(args, store=store)
+    if args.provider == 'gw-agent':
+        if getattr(args, 'mode', 'proposal') != 'direct':
+            raise LLMToolError('--provider gw-agent requires --mode direct')
+        return run_task_gw_agent_delegate(args, store=store)
     _validate_acceptance_scope(args.acceptance)
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
