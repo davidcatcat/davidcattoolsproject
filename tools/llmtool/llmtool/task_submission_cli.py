@@ -10,7 +10,6 @@ from pathlib import Path
 import re
 import secrets
 import shutil
-import signal
 import stat
 import subprocess
 import sys
@@ -2249,8 +2248,9 @@ def run_task_opencode_delegate(args, *, store):
             write_paths=write_paths, prompt=prompt,
             dispatch_store=store, dispatch_task_id=task['task_id'], steps=steps,
             prelaunch_validate=validate_prelaunch_d6_binding, model=model,
-            launch_callback=lambda pid, started_at, pgid: _record_direct_child_launch(
-                store, task['task_id'], developer, pid, started_at, pgid))
+            launch_callback=lambda pid, started_at, pgid: store.record_opencode_launch(
+                task['task_id'], assignment_id=developer['assignment_id'], pid=pid,
+                start_time=started_at, pgid=pgid))
     except opencode_direct_developer.DirectOpenCodeError as exc:
         if exc.attempted:
             developer.update(state='DEVELOPER_OUTCOME_UNKNOWN',
@@ -2655,8 +2655,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
             'prompt': prompt, 'log_path': 'agy.log', 'timeout': 600,
             'state_dirs': (),
         }, gate=route_gate, boundary=GatedBoundary(),
-           snapshot=capture_snapshot,
-           runner=_agy_liveness_runner(store, task['task_id'], developer, executable))
+           snapshot=capture_snapshot)
         after_registration = task_completion.read_d6_registration(
             registration.task_id, registration.common_dir)
         after = task_completion.collect_git_snapshot(registration.root)
@@ -2717,18 +2716,6 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     return 1
 
 
-def _record_direct_child_launch(store, task_id, developer, pid, start_time, pgid):
-    """Persist the child identity while the one-shot dispatch claim is current."""
-    observed = dict(developer)
-    observed['execution'] = {
-        'child_pid': pid, 'child_start_time': start_time, 'child_pgid': pgid,
-    }
-    store.compare_and_update(task_id, expected={'developer': developer},
-                             developer=observed)
-    developer.clear()
-    developer.update(observed)
-
-
 def _direct_child_liveness(execution):
     if (type(execution) is not dict or
             not {'child_pid', 'child_start_time', 'child_pgid'}.issubset(execution)):
@@ -2761,6 +2748,9 @@ def _direct_child_liveness(execution):
 
 
 def _recover_direct_child_dispatch(args, task, developer, store, *, expected_agent):
+    if (developer.get('provider_profile') != 'opencode' or
+            developer.get('state') != 'DEVELOPER_DISPATCHING'):
+        raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     try:
         snapshot = task_completion.collect_git_snapshot(os.getcwd())
         registration, _ = task_completion.bind_executor_task(
@@ -2777,14 +2767,13 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
     if liveness != 'DEAD':
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN')
     outcome = dict(developer)
-    execution = dict(developer.get('execution') or {})
-    execution.update({
+    execution = {
         'status': 'UNKNOWN', 'native_session_id': None,
         'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
         'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
         'source_bytes': None, 'source_file_count': None,
         'source_manifest_sha256': None,
-    })
+    }
     outcome.update(state='DEVELOPER_OUTCOME_UNKNOWN',
                    error_code='DIRECT_CHILD_NOT_RUNNING', execution=execution)
     try:
@@ -2793,47 +2782,6 @@ def _recover_direct_child_dispatch(args, task, developer, store, *, expected_age
     except Exception:
         raise LLMToolError('DIRECT_CHILD_LIVENESS_UNKNOWN') from None
     raise LLMToolError('DIRECT_CHILD_OUTCOME_UNKNOWN') from None
-
-
-def _agy_liveness_runner(store, task_id, developer, executable):
-    """Run the AGY child with a durable identity captured immediately after launch."""
-    def run(argv, cwd, env, timeout):
-        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, shell=False,
-            close_fds=True, start_new_session=True)
-        is_agy_invocation = (executable in argv and '--output-format' in argv and
-                             '--log-file' in argv and '-p' in argv)
-        try:
-            if is_agy_invocation:
-                _record_direct_child_launch(store, task_id, developer, process.pid,
-                    codex_direct_developer.process_start_time(process.pid),
-                    os.getpgid(process.pid))
-        except Exception:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except OSError:
-                pass
-            process.communicate()
-            raise
-        try:
-            stdout, stderr = process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired as exc:
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except OSError:
-                pass
-            try:
-                stdout, stderr = process.communicate(timeout=2)
-            except subprocess.TimeoutExpired:
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-                stdout, stderr = process.communicate()
-            raise subprocess.TimeoutExpired(argv, timeout, output=stdout or exc.output,
-                                               stderr=stderr or exc.stderr) from None
-        return process.returncode, stdout, stderr
-    return run
 
 
 def _normalize_agy_usage(value):
