@@ -358,7 +358,7 @@ def _argv(executable, root, model, effort, *, pycache_prefix, command_path=None)
 
 
 def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_id,
-        prelaunch_validate=None, timeout=None,
+        prelaunch_validate=None, launch_callback=None, timeout=None,
         dispatch_action='DISPATCH'):
     root = Path(root).resolve(strict=True)
     if type(prompt) is not str or len(prompt.encode('utf-8')) > MAX_PROMPT_BYTES:
@@ -415,6 +415,12 @@ def run(*, root, prompt, model, reasoning_effort, dispatch_store, dispatch_task_
                     lifecycle.own(process)
                 except LLMToolError:
                     _fail('CODEX_PROCESS_OWNERSHIP_UNKNOWN')
+                if launch_callback is not None:
+                    try:
+                        launch_callback(process.pid, process_start_time(process.pid),
+                                        os.getpgid(process.pid))
+                    except Exception:
+                        _fail('CODEX_LAUNCH_RECORD_REJECTED')
                 selector = selectors.DefaultSelector()
                 try:
                     for stream in (process.stdin, process.stdout, process.stderr):
@@ -543,4 +549,35 @@ def _attach_observed(exc, process, output, started, lifecycle):
         }
     except Exception:
         pass
+
+
+def process_start_time(pid):
+    """Return a stable OS process start marker, or None when it cannot be read."""
+    if type(pid) is not int or pid <= 0:
+        return None
+    # Linux exposes the kernel start tick in field 22. The command name may
+    # contain spaces, so parse fields only after the final closing parenthesis.
+    try:
+        with open(f'/proc/{pid}/stat', 'r', encoding='ascii') as stream:
+            fields = stream.read(4096).rsplit(')', 1)[1].split()
+        if fields[0] == 'Z':
+            return 'EXITED'
+        value = fields[19]
+        return value if value.isdigit() else None
+    except (OSError, IndexError, UnicodeError):
+        pass
+    # macOS does not expose procfs. `ps` provides the kernel start time in a
+    # bounded, content-free format; never include its output in an error.
+    try:
+        result = subprocess.run(['/bin/ps', '-o', 'lstart=,stat=', '-p', str(pid)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            timeout=2, check=False, close_fds=True, shell=False,
+            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C'})
+        raw = result.stdout.decode('ascii', 'strict').strip()
+        value, _, state = raw.rpartition(' ')
+        if state.startswith('Z'):
+            return 'EXITED'
+        return value if result.returncode == 0 and value and len(value) <= 64 else None
+    except (OSError, subprocess.TimeoutExpired, UnicodeError):
+        return None
 

@@ -319,6 +319,21 @@ class CodexDelegateTests(unittest.TestCase):
                 self.value.update(changes)
                 return self.value
 
+            def record_codex_launch(self, _task_id, *, assignment_id, pid,
+                                    start_time, pgid):
+                developer = self.value['developer']
+                if developer['assignment_id'] != assignment_id:
+                    raise AssertionError('unexpected Codex launch assignment')
+                developer['execution'] = {
+                    'status': 'RUNNING', 'native_session_id': None,
+                    'process_exit_code': None, 'stdout_sha256': None,
+                    'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                    'usage_source': 'UNKNOWN', 'source_bytes': None,
+                    'source_file_count': None, 'source_manifest_sha256': None,
+                    'child_pid': pid, 'child_start_time': start_time,
+                    'child_pgid': pgid}
+                return self.value
+
         self.store = MemoryStore(task)
         Registration = dataclasses.make_dataclass('Registration', [
             ('task_id', object), ('trusted_agent_id', object),
@@ -937,6 +952,21 @@ class CodexDelegateTests(unittest.TestCase):
                 self.value.update(changes)
                 return self.value
 
+            def record_codex_launch(self, _task_id, *, assignment_id, pid,
+                                    start_time, pgid):
+                developer = self.value['developer']
+                if developer['assignment_id'] != assignment_id:
+                    raise AssertionError('unexpected Codex launch assignment')
+                developer['execution'] = {
+                    'status': 'RUNNING', 'native_session_id': None,
+                    'process_exit_code': None, 'stdout_sha256': None,
+                    'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                    'usage_source': 'UNKNOWN', 'source_bytes': None,
+                    'source_file_count': None, 'source_manifest_sha256': None,
+                    'child_pid': pid, 'child_start_time': start_time,
+                    'child_pgid': pgid}
+                return self.value
+
         self.store = MemoryStore(task)
         Registration = dataclasses.make_dataclass('Registration', [
             ('task_id', object), ('trusted_agent_id', object),
@@ -1012,6 +1042,21 @@ class CodexDelegateTests(unittest.TestCase):
                 if any(self.value.get(key) != value for key, value in expected.items()):
                     raise AssertionError('unexpected Task update')
                 self.value.update(changes)
+                return self.value
+
+            def record_codex_launch(self, _task_id, *, assignment_id, pid,
+                                    start_time, pgid):
+                developer = self.value['developer']
+                if developer['assignment_id'] != assignment_id:
+                    raise AssertionError('unexpected Codex launch assignment')
+                developer['execution'] = {
+                    'status': 'RUNNING', 'native_session_id': None,
+                    'process_exit_code': None, 'stdout_sha256': None,
+                    'elapsed_ms': None, 'cleanup_status': 'UNKNOWN',
+                    'usage_source': 'UNKNOWN', 'source_bytes': None,
+                    'source_file_count': None, 'source_manifest_sha256': None,
+                    'child_pid': pid, 'child_start_time': start_time,
+                    'child_pgid': pgid}
                 return self.value
 
         self.store = MemoryStore(task)

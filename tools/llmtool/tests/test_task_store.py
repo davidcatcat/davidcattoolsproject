@@ -481,6 +481,30 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(refusal['reason_code'], 'WORKER_ASSIGNMENT_CLEAR_FORBIDDEN')
         self.assertRegex(refusal['policy_sha256'], r'^[0-9a-f]{64}$')
 
+    def test_codex_child_identity_is_written_only_by_trusted_launch_path(self):
+        self._allow_codex_dispatch()
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        pending = self._developer_assignment(provider='codex', max_tokens=None)
+        self.store.compare_and_update(
+            task['task_id'], expected={'developer': None}, developer=pending)
+        dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                       'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+        self.store.update(task['task_id'], developer=dispatching)
+        launch = {**dispatching, 'execution': {
+            'status': 'RUNNING', 'native_session_id': None,
+            'process_exit_code': None, 'stdout_sha256': None, 'elapsed_ms': None,
+            'cleanup_status': 'UNKNOWN', 'usage_source': 'UNKNOWN',
+            'source_bytes': None, 'source_file_count': None,
+            'source_manifest_sha256': None, 'child_pid': 123,
+            'child_start_time': '123456', 'child_pgid': 123}}
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=launch)
+        saved = self.store.record_codex_launch(
+            task['task_id'], assignment_id=pending['assignment_id'], pid=123,
+            start_time='123456', pgid=123)
+        self.assertEqual(saved['developer']['execution'], launch['execution'])
+
     def test_codex_direct_success_persists_native_thread_and_usage(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
