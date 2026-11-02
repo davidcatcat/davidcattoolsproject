@@ -18,6 +18,13 @@ import ci_mac_modules  # noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MAC_REQUIRED = {
     "test_chat_tui_pty.ChatTUIPTYTests",
+    "test_chat_tui_theme_pty.ThemePTYTests",
+    "test_cli_lifecycle_state.LifecycleStateTests",
+    "test_cli_provider_lifecycle.TUISignalOwnershipTests",
+    "test_cli_provider_lifecycle.CLIProviderLifecycleTests",
+    "test_codex_cli_provider.CodexCLIProviderTests",
+    "test_codex_direct_developer.CodexDirectDeveloperTests",
+    "test_opencode_direct_developer.DirectOpenCodeDeveloperTests",
     "test_review_authority_native.NativeProviderTests",
 }
 
@@ -65,6 +72,105 @@ class MacTestIdSelectionTests(unittest.TestCase):
         self.assertIn("test_developer_route_agy", route["test_ids"])
         self.assertNotIn("test_task_submission_cli", route["test_ids"])
 
+    def test_unmapped_llmtool_modules_select_direct_and_importing_tests(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_root = root / "tools/llmtool/llmtool"
+            (source_root / "developer_routes").mkdir(parents=True)
+            (source_root / "task_advance.py").write_text("# source\n", encoding="utf-8")
+            (source_root / "developer_routes/base.py").write_text("# source\n", encoding="utf-8")
+            tests = root / "tools/llmtool/tests"
+            tests.mkdir(parents=True)
+            test_sources = {
+                "test_chat_tui_pty.py": "import unittest\nclass ChatTUIPTYTests(unittest.TestCase): pass\n",
+                "test_review_authority_native.py": "import unittest\nclass NativeProviderTests(unittest.TestCase): pass\n",
+                "test_task_advance.py": "import unittest\nfrom llmtool.task_advance import advance\nclass AdvanceTests(unittest.TestCase): pass\n",
+                "test_task_consumer.py": "import unittest\nfrom llmtool.developer_routes import base\nclass ConsumerTests(unittest.TestCase): pass\n",
+            }
+            for name, contents in test_sources.items():
+                (tests / name).write_text(contents, encoding="utf-8")
+            manifest = root / "tools/llmtool/ci/mac-modules.txt"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                "test_chat_tui_pty.ChatTUIPTYTests\n"
+                "test_review_authority_native.NativeProviderTests\n",
+                encoding="utf-8",
+            )
+            with patch.object(ci_mac_modules, "MODULE_LIST", manifest):
+                advance = ci_mac_modules.selection_report(
+                    ["tools/llmtool/llmtool/task_advance.py"], root
+                )
+                route_base = ci_mac_modules.selection_report(
+                    ["tools/llmtool/llmtool/developer_routes/base.py"], root
+                )
+            self.assertEqual(advance["level"], "L1")
+            self.assertEqual(set(advance["test_ids"]), {
+                "test_chat_tui_pty.ChatTUIPTYTests",
+                "test_review_authority_native.NativeProviderTests",
+                "test_task_advance",
+            })
+            self.assertEqual(route_base["level"], "L1")
+            self.assertIn("test_task_consumer", route_base["test_ids"])
+            self.assertIn("test_chat_tui_pty.ChatTUIPTYTests", route_base["test_ids"])
+
+    def test_runtime_sources_select_direct_importing_and_mac_tests(self):
+        cases = (
+            ("tools/llmtool/llmtool/task_advance.py", "test_task_advance", ()),
+            ("tools/llmtool/llmtool/review_repair.py", "test_review_repair", ()),
+            ("tools/llmtool/llmtool/developer_routes/base.py",
+             "test_developer_route_contract", ("test_developer_route_agy",)),
+            ("tools/llmtool/llmtool/task_submission_cli.py",
+             "test_task_submission_cli", ("test_task_completion",)),
+        )
+        for path, direct_id, importer_ids in cases:
+            with self.subTest(path=path):
+                report = ci_mac_modules.selection_report([path], REPO_ROOT)
+                self.assertNotEqual(report["level"], "L3")
+                self.assertIn(direct_id, report["test_ids"])
+                self.assertTrue(MAC_REQUIRED <= set(report["test_ids"]))
+                for importer_id in importer_ids:
+                    self.assertIn(importer_id, report["test_ids"])
+
+    def test_chat_tui_source_selects_subprocess_pty_scenario_suite(self):
+        report = ci_mac_modules.selection_report(
+            ["tools/llmtool/llmtool/chat_tui.py"], REPO_ROOT
+        )
+        self.assertNotEqual(report["level"], "L3")
+        self.assertIn("test_chat_tui_scenarios", report["test_ids"])
+        self.assertTrue(MAC_REQUIRED <= set(report["test_ids"]))
+
+    def test_runtime_import_scan_failure_falls_back_to_full(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "tools/llmtool/llmtool/task_advance.py"
+            source.parent.mkdir(parents=True)
+            source.write_text("# source\n", encoding="utf-8")
+            tests = root / "tools/llmtool/tests"
+            tests.mkdir(parents=True)
+            (tests / "test_chat_tui_pty.py").write_text(
+                "import unittest\nclass ChatTUIPTYTests(unittest.TestCase): pass\n",
+                encoding="utf-8",
+            )
+            (tests / "test_review_authority_native.py").write_text(
+                "import unittest\nclass NativeProviderTests(unittest.TestCase): pass\n",
+                encoding="utf-8",
+            )
+            (tests / "test_broken.py").write_text("from llmtool.task_advance import (\n",
+                                                  encoding="utf-8")
+            manifest = root / "tools/llmtool/ci/mac-modules.txt"
+            manifest.parent.mkdir(parents=True)
+            manifest.write_text(
+                "test_chat_tui_pty.ChatTUIPTYTests\n"
+                "test_review_authority_native.NativeProviderTests\n",
+                encoding="utf-8",
+            )
+            with patch.object(ci_mac_modules, "MODULE_LIST", manifest):
+                report = ci_mac_modules.selection_report(
+                    ["tools/llmtool/llmtool/task_advance.py"], root
+                )
+            self.assertEqual(report["level"], "L3")
+            self.assertEqual(report["test_ids"], ["FULL"])
+
     def test_directly_changed_test_selects_its_whole_module(self):
         report = ci_mac_modules.selection_report(
             ["tools/llmtool/tests/test_developer_route_agy.py"], REPO_ROOT
@@ -82,6 +188,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
             "tools/llmtool/llmtool/providers/agy.py",
             "tools/llmtool/llmtool/authorization_policy.py",
             ".github/workflows/llmtool-mac-ci.yml",
+            "tools/mac-runner/setup.sh",
             "tools/llmtool/ci/mac-modules.txt",
         ):
             with self.subTest(path=path):

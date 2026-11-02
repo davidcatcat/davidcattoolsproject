@@ -11,6 +11,7 @@ name: llmtool Mac CI
 # Use workflow_dispatch after each merge train so the full suite runs.
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     # Skip top-level llmtool docs; deeper .md files remain included for runtime skills.
     paths:
       - 'tools/llmtool/**'
@@ -25,14 +26,13 @@ permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
-  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-
 jobs:
   check:
     name: check (macOS 3.13)
-    if: vars.MAC_CI_ENABLED == 'true'
+    if: vars.MAC_CI_ENABLED == 'true' && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'mac-ci')) && (github.event.action != 'labeled' || github.event.label.name == 'mac-ci')
+    concurrency:
+      group: ${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && 'full-main' || format('{0}-{1}', github.event_name, github.ref) }}
+      cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
     runs-on: [self-hosted, macOS, X64, local-mac-ci]
     timeout-minutes: 45
     steps:
