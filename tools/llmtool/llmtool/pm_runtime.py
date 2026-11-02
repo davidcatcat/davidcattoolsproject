@@ -513,10 +513,14 @@ def create_dedicated_pm(cwd, runtime='claude-code', account=None, *, state_root=
         role_options = {'environ': environ, 'home': home}
         if account is not None:
             role_options['cli'] = {'account': account}
-        resolved = role_config.resolve_role('pm', **role_options)
+        # A Codex binding records its own account. Resolve that account directly
+        # instead of inheriting roles.pm, which may intentionally remain Claude.
+        role = 'pm-codex-binding' if runtime == 'codex' and account is not None else 'pm'
+        resolved = role_config.resolve_role(role, **role_options)
         if (runtime == 'codex' and
                 (resolved.get('provider') != 'codex' or
-                 not role_config._name(resolved.get('account')))):
+                 not role_config._name(resolved.get('account')) or
+                 not resolved.get('config_dir'))):
             raise LLMToolError('Codex PM binding requires a Codex account')
     except LLMToolError:
         raise _error('PM_CONFIG_INVALID', 'PM account configuration is invalid') from None

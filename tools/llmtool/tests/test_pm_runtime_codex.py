@@ -160,7 +160,8 @@ class CodexRuntimeTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.make_runtime(create=False)
         binding = pm_runtime.create_dedicated_pm(str(self.cwd), runtime='codex',
-                                                 state_root=self.state, environ=self.environ)
+                                                 account='codex-pm', state_root=self.state,
+                                                 environ=self.environ)
         binding = pm_runtime.current_binding(state_root=self.state)
         binding['session_started'] = True
         pm_runtime._write_json_atomic(self.state,
@@ -173,7 +174,8 @@ class CodexRuntimeTests(unittest.TestCase):
 
     def test_busy_binding_is_refused_before_cli(self):
         binding = pm_runtime.create_dedicated_pm(str(self.cwd), runtime='codex',
-                                                 state_root=self.state, environ=self.environ)
+                                                 account='codex-pm', state_root=self.state,
+                                                 environ=self.environ)
         key = 'pm-' + binding['native_session_id']
         lock = pm_runtime._check_state_file(self.state / (key + '.lock'), create=True)
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -56,8 +56,9 @@ class CodexRuntime:
             options = {'environ': owner.environ,
                        'home': None if owner.environ is None else owner.environ.get('HOME'),
                        'cli': {'account': account}}
-            resolved = role_config.resolve_role('pm', **options)
-            if resolved.get('provider') != 'codex':
+            resolved = role_config.resolve_role('pm-codex-binding', **options)
+            if (resolved.get('provider') != 'codex' or
+                    resolved.get('account') != account or not resolved.get('config_dir')):
                 raise LLMToolError('PM account is not Codex')
             if account != resolved.get('account') or binding.get('account') != account:
                 raise _error('PM_ACCOUNT_MISMATCH')
@@ -199,8 +200,9 @@ class CodexRuntime:
         options = {'environ': self.owner.environ,
                    'home': None if self.owner.environ is None else self.owner.environ.get('HOME'),
                    'cli': {'account': account}}
-        resolved = role_config.resolve_role('pm', **options)
-        if resolved.get('provider') != 'codex' or resolved.get('account') != account:
+        resolved = role_config.resolve_role('pm-codex-binding', **options)
+        if (resolved.get('provider') != 'codex' or resolved.get('account') != account or
+                not resolved.get('config_dir')):
             raise _error('PM_CONFIG_INVALID')
         if resolved.get('config_dir') is not None:
             env['CODEX_HOME'] = resolved['config_dir']
