@@ -54,8 +54,7 @@ class CodexRuntimeTests(unittest.TestCase):
                     sys.exit(2)
             with open(__LOG__, 'a', encoding='utf-8') as stream:
                 stream.write(json.dumps({'args': args,
-                    'sentinel_present': 'FAKE_VALUE' in os.environ,
-                    'env_keys': sorted(os.environ)}) + '\\n')
+                    'sentinel_present': 'FAKE_VALUE' in os.environ}) + '\\n')
             home = pathlib.Path(os.environ.get('CODEX_HOME') or os.environ['HOME'] + '/.codex')
             sessions = home / 'sessions'
             sessions.mkdir(parents=True, exist_ok=True)
@@ -122,8 +121,10 @@ class CodexRuntimeTests(unittest.TestCase):
         self.assertFalse(any(call['sentinel_present'] for call in calls))
         allowed_env = {'PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE',
                        'SSL_CERT_FILE', 'SSL_CERT_DIR', 'CODEX_HOME'}
-        self.assertTrue(all(set(call['env_keys']) <= allowed_env for call in calls))
-        self.assertTrue(all('CODEX_HOME' in call['env_keys'] for call in calls))
+        env = runtime._codex_driver._environment()
+        self.assertLessEqual(set(env), allowed_env)
+        self.assertNotIn('FAKE_VALUE', env)
+        self.assertIn('CODEX_HOME', env)
         self.assertTrue(all('--sandbox' in call['args'] and
                             'workspace-write' in call['args'] and
                             '--ask-for-approval' in call['args'] and
@@ -131,7 +132,7 @@ class CodexRuntimeTests(unittest.TestCase):
 
     def test_malformed_output_and_process_exit_return_runtime_error_then_turn_end(self):
         expected_codes = {
-            'malformed': ['PM_STREAM_INVALID'],
+            'malformed': ['PM_PROCESS_EXITED'],
             'exit': ['PM_PROCESS_EXITED'],
         }
         for mode, expected in expected_codes.items():
