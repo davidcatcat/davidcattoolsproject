@@ -758,7 +758,8 @@ def add_task_submission_parsers(actions):
     advance.add_argument('--reviewer-session-done', action='store_true',
                          help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
     drive = actions.add_parser(
-        'drive', help='Drive Task advancement in the foreground until it needs attention')
+        'drive', help=('Drive Task advancement in the foreground; stops for attention '
+                       'if the initial Developer is unfinished'))
     drive.add_argument('task_id', help='existing durable Task ID')
     drive.add_argument('--merge', action='store_true',
                        help='merge only after the workflow reaches integration readiness')
@@ -1051,7 +1052,7 @@ def run_task_advance(args, *, store=None, **adapters):
 
 
 def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapters):
-    """Drive successive durable Task steps in this foreground process."""
+    """Drive Task steps here; stop for attention if its initial Developer is unfinished."""
     from .task_drive import drive
     result = drive(task_id=args.task_id,
         store=TaskStore() if store is None else store,

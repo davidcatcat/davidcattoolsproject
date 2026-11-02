@@ -60,17 +60,59 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
         self.assertEqual(len(calls), 6)
 
-    def test_waits_for_developer_and_stops_on_refusal(self):
+    def test_waits_for_ci_and_executor_then_stops_on_refusal(self):
         pauses = []
         advance, _calls = self.adapter([
-            {'task_id': 't', 'step': 'DEVELOPER_PENDING', 'codes': []},
-            {'task_id': 't', 'step': 'WAITING_REVIEW', 'codes': ['WAITING_REVIEW']},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+            {'task_id': 't', 'step': 'WAITING_EXECUTOR', 'codes': ['WAITING_EXECUTOR']},
             {'task_id': 't', 'step': 'REFUSED', 'codes': ['PUBLISH_REFUSED']},
         ])
         result = task_drive.drive(task_id='t', poll_seconds=1,
                                   advance_call=advance, sleep=pauses.append)
         self.assertEqual(result['step'], 'REFUSED')
         self.assertEqual(pauses, [1, 1])
+
+    def test_pending_review_not_ready_waits_without_counting_a_workflow_step(self):
+        pauses = []
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
+             'result': {'state': 'NOT_READY'}, 'codes': []},
+            {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
+             'result': {'outcome': 'REVIEW_PASS'}, 'codes': []},
+            {'task_id': 't', 'step': 'RUN_TASK_COMPLETE', 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+        ])
+        result = task_drive.drive(task_id='t', poll_seconds=0.25,
+                                  advance_call=advance, sleep=pauses.append)
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertEqual(result['steps'], 3)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(pauses, [0.25])
+
+    def test_repeated_review_not_ready_stops_at_bounded_poll_attempts(self):
+        pauses = []
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
+             'result': {'state': 'NOT_READY'}, 'codes': []},
+            {'task_id': 't', 'step': 'RECORD_REVIEW_RESULT',
+             'result': {'state': 'NOT_READY'}, 'codes': []},
+        ])
+        result = task_drive.drive(task_id='t', max_steps=2, poll_seconds=1,
+                                  advance_call=advance, sleep=pauses.append)
+        self.assertEqual(result['step'], 'MAX_STEPS')
+        self.assertEqual(result['steps'], 0)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(pauses, [1])
+
+    def test_unfinished_initial_developer_stops_for_attention_without_polling(self):
+        pauses = []
+        advance, _calls = self.adapter([
+            {'task_id': 't', 'step': 'DEVELOPER_ATTENTION',
+             'codes': ['DEVELOPER_ATTENTION']}])
+        result = task_drive.drive(task_id='t', poll_seconds=1,
+                                  advance_call=advance, sleep=pauses.append)
+        self.assertEqual(result['step'], 'DEVELOPER_ATTENTION')
+        self.assertEqual(pauses, [])
 
     def test_rerun_after_crash_does_not_repeat_persisted_side_effect(self):
         state = {'index': 0, 'effects': []}
