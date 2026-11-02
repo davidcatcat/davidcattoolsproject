@@ -340,6 +340,10 @@ class StatusLineTests(Base):
         self.assertTrue(ui.status_text().startswith("▸▸ PM 模式 · auto · 背景 0 | "))
         items = chat_tui_status.background_items([_record("t1"), _record("t2")])
         self.loaded(items)
+        ui.app.output.get_size = lambda: Size(rows=24, columns=80)
+        idle_status = ui.status_text()
+        self.assertIn("claude/default", idle_status)
+        self.assertNotIn("F1", idle_status)
         ui.pm_outbox.append("next")
         self.assertTrue(ui.status_text().startswith("▸▸ PM 模式 · auto · 背景 2 · ↓ 查看 · 佇列 1 | "),
                         ui.status_text())
