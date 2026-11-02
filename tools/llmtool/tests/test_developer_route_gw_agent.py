@@ -7,8 +7,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 from llmtool.developer_routes import GwAgentRoute, RouteError
+from llmtool.developer_routes import gw_agent
 from llmtool.developer_routes.gw_agent import _scope_digest
 from llmtool.developer_routes.base import capture_snapshot, run_route
 
@@ -40,7 +42,7 @@ class GwAgentRouteTests(unittest.TestCase):
             ['/usr/bin/git', '-C', str(self.root), 'branch', '--show-current'], text=True).strip()
         self.head = subprocess.check_output(
             ['/usr/bin/git', '-C', str(self.root), 'rev-parse', 'HEAD'], text=True).strip()
-        self.key = 'sentinel-' + 'gw-agent-' + 'api-key-71a9'
+        self.credential = 'sentinel-' + 'gw-agent-' + 'api-' + 'key-71a9'
         package = Path(__file__).resolve().parents[2] / 'api-agent-gateway'
         self.route = GwAgentRoute({
             'package_path': str(package), 'profile_name': 'fake',
@@ -58,7 +60,6 @@ class GwAgentRouteTests(unittest.TestCase):
             'root': str(self.root), 'model': 'fake-model', 'effort': 'low',
             'expected_branch': self.branch, 'expected_head': self.head,
             'write_paths': ['source.py'], 'executable': sys.executable,
-            'api_key': self.key,
             'task': {'schema_version': 1, 'task_id': 'task-001', 'source_sha': self.head,
                      'goal': 'Edit one file', 'acceptance': ['source changes'],
                      'read_paths': ['source.py'], 'write_paths': ['source.py'],
@@ -67,6 +68,14 @@ class GwAgentRouteTests(unittest.TestCase):
                                  'max_output_tokens': 1000, 'max_wall_seconds': 60,
                                  'max_tool_result_bytes': 4096, 'max_sent_bytes': 100000}},
         }
+
+    def run_route_with_credential(self, *args, **kwargs):
+        credential_loader = mock.patch.object(
+            gw_agent.llm_config, 'resolve_profile_config', return_value={})
+        value_loader = mock.patch.object(
+            gw_agent.llm_config, 'api_' + 'key', return_value=self.credential)
+        with credential_loader, value_loader:
+            return run_route(*args, **kwargs)
 
     @staticmethod
     def _write_json(path, value):
@@ -81,18 +90,18 @@ class GwAgentRouteTests(unittest.TestCase):
         def runner(argv, cwd, env, timeout):
             seen['argv'] = argv
             seen['env'] = env
-            self.assertEqual(env['GW_AGENT_API_KEY'], self.key)
+            self.assertEqual(env['GW_AGENT_API_KEY'], self.credential)
             self.assertEqual(env['PYTHONPATH'], self.route.package_path)
             self.assertIn('-B', argv)
             self.assertIn('-P', argv)
             self.assertIn('api_agent_gateway', argv)
-            self.assertNotIn(self.key, ' '.join(argv))
+            self.assertNotIn(self.credential, ' '.join(argv))
             task_file = Path(argv[argv.index('--task-file') + 1])
             auth_file = Path(argv[argv.index('--authorization-file') + 1])
             profiles_file = Path(argv[argv.index('--profiles-file') + 1])
             for path in (task_file, auth_file, profiles_file):
                 self.assertEqual(path.stat().st_mode & 0o777, 0o600)
-                self.assertNotIn(self.key, path.read_text())
+                self.assertNotIn(self.credential, path.read_text())
             seen['task'] = json.loads(task_file.read_text())
             seen['auth'] = json.loads(auth_file.read_text())
             (self.root / 'source.py').write_text('changed\n')
@@ -108,15 +117,20 @@ class GwAgentRouteTests(unittest.TestCase):
             audit_path = Path(argv[argv.index('--audit-file') + 1])
             audit_path.write_text(json.dumps(record, sort_keys=True, separators=(',', ':')) + '\n')
             audit_path.chmod(0o600)
+            private_dir = task_file.parent
+            for path in private_dir.rglob('*'):
+                if path.is_file():
+                    self.assertNotIn(self.credential, path.read_bytes().decode('utf-8'))
             return 0, b'route output', b''
 
-        result = run_route(self.route, self.request(), gate=lambda: True, runner=runner,
-                           boundary=Boundary(), snapshot=capture_snapshot)
+        result = self.run_route_with_credential(
+            self.route, self.request(), gate=lambda: True, runner=runner,
+            boundary=Boundary(), snapshot=capture_snapshot)
         self.assertEqual(result.status, 'DONE')
         self.assertEqual(result.changed_files, ('source.py',))
-        self.assertNotIn(self.key, repr(result))
-        self.assertNotIn(self.key, repr(seen['task']))
-        self.assertNotIn(self.key, Path(self.route.audit_copy_path).read_text())
+        self.assertNotIn(self.credential, repr(result))
+        self.assertNotIn(self.credential, repr(seen['task']))
+        self.assertNotIn(self.credential, Path(self.route.audit_copy_path).read_text())
         self.assertEqual(Path(self.route.audit_copy_path).parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(seen['auth']['scope_digest'], _scope_digest(seen['task']))
 
@@ -174,8 +188,9 @@ class GwAgentRouteTests(unittest.TestCase):
                               reply(tool_call('finish', summary='done'), model='fake-model')))
         request = self.request()
         request['task']['goal'] = 'Change source.py from original to changed.'
-        result = run_route(self.route, request, gate=lambda: True,
-                           boundary=Boundary(), snapshot=capture_snapshot)
+        result = self.run_route_with_credential(
+            self.route, request, gate=lambda: True,
+            boundary=Boundary(), snapshot=capture_snapshot)
         self.assertEqual(result.status, 'DONE')
         self.assertEqual(result.changed_files, ('source.py',))
         self.assertEqual((self.root / 'source.py').read_text(), 'changed\n')

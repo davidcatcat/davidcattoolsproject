@@ -14,6 +14,7 @@ import sys
 import tempfile
 
 from .base import DeveloperRoute, RouteError
+from .. import config as llm_config
 
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
@@ -94,9 +95,7 @@ class GwAgentRoute(DeveloperRoute):
     def validate_request(self, request):
         value = super().validate_request(request)
         task = value.get('task')
-        api_key = value.get('api_key')
-        if (type(task) is not dict or type(api_key) is not str or not api_key or
-                '\x00' in api_key or len(api_key) > 8192 or
+        if (type(task) is not dict or
                 type(task.get('task_id')) is not str or _TASK_ID.fullmatch(task['task_id']) is None or
                 task.get('source_sha') != value['expected_head'] or
                 type(task.get('read_paths')) is not list or type(task.get('write_paths')) is not list or
@@ -117,8 +116,6 @@ class GwAgentRoute(DeveloperRoute):
         if (package_path == root or root in package_path.parents or package_path in root.parents or
                 private_tmp == root or root in private_tmp.parents):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
-        key = request['api_key']
-        self._api_key = key
         task = dict(request['task'])
         try:
             serialized_task = _canonical(task)
@@ -126,8 +123,6 @@ class GwAgentRoute(DeveloperRoute):
                                               'profiles': {self.profile_name: self.profile}})
         except (TypeError, ValueError):
             raise RouteError('GW_AGENT_REQUEST_INVALID') from None
-        if key.encode('utf-8') in serialized_task or key.encode('utf-8') in serialized_profile:
-            raise RouteError('GW_AGENT_CREDENTIAL_LEAK')
         auth = {
             'schema_version': 1,
             'authorization_ref': self.authorization_ref,
@@ -164,13 +159,20 @@ class GwAgentRoute(DeveloperRoute):
                 '--state-dir', str(Path(tmp) / 'state')]
 
     def build_env(self, tmpdir):
+        try:
+            config_value = llm_config.resolve_profile_config('company-gw')
+            credential = llm_config.api_key(config_value)
+        except Exception:
+            raise RouteError('GW_AGENT_CREDENTIAL_MISSING') from None
+        if (type(credential) is not str or not credential or '\x00' in credential or
+                len(credential) > 8192):
+            raise RouteError('GW_AGENT_CREDENTIAL_MISSING')
         env = {key: os.environ[key] for key in
                ('PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE')
                if key in os.environ}
         env['TMPDIR'] = tmpdir
         env['PYTHONPATH'] = self.package_path
-        env['GW_AGENT_API_KEY'] = self._api_key
-        del self._api_key
+        env['GW_AGENT_API_KEY'] = credential
         return env
 
     def parse_output(self, stdout, stderr, log_text):
@@ -241,9 +243,6 @@ class GwAgentRoute(DeveloperRoute):
                 raise ValueError
             self._result = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
                                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-            key = request['api_key'].encode('utf-8')
-            if key in raw:
-                raise RouteError('GW_AGENT_CREDENTIAL_LEAK')
             if (type(self._result) is not dict or
                     self._result.get('task_id') != request['task']['task_id']):
                 raise RouteError('GW_AGENT_OUTPUT_INVALID')
@@ -253,8 +252,8 @@ class GwAgentRoute(DeveloperRoute):
                     info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600):
                 raise ValueError
             audit = source.read_bytes()
-            if len(audit) > 4 * 1024 * 1024 or key in audit:
-                raise RouteError('GW_AGENT_CREDENTIAL_LEAK')
+            if len(audit) > 4 * 1024 * 1024:
+                raise ValueError
             lines = audit.splitlines()
             if not lines or len(lines) != len([line for line in lines if line.strip()]):
                 raise ValueError
@@ -265,8 +264,8 @@ class GwAgentRoute(DeveloperRoute):
                 for field in ('sha256', 'record_sha256', 'digest'):
                     if type(last.get(field)) is str:
                         candidates.add(last[field])
-                unsigned = {key: value for key, value in last.items()
-                            if key not in ('sha256', 'record_sha256', 'digest')}
+                unsigned = {field: value for field, value in last.items()
+                            if field not in ('sha256', 'record_sha256', 'digest')}
                 candidates.add(hashlib.sha256(_canonical(unsigned)).hexdigest())
                 candidates.add(hashlib.sha256(_canonical(last)).hexdigest())
             if (type(expected) is not str or not re.fullmatch(r'[0-9a-f]{64}', expected) or
