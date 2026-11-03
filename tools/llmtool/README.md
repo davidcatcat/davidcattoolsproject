@@ -215,18 +215,14 @@ Local Mac work uses `/Users/davidsun/git/davidcataiporject/davidcattoolsproject`
 When the user chooses Codex Cloud, use only the repository checkout configured for
 that Cloud task; discover its actual root instead of assuming `/workspace` is a
 Git repository. Verify repository identity, branch, HEAD and working-tree state.
-This Cloud exception does not authorize worktrees, independent/milestone clones,
-sibling/nested repositories, or alternate local Mac checkouts.
-Separately, [safe-git](../../skills/safe-git/SKILL.md#owner-approved-two-agent-developer-worktree-exception-not-activated)
-records the owner-approved exception for exactly two fixed Codex/Claude
-developer worktrees. General use becomes **ACTIVE only after** the
-independently reviewed G7 activation-status PR has merged into `main`;
-while this record is in an OPEN/Draft PR, general two-root use stays DISABLED.
-Each developer must use its own verified fixed root, unique task branch and
-dedicated venv; shared Git ref integration and native F1 acceptance remain
-canonical-only. Any uncertain or crashed state means STOP/preserve and fall
-back to single canonical CLAIM/RELEASE. No F2 mutation, additional checkouts,
-automated historical process cleanup or CI/Runner control is granted.
+Owner D6 dynamic, registered, task-scoped worktrees are the current local
+development workflow. Follow [safe-git's Owner D6 worktree guidance](../../skills/safe-git/SKILL.md#owner-d6--dynamic-task-scoped-worktrees)
+and the [D6 worktree lifecycle](../../skills/safe-git/worktree-lifecycle.md)
+for registration, ownership and lifecycle requirements. Do not create
+independent clones or sibling/nested repositories. Cloud tasks continue to use
+only their configured checkout. F1 native acceptance remains canonical-only;
+F2 Git mutation is not authorized. If ownership, state or contents are uncertain,
+STOP and preserve the worktree.
 
 Follow the [llmtool development workflow](WORKFLOW.md) for Cloud development,
 Mac-required verification, evidence handoff and merge gates. Complete independent
