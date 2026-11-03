@@ -62,6 +62,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import sysconfig
@@ -216,6 +217,10 @@ def _resolve_cache_root(cache_root, worktree):
     else:
         root = Path(default_cache_root())
     root = Path(os.path.abspath(str(root)))
+    # Check the requested final component before realpath(), which would
+    # otherwise silently turn a symlinked cache root into its target.
+    if root.is_symlink():
+        raise EnvError("UNSAFE_CACHE_ROOT", "refusing symlinked cache root: %s" % root, 3)
     real_root = Path(os.path.realpath(str(root)))
     real_wt = Path(os.path.realpath(str(worktree)))
     if real_root == real_wt or real_wt in real_root.parents:
@@ -232,7 +237,39 @@ def _resolve_cache_root(cache_root, worktree):
             os.chmod(str(real_root), 0o700)
         except OSError:
             pass
+    _validate_cache_root(real_root)
     return real_root
+
+
+def _validate_cache_root(root, info=None):
+    """Require a real, private cache directory owned by this user."""
+
+    root = Path(root)
+    if info is None:
+        try:
+            info = root.lstat()
+        except OSError as exc:
+            raise EnvError("UNSAFE_CACHE_ROOT", "cannot inspect cache root %s: %s" % (root, exc), 3)
+    if stat.S_ISLNK(info.st_mode):
+        raise EnvError("UNSAFE_CACHE_ROOT", "refusing symlinked cache root: %s" % root, 3)
+    if not stat.S_ISDIR(info.st_mode):
+        raise EnvError("UNSAFE_CACHE_ROOT", "cache root is not a directory: %s" % root, 3)
+    if info.st_uid != os.getuid():
+        raise EnvError("UNSAFE_CACHE_ROOT", "cache root is not owned by the current uid: %s" % root, 3)
+    if stat.S_IMODE(info.st_mode) & 0o022:
+        raise EnvError("UNSAFE_CACHE_ROOT", "cache root is group/world-writable: %s" % root, 3)
+
+
+def open_cache_lock(cache_root):
+    """Open the cache lock without following a final-component symlink."""
+
+    path = Path(cache_root) / ".lock"
+    try:
+        return os.open(str(path), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise EnvError("UNSAFE_CACHE_LOCK", "refusing symlinked cache lock: %s" % path, 3)
+        raise EnvError("CACHE_LOCK_FAILED", "cannot open cache lock %s: %s" % (path, exc), 3)
 
 
 def default_cache_root():
@@ -1689,17 +1726,26 @@ def cmd_bootstrap(args):
     fp = fingerprint_id(inputs)
     cache_root = _resolve_cache_root(args.cache_root, worktree)
     lock_fd = worktree_lock(worktree)
+    cache_lock_fd = None
     try:
+        cache_lock_fd = open_cache_lock(cache_root)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        fcntl.flock(cache_lock_fd, fcntl.LOCK_EX)
         return _bootstrap_locked(
             args, started, timings, worktree, lock_path, requirements,
             python_executable, inputs, fp, cache_root,
         )
     finally:
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            if cache_lock_fd is not None:
+                fcntl.flock(cache_lock_fd, fcntl.LOCK_UN)
         finally:
-            os.close(lock_fd)
+            if cache_lock_fd is not None:
+                os.close(cache_lock_fd)
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(lock_fd)
 
 
 def _bootstrap_locked(

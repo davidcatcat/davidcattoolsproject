@@ -1175,6 +1175,37 @@ class CacheTest(EnvironmentTempCase):
         self.assertEqual(code, 4)
         self.assertIn("CACHE_INSIDE_WORKTREE", err)
 
+    def test_cache_root_with_unsafe_owner_or_permissions_is_rejected(self):
+        cache = self.tmp / "unsafe-cache"
+        cache.mkdir(mode=0o700)
+        info = cache.lstat()
+        foreign_owner = mock.Mock(st_mode=info.st_mode, st_uid=os.getuid() + 1)
+        with self.assertRaises(we.EnvError) as raised:
+            we._validate_cache_root(cache, foreign_owner)
+        self.assertEqual(raised.exception.status, "UNSAFE_CACHE_ROOT")
+
+        cache.chmod(0o777)
+        with self.assertRaises(we.EnvError) as raised:
+            we._validate_cache_root(cache)
+        self.assertEqual(raised.exception.status, "UNSAFE_CACHE_ROOT")
+
+    def test_symlinked_cache_root_and_lock_are_rejected(self):
+        target = self.tmp / "cache-target"
+        target.mkdir(mode=0o700)
+        linked_root = self.tmp / "cache-link"
+        os.symlink(str(target), str(linked_root))
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        with self.assertRaises(we.EnvError) as raised:
+            we._resolve_cache_root(linked_root, worktree)
+        self.assertEqual(raised.exception.status, "UNSAFE_CACHE_ROOT")
+
+        lock_target = self.tmp / "lock-target"
+        lock_target.touch()
+        os.symlink(str(lock_target), str(target / ".lock"))
+        with self.assertRaises(we.EnvError) as raised:
+            we.open_cache_lock(target)
+        self.assertEqual(raised.exception.status, "UNSAFE_CACHE_LOCK")
+
     def test_cache_info_lists_entries(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         self.seed_cache(worktree)
