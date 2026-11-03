@@ -1175,6 +1175,65 @@ class CacheTest(EnvironmentTempCase):
         self.assertEqual(code, 4)
         self.assertIn("CACHE_INSIDE_WORKTREE", err)
 
+    def test_unsafe_cache_root_owner_is_rejected_before_cache_work(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        real_lstat = os.lstat
+        cache_root = str(self.cache)
+
+        def foreign_owner(path):
+            result = real_lstat(path)
+            if os.fspath(path) == cache_root:
+                result = mock.Mock(st_mode=result.st_mode, st_uid=os.getuid() + 1)
+            return result
+
+        with mock.patch.object(we.os, "lstat", side_effect=foreign_owner):
+            with mock.patch.object(we, "ensure_wheelhouse") as ensure:
+                code, _, err = self.bootstrap(worktree)
+        self.assertEqual(code, 3)
+        self.assertIn("UNSAFE_CACHE_ROOT", err)
+        ensure.assert_not_called()
+        self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
+
+    def test_group_or_world_writable_cache_root_is_rejected_before_cache_work(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        self.cache.mkdir(mode=0o777)
+        self.cache.chmod(0o777)
+        with mock.patch.object(we, "ensure_wheelhouse") as ensure:
+            code, _, err = self.bootstrap(worktree)
+        self.assertEqual(code, 3)
+        self.assertIn("UNSAFE_CACHE_ROOT", err)
+        ensure.assert_not_called()
+        self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
+
+    def test_symlinked_cache_root_is_rejected_before_cache_work(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        target = self.tmp / "cache-target"
+        target.mkdir(mode=0o700)
+        cache_link = self.tmp / "cache-link"
+        cache_link.symlink_to(target, target_is_directory=True)
+        with mock.patch.object(we, "ensure_wheelhouse") as ensure:
+            code, _, err = self.run_cli(
+                "bootstrap", "--worktree", worktree, "--cache-root", cache_link, "--json"
+            )
+        self.assertEqual(code, 3)
+        self.assertIn("UNSAFE_CACHE_ROOT", err)
+        ensure.assert_not_called()
+        self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
+
+    def test_symlinked_cache_lock_is_rejected_without_following_it(self):
+        worktree = self.make_worktree(self.tmp / "wt", "A")
+        self.cache.mkdir(mode=0o700)
+        lock_target = self.tmp / "outside-lock"
+        lock_target.write_text("", encoding="utf-8")
+        (self.cache / ".lock").symlink_to(lock_target)
+        with mock.patch.object(we, "_collect_wheels") as collect:
+            code, _, err = self.bootstrap(worktree)
+        self.assertEqual(code, 3)
+        self.assertIn("UNSAFE_CACHE_LOCK", err)
+        collect.assert_not_called()
+        self.assertEqual(lock_target.read_text(encoding="utf-8"), "")
+        self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
+
     def test_cache_info_lists_entries(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         self.seed_cache(worktree)
