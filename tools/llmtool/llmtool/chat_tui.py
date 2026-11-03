@@ -111,8 +111,8 @@ under 「你」 below a rule with the local time. A turn's tool use is one line 
 does (▸ 執行中：description… 23s, counting every second, then ✓ description（4s）or
 ✗ description（38s，失敗）; the tool name only when the PM gave no description); F7 lists
 every call. Commands and tool output are never
-shown. The turn ends with a short usage line (seconds · tokens). /pm history shows the
-stored turns in the same layout (PM 歷史（最近 N 輪，存在本機）). PM thinking is never shown as the answer: while the PM thinks
+shown. The turn ends with a short usage line (seconds · tokens). /pm history replays stored
+turns beneath the 「上次對話（時間）」 header. PM thinking is never shown as the answer: while the PM thinks
 or works the pane shows a working line (PM 思考中… 12s), updated every second and
 replaced by the reply. Chat replies are never sent to or shown as the PM.
 
@@ -3683,15 +3683,14 @@ class ChatTUI:
     def _history_segments(self, history):
         """Stored turns in the live layout (W57): a rule with the time, 「你」 and 「PM」
         labels, Markdown bodies, the turn's tools on one line and a short usage line."""
-        turns, total = chat_tui_pm.history_turns(history)
-        header = "PM 歷史（最近 %d 輪，存在本機）" % len(turns)
-        if total > len(turns):
-            header += "，共 %d 輪" % total
+        turns, _total = chat_tui_pm.history_turns(history)
+        header_time = turns[-1]["header_time"] if turns else "時間不明"
+        header = "上次對話（%s）" % header_time
         segments = [(header, "role.system")]
         if not turns:
             segments.append(("\n" + BODY_INDENT + "還沒有存下的對話", "text"))
         sources = []
-        for turn in turns:
+        for index, turn in enumerate(turns):
             segments += [("\n\n", "text"),
                          (chat_tui_view.RULE_CHAR * 2 + " " + turn["time"], "rule"),
                          ("\n", "text")]
@@ -3706,7 +3705,12 @@ class ChatTUI:
                 segments += [("\n" + BODY_INDENT + "▸ 用過的工具：" + "、".join(turn["tools"]),
                               "tool.summary"), ("\n", "text")]
             segments.append(("\n", "text"))
-            reply = terminal_safe_text(turn["reply"]) or "（沒有存下回覆文字）"
+            reply = terminal_safe_text(turn["reply"])
+            if not reply:
+                if index == len(turns) - 1 and turn["status"] == "INTERRUPTED":
+                    reply = "輸入「繼續」讓 PM 接著做"
+                else:
+                    reply = "（沒有存下回覆文字）"
             body, body_sources = self._body(reply, BODY_INDENT)
             offset = sum(len(part) for part, _token in segments)
             sources += [(low + offset, high + offset, *rest) for low, high, *rest in body_sources]

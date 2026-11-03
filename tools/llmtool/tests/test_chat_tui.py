@@ -3364,7 +3364,7 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(ui.pm_state, 'idle')   # 暖機中… is the cold-start view of idle
             self.assertIn('PM session ' + self.session_id, ui.conversation.text)
             self.assertIn('dedicated (pm_runtime binding created', ui.conversation.text)
-            self.assertIn('PM 歷史（最近 0 輪，存在本機）\n  還沒有存下的對話', ui.conversation.text)
+            self.assertIn('上次對話（時間不明）\n  還沒有存下的對話', ui.conversation.text)
             argv = self.fakes[0].argv
             self.assertEqual(argv[argv.index('--session-id') + 1], self.session_id)
             self.assertIn('--include-partial-messages', argv)
@@ -3925,7 +3925,7 @@ class PMConversationTests(BoundedPMTest):
                 status='s ' + key)]}))
         ui, _ = self.drive([self.connect(), self.connected, '/pm history\r',
                             lambda ui: self.until(ui, lambda ui: ui.conversation.text.count(
-                                'PM 歷史（最近 1 輪，存在本機）') == 2)])
+                                '上次對話（') == 2)])
         text = ui.conversation.text
         self.assertNotIn(key[3:9], text)
         self.assertIn('▸ 用過的工具：[withheld]', text)
@@ -4204,7 +4204,7 @@ class PMConversationTests(BoundedPMTest):
 
     def test_history_disconnect_and_chat_is_never_the_pm(self):
         def history_shown(ui):
-            return self.until(ui, lambda ui: 'PM 歷史（最近 1 輪' in ui.conversation.text)
+            return self.until(ui, lambda ui: '上次對話（' in ui.conversation.text)
 
         ui, _ = self.drive([self.connect(), self.connected, 'first\r', self.turn_done,
                             '/pm history\r', history_shown,
@@ -4212,7 +4212,7 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: self.assertFalse(ui.pm_mode),
                             'chat now\r', self.idle])
         text = ui.conversation.text
-        history = text[text.index('PM 歷史（最近 1 輪，存在本機）'):]
+        history = text[text.index('上次對話（'):]
         self.assertNotIn('(history)', text)
         self.assertRegex(history, '── [0-9]{2}:[0-9]{2}\n你\n  first\n\nPM\n'
                                   '  ▸ 用過的工具：Read\n')
@@ -4293,14 +4293,15 @@ class PMConversationTests(BoundedPMTest):
             {'pm_session_id': self.session_id, 'turns': turns}))
         ui, _ = self.drive([self.connect(), self.connected])
         text = ui.conversation.text
-        history = text[text.index('PM 歷史（最近 2 輪，存在本機）'):]
+        history = text[text.index('上次對話（'):]
+        self.assertRegex(history, r'^上次對話（[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}）')
         self.assertNotIn('(history)', history)
         self.assertRegex(history, '\n\n── (10-2[78] )?[0-9]{2}:[0-9]{2}\n你\n  看 \\*\\*進度\\*\\*\n\nPM\n'
                                   '  ▸ 用過的工具：Read\n\n  ▍ 結論\n  • 一\n  • 二\n\n'
                                   '3.0 秒 · 1.2k tokens\n\n── ')
         self.assertIn('PM（背景通知）\n  背景完成\n\n已中斷', history)
         view = ui.view
-        rule = text.index('── ', text.index('PM 歷史'))
+        rule = text.index('── ', text.index('上次對話'))
         self.assertEqual(view.token_at(rule), 'rule')
         self.assertEqual(view.token_at(text.index('\n你\n', rule) + 1), 'role.owner')
         self.assertEqual(view.token_at(text.index('3.0 秒')), 'meta.usage')
