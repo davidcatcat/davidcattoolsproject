@@ -107,6 +107,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         # Cap-specific tests opt back into the real helper with a real TaskStore.
         cap_patch = patch.object(submission_cli, '_enforce_delegate_repair_cap')
         cap_patch.start()
+        self.cap_patch = cap_patch
         self.addCleanup(cap_patch.stop)
         policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
         policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
@@ -3660,6 +3661,164 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0][-2:], ['--trust-sha256', 'a' * 64])
         self.assertEqual(captured[0][4], '# trusted helper\n')
+
+
+class DelegateRepairCapTests(unittest.TestCase):
+    """Exercise the real assignment cap with durable TaskStore records."""
+
+    def setUp(self):
+        # Reuse the existing isolated D6/trust fixture, then restore the real
+        # cap helper for this class's focused tests.
+        TaskSubmissionCLITests.setUp(self)
+        self.cap_patch.stop()
+        self.store = TaskStore(Path(self.home) / '.local/state/llmtool/tasks')
+
+    def _task(self, executor=None, *, assigned=False):
+        request = 'Bounded repair-cap test task'
+        task_id, run_id = new_id(), new_id()
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        task = submission_cli._record(
+            task_id, run_id, 'pm-' + new_id(), 'selected', request,
+            state='PM_RESPONDED', request_sha=request_sha)
+        task['response'] = 'A bounded task is ready for delegation.'
+        self.store.create(task)
+        if assigned:
+            self._assign(task_id, executor)
+        return self.store.get(task_id)
+
+    def _assign(self, task_id, executor):
+        developer = {
+            'assignment_id': new_id(), 'selection_source': 'PM',
+            'state': 'DEVELOPER_PENDING', 'provider_profile': 'codex',
+            'provider_type': None, 'model': None,
+            'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+            'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['sample.py'], 'write_paths': ['sample.py'],
+            'acceptance': ['focused change is present'],
+            'context_sha256': 'b' * 64, 'egress_basis': 'Synthetic test fixture',
+            'input_bytes': 1, 'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'created_at': '2026-11-04T00:00:00Z',
+        }
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
+            'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+            'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        self.store.update(task_id, developer=developer, completion=completion)
+
+    def _args(self, task, provider, executor='executor-cap-test'):
+        if provider == 'codex':
+            return Namespace(task_id=task['task_id'], provider='codex', mode='direct',
+                             executor_task=executor, acceptance=['focused change is present'])
+        if provider == 'opencode':
+            return Namespace(task_id=task['task_id'], provider='opencode', mode='proposal',
+                             executor_task=executor, acceptance=['focused change is present'])
+        if provider == 'agy':
+            return Namespace(task_id=task['task_id'], provider='agy', mode='direct',
+                             owner_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
+                             executor_task=executor, acceptance=['focused change is present'])
+        return Namespace(task_id=task['task_id'], provider='gw-agent', mode='direct',
+                         executor_task=executor)
+
+    def test_fourth_assignment_is_refused_before_each_route_and_two_pass(self):
+        route_functions = {
+            'codex': 'run_task_codex_delegate',
+            'agy': 'run_task_agy_delegate',
+            'opencode': 'run_task_opencode_delegate',
+            'gw-agent': 'run_task_gw_agent_delegate',
+        }
+        for provider, function_name in route_functions.items():
+            with self.subTest(provider=provider):
+                executor = 'executor-' + provider
+                for _ in range(3):
+                    self._task(executor, assigned=True)
+                current = self._task()
+                route = getattr(submission_cli, function_name)
+                with patch.object(submission_cli, function_name,
+                                  side_effect=AssertionError('route must not start')) as called:
+                    with self.assertRaises(LLMToolError) as raised:
+                        run_task_delegate(self._args(current, provider, executor),
+                                          store=self.store)
+                self.assertIn('DELEGATE_REPAIR_LIMIT_REACHED', str(raised.exception))
+                called.assert_not_called()
+
+                # A separate D6 with two prior assignments is still admitted.
+                other_executor = executor + '-under-limit'
+                for _ in range(2):
+                    self._task(other_executor, assigned=True)
+                admitted = self._task()
+                with patch.object(submission_cli, function_name, return_value=0) as called:
+                    self.assertEqual(run_task_delegate(
+                        self._args(admitted, provider, other_executor), store=self.store), 0)
+                called.assert_called_once()
+
+    def test_other_executor_and_same_task_replay_do_not_consume_cap(self):
+        for _ in range(3):
+            self._task('executor-one', assigned=True)
+        current = self._task('executor-two', assigned=True)
+        with dispatcher_trust(Path(self.temp.name).resolve()):
+            submission_cli._enforce_delegate_repair_cap(
+                Namespace(task_id=current['task_id'], executor_task='executor-two'),
+                self.store)
+        self.assertNotIn('repair_cap_override', self.store.get(current['task_id']))
+
+    def test_high_debug_ref_validation_and_persistence(self):
+        for ref, valid in (
+                ('https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123', True),
+                ('http://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123', False),
+                ('https://github.com/other/repo/issues/120#issuecomment-123', False),
+                ('https://github.com/davidcatcat/davidcattoolsproject/issues/120', False)):
+            with self.subTest(ref=ref):
+                for _ in range(3):
+                    self._task('executor-high-debug', assigned=True)
+                current = self._task()
+                args = Namespace(task_id=current['task_id'],
+                                 executor_task='executor-high-debug', high_debug_ref=ref)
+                with dispatcher_trust(Path(self.temp.name).resolve()):
+                    if valid:
+                        submission_cli._enforce_delegate_repair_cap(args, self.store)
+                        override = self.store.get(current['task_id'])['repair_cap_override']
+                        self.assertEqual(override['ref'], ref)
+                        self.assertEqual(override['rounds'], 3)
+                        self.assertRegex(override['recorded_at'],
+                                         r'^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$')
+                    else:
+                        with self.assertRaises(LLMToolError) as raised:
+                            submission_cli._enforce_delegate_repair_cap(args, self.store)
+                        self.assertIn('DELEGATE_HIGH_DEBUG_REF_INVALID', str(raised.exception))
+
+    def test_unreadable_prior_record_fails_closed_with_task_id(self):
+        current = self._task()
+        class UnreadableStore:
+            def get(inner_self, task_id):
+                if task_id == current['task_id']:
+                    return self.store.get(task_id)
+                raise LLMToolError('record invalid')
+
+            def task_ids(inner_self):
+                return [current['task_id'], 'a' * 32]
+
+        with self.assertRaises(LLMToolError) as raised:
+            submission_cli._enforce_delegate_repair_cap(
+                Namespace(task_id=current['task_id'], executor_task='executor-x'),
+                UnreadableStore())
+        self.assertIn('DELEGATE_REPAIR_COUNT_UNAVAILABLE', str(raised.exception))
+        self.assertIn('a' * 32, str(raised.exception))
+
+    def test_background_codex_proposal_refusal_precedes_cap_check(self):
+        current = self._task()
+        args = self._args(current, 'codex')
+        args.background = True
+        args.mode = 'proposal'
+        with patch.object(submission_cli, '_enforce_delegate_repair_cap',
+                          side_effect=AssertionError('cap must remain later')) as cap:
+            with self.assertRaises(LLMToolError) as raised:
+                run_task_delegate(args, store=self.store)
+        self.assertIn('--background requires --mode direct', str(raised.exception))
+        cap.assert_not_called()
 
 
 if __name__ == '__main__':

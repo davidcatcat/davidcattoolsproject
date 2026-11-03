@@ -3992,17 +3992,30 @@ def _enforce_delegate_repair_cap(args, store):
         raise LLMToolError('DELEGATE_HIGH_DEBUG_REF_INVALID')
     executor_task = getattr(args, 'executor_task', None)
     task_id = args.task_id
-    current = store.get(task_id)
+    try:
+        current = store.get(task_id)
+    except Exception:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE task={task_id}') from None
     completion = current.get('completion')
     if (type(completion) is dict and
             completion.get('executor_task_id') == executor_task and
             type(current.get('developer')) is dict):
         return
     assignments = 0
-    for other_task_id in store.task_ids():
+    try:
+        other_task_ids = store.task_ids()
+    except Exception:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE task={task_id}') from None
+    for other_task_id in other_task_ids:
         if other_task_id == task_id:
             continue
-        other = store.get(other_task_id)
+        try:
+            other = store.get(other_task_id)
+        except Exception:
+            raise LLMToolError(
+                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE task={other_task_id}') from None
         completion = other.get('completion')
         if (type(completion) is dict and
                 completion.get('executor_task_id') == executor_task and
@@ -4015,6 +4028,7 @@ def _enforce_delegate_repair_cap(args, store):
         raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
     override = {'ref': high_debug_ref, 'rounds': assignments,
                 'recorded_at': _timestamp()}
+    # This records the cap authorization decision; later provider setup may fail.
     store.compare_and_update(
         task_id, expected={'record_sha256': current['record_sha256']},
         repair_cap_override=override)
