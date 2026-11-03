@@ -1422,7 +1422,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 self.attempt = dict(merge_attempt)
         store = Store()
         calls = []
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True, 'labels': []}
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+              'labels': [{'name': 'mac-ci'}]}
         def github_get(path):
             if path.startswith('commits/'):
                 return {'total_count': 2, 'check_runs': [
@@ -1455,6 +1456,76 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(replay['codes'], ['MERGE_ALREADY_CLAIMED'])
         self.assertEqual(len(calls), 2)
 
+    def test_merge_adds_mac_ci_label_once_before_waiting_for_ci(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        checks = {'total_count': 2, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'},
+            {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+             'conclusion': 'success'}]}
+
+        def run_case(*, verdict='PASS', head=HEAD, current=None, gh_code=0):
+            record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                      'review_dispatch_claim': [dict(review, head_sha=head,
+                          review_result={'verdict': verdict})]}
+            original = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+                        'labels': []}
+            current = original if current is None else current
+            calls = []
+
+            class Store:
+                def compare_and_update(self, *_args, **_kwargs):
+                    return None
+
+            def github_get(path):
+                if path.startswith('commits/'):
+                    return checks
+                if path.endswith('/files?per_page=100'):
+                    return [{'filename': 'src/module.py'}]
+                if path.startswith('pulls/'):
+                    return current
+                return []
+
+            def gh_runner(_root, args):
+                calls.append(args)
+                return type('R', (), {'returncode': gh_code})()
+
+            result = task_advance._merge_once(store=Store(), record=record,
+                number=17, head=HEAD, pr=original, events=[event],
+                github_get=github_get, gh_runner=gh_runner, root='/repo')
+            return result, calls
+
+        result, calls = run_case()
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+
+        labeled = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+                   'labels': [{'name': 'mac-ci'}]}
+        result, calls = run_case(current=labeled)
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertFalse(any('--add-label' in call for call in calls))
+
+        result, calls = run_case(verdict='FIX')
+        self.assertEqual(result['codes'], ['MERGE_REVIEW_NOT_PASS'])
+        self.assertEqual(calls, [])
+
+        result, calls = run_case(head='b' * 40)
+        self.assertEqual(result['codes'], ['MERGE_REVIEW_NOT_PASS'])
+        self.assertEqual(calls, [])
+
+        closed = {'number': 17, 'head': {'sha': HEAD}, 'state': 'closed',
+                  'mergeable': True, 'labels': []}
+        result, calls = run_case(current=closed)
+        self.assertEqual(result['codes'], ['MERGE_PR_NOT_OPEN'])
+        self.assertEqual(calls, [])
+
+        result, calls = run_case(gh_code=1)
+        self.assertEqual(result['codes'], ['MERGE_MAC_CI_LABEL_FAILED'])
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+
     def test_merge_refuses_unqualified_reviews_checks_heads_and_owner_acceptance(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
                   'review_result': {'verdict': 'PASS'}}
@@ -1476,7 +1547,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 'review_dispatch_claim': [review],
             })
             pr = pr or {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
-                        'labels': [], 'body': ''}
+                        'labels': [{'name': 'mac-ci'}], 'body': ''}
             checks = checks if checks is not None else [
                 {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
                  'conclusion': 'success'},
@@ -1604,7 +1675,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                     raise RuntimeError('claim race')
                 self.attempt = dict(merge_attempt)
         store, calls = Store(), []
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True, 'labels': []}
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+              'labels': [{'name': 'mac-ci'}]}
         def github_get(path):
             if path.startswith('commits/'):
                 return {'total_count': 1, 'check_runs': [
@@ -1667,7 +1739,8 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                 self.attempt = dict(merge_attempt)
 
         store, gh_calls = Store(), []
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True}
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+              'labels': [{'name': 'mac-ci'}]}
         checks = {'total_count': 2, 'check_runs': [
             {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
              'conclusion': 'success'},

@@ -94,6 +94,19 @@ def _merge_refusal(code):
     return {'step': 'MERGE_REFUSED', 'codes': [code], 'result': None}
 
 
+def _has_pr_label(pr, label):
+    labels = pr.get('labels', []) if type(pr) is dict else None
+    if type(labels) is not list:
+        return None
+    for item in labels:
+        name = item.get('name') if type(item) is dict else item
+        if type(name) is not str:
+            return None
+        if name == label:
+            return True
+    return False
+
+
 def _owner_acceptance_required(files):
     if type(files) is not list:
         return True
@@ -203,9 +216,6 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     review_version = _merge_pass_claim(record, number, head, events)
     if type(review_version) is not int:
         return _merge_refusal(review_version or 'MERGE_REVIEW_NOT_PASS')
-    code = _merge_checks(record, number, head, pr, github_get)
-    if code:
-        return _merge_refusal(code)
     try:
         current_pr = github_get(f'pulls/{number}')
     except Exception:
@@ -216,8 +226,22 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         return _merge_refusal('MERGE_STALE_HEAD')
     if current_pr.get('state') not in (None, 'open') or current_pr.get('merged') is True:
         return _merge_refusal('MERGE_PR_NOT_OPEN')
+    has_mac_ci = _has_pr_label(current_pr, 'mac-ci')
+    if has_mac_ci is None:
+        return _merge_refusal('MERGE_LABELS_UNAVAILABLE')
+    if not has_mac_ci:
+        try:
+            labeled = gh_runner(root, ['pr', 'edit', str(number), '--add-label', 'mac-ci'])
+        except Exception:
+            labeled = None
+        if labeled is None or getattr(labeled, 'returncode', 1) != 0:
+            return _merge_refusal('MERGE_MAC_CI_LABEL_FAILED')
+        return {'step': 'WAITING_CI', 'codes': [], 'result': {'pr': number, 'head': head}}
     if current_pr.get('mergeable') is not True:
         return _merge_refusal('MERGE_PR_NOT_MERGEABLE')
+    code = _merge_checks(record, number, head, pr, github_get)
+    if code:
+        return _merge_refusal(code)
     prior = record.get('merge_attempt')
     if prior is not None:
         if prior.get('pr') != number or prior.get('head_sha') != head:
