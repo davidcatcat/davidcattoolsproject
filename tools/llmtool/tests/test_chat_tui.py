@@ -6896,10 +6896,11 @@ class DetailOpenPrUiTests(Base):
             with patch.object(chat_tui_status, 'load_records', return_value=([record], 0)), \
                     patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
                     patch.object(chat_tui, '_open_pr_url', side_effect=fake_open):
-                ui, _ = self.drive(['o', lambda ui: self.assertEqual(ui.input.text, 'o'),
-                                    '\x1bOR', listed, '\r', detail_hint, 'o', 'o', result],
+                ui, _ = self.drive(['\x1bOR', listed, '\r', detail_hint, 'o', 'o', result,
+                                    '\t', 'o',
+                                    lambda ui: self.assertEqual(ui.input.text, 'o')],
                                    size=[Size(rows=24, columns=80)])
-        self.assertEqual(ui.input.text, '')
+        self.assertEqual(ui.input.text, 'o')
 
     def test_panel_detail_uses_the_same_pane_hint_and_keeps_draft(self):
         record = self.record(published_pr={'pr': 684})

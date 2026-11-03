@@ -3050,7 +3050,7 @@ class ChatTUI:
 
     def _set_task_view(self, text):
         view = self.task_view
-        text = self._with_pr_status(text)
+        text = self._with_pr_status(text, panel=True)
         safe_text = terminal_safe_text(text)
         view.set_text(safe_text)
         if safe_text.startswith("Task 詳情（唯讀）—"):
@@ -3150,7 +3150,7 @@ class ChatTUI:
         if hasattr(self, "task_view"):
             self._set_task_view(self.task_view.text)
 
-    def _with_pr_status(self, text):
+    def _with_pr_status(self, text, panel=False):
         if not text:
             return text
         status = "o 開啟 PR" if self.pr_open_line is None else "o 開啟 PR：" + self.pr_open_line
@@ -3160,12 +3160,10 @@ class ChatTUI:
                  "o 開啟 PR：沒有 PR", "o 開啟 PR：CONFLICT",
                  "o 開啟 PR：無信任的儲存庫", "o 開啟 PR：URL 不符",
                  "o 開啟 PR：沒有 Task"}
-        if len(lines) > 1 and lines[1] in known:
-            lines.pop(1)
-        if lines:
-            lines.insert(1, status)
-        else:
-            lines = [status]
+        lines = [line for line in lines if line not in known]
+        # Keep the existing detail's first three summary lines in place. The panel has a
+        # single heading, so its hint follows that heading and stays visible at 80 columns.
+        lines.insert(min(1 if panel else 3, len(lines)), status)
         return "\n".join(lines)
 
     def _refresh_pr_open_status(self):
@@ -3350,6 +3348,7 @@ class ChatTUI:
     def close_task_view(self):
         """Esc: back to the chat; its reading position and the draft were never touched."""
         self._clear_pr_open_status()
+        self._set_task_view("")
         self.task_view_task_id = None
         self.task_copy_at = None
         self.task_copy_label = None
