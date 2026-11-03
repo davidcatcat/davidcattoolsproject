@@ -12,6 +12,11 @@ from llmtool import action_contract as c
 from llmtool import authorization_policy as p
 from llmtool.errors import LLMToolError
 from test_action_contract import make_action, make_approval
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 PACKAGE = Path(__file__).resolve().parents[1] / 'llmtool'
 REDEEM_RUN = 'a'*32

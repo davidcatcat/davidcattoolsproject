@@ -53,3 +53,15 @@ The Owner authorizes **incremental improvement on the already delivered TUI**, t
 | 4 | PM adapter interface | — | [#396](https://github.com/davidcatcat/davidcattoolsproject/issues/396#issuecomment-6552740555) |
 | 5 | Install experience: `setup`, version/migrate, uninstall, private release (R1…R10; R1/R2 can start first) | 1–3 | [#396](https://github.com/davidcatcat/davidcattoolsproject/issues/396#issuecomment-6553006696) |
 | 6 | Pluggable execution backend local/ssh/github-actions (PR-1…PR-9; PR-9 needs D13 approval) | 1, #417 DET-1 | [#417](https://github.com/davidcatcat/davidcattoolsproject/issues/417#issuecomment-6552996403) |
+
+## Future backlog — TUI attachments (DEFERRED, Owner 2026-11-03)
+
+**Position:** Last in this Roadmap, **after A13**. Parked for future consideration; not part of active A3.5 W58–W63, A11c or A13 delivery. This is an item in the existing backlog, **not a new A-series milestone**.
+
+- **Images:** clipboard/screenshot paste, explicit local-path/drag input, multiple images and mixed text + image prompts, with clear attachment status and unsupported-provider feedback.
+- **Text files:** explicit attach of TXT/MD/LOG/JSON/YAML/CSV and analysis alongside the user's prompt; validate source, size, permissions and content before transfer.
+- **Later optional documents:** evaluate PDF/DOCX/XLSX after the first attachment workflow proves useful; do not promise unsupported native file or model capabilities.
+- **Architecture boundary:** TUI only collects/displays attachment references. Core owns authorized attachment access, lifetime, safety and provider capability checks; PM/runtime adapters deliver content to Claude/Codex/other providers only when supported and authorized. Never replace protected filesystem boundaries with arbitrary path access.
+- **Acceptance when resumed:** real macOS terminal paste/path UX plus proof that the target model actually received each attachment (not merely a displayed filename); multi-file and unsupported-provider/error cases must be explicit.
+
+**Authority/status:** Research and backlog only. **NOT STARTED / NO DISPATCH AUTHORIZED.** Do not create tasks, dispatch agents, change providers/Core, or move this ahead of the current Roadmap until the Owner explicitly re-prioritizes it.
