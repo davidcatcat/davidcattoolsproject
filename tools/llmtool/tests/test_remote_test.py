@@ -378,6 +378,37 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('REMOTE_STAGE_FAILED {stage} {type(exc).__name__}',
                       remote_test._REMOTE_SCRIPT)
 
+    def test_test_step_argv_uses_private_workspace_home_and_tmp(self):
+        parsed = ast.parse(remote_test._REMOTE_SCRIPT)
+        test_call = next(node.value for node in ast.walk(parsed)
+                         if isinstance(node, ast.Assign) and
+                         any(isinstance(target, ast.Name) and target.id == 'test'
+                             for target in node.targets) and
+                         isinstance(node.value, ast.Call) and
+                         isinstance(node.value.func, ast.Name) and
+                         node.value.func.id == 'nobody_run')
+        self.assertEqual(ast.unparse(test_call.args[0]), 'work + "/tools/llmtool"')
+        env_arg = next(keyword.value for keyword in test_call.keywords
+                       if keyword.arg == 'env')
+        self.assertEqual(ast.unparse(env_arg),
+                         '{"HOME": work + "/.home", "TMPDIR": work + "/.tmp"}')
+
+        work = '/tmp/llmtool-remote-test.Abc123'
+        env = {'HOME': work + '/.home', 'TMPDIR': work + '/.tmp'}
+        nobody = next(node for node in parsed.body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'nobody')
+        namespace = {}
+        exec(compile(ast.Module(body=[nobody], type_ignores=[]),
+                     '<remote-nobody-helper>', 'exec'), namespace)
+        command = namespace['nobody'](
+            work + '/tools/llmtool', ['/usr/bin/timeout', '120', 'python', '-m',
+                                      'unittest', 'discover'], env)
+        self.assertEqual(command[:8],
+                         ['sudo', '-n', '-u', 'nobody', 'env', '-i', '-C',
+                          work + '/tools/llmtool'])
+        self.assertIn('HOME=' + work + '/.home', command)
+        self.assertIn('TMPDIR=' + work + '/.tmp', command)
+
     def test_receipt_accepts_missing_log_path(self):
         receipt = json.loads(self.receipt().decode())
         receipt['remote_log_path'] = None

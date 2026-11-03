@@ -190,7 +190,7 @@ try:
             for index,mod in enumerate(mods):
                 allowance=(deadline-time.monotonic())/(len(mods)-index)-3
                 if allowance<=1: raise subprocess.TimeoutExpired(mod,0)
-                test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance),capture_stderr=True)
+                test=nobody_run(work+"/tools/llmtool",[work+"/venv/bin/python","-m","unittest","discover","-s","tests","-p",mod+".py"],limit=min(180,allowance),env={"HOME":work+"/.home","TMPDIR":work+"/.tmp"},capture_stderr=True)
                 test_output=test.stdout+(test.stderr or b""); log+=test_output
                 lines=[x.decode("utf8","replace").strip() for x in test_output.splitlines() if b"Ran " in x or b"OK" in x or b"FAILED" in x or b"ERROR" in x]
                 final=final_line(lines)
