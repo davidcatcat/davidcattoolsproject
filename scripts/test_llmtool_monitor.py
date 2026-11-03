@@ -5675,7 +5675,7 @@ class DiskUsageTests(unittest.TestCase):
     def statvfs_for(used_percent):
         from types import SimpleNamespace
         return SimpleNamespace(f_blocks=1000, f_bfree=1000 - used_percent,
-                               f_bavail=6, f_frsize=1024 ** 3)
+                               f_bavail=100 - used_percent, f_frsize=1024 ** 3)
 
     def test_home_volume_percentages_and_threshold_messages(self):
         for percent, label in ((50, ""), (91, "WARNING"), (97, "ATTENTION")):
@@ -5695,6 +5695,17 @@ class DiskUsageTests(unittest.TestCase):
                     self.assertIn("6.0G free", alert)
                 else:
                     self.assertEqual(alert, "")
+
+    def test_apfs_shared_container_uses_available_space_for_percentage(self):
+        monitor = mon.Monitor()
+        # df-like volume: 233G total, 176G used, 6.3G available.
+        fake = type("StatVFS", (), {"f_blocks": 2330, "f_bfree": 570,
+                                    "f_bavail": 63, "f_frsize": 100_000_000})()
+        with patch.object(mon.os, "statvfs", return_value=fake) as statvfs, \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+            monitor.refresh_disk_usage(now=0)
+        statvfs.assert_called_once_with("/home/test")
+        self.assertEqual(monitor.disk_usage, (97, 6_300_000_000))
 
     def test_statvfs_failure_is_silent(self):
         monitor = mon.Monitor()

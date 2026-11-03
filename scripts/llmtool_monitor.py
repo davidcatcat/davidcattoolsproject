@@ -774,13 +774,14 @@ class Monitor:
         self.disk_due = now + DISK_REFRESH_SECONDS
         try:
             usage = os.statvfs(os.path.expanduser("~"))
-            total = usage.f_blocks * usage.f_frsize
+            used = (usage.f_blocks - usage.f_bfree) * usage.f_frsize
+            available = usage.f_bavail * usage.f_frsize
+            total = used + available
             if total <= 0:
                 self.disk_usage = None
                 return
-            used = usage.f_blocks - usage.f_bfree
-            percent = max(0, min(100, int(used * 100 / usage.f_blocks)))
-            self.disk_usage = (percent, usage.f_bavail * usage.f_frsize)
+            percent = max(0, min(100, math.ceil(used * 100 / total)))
+            self.disk_usage = (percent, available)
         except Exception:
             self.disk_usage = None
 
