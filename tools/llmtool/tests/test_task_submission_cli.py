@@ -1427,6 +1427,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with patch.dict(os.environ, injected), \
                 patch('llmtool.task_submission_cli._trusted_d6_helper_source',
                       return_value=(self.executor_root, b'raise SystemExit(0)')), \
+                patch('llmtool.task_submission_cli._load_bootstrap_trust_sha256',
+                      return_value='a' * 64), \
                 patch.object(submission_cli.subprocess, 'run',
                              side_effect=reject_env_bootstrap), \
                 patch('llmtool.task_submission_cli.opencode_direct_developer.run') as launch, \
@@ -1442,7 +1444,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         argv, kwargs = captured[0]
         self.assertEqual(argv, [sys.executable, '-B', '-I', '-c',
                                 'raise SystemExit(0)', '--task-id', 'executor-task-1',
-                                '--worktree-root', str(self.executor_root)])
+                                '--worktree-root', str(self.executor_root),
+                                '--trust-sha256', 'a' * 64])
         self.assertNotIn(str(target_script), argv)
         self.assertFalse(marker_path.exists())
         self.assertEqual(Path(kwargs['cwd']), self.executor_root)
