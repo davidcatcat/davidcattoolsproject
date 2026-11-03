@@ -11,9 +11,22 @@ from unittest.mock import patch
 from llmtool import task_review_collector as c
 from llmtool.errors import LLMToolError
 from test_task_review import fixture,FakeHost,NOW
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 
 class CollectorTests(unittest.TestCase):
+    def test_observation_repository_must_equal_trust_slug(self):
+        ready,final,expect,events=fixture();observation=FakeHost(ready,final,expect,events).observation
+        self.assertIsNone(observation.validate(expect,events,NOW,10))
+        with review_trust_fixture.use_trust(review_trust_fixture.make_trust('otherorg/other-repo')), \
+             self.assertRaises(LLMToolError) as caught:
+            observation.validate(expect,events,NOW,10)
+        self.assertEqual(caught.exception.review_code,'REVIEW_IDENTITY_NOT_ATTESTED')
+
     def test_observation_allows_automation_branch_but_still_rejects_main(self):
         ready,final,expect,events=fixture();observation=FakeHost(ready,final,expect,events).observation
         dev,reviewer=expect.agents
@@ -208,6 +221,38 @@ class LocalFactsOriginTests(unittest.TestCase):
         ):
             with self.subTest(origin=origin), self.assertRaises(LLMToolError):
                 self._collect(origin)
+
+    def test_origin_and_repository_follow_trust_slug(self):
+        # #369 PR-6: allowed_origins/slug come from trust.json, read at use time.
+        with review_trust_fixture.use_trust(review_trust_fixture.make_trust('otherorg/other-repo')):
+            for origin in ('git@github.com:otherorg/other-repo.git',
+                           'https://github.com/otherorg/other-repo.git'):
+                with self.subTest(origin=origin):
+                    self.assertEqual(self._collect(origin).repository,'otherorg/other-repo')
+            for origin in ('git@github.com:davidcatcat/davidcattoolsproject.git',
+                           'https://github.com/davidcatcat/davidcattoolsproject.git',
+                           'ssh://git@github.com/otherorg/other-repo.git',
+                           'git@github.com:otherorg/other-repo.git/',
+                           'https://github.com/otherorg/other-repo',
+                           'https://github.com/OtherOrg/other-repo.git'):
+                with self.subTest(origin=origin), self.assertRaises(LLMToolError) as caught:
+                    self._collect(origin)
+                self.assertEqual(caught.exception.review_code,'REVIEW_REPOSITORY_INVALID')
+
+    def test_only_listed_origin_form_is_accepted(self):
+        https_only=review_trust_fixture.make_trust(
+            origins=('https://github.com/davidcatcat/davidcattoolsproject.git',))
+        with review_trust_fixture.use_trust(https_only):
+            self._collect('https://github.com/davidcatcat/davidcattoolsproject.git')
+            with self.assertRaises(LLMToolError):
+                self._collect('git@github.com:davidcatcat/davidcattoolsproject.git')
+
+    def test_missing_trust_fails_closed_with_sanitized_code(self):
+        from llmtool import trust
+        with patch.object(trust,'load_trust',side_effect=trust.TrustError('TRUST_MISSING')), \
+             self.assertRaises(LLMToolError) as caught:
+            self._collect('git@github.com:davidcatcat/davidcattoolsproject.git')
+        self.assertEqual(caught.exception.review_code,'TRUST_MISSING')
 
     def test_automation_branch_is_allowed_but_main_remains_rejected(self):
         facts=self._collect('git@github.com:davidcatcat/davidcattoolsproject.git',

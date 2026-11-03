@@ -15,6 +15,11 @@ from llmtool import review_authority as a, task_review as r, authorization_ledge
 from llmtool import authorization_policy as p
 from llmtool.task_review_collector import LocalFacts
 from test_task_review import fixture, FakeHost, NOW
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 REF='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6130032828'
 LOAD_TOLERANT_TIMEOUT_SECONDS=15
@@ -176,6 +181,42 @@ class AuthorityTests(unittest.TestCase):
                 hostdata=copy.deepcopy(self.h.hostdata)
                 hostdata['agents'][0]['origin']=origin
                 a._decode_host(r.canonical(hostdata).decode())
+    def test_host_policy_reference_follows_trust_issue_and_slug(self):
+        # #369 PR-6: reviewer_host_policy_issue and slug come from trust.json.
+        a._reference(REF)
+        new_issue=review_trust_fixture.make_trust(host_policy_issue=777)
+        new_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/777#issuecomment-1'
+        with review_trust_fixture.use_trust(new_issue):
+            a._reference(new_ref)
+            with self.assertRaises(Exception) as caught: a._reference(REF)
+            self.assertEqual(caught.exception.review_code,'REVIEW_HOST_POLICY_INVALID')
+            with self.assertRaises(Exception):
+                a._reference('https://github.com/davidcatcat/davidcattoolsproject/issues/7777#issuecomment-1')
+        with review_trust_fixture.use_trust(review_trust_fixture.make_trust('otherorg/other-repo')):
+            a._reference('https://github.com/otherorg/other-repo/issues/120#issuecomment-1')
+            with self.assertRaises(Exception): a._reference(REF)
+
+    def test_registered_agent_origin_and_observation_follow_trust_slug(self):
+        other=review_trust_fixture.make_trust('otherorg/other-repo',host_policy_issue=120)
+        self.assertEqual(self.h.observer.observe().repository,'davidcatcat/davidcattoolsproject')
+        with review_trust_fixture.use_trust(other):
+            for origin in ('git@github.com:otherorg/other-repo.git',
+                           'https://github.com/otherorg/other-repo.git'):
+                with self.subTest(origin=origin):
+                    agent=a.RegisteredAgent(**dict(self.h.hostdata['agents'][0],origin=origin))
+                    self.assertEqual(agent.origin,origin)
+            with self.assertRaises(Exception) as caught:
+                a.RegisteredAgent(**self.h.hostdata['agents'][0])
+            self.assertEqual(caught.exception.review_code,'REVIEW_REGISTRATION_INVALID')
+            # A host registration still carrying the old origin now fails closed.
+            with self.assertRaises(Exception) as caught: self.h.observer.observe()
+            self.assertEqual(caught.exception.review_code,'REVIEW_REGISTRATION_INVALID')
+        # With a registration accepted earlier, the Observation carries the current trust slug.
+        registration=a.load_host_registration(self.h.pin)
+        with review_trust_fixture.use_trust(other), \
+             patch.object(a,'load_host_registration',return_value=registration):
+            self.assertEqual(self.h.observer.observe().repository,'otherorg/other-repo')
+
     def zero(self,result,code=None):
         self.assertEqual(result['provider_calls'],0);self.assertFalse(result['authorized'])
         self.assertEqual(result['production_handoff'],'NOT_DELIVERED')
