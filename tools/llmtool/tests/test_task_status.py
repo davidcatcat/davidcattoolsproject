@@ -207,6 +207,23 @@ class TaskStatusTests(unittest.TestCase):
             self.assertEqual([row['pm_session_id'] for row in filtered['tasks']], ['pm-two'])
             self.assertEqual(before, [hashlib.sha256(row['record_sha256'].encode()).hexdigest() for row in rows])
 
+    def test_native_pm_session_uuid_filter_matches_pm_id_and_rejects_invalid(self):
+        native_session = '550e8400-e29b-41d4-a716-446655440000'
+        with tempfile.TemporaryDirectory() as root:
+            rows = [record(root, pm_session_id='pm-' + native_session),
+                    record(root, pm_session_id='pm-other')]
+            store = MemoryTaskStore(root, rows)
+
+            native_result = task_status.task_status(store=store, pm_session=native_session)
+            prefixed_result = task_status.task_status(
+                store=store, pm_session='pm-' + native_session)
+
+        self.assertEqual(native_result, prefixed_result)
+        self.assertEqual([row['pm_session_id'] for row in native_result['tasks']],
+                         ['pm-' + native_session])
+        with self.assertRaisesRegex(ValueError, '^invalid PM session$'):
+            task_status.task_status(store=store, pm_session='not-a-session')
+
     def test_limit_bound(self):
         with self.assertRaises(ValueError):
             task_status.task_status(limit=201, store=MemoryTaskStore('/tmp/unused', []))
