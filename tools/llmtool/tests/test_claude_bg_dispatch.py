@@ -23,6 +23,7 @@ _SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'claude_bg_dispatch.
 _spec = importlib.util.spec_from_file_location('claude_bg_dispatch_under_test', _SCRIPT)
 dispatch_tool = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dispatch_tool)
+REAL_RESOLVE_ROLE = dispatch_tool.role_config.resolve_role
 
 TARGET = '2b128608-8b94-4c12-96b9-e6cdf9a388c7'
 COPY = '95c9758e-1111-4222-8333-944455556666'
@@ -330,9 +331,8 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.scenario(account_dir=reviewer_dir,
                       all=[row(TARGET, status='done', state='done', cwd=self.cwd)], before=[],
                       after=[[row(TARGET, status='done', state='done', cwd=self.cwd)]])
-        real_resolve_role = dispatch_tool.role_config.resolve_role
         with patch.object(dispatch_tool.role_config, 'resolve_role',
-                          side_effect=lambda role: real_resolve_role(role, home=str(user_home))), \
+                          side_effect=lambda role: REAL_RESOLVE_ROLE(role, home=str(user_home))), \
                 patch.dict(os.environ, {'HOME': str(user_home), 'TMPDIR': str(temp_dir),
                                         'CLAUDE_CONFIG_DIR': '', 'ANTHROPIC_MODEL': ''}):
             code, receipt = self.dispatch(name='claude-reviewer')
