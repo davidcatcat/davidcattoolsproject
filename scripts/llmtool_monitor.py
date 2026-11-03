@@ -45,6 +45,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import math
 import os
+import platform
 import re
 import select
 import shutil
@@ -743,7 +744,17 @@ class _DarwinStatFS(ctypes.Structure):
 def _read_darwin_statfs(path: str) -> tuple[int, int, int, int]:
     """Return blocks, free blocks, available blocks and block size via libc."""
     libc = ctypes.CDLL(None, use_errno=True)
-    statfs = libc.statfs
+    machine = platform.machine()
+    if machine == "x86_64":
+        # On Intel macOS, statfs uses the legacy 32-bit-inode ABI. Its symbol
+        # cannot safely fill the 64-bit structure declared above.
+        statfs = getattr(libc, "statfs64", None)
+    elif machine == "arm64":
+        statfs = getattr(libc, "statfs", None)
+    else:
+        statfs = None
+    if statfs is None:
+        raise OSError("compatible Darwin statfs symbol is unavailable")
     statfs.argtypes = (ctypes.c_char_p, ctypes.POINTER(_DarwinStatFS))
     statfs.restype = ctypes.c_int
     result = _DarwinStatFS()
@@ -751,7 +762,11 @@ def _read_darwin_statfs(path: str) -> tuple[int, int, int, int]:
     if statfs(encoded_path, ctypes.byref(result)) != 0:
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), path)
-    return result.f_blocks, result.f_bfree, result.f_bavail, result.f_bsize
+    stats = result.f_blocks, result.f_bfree, result.f_bavail, result.f_bsize
+    blocks, free_blocks, available_blocks, block_size = stats
+    if (block_size <= 0 or available_blocks > blocks or free_blocks > blocks):
+        raise OSError("invalid Darwin statfs result")
+    return stats
 
 
 def _disk_volume_stats(path: str) -> tuple[int, int, int, int]:

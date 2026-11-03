@@ -5782,6 +5782,53 @@ class DiskUsageTests(unittest.TestCase):
         self.assertEqual(monitor.disk_usage,
                          (98, 1_358_817 * block_size))
 
+    @staticmethod
+    def darwin_statfs_function(blocks=100, free=20, available=10, block_size=4096):
+        from unittest.mock import Mock
+
+        def fill_result(_path, pointer):
+            result = pointer._obj
+            result.f_blocks = blocks
+            result.f_bfree = free
+            result.f_bavail = available
+            result.f_bsize = block_size
+            return 0
+
+        return Mock(side_effect=fill_result)
+
+    def test_darwin_x86_64_uses_statfs64_symbol(self):
+        from types import SimpleNamespace
+
+        statfs64 = self.darwin_statfs_function()
+        libc = SimpleNamespace(statfs64=statfs64)
+        with patch.object(mon.ctypes, "CDLL", return_value=libc), \
+                patch.object(mon.platform, "machine", return_value="x86_64"):
+            result = mon._read_darwin_statfs("/home/test")
+        statfs64.assert_called_once()
+        self.assertEqual(result, (100, 20, 10, 4096))
+
+    def test_darwin_arm64_uses_statfs_symbol(self):
+        from types import SimpleNamespace
+
+        statfs = self.darwin_statfs_function()
+        libc = SimpleNamespace(statfs=statfs)
+        with patch.object(mon.ctypes, "CDLL", return_value=libc), \
+                patch.object(mon.platform, "machine", return_value="arm64"):
+            result = mon._read_darwin_statfs("/home/test")
+        statfs.assert_called_once()
+        self.assertEqual(result, (100, 20, 10, 4096))
+
+    def test_garbage_darwin_statfs_result_falls_back_to_statvfs(self):
+        monitor = mon.Monitor()
+        fallback = self.statvfs_for(91)
+        with patch.object(mon, "_read_darwin_statfs", return_value=(100, 20, 101, 0)), \
+                patch.object(mon.os, "statvfs", return_value=fallback) as statvfs, \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "darwin"):
+            monitor.refresh_disk_usage(now=0)
+        statvfs.assert_called_once_with("/home/test")
+        self.assertEqual(monitor.disk_usage, (91, 9 * (1024 ** 3)))
+
     def test_statvfs_failure_is_silent(self):
         monitor = mon.Monitor()
         with patch.object(mon.os, "statvfs", side_effect=OSError("unavailable")), \
