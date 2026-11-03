@@ -387,11 +387,24 @@ class RemoteTestTests(unittest.TestCase):
                          isinstance(node.value, ast.Call) and
                          isinstance(node.value.func, ast.Name) and
                          node.value.func.id == 'nobody_run')
-        self.assertEqual(ast.unparse(test_call.args[0]), 'work + "/tools/llmtool"')
+        cwd_arg = test_call.args[0]
+        self.assertIsInstance(cwd_arg, ast.BinOp)
+        self.assertIsInstance(cwd_arg.op, ast.Add)
+        self.assertIsInstance(cwd_arg.left, ast.Name)
+        self.assertEqual(cwd_arg.left.id, 'work')
+        self.assertIsInstance(cwd_arg.right, ast.Constant)
+        self.assertEqual(cwd_arg.right.value, '/tools/llmtool')
         env_arg = next(keyword.value for keyword in test_call.keywords
                        if keyword.arg == 'env')
-        self.assertEqual(ast.unparse(env_arg),
-                         '{"HOME": work + "/.home", "TMPDIR": work + "/.tmp"}')
+        self.assertIsInstance(env_arg, ast.Dict)
+        self.assertEqual([key.value for key in env_arg.keys], ['HOME', 'TMPDIR'])
+        for value, suffix in zip(env_arg.values, ('/.home', '/.tmp')):
+            self.assertIsInstance(value, ast.BinOp)
+            self.assertIsInstance(value.op, ast.Add)
+            self.assertIsInstance(value.left, ast.Name)
+            self.assertEqual(value.left.id, 'work')
+            self.assertIsInstance(value.right, ast.Constant)
+            self.assertEqual(value.right.value, suffix)
 
         work = '/tmp/llmtool-remote-test.Abc123'
         env = {'HOME': work + '/.home', 'TMPDIR': work + '/.tmp'}
