@@ -23,6 +23,11 @@ from llmtool import opencode_direct_developer
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
 import d6_worktree_lifecycle  # noqa: E402
+import review_trust_fixture  # noqa: E402
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 
 class FakeClient:
