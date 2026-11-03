@@ -51,8 +51,6 @@ TEXT_DEVELOPER_CONTEXT_SEPARATOR = (
 
 REQUEST_LIMIT = 64 * 1024
 RESPONSE_LIMIT = 64 * 1024
-D6_INTEGRATOR_DISPATCHER_ROOT = Path(
-    '/Users/davidsun/git/davidcataiporject/davidcattoolsproject')
 _PROFILE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]{0,63}')
 # No production Reviewer dispatcher is installed. A future Host runtime may
 # bind this internal seam only after a separate authority/runtime grant.
@@ -2059,9 +2057,23 @@ class _DispatcherPreflightError(ValueError):
         super().__init__(code)
 
 
+def _dispatcher_trust_anchor():
+    """Return the trust.json dispatcher root and origin allowlist (#369 PR-5).
+
+    A TrustError keeps its sanitized code (for example TRUST_MISSING) and is
+    raised before any dispatcher Git command runs.
+    """
+    try:
+        trusted = trust.load_trust()
+    except trust.TrustError as exc:
+        raise _DispatcherPreflightError(exc.code) from None
+    return (Path(trusted.canonical_root),
+            tuple(trusted.repository['allowed_origins']))
+
+
 def _trusted_d6_helper_source(registration=None, source_rel=None):
     """Return pinned helper/source bytes, using approved D6 blobs when present."""
-    dispatcher_root = D6_INTEGRATOR_DISPATCHER_ROOT
+    dispatcher_root, allowed_origins = _dispatcher_trust_anchor()
     helper_rel = 'tools/llmtool/scripts/d6_worktree_env.py'
     lifecycle_rel = 'tools/llmtool/scripts/d6_worktree_lifecycle.py'
     source_rel = helper_rel if source_rel is None else source_rel
@@ -2099,17 +2111,15 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
     if not dispatcher_root.is_absolute():
         raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
     dispatcher_file = Path(__file__).resolve()
-    try:
-        dispatcher_file.relative_to(dispatcher_root)
-    except ValueError:
-        raise _DispatcherPreflightError(
-            'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL') from None
-    if (dispatcher_file != dispatcher_root / dispatcher_rel or
-            Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
+    if dispatcher_file != dispatcher_root / dispatcher_rel:
+        # #369 PR-5: the trust.json root is not the checkout this dispatcher
+        # runs from (for example llmtool started from a D6 worktree).
+        error = _DispatcherPreflightError('ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        error.canonical_hint = True
+        raise error
+    if (Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
             git('rev-parse', '--show-toplevel').decode().rstrip('\n') != str(dispatcher_root) or
-            git('remote', 'get-url', 'origin').decode().strip() not in (
-                'git@github.com:davidcatcat/davidcattoolsproject.git',
-                'https://github.com/davidcatcat/davidcattoolsproject.git')):
+            git('remote', 'get-url', 'origin').decode().strip() not in allowed_origins):
         raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
     if git('status', '--porcelain=v1', '--untracked-files=all'):
         raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_DIRTY')
@@ -2217,7 +2227,7 @@ def _bootstrap_registered_d6(registration):
         code = (exc.code if isinstance(exc, _DispatcherPreflightError)
                 else 'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
         error = opencode_direct_developer.DirectOpenCodeError(code)
-        if code == 'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL':
+        if getattr(exc, 'canonical_hint', False):
             error.args = (code +
                           ': Run llmtool from the canonical checkout; the current '
                           'working directory may remain in the D6 worktree.',)
@@ -2253,7 +2263,10 @@ def _bind_codex_native_session(registration, native_session_id):
         )
     except (OSError, subprocess.TimeoutExpired):
         return 'D6_BIND_NATIVE_SESSION_HELPER_UNAVAILABLE'
-    except (UnicodeDecodeError, ValueError):
+    except (UnicodeDecodeError, ValueError) as exc:
+        if (isinstance(exc, _DispatcherPreflightError) and
+                exc.code.startswith('TRUST_')):
+            return exc.code
         return 'D6_BIND_NATIVE_SESSION_HELPER_UNTRUSTED'
     if result.returncode == 0:
         return 'BOUND'
