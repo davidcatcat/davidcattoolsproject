@@ -416,6 +416,9 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     reviewer_role = role_config.resolve_role(
         'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
+    if (reviewer_key == 'claude-reviewer' and
+            (reviewer_role['source'] == 'builtin' or config_dir is None)):
+        _refuse('REVIEWER_ACCOUNT_UNCONFIGURED')
     if reviewer_key == 'codex-reviewer':
         if reviewer_role.get('provider') not in (None, 'codex'):
             _refuse('REVIEWER_CONFIG_INVALID')

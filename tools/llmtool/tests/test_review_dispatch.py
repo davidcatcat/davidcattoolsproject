@@ -58,6 +58,14 @@ class ReviewDispatchTests(unittest.TestCase):
         self.executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git')
         self.preflight = (TASK, self.executor, HEAD, 'd' * 40, 'claude-reviewer')
         self.created, self.sent, self.bound = [], [], []
+        self.real_resolve_role = review_dispatch.role_config.resolve_role
+        self.reviewer_role_patch = patch.object(
+            review_dispatch.role_config, 'resolve_role',
+            side_effect=lambda role: (
+                {'config_dir': '/private/test-reviewer-account', 'source': 'roles'}
+                if role == 'reviewer' else self.real_resolve_role(role)))
+        self.reviewer_role_patch.start()
+        self.addCleanup(self.reviewer_role_patch.stop)
 
     def tearDown(self):
         self.temp.cleanup()
@@ -124,12 +132,21 @@ class ReviewDispatchTests(unittest.TestCase):
             claim.get('pr') == 42 and claim.get('head_sha') == selected[2] and
             claim.get('version') == 1
             for claim in existing)
+        selected_role = ('reviewer' if selected[4] == 'claude-reviewer'
+                         else 'codex-reviewer')
+
+        def resolve_test_role(role):
+            if reviewer_role is not None and role == selected_role:
+                return reviewer_role
+            if role == 'reviewer':
+                return {'config_dir': '/private/test-reviewer-account', 'source': 'roles'}
+            return self.real_resolve_role(role)
+
         with patch.object(review_dispatch, '_preflight', side_effect=preflight or [self.preflight, self.preflight]), \
                 patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
                 patch.object(review_dispatch, '_resolve_github_login', return_value='reviewer-user'), \
                 patch.object(review_dispatch.role_config, 'resolve_role',
-                             return_value=reviewer_role or {
-                                 'config_dir': None, 'source': 'builtin'}) as resolve_role:
+                             side_effect=resolve_test_role) as resolve_role:
             result = review_dispatch.dispatch_review(
                 store=self.store, task_id=TASK, executor_task='executor-d6',
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
@@ -142,18 +159,15 @@ class ReviewDispatchTests(unittest.TestCase):
                 resolve_role.assert_not_called()
             return result
 
-    def test_happy_path_claims_creates_dispatches_and_binds(self):
-        result = self.invoke()
-        self.assertEqual(result['state'], 'DISPATCHED')
-        self.assertEqual(result['reviewer_task'][:9], 'reviewer-')
-        self.assertEqual(result['native_session_id'], 'native-session')
-        self.assertEqual(len(self.created), 1)
-        self.assertEqual(self.created[0]['github_login'], 'reviewer-user')
-        self.assertTrue(self.created[0]['task_id'].startswith('reviewer-'))
-        self.assertEqual(len(self.sent), 1)
-        self.assertEqual(len(self.bound), 1)
-        self.assertEqual(self.bound[0]['session_id'], 'native-session')
-        self.assertEqual(result['account_mode'], 'BUILTIN_DEFAULT')
+    def test_builtin_reviewer_role_is_refused_without_claim_or_dispatch(self):
+        with self.assertRaises(LLMToolError) as raised:
+            self.invoke(reviewer_role={'config_dir': None, 'source': 'builtin'})
+        self.assertEqual(raised.exception.review_dispatch_code,
+                         'REVIEWER_ACCOUNT_UNCONFIGURED')
+        self.assertNotIn('review_dispatch_claim', self.store.get(TASK))
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.sent, [])
+        self.assertEqual(self.bound, [])
 
     def test_reviewer_role_account_overrides_inherited_claude_config_dir(self):
         account = '/private/reviewer-account'
@@ -228,6 +242,9 @@ class ReviewDispatchTests(unittest.TestCase):
                           side_effect=[self.preflight, self.preflight]), \
                 patch.object(review_dispatch.worker_dispatch, 'evaluate',
                              return_value=SimpleNamespace(allowed=True, reason_code='')), \
+                patch.object(review_dispatch.role_config, 'resolve_role',
+                             return_value={'config_dir': '/private/test-reviewer-account',
+                                           'source': 'roles'}), \
                 patch.object(review_dispatch, '_resolve_github_login', side_effect=error):
             with self.assertRaises(LLMToolError):
                 review_dispatch.dispatch_review(
