@@ -1092,7 +1092,11 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
         self.assertFalse((directory / 'capture.json').exists())
 
     def test_termination_does_not_kill_unrelated_process_group(self):
-        unrelated = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+        ready_dir = tempfile.TemporaryDirectory(prefix='unrelated-ready-')
+        self.addCleanup(ready_dir.cleanup)
+        ready = Path(ready_dir.name) / 'ready'
+        unrelated = subprocess.Popen([sys.executable, '-c',
+            'import pathlib,sys,time; pathlib.Path(sys.argv[1]).touch(); time.sleep(30)', str(ready)],
             start_new_session=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL)
         def cleanup():
@@ -1100,6 +1104,11 @@ os.execve(sys.executable, [sys.executable, '-c', %r, 'ask', %r], os.environ)
                 unrelated.kill()
             unrelated.wait()
         self.addCleanup(cleanup)
+        deadline = time.monotonic() + 10
+        while not ready.exists():
+            if unrelated.poll() is not None or time.monotonic() >= deadline:
+                self.fail('unrelated process did not become ready before deadline')
+            time.sleep(0.01)
         self.interrupted('codex-cli', signal.SIGTERM)
         self.assertIsNone(unrelated.poll())
         self.assertEqual(os.getpgid(unrelated.pid), unrelated.pid)
