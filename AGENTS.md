@@ -3,14 +3,16 @@
 ## Current authority (restructured per Owner decision 010 step 2)
 
 - **Roles and PM:**
+  - The hierarchy is Owner → ChatGPT Coordinator (technical adviser and technical director: technical direction, architecture review and advice to help the Owner decide) → Claude Integrator/PM (day-to-day planning, dispatch, acceptance, tracking and integration) → sub-agent PMs, Developers and Reviewers.
   - Permanent role rules, Owner-controlled dispatch authority and live technical state are separate. Dispatch switches are in [worker-dispatch.json](tools/llmtool/worker-dispatch.json); live availability comes from the [local monitor](scripts/llmtool_monitor.py).
   - Since 2026-10-25, Claude is the Integrator/PM, replacing the Codex Integrator/PM. Claude assigns and integrates work, dispatches Developer work through llmtool first, and follows the [PM Continuation Contract](skills/ai-team-delivery/pm-continuation.md) after every result.
-  - The PM and Developers may split their work across sub-agents they start; one writer per D6 task still holds.
+  - Role accounts and models resolve from the user-level llmtool config through `resolve_role`.
+  - The PM uses sub-agent PMs proactively: mode A is read-only analysis; mode B executes one authorized work package. The PM and Developers may split work across sub-agents they start. No two PMs dispatch the same work, manage the same Task or edit conflicting files; one writer per D6 still applies. The main PM keeps overall responsibility. See [Sub-agent PMs](skills/ai-team-delivery/pm-continuation.md#sub-agent-pms-owner-d8-2026-11-02) for lease and hand-back details.
   - When an llmtool step fails, the PM records the defect and schedules its repair. Making the core llmtool flow work end to end is the priority.
   - Codex Developer (`gpt-6-luna`, high reasoning effort) remains a Developer route and self-reviews and self-repairs before hand-back.
   - OpenCode Developer remains a normal Developer route; the PM selects it from currently available Workers. Pause dispatch on a free-limit refusal or two consecutive route failures; no paid fallback.
   - Claude Developer / UI Agent (`claude-developer`) is `OWNER_ASSIGNMENT_ONLY`; dispatch only Task IDs registered in its `worker-dispatch.json` owner assignments.
-  - OpenCode and AGY direct CLI work are PM-selected routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; AGY is `ALLOWED` since 2026-10-31 and needs no individual Owner assignment. Neither requires Host D4/G3/M2. Both require a verified D6 task worktree and actual provider CLI, model, session and permission checks.
+  - OpenCode and AGY are PM-selected direct CLI routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; see their sections below.
   - The first Mac OpenCode CLI launch may require the Owner to start the prepared session once; the Owner does not handle routine dispatch.
 
 - **Worker dispatch:**
@@ -25,14 +27,13 @@
   - Codex advisory output from PM analysis is not an independent pre-review. A separately dispatched Codex advisory/pre-review Worker needs an Owner-authorized entry; if it is missing, refuse.
 
 - **OpenCode Developer:**
-  - Use a registered D6 task worktree, task-local OpenCode permissions, a free DeepSeek model, an exact writable-file allowlist, bounded task budget and repair policy, no paid fallback, self-review, PR and independent review/CI. The PM runs tests through `llmtool task remote-test` on EC2; Developers do not run tests in the D6.
-  - The former separate direct-session output-cap/retry-hook launcher requirement is superseded by the Owner's 2026-10-21 decision for normal direct Developer sessions.
+  - Use the OpenCode CLI in a verified registered D6 task worktree. Check the actual free DeepSeek model, session semantics, task-local permissions, exact writable-file allowlist and bounded task budget. OpenCode direct CLI work does not wait for Host D4/G3/M2. Follow the repair policy, use no paid fallback, self-review and hand back for PR and independent review/CI. The PM runs tests through `llmtool task remote-test` on EC2; Developers do not run tests in the D6.
   - D8 Host/Worker provider caps, retry stop, timeouts and cleanup still apply to llmtool-owned Worker invocations.
   - Keep credential, secret, personal/customer-data and restricted-log protection unchanged. Do not infer containment from prompt text or a resident TUI PID.
 
 - **AGY direct Developer:**
   - AGY follows its [worker-dispatch.json](tools/llmtool/worker-dispatch.json) row. The current `ALLOWED` entry (since 2026-10-31) permits PM-selected dispatch, subject to the normal scope, privacy, budget, live-availability and review gates. No automatic retry or fallback.
-  - As with OpenCode, direct AGY CLI work uses a verified registered D6 task worktree and requires authentication, actual model, executable/session semantics, least-privilege writable allowlist and remaining-quota checks. It does not wait for Host D4/G3/M2. A formal Reviewer must be independent and from another model family.
+  - Before dispatch, verify the registered D6 worktree, authentication, actual CLI executable and session semantics, actual model, task-local least-privilege writable allowlist and remaining quota. AGY does not wait for Host D4/G3/M2.
   - `ALLOWED` alone does not prove a working adapter.
   - On quota exhaustion, record bounded Task progress, SHA, changed files, unfinished checks and state (including UNKNOWN); release Writer ownership before reassignment. Never replay uncertain mutations or buy a fallback.
 
@@ -45,15 +46,13 @@
   - Classify availability using the [four-layer rule](skills/company-llm-delegation/SKILL.md#availability-classification). VPN/provider unavailability does not stop other Developers.
 
 - **Formal Reviewer:**
-  - The formal Security/Functional/QA Reviewer is from the other model family than the Developer (Owner 2026-10-25, #289 comment 6397242605): an independent Claude Reviewer reviews Codex Developer changes; an independent Codex Reviewer agent (`codex-reviewer`) reviews Claude Developer changes, including Claude PM changes.
+  - The usual formal Security/Functional/QA Reviewer is an independent Claude Reviewer for Codex Developer changes and an independent Codex Reviewer (`codex-reviewer`) for Claude Developer and Claude PM changes (Owner 2026-10-25, #289 comment 6397242605; D6 2026-11-02 meeting record). The PM may choose any formal Reviewer from a different model family than the actual authoring/execution model family (today `task complete` accepts only `claude-reviewer` or `codex-reviewer`), allowed by `worker-dispatch.json`, qualified for that kind of work and working in an independent read-only context. Require full Reviewer, Task, PR, HEAD and acceptance evidence; do not relax security or CI gates.
   - Each formal review uses a separate, read-only Reviewer Session/context with its own D6 reviewer record, distinct from Developer and PM; nobody formally reviews their own change.
   - All agents post as the same GitHub login, so login identity never proves independence. Publish the verdict under the [Transition record](skills/ai-team-delivery/pm-continuation.md#transition-record) rule.
   - llmtool PM assignment may select Codex, OpenCode, AGY, company `gw`, or `none`; `gw` proposes patches without file/Git authority. The PM should prefer `gw` for eligible small, low-risk, bounded Tasks.
-  - Under Owner decision 035:A (#525, c6468216854), `task complete` accepts a Codex PASS for a Claude-authored Task only if the independent D6 Reviewer is `codex-reviewer`, the persisted Task classifies the comment as `REVIEW_PASS`, and exactly one matching `COMPLETED` review dispatch claim binds its PASS and identical non-empty review text to the PR, HEAD and Reviewer Task. See the [formal verdict format](skills/ai-team-delivery/formal-verdict.md).
-  - Claude PASS handling is unchanged. For each Task, confirm the actual authoring/execution model family differs from the designated formal Reviewer, and prove the Task route and completion gates on the exact run. Unsupported `gw`/other routes cannot be declared formally complete merely because the PM chose them.
-  - Do not accept Codex PASS comments that lack those bindings or come from other Task authoring families.
+  - Confirm that the Reviewer family differs from the actual authoring/execution model family and that the exact run satisfies its supported route and completion gates. For a Codex Reviewer PASS, the independent D6 Reviewer must be `codex-reviewer`; the persisted Task must classify the comment as `REVIEW_PASS`, and exactly one matching `COMPLETED` review dispatch claim must bind the PASS and identical non-empty review text to the PR, HEAD and Reviewer Task. This bound Codex PASS is accepted for Claude-authored Tasks (Owner decision 035:A, #525, c6468216854) and, under the D6 2026-11-02 meeting record and #846, for AGY, OpenCode, company-gw and gw-agent Developer Tasks. PM selection alone does not make an unsupported route formally complete; reject Codex PASS without these bindings. Claude PASS handling is unchanged. See the [formal verdict format](skills/ai-team-delivery/formal-verdict.md).
   - When its environment allows, the Reviewer posts its own verdict. Otherwise the PM relays the Reviewer's unedited output, labelled with the Reviewer's `actor`, and checks the D6 reviewer record before merge.
-  - This pairing is the default (Owner 2026-10-27). When a family's token 5-hour or weekly limit makes its Reviewer unavailable, only the Owner may approve a different eligible formal pairing.
+  - If the usual Reviewer is unavailable, the PM finds another qualified, authorized cross-family Reviewer. Same-family and self-review are advisory only.
   - The PM records an affected review as waiting, continues independent authorized Tasks, and never substitutes a same-family or self-review verdict. Quota exhaustion alone does not stop the whole team.
   - Developers self-review and self-repair before hand-back; that is not a formal review. Bind verdicts to exact HEAD; retain applicable CI, security and Mac-native gates.
   - On FAIL, return findings to the original Developer. Qualified PASS plus exact-head CI and required runtime gates permits the Integrator to merge. Any other Reviewer output (for example, Codex review of a Codex Developer change) is advisory only.
@@ -63,7 +62,7 @@
 
 - **Owner channel (Owner 2026-11-02):** The Owner never edits anything on GitHub directly: no comments, labels, approvals, reviews, merges or file edits. No Agent may ask the Owner to change GitHub. Owner decisions, assignments and authorizations are given in the PM chat. The PM records them on the Task/Issue as a relayed comment (`actor=PM`), quotes the Owner's words, and says the comment is relayed. It is never posted as an Owner-authored event. Wherever a rule mentions an Owner comment, Owner assignment reference or Owner authorization on an Issue, it means that PM-relayed record. See [Owner authority matrix](skills/ai-team-delivery/owner-escalation.md#owner-channel).
 
-- **Owner escalation:** [Owner authority matrix](skills/ai-team-delivery/owner-escalation.md) is the single operational interpretation of routine PM choices versus reserved Owner decisions, including wrong requirements, root/sudo, macOS core changes, material scope/architecture/priority, spend, data export, security-risk acceptance, formal release GO/NO-GO and Reviewer-pairing exceptions. Only the dependent action waits; ordinary repairs and unrelated work continue. No response is not consent.
+- **Owner escalation:** [Owner authority matrix](skills/ai-team-delivery/owner-escalation.md) is the single operational interpretation of routine PM choices versus reserved Owner decisions, including wrong requirements, root/sudo, macOS core changes, material scope/architecture/priority, spend, data export, security-risk acceptance and formal release GO/NO-GO. For formal Reviewer selection, the PM asks the Owner only when no qualified, authorized cross-family Reviewer is available (D6). Only the dependent action waits; ordinary repairs and unrelated work continue. No response is not consent.
 
 - **D8a credentials:** For llmtool Host/Worker D4/G3/M2 only, the Host may use the single active local OpenCode credential in memory to start an isolated Worker. Never print, log, persist, export, copy, enumerate credentials, or put them in evidence/GitHub. This Host credential route is background and is not required for direct OpenCode Developer sessions.
 
