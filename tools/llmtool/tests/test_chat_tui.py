@@ -47,22 +47,42 @@ providers:
 
 OWNER_SLUG = 'davidcatcat/davidcattoolsproject'
 OWNER_PR_URL = 'https://github.com/' + OWNER_SLUG + '/pull/'
+_MODULE_FIXTURE_ACTIVE = False
 
 
 def _reset_test_patches():
-    # patch.stopall() also stops the module trust fixture; restore it for tests
-    # that import this module as well as for later tests in this module.
+    # patch.stopall() also stops the module trust fixture. Re-arm it only while
+    # this module's fixtures are active; layout/theme subclasses call this too.
     review_trust_fixture.stop_module()
     patch.stopall()
-    review_trust_fixture.start_module()
+    if _MODULE_FIXTURE_ACTIVE:
+        review_trust_fixture.start_module()
 
 
 def setUpModule():
+    global _MODULE_FIXTURE_ACTIVE
+    _MODULE_FIXTURE_ACTIVE = True
     review_trust_fixture.start_module()
 
 
 def tearDownModule():
+    global _MODULE_FIXTURE_ACTIVE
+    _MODULE_FIXTURE_ACTIVE = False
     review_trust_fixture.stop_module()
+
+
+class TestPatchLifecycleTests(unittest.TestCase):
+    def test_reset_does_not_rearm_trust_after_module_fixture(self):
+        global _MODULE_FIXTURE_ACTIVE
+        from llmtool import trust
+
+        _MODULE_FIXTURE_ACTIVE = False
+        try:
+            _reset_test_patches()
+            self.assertNotIsInstance(trust.load_trust, Mock)
+        finally:
+            _MODULE_FIXTURE_ACTIVE = True
+            review_trust_fixture.start_module()
 
 
 def core_view_json(task_id, **fields):
