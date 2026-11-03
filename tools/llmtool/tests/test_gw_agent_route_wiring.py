@@ -473,7 +473,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 ('DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_MODEL_ERROR'),
                 ('DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_RESULT_UNKNOWN')):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as temp:
-                store = task_store.TaskStore(Path(temp) / 'tasks')
+                store = task_store.TaskStore(Path(temp).resolve() / 'tasks')
                 store.create(make_record())
                 with patch.object(worker_dispatch, 'evaluate', return_value=decision):
                     current = seed_dispatching_developer(store)
@@ -486,7 +486,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 self.assertEqual(saved['developer']['error_code'], error_code)
 
         with tempfile.TemporaryDirectory() as temp:
-            store = task_store.TaskStore(Path(temp) / 'tasks')
+            store = task_store.TaskStore(Path(temp).resolve() / 'tasks')
             store.create(make_record())
             with patch.object(worker_dispatch, 'evaluate', return_value=decision):
                 current = seed_dispatching_developer(store)
