@@ -252,6 +252,17 @@ class WidgetTests(Base):
         self.assertIn('provider: first', ui.conversation.text)
         self.factory.assert_not_called()
 
+    def test_opening_banner_has_version_and_optional_source_revision(self):
+        with patch.object(chat_tui, '_source_revision', return_value=None):
+            ui, _ = self.drive([])
+        self.assertTrue(ui.conversation.text.startswith(
+            'LLMTool ' + chat_tui.__version__ + ' interactive chat (full-screen)'))
+        with patch.object(chat_tui, '_source_revision', return_value='12345678, dirty'):
+            ui, _ = self.drive([])
+        self.assertTrue(ui.conversation.text.startswith(
+            'LLMTool ' + chat_tui.__version__ + ' (12345678, dirty) interactive chat (full-screen)'))
+        self.assertNotIn(str(Path(__file__).resolve().parents[2]), ui.conversation.text)
+
     def test_pm_ghost_hints_render_after_the_cursor_without_editing_input(self):
         seen = {}
 
@@ -3963,6 +3974,9 @@ class PMConversationTests(BoundedPMTest):
         first_id = bindings[-1]['native_session_id']
         ui, _ = self.drive(['/pm use ' + first_id[:8] + '\r'])
         self.assertEqual(self.api.current_binding()['native_session_id'], first_id)
+        self.assertIn('PM selected: claude-code account default · ' + first_id[:8]
+                      + '; /pm connect to connect', ui.conversation.text)
+        self.assertNotIn(first_id, ui.conversation.text.split('PM selected:')[-1])
 
     def test_pm_accounts_guidance_named_checks_and_invalid_options(self):
         ui, _ = self.drive(['/pm accounts\r', '/pm accounts --check\r'])

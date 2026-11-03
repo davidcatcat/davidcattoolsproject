@@ -172,6 +172,17 @@ class PaneDrawTests(unittest.TestCase):
 
 
 class TurnTextTests(unittest.TestCase):
+    def test_pm_ghost_hint_fits_terminal_input_width_with_ellipsis(self):
+        width = len  # The hint is ASCII plus a one-cell ellipsis.
+        full_hint = chat_tui.ChatTUI.pm_ghost_hint('/pm ')
+        for columns in (80, 120):
+            available = columns - width('pm> ') - width('/pm ')
+            hint = chat_tui.ChatTUI.pm_ghost_hint('/pm ', available, width)
+            with self.subTest(columns=columns):
+                self.assertLessEqual(width(hint), available)
+                if width(full_hint) > available:
+                    self.assertTrue(hint.endswith('…'))
+
     def test_usage_line_is_short(self):
         event = {"status": "COMPLETED", "usage": {"input_tokens": 2000, "output_tokens": 400,
                                                   "cache_read_input_tokens": 90000}}

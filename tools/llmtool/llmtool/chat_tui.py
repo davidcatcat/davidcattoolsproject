@@ -14,13 +14,15 @@ import os
 import re
 import shlex
 import signal
+import subprocess
 import sys
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
-from . import (chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
+from . import (__version__, chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
                chat_tui_view, pm_runtime)
 from .chat import HELP, run_chat
 from .config import selected_provider
@@ -388,6 +390,8 @@ def history_matches(entries, query):
 
 def fit_width(text, width, get_cwidth):
     """Cut text to at most width terminal cells, ending with an ellipsis when cut."""
+    if width <= 0:
+        return ""
     if get_cwidth(text) <= width:
         return text
     result = []
@@ -399,6 +403,30 @@ def fit_width(text, width, get_cwidth):
         result.append(char)
         used += char_width
     return "".join(result) + "…"
+
+
+def _source_revision():
+    """Read the source checkout revision and dirty state without using the user's CWD."""
+    source_dir = Path(__file__).resolve().parent
+    try:
+        revision = subprocess.run(
+            ["git", "rev-parse", "--short=8", "HEAD"], cwd=source_dir,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=2, check=False)
+        if revision.returncode != 0:
+            return None
+        short = revision.stdout.strip()
+        if not re.fullmatch(r"[0-9a-f]{8,}", short):
+            return None
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=normal"], cwd=source_dir,
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=2, check=False)
+        if dirty.returncode != 0:
+            return None
+        return short[:8] + (", dirty" if dirty.stdout else "")
+    except (OSError, subprocess.SubprocessError):
+        return None
 
 
 FAILED = "llmtool: chat terminal UI failed; details omitted"
@@ -641,6 +669,7 @@ class ChatTUI:
         self._app_styles = {}
         self._get_cwidth = get_cwidth
         self.session = session
+        self.source_revision = _source_revision()
         self.dev = dev_enabled() if dev is None else dev   # W57: Task mode only with the flag
         self.busy = False
         self.quit_pending = False
@@ -802,7 +831,9 @@ class ChatTUI:
             linker=self.task_view_linker)
         history_text = ("History is stored locally." if session.history_saved
                         else "History stays in memory.")
-        opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
+        revision_label = (" (" + self.source_revision + ")" if self.source_revision else "")
+        opening = ("LLMTool " + __version__ + revision_label
+                   + " interactive chat (full-screen)\n" + session.status()
                    + "\n" + history_text + " F1 or /help for help; Ctrl-C exits.")
         if session.history_notice:
             opening += "\nllmtool: " + session.history_notice
@@ -820,7 +851,13 @@ class ChatTUI:
                 if (document.cursor_position != len(document.text) or
                         document.cursor_position_row != transformation_input.lineno):
                     return Transformation(transformation_input.fragments)
-                hint = self.pm_ghost_hint(document.text)
+                size = self.app.output.get_size()
+                line = document.current_line_before_cursor
+                prompt_width = get_cwidth("pm> " if self.pm_mode else
+                                          "task> " if self.task_profile else "> ")
+                hint = self.pm_ghost_hint(document.text,
+                                          size.columns - prompt_width - get_cwidth(line),
+                                          get_cwidth)
                 if not hint:
                     return Transformation(transformation_input.fragments)
                 fragments = list(transformation_input.fragments)
@@ -3071,7 +3108,7 @@ class ChatTUI:
         self.app.invalidate()
 
     @staticmethod
-    def pm_ghost_hint(text):
+    def pm_ghost_hint(text, width=None, get_cwidth=None):
         """Display-only completion for the PM command prefixes accepted by the TUI."""
         hints = {
             "/pm ": "new | list [--all] | use N|SESSION | accounts [--check] | "
@@ -3081,7 +3118,10 @@ class ChatTUI:
             "/pm use ": "N|SESSION",
             "/pm connect ": "[SESSION [CWD]]",
         }
-        return hints.get(text, "")
+        hint = hints.get(text, "")
+        if width is not None and get_cwidth is not None:
+            return fit_width(hint, width, get_cwidth)
+        return hint
 
     def run_pm_command(self, text):
         # Shell-style words, so a CWD with spaces can be quoted or escaped (W52 B3).
@@ -3191,7 +3231,7 @@ class ChatTUI:
                 return
             self.append("PM selected: " + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
                         + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
-                        + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))
+                        + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))[:8]
                         + "; /pm connect to connect")
             return
         if parts[1:2] == ["accounts"]:
