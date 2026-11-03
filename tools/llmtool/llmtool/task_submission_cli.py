@@ -34,6 +34,7 @@ from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
 from . import role_config
+from . import trust
 from .developer_routes import (AgyRoute, GwAgentRoute, RouteError, capture_snapshot,
                                for_platform, load_route_config, run_route)
 from .developer_routes.gw_agent import cleanup_audit_copies
@@ -2173,11 +2174,27 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
     return dispatcher_root, helper_source
 
 
+def _load_bootstrap_trust_sha256():
+    """Return the current owner's trust.json digest for the env helper pin."""
+    try:
+        digest = trust.load_trust().sha256
+    except trust.TrustError:
+        raise opencode_direct_developer.DirectOpenCodeError(
+            'ENV_BOOTSTRAP_TRUST_UNAVAILABLE') from None
+    if type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None:
+        raise opencode_direct_developer.DirectOpenCodeError(
+            'ENV_BOOTSTRAP_TRUST_UNAVAILABLE')
+    return digest
+
+
 def _bootstrap_registered_d6(registration):
     """Run the pinned dispatcher helper against an explicit registered root."""
     root = Path(registration.root)
     try:
         dispatcher_root, helper_source = _trusted_d6_helper_source(registration)
+        # The env helper requires the parent's trust digest (#369 PR-3); a
+        # missing or invalid trust.json refuses before any helper or model run.
+        trust_sha256 = _load_bootstrap_trust_sha256()
         env = {
             'PATH': '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin',
             'HOME': os.path.expanduser('~'), 'LC_ALL': 'C', 'LANG': 'C',
@@ -2188,7 +2205,8 @@ def _bootstrap_registered_d6(registration):
         }
         result = subprocess.run(
             [sys.executable, '-B', '-I', '-c', helper_source.decode('utf-8'),
-             '--task-id', registration.task_id, '--worktree-root', str(root)],
+             '--task-id', registration.task_id, '--worktree-root', str(root),
+             '--trust-sha256', trust_sha256],
             cwd=dispatcher_root, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
         )
