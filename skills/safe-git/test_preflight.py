@@ -1,5 +1,6 @@
 """Same public CLI as daily use, real disposable Git repo and Python venv."""
 import importlib.util
+import argparse
 import json
 import os
 import pwd
@@ -66,7 +67,8 @@ class PreflightTests(unittest.TestCase):
 
     def linked_worktree_args(self):
         root = self.parent / "linked"
-        self.git("worktree", "add", "--detach", str(root), "HEAD")
+        subprocess.run(["/usr/bin/git", "-C", str(self.root), "worktree", "add",
+                        "--detach", str(root), "HEAD"], check=True, capture_output=True)
         root.chmod(0o700)
         (root / ".git/info/exclude").write_text("tools/\n")
         venv = root / "tools/llmtool/.venv"
@@ -249,7 +251,11 @@ class PreflightTests(unittest.TestCase):
         self.assert_stop(self.invoke(args))
 
     def test_gitdir_change_between_reads_is_rejected(self):
-        parsed = gate.Parser().parse_args(self.args)
+        parsed = argparse.Namespace(
+            root=str(self.root), uid=os.getuid(), root_mode="700", parent_mode="700",
+            branch="task", head=self.git("rev-parse", "HEAD").strip(),
+            common_dir=str(self.root / ".git"), origin="file://" + str(self.root),
+            write_candidate=None, baseline=str(self.baseline), report=None)
         pinned = self.root / ".git"
         with patch.object(gate, "git_directory",
                           side_effect=[pinned, self.parent / "changed-gitdir"]):
