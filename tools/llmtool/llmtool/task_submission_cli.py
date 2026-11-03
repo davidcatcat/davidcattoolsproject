@@ -3987,9 +3987,6 @@ def _delegate_high_debug_ref(value):
 
 
 def _enforce_delegate_repair_cap(args, store):
-    if (not isinstance(store, TaskStore) or
-            not hasattr(args, 'task_id') or not hasattr(args, 'executor_task')):
-        return
     high_debug_ref = getattr(args, 'high_debug_ref', None)
     if high_debug_ref is not None and not _delegate_high_debug_ref(high_debug_ref):
         raise LLMToolError('DELEGATE_HIGH_DEBUG_REF_INVALID')

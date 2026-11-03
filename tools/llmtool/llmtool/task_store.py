@@ -862,7 +862,7 @@ def _validate(record):
                 type(ref) is not str or len(ref) > 512 or
                 re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/[1-9][0-9]*#issuecomment-[1-9][0-9]*', ref) is None or
                 type(repair_cap_override.get('rounds')) is not int or
-                not 3 <= repair_cap_override['rounds'] <= 1024 or
+                repair_cap_override['rounds'] < 3 or
                 not _valid_utc_seconds(repair_cap_override.get('recorded_at'))):
             _fail('TASK_REPAIR_CAP_OVERRIDE_INVALID')
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or

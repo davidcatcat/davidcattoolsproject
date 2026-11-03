@@ -103,6 +103,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve() / 'home'
         self.home.mkdir(mode=0o700)
+        # Most delegate tests exercise route behavior, not the assignment cap.
+        # Cap-specific tests opt back into the real helper with a real TaskStore.
+        cap_patch = patch.object(submission_cli, '_enforce_delegate_repair_cap')
+        cap_patch.start()
+        self.addCleanup(cap_patch.stop)
         policy = json.loads(Path(worker_dispatch._POLICY_PATH).read_text(encoding='utf-8'))
         policy['workers']['opencode-developer']['dispatch'] = 'ALLOWED'
         policy['workers']['opencode-developer']['reason'] = 'test fixture allows isolated route checks'
