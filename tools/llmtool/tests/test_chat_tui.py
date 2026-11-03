@@ -3925,7 +3925,7 @@ class PMConversationTests(BoundedPMTest):
                 status='s ' + key)]}))
         ui, _ = self.drive([self.connect(), self.connected, '/pm history\r',
                             lambda ui: self.until(ui, lambda ui: ui.conversation.text.count(
-                                'PM 歷史（最近 1 輪，存在本機）') == 2)])
+                                '上次對話（') == 2)])
         text = ui.conversation.text
         self.assertNotIn(key[3:9], text)
         self.assertIn('▸ 用過的工具：[withheld]', text)
@@ -4204,7 +4204,7 @@ class PMConversationTests(BoundedPMTest):
 
     def test_history_disconnect_and_chat_is_never_the_pm(self):
         def history_shown(ui):
-            return self.until(ui, lambda ui: 'PM 歷史（最近 1 輪' in ui.conversation.text)
+            return self.until(ui, lambda ui: '上次對話（' in ui.conversation.text)
 
         ui, _ = self.drive([self.connect(), self.connected, 'first\r', self.turn_done,
                             '/pm history\r', history_shown,
@@ -4212,7 +4212,7 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: self.assertFalse(ui.pm_mode),
                             'chat now\r', self.idle])
         text = ui.conversation.text
-        history = text[text.index('PM 歷史（最近 1 輪，存在本機）'):]
+        history = text[text.index('上次對話（'):]
         self.assertNotIn('(history)', text)
         self.assertRegex(history, '── [0-9]{2}:[0-9]{2}\n你\n  first\n\nPM\n'
                                   '  ▸ 用過的工具：Read\n')

@@ -31,6 +31,12 @@ class PMReplayDisplayTests(unittest.TestCase):
 
     def test_only_empty_final_interrupted_turn_gets_continue_hint(self):
         interrupted = self.turn("2026-10-28T00:00:00+00:00", status="INTERRUPTED", reply="")
+        interrupted_with_reply = self.turn("2026-10-28T00:00:00+00:00", status="INTERRUPTED",
+                                           reply="partial reply")
+        rendered = self.render([interrupted_with_reply])
+        self.assertIn("partial reply", rendered)
+        self.assertNotIn("輸入「繼續」讓 PM 接著做", rendered)
+
         rendered = self.render([interrupted, self.turn("2026-10-28T00:01:00+00:00")])
         self.assertIn("（沒有存下回覆文字）", rendered)
         self.assertNotIn("輸入「繼續」讓 PM 接著做", rendered)
