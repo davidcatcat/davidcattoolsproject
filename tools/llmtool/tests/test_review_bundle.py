@@ -163,6 +163,36 @@ class BundleTests(unittest.TestCase):
         self.args.output = str(self.root/'bundle.json')
         with self.assertRaises(LLMToolError): self.prepare()
 
+    def test_output_under_trust_protected_roots_rejected(self):
+        # #369 PR-7: PROTECTED is (canonical_root, workspace_root) read from trust.
+        tmp = tempfile.TemporaryDirectory(dir='/private/tmp' if sys.platform == 'darwin' else None)
+        self.addCleanup(tmp.cleanup)
+        base = Path(tmp.name)
+        canonical, workspace = base/'canonical', base/'workspace'
+        config = review_trust_fixture.make_trust(canonical_root=str(canonical),
+                                                 workspace_root=str(workspace))
+        for folder in (canonical/'private', workspace/'private', workspace/'tasks'/'private'):
+            folder.mkdir(parents=True, mode=0o700); folder.chmod(0o700)
+            self.args.output = str(folder/'bundle.json')
+            with self.subTest(folder=str(folder.relative_to(base))), \
+                    review_trust_fixture.use_trust(config):
+                with self.assertRaises(LLMToolError) as caught: self.prepare()
+                self.assertEqual(caught.exception.review_code, 'BUNDLE_PATH_INVALID')
+                self.assertFalse(Path(self.args.output).exists())
+        # Control: the same fixture accepts a private output outside its roots.
+        self.args.output = str(self.private/'bundle.json')
+        with review_trust_fixture.use_trust(config):
+            self.assertEqual(self.prepare()['status'], 'PREPARED')
+        self.assertEqual(b.protected_roots(), (Path(review_trust_fixture.OWNER_CANONICAL_ROOT),
+                                               Path(review_trust_fixture.OWNER_WORKSPACE_ROOT)))
+
+    def test_missing_trust_fails_closed_before_any_output(self):
+        from llmtool import trust
+        with patch.object(trust, 'load_trust', side_effect=trust.TrustError('TRUST_MISSING')):
+            with self.assertRaises(LLMToolError) as caught: self.prepare()
+        self.assertEqual(caught.exception.review_code, 'TRUST_MISSING')
+        self.assertFalse(Path(self.args.output).exists())
+
     def test_artifact_private_mode_hardlink_symlink_fifo_or_secret_path_rejected(self):
         original = self.index['artifacts'][0]['path']
         for kind in ('public','hardlink','symlink','fifo','credential'):

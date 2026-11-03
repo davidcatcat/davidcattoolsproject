@@ -16,13 +16,14 @@ from .errors import LLMToolError
 from .task_lifecycle import State, inspect_task, parse_events, parse_expectations
 from .task_verification import parse_task_contract
 from .task_review import canonical, load_json, reject, safe_id, screen
-from .review_origins import actions_run_pattern
+from .review_origins import actions_run_pattern, review_trust
 from .task_review_collector import (_LocalGit, collect_bundle_manifest,
     collect_local_facts, physical_directory, verify_bundle_facts)
 
 FILE_LIMIT = 1024 * 1024
 TOTAL_LIMIT = 4 * FILE_LIMIT
-PROTECTED = tuple(Path(p) for p in (
+# Legacy values, kept only for ``llmtool trust verify-legacy`` until #369 PR-10.
+LEGACY_PROTECTED = tuple(Path(p) for p in (
     '/Users/davidsun/git/davidcataiporject/davidcattoolsproject',
     '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject'))
 SECRET_PARTS = frozenset(('.git','.aws','.ssh','.codex','.claude','credentials',
@@ -46,12 +47,18 @@ def _sha(value):
     return value
 
 
+def protected_roots():
+    """Trust ``canonical_root`` and ``workspace_root``, read at use time (#369 PR-7)."""
+    config = review_trust()
+    return (Path(config.canonical_root), Path(config.workspace_root))
+
+
 def _private_path(filename, root):
     _input_spelling(filename)
     path = Path(filename)
     if not path.is_absolute() or str(path) != os.path.abspath(path):
         reject('BUNDLE_PATH_INVALID')
-    blocked = (*PROTECTED, root, root.parent, Path.home()/'.config')
+    blocked = (*protected_roots(), root, root.parent, Path.home()/'.config')
     if (any(path == p or p in path.parents for p in blocked) or
             path.parts[1] in ('dev','proc','sys','etc','System','Library','usr','bin','sbin') or
             any(part.lower() in SECRET_PARTS or part.lower().startswith('.env.')

@@ -83,6 +83,15 @@ class CLITests(unittest.TestCase):
             cwd=self.cwd, env=self.env, timeout=10, check=False,
         )
 
+    def run_trusted_cli(self, *args):
+        """CLI child under the fixture trust (#369 PR-7 grant deny-list reads trust)."""
+        import review_trust_fixture
+        return subprocess.run(
+            review_trust_fixture.cli_command(*args), stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+            cwd=self.cwd, env=self.env, timeout=10, check=False,
+        )
+
     def assert_failure(self, result):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, b"")
@@ -128,7 +137,7 @@ class CLITests(unittest.TestCase):
         self.assertEqual(result.returncode,0,result.stderr)
         self.assertIn(b'--evidence',result.stdout)
         self.assertIn(b'--output',result.stdout)
-        result = self.run_cli('task','review-bundle','--contract','/private/missing-contract',
+        result = self.run_trusted_cli('task','review-bundle','--contract','/private/missing-contract',
             '--expect','/private/missing-expect','--events','/private/missing-events',
             '--base','1'*40,'--evidence','/private/missing-index',
             '--output','/private/missing-output','--json')
@@ -146,10 +155,11 @@ class CLITests(unittest.TestCase):
         for command in ('review-request','review-wait'):
             result = self.run_cli('task',command,'--help')
             self.assertEqual(result.returncode,0,result.stderr)
-        request = self.run_cli('task','review-request','--bundle','/private/missing-bundle',
+        # Fixture trust: these children must never read the real trust.json.
+        request = self.run_trusted_cli('task','review-request','--bundle','/private/missing-bundle',
             '--bundle-sha256','0'*64,'--expect','/private/missing-expect',
             '--output','/private/missing-request','--json')
-        wait = self.run_cli('task','review-wait','--request','/private/missing-request',
+        wait = self.run_trusted_cli('task','review-wait','--request','/private/missing-request',
             '--request-sha256','0'*64,'--receipt','/private/missing-receipt',
             '--verdict','/private/missing-verdict','--timeout','0',
             '--output','/private/missing-result','--json')
@@ -342,7 +352,7 @@ class CLITests(unittest.TestCase):
                                 (('--phase0-grant', str(grant), '--phase0-grant-sha256', pin),
                                  b'phase0 grant does not cover capture')):
             with self.subTest(extra=extra[0]):
-                result = self.run_cli(*base, *extra)
+                result = self.run_trusted_cli(*base, *extra)
                 self.assert_failure(result)
                 self.assertIn(category, result.stderr)
                 for marker in (b'PRIVATE_', self.base_url.encode(), str(grant).encode(), b'Traceback'):
@@ -369,7 +379,7 @@ class CLITests(unittest.TestCase):
             not_before='2000-01-01T00:00:00Z',not_after='2100-01-01T00:00:00Z',
             authorizer_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-1')))
         grant.chmod(0o600); pin = hashlib.sha256(grant.read_bytes()).hexdigest()
-        result = self.run_cli('test-triage-worker','--file',str(path),'--exit-code','7',
+        result = self.run_trusted_cli('test-triage-worker','--file',str(path),'--exit-code','7',
             '--profile','company-test','--json','--phase0-grant',str(grant),'--phase0-grant-sha256',pin)
         self.assertEqual(result.returncode,7,result.stderr); self.assertEqual(result.stderr,b'')
         value=json.loads(result.stdout); self.assertEqual(value['schema_version'],2)
