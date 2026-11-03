@@ -48,29 +48,111 @@ def record(root, **extra):
 
 
 class TaskStatusTests(unittest.TestCase):
-    def test_dispatched_review_claim_uses_matching_reviewer_outcome(self):
-        claim = {'state': 'DISPATCHED', 'head_sha': 'a' * 40, 'version': 3}
+    def test_dispatched_review_claim_requires_same_head_accepted_evidence_for_pass(self):
+        claim = {'state': 'DISPATCHED', 'head_sha': 'a' * 40, 'version': 3,
+                 'reviewer_task': 'reviewer-v3'}
 
-        def summary(*, claim_value=claim, events=()):
+        def summary(*, claim_value=claim, events=(), completion=None):
             return task_status._summary({
                 'task_id': '1' * 32,
                 'review_dispatch_claim': claim_value,
                 'completion_events': list(events),
+                'completion': completion or {},
             })['review_claim_state']
 
-        matching = {
-            'source': 'REVIEWER', 'source_sha': 'a' * 40, 'version': 3,
-            'outcome': 'REVIEW_PASS',
-        }
-        self.assertEqual(summary(events=(matching,)), 'REVIEW_PASS')
-        self.assertEqual(summary(events=({**matching, 'outcome': 'REVIEW_FIX'},)),
-                         'REVIEW_FIX')
-        self.assertEqual(summary(events=({**matching, 'source_sha': 'b' * 40},)),
-                         'DISPATCHED')
-        self.assertEqual(summary(events=({**matching, 'version': 4},)), 'DISPATCHED')
-        self.assertEqual(summary(claim_value={**claim, 'state': 'COMPLETED'},
-                                 events=(matching,)), 'COMPLETED')
+        matching = {'source': 'REVIEWER', 'source_sha': 'a' * 40}
+        accepted_review = {'head_sha': 'a' * 40,
+                           'formal_review_state': 'ACCEPTED',
+                           'reviewer_task_id': 'reviewer-v3'}
+        accepted = {'evidence': {'review_pr_ci': accepted_review}}
+        self.assertEqual(summary(events=(matching,), completion=accepted), 'PASS')
+        with tempfile.TemporaryDirectory() as root:
+            closed = record(root)
+        closed.update({
+            'completion': {'state': 'PM_RETURNED', **accepted},
+            'review_dispatch_claim': claim,
+            'completion_events': [matching],
+        })
+        self.assertEqual(task_status._summary(closed)['review_claim_state'], 'PASS')
+        self.assertEqual(summary(events=(matching,)), 'DISPATCHED')
+        self.assertEqual(summary(events=({**matching, 'source_sha': 'b' * 40},),
+                               completion={'evidence': {'review_pr_ci': {
+                                   'head_sha': 'b' * 40,
+                                   'formal_review_state': 'ACCEPTED',
+                                   'reviewer_task_id': 'reviewer-v3'}}}), 'DISPATCHED')
+        self.assertEqual(summary(events=(matching,), completion={
+            'evidence': {'review_pr_ci': {
+                'head_sha': 'a' * 40, 'formal_review_state': 'ACCEPTED',
+                'reviewer_task_id': 'reviewer-v2'}}}), 'DISPATCHED')
+        self.assertEqual(summary(events=({**matching, 'version': 2,
+                                          'outcome': 'REVIEW_PASS'},)), 'DISPATCHED')
+        self.assertEqual(summary(events=({**matching, 'version': 3,
+                                          'outcome': 'REVIEW_FAIL'},)), 'REVIEW_FAIL')
+        self.assertEqual(summary(events=({**matching, 'version': 3,
+                                          'outcome': 'REVIEW_FIX'},)), 'DISPATCHED')
+        self.assertEqual(summary(events=({**matching, 'version': 3,
+                                          'outcome': 'REVIEW_PASS'},),
+                               completion=accepted), 'PASS')
         self.assertEqual(summary(claim_value=None), 'NONE')
+
+    def test_newest_dispatched_claim_ignores_older_claim_event(self):
+        older = {'state': 'COMPLETED', 'head_sha': 'a' * 40, 'version': 1,
+                 'reviewer_task': 'reviewer-v1'}
+        newest = {'state': 'DISPATCHED', 'head_sha': 'a' * 40, 'version': 2,
+                  'reviewer_task': 'reviewer-v2'}
+        summary = task_status._summary({
+            'task_id': '1' * 32,
+            'review_dispatch_claim': [older, newest],
+            'completion_events': [{
+                'source': 'REVIEWER', 'source_sha': 'a' * 40,
+                'version': 1, 'outcome': 'REVIEW_PASS'}],
+        })
+        self.assertEqual(summary['review_claim_state'], 'DISPATCHED')
+
+        # A v2 failure on the same HEAD must not inherit v1's accepted PASS.
+        v2_failure = task_status._summary({
+            'task_id': '1' * 32,
+            'review_dispatch_claim': [older, newest],
+            'completion_events': [{
+                'source': 'REVIEWER', 'source_sha': 'a' * 40,
+                'version': 2, 'outcome': 'REVIEW_FAIL'}],
+            'completion': {'evidence': {'review_pr_ci': {
+                'head_sha': 'a' * 40, 'formal_review_state': 'UNVERIFIED',
+                'reviewer_task_id': 'reviewer-v2'}}},
+        })
+        self.assertEqual(v2_failure['review_claim_state'], 'REVIEW_FAIL')
+
+        # Stored-shape v2 events omit version/outcome. Without accepted
+        # evidence for v2, the summary does not guess a verdict.
+        v2_stored_shape = task_status._summary({
+            'task_id': '1' * 32,
+            'review_dispatch_claim': [older, newest],
+            'completion_events': [{
+                'source': 'REVIEWER', 'source_sha': 'a' * 40}],
+            'completion': {'evidence': {'review_pr_ci': {
+                'head_sha': 'a' * 40, 'formal_review_state': 'UNVERIFIED',
+                'reviewer_task_id': 'reviewer-v2'}}},
+        })
+        self.assertEqual(v2_stored_shape['review_claim_state'], 'DISPATCHED')
+
+        # While v2 is still running, a v1 event alone is not evidence for v2.
+        v2_running = task_status._summary({
+            'task_id': '1' * 32,
+            'review_dispatch_claim': [older, newest],
+            'completion_events': [{
+                'source': 'REVIEWER', 'source_sha': 'a' * 40}],
+            'completion': {'evidence': {'review_pr_ci': {
+                'head_sha': 'a' * 40, 'formal_review_state': 'ACCEPTED',
+                'reviewer_task_id': 'reviewer-v1'}}},
+        })
+        self.assertEqual(v2_running['review_claim_state'], 'DISPATCHED')
+        completed = task_status._summary({
+            'task_id': '1' * 32,
+            'review_dispatch_claim': {**newest, 'state': 'COMPLETED'},
+            'completion_events': [{
+                'source': 'REVIEWER', 'source_sha': 'a' * 40}],
+        })
+        self.assertEqual(completed['review_claim_state'], 'COMPLETED')
 
     def test_derived_states(self):
         with tempfile.TemporaryDirectory() as root:
