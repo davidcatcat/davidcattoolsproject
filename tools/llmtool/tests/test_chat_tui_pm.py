@@ -56,7 +56,7 @@ class PMConfigHintTests(unittest.TestCase):
         hint = chat_tui_pm.error_text("PM_CONFIG_INVALID")
         self.assertIn("~/.config/llmtool/config.yaml", hint)
         self.assertIn("pm_runtime.claude_config_dir for Claude", hint)
-        self.assertIn("pm_runtime.codex_config_dir for Codex", hint)
+        self.assertIn("set roles.pm.account to an accounts.<name> entry with kind: codex and config_dir", hint)
         self.assertIn("roles.pm account and model", hint)
 
 
