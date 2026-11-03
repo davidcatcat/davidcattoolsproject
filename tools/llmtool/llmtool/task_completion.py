@@ -31,6 +31,7 @@ import tempfile
 import time
 from datetime import datetime, timezone
 
+from . import trust
 from .errors import LLMToolError
 from .test_output_excerpts import select_test_excerpts
 
@@ -44,14 +45,17 @@ _PROPOSAL_TREE_LIMIT = 8 * 1024 * 1024
 _TIMEOUT = 10
 _TEST_TIMEOUT = 180
 _TEST_OUTPUT_LIMIT = 256 * 1024
+# Legacy CI values, kept only for ``llmtool trust verify-legacy`` until #369
+# PR-10. The completion gate reads ``ci_trust`` from trust.json at use time
+# (see ``_ci_trust``); none of these is consulted by the runtime CI checks,
+# except that ``_GITHUB_ACTIONS_APP_ID`` stays the fixed pin the trust value
+# ``github_actions_app_id`` must equal (the trust schema pins it too).
 _MAC_CHECK = 'check (macOS 3.13)'
 _LINUX_CHECK = 'check (Linux 3.14)'
 _DOCS_CHECK = 'check (docs)'
 _REQUIRED_CHECKS = frozenset((_MAC_CHECK, _LINUX_CHECK))
 _NOT_RUN_CHECKS = ('Linux Python 3.9', 'Windows CI')
-# The Owner's Mac self-hosted runners (Issue #99); no other runner is trusted.
 _CI_RUNNER_NAMES = frozenset(('davidproject-self-action', 'davidproject-self-action-2'))
-_D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
 _CI_WORKFLOW_PATH = '.github/workflows/llmtool-mac-ci.yml'
 _CI_WORKFLOW_NAME = 'llmtool Mac CI'
 _LINUX_CI_WORKFLOW_PATH = '.github/workflows/llmtool-linux-ci.yml'
@@ -59,6 +63,9 @@ _LINUX_CI_WORKFLOW_NAME = 'llmtool Linux CI'
 _LINUX_CI_RUNNER_NAMES = frozenset((
     'ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3'))
 _GITHUB_ACTIONS_APP_ID = 15368
+_D6_EVIDENCE_STATES = frozenset(('ACTIVE', 'REVIEW_PENDING', 'REPAIR'))
+# A GitHub-hosted job reports this runner group; self-hosted groups never do.
+_GITHUB_HOSTED_RUNNER_GROUP = 'GitHub Actions'
 _TEST_REGISTRY = (
     (re.compile(r'tools/llmtool/tests/test_[A-Za-z0-9_]+\.py\Z'), 'unittest'),
     (re.compile(r'scripts/test_[A-Za-z0-9_]+\.py\Z'), 'script'),
@@ -1605,6 +1612,23 @@ def run_bounded_worktree_tests(*, root, source_sha, diff_sha256,
     return evidence
 
 
+def _trust_config():
+    """Return the frozen TrustConfig, read at use time; fail closed with TRUST_*."""
+    try:
+        return trust.load_trust()
+    except trust.TrustError as exc:
+        code = exc.code
+    _stop(code)
+
+
+def _trusted_slug():
+    return _trust_config().repository['slug']
+
+
+def _ci_trust():
+    return _trust_config().ci_trust
+
+
 def _github_get(path):
     # The repository is private, so an anonymous request always gets 404. Read
     # through the signed-in GitHub CLI: llmtool never sees its credential, and
@@ -1614,6 +1638,7 @@ def _github_get(path):
     gh = shutil.which('gh', path=_GH_PATH)
     if gh is None:
         _stop('GITHUB_EVIDENCE_UNAVAILABLE')
+    slug = _trusted_slug()
     env = {'PATH': _GH_PATH, 'HOME': os.path.expanduser('~'), 'LC_ALL': 'C',
            'GH_PROMPT_DISABLED': '1', 'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}
     if os.environ.get('GH_CONFIG_DIR'):
@@ -1621,7 +1646,7 @@ def _github_get(path):
     argv = [gh, 'api', '--method', 'GET',
             '-H', 'Accept: application/vnd.github+json',
             '-H', 'X-GitHub-Api-Version: 2022-11-28',
-            'repos/davidcatcat/davidcattoolsproject/' + path]
+            'repos/' + slug + '/' + path]
     try:
         process = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, shell=False,
@@ -1725,9 +1750,34 @@ def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha)
             _FORMAL_ACCEPT in lines and binding_line in lines)
 
 
+def _labels_equal(labels, expected):
+    return (type(labels) is list and all(type(label) is str for label in labels) and
+            set(labels) == set(expected))
+
+
+def _trusted_ci_runner(job, *, mode, runner_names, runner_labels):
+    """Exact runner identity from ci_trust; never prefix, substring or wildcard."""
+    labels = job.get('labels')
+    if mode == 'self-hosted':
+        runner_name = job.get('runner_name')
+        return (type(runner_name) is str and runner_names is not None and
+                runner_name in runner_names and
+                (runner_labels is None or _labels_equal(labels, runner_labels)))
+    if mode == 'github-hosted':
+        return (runner_labels is not None and _labels_equal(labels, runner_labels) and
+                'self-hosted' not in labels and
+                job.get('runner_group_name') == _GITHUB_HOSTED_RUNNER_GROUP)
+    return False
+
+
 def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
                              workflow_name, check_name, runner_names,
+                             runner_labels=None, mode='self-hosted',
+                             app_id=_GITHUB_ACTIONS_APP_ID,
                              pr_merged=False, pr_head_ref=None):
+    if type(app_id) is not int or app_id != _GITHUB_ACTIONS_APP_ID:
+        _stop('TRUST_CI_INVALID')
+    slug = _trusted_slug()
     workflow = _github_get('actions/workflows/' + workflow_path.rsplit('/', 1)[-1])
     if (type(workflow) is not dict or type(workflow.get('id')) is not int or
             workflow['id'] <= 0 or workflow.get('path') != workflow_path or
@@ -1754,8 +1804,7 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             pr_merged is True and type(pull_requests) is list and not pull_requests and
             run.get('head_branch') == pr_head_ref and
             type(run.get('head_repository')) is dict and
-            run['head_repository'].get('full_name') ==
-            'davidcatcat/davidcattoolsproject')
+            run['head_repository'].get('full_name') == slug)
         if (run.get('workflow_id') != workflow_id or run.get('path') != workflow_path or
                 run.get('event') != 'pull_request' or run.get('head_sha') != result_sha or
                 not (matching_pr or merged_empty_prs_match)):
@@ -1783,10 +1832,11 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             continue
         check_url = job.get('check_run_url')
         check_id_match = (None if type(check_url) is not str else re.fullmatch(
-            r'https://api\.github\.com/repos/davidcatcat/davidcattoolsproject/'
+            r'https://api\.github\.com/repos/' + re.escape(slug) + r'/'
             r'check-runs/([1-9][0-9]{0,18})', check_url))
         if (check_name in required_jobs or job.get('run_id') != run_id or
-                job.get('runner_name') not in runner_names or
+                not _trusted_ci_runner(job, mode=mode, runner_names=runner_names,
+                                       runner_labels=runner_labels) or
                 type(job.get('id')) is not int or job['id'] <= 0 or
                 check_id_match is None):
             _stop('CI_WORKFLOW_JOBS_INVALID')
@@ -1813,7 +1863,7 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
     app = None if check is None else check.get('app')
     if (check is not None and check.get('name') == check_name and
             check.get('head_sha') == result_sha and type(app) is dict and
-            app.get('id') == _GITHUB_ACTIONS_APP_ID and app.get('slug') == 'github-actions' and
+            app.get('id') == app_id and app.get('slug') == 'github-actions' and
             app.get('name') == 'GitHub Actions' and
             job.get('status') == 'completed' and job.get('conclusion') == 'success' and
             check.get('status') == 'completed' and check.get('conclusion') == 'success' and
@@ -1827,34 +1877,45 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
 
 def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
                          pr_merged=False, pr_head_ref=None):
+    """Exact-head CI evidence for every trusted workflow on the selected path.
+
+    Code path: every ci_trust workflow with a ``code_check`` must succeed and
+    the first such workflow is primary; the docs-only path does the same with
+    ``docs_check``. With the Owner's values this is the Mac + Linux code gate
+    and the Linux ``check (docs)`` docs gate.
+    """
+    ci_trust = _ci_trust()
     docs_only = _docs_only_ci(changed_paths)
-    if docs_only:
-        mac = {'workflow_id': None, 'run_id': None, 'run_attempt': None,
-               'run_number': None, 'successful_checks': [], 'check_ids': {}}
-        linux_check = _DOCS_CHECK
-    else:
-        mac = _collect_one_ci_workflow(
-            pr_number=pr_number, result_sha=result_sha, workflow_path=_CI_WORKFLOW_PATH,
-            workflow_name=_CI_WORKFLOW_NAME, check_name=_MAC_CHECK,
-            runner_names=_CI_RUNNER_NAMES, pr_merged=pr_merged,
-            pr_head_ref=pr_head_ref)
-        linux_check = _LINUX_CHECK
-    linux = _collect_one_ci_workflow(
-        pr_number=pr_number, result_sha=result_sha, workflow_path=_LINUX_CI_WORKFLOW_PATH,
-        workflow_name=_LINUX_CI_WORKFLOW_NAME, check_name=linux_check,
-        runner_names=_LINUX_CI_RUNNER_NAMES, pr_merged=pr_merged,
-        pr_head_ref=pr_head_ref)
-    successful = set(mac['successful_checks']) | set(linux['successful_checks'])
-    check_ids = dict(mac['check_ids'])
-    check_ids.update(linux['check_ids'])
-    primary = linux if docs_only else mac
+    field = 'docs_check' if docs_only else 'code_check'
+    selected = [workflow for workflow in ci_trust['workflows'] if workflow[field] is not None]
+    if not selected:
+        _stop('TRUST_CI_INVALID')
+    results = [_collect_one_ci_workflow(
+        pr_number=pr_number, result_sha=result_sha, workflow_path=workflow['path'],
+        workflow_name=workflow['name'], check_name=workflow[field],
+        runner_names=workflow['runner_names'], runner_labels=workflow['runner_labels'],
+        mode=ci_trust['mode'], app_id=ci_trust['github_actions_app_id'],
+        pr_merged=pr_merged, pr_head_ref=pr_head_ref) for workflow in selected]
+    successful, check_ids = set(), {}
+    for result in results:
+        successful.update(result['successful_checks'])
+        check_ids.update(result['check_ids'])
+    primary, primary_workflow = results[0], selected[0]
     return {'workflow_id': primary['workflow_id'], 'run_id': primary['run_id'],
             'run_attempt': primary['run_attempt'], 'run_number': primary['run_number'],
             'successful_checks': sorted(successful), 'check_ids': check_ids,
             'linux_required': True, 'docs_only': docs_only,
-            'required_checks': [_DOCS_CHECK] if docs_only else sorted(_REQUIRED_CHECKS),
-            'workflow_path': _LINUX_CI_WORKFLOW_PATH if docs_only else _CI_WORKFLOW_PATH,
-            'workflow_name': _LINUX_CI_WORKFLOW_NAME if docs_only else _CI_WORKFLOW_NAME}
+            'required_checks': sorted(workflow[field] for workflow in selected),
+            'workflow_path': primary_workflow['path'],
+            'workflow_name': primary_workflow['name']}
+
+
+def _not_run_checks(docs_only):
+    """Display-only NOT_RUN names: ci_trust not_run_checks, plus skipped code checks."""
+    ci_trust = _ci_trust()
+    skipped = tuple(workflow['code_check'] for workflow in ci_trust['workflows']
+                    if docs_only and workflow['code_check'] is not None)
+    return tuple(ci_trust['not_run_checks']) + skipped
 
 
 def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
@@ -1881,7 +1942,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             type(pr.get('head')) is not dict or pr['head'].get('sha') != result_sha or
             type(pr.get('base')) is not dict or
             type(pr['base'].get('repo')) is not dict or
-            pr['base']['repo'].get('full_name') != 'davidcatcat/davidcattoolsproject' or
+            pr['base']['repo'].get('full_name') != _trusted_slug() or
             type((pr.get('user') or {}).get('login')) is not str):
         _stop('PR_HEAD_MISMATCH')
     reviews = _github_get(f'pulls/{pr_number}/reviews?per_page=100')
@@ -2160,8 +2221,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             'required_checks': sorted(required_checks),
             'successful_checks': sorted(successful), 'ci_head_sha': result_sha,
             'not_run_checks': [{'name': name, 'status': 'NOT_RUN'}
-                               for name in (_NOT_RUN_CHECKS +
-                                   ((_MAC_CHECK, _LINUX_CHECK) if ci['docs_only'] else ()))],
+                               for name in _not_run_checks(ci['docs_only'])],
             'ci_workflow_path': ci['workflow_path'],
             'ci_workflow_name': ci['workflow_name'],
             'ci_workflow_id': ci['workflow_id'], 'ci_run_id': ci['run_id'],
