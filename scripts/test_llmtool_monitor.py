@@ -5668,3 +5668,49 @@ class PsArgvTests(unittest.TestCase):
         self.assertIn(os.getpid(), [row[0] for row in rows])
         mine, = [row for row in rows if row[0] == os.getpid()]
         self.assertEqual(mine[1:3], (os.getppid(), os.getpgrp()))
+
+
+class DiskUsageTests(unittest.TestCase):
+    @staticmethod
+    def statvfs_for(used_percent):
+        from types import SimpleNamespace
+        return SimpleNamespace(f_blocks=1000, f_bfree=1000 - used_percent,
+                               f_bavail=6, f_frsize=1024 ** 3)
+
+    def test_home_volume_percentages_and_threshold_messages(self):
+        for percent, label in ((50, ""), (91, "WARNING"), (97, "ATTENTION")):
+            with self.subTest(percent=percent):
+                monitor = mon.Monitor()
+                fake = self.statvfs_for(percent)
+                with patch.object(mon.os, "statvfs", return_value=fake) as statvfs, \
+                        patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+                    monitor.refresh_disk_usage(now=0)
+                statvfs.assert_called_once_with("/home/test")
+                self.assertEqual(monitor.disk_usage, (percent, 6 * 1024 ** 3))
+                self.assertIn(f"disk {percent}% (6.0G free)", mon.disk_status(monitor.disk_usage))
+                alert = mon.disk_alert(monitor.disk_usage)
+                if label:
+                    self.assertTrue(alert.startswith(label))
+                    self.assertIn("old D6 worktrees under the workspace root", alert)
+                    self.assertIn("6.0G free", alert)
+                else:
+                    self.assertEqual(alert, "")
+
+    def test_statvfs_failure_is_silent(self):
+        monitor = mon.Monitor()
+        with patch.object(mon.os, "statvfs", side_effect=OSError("unavailable")), \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+            monitor.refresh_disk_usage(now=0)
+        self.assertIsNone(monitor.disk_usage)
+        self.assertEqual(mon.disk_status(monitor.disk_usage), "")
+        self.assertEqual(mon.disk_alert(monitor.disk_usage), "")
+
+    def test_statvfs_is_limited_to_once_per_60_seconds(self):
+        monitor = mon.Monitor()
+        with patch.object(mon.os, "statvfs", return_value=self.statvfs_for(50)) as statvfs, \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+            monitor.refresh_disk_usage(now=0)
+            monitor.refresh_disk_usage(now=59.9)
+            statvfs.assert_called_once_with("/home/test")
+            monitor.refresh_disk_usage(now=60)
+        self.assertEqual(statvfs.call_count, 2)

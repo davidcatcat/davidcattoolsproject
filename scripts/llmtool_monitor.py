@@ -70,6 +70,9 @@ IGNORED = frozenset({"grep", "egrep", "fgrep", "pgrep", "ps"})
 PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
 NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
+DISK_REFRESH_SECONDS = 60.0
+DISK_WARNING_PERCENT = 90
+DISK_ATTENTION_PERCENT = 95
 
 
 @dataclass(frozen=True)
@@ -695,6 +698,24 @@ def _fit(text: str, width: int) -> str:
     return text if len(text) <= width else text[:width - 1] + "…"
 
 
+def disk_status(usage: tuple[int, int] | None) -> str:
+    if usage is None:
+        return ""
+    percent, free_bytes = usage
+    return f"disk {percent}% ({free_bytes / (1024 ** 3):.1f}G free)"
+
+
+def disk_alert(usage: tuple[int, int] | None) -> str:
+    if usage is None:
+        return ""
+    percent, free_bytes = usage
+    if percent < DISK_WARNING_PERCENT:
+        return ""
+    level = "ATTENTION" if percent >= DISK_ATTENTION_PERCENT else "WARNING"
+    return (f"{level}: disk {percent}% used ({free_bytes / (1024 ** 3):.1f}G free); "
+            "the PM can retire old D6 worktrees under the workspace root.")
+
+
 def table_lines(processes: list[Process]) -> list[str]:
     # Owner sits next to PID so it stays visible in an 80-column terminal.
     lines = [f"{'ROLE':<25} {'NAME':<12} {'PID':<7} {'OWNER':<30} {'PGID':<7} {'STATE':<5} ELAPSED"]
@@ -742,6 +763,26 @@ class Monitor:
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
         self.stale = False   # the file on disk changed since start: a restart is needed
+        self.disk_usage: tuple[int, int] | None = None  # used percent, available bytes
+        self.disk_due = 0.0
+
+    def refresh_disk_usage(self, now: float | None = None) -> None:
+        """Read the home volume at most once per minute; failure is silent."""
+        now = time.monotonic() if now is None else now
+        if now < self.disk_due:
+            return
+        self.disk_due = now + DISK_REFRESH_SECONDS
+        try:
+            usage = os.statvfs(os.path.expanduser("~"))
+            total = usage.f_blocks * usage.f_frsize
+            if total <= 0:
+                self.disk_usage = None
+                return
+            used = usage.f_blocks - usage.f_bfree
+            percent = max(0, min(100, int(used * 100 / usage.f_blocks)))
+            self.disk_usage = (percent, usage.f_bavail * usage.f_frsize)
+        except Exception:
+            self.disk_usage = None
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -755,6 +796,7 @@ class Monitor:
 
     def poll(self) -> list[tuple[str, str, str]]:
         self.polls += 1
+        self.refresh_disk_usage()
         now = time.monotonic()
         stamp = datetime.now().strftime("%H:%M:%S")
         try:
@@ -5778,8 +5820,13 @@ def run_once(github: "GitHubSource | None" = None) -> int:
         github.refresh()   # before the poll, so the D6 list can see PR states
         mon.github = github
     mon.poll()
-    print(f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
-          f"{summary(mon.processes, mon.lingering, ci_view=github.ci_view if github else None)}")
+    header = (f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
+              f"{summary(mon.processes, mon.lingering, ci_view=github.ci_view if github else None)}")
+    disk = disk_status(mon.disk_usage)
+    print(header + (f"  ·  {disk}" if disk else ""))
+    alert = disk_alert(mon.disk_usage)
+    if alert:
+        print(alert)
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
@@ -5889,17 +5936,24 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
     h, w = stdscr.getmaxyx()
     body = max(1, h - 4)
     stdscr.erase()
-    put(0, f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}",
+    header = f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}"
+    disk = disk_status(mon.disk_usage)
+    if disk:
+        header += f" · {disk}"
+    put(0, header,
         colors.get("title", 0) | curses.A_BOLD)
-    if mon.stale:
-        put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
-            colors.get("!", 0) | curses.A_BOLD)
     status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
               else summary(mon.processes, mon.lingering,
                            ci_view=mon.github.ci_view if mon.github else None))
     running = running_stages(mon.tasks)
     status += f"  ·  llmtool stages running: {running}" if running else ""
     put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)
+    alert = disk_alert(mon.disk_usage)
+    stale = (f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開"
+             if mon.stale else "")
+    if alert or stale:
+        put(2, "  ·  ".join(item for item in (stale, alert) if item),
+            colors.get("!", 0) | curses.A_BOLD)
     if view == "log":
         entries = list(mon.log)
         offset = max(0, min(offset, len(entries) - body))
