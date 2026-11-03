@@ -142,13 +142,23 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             def __init__(self):
                 self.value = dict(task)
                 self.claims = 0
+                self.developer_states = []
 
             def get(self, _task_id):
                 return dict(self.value)
 
             def compare_and_update(self, _task_id, *, expected, **updates):
                 self.claims += 1
+                for key, value in expected.items():
+                    if self.value.get(key) != value:
+                        raise task_store.TaskStoreConflict('expected value changed')
+                denial = worker_dispatch.authorize_task_store_change(
+                    self.value, updates, expected)
+                if denial is not None:
+                    raise denial
                 self.value.update(updates)
+                if type(self.value.get('developer')) is dict:
+                    self.developer_states.append(self.value['developer']['state'])
                 return dict(self.value)
 
             def update(self, _task_id, **updates):
@@ -177,15 +187,22 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['SYNTHETIC'],
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+             patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
+                 'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
              patch.object(worker_dispatch, 'authorize_dispatch',
                           side_effect=worker_dispatch.WorkerDispatchDenied('OWNER_PAUSED')), \
              patch.object(task_submission_cli, 'run_route') as runner, \
              patch.object(task_submission_cli, '_task_view', return_value={}):
             status = task_submission_cli.run_task_gw_agent_delegate(args, store=store)
         self.assertEqual(status, 1)
-        self.assertEqual(store.claims, 1)
+        self.assertEqual(store.claims, 3)
+        self.assertEqual(store.developer_states,
+                         ['DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
+                          'DEVELOPER_UNAVAILABLE'])
         self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
+        self.assertEqual(store.value['dispatch_audit'][-1]['action'], 'DISPATCH')
+        self.assertEqual(store.value['dispatch_audit'][-1]['decision'], 'ALLOWED')
         runner.assert_not_called()
 
     def test_gw_agent_developer_shape_includes_execution_and_direct_callback(self):
@@ -200,7 +217,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         developer = {
             'assignment_id': 'd' * 32, 'selection_source': 'PM',
             'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
-            'provider_type': None, 'model': None,
+            'provider_type': 'gw-agent-cli', 'model': 'gw-agent-default',
             'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
             'session_id': 'dev-' + 'e' * 32, 'source_sha': 'f' * 40,
             'source_sha_binding': 'D6_REGISTRY_OBSERVED',
