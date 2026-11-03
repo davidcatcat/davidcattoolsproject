@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -2152,11 +2153,11 @@ class TaskListTests(Base):
             self.assertTrue(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
             rows = self.list_rows(ui)
-            self.assertIn('2 shown, 0 unreadable', rows[0])
+            self.assertIn('2 shown, 0 hidden, 0 unreadable', rows[0])
             # The derived stage is labelled as derived in the pane itself (#510 review).
             self.assertIn('stage derived by the TUI', rows[0])
             self.assertIn('Stage (derived)', rows[1])
-            self.assertIn('Updated (Core)', rows[1])
+            self.assertIn('PR', rows[1])
             self.assertNotIn('Next responsible', '\n'.join(rows))
             self.assertEqual(sum('已建立／待派工' in row for row in rows), 1)
             self.assertEqual(sum('UNAVAILABLE' in row for row in rows), 1)
@@ -6682,6 +6683,159 @@ class ScrollSelectTests(Base):
 
         self.drive(['first\r', self.idle, 'draft', press(3, 2), release(3, 2),
                     WHEEL_UP * 3, WHEEL_DOWN * 3, check])
+
+
+class TaskGroupProjectionTests(unittest.TestCase):
+    """Pure F3 grouping, filtering and compact PR projection."""
+
+    NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def record(task_id, updated, **changes):
+        record = {'task_id': task_id * 32, 'request': task_id,
+                  'created_at': updated, 'updated_at': updated,
+                  'developer': {'executor_task_id': 'd6-task'}}
+        record.update(changes)
+        return record
+
+    def test_original_and_three_repair_rounds_form_one_row(self):
+        from llmtool import chat_tui_status
+        records = [self.record(letter, '2026-11-04T%02d:00:00Z' % hour,
+                               **({'review_repair_claims': [{'pr': 884}]}
+                                  if letter == 'a' else {}))
+                   for letter, hour in zip('dcba', (11, 10, 9, 8))]
+        groups, hidden = chat_tui_status.group_rows(records, self.NOW, False)
+        self.assertEqual(hidden, 0)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['record']['task_id'], 'd' * 32)
+        self.assertEqual(groups[0]['rounds'], 3)
+        self.assertEqual(groups[0]['pr'], '#884')
+
+    def test_done_and_four_day_idle_groups_are_hidden_until_show_all(self):
+        from llmtool import chat_tui_status
+        done = self.record('d', '2026-11-04T11:00:00Z', completion={
+            'state': 'PM_RETURNED', 'pm_recommendation': {'decision': 'ACCEPT'}})
+        old = dict(self.record('o', '2026-10-31T11:00:00Z'),
+                   developer={'executor_task_id': 'old-d6'})
+        recent = dict(self.record('r', '2026-11-04T10:00:00Z'),
+                      developer={'executor_task_id': 'recent-d6'})
+        groups, hidden = chat_tui_status.group_rows([done, old, recent], self.NOW, False)
+        self.assertEqual(hidden, 2)
+        self.assertEqual([group['record']['task_id'] for group in groups], ['r' * 32])
+        groups, hidden = chat_tui_status.group_rows([done, old, recent], self.NOW, True)
+        self.assertEqual(hidden, 0)
+        self.assertEqual(len(groups), 3)
+
+    def test_published_pr_and_conflicting_sources(self):
+        from llmtool import chat_tui_status
+        published = self.record('p', '2026-11-04T11:00:00Z',
+                                published_pr={'pr': 885})
+        group, _hidden = chat_tui_status.group_rows([published], self.NOW, True)
+        self.assertEqual(group[0]['pr'], '#885')
+        conflict = self.record('c', '2026-11-04T11:00:00Z',
+                               published_pr={'pr': 885},
+                               review_dispatch_claim={'pr': 886})
+        group, _hidden = chat_tui_status.group_rows([conflict], self.NOW, True)
+        self.assertEqual(group[0]['pr'], 'CONFLICT')
+        detail_pr, _url = chat_tui_status.pull_request(published)
+        self.assertIn('#885', detail_pr)
+
+    def test_placeholder_rows_without_task_records_remain_individual_rows(self):
+        from llmtool import chat_tui_status
+        placeholders = [None, {}, {'developer': None}]
+        groups, hidden = chat_tui_status.group_rows(placeholders, self.NOW, True)
+        self.assertEqual(hidden, 0)
+        self.assertEqual([group['record'] for group in groups], placeholders)
+        self.assertTrue(all(group['rounds'] == 0 and not group['pr']
+                            for group in groups))
+        self.assertTrue(all(chat_tui_status.row(record)['task_id'] == 'UNKNOWN'
+                            for record in placeholders))
+
+    def test_merged_event_is_terminal(self):
+        from llmtool import chat_tui_status
+        merged = self.record('m', '2026-11-04T11:00:00Z', completion_events=[{
+            'source': 'GITHUB', 'marker_type': 'merge', 'marker_status': 'MERGED'}])
+        groups, hidden = chat_tui_status.group_rows([merged], self.NOW, False)
+        self.assertEqual(groups, [])
+        self.assertEqual(hidden, 1)
+
+    def test_newest_created_round_is_head_and_newest_update_controls_idle(self):
+        from llmtool import chat_tui_status
+        older_abandoned = self.record(
+            'o', '2026-11-04T11:30:00Z', created_at='2026-11-01T08:00:00Z',
+            abandonment={'abandoned_at': '2026-11-04T11:00:00Z'},
+            developer={'executor_task_id': 'shared-d6', 'state': 'DEVELOPER_RESPONDED'})
+        newest_in_progress = self.record(
+            'n', '2026-10-31T11:00:00Z', created_at='2026-11-02T08:00:00Z',
+            developer={'executor_task_id': 'shared-d6', 'state': 'DEVELOPER_PENDING'})
+        groups, hidden = chat_tui_status.group_rows(
+            [older_abandoned, newest_in_progress], self.NOW, False)
+        self.assertEqual(hidden, 0)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['record']['task_id'], 'n' * 32)
+        self.assertEqual(groups[0]['rounds'], 1)
+
+
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class TaskGroupListUiTests(Base):
+    """F3 keeps grouped selection and actions attached to the newest Task ID."""
+
+    drive = WidgetTests.drive
+
+    @staticmethod
+    async def listed(ui):
+        for _ in range(200):
+            if ui.list_loaded is not None and ui.list_reader is None:
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError('list read did not finish')
+
+    def test_toggle_refresh_copy_and_enter_keep_group_head_selected(self):
+        from llmtool import chat_tui_status
+        now = datetime.now(timezone.utc)
+        older = {'task_id': 'a' * 32, 'request': 'older round',
+                 'created_at': (now - timedelta(days=2)).isoformat(),
+                 'updated_at': (now - timedelta(minutes=1)).isoformat(),
+                 'developer': {'executor_task_id': 'shared', 'state': 'DEVELOPER_RESPONDED'}}
+        newest = {'task_id': 'b' * 32, 'request': 'newest round',
+                  'created_at': (now - timedelta(days=1)).isoformat(),
+                  'updated_at': (now - timedelta(minutes=2)).isoformat(),
+                  'developer': {'executor_task_id': 'shared', 'state': 'DEVELOPER_PENDING'}}
+        done = {'task_id': 'c' * 32, 'request': 'done',
+                'created_at': now.isoformat(), 'updated_at': now.isoformat(),
+                'completion': {'state': 'PM_RETURNED'},
+                'developer': {'executor_task_id': 'done-d6', 'state': 'DEVELOPER_RESPONDED'}}
+        records = [older, newest, done]
+
+        async def initial(ui):
+            await self.listed(ui)
+            self.assertEqual(ui.selected_task_id(), 'b' * 32)
+            self.assertEqual(len(ui.list_records), 1)
+            ui.list_view.copy = Mock()
+            ui.start_task = Mock()
+
+        def toggled_on(ui):
+            self.assertTrue(ui.list_show_all)
+            self.assertEqual(ui.selected_task_id(), 'b' * 32)
+            self.assertEqual(len(ui.list_records), 2)
+
+        def toggled_off(ui):
+            self.assertFalse(ui.list_show_all)
+            self.assertEqual(ui.selected_task_id(), 'b' * 32)
+
+        def refreshed(ui):
+            ui.finish_list((records, 0, None))
+            self.assertEqual(ui.selected_task_id(), 'b' * 32)
+
+        def copied(ui):
+            ui.list_view.copy.assert_called_once_with('b' * 32)
+
+        def opened(ui):
+            ui.start_task.assert_called_once_with('show', 'b' * 32, None)
+
+        with patch.object(chat_tui_status, 'load_records', return_value=(records, 0)):
+            self.drive(['\x1bOR', initial, 'a', toggled_on, 'a', toggled_off,
+                        refreshed, 'c', copied, '\r', opened])
 
 
 if __name__ == '__main__':
