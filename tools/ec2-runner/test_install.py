@@ -1,6 +1,7 @@
 """Offline fixtures for the EC2 runner installer and ownership selftest."""
 from pathlib import Path
 import os
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -111,9 +112,13 @@ class InstallSelftestTests(unittest.TestCase):
         for result in (self.run_installer(), self.run_selftest()):
             self.assertEqual(result.returncode, 0, result.stderr)
         plan = self.run_installer()
-        self.assertNotIn(str(self.tree / 'bin'), plan.stdout)
-        self.assertNotIn(str(self.tree / 'externals'), plan.stdout)
-        self.assertNotIn(str(self.tree / '_work' / '_update'), plan.stdout)
+        self.assertEqual(plan.returncode, 0, plan.stderr)
+        planned_paths = [Path(shlex.split(line)[-1]) for line in plan.stdout.splitlines()]
+        self.assertNotIn(self.tree / 'bin', planned_paths)
+        self.assertNotIn(self.tree / 'externals', planned_paths)
+        update_tree = self.tree / '_work' / '_update'
+        self.assertFalse(any(path == update_tree or update_tree in path.parents
+                             for path in planned_paths))
 
     def test_invalid_runner_symlink_targets_are_refused(self):
         cases = ('escape', 'dangling', 'other-version', 'elsewhere')
