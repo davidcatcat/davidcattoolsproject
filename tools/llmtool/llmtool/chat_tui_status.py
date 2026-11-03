@@ -447,6 +447,63 @@ def background_items(records):
     return items
 
 
+def group_rows(records, now, show_all):
+    """Group Task list rows by D6 executor, returning (visible groups, hidden count).
+
+    Input records are expected newest first, as returned by load_records. Records without
+    an executor Task ID remain independent rows. The helper is a display projection only.
+    """
+    grouped, order = {}, []
+    for index, record in enumerate(records):
+        developer = _dict(record.get("developer")) or {}
+        executor = developer.get("executor_task_id")
+        key = ("d6", executor) if type(executor) is str and executor else ("task", index)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(record)
+
+    visible, hidden = [], 0
+    terminal = {"DONE", "COMPLETED", "ABANDONED", "FAILED"}
+    for key in order:
+        members = grouped[key]
+        head = members[0]
+        current, _reason = stage(head)
+        completion = _dict(head.get("completion")) or {}
+        developer = _dict(head.get("developer")) or {}
+        terminal_state = (current in terminal or head.get("state") in terminal
+                          or completion.get("state") in terminal
+                          or developer.get("state") in terminal)
+        updated = head.get("updated_at")
+        idle = False
+        try:
+            timestamp = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
+            if timestamp.tzinfo is None:
+                timestamp = timestamp.replace(tzinfo=timezone.utc)
+            reference = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+            idle = (reference - timestamp).total_seconds() > 72 * 60 * 60
+        except (AttributeError, TypeError, ValueError):
+            pass
+        if not show_all and (terminal_state or idle):
+            hidden += 1
+            continue
+
+        numbers = []
+        for member in members:
+            for number, _label in _pr_sources(member):
+                if number not in numbers:
+                    numbers.append(number)
+            published = _dict(member.get("published_pr")) or {}
+            published_number = published.get("pr")
+            if (type(published_number) is int and 1 <= published_number <= 999999999
+                    and published_number not in numbers):
+                numbers.append(published_number)
+        pr = "CONFLICT" if len(numbers) > 1 else ("#%d" % numbers[0] if numbers else "")
+        visible.append({"record": head, "rounds": len(members) - 1, "pr": pr,
+                        "owner": _owner_decision(head) is not None})
+    return visible, hidden
+
+
 def read_background(pm_session, store=None):
     """background_items of the Tasks bound to a PM session (the PM inbox's TaskStore read)."""
     from .active_pm_inbox import _session_records, pm_session_key

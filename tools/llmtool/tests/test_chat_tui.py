@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -2152,11 +2153,11 @@ class TaskListTests(Base):
             self.assertTrue(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
             rows = self.list_rows(ui)
-            self.assertIn('2 shown, 0 unreadable', rows[0])
+            self.assertIn('2 shown, 0 hidden, 0 unreadable', rows[0])
             # The derived stage is labelled as derived in the pane itself (#510 review).
             self.assertIn('stage derived by the TUI', rows[0])
             self.assertIn('Stage (derived)', rows[1])
-            self.assertIn('Updated (Core)', rows[1])
+            self.assertIn('PR', rows[1])
             self.assertNotIn('Next responsible', '\n'.join(rows))
             self.assertEqual(sum('已建立／待派工' in row for row in rows), 1)
             self.assertEqual(sum('UNAVAILABLE' in row for row in rows), 1)
@@ -6682,6 +6683,59 @@ class ScrollSelectTests(Base):
 
         self.drive(['first\r', self.idle, 'draft', press(3, 2), release(3, 2),
                     WHEEL_UP * 3, WHEEL_DOWN * 3, check])
+
+
+class TaskGroupProjectionTests(unittest.TestCase):
+    """Pure F3 grouping, filtering and compact PR projection."""
+
+    NOW = datetime(2026, 11, 4, 12, 0, tzinfo=timezone.utc)
+
+    @staticmethod
+    def record(task_id, updated, **changes):
+        record = {'task_id': task_id * 32, 'request': task_id,
+                  'updated_at': updated, 'developer': {'executor_task_id': 'd6-task'}}
+        record.update(changes)
+        return record
+
+    def test_original_and_three_repair_rounds_form_one_row(self):
+        from llmtool import chat_tui_status
+        records = [self.record(letter, '2026-11-04T%02d:00:00Z' % hour,
+                               **({'review_repair_claims': [{'pr': 884}]}
+                                  if letter == 'a' else {}))
+                   for letter, hour in zip('dcba', (11, 10, 9, 8))]
+        groups, hidden = chat_tui_status.group_rows(records, self.NOW, False)
+        self.assertEqual(hidden, 0)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(groups[0]['record']['task_id'], 'd' * 32)
+        self.assertEqual(groups[0]['rounds'], 3)
+        self.assertEqual(groups[0]['pr'], '#884')
+
+    def test_done_and_four_day_idle_groups_are_hidden_until_show_all(self):
+        from llmtool import chat_tui_status
+        done = self.record('d', '2026-11-04T11:00:00Z', completion={
+            'state': 'PM_RETURNED', 'pm_recommendation': {'decision': 'ACCEPT'}})
+        old = dict(self.record('o', '2026-10-31T11:00:00Z'),
+                   developer={'executor_task_id': 'old-d6'})
+        recent = dict(self.record('r', '2026-11-04T10:00:00Z'),
+                      developer={'executor_task_id': 'recent-d6'})
+        groups, hidden = chat_tui_status.group_rows([done, old, recent], self.NOW, False)
+        self.assertEqual(hidden, 2)
+        self.assertEqual([group['record']['task_id'] for group in groups], ['r' * 32])
+        groups, hidden = chat_tui_status.group_rows([done, old, recent], self.NOW, True)
+        self.assertEqual(hidden, 0)
+        self.assertEqual(len(groups), 3)
+
+    def test_published_pr_and_conflicting_sources(self):
+        from llmtool import chat_tui_status
+        published = self.record('p', '2026-11-04T11:00:00Z',
+                                published_pr={'pr': 885})
+        group, _hidden = chat_tui_status.group_rows([published], self.NOW, True)
+        self.assertEqual(group[0]['pr'], '#885')
+        conflict = self.record('c', '2026-11-04T11:00:00Z',
+                               published_pr={'pr': 885},
+                               review_dispatch_claim={'pr': 886})
+        group, _hidden = chat_tui_status.group_rows([conflict], self.NOW, True)
+        self.assertEqual(group[0]['pr'], 'CONFLICT')
 
 
 if __name__ == '__main__':
