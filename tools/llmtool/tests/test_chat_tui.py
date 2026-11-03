@@ -6838,5 +6838,103 @@ class TaskGroupListUiTests(Base):
                         refreshed, 'c', copied, '\r', opened])
 
 
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class OpenTaskPrKeyTests(Base):
+    """The detail-only o shortcut opens exactly one PR from trusted Task data."""
+
+    drive = WidgetTests.drive
+
+    @staticmethod
+    async def wait_for_open_status(ui):
+        for _ in range(200):
+            if ui.task_pr_status != '正在開啟 PR…':
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError('PR opener did not finish')
+
+    def open_detail(self, ui):
+        ui._show_task_view('Task 詳情（唯讀）', 'a' * 32)
+
+    def test_o_opens_one_exact_trusted_url_from_detail(self):
+        opened = []
+        main_thread = threading.get_ident()
+        record = {'published_pr': {'pr': 123}}
+
+        def fake_open(url):
+            opened.append((url, threading.get_ident()))
+
+        async def finished(ui):
+            await self.wait_for_open_status(ui)
+            self.assertEqual(ui.task_pr_status, '已開啟 PR')
+
+        with patch.object(chat_tui.sys, 'platform', 'darwin'), \
+                patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                patch.object(chat_tui_status, 'pr_url', return_value=OWNER_PR_URL), \
+                patch.object(chat_tui, '_open_pr_url', side_effect=fake_open):
+            self.drive([self.open_detail, 'o', finished])
+        self.assertEqual(len(opened), 1)
+        self.assertEqual(opened[0][0], OWNER_PR_URL + '123')
+        self.assertNotEqual(opened[0][1], main_thread)
+
+    def test_no_pr_conflict_and_untrusted_prefix_never_open(self):
+        cases = (
+            ({}, '此 Task 沒有 PR，未開啟', False),
+            ({'published_pr': {'pr': 123},
+              'completion': {'evidence': {'review_pr_ci': {'pr_number': 456}}}},
+             'PR 編號衝突，未開啟', False),
+            ({'published_pr': {'pr': 123}}, 'PR 信任來源不可用，未開啟', True),
+            ({'published_pr': {'pr': 123}}, 'PR URL 不符合信任來源，未開啟', False),
+        )
+        for record, expected, trust_unavailable in cases:
+            with self.subTest(expected=expected):
+                with patch.object(chat_tui.sys, 'platform', 'darwin'), \
+                        patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                        patch.object(chat_tui_status, 'pr_url',
+                                     return_value=None if trust_unavailable else OWNER_PR_URL) as trust_url, \
+                        patch.object(chat_tui_status, 'pull_request',
+                                     side_effect=(lambda _record:
+                                                  ('#123', 'https://evil.example/pull/123'))
+                                     if expected.startswith('PR URL') else
+                                     chat_tui_status.pull_request), \
+                        patch.object(chat_tui, '_open_pr_url') as opener:
+                    async def finished(ui):
+                        await self.wait_for_open_status(ui)
+                        self.assertEqual(ui.task_pr_status, expected)
+
+                    self.drive([self.open_detail, 'o', finished])
+                    opener.assert_not_called()
+                    if not record or 'completion' in record:
+                        trust_url.assert_not_called()
+
+    def test_non_darwin_and_failed_open_show_status_without_raising(self):
+        with patch.object(chat_tui.sys, 'platform', 'linux'), \
+                patch.object(chat_tui_status, 'read_task_detail') as read, \
+                patch.object(chat_tui, '_open_pr_url') as opener:
+            self.drive([self.open_detail, 'o',
+                        lambda ui: self.assertIn('僅支援 macOS', ui.status_keys())])
+            read.assert_not_called()
+            opener.assert_not_called()
+
+        async def failed(ui):
+            await self.wait_for_open_status(ui)
+            self.assertEqual(ui.task_pr_status, '開啟 PR 失敗')
+
+        with patch.object(chat_tui.sys, 'platform', 'darwin'), \
+                patch.object(chat_tui_status, 'read_task_detail',
+                             return_value={'published_pr': {'pr': 123}}), \
+                patch.object(chat_tui, '_open_pr_url', side_effect=OSError('hidden detail')):
+            self.drive([self.open_detail, 'o', failed])
+
+    def test_o_in_the_input_is_kept_in_the_draft(self):
+        with patch.object(chat_tui.sys, 'platform', 'darwin'), \
+                patch.object(chat_tui, '_open_pr_url') as opener:
+            def input_focused(ui):
+                self.assertTrue(ui.app.layout.has_focus(ui.input))
+                self.assertEqual(ui.input.text, 'o')
+                opener.assert_not_called()
+
+            self.drive([self.open_detail, '\t', 'o', input_focused])
+
+
 if __name__ == '__main__':
     unittest.main()

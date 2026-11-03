@@ -15,6 +15,7 @@ import re
 import shlex
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -133,8 +134,9 @@ arriving meanwhile, and Esc returns to the chat at the same place with the draft
 The detail lists its evidence and where each value comes from (PR, CONFLICT when TaskStore
 names different PRs, PR state, CI head SHA, Reviewer source, read time; UNKNOWN with the
 reason when Core has none). The detail has focus when it opens: c copies the Task ID it
-shows and C (Shift-C) copies the whole detail (or a whole developer list) as plain text.
-Tab moves to the input line, where c and C are typed as usual; Tab again returns. A drag in the detail selects and
+shows, C (Shift-C) copies the whole detail (or a whole developer list) as plain text, and o
+opens the Task's single trusted PR in the browser.
+Tab moves to the input line, where c, C and o are typed as usual; Tab again returns. A drag in the detail selects and
 copies like the conversation (double-click: a word; Ctrl-C copies the selection again).
 
 A chat reply is never a Task: to dispatch work, /pm connect and tell the PM.%s"""
@@ -178,6 +180,15 @@ not record are UNKNOWN or NOT_AVAILABLE."""
 def dev_enabled(environ=None):
     """The developer flag: LLMTOOL_TUI_DEV=1 (the --dev option passes dev=True)."""
     return (os.environ if environ is None else environ).get(DEV_ENV) == "1"
+
+
+def _open_pr_url(url):
+    """Open a trusted PR URL on macOS without a shell or terminal I/O."""
+    if sys.platform != "darwin":
+        raise OSError("browser opening is available only on macOS")
+    subprocess.run(["/usr/bin/open", url], stdin=subprocess.DEVNULL,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                   shell=False, check=True)
 
 
 def key_help(dev):
@@ -869,6 +880,7 @@ class ChatTUI:
         # W60: the Task ID the open detail shows (c copies it; None when the detail has no
         # Task record), fixed when the detail opens, and when c was last pressed.
         self.task_view_task_id = None
+        self.task_pr_status = None
         self.task_copy_at = None
         # W60: what the detail's last copy was ("Task ID", "全文", None for a selection).
         self.task_copy_label = None
@@ -1134,6 +1146,11 @@ class ChatTUI:
                   & ~searching)
         def _task_view_copy_all(event):
             self.copy_task_detail()
+
+        @keys.add("o", filter=showing_task_view & task_view_focused & ~picker_shown
+                  & ~searching)
+        def _task_view_open_pr(event):
+            self.open_task_pr()
 
         # W60: the same C in the developer panes (F2 detail, F3 whole list, F4 events).
         @keys.add("C", filter=dev_pane_shown & ~picker_shown & ~searching
@@ -1448,12 +1465,15 @@ class ChatTUI:
         keys = []
         if self.task_view_visible():
             keys.append("Esc 返回")   # W59: Esc closes the detail; it never interrupts here
+            if self.task_pr_status:
+                keys.append(self.task_pr_status)
             copied = self._task_copy_status()
             if copied:
                 keys.append(copied)
             elif self.app.layout.has_focus(self.task_pane):
                 if self.task_view_task_id:
                     keys.append("c 複製 Task ID")
+                    keys.append("o 開啟 PR")
                 keys.append(chat_tui_status.COPY_ALL_STATUS)
                 keys.append("拖曳即複製")
             else:
@@ -3078,6 +3098,7 @@ class ChatTUI:
         ↓ panel never changes it.
         """
         self.task_view_task_id = task_id
+        self.task_pr_status = None
         self.task_copy_at = None
         self.task_copy_label = None
         self.task_view.copied = None   # a new detail starts without the last copy's status
@@ -3114,6 +3135,57 @@ class ChatTUI:
         self.task_copy_label = "Task ID"
         if self.task_view_task_id:
             self.task_view.copy(self.task_view_task_id)
+        self.app.invalidate()
+
+    def open_task_pr(self):
+        """Open the detail Task's single trusted PR on a background thread."""
+        task_id = self.task_view_task_id
+        if not task_id:
+            self.task_pr_status = "沒有 Task，未開啟 PR"
+            self.app.invalidate()
+            return
+        if sys.platform != "darwin":
+            self.task_pr_status = "僅支援 macOS 開啟 PR"
+            self.app.invalidate()
+            return
+        self.task_pr_status = "正在開啟 PR…"
+        self.app.invalidate()
+        loop = asyncio.get_running_loop()
+        seq = self.task_view_seq
+        threading.Thread(target=self._open_task_pr_worker, args=(loop, seq, task_id),
+                         name="llmtool-chat-open-pr", daemon=True).start()
+
+    def _open_task_pr_worker(self, loop, seq, task_id):
+        try:
+            record = chat_tui_status.read_task_detail(task_id)
+            sources = chat_tui_status._pr_sources(record) if type(record) is dict else []
+            numbers = {number for number, _label in sources
+                       if type(number) is int and 1 <= number <= 999999999}
+            if not numbers:
+                status = "此 Task 沒有 PR，未開啟"
+            elif len(numbers) != 1:
+                status = "PR 編號衝突，未開啟"
+            else:
+                prefix = chat_tui_status.pr_url()
+                if not prefix or not prefix.startswith("https://github.com/"):
+                    status = "PR 信任來源不可用，未開啟"
+                else:
+                    number = next(iter(numbers))
+                    _number_text, url = chat_tui_status.pull_request(record)
+                    expected = prefix + str(number)
+                    if url != expected or not url.startswith(prefix):
+                        status = "PR URL 不符合信任來源，未開啟"
+                    else:
+                        _open_pr_url(url)
+                        status = "已開啟 PR"
+        except Exception:
+            status = "開啟 PR 失敗"
+        self._post(loop, self.finish_open_task_pr, seq, task_id, status)
+
+    def finish_open_task_pr(self, seq, task_id, status):
+        if seq != self.task_view_seq or not self.show_task_view or task_id != self.task_view_task_id:
+            return
+        self.task_pr_status = status
         self.app.invalidate()
 
     def copy_dev_task_id(self):
