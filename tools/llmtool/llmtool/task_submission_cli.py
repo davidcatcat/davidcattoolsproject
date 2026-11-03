@@ -33,6 +33,7 @@ from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
+from .developer_output_normalize import _HUNK
 from . import role_config
 from . import trust
 from .developer_routes import (AgyRoute, GwAgentRoute, RouteError, capture_snapshot,
@@ -1663,26 +1664,21 @@ def _text_developer_rejection_detail(value, error_code, source_files):
         return {'reason': 'APPLY_CHECK_FAILED', 'hunk': None}
     if type(value) is not str:
         return {'reason': 'STRICT_PARSE', 'hunk': None}
-    lines = value.splitlines()
-    from .developer_output_normalize import _HUNK
-    recounted = _recount_developer_hunks(value)
-    if recounted != value:
-        original_headers = [line for line in lines if line.startswith('@@')]
-        recounted_headers = [line for line in recounted.splitlines()
-                             if line.startswith('@@')]
-        changed = next((index for index, (before, after) in enumerate(
-            zip(original_headers, recounted_headers)) if before != after), None)
-        return {'reason': 'HUNK_COUNTS_RECOUNTED', 'hunk': changed}
+    lines = _recount_developer_hunks(value).splitlines()
     current_hunk = None
+    current_path = None
     hunk_index = -1
     hunks = []
     for line in lines:
-        if line.startswith('@@'):
+        if line.startswith('--- a/'):
+            current_path = line[6:]
+            current_hunk = None
+        elif line.startswith('@@'):
             hunk_index += 1
             current_hunk = hunk_index
             if _HUNK.fullmatch(line) is None:
                 return {'reason': 'HUNK_HEADER_INVALID', 'hunk': current_hunk}
-            hunks.append((current_hunk, []))
+            hunks.append((current_hunk, current_path, []))
         elif current_hunk is not None:
             if line.startswith(('diff --git ', '--- ', '+++ ')):
                 current_hunk = None
@@ -1691,15 +1687,14 @@ def _text_developer_rejection_detail(value, error_code, source_files):
             elif not line.startswith((' ', '+', '-')):
                 return {'reason': 'HUNK_LINE_UNPREFIXED', 'hunk': current_hunk}
             else:
-                hunks[-1][1].append(line)
+                hunks[-1][2].append(line)
     if error_code == 'DEVELOPER_OUTPUT_INVALID_ENVELOPE':
         return {'reason': 'SECTION_HEADER_INVALID', 'hunk': None}
     if not hunks:
         return {'reason': 'SECTION_HEADER_INVALID', 'hunk': None}
-    edits = []
-    for index, body in hunks:
+    edits = {}
+    for index, path, body in hunks:
         old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
-        path = next((line[6:] for line in lines if line.startswith('--- a/')), None)
         source = source_files.get(path) if path is not None else None
         if type(source) is str and old_side:
             source_lines = source.splitlines()
@@ -1710,12 +1705,15 @@ def _text_developer_rejection_detail(value, error_code, source_files):
             if len(matches) > 1:
                 return {'reason': 'OLD_SIDE_AMBIGUOUS', 'hunk': index}
             start, end = matches[0], matches[0] + len(old_side)
-            if edits and start < edits[-1][1]:
+            file_edits = edits.setdefault(path, [])
+            if file_edits and start < file_edits[-1][1]:
                 return {'reason': 'HUNKS_OVERLAP', 'hunk': index}
-            edits.append((start, end))
+            file_edits.append((start, end))
         if not any(line.startswith(('+', '-')) for line in body):
             return {'reason': 'NO_CHANGE', 'hunk': index}
     return {'reason': 'STRICT_PARSE', 'hunk': hunks[0][0] if hunks else None}
+
+
 def _ignored_file_fingerprints(root):
     """Fingerprint bounded ignored paths so replacement and in-place writes count."""
     entries = task_completion._git(root,

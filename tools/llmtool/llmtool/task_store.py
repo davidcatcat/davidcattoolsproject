@@ -1378,7 +1378,7 @@ def _validate(record):
                             'HUNK_HEADER_INVALID', 'HUNK_LINE_UNPREFIXED',
                             'OLD_SIDE_NOT_FOUND', 'OLD_SIDE_AMBIGUOUS',
                             'HUNKS_OVERLAP', 'NO_CHANGE', 'STRICT_PARSE',
-                            'APPLY_CHECK_FAILED', 'HUNK_COUNTS_RECOUNTED') or
+                            'APPLY_CHECK_FAILED') or
                         (detail['hunk'] is not None and
                          (type(detail['hunk']) is not int or detail['hunk'] < 0))):
                     _fail()

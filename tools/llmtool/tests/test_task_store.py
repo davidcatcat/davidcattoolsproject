@@ -865,6 +865,7 @@ class TaskStoreTests(unittest.TestCase):
 
         invalid_details = (
             {'reason': 'NOT_A_REASON', 'hunk': 0},
+            {'reason': 'HUNK_COUNTS_RECOUNTED', 'hunk': 0},
             {'reason': 'STRICT_PARSE', 'hunk': -1},
             {'reason': 'STRICT_PARSE', 'hunk': True},
             {'reason': 'STRICT_PARSE', 'hunk': None, 'extra': 'value'},

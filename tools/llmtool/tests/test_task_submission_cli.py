@@ -1824,6 +1824,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                   '--- a/sample.py\n+++ b/sample.py\n')
         cases = (
             (prefix + '@@ -1 +1 @@\n VALUE = 2\n', 'OLD_SIDE_NOT_FOUND', 0),
+            (prefix + '@@ -1,8 +1,8 @@\n VALUE = 2\n+VALUE = 3\n',
+             'OLD_SIDE_NOT_FOUND', 0),
             (prefix + '@@ -1 +1 @@\n VALUE = 1\n?bad\n',
              'HUNK_LINE_UNPREFIXED', 0),
             (prefix + '@@ broken\n+VALUE = 2\n', 'HUNK_HEADER_INVALID', 0),
@@ -1838,6 +1840,20 @@ class TaskSubmissionCLITests(unittest.TestCase):
             submission_cli._text_developer_rejection_detail(
                 '', 'DEVELOPER_OUTPUT_INVALID_DIFF', None),
             {'reason': 'SOURCE_UNREADABLE', 'hunk': None})
+
+    def test_text_developer_rejection_detail_tracks_each_file_hunk(self):
+        value = (
+            'diff --git a/first.py b/first.py\n'
+            '--- a/first.py\n+++ b/first.py\n'
+            '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 2\n'
+            'diff --git a/second.py b/second.py\n'
+            '--- a/second.py\n+++ b/second.py\n'
+            '@@ -1 +1 @@\n-VALUE = 1\n+VALUE = 3\n')
+        self.assertEqual(
+            submission_cli._text_developer_rejection_detail(
+                value, 'DEVELOPER_OUTPUT_INVALID_DIFF',
+                {'first.py': 'VALUE = 1\n', 'second.py': 'VALUE = 1\n'}),
+            {'reason': 'STRICT_PARSE', 'hunk': 0})
 
     def test_captured_source_files_admit_allowed_addition_and_deletion(self):
         added = 'tools/llmtool/new_module.py'
