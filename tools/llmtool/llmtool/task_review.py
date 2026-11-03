@@ -45,7 +45,7 @@ HOST_INSTRUCTIONS = (
     'findings, criterion_evidence. Echo the seven binding fields from the packet '
     'exactly; packet_digest must equal the host verdict_binding packet_digest. '
     'security and functional each equal APPROVE, CHANGES_REQUIRED or BLOCKED. '
-    'findings: array of at most32 objects, each with exactly finding_id, category '
+    'findings: array of at most 32 objects, each with exactly finding_id, category '
     '(Security|Functional), severity (SEV-0..SEV-4), priority (P0..P3), release_blocker '
     '(boolean), summary, reproducer (strings <=1024 characters), path (selected '
     'source path), criterion_id (final contract criterion), evidence_refs '
