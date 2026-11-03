@@ -156,19 +156,26 @@ def _merge_pass_claim(record, number, head, events):
     candidates = []
     for claim in _claims(record):
         if (type(claim) is not dict or claim.get('pr') != number or
-                claim.get('head_sha') != head or claim.get('state') != 'COMPLETED' or
+                claim.get('head_sha') != head or
+                claim.get('state') not in ('COMPLETED', 'DISPATCHED') or
                 type(claim.get('version')) is not int):
             continue
         result = claim.get('review_result')
-        if type(result) is not dict:
-            continue
         outcome = next((event.get('outcome') or event.get('state') for event in events
                         if type(event) is dict and event.get('source') == 'REVIEWER' and
                         event.get('source_sha') == head and
                         event.get('version') == claim['version']), None)
         if outcome is None:
             continue
-        candidates.append((claim['version'], result.get('verdict'), outcome))
+        if claim.get('state') == 'COMPLETED':
+            if type(result) is not dict:
+                continue
+            verdict = result.get('verdict')
+        else:
+            # Claude Reviewer dispatches remain DISPATCHED and keep the
+            # classified verdict only in the matching REVIEWER completion event.
+            verdict = 'PASS' if outcome == 'REVIEW_PASS' else None
+        candidates.append((claim['version'], verdict, outcome))
     if not candidates:
         return None
     latest = max(candidates, key=lambda item: item[0])

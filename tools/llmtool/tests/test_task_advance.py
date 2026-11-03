@@ -1511,11 +1511,25 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         newer_fix = dict(review, version=2, review_result={'verdict': 'FIX'})
         newer_fix_event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 2,
                            'outcome': 'REVIEW_FAIL'}
+        claude_pass = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'DISPATCHED'}
+        claude_fix = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                      'outcome': 'REVIEW_FAIL'}
         moved = {'number': 17, 'head': {'sha': 'b' * 40}, 'mergeable': True,
                  'labels': [], 'body': ''}
         tui = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
                'labels': [], 'body': '<!-- llmtool-owner-accepted -->'}
         cases = [
+            ('Claude PASS', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                'review_dispatch_claim': [claude_pass]}}, 'MERGED'),
+            ('Claude FIX', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                'review_dispatch_claim': [claude_pass]}, 'events': [claude_fix]},
+             'MERGE_REVIEW_NOT_PASS'),
+            ('Claude wrong head', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                'review_dispatch_claim': [dict(claude_pass, head_sha='b' * 40)]}},
+             'MERGE_REVIEW_NOT_PASS'),
+            ('Claude newer FIX', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                'review_dispatch_claim': [claude_pass]},
+                'events': [event, newer_fix_event]}, 'MERGE_NEWER_REVIEW_EXISTS'),
             ('FIX', {'record': fix_record}, 'MERGE_REVIEW_NOT_PASS'),
             ('newer FIX', {'record': {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
                 'review_dispatch_claim': [review, newer_fix]},
