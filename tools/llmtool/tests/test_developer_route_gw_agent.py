@@ -1,6 +1,7 @@
 """Offline contract tests for the gw-agent Developer route."""
 
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -101,6 +102,58 @@ class GwAgentRouteTests(unittest.TestCase):
             with self.assertRaises(RouteError) as caught:
                 GwAgentRoute(config)
         self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
+
+    def test_tilde_package_path_expands_and_checks_ownership_and_permissions(self):
+        home = Path(self.temp.name) / 'home'
+        package = home / '.local' / 'lib' / 'api-agent-gateway'
+        gateway = package / 'api_agent_gateway'
+        gateway.mkdir(parents=True)
+        config = dict(self.route.config, package_path='~/.local/lib/api-agent-gateway')
+        with mock.patch.dict('os.environ', {'HOME': str(home)}):
+            route = GwAgentRoute(config)
+        self.assertEqual(route.package_path, str(package.resolve()))
+
+        for target in (package, gateway):
+            original_mode = target.stat().st_mode & 0o777
+            for writable_bit in (0o020, 0o002):
+                target.chmod(original_mode | writable_bit)
+                with self.subTest(target=target, writable_bit=writable_bit), \
+                        self.assertRaises(RouteError) as caught:
+                    GwAgentRoute(config)
+                self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
+            target.chmod(original_mode)
+
+        with mock.patch.object(gw_agent.os, 'getuid', return_value=os.getuid() + 1):
+            with self.assertRaises(RouteError) as caught:
+                GwAgentRoute(config)
+        self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
+
+    def test_pinned_route_still_requires_matching_requested_model(self):
+        config = dict(self.route.config, expected_served_model='fake-model')
+        pinned = GwAgentRoute(config)
+        self.assertEqual(pinned.validate_profile('fake-model', 'low'), ('fake-model', 'low'))
+        with self.assertRaises(RouteError) as caught:
+            pinned.validate_profile('other-model', 'low')
+        self.assertEqual(caught.exception.code, 'GW_AGENT_PROFILE_INVALID')
+
+    def test_unpinned_route_records_well_formed_served_model(self):
+        request = self.request()
+        validated = self.route.validate_request(request)
+        result = {'schema_version': 1, 'status': 'DONE', 'code': None,
+                  'run_id': 'a' * 24, 'session_id': None, 'task_id': 'task-001',
+                  'changed_paths': [], 'summary': 'done', 'served_model': 'provider/model-v2',
+                  'usage': {}, 'turns': 1, 'budget_used': {}, 'audit_sha256': 'b' * 64}
+        self.route._result = result
+        parsed = self.route.parse_output(b'', b'', '')
+        self.assertEqual(self.route.verified_model('', validated['model']), 'provider/model-v2')
+        self.assertEqual(validated['model'], 'provider/model-v2')
+        self.assertEqual(parsed['status'], 'DONE')
+
+        for malformed in ('', 'bad model', 'UNKNOWN'):
+            self.route._result = dict(result, served_model=malformed)
+            with self.subTest(served_model=malformed), self.assertRaises(RouteError) as caught:
+                self.route.parse_output(b'', b'', '')
+            self.assertEqual(caught.exception.code, 'GW_AGENT_OUTPUT_INVALID')
 
     @staticmethod
     def _write_json(path, value):

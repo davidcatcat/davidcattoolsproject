@@ -92,17 +92,35 @@ class GwAgentRoute(DeveloperRoute):
         profile = config.get('profile')
         profile_name = config.get('profile_name')
         authorization_ref = config.get('authorization_ref')
-        expected = config.get('expected_served_model', config.get('default_model'))
-        if (type(package) is not str or not os.path.isabs(package) or
+        expected = config.get('expected_served_model')
+        default_model = config.get('default_model')
+        if (type(package) is not str or
+                (not os.path.isabs(package) and not package.startswith('~/')) or
                 type(profile) is not dict or type(profile_name) is not str or not profile_name or
                 type(authorization_ref) is not str or not authorization_ref.strip() or
-                type(expected) is not str or _MODEL.fullmatch(expected) is None):
+                (expected is not None and
+                 (type(expected) is not str or _MODEL.fullmatch(expected) is None)) or
+                type(default_model) is not str or _MODEL.fullmatch(default_model) is None):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
-        if profile.get('auth_env') != 'GW_AGENT_API_KEY' or profile.get('model') != expected:
+        if (profile.get('auth_env') != 'GW_AGENT_API_KEY' or
+                type(profile.get('model')) is not str or
+                _MODEL.fullmatch(profile['model']) is None or
+                (expected is not None and profile['model'] != expected)):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         try:
-            resolved_package = Path(package).resolve(strict=True)
-            package_is_valid = (resolved_package / 'api_agent_gateway').is_dir()
+            expanded_package = os.path.expanduser(package) if package.startswith('~/') else package
+            resolved_package = Path(expanded_package).resolve(strict=True)
+            gateway_dir = resolved_package / 'api_agent_gateway'
+            package_info = resolved_package.stat()
+            gateway_info = gateway_dir.stat()
+            package_is_valid = (
+                stat.S_ISDIR(package_info.st_mode) and
+                stat.S_ISDIR(gateway_info.st_mode) and
+                package_info.st_uid == os.getuid() and
+                gateway_info.st_uid == os.getuid() and
+                not (stat.S_IMODE(package_info.st_mode) & 0o022) and
+                not (stat.S_IMODE(gateway_info.st_mode) & 0o022) and
+                resolved_package.is_dir() and gateway_dir.is_dir())
         except (OSError, RuntimeError, ValueError):
             raise RouteError('GW_AGENT_CONFIG_INVALID') from None
         if not package_is_valid:
@@ -112,6 +130,8 @@ class GwAgentRoute(DeveloperRoute):
         self.profile_name = profile_name
         self.authorization_ref = authorization_ref
         self.expected_served_model = expected
+        self._default_model = default_model
+        self._validated_request = None
         classes = config.get('allowed_data_classes')
         if (type(classes) is not list or not classes or
                 any(type(item) is not str or not item for item in classes) or
@@ -123,7 +143,7 @@ class GwAgentRoute(DeveloperRoute):
 
     @property
     def default_model(self):
-        return self.expected_served_model
+        return self._default_model
 
     @property
     def default_effort(self):
@@ -131,13 +151,15 @@ class GwAgentRoute(DeveloperRoute):
 
     def validate_profile(self, model, effort):
         if (type(model) is not str or _MODEL.fullmatch(model) is None or
-                model != self.expected_served_model or type(effort) is not str or
+                (self.expected_served_model is not None and
+                 model != self.expected_served_model) or type(effort) is not str or
                 effort not in ('minimal', 'low', 'medium', 'high')):
             raise RouteError('GW_AGENT_PROFILE_INVALID')
         return model, effort
 
     def validate_request(self, request):
         value = super().validate_request(request)
+        self._validated_request = value
         task = value.get('task')
         if (type(task) is not dict or
                 type(task.get('task_id')) is not str or _TASK_ID.fullmatch(task['task_id']) is None or
@@ -237,6 +259,8 @@ class GwAgentRoute(DeveloperRoute):
                     for path in result['changed_paths']) or
                 type(result.get('summary')) is not str or
                 type(result.get('served_model')) is not str or
+                _MODEL.fullmatch(result['served_model']) is None or
+                result['served_model'] == 'UNKNOWN' or
                 type(result.get('task_id')) is not str or
                 type(result.get('run_id')) is not str or
                 re.fullmatch(r'[0-9a-f]{24}', result['run_id']) is None or
@@ -252,6 +276,8 @@ class GwAgentRoute(DeveloperRoute):
             raise RouteError('GW_AGENT_OUTPUT_INVALID')
         self._status = result['status']
         self._gateway_code = result['code']
+        if self.expected_served_model is None and self._validated_request is not None:
+            self._validated_request['model'] = result['served_model']
         return {'status': result['status'], 'summary': result['summary'][:4000],
                 'session_id': result.get('session_id'), 'usage': result.get('usage'),
                 'changed_paths': result['changed_paths']}
@@ -296,7 +322,8 @@ class GwAgentRoute(DeveloperRoute):
         if not isinstance(self._result, dict):
             return None
         model = self._result.get('served_model')
-        if type(model) is not str or model == 'UNKNOWN':
+        if (type(model) is not str or _MODEL.fullmatch(model) is None or
+                model == 'UNKNOWN'):
             return None
         return model
 
