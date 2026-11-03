@@ -207,6 +207,62 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.append_remote_test_receipt(task['task_id'], invalid)
 
+    def test_published_pr_is_idempotent_replaceable_and_validated(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+
+        first = self.store.record_published_pr(task['task_id'], 425, 'a' * 40)
+        self.assertEqual(first, self.store.record_published_pr(
+            task['task_id'], 425, 'a' * 40))
+        self.assertEqual(self.store.get(task['task_id'])['published_pr'], first)
+        replacement = self.store.record_published_pr(
+            task['task_id'], 426, 'b' * 40)
+        self.assertEqual(replacement['pr'], 426)
+        self.assertEqual(replacement['head_sha'], 'b' * 40)
+
+        claim = {
+            'executor_task': 'executor-d6', 'pr': 426, 'head_sha': 'b' * 40,
+            'version': 1, 'state': 'CLAIMED', 'reviewer_task': 'reviewer-d6',
+            'native_session_id': None, 'account_mode': 'ROLES',
+            'claimed_at': '2026-10-27T00:00:00Z',
+            'updated_at': '2026-10-27T00:00:00Z',
+        }
+        current = self.store.get(task['task_id'])
+        saved = self.store.compare_and_update(
+            task['task_id'], expected={'record_sha256': current['record_sha256']},
+            review_dispatch_claim=[claim], remote_test_receipts=[])
+        task_store_module._validate(saved)
+        with_published = dict(saved, published_pr=replacement)
+        with_published['record_sha256'] = task_store_module._digest(with_published)
+        task_store_module._validate(with_published)
+        without_published = dict(saved)
+        without_published.pop('published_pr')
+        without_published['record_sha256'] = task_store_module._digest(without_published)
+        task_store_module._validate(without_published)
+
+        for invalid in (
+                {'pr': True, 'head_sha': 'a' * 40,
+                 'recorded_at': '2026-10-27T00:00:00Z'},
+                {'pr': 0, 'head_sha': 'a' * 40,
+                 'recorded_at': '2026-10-27T00:00:00Z'},
+                {'pr': 425, 'head_sha': 'A' * 40,
+                 'recorded_at': '2026-10-27T00:00:00Z'},
+                {'pr': 425, 'head_sha': 'a' * 40,
+                 'recorded_at': 'bad'},
+                {'pr': 425, 'head_sha': 'a' * 40,
+                 'recorded_at': '2026-10-27T00:00:00Z', 'extra': True},
+        ):
+            malformed = dict(saved, published_pr=invalid)
+            malformed['record_sha256'] = task_store_module._digest(malformed)
+            with self.subTest(invalid=invalid), self.assertRaises(LLMToolError) as caught:
+                task_store_module._validate(malformed)
+            self.assertEqual(caught.exception.code, 'TASK_PUBLISHED_PR_INVALID')
+
+        for pr, head in ((True, 'a' * 40), (0, 'a' * 40), (425, 'bad')):
+            with self.subTest(pr=pr, head=head), self.assertRaises(LLMToolError) as caught:
+                self.store.record_published_pr(task['task_id'], pr, head)
+            self.assertEqual(caught.exception.code, 'TASK_PUBLISHED_PR_INVALID')
+
     def test_remote_test_receipt_accepts_missing_log_and_rejects_other_paths(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
