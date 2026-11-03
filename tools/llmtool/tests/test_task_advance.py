@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from llmtool import task_advance
 from llmtool import task_submission_cli
+from llmtool.task_store import _json_bytes
 from llmtool.cli import main, parser_for_cli
 
 
@@ -48,9 +49,7 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
     }
     if excerpt is not None:
         receipt['failure_excerpt'] = excerpt
-    receipt['receipt_digest'] = hashlib.sha256(json.dumps(
-        receipt, ensure_ascii=True, sort_keys=True,
-        separators=(',', ':')).encode('utf-8')).hexdigest()
+    receipt['receipt_digest'] = hashlib.sha256(_json_bytes(receipt)).hexdigest()
     return receipt
 
 
@@ -335,7 +334,7 @@ class TaskAdvanceTests(unittest.TestCase):
 
     def test_remote_test_fail_uses_repair_path_with_excerpt(self):
         record = base_record(remote_test_receipts=[remote_receipt(
-            base_record(), result='FAIL', excerpt='FAIL: test_example\nAssertionError')])
+            base_record(), result='FAIL', excerpt='FAIL: test_example\nAssertionError: café')])
         store = type('S', (), {'get': lambda self, _id: record})()
         seen = {}
         def repair(**kwargs):
@@ -347,7 +346,14 @@ class TaskAdvanceTests(unittest.TestCase):
                 pr_number=17, cwd='/repo/task', repair_review_call=repair)
         self.assertEqual(result['step'], 'REPAIR_REVIEW')
         self.assertEqual(seen['remote_test_receipt']['failure_excerpt'],
-                         'FAIL: test_example\nAssertionError')
+                         'FAIL: test_example\nAssertionError: café')
+
+    def test_tampered_remote_test_receipt_is_skipped(self):
+        receipt = remote_receipt(base_record(), result='FAIL', excerpt='failure')
+        receipt['failure_excerpt'] = 'tampered'
+        record = base_record(remote_test_receipts=[receipt])
+        self.assertEqual(task_advance._remote_test_status(record, d6()),
+                         ('ADMISSION_DENIED', None, None))
 
     def test_timeout_and_sha_mismatch_receipts_require_attention(self):
         for outcome, code in (('TIMEOUT', 'REMOTE_TEST_TIMEOUT'),
@@ -1281,6 +1287,23 @@ class TaskAdvancePublishTests(unittest.TestCase):
             self.publish()
         self.assertEqual(caught.exception.code, 'PUBLISH_IGNORED_STRAY')
         self.assertEqual(self.git(['rev-parse', 'HEAD'], cwd=self.root).strip(), self.initial_head)
+
+    def test_ignored_cache_under_bootstrap_venv_does_not_block_publish(self):
+        cache = os.path.join(self.root, 'tools', 'llmtool', '.venv',
+                             'lib', 'python3', 'site-packages', 'pkg', '__pycache__')
+        os.makedirs(cache)
+        with open(os.path.join(cache, 'module.pyc'), 'wb') as stream:
+            stream.write(b'ignored')
+        self.git(['config', 'core.excludesfile', os.path.join(self.tmp.name, 'ignore')], cwd=self.root)
+        with open(os.path.join(self.tmp.name, 'ignore'), 'w', encoding='utf-8') as stream:
+            stream.write('tools/llmtool/.venv/\n')
+        with open(os.path.join(self.root, 'allowed.txt'), 'w', encoding='utf-8') as stream:
+            stream.write('published with ignored venv cache\n')
+
+        result = self.publish()
+
+        self.assertEqual(result['head'], self.git(['rev-parse', 'HEAD'], cwd=self.root).strip())
+        self.assertNotEqual(result['head'], self.initial_head)
 
     def test_non_fast_forward_remote_is_refused_without_commit(self):
         peer = os.path.join(self.tmp.name, 'peer')
