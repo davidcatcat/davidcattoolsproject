@@ -58,10 +58,12 @@ class ReviewDispatchTests(unittest.TestCase):
         self.executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git')
         self.preflight = (TASK, self.executor, HEAD, 'd' * 40, 'claude-reviewer')
         self.created, self.sent, self.bound = [], [], []
+        self.real_resolve_role = review_dispatch.role_config.resolve_role
         self.reviewer_role_patch = patch.object(
             review_dispatch.role_config, 'resolve_role',
-            return_value={'config_dir': '/private/test-reviewer-account',
-                          'source': 'roles'})
+            side_effect=lambda role: (
+                {'config_dir': '/private/test-reviewer-account', 'source': 'roles'}
+                if role == 'reviewer' else self.real_resolve_role(role)))
         self.reviewer_role_patch.start()
         self.addCleanup(self.reviewer_role_patch.stop)
 
@@ -130,13 +132,21 @@ class ReviewDispatchTests(unittest.TestCase):
             claim.get('pr') == 42 and claim.get('head_sha') == selected[2] and
             claim.get('version') == 1
             for claim in existing)
+        selected_role = ('reviewer' if selected[4] == 'claude-reviewer'
+                         else 'codex-reviewer')
+
+        def resolve_test_role(role):
+            if reviewer_role is not None and role == selected_role:
+                return reviewer_role
+            if role == 'reviewer':
+                return {'config_dir': '/private/test-reviewer-account', 'source': 'roles'}
+            return self.real_resolve_role(role)
+
         with patch.object(review_dispatch, '_preflight', side_effect=preflight or [self.preflight, self.preflight]), \
                 patch.object(review_dispatch.worker_dispatch, 'evaluate', return_value=gate), \
                 patch.object(review_dispatch, '_resolve_github_login', return_value='reviewer-user'), \
                 patch.object(review_dispatch.role_config, 'resolve_role',
-                             return_value=reviewer_role or {
-                                 'config_dir': '/private/test-reviewer-account',
-                                 'source': 'roles'}) as resolve_role:
+                             side_effect=resolve_test_role) as resolve_role:
             result = review_dispatch.dispatch_review(
                 store=self.store, task_id=TASK, executor_task='executor-d6',
                 pr_number=42, version=1, create_d6=create, dispatch_session=send,
