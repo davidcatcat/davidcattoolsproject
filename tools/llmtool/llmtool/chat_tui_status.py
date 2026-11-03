@@ -315,6 +315,29 @@ def pr_url():
     return "https://github.com/" + slug + "/pull/"
 
 
+def pr_open_target(record, fallback_records=()):
+    """Trusted PR URL for one unambiguous Task/group PR, or a short refusal code."""
+    def numbers(records):
+        return {number for item in records for number, _label in _pr_sources(item)
+                if type(number) is int and 1 <= number <= 999999999}
+
+    found = numbers((record,)) if type(record) is dict else set()
+    if len(found) > 1:
+        return None, "CONFLICT"
+    if not found:
+        found = numbers(fallback_records)
+    if len(found) > 1:
+        return None, "CONFLICT"
+    if not found:
+        return None, "NO_PR"
+    base = pr_url()
+    if base is None:
+        return None, "NO_TRUST"
+    if not re.fullmatch(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/", base):
+        return None, "URL_MISMATCH"
+    return base + str(next(iter(found))), None
+
+
 def _usage(usage):
     if type(usage) is not dict:
         return None

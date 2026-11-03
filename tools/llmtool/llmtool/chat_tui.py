@@ -15,6 +15,7 @@ import re
 import shlex
 import signal
 import stat
+import subprocess
 import sys
 import threading
 import time
@@ -221,6 +222,19 @@ MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
 TASK_ID = re.compile(r"[0-9a-f]{32}")   # W59: a background row opens a detail only for one
 TURN_ROW_REASON = "這一列是 PM 自行開始的背景回合，沒有 Task 記錄"
+
+
+def _open_pr_url(url):
+    """Open one already validated PR URL without a shell or UI-thread blocking."""
+    if sys.platform != "darwin":
+        return "NON_DARWIN"
+    try:
+        subprocess.run(["/usr/bin/open", url], stdin=subprocess.DEVNULL,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       timeout=10, check=True)
+    except (OSError, subprocess.SubprocessError):
+        return "OPEN_FAILED"
+    return "OPENED"
 # Status bar fields in display order, and the order they drop when the row is too narrow.
 STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usage", "keys",
                  "scroll", "mouse", "help")
@@ -791,6 +805,9 @@ class ChatTUI:
         self.last_task_id = None
         self.show_detail = False
         self.detail_task_id = None
+        self.pr_open_line = None
+        self.pr_open_in_flight = False
+        self.pr_open_seq = 0
         # Task list: rows read from TaskStore on a reader thread (never busy/single-flight).
         self.show_list = False
         self.list_records = []
@@ -1119,6 +1136,12 @@ class ChatTUI:
         def _task_view_enter(event):
             if menu_shown():
                 self.accept_menu()
+
+        @keys.add("o", filter=((showing_task_view & task_view_focused)
+                                | (dev_pane_shown & detail_focused))
+                  & ~picker_shown & ~searching)
+        def _open_detail_pr(event):
+            self.open_detail_pr()
 
         # W60: c copies the detail's Task ID; with a draft it types into the draft as before.
         # W60: c and C act only while the detail pane has focus (it takes focus when it
@@ -2203,9 +2226,14 @@ class ChatTUI:
 
     def toggle_detail(self, show):
         """Show the last Task detail read from Core in place of the conversation."""
+        if not show:
+            self._clear_pr_open_status()
         if show and not self.detail.text:
             self.append("llmtool: no Task detail loaded yet; use /task show TASK_ID")
             show = False
+        elif show:
+            self._set_read_text(self.detail_view, self.detail_view.text, keep=True,
+                                highlight_lines=3)
         self._leave_conversation()
         self.show_detail = show
         # Closing a detail opened from the list goes back to the list. A detail opened from
@@ -2455,6 +2483,7 @@ class ChatTUI:
         return terminal_safe_text("\n".join(lines))
 
     def set_detail(self, text, task_id=None):
+        self._clear_pr_open_status()
         self.detail_task_id = task_id
         safe_text = terminal_safe_text(text)
         self._set_read_text(self.detail_view, safe_text, keep=False, highlight_lines=3)
@@ -3021,10 +3050,13 @@ class ChatTUI:
 
     def _set_task_view(self, text):
         view = self.task_view
+        text = self._with_pr_status(text)
         safe_text = terminal_safe_text(text)
         view.set_text(safe_text)
         if safe_text.startswith("Task 詳情（唯讀）—"):
             start = safe_text.find("\n") + 1
+            if safe_text.startswith("o 開啟 PR", start):
+                start = safe_text.find("\n", start) + 1
             if safe_text.startswith("狀態：", start):
                 view._clip_spans(0)
                 end = start
@@ -3077,6 +3109,7 @@ class ChatTUI:
         ``task_id`` is the validated Task the detail reads (what c copies); a refresh of the
         ↓ panel never changes it.
         """
+        self._clear_pr_open_status()
         self.task_view_task_id = task_id
         self.task_copy_at = None
         self.task_copy_label = None
@@ -3107,6 +3140,99 @@ class ChatTUI:
             return   # closed, or replaced by a newer open
         self._set_task_view(text)
         self.app.invalidate()
+
+    def _clear_pr_open_status(self):
+        self.pr_open_seq += 1
+        self.pr_open_line = None
+        if hasattr(self, "detail_view"):
+            self._set_read_text(self.detail_view, self.detail_view.text, keep=True,
+                                highlight_lines=3)
+        if hasattr(self, "task_view"):
+            self._set_task_view(self.task_view.text)
+
+    def _with_pr_status(self, text):
+        if not text:
+            return text
+        status = "o 開啟 PR" if self.pr_open_line is None else "o 開啟 PR：" + self.pr_open_line
+        lines = str(text).split("\n")
+        known = {"o 開啟 PR", "o 開啟 PR：開啟中…", "o 開啟 PR：已開啟",
+                 "o 開啟 PR：開啟失敗", "o 開啟 PR：僅 macOS 可用",
+                 "o 開啟 PR：沒有 PR", "o 開啟 PR：CONFLICT",
+                 "o 開啟 PR：無信任的儲存庫", "o 開啟 PR：URL 不符",
+                 "o 開啟 PR：沒有 Task"}
+        if len(lines) > 1 and lines[1] in known:
+            lines.pop(1)
+        if lines:
+            lines.insert(1, status)
+        else:
+            lines = [status]
+        return "\n".join(lines)
+
+    def _refresh_pr_open_status(self):
+        if self.show_task_view:
+            self._set_task_view(self.task_view.text)
+        elif self.show_detail:
+            self._set_read_text(self.detail_view, self.detail_view.text, keep=True,
+                                highlight_lines=3)
+        self.app.invalidate()
+
+    def _pr_group_fallback(self, task_id):
+        head = next((item for item in self.list_records_all
+                     if chat_tui_task.value(item, "task_id") == task_id), None)
+        if not isinstance(head, dict):
+            return []
+        executor = (head.get("developer") or {}).get("executor_task_id")
+        if not executor:
+            return [head]
+        return [item for item in self.list_records_all
+                if isinstance(item, dict)
+                and (item.get("developer") or {}).get("executor_task_id") == executor]
+
+    def open_detail_pr(self):
+        """Open the focused Task detail's single trusted PR on one worker at a time."""
+        if self.pr_open_in_flight:
+            return
+        panel = self.task_view_visible()
+        task_id = self.task_view_task_id if panel else self.detail_task_id
+        if not task_id or task_id in (chat_tui_task.UNKNOWN, chat_tui_task.NOT_AVAILABLE):
+            self.pr_open_line = "沒有 Task"
+            self._refresh_pr_open_status()
+            return
+        self.pr_open_in_flight = True
+        self.pr_open_line = "開啟中…"
+        self.pr_open_seq += 1
+        seq = self.pr_open_seq
+        self._refresh_pr_open_status()
+        loop = asyncio.get_running_loop()
+        fallback = [] if panel else self._pr_group_fallback(task_id)
+        threading.Thread(target=self._open_detail_pr_worker,
+                         args=(loop, seq, task_id, panel, fallback),
+                         name="llmtool-chat-open-pr", daemon=True).start()
+
+    def _open_detail_pr_worker(self, loop, seq, task_id, panel, fallback):
+        try:
+            record = chat_tui_status.read_task_detail(task_id)
+        except Exception:
+            record = None
+        try:
+            url, refusal = chat_tui_status.pr_open_target(record, fallback)
+        except Exception:
+            url, refusal = None, "NO_TRUST"
+        result = refusal if refusal else _open_pr_url(url)
+        self._post(loop, self.finish_open_detail_pr, seq, task_id, panel, result)
+
+    def finish_open_detail_pr(self, seq, task_id, panel, result):
+        self.pr_open_in_flight = False
+        current_id = self.task_view_task_id if panel else self.detail_task_id
+        visible = self.task_view_visible() if panel else self.show_detail
+        if seq != self.pr_open_seq or current_id != task_id or not visible:
+            return
+        labels = {"OPENED": "已開啟", "OPEN_FAILED": "開啟失敗",
+                  "NON_DARWIN": "僅 macOS 可用", "NO_PR": "沒有 PR",
+                  "CONFLICT": "CONFLICT", "NO_TRUST": "無信任的儲存庫",
+                  "URL_MISMATCH": "URL 不符"}
+        self.pr_open_line = labels.get(result, "開啟失敗")
+        self._refresh_pr_open_status()
 
     def copy_task_id(self):
         """W60 c: the open detail's Task ID to the clipboard (the pane's clipboard worker)."""
@@ -3180,6 +3306,8 @@ class ChatTUI:
 
     def _set_read_text(self, view, text, keep=True, highlight_lines=0):
         """Replace a developer pane's text (already terminal-safe); ``keep`` the place."""
+        if view is self.detail_view:
+            text = self._with_pr_status(text)
         top_offset = view.top_offset
         view.set_tail(0, [(text, "text")])
         if highlight_lines:
@@ -3221,6 +3349,7 @@ class ChatTUI:
 
     def close_task_view(self):
         """Esc: back to the chat; its reading position and the draft were never touched."""
+        self._clear_pr_open_status()
         self.task_view_task_id = None
         self.task_copy_at = None
         self.task_copy_label = None

@@ -6838,5 +6838,131 @@ class TaskGroupListUiTests(Base):
                         refreshed, 'c', copied, '\r', opened])
 
 
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class DetailOpenPrUiTests(Base):
+    """Opening a PR is bound to the focused detail, rendered in that pane, and single-flight."""
+
+    drive = WidgetTests.drive
+
+    TASK = 'd' * 32
+
+    def record(self, **changes):
+        record = {'task_id': self.TASK, 'request': 'Open PR test',
+                  'created_at': '2026-11-04T11:00:00Z',
+                  'updated_at': '2026-11-04T11:00:00Z',
+                  'developer': {'executor_task_id': 'shared-d6'}}
+        record.update(changes)
+        return record
+
+    async def until(self, ui, condition, what):
+        for _ in range(200):
+            if condition():
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError(what)
+
+    def test_f3_enter_o_opens_one_trusted_url_and_draft_o_is_text(self):
+        record = self.record(review_dispatch_claim={'pr': 683, 'state': 'CLAIMED'})
+        calls, started, release = [], threading.Event(), threading.Event()
+
+        def fake_open(url):
+            calls.append(url)
+            started.set()
+            release.wait(1)
+            return 'OPENED'
+
+        async def listed(ui):
+            for _ in range(200):
+                if ui.list_loaded is not None and ui.list_reader is None:
+                    break
+                await asyncio.sleep(0.01)
+            ui.start_task = lambda _verb, task_id, _arg: ui.set_detail('Task: ' + task_id,
+                                                                       task_id=task_id)
+
+        def detail_hint(ui):
+            self.assertIn('o 開啟 PR', ui.detail_view.text)
+
+        async def result(ui):
+            await self.until(ui, started.is_set, 'fake opener started')
+            self.assertEqual(calls, [OWNER_PR_URL + '683'])
+            await asyncio.sleep(0.08)   # a repeated key while open() is blocked is ignored
+            self.assertEqual(calls, [OWNER_PR_URL + '683'])
+            release.set()
+            await self.until(ui, lambda: '已開啟' in ui.detail_view.text, 'result in detail pane')
+            self.assertIn('o 開啟 PR：已開啟', ui.detail_view.text)
+            self.assertNotIn('已開啟', ui.status_keys())
+
+        with review_trust_fixture.use_trust():
+            with patch.object(chat_tui_status, 'load_records', return_value=([record], 0)), \
+                    patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                    patch.object(chat_tui, '_open_pr_url', side_effect=fake_open):
+                ui, _ = self.drive(['o', lambda ui: self.assertEqual(ui.input.text, 'o'),
+                                    '\x1bOR', listed, '\r', detail_hint, 'o', 'o', result],
+                                   size=(80, 24))
+        self.assertEqual(ui.input.text, '')
+
+    def test_panel_detail_uses_the_same_pane_hint_and_keeps_draft(self):
+        record = self.record(published_pr={'pr': 684})
+        calls = []
+
+        async def opened(ui):
+            await self.until(ui, lambda: bool(calls), 'panel opener called')
+            self.assertEqual(calls, [OWNER_PR_URL + '684'])
+            await self.until(ui, lambda: '已開啟' in ui.task_view.text, 'panel result shown')
+            self.assertIn('o 開啟 PR：已開啟', ui.task_view.text)
+            self.assertEqual(ui.input.text, 'draft')
+            ui.close_task_view()
+            self.assertNotIn('o 開啟 PR', ui.task_view.text)
+
+        with review_trust_fixture.use_trust():
+            with patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                    patch.object(chat_tui, '_open_pr_url',
+                                 side_effect=lambda url: (calls.append(url), 'OPENED')[1]):
+                self.drive([lambda ui: (setattr(ui.input, 'text', 'draft'),
+                                        ui._show_task_view('Task detail heading', self.TASK)),
+                            lambda ui: self.assertIn('o 開啟 PR', ui.task_view.text),
+                            'o', opened], size=(80, 24))
+
+    def test_refusal_and_platform_results_are_rendered_and_single_group_pr_is_resolved(self):
+        head = self.record()
+        older = self.record(task_id='e' * 32,
+                            review_repair_claims=[{'pr': 685, 'state': 'CLAIMED'}])
+        with review_trust_fixture.use_trust():
+            self.assertEqual(chat_tui_status.pr_open_target(head, [head, older]),
+                             (OWNER_PR_URL + '685', None))
+            self.assertEqual(chat_tui_status.pr_open_target(head, [
+                head, older, self.record(task_id='f' * 32,
+                                         published_pr={'pr': 686})]), (None, 'CONFLICT'))
+        from llmtool.trust import TrustError
+        with patch.object(chat_tui_status.trust, 'load_trust',
+                          side_effect=TrustError('TRUST_MISSING')):
+            self.assertEqual(chat_tui_status.pr_open_target(older), (None, 'NO_TRUST'))
+        with patch.object(chat_tui_status, 'pr_url', return_value='https://example.test/pull/'):
+            self.assertEqual(chat_tui_status.pr_open_target(older), (None, 'URL_MISMATCH'))
+        cases = [
+            (self.record(), 'NO_PR', '沒有 PR'),
+            (self.record(review_dispatch_claim={'pr': 685}, published_pr={'pr': 686}),
+             'CONFLICT', 'CONFLICT'),
+            (self.record(), 'NO_TRUST', '無信任的儲存庫'),
+            (self.record(), 'URL_MISMATCH', 'URL 不符'),
+        ]
+        for record, result, label in cases:
+            with self.subTest(result=result):
+                def show(ui):
+                    ui.set_detail('Task: ' + self.TASK, task_id=self.TASK)
+                    ui.finish_open_detail_pr(ui.pr_open_seq, self.TASK, False, result)
+                    self.assertIn('o 開啟 PR：' + label, ui.detail_view.text)
+                self.drive([show], size=(80, 24))
+
+        for platform, expected in (('linux', '僅 macOS 可用'), ('darwin', '開啟失敗')):
+            with self.subTest(platform=platform):
+                def finish(ui):
+                    ui.set_detail('Task: ' + self.TASK, task_id=self.TASK)
+                    ui.finish_open_detail_pr(ui.pr_open_seq, self.TASK, False,
+                                             'NON_DARWIN' if platform == 'linux' else 'OPEN_FAILED')
+                    self.assertIn('o 開啟 PR：' + expected, ui.detail_view.text)
+                self.drive([finish], size=(80, 24))
+
+
 if __name__ == '__main__':
     unittest.main()
