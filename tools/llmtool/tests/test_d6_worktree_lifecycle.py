@@ -288,6 +288,60 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(lifecycle._read_registry_record(record_path)["head_sha"],
                          worktree_head)
 
+    def _rebind_outside_test_mode(self, task_id, *, execute=False):
+        argv = ["--rebind-device-task-id", task_id]
+        if execute:
+            argv.append("--execute-approved-rebind")
+        output, errors = io.StringIO(), io.StringIO()
+        environ = {key: value for key, value in os.environ.items()
+                   if key != "LLMTOOL_D6_TESTING"}
+        with patch.dict(os.environ, environ, clear=True), \
+                contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            self.assertNotIn("LLMTOOL_D6_TESTING", os.environ)
+            result = lifecycle._main(argv)
+        return result, output.getvalue(), errors.getvalue()
+
+    def test_device_rebind_cli_succeeds_outside_test_mode(self):
+        # The CLI never passes a workspace root; the trusted tasks_root (a str)
+        # must still compare equal to itself as a Path outside test mode.
+        root, record_path = self._registered_result_fixture("rebind-real-mode")
+        record = lifecycle._read_registry_record(record_path)
+        original_device = record["physical_identity"]["device"]
+        record["physical_identity"]["device"] = original_device + 1
+        lifecycle._replace_record(record_path, record)
+
+        result, stdout, stderr = self._rebind_outside_test_mode("rebind-real-mode")
+        self.assertEqual((result, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout)["result"], "READY")
+
+        result, stdout, stderr = self._rebind_outside_test_mode(
+            "rebind-real-mode", execute=True)
+        self.assertEqual((result, stderr), (0, ""))
+        self.assertEqual(json.loads(stdout)["result"], "REBOUND")
+        self.assertEqual(lifecycle._read_registry_record(record_path)
+                         ["physical_identity"]["device"], root.lstat().st_dev)
+
+    def test_device_rebind_refuses_mismatching_workspace_root_outside_test_mode(self):
+        _, record_path = self._registered_result_fixture("rebind-root-mismatch")
+        record = lifecycle._read_registry_record(record_path)
+        record["physical_identity"]["device"] += 1
+        lifecycle._replace_record(record_path, record)
+        before = lifecycle._read_registry_record(record_path)
+        other = self.root / "other-tasks"
+        other.mkdir(mode=0o700)
+        environ = {key: value for key, value in os.environ.items()
+                   if key != "LLMTOOL_D6_TESTING"}
+        with patch.dict(os.environ, environ, clear=True):
+            for workspace_root in (other, str(other)):
+                with self.subTest(type=type(workspace_root).__name__):
+                    with self.assertRaises(lifecycle.LifecycleError) as raised:
+                        lifecycle.rebind_device_tasks(
+                            canonical_root=self.source,
+                            task_ids=["rebind-root-mismatch"], execute=True,
+                            workspace_root=workspace_root)
+                    self.assertEqual(raised.exception.code, "D6_WORKSPACE_ROOT_INVALID")
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
     def test_device_rebind_refuses_every_non_device_mismatch(self):
         cases = (
             ("inode", "D6_REBIND_INODE_MISMATCH"),

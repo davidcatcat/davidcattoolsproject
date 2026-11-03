@@ -1626,6 +1626,7 @@ def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
         _stop("D6_TASK_INPUT_INVALID")
     if workspace_root is None:
         workspace_root = trust["tasks_root"]
+    workspace_root = Path(workspace_root)
     if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     workspace_root = Path(os.path.realpath(workspace_root))
