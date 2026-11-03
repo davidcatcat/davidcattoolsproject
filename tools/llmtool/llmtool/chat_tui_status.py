@@ -573,7 +573,7 @@ def read_task_detail(task_id, store=None):
     return store.get(task_id)
 
 
-COPY_HINT = " · c 複製 Task ID · o 開啟 PR"   # detail header names the available actions
+COPY_HINT = " · c 複製 Task ID"        # W60: keep the detail heading's existing layout
 COPY_ALL_KEY = "C 複製全文"        # W60: Shift-C copies the whole detail text
 COPY_ALL_HINT = " · " + COPY_ALL_KEY
 COPY_ALL_STATUS = "C 全文"         # the same key, short enough for the 80-column status bar

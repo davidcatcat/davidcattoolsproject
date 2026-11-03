@@ -1473,8 +1473,9 @@ class ChatTUI:
             elif self.app.layout.has_focus(self.task_pane):
                 if self.task_view_task_id:
                     keys.append("c 複製 Task ID")
-                    keys.append("o 開啟 PR")
                 keys.append(chat_tui_status.COPY_ALL_STATUS)
+                if self.task_view_task_id:
+                    keys.append("o 開啟 PR")
                 keys.append("拖曳即複製")
             else:
                 keys.append("Tab 回詳情（c/C 複製）")
