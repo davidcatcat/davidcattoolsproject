@@ -42,9 +42,21 @@ Research findings and benchmark history are preserved in [the 2026-11-03 history
   lines, relevant file names and small necessary snippets. Do not send the whole
   repository or an entire CI log by default. **Do not infer token savings from this
   ordinary bounded-input mode**; the positive L01 result used a different large-input
-  benchmark pipeline described below.
+  benchmark pipeline described in the [L01 token-saving pipeline preconditions](../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions).
 - Preserve the original deterministic/raw evidence separately; the model output is a
   derived summary, not ground truth.
+
+## C1B Live Phase 0 safeguards
+
+- **Owner-only Live grants.** AI agents must not create, change or fabricate grants for
+  real Live execution; only the Owner supplies them.
+- **A grant is not authorization.** A real Phase 0 invocation requires the Owner's
+  authorization and a non-author check of its evidence.
+- **Off-repo only.** Live grant files must be outside every Git worktree.
+- **Company-only Phase 0 first.** A new or redesigned route must pass a pre-registered
+  Company-only reliability Phase 0 before any paired Codex benchmark.
+
+See the [C1B test-triage Worker history](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only) for the full grant safeguards and the [token-savings benchmark history](../../docs/history/company-llm-delegation-research-20261103.md#token-savings-benchmark) for the benchmark gate.
 
 ## Availability classification
 
@@ -67,7 +79,8 @@ Do not infer a layer from an earlier layer, and do not infer it from the VPN ser
 list (`scutil --nc list`). Use that list only as a hint for the Owner reminder in
 [WORKFLOW](../../tools/llmtool/WORKFLOW.md). A TCP `PASS` authorizes nothing. Layers
 2–4 require an llmtool call that the existing data-permission basis already covers,
-and C1B live calls also need the Phase 0 grant below. Without that authorization the
+and C1B live calls also need the [Phase 0 grant safeguards](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only).
+Without that authorization the
 layer stays `UNKNOWN`. Never bypass a gate because TCP is reachable.
 
 ## Runtime skill selection
@@ -76,7 +89,7 @@ Use the smallest applicable llmtool runtime skill:
 
 - `test-triage` — bounded development aid for test failures. Do not call the ordinary
   runtime skill a validated token-saving route. The savings claim applies only when the
-  L01 benchmark-pipeline preconditions below are reproduced.
+  [L01 benchmark-pipeline preconditions](../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions) are reproduced.
 - `log-triage` — bounded development aid for log compression only; EXPERIMENTAL for
   token-saving/reliability claims.
 - `context-pack` — existing evidence-first Context Packet for general evidence
