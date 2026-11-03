@@ -62,10 +62,14 @@ check_tree() {
   while IFS= read -r -d '' path; do
     [[ -d "$path" || -f "$path" ]] || fail "refusing special file: $path"
   done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o ! -type d ! -type f ! -type l -print0)
-  for directory in _work _tmp _diag; do
+  for directory in _work _diag; do
     [[ -d "$tree/$directory" && ! -L "$tree/$directory" ]] ||
       fail "missing runner directory $tree/$directory"
   done
+  if [[ -e "$tree/_tmp" || -L "$tree/_tmp" ]]; then
+    [[ -d "$tree/_tmp" && ! -L "$tree/_tmp" ]] ||
+      fail "refusing non-directory runner path $tree/_tmp"
+  fi
   for file in .runner .credentials .env .path; do
     [[ -f "$tree/$file" && ! -L "$tree/$file" ]] || fail "missing runner file $tree/$file"
   done
@@ -125,11 +129,21 @@ while IFS= read -r -d '' path; do
   plan_path+=("$path")
 done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o -print0 | sort -z)
 
+tmp_path=$tree/_tmp
+create_tmp=0
+if [[ ! -e "$tmp_path" && ! -L "$tmp_path" ]]; then
+  create_tmp=1
+fi
+
 for index in "${!plan_path[@]}"; do
   owner=${plan_owner[$index]}; mode=${plan_mode[$index]}; path=${plan_path[$index]}
   if [[ -L "$path" ]]; then continue; fi
   printf 'chown -h %s -- %q\nchmod %s -- %q\n' "$owner" "$path" "$mode" "$path"
 done
+if (( create_tmp )); then
+  printf 'mkdir -m 0700 -- %q\nchown -h %s -- %q\nchmod 0700 -- %q\n' \
+    "$tmp_path" "$account:$account" "$tmp_path" "$tmp_path"
+fi
 (( dry_run )) && exit 0
 
 for index in "${!plan_path[@]}"; do
@@ -139,4 +153,10 @@ for index in "${!plan_path[@]}"; do
   if [[ -L "$path" ]]; then fail "refusing symlink path: $path"; fi
   chmod "$mode" -- "$path"
 done
+if (( create_tmp )); then
+  mkdir -m 0700 -- "$tmp_path" || fail "could not create runner directory $tmp_path"
+  chown -h "$account:$account" -- "$tmp_path"
+  [[ -d "$tmp_path" && ! -L "$tmp_path" ]] || fail "refusing symlink path: $tmp_path"
+  chmod 0700 -- "$tmp_path"
+fi
 printf 'installed root-owned permissions for %s\n' "$tree"
