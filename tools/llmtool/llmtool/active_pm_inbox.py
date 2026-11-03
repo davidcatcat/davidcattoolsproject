@@ -56,8 +56,12 @@ def pm_session_key(value):
 def claude_session_file(native_session_id, cwd, environ=None):
     """Return where Claude Code keeps this session's transcript for ``cwd``."""
     env = os.environ if environ is None else environ
-    base = env.get('CLAUDE_CONFIG_DIR') or (
-        os.path.join(env['HOME'], '.claude') if env.get('HOME') else None)
+    base = env.get('CLAUDE_CONFIG_DIR')
+    if not base and env.get('HOME'):
+        from .role_config import resolve_role
+        base = resolve_role('pm', environ=env, home=env['HOME'])['config_dir']
+    if not base:
+        base = os.path.join(env['HOME'], '.claude') if env.get('HOME') else None
     if base is None or not os.path.isabs(base):
         raise LLMToolError('Claude Code configuration directory is unavailable')
     encoded = ''.join(char if char.isascii() and (char.isalnum() or char == '-') else '-'

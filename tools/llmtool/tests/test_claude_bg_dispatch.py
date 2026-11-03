@@ -39,7 +39,9 @@ state_path = home / 'state.json'
 state = json.loads(state_path.read_text()) if state_path.exists() else {'polls': 0}
 argv = sys.argv[1:]
 with open(home / 'calls.jsonl', 'a') as log:
-    log.write(json.dumps({'argv': argv, 'cwd': os.getcwd()}) + '\n')
+    log.write(json.dumps({'argv': argv, 'cwd': os.getcwd(),
+                          'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'),
+                          'model': os.environ.get('ANTHROPIC_MODEL')}) + '\n')
 
 def fill(value):
     text = json.dumps(value)
@@ -165,6 +167,10 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                                 'claude-developer', True, 'OWNER_POLICY_ALLOWED', 'a' * 64))
         gate.start()
         self.addCleanup(gate.stop)
+        role = patch.object(dispatch_tool.role_config, 'resolve_role', return_value={
+            'role': 'claude-developer', 'config_dir': None, 'model': None})
+        role.start()
+        self.addCleanup(role.stop)
         self.root = str(self.f.root)
         self.cwd = str(self.home)  # the session's recorded cwd must exist to launch there
 
@@ -267,6 +273,39 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertEqual(receipt['reason'], 'WORKER_UNKNOWN')
         gate.assert_not_called()
+        self.assertEqual(self.calls(), [])
+
+    def test_role_config_dir_and_model_are_used_only_when_environment_is_unset(self):
+        role_dir = self.home / 'role-account'
+        role_dir.mkdir()
+        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)], before=[], after=[[]])
+        configured = {'role': 'claude-developer', 'config_dir': str(role_dir),
+                      'model': 'role-model'}
+        with patch.object(dispatch_tool.role_config, 'resolve_role', return_value=configured), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': '', 'ANTHROPIC_MODEL': ''}, clear=False):
+            os.environ.pop('CLAUDE_CONFIG_DIR', None)
+            os.environ.pop('ANTHROPIC_MODEL', None)
+            self.dispatch()
+        launch = self.launches()[0]
+        self.assertEqual(launch['config_dir'], str(role_dir))
+        self.assertEqual(launch['model'], 'role-model')
+
+        self.reset()
+        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)], before=[], after=[[]])
+        with patch.object(dispatch_tool.role_config, 'resolve_role', return_value=configured), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config),
+                                        'ANTHROPIC_MODEL': 'env-model'}):
+            self.dispatch()
+        launch = self.launches()[0]
+        self.assertEqual(launch['config_dir'], str(self.config))
+        self.assertEqual(launch['model'], 'env-model')
+
+    def test_invalid_role_config_reports_role_error_without_launching(self):
+        error = dispatch_tool.LLMToolError('invalid role config')
+        error.role_config_code = 'ROLE_ACCOUNT_DIR_INVALID'
+        with patch.object(dispatch_tool.role_config, 'resolve_role', side_effect=error):
+            code, receipt = self.dispatch()
+        self.assertEqual((code, receipt['reason']), (2, 'ROLE_ACCOUNT_DIR_INVALID'))
         self.assertEqual(self.calls(), [])
 
     def test_busy_with_new_action_is_delivered_and_old_history_is_ignored(self):

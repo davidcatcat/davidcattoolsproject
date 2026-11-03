@@ -17,6 +17,7 @@ from unittest.mock import patch
 import unittest
 
 from llmtool import active_pm_inbox
+from llmtool import role_config
 from llmtool import task_store as task_store_module
 from llmtool.cli import main
 from llmtool.errors import LLMToolError
@@ -934,13 +935,36 @@ class ActivePMInboxTests(unittest.TestCase):
                 active_pm_inbox.observe_claude_session(self.session, str(self.pm_cwd))
         home = self.base / 'only-home'
         native = str(uuid.uuid4())
-        with patch.dict(os.environ, {'HOME': str(home)}, clear=True):
+        with patch.object(role_config, 'resolve_role', return_value={'config_dir': None}), \
+                patch.dict(os.environ, {'HOME': str(home)}, clear=True):
             path = active_pm_inbox.claude_session_file(native, str(self.pm_cwd))
             self.assertEqual(path.parents[2], home / '.claude')
             path.parent.mkdir(parents=True)
             path.write_text('{}\n')
             self.assertEqual(active_pm_inbox.observe_claude_session(
                 native, str(self.pm_cwd)), str(self.pm_cwd))
+
+    def test_session_lookup_prefers_environment_then_pm_role_then_home(self):
+        native = str(uuid.uuid4())
+        env_dir = self.base / 'environment-claude'
+        role_dir = self.base / 'pm-role-claude'
+        home = self.base / 'pm-home'
+        with patch.object(role_config, 'resolve_role', return_value={
+                'config_dir': str(role_dir)}) as resolve:
+            path = active_pm_inbox.claude_session_file(
+                native, str(self.pm_cwd), {'CLAUDE_CONFIG_DIR': str(env_dir), 'HOME': str(home)})
+            self.assertEqual(path.parents[2], env_dir)
+            resolve.assert_not_called()
+
+            path = active_pm_inbox.claude_session_file(
+                native, str(self.pm_cwd), {'HOME': str(home)})
+            self.assertEqual(path.parents[2], role_dir)
+            resolve.assert_called_once_with('pm', environ={'HOME': str(home)}, home=str(home))
+
+        with patch.object(role_config, 'resolve_role', return_value={'config_dir': None}):
+            path = active_pm_inbox.claude_session_file(
+                native, str(self.pm_cwd), {'HOME': str(home)})
+            self.assertEqual(path.parents[2], home / '.claude')
 
     def test_cwd_encoding_matches_claude_code_project_directories(self):
         base = active_pm_inbox.claude_session_file('x', '/').parent.parent

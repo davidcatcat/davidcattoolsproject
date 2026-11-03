@@ -62,6 +62,7 @@ from llmtool.errors import LLMToolError  # noqa: E402
 from llmtool.task_completion import read_d6_registration  # noqa: E402
 from llmtool import worker_dispatch  # noqa: E402
 from llmtool import active_pm_inbox, developer_assignment_inbox  # noqa: E402
+from llmtool import role_config  # noqa: E402
 from llmtool.task_store import TaskStore  # noqa: E402
 
 ASSIGNMENT_ID_RE = re.compile(r"[0-9a-f]{32}\Z")
@@ -106,14 +107,17 @@ def _now_ms():
     return int(time.time() * 1000)
 
 
-def config_dir():
-    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or os.path.expanduser("~/.claude"))
+def config_dir(role_settings=None):
+    value = os.environ.get("CLAUDE_CONFIG_DIR")
+    if not value and role_settings is not None:
+        value = role_settings.get("config_dir")
+    return Path(value or os.path.expanduser("~/.claude"))
 
 
-def _run(argv, *, cwd=None, timeout=CLI_TIMEOUT):
+def _run(argv, *, cwd=None, timeout=CLI_TIMEOUT, env=None):
     try:
         proc = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
-                              timeout=timeout, check=False)
+                              timeout=timeout, check=False, env=env)
     except (OSError, subprocess.SubprocessError) as exc:
         raise DispatchError("CLAUDE_CLI_UNAVAILABLE", type(exc).__name__)
     if len(proc.stdout) > OUTPUT_LIMIT:
@@ -136,12 +140,12 @@ def list_agents(claude, *, include_done=False):
             if type(row.get("sessionId")) is str and UUID_RE.fullmatch(row["sessionId"])]
 
 
-def transcript_paths(session_id):
-    return sorted(glob.glob(os.path.join(glob.escape(str(config_dir() / "projects")), "*",
+def transcript_paths(session_id, role_settings=None):
+    return sorted(glob.glob(os.path.join(glob.escape(str(config_dir(role_settings) / "projects")), "*",
                                          glob.escape(session_id) + ".jsonl")))
 
 
-def resolve_session(target, rows):
+def resolve_session(target, rows, role_settings=None):
     """One full UUID for an exact full UUID or exact session name; never a guess.
 
     Short ids, UUID prefixes and any other id-shaped value (hex digits and
@@ -149,7 +153,7 @@ def resolve_session(target, rows):
     can match a different session than the one the PM meant.
     """
     if UUID_RE.fullmatch(target):
-        if any(row["sessionId"] == target for row in rows) or transcript_paths(target):
+        if any(row["sessionId"] == target for row in rows) or transcript_paths(target, role_settings):
             return target
         raise DispatchError("SESSION_NOT_FOUND", target)
     if ID_SHAPED_RE.fullmatch(target):
@@ -162,11 +166,11 @@ def resolve_session(target, rows):
     return matches.pop()
 
 
-def session_cwd(session_id, rows):
+def session_cwd(session_id, rows, role_settings=None):
     for row in rows:
         if row["sessionId"] == session_id and type(row.get("cwd")) is str:
             return row["cwd"]
-    for path in transcript_paths(session_id):
+    for path in transcript_paths(session_id, role_settings):
         cwd = None
         for entry in _entries(path):
             if type(entry.get("cwd")) is str:
@@ -338,6 +342,10 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
                                 CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role) is not None)
     if not is_claude_developer_role and not ROLE_RE.fullmatch(role or ""):
         raise DispatchError("ROLE_NAME_INVALID")
+    try:
+        role_settings = role_config.resolve_role(role)
+    except LLMToolError as exc:
+        raise DispatchError(getattr(exc, "role_config_code", "ROLE_CONFIG_INVALID")) from None
     worker_key = {"claude-reviewer": "claude-reviewer",
                   "codex-reviewer": "codex-reviewer"}.get(role)
     if worker_key is None and is_claude_developer_role:
@@ -356,12 +364,12 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         cwd = registration.root
         session_args = ["--session-id", expected]
     else:
-        expected = resolve_session(target, rows)
+        expected = resolve_session(target, rows, role_settings)
         current = _row(list_agents(claude), expected)
         if current is not None and current.get("status") == "busy":
             # Resuming a busy session starts a second writer for the same task.
             raise DispatchError("SESSION_BUSY", expected)
-        cwd = session_cwd(expected, rows)
+        cwd = session_cwd(expected, rows, role_settings)
         session_args = ["--resume", expected]
     before_ids = {row["sessionId"] for row in list_agents(claude)}
     receipt = {
@@ -379,7 +387,12 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
             ["-n", role, "--add-dir", registration.root, "--", prompt])
     launch_ms = _now_ms()
     receipt["launched_at"] = _iso(launch_ms)
-    code, output = _run(argv, cwd=cwd)
+    launch_env = os.environ.copy()
+    if not launch_env.get("CLAUDE_CONFIG_DIR") and role_settings.get("config_dir"):
+        launch_env["CLAUDE_CONFIG_DIR"] = role_settings["config_dir"]
+    if "ANTHROPIC_MODEL" not in launch_env and role_settings.get("model"):
+        launch_env["ANTHROPIC_MODEL"] = role_settings["model"]
+    code, output = _run(argv, cwd=cwd, env=launch_env)
     if code != 0:
         receipt["reason"] = "LAUNCH_FAILED"
         return receipt
@@ -406,7 +419,8 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
                 # A finished session (often `status` null) is checked before the
                 # failure rules: it was delivered if it acted after launch, and
                 # there is nothing left to stop either way.
-                action = first_action_since(started, launch_ms, offsets)
+                action = first_action_since(started, launch_ms, offsets,
+                                            paths=transcript_paths(started, role_settings))
                 if action is not None:
                     receipt.update(result="DELIVERED", reason=None, first_action=action,
                                    receipt_at=_iso(_now_ms()))
@@ -419,14 +433,16 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
                 receipt["stop"] = stop_session(claude, row)
                 return receipt
             if row.get("status") in RECEIPT_STATUSES:
-                action = first_action_since(started, launch_ms, offsets)
+                action = first_action_since(started, launch_ms, offsets,
+                                            paths=transcript_paths(started, role_settings))
                 if action is not None:
                     receipt.update(result="DELIVERED", reason=None, first_action=action,
                                    receipt_at=_iso(_now_ms()))
                     return receipt
         if time.monotonic() >= deadline:
             if row is not None:
-                action = first_action_since(started, launch_ms, offsets)
+                action = first_action_since(started, launch_ms, offsets,
+                                            paths=transcript_paths(started, role_settings))
                 if action is not None:
                     receipt.update(result="DELIVERED", reason=None, first_action=action,
                                    receipt_at=_iso(_now_ms()))
