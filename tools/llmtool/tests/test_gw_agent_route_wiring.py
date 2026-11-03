@@ -345,6 +345,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 return dict(self.value)
 
             def compare_and_update(self, _task_id, *, expected, **updates):
+                for key, value in expected.items():
+                    if self.value.get(key) != value:
+                        raise task_store.TaskStoreConflict('expected value changed')
                 self.value.update(updates)
                 return dict(self.value)
 
@@ -393,6 +396,76 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(store.value['developer']['error_code'],
                          'DEVELOPER_GW_AGENT_MODEL_ERROR')
         event.assert_not_called()
+
+    def test_profile_route_error_after_authorization_is_persisted(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None, 'completion': None}
+
+        class Store:
+            def __init__(self):
+                self.value = copy.deepcopy(task)
+
+            def get(self, _task_id):
+                return copy.deepcopy(self.value)
+
+            def compare_and_update(self, _task_id, *, expected, **updates):
+                for key, value in expected.items():
+                    if self.value.get(key) != value:
+                        raise task_store.TaskStoreConflict('expected value changed')
+                self.value.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.value)
+
+            def update(self, _task_id, **updates):
+                self.value.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.value)
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        store = Store()
+
+        def authorize_and_rewrite(_store, _task_id, _worker_key, _action):
+            # The real authorization gate persists its audit before returning.
+            store.value['dispatch_audit'] = [{'decision': 'ALLOWED'}]
+
+        def invalid_profile(*_args):
+            raise RouteError('GW_AGENT_CONFIG_INVALID')
+
+        route = SimpleNamespace(validate_profile=invalid_profile)
+        with patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])), \
+             patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='REMOTE_RECEIPT'), \
+             patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
+             patch.object(task_submission_cli, 'load_route_config',
+                          return_value={'routes': {'gw-agent': {
+                              'allowed_data_classes': ['SYNTHETIC'],
+                              'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+             patch.object(worker_dispatch, 'authorize_dispatch',
+                          side_effect=authorize_and_rewrite), \
+             patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
+             patch.object(task_submission_cli, '_task_view', return_value={}):
+            status = task_submission_cli.run_task_gw_agent_delegate(args, store=store)
+
+        self.assertEqual(status, 1)
+        self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(store.value['developer']['error_code'],
+                         'DEVELOPER_GW_AGENT_CONFIG_INVALID')
+        self.assertNotEqual(store.value['developer']['error_code'],
+                            'gw-agent outcome could not be persisted')
 
     def test_gw_agent_success_persists_when_served_model_differs(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,

@@ -3225,7 +3225,14 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     try:
         worker_dispatch.authorize_dispatch(store, task['task_id'], 'company-gw-agent', 'DISPATCH')
     except worker_dispatch.WorkerDispatchDenied as exc:
+        # The authorization gate appends a durable audit entry (including on
+        # denial). Bind failure persistence to the developer record currently
+        # stored after that transaction.
+        current = store.get(task['task_id'])
+        expected_developer = copy.deepcopy(current.get('developer'))
         return persist_failure('DEVELOPER_' + exc.dispatch_code)
+    current = store.get(task['task_id'])
+    expected_developer = copy.deepcopy(current.get('developer'))
     try:
         route = GwAgentRoute(route_config)
         route.validate_profile(model, effort)
