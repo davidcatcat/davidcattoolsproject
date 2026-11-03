@@ -6964,6 +6964,100 @@ class DetailOpenPrUiTests(Base):
                     self.assertIn('o 開啟 PR：' + expected, ui.detail_view.text)
                 self.drive([finish], size=[Size(rows=24, columns=80)])
 
+    def test_status_is_cleared_when_f3_or_panel_detail_is_hidden(self):
+        record = self.record(review_dispatch_claim={'pr': 687})
+        started, release = threading.Event(), threading.Event()
+
+        def fake_open(_url):
+            started.set()
+            release.wait(1)
+            return 'OPENED'
+
+        async def hidden_after_f3(ui):
+            await self.until(ui, lambda: started.is_set(), 'F3 opener started')
+            self.assertIn('o 開啟 PR：開啟中…', ui.detail_view.text)
+            ui.toggle_events(True)
+            self.assertNotIn('o 開啟 PR', ui.detail_view.text)
+            release.set()
+            await asyncio.sleep(0.08)
+            self.assertNotIn('o 開啟 PR', ui.detail_view.text)
+
+        with review_trust_fixture.use_trust():
+            with patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                    patch.object(chat_tui, '_open_pr_url', side_effect=fake_open):
+                self.drive([lambda ui: ui.set_detail('Task: ' + self.TASK,
+                                                     task_id=self.TASK),
+                            'o', hidden_after_f3], size=[Size(rows=24, columns=80)])
+
+        started.clear()
+        release.clear()
+
+        async def hidden_panel(ui):
+            await self.until(ui, lambda: started.is_set(), 'panel opener started')
+            self.assertIn('o 開啟 PR：開啟中…', ui.task_view.text)
+            ui.toggle_list(True)
+            self.assertNotIn('o 開啟 PR', ui.task_view.text)
+            release.set()
+            await asyncio.sleep(0.08)
+            self.assertNotIn('o 開啟 PR', ui.task_view.text)
+
+        with review_trust_fixture.use_trust():
+            with patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                    patch.object(chat_tui, '_open_pr_url', side_effect=fake_open):
+                self.drive([lambda ui: ui._show_task_view('Task detail', self.TASK),
+                            'o', hidden_panel], size=[Size(rows=24, columns=80)])
+
+    def test_changed_task_drops_old_open_result_and_status(self):
+        first = self.TASK
+        second = 'e' * 32
+        started, release = threading.Event(), threading.Event()
+
+        def fake_open(_url):
+            started.set()
+            release.wait(1)
+            return 'OPENED'
+
+        async def switch_task(ui):
+            await self.until(ui, lambda: started.is_set(), 'opener started')
+            self.assertIn('o 開啟 PR：開啟中…', ui.detail_view.text)
+            ui.set_detail('Task: ' + second, task_id=second)
+            self.assertNotIn('o 開啟 PR', ui.detail_view.text)
+            release.set()
+            await asyncio.sleep(0.08)
+            self.assertNotIn('o 開啟 PR', ui.detail_view.text)
+
+        record = self.record(review_dispatch_claim={'pr': 688})
+        with review_trust_fixture.use_trust():
+            with patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                    patch.object(chat_tui, '_open_pr_url', side_effect=fake_open):
+                self.drive([lambda ui: ui.set_detail('Task: ' + first, task_id=first),
+                            'o', switch_task], size=[Size(rows=24, columns=80)])
+
+    def test_f3_detail_result_updates_visible_pane_when_panel_detail_is_loaded(self):
+        record = self.record(review_dispatch_claim={'pr': 689})
+        for opener_result, expected in (('OPENED', '已開啟'),
+                                        ('OPEN_FAILED', '開啟失敗')):
+            with self.subTest(result=opener_result):
+                calls = []
+
+                async def shown(ui):
+                    await self.until(ui, lambda: expected in ui.detail_view.text,
+                                     'visible F3 detail result')
+                    self.assertIn('o 開啟 PR：' + expected, ui.detail_view.text)
+                    self.assertNotIn('o 開啟 PR', ui.task_view.text)
+                    self.assertEqual(calls, [OWNER_PR_URL + '689'])
+
+                with review_trust_fixture.use_trust():
+                    with patch.object(chat_tui_status, 'read_task_detail',
+                                      return_value=record), \
+                            patch.object(chat_tui, '_open_pr_url',
+                                         side_effect=lambda url: (calls.append(url),
+                                                                  opener_result)[1]):
+                        self.drive([lambda ui: ui._show_task_view('Panel detail', self.TASK),
+                                    lambda ui: ui.set_detail('Task: ' + self.TASK,
+                                                             task_id=self.TASK),
+                                    'o', shown], size=[Size(rows=24, columns=80)])
+
 
 if __name__ == '__main__':
     unittest.main()

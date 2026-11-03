@@ -2215,6 +2215,8 @@ class ChatTUI:
             view.clear_selection()
 
     def toggle_help(self):
+        if not self.show_help:
+            self._clear_pr_open_status()
         self.show_help = not self.show_help
         self._leave_conversation()
         # Never leave focus on a hidden pane; the help pane itself scrolls when focused.
@@ -2226,7 +2228,7 @@ class ChatTUI:
 
     def toggle_detail(self, show):
         """Show the last Task detail read from Core in place of the conversation."""
-        if not show:
+        if not show or (show and self.task_view_visible()):
             self._clear_pr_open_status()
         if show and not self.detail.text:
             self.append("llmtool: no Task detail loaded yet; use /task show TASK_ID")
@@ -2245,6 +2247,8 @@ class ChatTUI:
 
     # -- Task list (TaskStore reads only; never a provider or network call) ----------
     def toggle_list(self, show):
+        if show:
+            self._clear_pr_open_status()
         self._leave_conversation()
         self.show_list = show
         self._list_shown_index = None   # W60: scroll to the selection when shown
@@ -2260,6 +2264,8 @@ class ChatTUI:
 
     def toggle_events(self, show):
         """Recent events across Tasks; shares the list's TaskStore reader and interval."""
+        if show:
+            self._clear_pr_open_status()
         self._leave_conversation()
         self.show_events = show
         if show:
@@ -3167,12 +3173,35 @@ class ChatTUI:
         return "\n".join(lines)
 
     def _refresh_pr_open_status(self):
-        if self.show_task_view:
-            self._set_task_view(self.task_view.text)
-        elif self.show_detail:
+        # A panel detail can remain loaded behind F2/F3/F4. Always update the pane
+        # that is actually on screen so a result cannot land in hidden text.
+        if self.show_detail and not self.show_help:
             self._set_read_text(self.detail_view, self.detail_view.text, keep=True,
                                 highlight_lines=3)
+            self._scroll_pr_status_into_view(self.detail_view, self.detail)
+        elif self.task_view_visible():
+            self._set_task_view(self.task_view.text)
+            self._scroll_pr_status_into_view(self.task_view, self.task_pane)
         self.app.invalidate()
+
+    def _scroll_pr_status_into_view(self, view, pane):
+        """Keep the inserted PR hint visible when a detail was already scrolled."""
+        lines = view.text.split("\n")
+        status_line = next((i for i, line in enumerate(lines)
+                            if line.startswith("o 開啟 PR")), None)
+        if status_line is None:
+            return
+        info = pane.window.render_info
+        height = max(1, info.window_height if info is not None else 20)
+        top = view.top
+        if status_line < top:
+            top = status_line
+        elif status_line >= top + height:
+            top = status_line - height + 1
+        starts = [0] + [i + 1 for i, char in enumerate(view.text) if char == "\n"]
+        view.top = max(0, min(top, len(starts) - 1))
+        view.top_offset = starts[view.top]
+        view.following = False
 
     def _pr_group_fallback(self, task_id):
         head = next((item for item in self.list_records_all
@@ -3222,8 +3251,10 @@ class ChatTUI:
     def finish_open_detail_pr(self, seq, task_id, panel, result):
         self.pr_open_in_flight = False
         current_id = self.task_view_task_id if panel else self.detail_task_id
-        visible = self.task_view_visible() if panel else self.show_detail
+        visible = self.task_view_visible() if panel else self.show_detail and not self.show_help
         if seq != self.pr_open_seq or current_id != task_id or not visible:
+            if seq == self.pr_open_seq:
+                self._clear_pr_open_status()
             return
         labels = {"OPENED": "已開啟", "OPEN_FAILED": "開啟失敗",
                   "NON_DARWIN": "僅 macOS 可用", "NO_PR": "沒有 PR",
