@@ -7,6 +7,17 @@ from unittest.mock import patch
 from llmtool import worker_dispatch
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class ReviewerGateIntegrationTests(unittest.TestCase):
     def test_completion_consumes_reviewer_dispatch_authorization_once(self):
         task_completion_tests = importlib.import_module('test_task_completion')

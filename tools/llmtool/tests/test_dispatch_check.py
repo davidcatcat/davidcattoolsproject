@@ -12,6 +12,17 @@ from llmtool import dispatch_check
 from llmtool.worker_dispatch import PolicyDecision
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class DispatchCheckTests(unittest.TestCase):
     def test_allowed_prints_only_minimal_decision_and_returns_zero(self):
         decision = PolicyDecision('claude-reviewer', True, 'OWNER_POLICY_ALLOWED', 'a' * 64)

@@ -17,6 +17,17 @@ from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool import worker_dispatch
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class DirectOpenCodeDeveloperTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='llmtool-opencode-direct-')

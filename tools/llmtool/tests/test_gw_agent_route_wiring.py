@@ -17,6 +17,17 @@ from llmtool.errors import LLMToolError
 from llmtool import task_store
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class GwAgentRouteWiringTests(unittest.TestCase):
     def test_pm_assignment_accepts_gw_agent_and_missing_data_class_is_pre_mutation(self):
         response = json.dumps({'schema_version': 1, 'summary': 'bounded',
