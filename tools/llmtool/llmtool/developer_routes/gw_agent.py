@@ -100,9 +100,14 @@ class GwAgentRoute(DeveloperRoute):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         if profile.get('auth_env') != 'GW_AGENT_API_KEY' or profile.get('model') != expected:
             raise RouteError('GW_AGENT_CONFIG_INVALID')
-        self.package_path = str(Path(package).resolve(strict=True))
-        if not (Path(self.package_path) / 'api_agent_gateway').is_dir():
+        try:
+            resolved_package = Path(package).resolve(strict=True)
+            package_is_valid = (resolved_package / 'api_agent_gateway').is_dir()
+        except (OSError, RuntimeError, ValueError):
+            raise RouteError('GW_AGENT_CONFIG_INVALID') from None
+        if not package_is_valid:
             raise RouteError('GW_AGENT_CONFIG_INVALID')
+        self.package_path = str(resolved_package)
         self.profile = dict(profile)
         self.profile_name = profile_name
         self.authorization_ref = authorization_ref
