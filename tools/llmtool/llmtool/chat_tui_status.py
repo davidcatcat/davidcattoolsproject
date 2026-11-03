@@ -399,7 +399,8 @@ def _summary_text(record):
         "Reviewer: " + who,
         "Latest review verdict: " + verdict,
         "CI: " + ci(record),
-        "PR: " + number + ("" if link == NOT_AVAILABLE else "  " + link),
+        "PR: " + number + ("  " + link if link != NOT_AVAILABLE else
+                           ("  " + NOT_AVAILABLE if number != NOT_AVAILABLE else "")),
         "Tokens (provider-reported): " + tokens(record),
         "Next responsible (derived): " + _NEXT.get(current, UNKNOWN),
         "Last inbox event: " + last_event(record),

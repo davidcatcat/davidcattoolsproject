@@ -50,6 +50,14 @@ OWNER_SLUG = 'davidcatcat/davidcattoolsproject'
 OWNER_PR_URL = 'https://github.com/' + OWNER_SLUG + '/pull/'
 
 
+def _reset_test_patches():
+    # patch.stopall() also stops the module trust fixture; restore it for tests
+    # that import this module as well as for later tests in this module.
+    review_trust_fixture.stop_module()
+    patch.stopall()
+    review_trust_fixture.start_module()
+
+
 def setUpModule():
     review_trust_fixture.start_module()
 
@@ -131,7 +139,7 @@ class Base(unittest.TestCase):
         self.client = Mock()
         self.client.complete.return_value = Reply('reply', {})
         self.factory = patch('llmtool.chat.create_client', return_value=self.client).start()
-        self.addCleanup(patch.stopall)
+        self.addCleanup(_reset_test_patches)
         # W56d: the TUI settings file and the PM background read never reach the real HOME;
         # tests that exercise the background read stop this patch.
         patch('llmtool.chat_tui_theme.settings_path',
@@ -4772,11 +4780,12 @@ class PMConversationTests(BoundedPMTest):
             self.assertEqual(reads, [(self.W59_TASK_B, 'llmtool-chat-task-detail')])
             self.assertIn('Esc 返回', ui.status_text())
 
-        with patch.object(chat_tui_status, 'read_task_detail', side_effect=read):
-            ui, _ = self.drive([self.connect(), self.connected, self.w59_listed,
-                                '\x1b[B', lambda ui: self.assertTrue(ui.background_visible()),
-                                '\x1b[B', lambda ui: self.assertEqual(ui.background_index, 1),
-                                '\r', opened])
+        with review_trust_fixture.use_trust():
+            with patch.object(chat_tui_status, 'read_task_detail', side_effect=read):
+                ui, _ = self.drive([self.connect(), self.connected, self.w59_listed,
+                                    '\x1b[B', lambda ui: self.assertTrue(ui.background_visible()),
+                                    '\x1b[B', lambda ui: self.assertEqual(ui.background_index, 1),
+                                    '\r', opened])
         self.assertEqual(self.fakes[0].users(), [])          # Enter sent nothing to the PM
 
     def test_w59_detail_opens_during_a_pm_turn_and_the_stream_keeps_arriving(self):
@@ -4890,24 +4899,40 @@ class PMConversationTests(BoundedPMTest):
             read.assert_not_called()
 
     def test_w59_pr_url_in_the_detail_is_an_osc8_link(self):
-        with create_pipe_input() as pipe:
-            ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput(), pm_api=self.api)
-        ui.links_supported = True
-        ui._linker = chat_tui_theme.Linker(str(self.temp_root), 'o/r')
-        text = 'PR: #661  ' + OWNER_PR_URL + '661\nPR: #7'
-        links = ui.task_view_linker().links(text, 0, len(text))
-        urls = [url for _low, _high, url in links]
-        self.assertEqual(urls, [OWNER_PR_URL + '661'])   # never the cwd repo's #N
-        low, high, _url = links[0]
-        self.assertEqual(text[low:high], OWNER_PR_URL + '661')
-        wrapped = ui.task_view_linker().links(text, low + 5, low + 9)   # a row inside the URL
-        self.assertEqual(wrapped, links)
-        self.assertTrue(ui.task_view_linker().open_sequence(urls[0]).startswith('\x1b]8;id='))
-        ui._linker = None                                       # repo lookup not finished
-        self.assertEqual([url for _l, _h, url in ui.task_view_linker().links(text, 0, len(text))],
-                         [OWNER_PR_URL + '661'])
-        ui.settings['links'] = 'off'
-        self.assertIsNone(ui.task_view_linker())
+        with review_trust_fixture.use_trust():
+            with create_pipe_input() as pipe:
+                ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput(), pm_api=self.api)
+            ui.links_supported = True
+            ui._linker = chat_tui_theme.Linker(str(self.temp_root), 'o/r')
+            text = 'PR: #661  ' + OWNER_PR_URL + '661\nPR: #7'
+            links = ui.task_view_linker().links(text, 0, len(text))
+            urls = [url for _low, _high, url in links]
+            self.assertEqual(urls, [OWNER_PR_URL + '661'])   # never the cwd repo's #N
+            low, high, _url = links[0]
+            self.assertEqual(text[low:high], OWNER_PR_URL + '661')
+            wrapped = ui.task_view_linker().links(text, low + 5, low + 9)   # a row inside the URL
+            self.assertEqual(wrapped, links)
+            self.assertTrue(ui.task_view_linker().open_sequence(urls[0]).startswith('\x1b]8;id='))
+            ui._linker = None                                       # repo lookup not finished
+            self.assertEqual([url for _l, _h, url in ui.task_view_linker().links(text, 0, len(text))],
+                             [OWNER_PR_URL + '661'])
+            ui.settings['links'] = 'off'
+            self.assertIsNone(ui.task_view_linker())
+
+    def test_w59_pr_without_trust_shows_not_available_and_has_no_osc8_link(self):
+        from llmtool.trust import TrustError
+
+        async def opened(ui):
+            await self.until(ui, lambda ui: self.W59_TASK_B in self.w59_text(ui), 'detail read')
+            text = self.w59_text(ui)
+            self.assertIn('PR: #661 (from review claim)  NOT_AVAILABLE', text)
+            self.assertEqual(ui.task_view_linker().links(text, 0, len(text)), [])
+
+        with patch.object(chat_tui_status.trust, 'load_trust',
+                          side_effect=TrustError('TRUST_MISSING')):
+            with patch.object(chat_tui_status, 'read_task_detail', side_effect=self.w59_record):
+                self.drive([self.connect(), self.connected, self.w59_listed,
+                            '\x1b[B', '\x1b[B', '\r', opened])
 
 
     def test_w59_a_late_read_is_dropped_and_esc_after_closing_interrupts(self):
