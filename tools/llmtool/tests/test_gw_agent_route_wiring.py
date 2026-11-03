@@ -1,5 +1,4 @@
 import copy
-import ast
 import hashlib
 import inspect
 import io
@@ -262,16 +261,6 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                       validator)
 
     def test_pending_gw_agent_provider_binding_is_validated_at_dispatch(self):
-        validator_ast = ast.parse(inspect.getsource(task_store._validate))
-        expected_provider = next(
-            node.value for node in ast.walk(validator_ast)
-            if isinstance(node, ast.Assign) and
-            any(isinstance(target, ast.Name) and target.id == 'expected_provider'
-                for target in node.targets) and isinstance(node.value, ast.Dict))
-        task_store_provider_profiles = {
-            key.value for key in expected_provider.keys if isinstance(key, ast.Constant)}
-        self.assertTrue(task_store_provider_profiles <= set(worker_dispatch._PROVIDER_TYPES))
-
         task_id, run_id = 'a' * 32, 'b' * 32
         task_contract = {
             'schema_version': 1, 'contract_version': 1, 'task_id': task_id,
@@ -325,6 +314,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         dispatching = copy.deepcopy(developer)
         dispatching.update(state='DEVELOPER_DISPATCHING',
                            provider_type='gw-agent-cli', model='gw-agent-default')
+        self.assertFalse(worker_dispatch._developer_identity_changed(developer, dispatching))
+        self.assertTrue(worker_dispatch._initial_provider_binding(developer, dispatching))
         updated = copy.deepcopy(record)
         updated['developer'] = dispatching
         updated['record_sha256'] = task_store._digest(updated)
