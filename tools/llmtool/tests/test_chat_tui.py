@@ -6737,6 +6737,17 @@ class TaskGroupProjectionTests(unittest.TestCase):
         group, _hidden = chat_tui_status.group_rows([conflict], self.NOW, True)
         self.assertEqual(group[0]['pr'], 'CONFLICT')
 
+    def test_placeholder_rows_without_task_records_remain_individual_rows(self):
+        from llmtool import chat_tui_status
+        placeholders = [None, {}, {'developer': None}]
+        groups, hidden = chat_tui_status.group_rows(placeholders, self.NOW, True)
+        self.assertEqual(hidden, 0)
+        self.assertEqual([group['record'] for group in groups], placeholders)
+        self.assertTrue(all(group['rounds'] == 0 and not group['pr']
+                            for group in groups))
+        self.assertTrue(all(chat_tui_status.row(record)['task_id'] == 'UNKNOWN'
+                            for record in placeholders))
+
 
 if __name__ == '__main__':
     unittest.main()

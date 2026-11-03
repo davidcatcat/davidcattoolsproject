@@ -2342,6 +2342,15 @@ class ChatTUI:
         """The rows that fit the list pane (selected row in view)."""
         return self._list_fragments(full=False)
 
+    def _list_group(self, index, record):
+        """Return the projection for a row, including transient placeholder rows."""
+        if (index < len(self.list_groups)
+                and self.list_groups[index].get("record") is record):
+            return self.list_groups[index]
+        groups, _hidden = chat_tui_status.group_rows(
+            [record], datetime.now(timezone.utc), True)
+        return groups[0]
+
     def _list_fragments(self, full):
         """List fragments; ``full``: every listed Task (W60: the scrollable list view)."""
         width = max(1, self.app.output.get_size().columns)
@@ -2373,8 +2382,9 @@ class ChatTUI:
             self._list_header_rows = len(rows)
             top, space = 0, len(self.list_records)
         for index in range(top, min(len(self.list_records), top + space)):
-            item = chat_tui_status.row(self.list_records[index])
-            group = self.list_groups[index]
+            record = self.list_records[index]
+            item = chat_tui_status.row(record)
+            group = self._list_group(index, record)
             stage = item["stage"] + " " * max(0, 26 - self._get_cwidth(item["stage"]))
             rounds = ("+%d rounds" % group["rounds"] if group["rounds"] else "-").ljust(12)
             text = (("▶ " if index == self.list_index else "  ") + item["task_id"][:8] + "  "
@@ -2435,7 +2445,7 @@ class ChatTUI:
         lines = "".join(fragments).split("\n")[:self._list_header_rows]
         for index, record in enumerate(self.list_records):
             item = chat_tui_status.row(record)
-            group = self.list_groups[index]
+            group = self._list_group(index, record)
             stage = item["stage"] + " " * max(0, 26 - self._get_cwidth(item["stage"]))
             rounds = ("+%d rounds" % group["rounds"] if group["rounds"] else "-").ljust(12)
             lines.append(("▶ " if index == self.list_index else "  ") + item["task_id"] + "  "

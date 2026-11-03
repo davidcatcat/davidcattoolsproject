@@ -455,7 +455,8 @@ def group_rows(records, now, show_all):
     """
     grouped, order = {}, []
     for index, record in enumerate(records):
-        developer = _dict(record.get("developer")) or {}
+        record_dict = _dict(record) or {}
+        developer = _dict(record_dict.get("developer")) or {}
         executor = developer.get("executor_task_id")
         key = ("d6", executor) if type(executor) is str and executor else ("task", index)
         if key not in grouped:
@@ -468,13 +469,14 @@ def group_rows(records, now, show_all):
     for key in order:
         members = grouped[key]
         head = members[0]
+        head_dict = _dict(head) or {}
         current, _reason = stage(head)
-        completion = _dict(head.get("completion")) or {}
-        developer = _dict(head.get("developer")) or {}
-        terminal_state = (current in terminal or head.get("state") in terminal
+        completion = _dict(head_dict.get("completion")) or {}
+        developer = _dict(head_dict.get("developer")) or {}
+        terminal_state = (current in terminal or head_dict.get("state") in terminal
                           or completion.get("state") in terminal
                           or developer.get("state") in terminal)
-        updated = head.get("updated_at")
+        updated = head_dict.get("updated_at")
         idle = False
         try:
             timestamp = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
@@ -490,10 +492,11 @@ def group_rows(records, now, show_all):
 
         numbers = []
         for member in members:
-            for number, _label in _pr_sources(member):
+            member_dict = _dict(member) or {}
+            for number, _label in _pr_sources(member_dict):
                 if number not in numbers:
                     numbers.append(number)
-            published = _dict(member.get("published_pr")) or {}
+            published = _dict(member_dict.get("published_pr")) or {}
             published_number = published.get("pr")
             if (type(published_number) is int and 1 <= published_number <= 999999999
                     and published_number not in numbers):
