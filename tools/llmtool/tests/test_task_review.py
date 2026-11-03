@@ -148,6 +148,9 @@ class ReviewTests(unittest.TestCase):
     def setUp(self):
         self.ready,self.final,self.expect,self.events=fixture()
         self.host=FakeHost(self.ready,self.final,self.expect,self.events)
+    def test_host_instructions_findings_limit_spacing(self):
+        self.assertIn('findings: array of at most 32 objects',r.HOST_INSTRUCTIONS)
+        self.assertNotIn('most32',r.HOST_INSTRUCTIONS)
     def run_review(self,events=None,expect=None):
         return r._run_fake_review(self.ready,self.final,expect or self.expect,
                                   self.events if events is None else events,self.host)
