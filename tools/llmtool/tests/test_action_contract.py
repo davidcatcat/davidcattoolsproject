@@ -415,6 +415,13 @@ class StrictContractTests(unittest.TestCase):
                 raw['scope'] = [path]
                 self.reject(raw)
         self.reject({**action, 'scope': ['FILE.txt', 'file.txt']})
+        # casefold catches Unicode spellings that lower() does not equate.
+        self.reject({**action, 'scope': ['STRASSE.txt', 'Straße.txt']})
+        target = make_action(c.ActionKind.GIT_OPERATION).payload.files[0]
+        colliding_files = (target, replace(target, path='Straße.txt'),
+                           replace(target, path='STRASSE.txt'))
+        with self.assertRaises(LLMToolError):
+            c._files(colliding_files)
 
     def test_absent_regular_metadata_content_and_size_fail_closed(self):
         action = make_action().to_dict()

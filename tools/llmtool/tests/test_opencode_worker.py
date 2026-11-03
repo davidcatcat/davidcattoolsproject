@@ -606,6 +606,16 @@ class OpenCodeWorkerTests(unittest.TestCase):
         with self.assertRaises(w.WorkerError) as caught:
             w.preflight(collision)
         self.assertEqual(caught.exception.worker_code, 'OPENCODE_SCOPE_INVALID')
+        casefold_collision = replace(self.job(),
+            read_paths=('STRASSE.txt', 'Straße.txt'), write_paths=())
+        with self.assertRaises(w.WorkerError) as caught:
+            w.preflight(casefold_collision)
+        self.assertEqual(caught.exception.worker_code, 'OPENCODE_SCOPE_INVALID')
+        cross_list_collision = replace(self.job(), read_paths=('Straße.txt',),
+            write_paths=('STRASSE.txt',))
+        with self.assertRaises(w.WorkerError) as caught:
+            w.preflight(cross_list_collision)
+        self.assertEqual(caught.exception.worker_code, 'OPENCODE_SCOPE_INVALID')
 
     def test_scope_component_swap_to_symlink_is_refused_by_no_follow_walk(self):
         job = self.job()
