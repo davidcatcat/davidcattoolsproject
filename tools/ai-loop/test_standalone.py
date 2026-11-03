@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 import os
+import importlib.util
 
 import ai_loop
 
@@ -113,10 +114,22 @@ class StandaloneSafetyTests(unittest.TestCase):
             run.assert_not_called()
 
     def test_ci_classifies_ai_loop_separately_from_llmtool_shards(self):
-        workflow = (ROOT.parents[1] / ".github/workflows/llmtool-linux-ci.yml").read_text(
+        repository = ROOT.parents[1]
+        classifier_path = repository / "tools/llmtool/scripts/ci_path_classes.py"
+        spec = importlib.util.spec_from_file_location("ci_path_classes", classifier_path)
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        classifier = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(classifier)
+
+        changed_path = b"tools/ai-loop/test_standalone.py\0"
+        self.assertEqual(classifier.classify_path("tools/ai-loop/test_standalone.py"), "ai-loop")
+        self.assertEqual(classifier.linux_flags(changed_path), (False, False, False, True))
+
+        workflow = (repository / ".github/workflows/llmtool-linux-ci.yml").read_text(
             encoding="utf-8"
         )
-        self.assertIn("tools/ai-loop/*) ai_loop=true ;;", workflow)
+        self.assertIn("ai_loop: ${{ steps.classify.outputs.ai_loop }}", workflow)
         self.assertIn("needs.changes.outputs.ai_loop == 'true'", workflow)
         self.assertIn("python3.14 -B -m unittest discover -s tools/ai-loop", workflow)
 
