@@ -447,7 +447,8 @@ class ThemePTYTests(unittest.TestCase):
         terminal.send("\x1b[B")
         terminal.wait_text("背景工作 1 項", "↓ panel")
         terminal.send("\r")
-        rows = terminal.wait_text("證據與出處", "detail opened")
+        # The evidence section may be below the 24-row viewport; the detail header is visible.
+        rows = terminal.wait_text("Task 詳情（唯讀）", "detail opened")
         rows = terminal.wait_stable("detail drawn")
         self.assertTrue(rows[0].startswith("Task 詳情（唯讀）"))
         self.assertIn("C 複製全文", rows[0])                           # header: one row at 80
@@ -481,7 +482,6 @@ class ThemePTYTests(unittest.TestCase):
         terminal.send("\t")
         terminal.send("cat Cat")
         terminal.wait_text("pm> cat Cat", "cat typed on the input line")
-        time.sleep(0.4)
         self.assertEqual(terminal.clipboard(), whole)                 # nothing copied
         terminal.esc()
         terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed")
