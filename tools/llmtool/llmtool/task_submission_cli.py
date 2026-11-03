@@ -3163,7 +3163,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
-        'provider_type': 'gw-agent-cli', 'model': model,
+        'provider_type': None, 'model': None,
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
         'session_id': 'dev-' + new_id(), 'source_sha': snapshot.head,
         'source_sha_binding': 'D6_REGISTRY_OBSERVED', 'read_paths': read_paths,
@@ -3213,7 +3213,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         _print(_task_view(saved))
         return 1
 
-    developer.update(state='DEVELOPER_DISPATCHING')
+    developer.update(state='DEVELOPER_DISPATCHING', provider_type='gw-agent-cli',
+                     model=model)
     try:
         dispatching = store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},

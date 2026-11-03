@@ -155,6 +155,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 self.value = dict(task)
                 self.claims = 0
                 self.developer_states = []
+                self.developer_records = []
 
             def get(self, _task_id):
                 return copy.deepcopy(self.value)
@@ -171,6 +172,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 self.value.update(copy.deepcopy(updates))
                 if type(self.value.get('developer')) is dict:
                     self.developer_states.append(self.value['developer']['state'])
+                    self.developer_records.append(copy.deepcopy(self.value['developer']))
                 return copy.deepcopy(self.value)
 
             def update(self, _task_id, **updates):
@@ -212,6 +214,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(store.developer_states,
                          ['DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
                           'DEVELOPER_UNAVAILABLE'])
+        self.assertIsNone(store.developer_records[0]['provider_type'])
+        self.assertIsNone(store.developer_records[0]['model'])
+        self.assertEqual(store.developer_records[1]['provider_type'], 'gw-agent-cli')
+        self.assertEqual(store.developer_records[1]['model'], 'gw-agent-default')
         self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
         self.assertEqual(store.value['dispatch_audit'][-1]['action'], 'DISPATCH')
@@ -230,7 +236,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         developer = {
             'assignment_id': 'd' * 32, 'selection_source': 'PM',
             'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
-            'provider_type': 'gw-agent-cli', 'model': 'gw-agent-default',
+            'provider_type': None, 'model': None,
             'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
             'session_id': 'dev-' + 'e' * 32, 'source_sha': 'f' * 40,
             'source_sha_binding': 'D6_REGISTRY_OBSERVED',
@@ -253,6 +259,75 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         validator = inspect.getsource(task_store._validate)
         self.assertIn("developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent')",
                       validator)
+
+    def test_pending_gw_agent_provider_binding_is_validated_at_dispatch(self):
+        task_id, run_id = 'a' * 32, 'b' * 32
+        task_contract = {
+            'schema_version': 1, 'contract_version': 1, 'task_id': task_id,
+            'goal': 'Run the bounded gw-agent task.', 'authorized_scope': ['pm-planning'],
+            'forbidden_scope': [], 'criteria': [{'criterion_id': 'result',
+                'description': 'Record the result.', 'kind': 'ARTIFACT'}],
+            'previous_digest': None,
+        }
+        contract = task_store.parse_task_contract(json.dumps(task_contract))
+        binding = vars(contract.binding(run_id))
+        task = {'task_id': task_id, 'run_id': run_id, 'task_binding': binding}
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        developer = {
+            'assignment_id': 'd' * 32, 'selection_source': 'PM',
+            'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
+            'provider_type': None, 'model': None,
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + 'e' * 32, 'source_sha': 'f' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['Record the result.'], 'context_sha256': '1' * 64,
+            'egress_basis': 'Synthetic test context.', 'input_bytes': 128,
+            'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'execution': None, 'created_at': '2026-01-01T00:00:00Z',
+            'direct_result_callback': task_submission_cli._direct_result_callback(
+                task, registration, 'f' * 40, test_policy='REMOTE_RECEIPT'),
+        }
+        record = {
+            'schema_version': 2, 'task_id': task_id, 'run_id': run_id,
+            'pm_session_id': 'pm-test', 'pm_provider_profile': 'test-provider',
+            'pm_provider_type': 'test-provider', 'pm_model': 'test-model',
+            'backend_session_semantics': 'EPHEMERAL_SINGLE_CALL',
+            'native_session_id': None, 'state': 'PM_RESPONDED',
+            'created_at': '2026-01-01T00:00:00Z', 'updated_at': '2026-01-01T00:00:00Z',
+            'task_contract': task_contract, 'task_binding': binding,
+            'request': 'bounded request',
+            'request_sha256': hashlib.sha256(b'bounded request').hexdigest(),
+            'response': 'PM response', 'usage': None, 'error_code': None,
+            'developer': developer,
+            'pm_assignment': {'schema_version': 1, 'route': 'gw-agent', 'risk': 'LOW',
+                'goal': 'Run the bounded gw-agent task.',
+                'acceptance': ['Record the result.']},
+            'dispatch_audit': [],
+        }
+        record['record_sha256'] = task_store._digest(record)
+        task_store._validate(record)
+
+        dispatching = copy.deepcopy(developer)
+        dispatching.update(state='DEVELOPER_DISPATCHING',
+                           provider_type='gw-agent-cli', model='gw-agent-default')
+        self.assertFalse(worker_dispatch._developer_identity_changed(developer, dispatching))
+        self.assertTrue(worker_dispatch._initial_provider_binding(developer, dispatching))
+        updated = copy.deepcopy(record)
+        updated['developer'] = dispatching
+        updated['record_sha256'] = task_store._digest(updated)
+        task_store._validate(updated)
+
+        decision = worker_dispatch.PolicyDecision(
+            'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)
+        with patch.object(worker_dispatch, 'evaluate', return_value=decision):
+            denial = worker_dispatch.authorize_task_store_change(
+                record, {'developer': dispatching}, {'developer': developer})
+        self.assertIsNone(denial)
+        self.assertEqual(record['dispatch_audit'][-1]['action'], 'DISPATCH')
 
     def test_allowed_route_error_maps_to_safe_developer_code(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
