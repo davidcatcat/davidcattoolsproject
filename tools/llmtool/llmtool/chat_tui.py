@@ -145,7 +145,8 @@ DEV_ENV = "LLMTOOL_TUI_DEV"
 TASK_HIDDEN = "Task 模式是開發測試用；要派工請用 /pm connect 和 PM 說"
 DEV_KEY_HELP = """  F2                    Toggle the last Task detail (Esc also closes it)
   F3                    Toggle the Task list (/task list): Up/Down choose, Enter opens the
-                        detail, F5 or r refreshes, Esc closes; refreshes itself every
+                        detail, a shows all / hides completed or idle groups, F5 or r refreshes,
+                        Esc closes; refreshes itself every
                         %d s while shown (local TaskStore read only, no AI call)
   F4                    Toggle recent events across Tasks (/task events): newest first;
                         F5 or r refreshes, Esc closes; never acknowledges or polls
@@ -793,6 +794,10 @@ class ChatTUI:
         # Task list: rows read from TaskStore on a reader thread (never busy/single-flight).
         self.show_list = False
         self.list_records = []
+        self.list_records_all = []
+        self.list_groups = []
+        self.list_hidden_count = 0
+        self.list_show_all = False
         self.list_index = 0
         self.list_unreadable = 0
         self.list_error = None
@@ -1296,6 +1301,13 @@ class ChatTUI:
         @keys.add("down", filter=list_focused)
         def _list_down(event):
             self.move_list(1)
+
+        @keys.add("a", filter=list_focused)
+        def _list_show_all(event):
+            self.list_show_all = not self.list_show_all
+            self._project_list_records()
+            self._list_shown_index = None
+            self.app.invalidate()
 
         @keys.add("enter", filter=list_focused)
         def _list_open(event):
@@ -2240,7 +2252,7 @@ class ChatTUI:
         elif self.list_error is not None:
             text = "Recent events: llmtool: " + self.list_error
         else:
-            text = chat_tui_events.recent_text(self.list_records, self.list_unreadable,
+            text = chat_tui_events.recent_text(self.list_records_all, self.list_unreadable,
                                                self.list_loaded[1])
         if self.unseen_output:
             text = "new conversation output — Esc shows it\n" + text
@@ -2273,15 +2285,24 @@ class ChatTUI:
         records, unreadable, error = outcome
         selected = self.selected_task_id()
         self.list_reader = None
-        self.list_records, self.list_unreadable, self.list_error = records, unreadable, error
+        self.list_records_all = records
+        self.list_unreadable, self.list_error = unreadable, error
+        self._project_list_records(selected)
         self.list_loaded = (time.monotonic(), time.strftime("%H:%M:%S"))
-        ids = [chat_tui_task.value(r, "task_id") for r in records]
-        # Keep the selection on the same Task when it is still listed.
-        self.list_index = ids.index(selected) if selected in ids else min(
-            self.list_index, max(0, len(records) - 1))
         if self.show_events:
             self.render_events()
         self.app.invalidate()
+
+    def _project_list_records(self, selected=None):
+        """Keep F3 selection and actions bound to each visible group's newest Task."""
+        if selected is None:
+            selected = self.selected_task_id()
+        self.list_groups, self.list_hidden_count = chat_tui_status.group_rows(
+            self.list_records_all, datetime.now(timezone.utc), self.list_show_all)
+        self.list_records = [group["record"] for group in self.list_groups]
+        ids = [chat_tui_task.value(record, "task_id") for record in self.list_records]
+        self.list_index = ids.index(selected) if selected in ids else min(
+            self.list_index, max(0, len(self.list_records) - 1))
 
     def list_visible(self):
         """The list is on screen: not hidden behind the detail or help pane."""
@@ -2321,6 +2342,15 @@ class ChatTUI:
         """The rows that fit the list pane (selected row in view)."""
         return self._list_fragments(full=False)
 
+    def _list_group(self, index, record):
+        """Return the projection for a row, including transient placeholder rows."""
+        if (index < len(self.list_groups)
+                and self.list_groups[index].get("record") is record):
+            return self.list_groups[index]
+        groups, _hidden = chat_tui_status.group_rows(
+            [record], datetime.now(timezone.utc), True)
+        return groups[0]
+
     def _list_fragments(self, full):
         """List fragments; ``full``: every listed Task (W60: the scrollable list view)."""
         width = max(1, self.app.output.get_size().columns)
@@ -2329,13 +2359,16 @@ class ChatTUI:
         if self.list_loaded is None:
             state = "reading TaskStore…"
         else:
-            state = ("%d shown, %d unreadable; refreshed %s; auto every %ds"
-                     % (len(self.list_records), self.list_unreadable, self.list_loaded[1],
-                        chat_tui_status.REFRESH_SECONDS))
-        rows = [("class:menu.header", cut(" Tasks (TaskStore records; stage derived by the TUI) — "
-                                          + state + " — Enter detail, F5/r refresh, Esc close")),
+            state = ("%d shown, %d hidden, %d unreadable"
+                     % (len(self.list_records), self.list_hidden_count, self.list_unreadable))
+        header = " Tasks (stage derived by the TUI): " + state + "; a shows all"
+        if self.list_loaded is not None:
+            header += ("; refreshed %s; auto every %ds"
+                       % (self.list_loaded[1], chat_tui_status.REFRESH_SECONDS))
+        rows = [("class:menu.header", cut(header)),
                 ("class:menu.header", cut("  " + "Task ID".ljust(8) + "  " + "Stage (derived)".ljust(26)
-                                          + "Updated (Core)".ljust(20) + "  Request (Core, first line)"))]
+                                          + "Rounds".ljust(12) + "PR".ljust(12) + "Owner".ljust(8)
+                                          + "Request (Core, first line) — Enter detail; F5/r refresh; Esc close"))]
         if self.unseen_output:
             rows.append(("class:menu.header", cut(" new conversation output — Esc shows it")))
         if self.list_error is not None:
@@ -2350,10 +2383,14 @@ class ChatTUI:
             self._list_header_rows = len(rows)
             top, space = 0, len(self.list_records)
         for index in range(top, min(len(self.list_records), top + space)):
-            item = chat_tui_status.row(self.list_records[index])
+            record = self.list_records[index]
+            item = chat_tui_status.row(record)
+            group = self._list_group(index, record)
             stage = item["stage"] + " " * max(0, 26 - self._get_cwidth(item["stage"]))
+            rounds = ("+%d rounds" % group["rounds"] if group["rounds"] else "-").ljust(12)
             text = (("▶ " if index == self.list_index else "  ") + item["task_id"][:8] + "  "
-                    + stage + item["updated"][:20] + "  " + item["name"])
+                    + stage + rounds + (group["pr"] or "-").ljust(12)
+                    + ("Owner" if group["owner"] else "").ljust(8) + item["name"])
             rows.append(("class:menu.current" if index == self.list_index else "", cut(text)))
         result = []
         for row in rows:
@@ -2409,9 +2446,12 @@ class ChatTUI:
         lines = "".join(fragments).split("\n")[:self._list_header_rows]
         for index, record in enumerate(self.list_records):
             item = chat_tui_status.row(record)
+            group = self._list_group(index, record)
             stage = item["stage"] + " " * max(0, 26 - self._get_cwidth(item["stage"]))
+            rounds = ("+%d rounds" % group["rounds"] if group["rounds"] else "-").ljust(12)
             lines.append(("▶ " if index == self.list_index else "  ") + item["task_id"] + "  "
-                         + stage + item["updated"][:20] + "  " + item["name"])
+                         + stage + rounds + (group["pr"] or "-").ljust(12)
+                         + ("Owner" if group["owner"] else "").ljust(8) + item["name"])
         return terminal_safe_text("\n".join(lines))
 
     def set_detail(self, text, task_id=None):
