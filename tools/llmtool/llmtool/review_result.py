@@ -44,11 +44,17 @@ def _comment_verdict(comment, *, head, version, task):
     if len(lines) < 2:
         return None
     marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
+    developer = task.get('developer')
+    if (marker is not None and marker.group(1) == 'Claude' and
+            type(developer) is dict and developer.get('provider_profile') == 'claude'):
+        return None
     codex_formal_pass = False
     codex_bound = False
     if marker is not None and marker.group(1) == 'Codex':
-        developer = task.get('developer')
-        if type(developer) is not dict or developer.get('provider_profile') != 'claude':
+        if (type(developer) is not dict or
+                developer.get('provider_profile') in ('codex', 'claude') or
+                developer.get('provider_profile') not in
+                ('opencode', 'agy', 'company-gw', 'company-gw-agent', 'gw-agent')):
             return None
         binding = next((match for line in lines[1:]
                         if (match := _CODEX_BINDING.fullmatch(line)) is not None), None)
@@ -68,8 +74,8 @@ def _comment_verdict(comment, *, head, version, task):
     if raw_head != head or int(raw_version) != version:
         return None
     marker_matches = marker is not None and marker.group(2) == status
-    # A Codex PASS is formal only for a Claude-authored Task and the exact
-    # accept and binding lines required by the Codex Reviewer prompt.
+    # A Codex PASS is formal only for a cross-family Task and the exact accept
+    # and binding lines required by the Codex Reviewer prompt.
     if marker_matches and marker.group(1) == 'Codex' and status == 'PASS':
         codex_formal_pass = _codex_formal_pass(
             lines, head=head, version=version, task_id=task['task_id'],

@@ -831,6 +831,8 @@ def add_task_submission_parsers(actions):
                                  help='public GitHub pull request number')
     review_dispatch.add_argument('--version', type=int, default=1,
                                  help='review verdict version (1-9999; default 1)')
+    review_dispatch.add_argument('--reviewer', choices=('claude-reviewer', 'codex-reviewer'),
+                                 help='formal Reviewer (default follows the current mapping)')
     review_result = actions.add_parser(
         'review-result', help='Record the dispatched Reviewer verdict for the original PM')
     review_result.add_argument('task_id', help='existing durable Task ID')
@@ -1063,7 +1065,8 @@ def run_task_review_dispatch(args, *, store=None):
     from .review_dispatch import dispatch_review
     result = dispatch_review(store=TaskStore() if store is None else store,
                              task_id=args.task_id, executor_task=args.executor_task,
-                             pr_number=args.pr, version=getattr(args, 'version', 1))
+                             pr_number=args.pr, version=getattr(args, 'version', 1),
+                             reviewer=getattr(args, 'reviewer', None))
     return _print(result)
 
 

@@ -51,6 +51,54 @@ class ReviewDispatchTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
+    def test_reviewer_family_and_policy_matrix(self):
+        families = ('codex', 'claude', 'opencode', 'agy', 'company-gw',
+                    'company-gw-agent', 'gw-agent')
+        for family in families:
+            for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                with self.subTest(family=family, reviewer=reviewer):
+                    task = {'task_id': TASK, 'developer': {'provider_profile': family}}
+                    reviewer_family = reviewer.removesuffix('-reviewer')
+                    if reviewer_family == family:
+                        for allowed in (True, False):
+                            with patch.object(
+                                    review_dispatch.worker_dispatch, 'evaluate',
+                                    return_value=SimpleNamespace(
+                                        allowed=allowed, reason_code='PAUSED')) as evaluate:
+                                with self.assertRaises(LLMToolError) as raised:
+                                    review_dispatch._select_reviewer(task, reviewer)
+                            self.assertEqual(raised.exception.review_dispatch_code,
+                                             'REVIEWER_SAME_FAMILY')
+                            evaluate.assert_not_called()
+                    else:
+                        with patch.object(
+                                review_dispatch.worker_dispatch, 'evaluate',
+                                return_value=SimpleNamespace(allowed=True)) as evaluate:
+                            self.assertEqual(review_dispatch._select_reviewer(task, reviewer),
+                                             reviewer)
+                        evaluate.assert_called_once_with(reviewer, None, TASK)
+
+                        with patch.object(
+                                review_dispatch.worker_dispatch, 'evaluate',
+                                return_value=SimpleNamespace(
+                                    allowed=False, reason_code='PAUSED')), \
+                                patch.object(review_dispatch.task_completion,
+                                             'read_d6_registration') as read_d6:
+                            with self.assertRaises(LLMToolError) as raised:
+                                review_dispatch._preflight(
+                                    self.store, TASK, 'executor-d6', 42, 1,
+                                    task=task, reviewer=reviewer)
+                        self.assertEqual(raised.exception.review_dispatch_code,
+                                         'REVIEWER_NOT_ALLOWED')
+                        read_d6.assert_not_called()
+
+            with self.subTest(family=family, reviewer='default'):
+                expected = 'codex-reviewer' if family == 'claude' else 'claude-reviewer'
+                with patch.object(
+                        review_dispatch.worker_dispatch, 'evaluate',
+                        return_value=SimpleNamespace(allowed=True)):
+                    self.assertEqual(review_dispatch._select_reviewer(task), expected)
+
     def invoke(self, *, create=None, preflight=None, policy=True, codex_runner=None,
                reviewer_role=None):
         create = create or (lambda **kw: self.created.append(kw))
