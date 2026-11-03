@@ -1469,6 +1469,11 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
              'conclusion': 'success'},
             {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
              'conclusion': 'success'}]}
+        skipped_macos_checks = {'total_count': 2, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'},
+            {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+             'conclusion': 'skipped'}]}
 
         def run_case(*, verdict='PASS', head=HEAD, current=None, gh_code=0,
                      checks=linux_only_checks):
@@ -1506,11 +1511,19 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(result['step'], 'WAITING_CI')
         self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
 
+        result, calls = run_case(checks=skipped_macos_checks)
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+
         labeled = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
                    'labels': [{'name': 'mac-ci'}]}
         result, calls = run_case(current=labeled, checks=green_checks)
         self.assertEqual(result['step'], 'MERGED')
         self.assertFalse(any('--add-label' in call for call in calls))
+
+        result, calls = run_case(current=labeled, checks=skipped_macos_checks)
+        self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
+        self.assertEqual(calls, [])
 
         result, calls = run_case(verdict='FIX')
         self.assertEqual(result['codes'], ['MERGE_REVIEW_NOT_PASS'])
