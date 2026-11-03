@@ -3163,7 +3163,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
-        'provider_type': None, 'model': None,
+        'provider_type': 'gw-agent-cli', 'model': model,
         'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
         'session_id': 'dev-' + new_id(), 'source_sha': snapshot.head,
         'source_sha_binding': 'D6_REGISTRY_OBSERVED', 'read_paths': read_paths,
@@ -3192,25 +3192,33 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
     }
     try:
-        store.compare_and_update(task['task_id'],
+        claimed = store.compare_and_update(task['task_id'],
             expected={'schema_version': 2, 'state': 'PM_RESPONDED', 'developer': None,
                       'completion': None}, developer=developer, completion=completion)
     except TaskStoreConflict:
         raise LLMToolError('developer assignment already exists; duplicate dispatch refused') from None
+    expected_developer = copy.deepcopy(claimed['developer'])
 
     def persist_failure(error_code, *, state='DEVELOPER_UNAVAILABLE'):
+        nonlocal expected_developer
         developer.update(state=state, provider_type='gw-agent-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)
         try:
-            saved = store.update(task['task_id'], developer=developer)
+            saved = store.compare_and_update(
+                task['task_id'], expected={'developer': expected_developer},
+                developer=developer)
         except Exception:
             raise LLMToolError('gw-agent outcome could not be persisted') from None
+        expected_developer = copy.deepcopy(saved['developer'])
         _print(_task_view(saved))
         return 1
 
-    developer.update(state='DEVELOPER_DISPATCHING', provider_type='gw-agent-cli', model=model)
+    developer.update(state='DEVELOPER_DISPATCHING')
     try:
-        store.update(task['task_id'], developer=developer)
+        dispatching = store.compare_and_update(
+            task['task_id'], expected={'developer': expected_developer},
+            developer=developer)
+        expected_developer = copy.deepcopy(dispatching['developer'])
     except worker_dispatch.WorkerDispatchDenied as exc:
         return persist_failure('DEVELOPER_' + exc.dispatch_code)
     try:
@@ -3272,7 +3280,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         usage = _normalize_agy_usage(result.usage)
         if usage is not None:
             usage['served_model'] = served_model
-        developer.update(state='DEVELOPER_RESPONDED', model=served_model, artifact=artifact,
+        developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             usage=usage, error_code=None,
             audit_sha256=audit_sha,
@@ -3290,7 +3298,10 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN', state='BLOCKED')
     try:
-        saved = store.update(task['task_id'], developer=developer, completion=completion)
+        saved = store.compare_and_update(
+            task['task_id'], expected={'developer': expected_developer},
+            developer=developer, completion=completion)
+        expected_developer = copy.deepcopy(saved['developer'])
     except Exception:
         return persist_failure('DEVELOPER_RESULT_PERSISTENCE_REJECTED', state='DEVELOPER_OUTCOME_UNKNOWN')
     if developer['state'] == 'DEVELOPER_RESPONDED':
