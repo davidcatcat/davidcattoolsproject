@@ -382,8 +382,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         original = d6env.validate_registered_worktree
         calls = []
 
-        def validate_then_add_untracked(task_id, root=None):
-            result = original(task_id, root)
+        def validate_then_add_untracked(task_id, root=None, trust=None):
+            result = original(task_id, root, trust)
             calls.append(True)
             if len(calls) == 1:
                 shadow = self.root / "tools" / "llmtool" / "GNUmakefile"
@@ -552,8 +552,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         original = d6env.validate_registered_worktree
         calls = []
 
-        def validate_then_change(task_id, root=None):
-            result = original(task_id, root)
+        def validate_then_change(task_id, root=None, trust=None):
+            result = original(task_id, root, trust)
             calls.append(True)
             if len(calls) == 1:
                 makefile = self.root / "tools" / "llmtool" / "Makefile"
@@ -572,8 +572,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         original = d6env.validate_registered_worktree
         calls = []
 
-        def validate_then_change(task_id, root=None):
-            result = original(task_id, root)
+        def validate_then_change(task_id, root=None, trust=None):
+            result = original(task_id, root, trust)
             calls.append(True)
             if len(calls) == 1:
                 lock = self.root / "tools" / "llmtool" / "worktree-env.lock"

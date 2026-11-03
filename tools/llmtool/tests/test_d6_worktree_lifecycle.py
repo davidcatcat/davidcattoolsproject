@@ -36,6 +36,19 @@ def _actual_cache_fingerprint():
     })
 
 
+def _with_child_trust_home(home, code):
+    """Test-only wrapper: run the exact child code with pw_dir set to ``home``."""
+    return (
+        "import pwd as _fixture_pwd\n"
+        "_fixture_getpwuid = _fixture_pwd.getpwuid\n"
+        "def _fixture_temp_home(uid):\n"
+        "    entry = _fixture_getpwuid(uid)\n"
+        "    return _fixture_pwd.struct_passwd(\n"
+        "        tuple(entry[:5]) + (" + repr(home) + ",) + tuple(entry[6:]))\n"
+        "_fixture_pwd.getpwuid = _fixture_temp_home\n"
+        "exec(compile(" + repr(code) + ", '<string>', 'exec'))\n")
+
+
 class D6WorktreeLifecycleTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -109,6 +122,29 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             side_effect=lambda: self._original_load_trust(home=str(self.trust_home)))
         self._trust_patch.start()
         self.addCleanup(self._trust_patch.stop)
+        self._original_env_load_trust = d6env._load_trust
+        self._env_trust_patch = patch.object(
+            d6env, "_load_trust",
+            side_effect=lambda: self._original_env_load_trust(home=str(self.trust_home)))
+        self._env_trust_patch.start()
+        self.addCleanup(self._env_trust_patch.stop)
+        # Bootstrapped children run the exact approved blob with ``-I -c``; they
+        # read trust only from pwd.getpwuid(...).pw_dir.  The fixture points
+        # that lookup at the temp trust home inside the child, so the real
+        # ~/.config/llmtool/trust.json is never read and product code keeps no
+        # env/CLI location override.
+        real_run = subprocess.run
+        trust_home = str(self.trust_home)
+
+        def run_with_temp_trust_home(argv, *args, **kwargs):
+            if isinstance(argv, list) and argv[:4] == [sys.executable, "-B", "-I", "-c"]:
+                argv = argv[:4] + [_with_child_trust_home(trust_home, argv[4])] + argv[5:]
+            return real_run(argv, *args, **kwargs)
+
+        self._child_trust_patch = patch.object(
+            lifecycle.subprocess, "run", side_effect=run_with_temp_trust_home)
+        self._child_trust_patch.start()
+        self.addCleanup(self._child_trust_patch.stop)
         self._script_path_patch = patch.object(
             lifecycle, "__file__",
             str(self.source / "tools" / "llmtool" / "scripts" /
@@ -991,7 +1027,8 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             script = root / "tools" / "llmtool" / "scripts" / "d6_worktree_env.py"
             with patch.object(d6env, "__file__", str(script)):
                 return d6env.main(["--task-id", task_id,
-                                   "--worktree-root", str(root)])
+                                   "--worktree-root", str(root),
+                                   "--trust-sha256", d6env._load_trust()["sha256"]])
         finally:
             os.chdir(previous)
 
@@ -1142,7 +1179,7 @@ class GitTimeoutTests(unittest.TestCase):
             root = Path(os.path.realpath(tmp))
             trusted = root / "tools" / "llmtool" / "scripts" / "d6_worktree_lifecycle.py"
             with patch.object(lifecycle, "_load_trust", return_value={
-                    "canonical_root": str(root), "tasks_root": str(self.tasks),
+                    "canonical_root": str(root), "tasks_root": str(root / "tasks"),
                     "origins": frozenset(("git@github.com:davidcatcat/davidcattoolsproject.git",)),
                     "sha256": "a" * 64}), \
                     patch.object(lifecycle, "__file__", str(trusted)), \
