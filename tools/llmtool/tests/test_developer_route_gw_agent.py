@@ -277,6 +277,37 @@ class GwAgentRouteTests(unittest.TestCase):
         quota_error = run('MODEL_ERROR', 'HTTP_429', 4)
         self.assertEqual(quota_error.code, 'GW_AGENT_QUOTA_EXHAUSTED')
 
+    def test_setup_route_errors_are_preserved_and_private_tmp_is_removed(self):
+        cases = (
+            ('prepare_files', RouteError('GW_AGENT_CONFIG_INVALID',
+                                         facts={'detail': 'must not escape'})),
+            ('build_env', RouteError('GW_AGENT_CREDENTIAL_MISSING',
+                                     facts={'detail': 'must not escape'})),
+            ('build_argv', ValueError('must not escape')),
+        )
+        for method, failure in cases:
+            private_dirs = []
+            real_mkdtemp = tempfile.mkdtemp
+
+            def record_mkdtemp(*args, **kwargs):
+                path = real_mkdtemp(*args, **kwargs)
+                private_dirs.append(path)
+                return path
+
+            with self.subTest(method=method), \
+                    mock.patch.object(self.route, method, side_effect=failure), \
+                    mock.patch('llmtool.developer_routes.base.tempfile.mkdtemp',
+                               side_effect=record_mkdtemp):
+                with self.assertRaises(RouteError) as caught:
+                    run_route(self.route, self.request(), gate=lambda: True,
+                              runner=lambda *args: (0, b'', b''),
+                              boundary=Boundary(), snapshot=capture_snapshot)
+                expected = (failure.code if isinstance(failure, RouteError)
+                            else 'GW_AGENT_REQUEST_INVALID')
+                self.assertEqual(caught.exception.code, expected)
+                self.assertEqual(len(private_dirs), 1)
+                self.assertFalse(Path(private_dirs[0]).exists())
+
     def test_audit_verifier_rejects_self_declared_digest_on_broken_chain(self):
         with tempfile.TemporaryDirectory() as temp:
             result_path = Path(temp) / 'result.json'

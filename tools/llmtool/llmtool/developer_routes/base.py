@@ -520,6 +520,9 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
         route.prepare_files(private_tmp, value)
         env = route.build_env(private_tmp)
         argv = list(prefix) + route.build_argv(value['executable'], value)
+    except RouteError:
+        shutil.rmtree(private_tmp, ignore_errors=True)
+        raise
     except Exception:
         shutil.rmtree(private_tmp, ignore_errors=True)
         raise RouteError(_route_code(route, 'REQUEST_INVALID')) from None
