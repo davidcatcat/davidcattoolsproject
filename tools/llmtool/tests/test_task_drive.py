@@ -129,6 +129,39 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(result['steps'], 2)
         self.assertEqual([call['merge'] for call in calls], [False, True])
 
+    def test_merge_waits_for_mac_ci_then_retries_merge(self):
+        pauses = []
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'result': {'pr': 17, 'head': 'a' * 40}, 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'result': {'pr': 17, 'head': 'a' * 40}, 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ])
+
+        result = task_drive.drive(task_id='t', merge=True, max_steps=8,
+                                  poll_seconds=0.25, advance_call=advance,
+                                  sleep=pauses.append)
+
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual([call['merge'] for call in calls],
+                         [False, True, False, True, False, True])
+        self.assertEqual(pauses, [0.25, 0.25])
+
+    def test_waiting_ci_without_merge_does_not_attempt_merge(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+        ])
+
+        result = task_drive.drive(task_id='t', merge=False, max_steps=1,
+                                  advance_call=advance)
+
+        self.assertEqual(result['step'], 'MAX_STEPS')
+        self.assertEqual([call['merge'] for call in calls], [False])
+
     def test_repeated_review_not_ready_stops_at_bounded_poll_attempts(self):
         pauses = []
         advance, calls = self.adapter([

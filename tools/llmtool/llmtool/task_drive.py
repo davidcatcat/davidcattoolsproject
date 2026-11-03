@@ -91,6 +91,14 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             if type(merged) is not dict:
                 return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
                         'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
+            # A skipped or missing Mac check asks the existing merge path to
+            # apply mac-ci and wait for the replacement run. Poll the Task
+            # again so a later successful exact-head Mac run can reach merge.
+            if merged.get('step') == 'WAITING_CI':
+                if attempts >= max_steps:
+                    break
+                pause(poll_seconds)
+                continue
             return dict(merged, steps=completed)
         if step == 'MERGE_OWNER_ACCEPTANCE_MANUAL' or 'MERGE_OWNER_ACCEPTANCE_MANUAL' in codes:
             return dict(result, steps=completed)

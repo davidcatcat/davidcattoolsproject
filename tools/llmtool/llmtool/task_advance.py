@@ -257,8 +257,10 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
             if labeled is None or getattr(labeled, 'returncode', 1) != 0:
                 return _merge_refusal('MERGE_MAC_CI_LABEL_FAILED')
             return {'step': 'WAITING_CI', 'codes': [], 'result': {'pr': number, 'head': head}}
-        code = ('MERGE_MACOS_CHECK_REQUIRED' if code == 'MERGE_MACOS_CHECK_SKIPPED' else
-                'MERGE_REQUIRED_CHECK_MISSING')
+        # The label can start a replacement Mac run for a missing or skipped
+        # check. Keep waiting on subsequent merge polls without issuing the
+        # label command again; a failed Mac run was rejected above.
+        return {'step': 'WAITING_CI', 'codes': [], 'result': {'pr': number, 'head': head}}
     if code:
         return _merge_refusal(code)
     prior = record.get('merge_attempt')
