@@ -92,11 +92,24 @@ def _summary(record):
     latest = events[-1] if events and type(events[-1]) is dict else None
     claim = record.get('review_dispatch_claim')
     if type(claim) is list:
-        claim_state = claim[-1].get('state') if claim and type(claim[-1]) is dict else 'UNKNOWN'
+        claim = claim[-1] if claim and type(claim[-1]) is dict else None
+        claim_state = claim.get('state') if claim is not None else 'UNKNOWN'
     elif type(claim) is dict:
         claim_state = claim.get('state', 'UNKNOWN')
     else:
+        claim = None
         claim_state = 'NONE'
+    if claim_state == 'DISPATCHED' and type(claim.get('head_sha')) is str and \
+            type(claim.get('version')) is int:
+        reviewer_event = next((event for event in events
+                               if type(event) is dict and
+                               event.get('source') == 'REVIEWER' and
+                               event.get('source_sha') == claim['head_sha'] and
+                               event.get('version') == claim['version']), None)
+        if reviewer_event is not None:
+            outcome = reviewer_event.get('outcome') or reviewer_event.get('state')
+            if type(outcome) is str:
+                claim_state = outcome
     completion = record.get('completion')
     completion = completion if type(completion) is dict else {}
     return {

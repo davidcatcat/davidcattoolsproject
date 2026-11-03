@@ -321,7 +321,7 @@ class MacTestIdSelectionTests(unittest.TestCase):
                 "L1",
                 MAC_REQUIRED | {
                     "test_chat_tui", "test_chat_tui_scenarios",
-                    "test_chat_tui_theme", "test_chat_tui_layout",
+                    "test_chat_tui_theme", "test_chat_tui_layout", "test_chat_tui_pm",
                 },
                 None,
             ),

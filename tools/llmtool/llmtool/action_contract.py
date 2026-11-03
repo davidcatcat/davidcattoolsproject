@@ -71,11 +71,24 @@ def _identifier(value):
 _DENIED_PARTS = frozenset(('.git', '.ssh', '.aws', '.kube', '.codex', '.claude',
     '.gnupg', '.azure', '.docker', '.password-store', '.env', '.netrc', '.npmrc',
     '.pypirc', '.pgpass', '.git-credentials', '.vault-token', 'id_rsa', 'id_dsa',
-    'id_ecdsa', 'id_ed25519', 'credentials.json', 'kubeconfig'))
+    'id_ecdsa', 'id_ed25519', 'credentials.json', 'kubeconfig', '.gitmodules',
+    '.gitattributes', '.lfsconfig'))
+
+
+def _path_collision_key(path):
+    return unicodedata.normalize('NFC', path).casefold()
+
+
+def _unique_path_spellings(paths):
+    keys = tuple(_path_collision_key(path) for path in paths)
+    if len(set(keys)) != len(keys):
+        _invalid()
 
 
 def _path(value, absolute=False):
     _text(value)
+    if unicodedata.normalize('NFC', value) != value:
+        _invalid()
     if value.startswith('/') != absolute or value.endswith('/') or value == '/':
         _invalid()
     parts = value[1:].split('/') if absolute else value.split('/')
@@ -88,6 +101,8 @@ def _path(value, absolute=False):
                 lower.endswith(('.pem', '.key', '.p12', '.pfx')) or
                 any(not (c.isalnum() or c in '._-') for c in part)):
             _invalid()
+    if len(parts) >= 2 and parts[0].casefold() == '.github' and parts[1].casefold() == 'workflows':
+        _invalid()
     if any(parts[i].lower() == '.config' and parts[i+1].lower() in
            ('llmtool', 'gh', 'gcloud') for i in range(len(parts)-1)):
         _invalid()
@@ -106,6 +121,7 @@ def _scope(value):
     value = _collection(value, str)
     for path in value:
         _path(path)
+    _unique_path_spellings(value)
     if tuple(sorted(set(value))) != value:
         _invalid()
     return value
@@ -256,6 +272,7 @@ class FileExpectation(ContractValue):
 def _files(value):
     value = _collection(value, FileExpectation)
     paths = tuple(item.path for item in value)
+    _unique_path_spellings(paths)
     if tuple(sorted(set(paths))) != paths:
         _invalid()
     if sum(item.state.metadata.size for item in value if item.state.exists) > MAX_CONTENT_BYTES:

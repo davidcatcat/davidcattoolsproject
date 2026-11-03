@@ -495,7 +495,7 @@ class Terminal:
         self.wait_text("/pm connect connects to it", "/pm new binding")
         self.submit("/pm connect")
         self.wait_text("PM mode", "/pm connect")
-        self.wait_text("PM 歷史", "/pm connect history")
+        self.wait_text("上次對話（", "/pm connect history")
 
 
 class CPUBurner:

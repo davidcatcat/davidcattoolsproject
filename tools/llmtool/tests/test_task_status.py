@@ -48,6 +48,30 @@ def record(root, **extra):
 
 
 class TaskStatusTests(unittest.TestCase):
+    def test_dispatched_review_claim_uses_matching_reviewer_outcome(self):
+        claim = {'state': 'DISPATCHED', 'head_sha': 'a' * 40, 'version': 3}
+
+        def summary(*, claim_value=claim, events=()):
+            return task_status._summary({
+                'task_id': '1' * 32,
+                'review_dispatch_claim': claim_value,
+                'completion_events': list(events),
+            })['review_claim_state']
+
+        matching = {
+            'source': 'REVIEWER', 'source_sha': 'a' * 40, 'version': 3,
+            'outcome': 'REVIEW_PASS',
+        }
+        self.assertEqual(summary(events=(matching,)), 'REVIEW_PASS')
+        self.assertEqual(summary(events=({**matching, 'outcome': 'REVIEW_FIX'},)),
+                         'REVIEW_FIX')
+        self.assertEqual(summary(events=({**matching, 'source_sha': 'b' * 40},)),
+                         'DISPATCHED')
+        self.assertEqual(summary(events=({**matching, 'version': 4},)), 'DISPATCHED')
+        self.assertEqual(summary(claim_value={**claim, 'state': 'COMPLETED'},
+                                 events=(matching,)), 'COMPLETED')
+        self.assertEqual(summary(claim_value=None), 'NONE')
+
     def test_derived_states(self):
         with tempfile.TemporaryDirectory() as root:
             base = record(root)
