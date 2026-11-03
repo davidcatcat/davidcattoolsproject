@@ -247,10 +247,70 @@ class WidgetTests(Base):
     def test_starts_without_provider_call_and_exits_cleanly(self):
         ui, result = self.drive([])
         self.assertEqual(result, 0)
-        self.assertIn('LLMTool interactive chat (full-screen)', ui.conversation.text)
+        self.assertTrue(ui.conversation.text.startswith('LLMTool ' + chat_tui.__version__))
+        self.assertIn('interactive chat (full-screen)', ui.conversation.text)
         self.assertIn('History stays in memory.', ui.conversation.text)
         self.assertIn('provider: first', ui.conversation.text)
         self.factory.assert_not_called()
+
+    def test_opening_banner_has_version_and_optional_source_revision(self):
+        with patch.object(chat_tui, '_source_revision', return_value=None):
+            ui, _ = self.drive([])
+        self.assertEqual(ui.conversation.text.splitlines()[0],
+                         'LLMTool ' + chat_tui.__version__ + ' interactive chat (full-screen)')
+        with patch.object(chat_tui, '_source_revision', return_value='12345678'):
+            ui, _ = self.drive([])
+        self.assertEqual(ui.conversation.text.splitlines()[0],
+                         'LLMTool ' + chat_tui.__version__
+                         + ' (12345678) interactive chat (full-screen)')
+        self.assertNotIn(str(Path(__file__).resolve().parents[2]), ui.conversation.text)
+
+    def test_source_revision_reads_git_metadata_without_running_a_process(self):
+        revision = '1234567890abcdef1234567890abcdef12345678'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'source'
+            package = root / 'tools' / 'llmtool' / 'llmtool'
+            package.mkdir(parents=True)
+            module = package / 'chat_tui.py'
+            module.touch()
+            git = root / '.git'
+            git.mkdir()
+            (git / 'HEAD').write_text('ref: refs/heads/main\n')
+            ref = git / 'refs' / 'heads' / 'main'
+            ref.parent.mkdir(parents=True)
+            ref.write_text(revision + '\n')
+            with patch('subprocess.run', side_effect=AssertionError('must not run Git')):
+                self.assertEqual(chat_tui._source_revision(module), '12345678')
+
+            ref.unlink()
+            (git / 'packed-refs').write_text('# pack-refs\n' + revision + ' refs/heads/main\n')
+            with patch('subprocess.run', side_effect=AssertionError('must not run Git')):
+                self.assertEqual(chat_tui._source_revision(module), '12345678')
+
+            (git / 'HEAD').unlink()
+            (git / 'packed-refs').unlink()
+            (git / 'refs' / 'heads' / 'main').unlink(missing_ok=True)
+            (git / 'refs' / 'heads').rmdir()
+            (git / 'refs').rmdir()
+            git.rmdir()
+            worktree_git = Path(temp) / 'worktree-git'
+            worktree_git.mkdir()
+            (worktree_git / 'HEAD').write_text(revision + '\n')
+            (root / '.git').write_text('gitdir: ' + str(worktree_git) + '\n')
+            self.assertEqual(chat_tui._source_revision(module), '12345678')
+
+            (root / '.git').unlink()
+            (root / '.git').symlink_to(worktree_git, target_is_directory=True)
+            self.assertIsNone(chat_tui._source_revision(module))
+
+    def test_source_revision_is_omitted_when_git_metadata_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'source'
+            package = root / 'llmtool'
+            package.mkdir(parents=True)
+            module = package / 'chat_tui.py'
+            module.touch()
+            self.assertIsNone(chat_tui._source_revision(module))
 
     def test_pm_ghost_hints_render_after_the_cursor_without_editing_input(self):
         seen = {}
@@ -3963,6 +4023,9 @@ class PMConversationTests(BoundedPMTest):
         first_id = bindings[-1]['native_session_id']
         ui, _ = self.drive(['/pm use ' + first_id[:8] + '\r'])
         self.assertEqual(self.api.current_binding()['native_session_id'], first_id)
+        self.assertIn('PM selected: claude-code account default · ' + first_id[:8]
+                      + '; /pm connect to connect', ui.conversation.text)
+        self.assertNotIn(first_id, ui.conversation.text.split('PM selected:')[-1])
 
     def test_pm_accounts_guidance_named_checks_and_invalid_options(self):
         ui, _ = self.drive(['/pm accounts\r', '/pm accounts --check\r'])
