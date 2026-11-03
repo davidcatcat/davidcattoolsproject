@@ -178,12 +178,15 @@ def _failed_event(task, *, executor_task, pr_number, github_get):
         if (type(event) is not dict or event.get('source') != 'REVIEWER' or
                 event.get('state') != 'PENDING'):
             continue
-        claim = next((item for item in claims if type(item) is dict and
-                      item.get('executor_task') == executor_task and
-                      item.get('pr') == pr_number and item.get('head_sha') == event.get('source_sha') and
-                      event.get('session_id') == 'review-' + event.get('event_id')),
-                     None)
-        if claim is not None:
+        matching_claims = [item for item in claims if type(item) is dict and
+                           item.get('executor_task') == executor_task and
+                           item.get('pr') == pr_number and
+                           item.get('head_sha') == event.get('source_sha') and
+                           type(item.get('version')) is int and
+                           1 <= item['version'] <= 9999 and
+                           event.get('session_id') == 'review-' + event.get('event_id')]
+        if matching_claims:
+            claim = max(matching_claims, key=lambda item: item['version'])
             candidates.append((event.get('received_at', ''), event, claim))
     if not candidates:
         _refuse('REVIEW_FAIL_EVENT_MISSING')
