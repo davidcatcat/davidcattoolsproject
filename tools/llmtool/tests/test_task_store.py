@@ -271,9 +271,14 @@ class TaskStoreTests(unittest.TestCase):
         self.store.update(task['task_id'], repair_cap_override=valid)
         self.assertEqual(self.store.get(task['task_id'])['repair_cap_override'], valid)
         for invalid in (
+                None,
+                {'ref': 7, 'rounds': 3,
+                 'recorded_at': '2026-11-04T00:00:00Z'},
                 {'ref': 'http://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
                  'rounds': 3, 'recorded_at': '2026-11-04T00:00:00Z'},
                 {'ref': valid['ref'], 'rounds': True,
+                 'recorded_at': '2026-11-04T00:00:00Z'},
+                {'ref': valid['ref'], 'rounds': 2,
                  'recorded_at': '2026-11-04T00:00:00Z'},
                 {'ref': valid['ref'], 'rounds': 3, 'recorded_at': 'bad'},
                 {'ref': valid['ref'], 'rounds': 3,
@@ -284,10 +289,11 @@ class TaskStoreTests(unittest.TestCase):
             malformed = dict(self.store.get(task['task_id']),
                              repair_cap_override=invalid)
             malformed['record_sha256'] = task_store_module._digest(malformed)
-            with self.subTest(invalid=invalid), self.assertRaises(LLMToolError) as caught:
-                task_store_module._validate(malformed)
-            self.assertEqual(caught.exception.task_store_error_code,
-                             'TASK_REPAIR_CAP_OVERRIDE_INVALID')
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(LLMToolError) as caught:
+                    task_store_module._validate(malformed)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_REPAIR_CAP_OVERRIDE_INVALID')
 
         for pr, head in ((True, 'a' * 40), (0, 'a' * 40), (425, 'bad')):
             with self.subTest(pr=pr, head=head), self.assertRaises(LLMToolError) as caught:

@@ -798,7 +798,10 @@ def _validate(record):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
     published_pr = record.get('published_pr') if type(record) is dict else None
-    repair_cap_override = record.get('repair_cap_override') if type(record) is dict else None
+    repair_cap_override_present = (type(record) is dict and
+                                   'repair_cap_override' in record)
+    repair_cap_override = (record.get('repair_cap_override')
+                           if repair_cap_override_present else None)
     keys.discard('merge_attempt')
     keys.discard('published_pr')
     keys.discard('repair_cap_override')
@@ -852,14 +855,14 @@ def _validate(record):
                 re.fullmatch(r'[0-9a-f]{40}', published_pr['head_sha']) is None or
                 not _valid_utc_seconds(published_pr.get('recorded_at'))):
             _fail('TASK_PUBLISHED_PR_INVALID')
-    if repair_cap_override is not None:
+    if repair_cap_override_present:
         ref = repair_cap_override.get('ref') if type(repair_cap_override) is dict else None
         if (type(repair_cap_override) is not dict or
                 set(repair_cap_override) != frozenset(('ref', 'rounds', 'recorded_at')) or
                 type(ref) is not str or len(ref) > 512 or
                 re.fullmatch(r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/(?:issues|pull)/[1-9][0-9]*#issuecomment-[1-9][0-9]*', ref) is None or
                 type(repair_cap_override.get('rounds')) is not int or
-                not 1 <= repair_cap_override['rounds'] <= 1024 or
+                not 3 <= repair_cap_override['rounds'] <= 1024 or
                 not _valid_utc_seconds(repair_cap_override.get('recorded_at'))):
             _fail('TASK_REPAIR_CAP_OVERRIDE_INVALID')
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or

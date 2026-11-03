@@ -3987,6 +3987,9 @@ def _delegate_high_debug_ref(value):
 
 
 def _enforce_delegate_repair_cap(args, store):
+    if (not isinstance(store, TaskStore) or
+            not hasattr(args, 'task_id') or not hasattr(args, 'executor_task')):
+        return
     high_debug_ref = getattr(args, 'high_debug_ref', None)
     if high_debug_ref is not None and not _delegate_high_debug_ref(high_debug_ref):
         raise LLMToolError('DELEGATE_HIGH_DEBUG_REF_INVALID')
@@ -4022,7 +4025,6 @@ def _enforce_delegate_repair_cap(args, store):
 
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
-    _enforce_delegate_repair_cap(args, store)
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
@@ -4077,6 +4079,7 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
         if registration.task_id != getattr(args, 'executor_task', None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+        _enforce_delegate_repair_cap(args, store)
         return _run_background_delegate(
             args, provider=provider, store=store,
             d6_binding=(registration, _snapshot))
@@ -4086,17 +4089,21 @@ def run_task_delegate(args, *, store=None):
         if getattr(args, 'owner_ref', None) is None:
             raise LLMToolError('--provider agy requires --owner-ref')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
+        _enforce_delegate_repair_cap(args, store)
         return run_task_agy_delegate(args, store=store)
     if args.provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
+        _enforce_delegate_repair_cap(args, store)
         return run_task_gw_agent_delegate(args, store=store)
     _validate_acceptance_scope(args.acceptance)
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
+        _enforce_delegate_repair_cap(args, store)
         return run_task_codex_delegate(args, store=store)
     if args.provider == 'opencode':
+        _enforce_delegate_repair_cap(args, store)
         return run_task_opencode_delegate(args, store=store)
     if args.provider not in ('company-gw', 'codex'):
         raise LLMToolError('unsupported Developer route')
@@ -4143,6 +4150,7 @@ def run_task_delegate(args, *, store=None):
                                  separators=(',', ':')).encode('utf-8'))
     if input_bytes > REQUEST_LIMIT:
         raise LLMToolError('developer request exceeds the supported size')
+    _enforce_delegate_repair_cap(args, store)
     developer = {
         'assignment_id': new_id(), 'selection_source': args.selection_source,
         'state': 'DEVELOPER_PENDING', 'provider_profile': args.provider,
