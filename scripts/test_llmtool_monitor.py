@@ -1228,6 +1228,9 @@ POLICY_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/28
 GW_AGENT_EVIDENCE = "https://github.com/davidcatcat/davidcattoolsproject/issues/120"
 GW_AGENT_ENTRY = {"dispatch": "PAUSED", "decided_by": "PM", "decided_at": "2026-11-03",
                   "reason": "test", "evidence": GW_AGENT_EVIDENCE}
+GW_AGENT_OWNER_EVIDENCE = GW_AGENT_EVIDENCE + "#issuecomment-6594101520"   # #120 D1 = A
+GW_AGENT_OWNER_ALLOWED = {"dispatch": "ALLOWED", "decided_by": "Owner",
+                          "evidence": GW_AGENT_OWNER_EVIDENCE}
 
 
 def policy(workers):
@@ -1321,7 +1324,35 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
             "unhashable switch": {"agy": {"dispatch": []}},
             "object switch": {"agy": {"dispatch": {}}},
             "date not a string": {"agy": {"decided_at": 20261022}},
-            # company-gw-agent: only PAUSED + PM + exactly issues/120 (#120 WP3b)
+            # company-gw-agent: only PAUSED + PM + exactly issues/120 (#120 WP3b),
+            # or ALLOWED + Owner + exactly the D1 = A comment (#120)
+            "gw-agent allowed by Owner D1": {"company-gw-agent": dict(GW_AGENT_OWNER_ALLOWED)},
+            "gw-agent allowed by Owner D1 + assignment": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, owner_assignments=[good])},
+            "gw-agent allowed by PM D1": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, decided_by="PM")},
+            "gw-agent paused by Owner D1": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, dispatch="PAUSED")},
+            "gw-agent paused by Owner bare #120": {"company-gw-agent": {"decided_by": "Owner"}},
+            "gw-agent assignment only by Owner D1": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, dispatch="OWNER_ASSIGNMENT_ONLY")},
+            "gw-agent paused by PM D1": {"company-gw-agent": {"evidence": GW_AGENT_OWNER_EVIDENCE}},
+            "gw-agent allowed by Owner bare #120": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE)},
+            "gw-agent allowed by Owner other comment": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE + "#issuecomment-6594101521")},
+            "gw-agent allowed by Owner comment +1 digit": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE + "0")},
+            "gw-agent allowed by Owner comment -1 digit": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE[:-1])},
+            "gw-agent allowed by Owner comment trailing slash": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_OWNER_EVIDENCE + "/")},
+            "gw-agent allowed by Owner comment on #1200": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED,
+                evidence=GW_AGENT_EVIDENCE + "0#issuecomment-6594101520")},
+            "gw-agent allowed by Owner lower-case switch": {"company-gw-agent": dict(
+                GW_AGENT_OWNER_ALLOWED, dispatch="allowed")},
+            "other key Owner D1 comment": {"company-gw": {"evidence": GW_AGENT_OWNER_EVIDENCE}},
             "gw-agent missing": {"company-gw-agent": None},
             "gw-agent allowed": {"company-gw-agent": {"dispatch": "ALLOWED"}},
             "gw-agent assignment only": {"company-gw-agent": {"dispatch": "OWNER_ASSIGNMENT_ONLY"}},
@@ -1365,8 +1396,25 @@ class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
             with self.subTest(label):
                 self.agree(raw.encode())
         self.assertEqual(mon.worker_dispatch(json.dumps(policy({})).encode())[1], "")
+        for label in ("gw-agent allowed by Owner D1", "gw-agent allowed by Owner D1 + assignment"):
+            with self.subTest(must_accept=label):
+                self.assertTrue(self.agree(json.dumps(policy(cases[label])).encode()))
+        switches, problem = mon.worker_dispatch(
+            json.dumps(policy(cases["gw-agent allowed by Owner D1"])).encode())
+        self.assertEqual(problem, "")
+        self.assertEqual(switches["company-gw-agent"][:2], ("ALLOWED", "Owner"))
         for label in ("gw-agent allowed", "gw-agent by Owner", "gw-agent PM #289",
-                      "other key PM #120 paused", "gw-agent missing"):
+                      "other key PM #120 paused", "gw-agent missing",
+                      "gw-agent allowed by PM D1", "gw-agent paused by Owner D1",
+                      "gw-agent paused by Owner bare #120", "gw-agent assignment only by Owner D1",
+                      "gw-agent paused by PM D1", "gw-agent allowed by Owner bare #120",
+                      "gw-agent allowed by Owner other comment",
+                      "gw-agent allowed by Owner comment +1 digit",
+                      "gw-agent allowed by Owner comment -1 digit",
+                      "gw-agent allowed by Owner comment trailing slash",
+                      "gw-agent allowed by Owner comment on #1200",
+                      "gw-agent allowed by Owner lower-case switch",
+                      "other key Owner D1 comment"):
             with self.subTest(must_reject=label):
                 self.assertEqual(mon.worker_dispatch(json.dumps(policy(cases[label])).encode())[1],
                                  "rejected")
@@ -3539,6 +3587,25 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(no_cli["opencode developer"].detail,
                          "Owner 暫停派工（10-22）；本 repo 最近一次：認證失敗（401），需要重新登入")
         self.assertEqual(no_cli["opencode developer"].state, mon.PAUSED)
+
+    def test_company_gw_agent_owner_allowed_shows_as_dispatchable(self):
+        # #120 D1 = A: the Owner's exact decision comment opens the gw Agent route.
+        switches = self._dispatch({"company-gw-agent": dict(GW_AGENT_OWNER_ALLOWED)})
+        rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None, dispatch=switches))
+        row = rows["公司 gw agent"]
+        self.assertEqual((row.state, row.detail, row.authority), (mon.IDLE, "可派工", "Owner"))
+        # Any other comment on #120 fails closed for every Worker.
+        other = self._dispatch({"company-gw-agent": dict(
+            GW_AGENT_OWNER_ALLOWED, evidence=GW_AGENT_EVIDENCE + "#issuecomment-6594101521")})
+        rows = self.by_name(mon.office_rows([], self.NOW, codex_root=str(self.codex),
+                                            claude_root=str(self.claude),
+                                            canonical=self.canonical, opencode_db="/nonexistent",
+                                            cwd_of=lambda pid: None, dispatch=other))
+        self.assertEqual(rows["公司 gw agent"].state, mon.UNCHECKED)
+        self.assertEqual(rows["公司 gw"].state, mon.UNCHECKED)
 
     def test_company_gw_row_reads_llmtool_outcomes_never_request_or_response(self):
         tasks = Path(tempfile.mkdtemp(dir=self.tmp.name))
