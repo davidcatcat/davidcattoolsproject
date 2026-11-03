@@ -122,6 +122,44 @@ def _read_trust_bytes(home, uid):
 # END llmtool-trust-reader v1
 
 
+# BEGIN llmtool-trust-roots v1
+def _validate_roots(value, uid, home):
+    roots, infos = [], []
+    for key in ("canonical_root", "workspace_root", "tasks_root"):
+        path = value[key]
+        try:
+            info = os.stat(path, follow_symlinks=False)
+            real = os.path.realpath(path)
+        except OSError:
+            _fail("TRUST_PATH_INVALID")
+        if (not stat.S_ISDIR(info.st_mode) or real != path or info.st_uid != uid or
+                stat.S_IMODE(info.st_mode) & 0o022):
+            _fail("TRUST_PATH_INVALID")
+        roots.append(path)
+        infos.append(info)
+    canonical, workspace, tasks = roots
+    if _overlap(canonical, workspace):
+        _fail("TRUST_PATHS_OVERLAP")
+    if not _strict_child(tasks, workspace) or stat.S_IMODE(infos[2].st_mode) & 0o022:
+        _fail("TRUST_PATHS_OVERLAP")
+    config_dir = os.path.join(home, ".config", "llmtool")
+    for root in roots:
+        if root == home or _overlap(config_dir, root):
+            _fail("TRUST_PATHS_OVERLAP")
+
+
+def _strict_child(path, parent):
+    try:
+        return os.path.commonpath((path, parent)) == parent and path != parent
+    except ValueError:
+        return False
+
+
+def _overlap(left, right):
+    return left == right or _strict_child(left, right) or _strict_child(right, left)
+# END llmtool-trust-roots v1
+
+
 def _load_trust(home=None):
     """Trust ``canonical_root``/``workspace_root`` (#369 PR-7), failing closed."""
     if os.name != "posix" or sys.platform.startswith("win"):
@@ -157,15 +195,22 @@ def _load_trust(home=None):
                                "tasks_root", "repository", "ci_trust", "tools"} or
                 type(value["schema_version"]) is not int or value["schema_version"] != 1):
             _fail("TRUST_SCHEMA_INVALID")
-        roots = (value["canonical_root"], value["workspace_root"])
-        if any(type(item) is not str or not os.path.isabs(item) or
-               os.path.normpath(item) != item for item in roots):
+        roots = (value["canonical_root"], value["workspace_root"], value["tasks_root"])
+        if any(type(item) is not str or not 1 <= len(item) <= 1024 or
+               any(ord(char) < 0x20 or ord(char) > 0x7e for char in item) or
+               not os.path.isabs(item) or os.path.normpath(item) != item
+               for item in roots):
             _fail("TRUST_SCHEMA_INVALID")
+        # Same physical-path, ownership, mode and overlap checks as trust.load_trust:
+        # a symlinked or shared root must not let private_write miss the deny-list.
+        _validate_roots(value, os.getuid(), home)
     except TrustError:
         raise
     except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
         _fail("TRUST_MALFORMED")
-    return tuple(Path(item) for item in roots)
+    # tasks_root is validated as a strict child of workspace_root, so the two
+    # protected roots cover it.
+    return tuple(Path(item) for item in roots[:2])
 
 
 class Rejected(Exception):

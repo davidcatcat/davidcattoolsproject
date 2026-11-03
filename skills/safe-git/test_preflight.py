@@ -381,6 +381,96 @@ class PreflightTests(unittest.TestCase):
         for output in (result.stdout, result.stderr):
             self.assertNotIn(str(self.home).encode(), output)
 
+    def trust_with(self, **roots):
+        value = {
+            "schema_version": 1, "canonical_root": str(self.trust_canonical),
+            "workspace_root": str(self.trust_workspace),
+            "tasks_root": str(self.trust_workspace / "tasks"),
+            "repository": {}, "ci_trust": {}, "tools": {}}
+        value.update(roots)
+        self.write_trust(value)
+
+    def assert_trust_rejected(self, code):
+        with self.assertRaises(gate.TrustError) as caught:
+            gate._load_trust()
+        self.assertEqual(caught.exception.code, code)
+
+    def test_symlinked_trust_root_rejected_before_any_write(self):
+        # v1 FIX: a root spelled through a symlink would let private_write compare
+        # the symlink spelling and miss outputs under the physical repository.
+        link = self.parent / "canonical-link"
+        link.symlink_to(self.root, target_is_directory=True)
+        target = self.root / "private" / "candidate.json"
+        (self.root / "private").mkdir(mode=0o700)
+        self.trust_with(canonical_root=str(link))
+        self.assert_trust_rejected("TRUST_PATH_INVALID")
+        for args in (self.candidate_args(target), self.args + ["--report", str(target)]):
+            result = self.invoke(args)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stderr, b"STOP: preflight rejected (TRUST_PATH_INVALID)\n")
+        self.assertFalse(target.exists())
+        # A symlinked ancestor is refused the same way (realpath != configured path).
+        parent_link = self.parent / "workspace-parent-link"
+        parent_link.symlink_to(self.trust_workspace.parent, target_is_directory=True)
+        self.trust_with(workspace_root=str(parent_link / "workspace"),
+                        tasks_root=str(parent_link / "workspace" / "tasks"))
+        self.assert_trust_rejected("TRUST_PATH_INVALID")
+        # Control: the physical spelling of the same repository is a valid root and
+        # then denies the write under it.
+        self.trust_with(canonical_root=str(self.root))
+        self.assertEqual(gate._load_trust()[0], self.root)
+        self.assert_stop(self.invoke(self.candidate_args(target)))
+        self.assertFalse(target.exists())
+
+    def test_overlapping_trust_roots_rejected(self):
+        canonical = str(self.trust_canonical)
+        workspace = str(self.trust_workspace)
+        nested = self.trust_canonical / "workspace"
+        (nested / "tasks").mkdir(mode=0o700, parents=True)
+        cases = {
+            "same": dict(workspace_root=canonical, tasks_root=str(self.trust_canonical / "x")),
+            "workspace inside canonical": dict(workspace_root=str(nested),
+                                               tasks_root=str(nested / "tasks")),
+            "canonical inside workspace": dict(canonical_root=str(self.trust_workspace / "tasks")),
+            "tasks equals workspace": dict(tasks_root=workspace),
+            "tasks outside workspace": dict(tasks_root=canonical),
+            "root is home": dict(canonical_root=str(self.home)),
+            "root contains trust config": dict(canonical_root=str(self.home.parent)),
+        }
+        (self.trust_canonical / "x").mkdir(mode=0o700)
+        for name, roots in cases.items():
+            with self.subTest(case=name):
+                self.trust_with(**roots)
+                self.assert_trust_rejected("TRUST_PATHS_OVERLAP")
+        result = self.invoke()
+        self.assertEqual(result.stderr, b"STOP: preflight rejected (TRUST_PATHS_OVERLAP)\n")
+        self.assertNotIn(str(self.home).encode(), result.stderr)
+
+    def test_non_private_foreign_or_missing_trust_root_rejected(self):
+        self.trust_canonical.chmod(0o777)
+        self.assert_trust_rejected("TRUST_PATH_INVALID")
+        self.trust_canonical.chmod(0o720)
+        self.assert_trust_rejected("TRUST_PATH_INVALID")
+        self.trust_canonical.chmod(0o700)
+        cases = {
+            # Root-owned system directory: owner check fails (st_uid != uid).
+            "foreign owner": dict(canonical_root="/usr" if os.path.realpath("/usr") == "/usr" else "/"),
+            "missing": dict(canonical_root=str(self.trust_canonical.parent / "absent")),
+            "regular file": dict(canonical_root=str(self.trust_file)),
+        }
+        for name, roots in cases.items():
+            with self.subTest(case=name):
+                self.trust_with(**roots)
+                self.assert_trust_rejected("TRUST_PATH_INVALID")
+        for bad in ("relative/tasks", str(self.trust_workspace) + "/tasks/", 7,
+                    str(self.trust_workspace / "ta\nsks")):
+            with self.subTest(tasks_root=bad):
+                self.trust_with(tasks_root=bad)
+                self.assert_trust_rejected("TRUST_SCHEMA_INVALID")
+        self.trust_with()
+        self.assertEqual(gate._load_trust(), (self.trust_canonical, self.trust_workspace))
+
     @unittest.skipUnless(sys.platform == "darwin", "native macOS ACL required")
     def test_mac_acl_write_grant_rejected(self):
         self.assert_pass()

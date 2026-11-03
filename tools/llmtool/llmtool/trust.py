@@ -309,6 +309,7 @@ def _read_trust_bytes(home, uid):
 # END llmtool-trust-reader v1
 
 
+# BEGIN llmtool-trust-roots v1
 def _validate_roots(value, uid, home):
     roots, infos = [], []
     for key in ("canonical_root", "workspace_root", "tasks_root"):
@@ -332,6 +333,18 @@ def _validate_roots(value, uid, home):
     for root in roots:
         if root == home or _overlap(config_dir, root):
             _fail("TRUST_PATHS_OVERLAP")
+
+
+def _strict_child(path, parent):
+    try:
+        return os.path.commonpath((path, parent)) == parent and path != parent
+    except ValueError:
+        return False
+
+
+def _overlap(left, right):
+    return left == right or _strict_child(left, right) or _strict_child(right, left)
+# END llmtool-trust-roots v1
 
 
 def _validate_tools(tools, uid):
@@ -385,17 +398,6 @@ def _safe_tool_ancestors(path, uid):
         if current.parent == current:
             return True
         current = current.parent
-
-
-def _strict_child(path, parent):
-    try:
-        return os.path.commonpath((path, parent)) == parent and path != parent
-    except ValueError:
-        return False
-
-
-def _overlap(left, right):
-    return left == right or _strict_child(left, right) or _strict_child(right, left)
 
 
 def _binding(value):
