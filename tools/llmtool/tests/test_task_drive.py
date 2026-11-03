@@ -35,6 +35,32 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(result['step'], 'MERGED')
         self.assertEqual([call['merge'] for call in calls], [False] * 6 + [True])
 
+    def test_carries_published_pr_into_later_advance_calls(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'pr': 17, 'head': 'a' * 40, 'codes': []},
+            {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+        ])
+
+        result = task_drive.drive(task_id='t', advance_call=advance)
+
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertIsNone(calls[0]['pr_number'])
+        self.assertEqual([call['pr_number'] for call in calls[1:]], [17, 17])
+
+    def test_explicit_pr_number_is_not_replaced_by_published_pr(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'pr': 17, 'head': 'a' * 40, 'codes': []},
+            {'task_id': 't', 'step': 'RUN_REMOTE_TEST', 'codes': []},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+        ])
+
+        result = task_drive.drive(task_id='t', pr_number=23,
+                                  advance_call=advance)
+
+        self.assertEqual(result['step'], 'READY_FOR_INTEGRATION')
+        self.assertEqual([call['pr_number'] for call in calls], [23, 23, 23])
+
     def test_cli_registers_foreground_drive_options(self):
         args = parser_for_cli().parse_args([
             'task', 'drive', 'task-1', '--merge', '--max-steps', '12',
