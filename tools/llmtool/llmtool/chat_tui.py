@@ -2361,8 +2361,11 @@ class ChatTUI:
         else:
             state = ("%d shown, %d hidden, %d unreadable"
                      % (len(self.list_records), self.list_hidden_count, self.list_unreadable))
-        rows = [("class:menu.header", cut(" Tasks (stage derived by the TUI) — "
-                                          + state + "; a show all")),
+        header = " Tasks (stage derived by the TUI): " + state + "; a shows all"
+        if self.list_loaded is not None:
+            header += ("; refreshed %s; auto every %ds"
+                       % (self.list_loaded[1], chat_tui_status.REFRESH_SECONDS))
+        rows = [("class:menu.header", cut(header)),
                 ("class:menu.header", cut("  " + "Task ID".ljust(8) + "  " + "Stage (derived)".ljust(26)
                                           + "Rounds".ljust(12) + "PR".ljust(12) + "Owner".ljust(8)
                                           + "Request (Core, first line) — Enter detail; F5/r refresh; Esc close"))]

@@ -277,6 +277,10 @@ def _pr_sources(record):
     number = (review_ci or {}).get("pr_number")
     if type(number) is int and 1 <= number <= 999999999:
         found.append((number, "completion review_pr_ci.pr_number"))
+    published = _dict(record.get("published_pr")) or {}
+    number = published.get("pr")
+    if type(number) is int and 1 <= number <= 999999999:
+        found.append((number, "published_pr.pr"))
     return found
 
 
@@ -466,28 +470,46 @@ def group_rows(records, now, show_all):
 
     visible, hidden = [], 0
     terminal = {"DONE", "COMPLETED", "ABANDONED", "FAILED"}
+    from . import task_status
+
+    def timestamp(record, field):
+        try:
+            parsed = datetime.fromisoformat(str((_dict(record) or {}).get(field)).replace(
+                "Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            return None
+
     for key in order:
         members = grouped[key]
+        # Records arrive ordered by update time. A repair can update an older Task after a
+        # newer round was created, so choose the head by creation time instead. Iteration
+        # order breaks ties and is the fallback when creation timestamps are missing.
         head = members[0]
+        newest_created = None
+        for member in members:
+            created = timestamp(member, "created_at")
+            if created is not None and (newest_created is None or created > newest_created):
+                head, newest_created = member, created
         head_dict = _dict(head) or {}
         # F3 can briefly render placeholder rows while the list is being replaced.
         # Keep those rows independent and render their unknown stage without raising.
         current, _reason = stage(head_dict)
         completion = _dict(head_dict.get("completion")) or {}
         developer = _dict(head_dict.get("developer")) or {}
-        terminal_state = (current in terminal or head_dict.get("state") in terminal
+        terminal_state = (current in terminal or task_status.derive_state(head_dict) in terminal
+                          or head_dict.get("state") in terminal
                           or completion.get("state") in terminal
                           or developer.get("state") in terminal)
-        updated = head_dict.get("updated_at")
-        idle = False
-        try:
-            timestamp = datetime.fromisoformat(str(updated).replace("Z", "+00:00"))
-            if timestamp.tzinfo is None:
-                timestamp = timestamp.replace(tzinfo=timezone.utc)
-            reference = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
-            idle = (reference - timestamp).total_seconds() > 72 * 60 * 60
-        except (AttributeError, TypeError, ValueError):
-            pass
+        updates = [stamp for stamp in (timestamp(member, "updated_at") for member in members)
+                   if stamp is not None]
+        latest_update = max(updates) if updates else None
+        reference = now if now.tzinfo else now.replace(tzinfo=timezone.utc)
+        idle = (latest_update is not None
+                and (reference.astimezone(timezone.utc) - latest_update).total_seconds()
+                > 72 * 60 * 60)
         if not show_all and (terminal_state or idle):
             hidden += 1
             continue
@@ -498,11 +520,6 @@ def group_rows(records, now, show_all):
             for number, _label in _pr_sources(member_dict):
                 if number not in numbers:
                     numbers.append(number)
-            published = _dict(member_dict.get("published_pr")) or {}
-            published_number = published.get("pr")
-            if (type(published_number) is int and 1 <= published_number <= 999999999
-                    and published_number not in numbers):
-                numbers.append(published_number)
         pr = "CONFLICT" if len(numbers) > 1 else ("#%d" % numbers[0] if numbers else "")
         visible.append({"record": head, "rounds": len(members) - 1, "pr": pr,
                         "owner": _owner_decision(head_dict) is not None})
