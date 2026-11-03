@@ -1,18 +1,22 @@
-> 本則是 READ-ONLY 調查產出的 F2 合約設計稿，**不是實作，也不授權任何動作**。F2 目前仍是 NOT AUTHORIZED。
+> **DESIGN ONLY / NOT AUTHORIZED**
+>
+> 本則是 READ-ONLY 調查產出的 F2 合約設計稿，不是實作，也不授權任何動作。F2.0 不授權任何寫入、Commit、Push 或 PR；F2.1 及之後每一階段都需要獨立 Security review 與 Owner 另行授權。
+>
+> **來源討論：** [A11b F2 設計來源（issue #97 comment 6552968268）](https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6552968268)。
 >
 > **整合者註：與其他規格的對齊**
-> 1. **§3.1、§9.3 寫成 UNKNOWN 的 `trust.json`**，其規格已貼在 #369（https://github.com/davidcatcat/davidcattoolsproject/issues/369#issuecomment-6552692881 ）。F2 的 `repo_identity` 取該規格的 `canonical_root`、`allowed_origins`、`slug`，以及其中的 `trust_binding_sha256`。
+> 1. **(updated) `trust.json` loader 已在目前 main 實作**，可載入並驗證 owner-only 設定，產生 repository binding；規格來源仍是 [#369 comment 6552692881](https://github.com/davidcatcat/davidcattoolsproject/issues/369#issuecomment-6552692881)，實作見 [`trust.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/trust.py#L413-L464)。F2 的 `repo_identity` 可沿用 `canonical_root`、`allowed_origins`、`slug` 與 binding；F2 如何在每個入口強制重驗仍屬設計問題。
 > 2. **§3.2 和 §6 引用的 `approve(...)`**，就是本 issue 上一則 A11b.3 設計中的 approval record 與 ledger（https://github.com/davidcatcat/davidcattoolsproject/issues/97#issuecomment-6552954731 ）。兩者的對應方式：
 >    - F2 的五個 `action_class` 都對應 A11b.3 的 `REPO_MUTATION` 類別，各自另有子類別；
 >    - issuer 只限 `OWNER_LOCAL_TTY`，初期不開放 GitHub 留言或遠端（`REMOTE_OWNER`）核准。
-> 3. **§9.2 的開放問題**，會由整合者另外整理成白話版請 Owner 決定。
+> 3. **§9.2 的開放問題**保持開放；本文件未記錄 Owner 答覆。
 >
 > 實作要分階段進行，每個階段都要通過獨立的 Security review，並取得 Owner 另外的授權。
 
 # A11b F2：llmtool 直接修改使用者 Repository 檔案與 Git 的 Action／Approval 合約（設計稿）
 
-- **狀態：DESIGN ONLY / NOT AUTHORIZED。** 本文件不授權任何實作、執行、Commit、Push 或 PR。
-- **Base commit：** `e1387d896d8e6d352b9b9952e17b6181b7b88439`。F1 的歸檔參考點是 `d41600ff98568770fb918fdf4a3309dd144a0dfe`。
+- **狀態：DESIGN ONLY / NOT AUTHORIZED。** F2.0 不授權任何寫入、Commit、Push 或 PR。F2.1 及之後每一階段各自需要獨立 Security review 與 Owner grant。
+- **Base commit：** `5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45`（目前 `origin/main`）。F1 的歸檔參考點是 `d41600ff98568770fb918fdf4a3309dd144a0dfe`。
 - **標記：** **FACT** = 已用 repo 原始碼或歸檔文件驗證；**OPINION** = 設計建議；**UNKNOWN** = 尚未驗證，或需要 Owner／其他方決定。
 
 ---
@@ -21,22 +25,28 @@
 
 ### 1.1 F1 的事實（來自歸檔與 `d41600ff`）
 
-- **範圍與驗收：** A11b.2.2.2 F1 是「只在私有、可丟棄的 fixture 中執行 Git ADD」。它經 PR #84 合併到 `main@46b17b13`，通過了獨立的 Security 與 Functional QA、exact-head CI，以及 Mac 原生驗收。
-- **只有一個 Git 動作：** F1 只實作了 `GitOperation.ADD`。到現在，`action_contract.py` 中的 Git 動作仍然只有這一個。
-- **只吃資料：** 入口 `_git_add_private.run_fixture_add(baseline, changes)` 會自己建立一個全新的私有 fixture，**只接受資料，不接受 repo 路徑、指令或 callback**。
-- **拒絕 linked worktree：** F1 的 metadata 檢查遇到 `commondir`、`objects/info/alternates`、`info/sparse-checkout` 或 `worktrees` 就拒絕，所以不支援 linked、sparse 或 alternate repo。
-- **固定的安全 Git 設定：** F1 的 Git 子程序一律套用 `SAFE_CONFIG`，並設定 `GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_ATTR_NOSYSTEM=1`。`SAFE_CONFIG` 包括：
+- **範圍與驗收：** A11b.2.2.2 F1 是「只在私有、可丟棄的 fixture 中執行 Git ADD」。PR #84 合併到 `main@46b17b13`，記錄了獨立 Security 與 Functional QA、exact-head CI 及 Mac 原生驗收（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
+- **(updated) 只有一個 Git 動作：** F1 只實作了 `GitOperation.ADD`；目前 main 的 Action contract 也只列出 `ADD`（[`action_contract.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/action_contract.py#L187-L189)）。
+- **只吃資料：** F1 的 `_git_add_private.run_fixture_add(baseline, changes)` 入口會建立私有 fixture，只接受資料，不接受 repo 路徑、指令或 callback（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
+- **拒絕 linked worktree：** F1 的 metadata 檢查遇到 `commondir`、`objects/info/alternates`、`info/sparse-checkout` 或 `worktrees` 就拒絕，因此不支援 linked、sparse 或 alternate repo（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
+- **固定的安全 Git 設定：** F1 的 Git 子程序一律套用 `SAFE_CONFIG`，並設定 `GIT_CONFIG_NOSYSTEM=1`、`GIT_CONFIG_GLOBAL=/dev/null`、`GIT_ATTR_NOSYSTEM=1`（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。`SAFE_CONFIG` 包括：
   - `core.hooksPath=/dev/null`、`core.fsmonitor=false`
   - `credential.helper=`、`core.sshCommand=`
   - `protocol.*.allow=never`
   - `gpg.program=`、`commit.gpgSign=false`
   - `gc.auto=0`、`maintenance.auto=false`
-- **路徑檢查：** 用 `O_NOFOLLOW` 逐一開啟路徑上的每個元件，要求擁有者是目前的 euid、不可被 group 或 other 寫入、regular file 的 `st_nlink == 1`，並拒絕以 root 執行。
-- **只支援 Darwin：** 程序身分檢查（`_git_process_identity.py`）只能在 Darwin 上用；文件明寫它「not an atomic handle against a hostile same-UID reaper」。
-- **C3 detached-escape 未驗證：** C3 的端到端測試是 **NOT_VERIFIED**，只在「同一個 UID 是可信的」前提下被接受。
-- **已歸檔：** 2026-10-20 的歸檔已把 F1 的模組從現行程式碼中移除。
+- **路徑檢查：** F1 用 `O_NOFOLLOW` 逐一開啟路徑元件，要求擁有者是目前的 euid、不可被 group 或 other 寫入、regular file 的 `st_nlink == 1`，並拒絕以 root 執行（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
+- **只支援 Darwin：** F1 程序身分檢查（`_git_process_identity.py`）只能在 Darwin 上用；其文件說明它不是可抵抗 hostile same-UID reaper 的 atomic handle（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
+- **C3 detached-escape 未驗證：** F1 C3 端到端測試為 **NOT_VERIFIED**，僅在信任同 UID 程式的前提下被接受（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
+- **已歸檔：** 2026-10-20 的歸檔已把 F1 模組從現行程式碼移除（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
 
-### 1.2 F1 與 F2 的差異
+#### 1.1.1 目前 main 的相關實作狀態（FACT）
+
+- **(updated) WP-A 路徑硬化：** Action contract 要求 NFC 正規形式、以 NFC+casefold 比對路徑碰撞，並拒絕 `.gitmodules`、`.gitattributes`、`.lfsconfig` 與 `.github/workflows/**` 路徑；OpenCode scope 檢查也比對 NFC/casefold 碰撞，並以 dirfd + `O_NOFOLLOW` 錨定父目錄、拒絕 symlink leaf（[`action_contract.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/action_contract.py#L69-L109)、[`opencode_worker.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/opencode_worker.py#L330-L405)）。這些檢查只證明所列 schema/scope 邊界；不證明 F2 有安全的原子寫入或完整 TOCTOU 執行邊界。
+- **(updated) WP-B ledger recovery：** `dispatch_review_handoff` 在 ledger 目錄鎖內首次 handoff 時呼叫 `ledger.recover()`，把舊 `CONSUMED` receipt 復原成 `EFFECT_UNKNOWN`；它不把未知效果當成功或自動重做（[`review_handoff.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/review_handoff.py#L412-L447)、[`authorization_ledger.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/authorization_ledger.py#L553-L557)）。
+- **(updated) 尚無公開的 production Owner issuer：** action CLI 的成功輸出仍是 `authorized=false`；public `review_authority_factory()` 仍回傳 `UnavailableReviewAuthority`。現有 review handoff issuer 不構成 F2 Owner authorization（[`action_contract_cli.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/action_contract_cli.py#L94-L115)、[`review_authority.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/review_authority.py#L604-L607)）。
+
+## 1.2 F1 與 F2 的差異
 
 | 面向 | F1 | F2 需要 |
 |---|---|---|
@@ -47,7 +57,7 @@
 | 回復 | 出事時永久保留 fixture | 必須能安全撤銷 commit 和 remote branch |
 | 平台 | 程序身分只支援 Darwin | 依 Owner 決定支援 POSIX |
 
-- **FACT：** 歸檔明文寫著「Fixture-only F1 approval cannot be reused as F2 authority」。
+- **FACT：** 歸檔明文寫著「Fixture-only F1 approval cannot be reused as F2 authority」（[merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)）。
 - **OPINION：** F1 最值得重用的是技術零件：`SAFE_CONFIG`、no-follow 路徑走訪、blob OID 綁定，以及「UNKNOWN 永遠不能升級為成功」的原則。它的授權不能沿用。
 
 ---
@@ -111,8 +121,8 @@ plan_hash = SHA-256(canonical JSON(ActionPlan))
 - 本地步驟（WRITE、ADD、COMMIT）可以用一次核准涵蓋整個計畫。
 - **PUSH 和 PR_DRAFT 必須各自另外核准**，因為它們會離開本機，並影響共享的 remote。
 - 核准紀錄必須只能使用一次、受 TTL 限制，並綁定 `plan_hash`、`issuer` 和 `action_class`。
-- redeem 沿用 ledger 現有的狀態流程：ISSUED → CONSUMED → EFFECT_DONE 或 EFFECT_UNKNOWN。
-- EFFECT_UNKNOWN 永遠不算成功，也不能自動重試。
+- redeem 沿用 ledger 現有的狀態流程：ISSUED → CONSUMED → EFFECT_DONE 或 EFFECT_UNKNOWN（[`authorization_ledger.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/authorization_ledger.py#L1-L9)）。
+- EFFECT_UNKNOWN 永遠不算成功，也不能自動重試（[`review_handoff.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/review_handoff.py#L181-L190)、[`authorization_ledger.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/authorization_ledger.py#L553-L557)）。
 
 ### 3.3 每一步執行前後都要重新驗證
 
@@ -131,7 +141,7 @@ plan_hash = SHA-256(canonical JSON(ActionPlan))
 
 ### 4.1 威脅模型
 
-- **FACT：** 現有的 F1、ledger 和 authorization_policy 都聲明**不防禦惡意的同 UID 程式**。
+- **FACT (updated)：** 現有 ledger 與 authorization policy 明確說明其同 UID 限制（[`authorization_ledger.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/authorization_ledger.py#L11-L21)、[`authorization_policy.py` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/llmtool/authorization_policy.py#L1-L11)）。
 - **OPINION：** F2 沿用這個前提，但要在使用者看得到的地方明寫：「同一使用者帳號下的惡意程式可以偽造核准，或在途中修改檔案；F2 不是沙箱。」
 - Repository 的**內容**一律不可信，包括 config、attributes、hooks、檔名和 symlink。
 
@@ -173,7 +183,7 @@ plan_hash = SHA-256(canonical JSON(ActionPlan))
 ### 4.5 子程序控制
 
 - 每個 Git 子程序都要放在新的 process group 或 session，並設硬 timeout 和輸出上限。結束後要確認沒有殘留的子孫程序。無法確認時記為 `EFFECT_UNKNOWN`，並保留 worktree。
-- **FACT：** `write_boundary.for_platform()` 只支援 macOS 的 `sandbox-exec`，在 Linux 上回傳 `UnsupportedBoundary`。
+- **FACT：** `write_boundary.for_platform()` 的平台限制見 [merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)；本稿不把該 F1 邊界視為 F2 可用的執行器。
 - **OPINION：** F2 本身**不執行任何 repo 內的工具**，包括 test、build 和 formatter。
 
 ### 4.6 大小上限（OPINION，初始值待 Security review 調整）
@@ -226,13 +236,13 @@ plan_hash = SHA-256(canonical JSON(ActionPlan))
   - PM 不能核准自己提出的計畫；
   - Developer 不能核准自己的計畫；
   - Reviewer 的核准不等於 Owner 的產品驗收。
-- **FACT：** 目前所有角色可能共用同一個 GitHub login，所以 GitHub 身分**不能**用來區分核准者。核准必須在本機以 out-of-band 的方式互動完成。
+- **FACT：** 目前角色可能共用同一 GitHub login，因此 login 身分不能證明核准者不同；Owner channel 與身份政策記錄於 [merged PR #84](https://github.com/davidcatcat/davidcattoolsproject/pull/84)。核准者真實性仍需本機 out-of-band 互動。
 
 ---
 
 ## 7. 什麼時候**不需要** F2
 
-- **FACT：** Roadmap 明文規定，已授權的 Developer CLI 在自己的 worktree 裡修改、commit、push，屬於 **Worker 自己的 Git 操作，不需要 F2**。
+- **FACT (updated)：** Roadmap 明定 F2 尚未授權，並將 F2 與 Developer 的既有工作區操作分開（[`ROADMAP.md` at base](https://github.com/davidcatcat/davidcattoolsproject/blob/5c2853ffac38b1e8f4bb2d836ee8ea7bf0e22d45/tools/llmtool/ROADMAP.md#L20-L24)）。Worker 自有 Git 操作不因此成為 F2 授權。
 - **不需要 F2 的情況：**
   - Developer 在自己的 D6 worktree 中，用既有權限寫入；
   - Integrator 依 safe-git 流程手動 push 或 merge；
@@ -305,4 +315,3 @@ plan_hash = SHA-256(canonical JSON(ActionPlan))
 5. **平台順序：** 先在 macOS 驗收，等 Linux 有等效沙箱之後再開放，可以嗎？
 
 ---
-_Generated by [Claude Code](https://claude.ai/code)_
