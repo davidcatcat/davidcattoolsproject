@@ -47,6 +47,28 @@ def _policy(task, reviewer_key):
     return worker_dispatch.evaluate(reviewer_key, assignment, task.get('task_id'))
 
 
+def _select_reviewer(task, requested=None):
+    """Choose the default or explicit Reviewer and enforce family separation."""
+    developer = task.get('developer') if type(task) is dict else None
+    family = developer.get('provider_profile') if type(developer) is dict else None
+    supported_families = ('codex', 'claude', 'opencode', 'agy', 'company-gw',
+                          'company-gw-agent', 'gw-agent')
+    if type(family) is not str or family not in supported_families:
+        _refuse('REVIEWER_FAMILY_UNSUPPORTED')
+    reviewer_key = requested
+    if reviewer_key is None:
+        reviewer_key = 'codex-reviewer' if family == 'claude' else 'claude-reviewer'
+    if reviewer_key not in ('claude-reviewer', 'codex-reviewer'):
+        _refuse('REVIEWER_INVALID')
+    reviewer_family = 'claude' if reviewer_key == 'claude-reviewer' else 'codex'
+    if family is not None and reviewer_family == family:
+        _refuse('REVIEWER_SAME_FAMILY')
+    policy = _policy(task, reviewer_key)
+    if not policy.allowed:
+        _refuse('REVIEWER_NOT_ALLOWED')
+    return reviewer_key
+
+
 def _resolve_github_login():
     """Resolve the authenticated GitHub account without exposing credentials."""
     gh = shutil.which('gh', path=task_completion._GH_PATH)
@@ -73,9 +95,13 @@ def _resolve_github_login():
     return login
 
 
-def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
+def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
+               reviewer=None):
     if task is None:
         task = store.get(task_id)
+    # Reviewer family/dispatch refusals precede binding, D6, and PR checks;
+    # dispatch-policy details are intentionally normalized to REVIEWER_NOT_ALLOWED.
+    reviewer_key = _select_reviewer(task, reviewer)
     binding = task.get('task_binding')
     try:
         task_completion.validate_task_binding(
@@ -121,14 +147,6 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None):
         _refuse('REVIEW_PROMPT_PR_UNAVAILABLE')
     if type(version) is not int or not 1 <= version <= 9999:
         _refuse('REVIEW_PROMPT_BINDING_MISSING')
-    developer = task.get('developer')
-    family = developer.get('provider_profile') if type(developer) is dict else None
-    if family in ('codex', 'opencode', 'company-gw', 'agy', 'gw-agent'):
-        reviewer_key = 'claude-reviewer'
-    elif family == 'claude':
-        reviewer_key = 'codex-reviewer'
-    else:
-        _refuse('REVIEWER_FAMILY_UNSUPPORTED')
     return task, executor, head, base['sha'], reviewer_key
 
 
@@ -361,11 +379,17 @@ def _bind_d6(task_id, session_id, repo_root):
 
 def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
                     create_d6=None, dispatch_session=None, bind_session=None,
-                    prompt_renderer=None, codex_runner=None):
+                    prompt_renderer=None, codex_runner=None, reviewer=None):
     """Claim once, create a read-only Reviewer D6 and bind its dispatched session."""
     task = store.get(task_id)
     _, executor, head, _base, reviewer_key = _preflight(
-        store, task_id, executor_task, pr_number, version, task=task)
+        store, task_id, executor_task, pr_number, version, task=task,
+        reviewer=reviewer)
+    # Authorization must be checked before a durable claim is created. The
+    # policy is re-read again immediately before each external side effect.
+    gate = _policy(task, reviewer_key)
+    if not gate.allowed:
+        _refuse('REVIEWER_NOT_ALLOWED')
     stored_claims = task.get('review_dispatch_claim')
     claims = ([stored_claims] if type(stored_claims) is dict else
               list(stored_claims) if type(stored_claims) is list else [])
@@ -389,9 +413,6 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
             except Exception:
                 _refuse('REVIEW_DISPATCH_OUTCOME_UNKNOWN')
         return prior
-    policy = _policy(task, reviewer_key)
-    if not policy.allowed:
-        _refuse(policy.reason_code)
     reviewer_role = role_config.resolve_role(
         'reviewer' if reviewer_key == 'claude-reviewer' else 'codex-reviewer')
     config_dir = reviewer_role['config_dir'] if reviewer_role is not None else None
@@ -450,7 +471,8 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
         else:
             prompt = prompt_renderer(task_id, executor_task, reviewer_task, pr_number, version)
         # Detect a moved PR/head before starting the Reviewer session.
-        _, _, current_head, _, _ = _preflight(store, task_id, executor_task, pr_number, version)
+        _, _, current_head, _, _ = _preflight(
+            store, task_id, executor_task, pr_number, version, reviewer=reviewer_key)
         if current_head != head:
             _refuse('REVIEW_PROMPT_PR_HEAD_MISMATCH')
         gate = _policy(task, reviewer_key)
