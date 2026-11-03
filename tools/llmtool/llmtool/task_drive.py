@@ -26,14 +26,19 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         raise ValueError('poll_seconds must be non-negative')
     invoke = task_advance.advance if advance_call is None else advance_call
     pause = time.sleep if sleep is None else sleep
+    # Keep an explicitly supplied PR authoritative for the whole drive. When
+    # publication discovers the PR, carry it into every subsequent advance.
+    pr_number = adapters.get('pr_number')
     completed = 0
     attempts = 0
 
     # Polls consume the bounded call budget so a permanently pending Task
     # cannot spin forever, but they do not count as completed workflow steps.
     while attempts < max_steps:
+        advance_adapters = dict(adapters)
+        advance_adapters['pr_number'] = pr_number
         result = invoke(task_id=task_id, store=store,
-                        merge=False, **adapters)
+                        merge=False, **advance_adapters)
         attempts += 1
         if type(result) is not dict:
             return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
@@ -47,6 +52,8 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
 
         # Publication's one-step adapter returns {pr, head} without a step.
         if step is None and type(result.get('pr')) is int and type(result.get('head')) is str:
+            if pr_number is None:
+                pr_number = result['pr']
             completed += 1
             continue
         if step is None and codes:
@@ -75,7 +82,10 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
                 break
             # The merge flag selects only this explicit final step. Calling
             # advance(merge=True) earlier would skip the preceding workflow.
-            merged = invoke(task_id=task_id, store=store, merge=True, **adapters)
+            advance_adapters = dict(adapters)
+            advance_adapters['pr_number'] = pr_number
+            merged = invoke(task_id=task_id, store=store, merge=True,
+                            **advance_adapters)
             attempts += 1
             completed += 1
             if type(merged) is not dict:
