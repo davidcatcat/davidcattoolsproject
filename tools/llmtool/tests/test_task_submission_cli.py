@@ -99,6 +99,10 @@ class FakeClient:
 
 class TaskSubmissionCLITests(unittest.TestCase):
     def setUp(self):
+        cap_patch = patch.object(submission_cli, '_check_delegate_repair_cap',
+                                 lambda args, store: None)
+        cap_patch.start()
+        self.addCleanup(cap_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.home = Path(self.temp.name).resolve() / 'home'
@@ -3654,6 +3658,143 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0][-2:], ['--trust-sha256', 'a' * 64])
         self.assertEqual(captured[0][4], '# trusted helper\n')
+
+
+class DelegateRepairCapTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.store = TaskStore(Path(self.temp.name).resolve() / 'tasks')
+
+    def _task(self, *, executor='executor-task-1', developer=False, route='codex'):
+        task_id, run_id = new_id(), new_id()
+        request = 'Bounded repair-cap fixture.'
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        task = _record(
+            task_id, run_id, 'pm-' + new_id(), 'pm-profile', request,
+            state='PM_RESPONDED', provider_type='openai-compatible', model='pm-model',
+            backend='NO_NATIVE_SESSION_ID_EXPOSED', request_sha=request_sha)
+        assignment = {'schema_version': 1, 'route': route, 'risk': 'LOW',
+                      'goal': 'Test the repair cap.', 'acceptance': ['dispatch is bounded']}
+        task.update(
+            pm_route_binding={'type': 'openai-compatible', 'model': 'pm-model',
+                              'base_url': None},
+            response=json.dumps({'schema_version': 1, 'summary': 'Fixture response.',
+                                 'developer_assignment': assignment}),
+            pm_assignment=assignment)
+        developer_record = None
+        completion = None
+        if developer:
+            developer_record = {
+                'assignment_id': new_id(), 'selection_source': 'PM',
+                'state': 'DEVELOPER_PENDING', 'provider_profile': route,
+                'provider_type': 'codex-cli', 'model': 'fixture-model',
+                'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+                'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
+                'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+                'read_paths': ['sample.py'], 'write_paths': ['sample.py'],
+                'acceptance': ['dispatch is bounded'], 'context_sha256': 'b' * 64,
+                'egress_basis': 'Approved synthetic test context.', 'input_bytes': 10,
+                'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
+                'artifact_sha256': None, 'usage': None, 'error_code': None,
+                'created_at': '2026-11-04T00:00:00Z',
+            }
+            completion = {
+                'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
+                'reviewer_task_id': None, 'evidence': None, 'missing_gates': [],
+                'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+                'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+            }
+        self.store.create(task)
+        if developer:
+            self.store.compare_and_update(
+                task_id, expected={'developer': None, 'completion': None},
+                developer=developer_record, completion=completion)
+        return task
+
+    def _prior_assignments(self, count=3, *, executor='executor-task-1'):
+        for _ in range(count):
+            self._task(executor=executor, developer=True)
+
+    def _args(self, task, provider, **changes):
+        values = dict(task_id=task['task_id'], provider=provider,
+                      mode=('direct' if provider in ('codex', 'agy', 'gw-agent')
+                            else 'proposal'),
+                      selection_source='PM', executor_task='executor-task-1',
+                      read_path=['sample.py'], write_path=['sample.py'],
+                      acceptance=['dispatch is bounded'],
+                      egress_basis='Approved synthetic test context.',
+                      context='VALUE = 1\n', owner_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-1')
+        values.update(changes)
+        return Namespace(**values)
+
+    def test_three_prior_assignments_refuse_all_routes_before_route_call(self):
+        self._prior_assignments()
+        routes = {
+            'codex': 'run_task_codex_delegate',
+            'agy': 'run_task_agy_delegate',
+            'opencode': 'run_task_opencode_delegate',
+            'gw-agent': 'run_task_gw_agent_delegate',
+        }
+        for provider, route_name in routes.items():
+            with self.subTest(provider=provider):
+                task = self._task(route=provider)
+                with patch.object(submission_cli, route_name) as route:
+                    with self.assertRaisesRegex(LLMToolError,
+                                                'DELEGATE_REPAIR_LIMIT_REACHED'):
+                        run_task_delegate(self._args(task, provider), store=self.store)
+                    route.assert_not_called()
+
+    def test_two_prior_assignments_allow_next_and_other_d6_is_unaffected(self):
+        self._prior_assignments(2)
+        self._prior_assignments(3, executor='executor-task-other')
+        task = self._task()
+        args = self._args(task, 'opencode')
+        with patch.object(submission_cli, 'run_task_opencode_delegate', return_value=7) as route:
+            self.assertEqual(run_task_delegate(args, store=self.store), 7)
+        route.assert_called_once()
+
+    def test_same_task_replay_is_not_counted(self):
+        task = self._task(executor='executor-task-1', developer=True)
+        self.assertIsNone(submission_cli._check_delegate_repair_cap(
+            self._args(task, 'opencode'), self.store))
+
+    def test_valid_high_debug_ref_stores_override(self):
+        self._prior_assignments()
+        task = self._task()
+        ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
+        args = self._args(task, 'opencode', high_debug_ref=ref)
+        with patch.object(submission_cli.trust, 'load_trust') as trusted:
+            trusted.return_value.repository = {'slug': 'davidcatcat/davidcattoolsproject'}
+            submission_cli._check_delegate_repair_cap(args, self.store)
+        override = self.store.get(task['task_id'])['repair_cap_override']
+        self.assertEqual(override['ref'], ref)
+        self.assertGreaterEqual(override['rounds'], 3)
+
+    def test_invalid_high_debug_refs_refuse(self):
+        self._prior_assignments()
+        task = self._task()
+        refs = (
+            'http://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
+            'https://github.com/elsewhere/project/issues/120#issuecomment-123',
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/120',
+        )
+        with patch.object(submission_cli.trust, 'load_trust') as trusted:
+            trusted.return_value.repository = {'slug': 'davidcatcat/davidcattoolsproject'}
+            for ref in refs:
+                with self.subTest(ref=ref), self.assertRaisesRegex(
+                        LLMToolError, 'DELEGATE_HIGH_DEBUG_REF_INVALID'):
+                    submission_cli._check_delegate_repair_cap(
+                        self._args(task, 'opencode', high_debug_ref=ref), self.store)
+
+    def test_unreadable_prior_record_refuses_with_task_id(self):
+        self._prior_assignments(1)
+        broken = self.store.task_ids()[0]
+        self.store.root.joinpath(broken + '.json').write_text('{broken', encoding='utf-8')
+        task = self._task()
+        with self.assertRaisesRegex(LLMToolError,
+                                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {broken}'):
+            submission_cli._check_delegate_repair_cap(self._args(task, 'opencode'), self.store)
 
 
 if __name__ == '__main__':
