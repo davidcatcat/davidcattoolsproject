@@ -492,6 +492,29 @@ class ReviewDispatchTests(unittest.TestCase):
                     self.store, TASK, 'executor-d6', 42, 1, task=task)
         self.assertEqual(raised.exception.review_dispatch_code, 'REVIEWER_FAMILY_UNSUPPORTED')
 
+    def test_missing_developer_family_is_refused_before_d6_for_default_and_explicit(self):
+        task = {
+            'task_id': TASK, 'run_id': 'c' * 32,
+            'task_binding': {'contract_digest': 'd' * 64},
+            'completion': {'executor_task_id': 'executor-d6',
+                           'evidence': {'common_dir': '/repo/.git'}},
+        }
+        for developer in (None, {}, {'owner_assignment_ref': 'owner-assignment'}):
+            task['developer'] = developer
+            for reviewer in (None, 'codex-reviewer'):
+                with self.subTest(developer=developer, reviewer=reviewer), \
+                        patch.object(review_dispatch.worker_dispatch, 'evaluate') as evaluate, \
+                        patch.object(review_dispatch.task_completion,
+                                     'read_d6_registration') as read_d6:
+                    with self.assertRaises(LLMToolError) as raised:
+                        review_dispatch._preflight(
+                            self.store, TASK, 'executor-d6', 42, 1,
+                            task=task, reviewer=reviewer)
+                    self.assertEqual(raised.exception.review_dispatch_code,
+                                     'REVIEWER_FAMILY_UNSUPPORTED')
+                    evaluate.assert_not_called()
+                    read_d6.assert_not_called()
+
     def test_paused_worker_policy_refuses_before_claim_or_side_effect(self):
         with self.assertRaises(LLMToolError):
             self.invoke(policy=False)

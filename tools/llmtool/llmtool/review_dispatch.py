@@ -53,7 +53,7 @@ def _select_reviewer(task, requested=None):
     family = developer.get('provider_profile') if type(developer) is dict else None
     supported_families = ('codex', 'claude', 'opencode', 'agy', 'company-gw',
                           'company-gw-agent', 'gw-agent')
-    if family is not None and family not in supported_families:
+    if type(family) is not str or family not in supported_families:
         _refuse('REVIEWER_FAMILY_UNSUPPORTED')
     reviewer_key = requested
     if reviewer_key is None:
@@ -99,8 +99,8 @@ def _preflight(store, task_id, executor_task, pr_number, version, *, task=None,
                reviewer=None):
     if task is None:
         task = store.get(task_id)
-    # Reviewer choice, family separation, and Owner dispatch authorization must
-    # be resolved before reading D6 registration or contacting a provider.
+    # Reviewer family/dispatch refusals precede binding, D6, and PR checks;
+    # dispatch-policy details are intentionally normalized to REVIEWER_NOT_ALLOWED.
     reviewer_key = _select_reviewer(task, reviewer)
     binding = task.get('task_binding')
     try:
