@@ -190,7 +190,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
     def test_real_task_store_accepts_gw_agent_developer_record_before_route_call(self):
         task_id, run_id = 'a' * 32, 'b' * 32
         request = 'synthetic bounded task'
-        assignment = {'schema_version': 1, 'route': 'gw-agent', 'risk': 'LOW',
+        assignment = {'route': 'gw-agent', 'risk': 'LOW',
                       'goal': 'Update src.py.', 'acceptance': ['record result']}
         response = json.dumps({'schema_version': 1, 'summary': 'bounded',
                                'developer_assignment': assignment})
@@ -241,7 +241,6 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                               return_value=(['src.py'], ['src.py'])), \
                  patch.object(task_submission_cli, '_remote_receipt_test_policy',
                               return_value='REMOTE_RECEIPT'), \
-                 patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
                  patch.object(task_submission_cli, 'load_route_config',
                               return_value={'routes': {'gw-agent': {
                                   'allowed_data_classes': ['SYNTHETIC'],
