@@ -1,5 +1,6 @@
 """Offline contract tests for the gw-agent Developer route."""
 
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -276,6 +277,50 @@ class GwAgentRouteTests(unittest.TestCase):
         (self.root / 'outside.py').unlink()
         quota_error = run('MODEL_ERROR', 'HTTP_429', 4)
         self.assertEqual(quota_error.code, 'GW_AGENT_QUOTA_EXHAUSTED')
+
+    def test_setup_route_errors_are_preserved_and_private_tmp_is_removed(self):
+        cases = (
+            ('prepare_files', RouteError('GW_AGENT_CONFIG_INVALID',
+                                         facts={'detail': 'must not escape'})),
+            ('build_env', RouteError('GW_AGENT_CREDENTIAL_MISSING',
+                                     facts={'detail': 'must not escape'})),
+            ('build_argv', ValueError('must not escape')),
+        )
+        for method, failure in cases:
+            private_dirs = []
+            real_mkdtemp = tempfile.mkdtemp
+
+            def record_mkdtemp(*args, **kwargs):
+                path = real_mkdtemp(*args, **kwargs)
+                private_dirs.append(path)
+                return path
+
+            with tempfile.TemporaryDirectory() as isolated_home, \
+                    self.subTest(method=method), \
+                    mock.patch.dict(os.environ, {'HOME': isolated_home,
+                                                 'TMPDIR': isolated_home}), \
+                    mock.patch('tempfile.tempdir', None), \
+                    mock.patch('llmtool.developer_routes.base.tempfile.mkdtemp',
+                               side_effect=record_mkdtemp), \
+                    ExitStack() as setup:
+                if method in ('build_env', 'build_argv'):
+                    setup.enter_context(mock.patch.object(
+                        self.route, 'prepare_files', return_value=None))
+                if method == 'build_argv':
+                    setup.enter_context(mock.patch.object(
+                        self.route, 'build_env',
+                        return_value={'GW_AGENT_API_KEY': self.credential}))
+                setup.enter_context(mock.patch.object(
+                    self.route, method, side_effect=failure))
+                with self.assertRaises(RouteError) as caught:
+                    run_route(self.route, self.request(), gate=lambda: True,
+                              runner=lambda *args: (0, b'', b''),
+                              boundary=Boundary(), snapshot=capture_snapshot)
+                expected = (failure.code if isinstance(failure, RouteError)
+                            else 'GW_AGENT_REQUEST_INVALID')
+                self.assertEqual(caught.exception.code, expected)
+                self.assertEqual(len(private_dirs), 1)
+                self.assertFalse(Path(private_dirs[0]).exists())
 
     def test_audit_verifier_rejects_self_declared_digest_on_broken_chain(self):
         with tempfile.TemporaryDirectory() as temp:
