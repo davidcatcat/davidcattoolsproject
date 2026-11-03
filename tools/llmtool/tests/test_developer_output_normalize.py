@@ -284,7 +284,7 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
 
     def test_source_anchor_keeps_missing_newline_when_appending_at_eof(self):
         source = 'a\nb\nc'
-        raw = (self.HEADER + '@@ -1,3 +1,4 @@\n a\n b\n-c\n'
+        raw = (self.HEADER + '@@ -8,3 +8,4 @@\n a\n b\n-c\n'
                r'\ No newline at end of file' + '\n+c\n+tail\n'
                r'\ No newline at end of file' + '\n')
         anchored, tokens = reanchor_developer_output(
