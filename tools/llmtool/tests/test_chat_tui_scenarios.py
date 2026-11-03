@@ -429,7 +429,9 @@ class TUIUserScenarioTests(TUIScenarioCase):
         dump("F7 expanded")
         terminal.submit("/pm history")
         terminal.wait_for(lambda rows: "上次對話（" in
-                          terminal.text().rsplit("> /pm history", 1)[-1], "/pm history")
+                          "\n".join(rows).rsplit("> /pm history", 1)[-1] and
+                          "▸ 用過的工具：Bash、Read" in "\n".join(rows),
+                          "/pm history header and tool summary")
         history = terminal.text()
         self.assertNotIn("(history)", history)
         self.assertIn("▸ 用過的工具：Bash、Read", history)

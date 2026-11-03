@@ -111,8 +111,8 @@ under 「你」 below a rule with the local time. A turn's tool use is one line 
 does (▸ 執行中：description… 23s, counting every second, then ✓ description（4s）or
 ✗ description（38s，失敗）; the tool name only when the PM gave no description); F7 lists
 every call. Commands and tool output are never
-shown. The turn ends with a short usage line (seconds · tokens). /pm history shows the
-stored turns in the same layout under 「上次對話（時間）」. PM thinking is never shown as the answer: while the PM thinks
+shown. The turn ends with a short usage line (seconds · tokens). /pm history replays stored
+turns beneath the 「上次對話（時間）」 header. PM thinking is never shown as the answer: while the PM thinks
 or works the pane shows a working line (PM 思考中… 12s), updated every second and
 replaced by the reply. Chat replies are never sent to or shown as the PM.
 
