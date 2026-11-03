@@ -329,7 +329,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertIsNone(denial)
         self.assertEqual(record['dispatch_audit'][-1]['action'], 'DISPATCH')
 
-    def test_allowed_route_error_maps_to_safe_developer_code(self):
+    def test_route_failures_map_to_persistable_developer_states(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
             'task_binding': {'contract_digest': 'c' * 64},
@@ -367,6 +367,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         def fail_runner(_route, _request, *, gate, **_kwargs):
             self.assertIs(gate(), decision)
             raise RouteError('GW_AGENT_MODEL_ERROR')
+
+        def unexpected_runner(_route, _request, **_kwargs):
+            raise RuntimeError('unexpected route failure')
+        unexpected_store = Store()
         with patch.object(task_completion, 'validate_task_binding'), \
              patch.object(task_completion, 'bind_executor_task',
                           return_value=(registration, snapshot)), \
@@ -388,11 +392,99 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_task_view', return_value={}):
             status = task_submission_cli.run_task_gw_agent_delegate(
                 args, store=store, route_runner=fail_runner)
+            unexpected_status = task_submission_cli.run_task_gw_agent_delegate(
+                args, store=unexpected_store, route_runner=unexpected_runner)
         self.assertEqual(status, 1)
-        self.assertEqual(store.value['developer']['state'], 'BLOCKED')
+        self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertEqual(store.value['developer']['error_code'],
                          'DEVELOPER_GW_AGENT_MODEL_ERROR')
         event.assert_not_called()
+
+        self.assertEqual(unexpected_status, 1)
+        self.assertEqual(unexpected_store.value['developer']['state'],
+                         'DEVELOPER_OUTCOME_UNKNOWN')
+        self.assertEqual(unexpected_store.value['developer']['error_code'],
+                         'DEVELOPER_RESULT_UNKNOWN')
+
+    def test_gw_agent_failure_states_persist_in_real_task_store(self):
+        task_id, run_id = 'a' * 32, 'b' * 32
+        task_contract_data = {
+            'schema_version': 1, 'contract_version': 1, 'task_id': task_id,
+            'goal': 'Run the bounded gw-agent task.', 'authorized_scope': ['pm-planning'],
+            'forbidden_scope': [], 'criteria': [{'criterion_id': 'result',
+                'description': 'Record the result.', 'kind': 'ARTIFACT'}],
+            'previous_digest': None,
+        }
+        contract = task_store.parse_task_contract(json.dumps(task_contract_data))
+        binding = vars(contract.binding(run_id))
+        task = {'task_id': task_id, 'run_id': run_id, 'task_binding': binding}
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        developer = {
+            'assignment_id': 'd' * 32, 'selection_source': 'PM',
+            'state': 'DEVELOPER_DISPATCHING', 'provider_profile': 'gw-agent',
+            'provider_type': 'gw-agent-cli', 'model': 'gw-agent-default',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + 'e' * 32, 'source_sha': 'f' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['Record the result.'], 'context_sha256': '1' * 64,
+            'egress_basis': 'Synthetic test context.', 'input_bytes': 128,
+            'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'execution': None, 'created_at': '2026-01-01T00:00:00Z',
+            'direct_result_callback': task_submission_cli._direct_result_callback(
+                task, registration, 'f' * 40, test_policy='REMOTE_RECEIPT'),
+        }
+
+        def make_record():
+            record = {
+                'schema_version': 2, 'task_id': task_id, 'run_id': run_id,
+                'pm_session_id': 'pm-test', 'pm_provider_profile': 'test-provider',
+                'pm_provider_type': 'test-provider', 'pm_model': 'test-model',
+                'backend_session_semantics': 'EPHEMERAL_SINGLE_CALL',
+                'native_session_id': None, 'state': 'PM_RESPONDED',
+                'created_at': '2026-01-01T00:00:00Z',
+                'updated_at': '2026-01-01T00:00:00Z',
+                'task_contract': task_contract_data, 'task_binding': binding,
+                'request': 'bounded request',
+                'request_sha256': hashlib.sha256(b'bounded request').hexdigest(),
+                'response': 'PM response', 'usage': None, 'error_code': None,
+                'developer': copy.deepcopy(developer),
+                'pm_assignment': {'schema_version': 1, 'route': 'gw-agent', 'risk': 'LOW',
+                    'goal': 'Run the bounded gw-agent task.',
+                    'acceptance': ['Record the result.']},
+                'dispatch_audit': [],
+            }
+            record['record_sha256'] = task_store._digest(record)
+            return record
+
+        for state, error_code in (
+                ('DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_MODEL_ERROR'),
+                ('DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_RESULT_UNKNOWN')):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as temp:
+                store = task_store.TaskStore(Path(temp) / 'tasks')
+                store.create(make_record())
+                current = store.get(task_id)
+                updated_developer = copy.deepcopy(current['developer'])
+                updated_developer.update(state=state, error_code=error_code)
+                saved = store.compare_and_update(
+                    task_id, expected={'developer': current['developer']},
+                    developer=updated_developer)
+                self.assertEqual(saved['developer']['state'], state)
+                self.assertEqual(saved['developer']['error_code'], error_code)
+
+        with tempfile.TemporaryDirectory() as temp:
+            store = task_store.TaskStore(Path(temp) / 'tasks')
+            store.create(make_record())
+            current = store.get(task_id)
+            blocked = copy.deepcopy(current['developer'])
+            blocked.update(state='BLOCKED', error_code='DEVELOPER_GW_AGENT_MODEL_ERROR')
+            # BLOCKED is reserved for AGY-specific conditions in TaskStore validation.
+            with self.assertRaises(LLMToolError):
+                store.compare_and_update(task_id,
+                    expected={'developer': current['developer']}, developer=blocked)
 
     def test_gw_agent_success_persists_when_served_model_differs(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
