@@ -2328,6 +2328,54 @@ class OfficeViewTests(unittest.TestCase):
             if isinstance(value, (dict, list, set, tuple, frozenset)):
                 self.assertNotIn(secret, repr(value), name)
 
+    def test_row_caches_keep_no_argv(self):
+        secret = "ROW-ARGV-SECRET-91c4"   # unique to this test
+        for function in (mon.safe_name, mon.classify, mon._remote_test_job):
+            self.assertFalse(hasattr(function, "cache_info"), function.__name__)
+            self.assertFalse(hasattr(function, "__wrapped__"), function.__name__)
+        snap = mon.snapshot_from([
+            (60, 1, 60, "00:10", "S", f"claude -p --model sonnet {secret}"),
+            (61, 60, 60, "00:10", "S", f"/bin/zsh -c echo {secret}"),
+            (62, 1, 62, "00:10", "S", f"python3 -m llmtool task remote-test abcdef12 --sha {'a' * 40}"
+                                      f" --module test_x --ref {secret}"),
+            (63, 1, 63, "00:10", "S", f"ssh host python3 - {'b' * 40} {secret} /repo /py test_y"),
+            (64, 1, 64, "00:10", "S", f"/opt/bin/codex exec {secret}"),
+        ], self_pid=99999)
+        self.assertEqual({p.pid: (p.role, p.name, p.job, p.codex_exec) for p in snap.processes}, {
+            60: ("Claude Code CLI", "claude", (), False),
+            61: ("  child", "zsh", (), False),
+            62: ("llmtool CLI", "python3", ("cli", "abcdef12", "aaaaaaa", ("test_x",)), False),
+            64: ("Codex CLI", "codex", (), True)})
+        self.assertNotIn(secret, repr(snap.processes))
+        self.assertTrue(mon._row_facts_cache)
+        for key, value in mon._row_facts_cache.items():
+            self.assertIsInstance(key, bytes)
+            self.assertNotIn(secret.encode(), key)
+            self.assertNotIn(secret, repr(value))
+        for name, value in vars(mon).items():
+            if isinstance(value, (dict, list, set, tuple, frozenset)):
+                self.assertNotIn(secret, repr(value), name)
+
+    def test_row_facts_are_computed_once_per_command_and_evicted_on_exit(self):
+        entries = [(100 + i, 1, 100 + i, "00:10", "S", f"/bin/proc{i % 250} --arg {i % 250}")
+                   for i in range(500)] + [(900, 1, 900, "00:10", "S", "claude -p x")]
+        first = mon.snapshot_from(entries, self_pid=99999)
+        with patch.object(mon, "_row_facts", wraps=mon._row_facts) as facts:
+            again = mon.snapshot_from(entries, self_pid=99999)
+            self.assertEqual(facts.call_count, 0)   # every row reused its earlier result
+            self.assertEqual(again.processes, first.processes)
+            # A new command is computed once, however many rows share it.
+            mon.snapshot_from(entries + [(901, 1, 901, "00:10", "S", "claude -p y"),
+                                         (902, 1, 902, "00:10", "S", "claude -p y")], self_pid=99999)
+            self.assertEqual(facts.call_count, 1)
+        self.assertEqual(len(mon._row_facts_cache), 252)   # 250 + "claude -p x" + "claude -p y"
+        # Processes that exited leave the cache on the next poll.
+        mon.snapshot_from(entries[:10], self_pid=99999)
+        self.assertEqual(len(mon._row_facts_cache), 10)
+        with patch.object(mon, "ROW_FACTS_MAX", 5):
+            mon.snapshot_from(entries[:10], self_pid=99999)
+            self.assertEqual(mon._row_facts_cache, {})
+
     def test_codex_rows_show_what_they_do_like_claude_rows(self):
         path = self.codex.parent / "state.sqlite"
         db = sqlite3.connect(path)
