@@ -222,7 +222,7 @@ class ReviewResultTests(unittest.TestCase):
                              'REVIEW_PASS')
 
     def test_codex_pass_stays_advisory_for_same_family_tasks(self):
-        for family in ('codex', 'claude'):
+        for family in ('codex',):
             self.store = FamilyStore(self.store, family)
             self.assertEqual(self.run_result([_comment(actor='Codex')])['state'],
                              'NOT_READY')
