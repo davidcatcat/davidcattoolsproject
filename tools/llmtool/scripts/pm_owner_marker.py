@@ -42,7 +42,11 @@ def _run(argv: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess:
         raise MarkerError("command failed") from exc
 
 
-def repository_slug() -> str:
+def repository_slug(explicit: str | None = None) -> str:
+    if explicit is not None:
+        if not REPO_SLUG.fullmatch(explicit):
+            raise MarkerError("repository slug is invalid")
+        return explicit
     result = _run(["git", "remote", "get-url", "origin"], timeout=10)
     if result.returncode:
         raise MarkerError("cannot determine repository from origin remote")
@@ -175,6 +179,7 @@ def _body_answer(owner_words: str, pm_reading: str) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--repo", help="GitHub OWNER/NAME (defaults to the origin remote)")
     sub = parser.add_subparsers(dest="command", required=True)
     ask = sub.add_parser("ask")
     ask.add_argument("number")
@@ -189,7 +194,7 @@ def main(argv=None) -> int:
     try:
         if args.command != "open-rows" and not ISSUE_NUMBER.fullmatch(args.number):
             raise MarkerError("issue or pull request number is invalid")
-        repo = repository_slug()
+        repo = repository_slug(args.repo)
         if args.command == "ask":
             question = args.question.strip()
             if not question:

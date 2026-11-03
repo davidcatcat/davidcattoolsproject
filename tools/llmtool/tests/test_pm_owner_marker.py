@@ -57,14 +57,18 @@ elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
             "#!/bin/sh\nexec python3 -B \"$FAKE_GH_SCRIPT\" \"$@\"\n", encoding="utf-8")
         self.gh.chmod(0o700)
 
-    def run_cli(self, *args, fail=False):
+    def run_cli(self, *args, fail=False, repo=True, cwd=None):
         env = os.environ.copy()
         env["PATH"] = str(self.bin) + os.pathsep + env["PATH"]
         env["FAKE_GH_CALLS"] = str(self.calls)
         env["FAKE_GH_SCRIPT"] = str(self.tmp / "fake_gh.py")
         if fail:
             env["FAKE_GH_FAIL"] = "1"
-        return subprocess.run([sys.executable, "-B", str(SCRIPT), *args], cwd=ROOT,
+        command = [sys.executable, "-B", str(SCRIPT)]
+        if repo:
+            command.extend(["--repo", "a/b"])
+        command.extend(args)
+        return subprocess.run(command, cwd=ROOT if cwd is None else cwd,
                               env=env, capture_output=True, text=True, check=False)
 
     def recorded_calls(self):
@@ -103,6 +107,12 @@ elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout.splitlines(), ["17"])
         self.assertTrue(all("comment" not in call["args"] for call in self.recorded_calls()))
+
+    def test_default_repo_detection_fails_closed_without_origin(self):
+        result = self.run_cli("open-rows", repo=False, cwd=self.tmp)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("cannot determine repository from origin remote", result.stderr)
+        self.assertFalse(self.calls.exists())
 
 
 if __name__ == "__main__":
