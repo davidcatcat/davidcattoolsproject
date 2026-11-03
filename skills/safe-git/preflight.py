@@ -181,6 +181,53 @@ def repository_identity(root):
     return [git(root, *command).decode().strip() for command in commands]
 
 
+def git_directory(root):
+    # Git canonicalizes --absolute-git-dir, which can hide a symlink replacing
+    # the linked worktree's gitdir. Recover the lexical path from the checkout
+    # metadata and require Git's result to agree with it.
+    gitdir_output = Path(os.fsdecode(git(
+        root, "rev-parse", "--path-format=absolute", "--absolute-git-dir"
+    ).strip()))
+    marker = root / ".git"
+    marker_info = marker.lstat()
+    if stat.S_ISDIR(marker_info.st_mode):
+        lexical = marker
+    else:
+        require(stat.S_ISREG(marker_info.st_mode) and marker_info.st_uid == os.getuid()
+                and not (marker_info.st_mode & 0o022))
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, "rb") as stream:
+            require(identity(os.fstat(stream.fileno())) == identity(marker_info))
+            data = stream.read()
+            require(identity(os.fstat(stream.fileno())) == identity(marker_info))
+        require(identity(marker.lstat()) == identity(marker_info))
+        match = re.fullmatch(rb"gitdir: ([^\r\n]+)\n?", data)
+        require(match is not None)
+        target = Path(os.fsdecode(match.group(1)))
+        if not target.is_absolute():
+            target = root / target
+        lexical = Path(os.path.abspath(target))
+    require(gitdir_output == lexical)
+    return lexical
+
+
+def pin_git_directory(root, uid, common):
+    path = git_directory(root)
+    marker_info = (root / ".git").lstat()
+    if stat.S_ISDIR(marker_info.st_mode):
+        require(path == common)
+    else:
+        require(path.parent == common / "worktrees")
+    directory(path, uid)
+    return path
+
+
+def verify_git_directory(root, pinned, uid):
+    current = git_directory(root)
+    require(current == pinned)
+    directory(current, uid)
+
+
 def check(args):
     root = Path(args.root)
     require(args.uid == os.getuid())
@@ -190,11 +237,13 @@ def check(args):
     require(repository_identity(root) == expected_identity)
     common = Path(args.common_dir)
     directory(common, args.uid)
+    pinned_git_dir = pin_git_directory(root, args.uid, common)
     if args.write_candidate:
         observed = inventory(root)
         require(inventory(root) == observed)
         require(repository_identity(root) == expected_identity)
         private_write(args.write_candidate, observed, root, common, args.uid)
+        verify_git_directory(root, pinned_git_dir, args.uid)
         return "CANDIDATE: review required"
     baseline = Path(args.baseline)
     directory(baseline.parent, args.uid, 0o700)
@@ -233,6 +282,7 @@ def check(args):
     directory(common, args.uid)
     if args.report:
         private_write(args.report, delta(expected, observed), root, common, args.uid)
+    verify_git_directory(root, pinned_git_dir, args.uid)
     return "PASS: read-only preflight"
 
 
