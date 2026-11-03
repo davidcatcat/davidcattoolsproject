@@ -277,6 +277,41 @@ def _trust_binding_status(record, trust):
     return "rotated"
 
 
+def _rotated_record_root(record, task_id, canonical_root, common_dir):
+    """The validated recorded root of a trust-rotated record, or None (7.3).
+
+    A rotation may move ``tasks_root``, so retire, reconcile and
+    --release-retain handle a rotated record at the root recorded at creation
+    instead of the current workspace. That path must be absolute, normal and
+    free of symlinks, be named after the task, sit outside the canonical
+    checkout and belong to this repository; its parent (the record's own
+    tasks_root) must be a real directory owned by this user when it exists.
+    """
+    recorded = record.get("root_realpath")
+    if (type(recorded) is not str or not os.path.isabs(recorded) or
+            os.path.normpath(recorded) != recorded or
+            os.path.realpath(recorded) != recorded or
+            os.path.basename(recorded) != task_id or
+            record.get("git_common_dir") != str(common_dir)):
+        return None
+    canonical = str(canonical_root)
+    if (recorded == canonical or recorded.startswith(canonical + "/") or
+            canonical.startswith(recorded + "/")):
+        return None
+    root = Path(recorded)
+    if root.parent == Path(root.anchor):
+        return None
+    try:
+        info = root.parent.lstat()
+    except FileNotFoundError:
+        return root
+    except OSError:
+        return None
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid():
+        return None
+    return root
+
+
 def _require_trust_binding(record, trust):
     status = _trust_binding_status(record, trust)
     if status == "rotated":
@@ -1436,13 +1471,23 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
     if state not in RETIRE_STATES and state != "RETAIN_BLOCKED":
         plan["reasons"].append("D6_RETIRE_STATE_NOT_RETIRABLE")
         return plan
-    reasons = _identity_reasons(root, record, canonical_root, common_dir, workspace_root)
+    trust_status = _trust_binding_status(record, _load_trust() if trust is None else trust)
+    identity_workspace = workspace_root
+    if trust_status == "rotated":
+        # A rotation may have moved tasks_root: check the tree at its validated
+        # recorded root, under the record's own tasks_root (7.3). An invalid
+        # recorded root falls back to the current workspace, whose identity
+        # gates then name the failure.
+        recorded_root = _rotated_record_root(record, task_id, canonical_root, common_dir)
+        if recorded_root is not None:
+            root, identity_workspace = recorded_root, recorded_root.parent
+            plan["root"] = str(root)
+    reasons = _identity_reasons(root, record, canonical_root, common_dir, identity_workspace)
     if reasons:
         plan["reasons"].extend(reasons)
         return plan
     # A rotated trust binding never lets retire remove the tree; the caller
     # turns this sole reason into a durable RETAIN_BLOCKED on execute (7.3).
-    trust_status = _trust_binding_status(record, _load_trust() if trust is None else trust)
     if trust_status == "rotated":
         plan["reasons"].append("D6_TRUST_ROTATED")
         plan["trust_rotated"] = True
@@ -2085,25 +2130,31 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=None):
             except LifecycleError:
                 continue
             task_id = record.get("task_id")
-            expected_root = workspace_root / task_id if type(task_id) is str else None
             if (type(task_id) is not str or not TASK_ID_RE.fullmatch(task_id) or
                     record_path.name != task_id + ".json" or
                     record.get("schema_version") != 1 or
                     record.get("state") in ("RETAIN_BLOCKED", "REMOVED",
                                              "RETIRED_EXTERNALLY") or
-                    type(record.get("root_realpath")) is not str or
-                    os.path.realpath(record["root_realpath"]) !=
-                    os.path.realpath(expected_root)):
+                    type(record.get("root_realpath")) is not str):
                 continue
-            root = workspace_root / task_id
+            trust_status = _trust_binding_status(record, trust)
+            if trust_status == "rotated":
+                # A rotation may have moved tasks_root: use the validated
+                # recorded root so the record still reaches RETAIN_BLOCKED (7.3).
+                root = _rotated_record_root(record, task_id, canonical_root, common_dir)
+                if root is None:
+                    continue
+            else:
+                root = workspace_root / task_id
+                if os.path.realpath(record["root_realpath"]) != os.path.realpath(root):
+                    continue
             if os.path.lexists(root) or os.path.realpath(root) in listed:
                 continue
-            candidates.append((task_id, record_path, record))
+            candidates.append((task_id, record_path, record, trust_status))
         results = []
-        for task_id, record_path, record in candidates:
+        for task_id, record_path, record, trust_status in candidates:
             result = {"task_id": task_id, "mode": "execute" if execute else "dry-run",
                       "result": "RETIRED_EXTERNALLY" if execute else "RECONCILE_READY"}
-            trust_status = _trust_binding_status(record, trust)
             if trust_status == "legacy":
                 result["legacy_unstamped"] = True
             if trust_status == "rotated":
@@ -2233,6 +2284,13 @@ def release_retained_records(*, canonical_root, approvals, workspace_root=None):
                 elif trust_status == "legacy":
                     result["legacy_unstamped"] = True
                 root = workspace_root / task_id
+                if trust_status == "rotated":
+                    # The old tree is checked at its validated recorded root,
+                    # which may sit under a tasks_root the rotation moved (7.3).
+                    recorded_root = _rotated_record_root(record, task_id,
+                                                         canonical_root, common_dir)
+                    if recorded_root is not None:
+                        root = recorded_root
                 if (record.get("schema_version") != 1 or
                         record.get("task_id") != task_id or
                         record.get("state") != "RETAIN_BLOCKED" or

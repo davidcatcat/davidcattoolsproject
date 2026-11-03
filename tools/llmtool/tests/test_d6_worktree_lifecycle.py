@@ -144,11 +144,11 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.addCleanup(self._script_path_patch.stop)
 
     def _write_trust(self, *, retain_release_issues=(289, 352), origins=None,
-                     ci_trust=None):
+                     ci_trust=None, tasks_root=None):
         """(Re)write the temp trust.json; never the real Owner file."""
         self.trust_path.write_text(json.dumps({
             "schema_version": 1, "canonical_root": str(self.source),
-            "workspace_root": str(self.root), "tasks_root": str(self.tasks),
+            "workspace_root": str(self.root), "tasks_root": str(tasks_root or self.tasks),
             "repository": {"slug": "davidcatcat/davidcattoolsproject",
                            "allowed_origins": list(origins or [
                                "git@github.com:davidcatcat/davidcattoolsproject.git"]),
@@ -393,6 +393,60 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(released["result"], "RETIRED_EXTERNALLY")
         self.assertIs(released["trust_rotated"], True)
         self.assertEqual(lifecycle._read_registry_record(rotated_path)["owner_approval_ref"], new)
+
+    def test_rotated_tasks_root_absent_tree_reconciles_and_releases(self):
+        root, record_path = self._registered_result_fixture("moved-absent")
+        self._stamp(record_path)
+        subprocess.run(["/usr/bin/git", "worktree", "unlock", str(root)],
+                       cwd=self.source, check=True, capture_output=True)
+        shutil.rmtree(root)
+        subprocess.run(["/usr/bin/git", "worktree", "prune"], cwd=self.source,
+                       check=True, capture_output=True)
+        new_tasks = self.root / "tasks-new"
+        new_tasks.mkdir(mode=0o700)
+        self._write_trust(tasks_root=new_tasks, retain_release_issues=[900])
+
+        def reconcile(execute):
+            output = io.StringIO()
+            with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                    contextlib.redirect_stdout(output):
+                lifecycle.reconcile_registry(canonical_root=self.source, execute=execute,
+                                             workspace_root=new_tasks)
+            return {item["task_id"]: item for item in json.loads(output.getvalue())["records"]}
+
+        dry = reconcile(False)
+        self.assertEqual((dry["moved-absent"]["result"], dry["moved-absent"]["reason"]),
+                         ("BLOCKED", "D6_TRUST_ROTATED"))
+        self.assertEqual(lifecycle._read_registry_record(record_path)["state"], "ACTIVE")
+        self.assertEqual(reconcile(True)["moved-absent"]["result"], "RETAIN_BLOCKED")
+        self.assertEqual(lifecycle._read_registry_record(record_path)["state"],
+                         "RETAIN_BLOCKED")
+
+        approval = "https://github.com/davidcatcat/davidcattoolsproject/issues/900#issuecomment-3"
+        # The old tree reappearing at its recorded root blocks the release.
+        root.mkdir(mode=0o700)
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(lifecycle._main([
+                "--release-retain", "moved-absent=" + approval,
+                "--repo-root", str(self.source)]), 1)
+        (blocked,) = json.loads(output.getvalue())["records"]
+        self.assertEqual(blocked["reason"], "D6_RELEASE_RETAIN_WORKTREE_PRESENT")
+        root.rmdir()
+
+        output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                contextlib.redirect_stdout(output):
+            self.assertEqual(lifecycle._main([
+                "--release-retain", "moved-absent=" + approval,
+                "--repo-root", str(self.source)]), 0)
+        (released,) = json.loads(output.getvalue())["records"]
+        self.assertEqual(released["result"], "RETIRED_EXTERNALLY")
+        self.assertIs(released["trust_rotated"], True)
+        record = lifecycle._read_registry_record(record_path)
+        self.assertEqual((record["state"], record["owner_approval_ref"]),
+                         ("RETIRED_EXTERNALLY", approval))
 
     def test_release_retain_requires_trust_retain_release_issues(self):
         self._write_trust()

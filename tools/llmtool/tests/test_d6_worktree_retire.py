@@ -121,7 +121,7 @@ class D6RetireTests(unittest.TestCase):
         return json.loads((self.registry / (task_id + ".json")).read_text())
 
     def _retire(self, task_ids, *, execute=False, squash=None, discard=(), evidence=None,
-                reviewed_pr=None):
+                reviewed_pr=None, workspace_root=None):
         output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
                 patch.object(lifecycle, "_process_cwds", side_effect=self._cwds), \
@@ -131,7 +131,7 @@ class D6RetireTests(unittest.TestCase):
                 squash_evidence=squash, discard_uncommitted=discard,
                 unknown_evidence=evidence,
                 reviewed_pr_evidence=reviewed_pr,
-                workspace_root=self.tasks)
+                workspace_root=workspace_root or self.tasks)
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertEqual([line["task_id"] for line in lines], task_ids)
         return ok, lines
@@ -185,6 +185,79 @@ class D6RetireTests(unittest.TestCase):
                                    evidence={"rotated-task": "0" * 64})
         self.assertFalse(ok)
         self.assertEqual(line["reasons"], ["D6_TRUST_ROTATED"])
+        self.assertTrue(root.is_dir())
+
+    def test_rotated_tasks_root_with_old_tree_present_is_retain_blocked(self):
+        root, _head = self._task("moved-root")
+        self._stamp("moved-root")
+        new_tasks = self.top / "tasks-new"
+        new_tasks.mkdir(mode=0o700)
+        self._edit_trust(lambda value: value.update(tasks_root=str(new_tasks)))
+        before = self._record("moved-root")
+
+        ok, (line,) = self._retire(["moved-root"], workspace_root=new_tasks)
+        self.assertFalse(ok)
+        self.assertEqual((line["result"], line["reasons"], line["root"]),
+                         ("RETAIN_BLOCKED", ["D6_TRUST_ROTATED"], str(root)))
+        self.assertEqual(self._record("moved-root"), before)
+
+        ok, (line,) = self._retire(["moved-root"], execute=True, workspace_root=new_tasks)
+        self.assertFalse(ok)
+        self.assertEqual((line["result"], line["reasons"]),
+                         ("RETAIN_BLOCKED", ["D6_TRUST_ROTATED"]))
+        self.assertTrue(line["registry_updated"])
+        record = self._record("moved-root")
+        self.assertEqual(record["state"], "RETAIN_BLOCKED")
+        self.assertIn("trust rotation", record["evidence_refs"][-1])
+        self.assertTrue((root / "tools" / "llmtool" / "app.py").is_file())
+        self.assertIn(str(root), _git(self.source, "worktree", "list"))
+
+    def test_rotated_record_root_is_still_validated(self):
+        root, _head = self._task("moved-bad")
+        self._stamp("moved-bad")
+        new_tasks = self.top / "tasks-new"
+        new_tasks.mkdir(mode=0o700)
+        self._edit_trust(lambda value: value.update(tasks_root=str(new_tasks)))
+        link = self.top / "tasks-link"
+        os.symlink(self.tasks, link)
+        record_path = self.registry / "moved-bad.json"
+        outside = "D6_RETIRE_ROOT_OUTSIDE_WORKSPACE"
+        for bad_root, reason in (
+                (str(link / "moved-bad"), outside),
+                (str(self.tasks / "other-name"), outside),
+                (str(self.tasks) + "/../tasks/moved-bad", outside),
+                ("moved-bad", "D6_RETIRE_RECORD_INVALID"),
+                (str(self.source / "moved-bad"), "D6_RETIRE_CANONICAL_ROOT")):
+            record = self._record("moved-bad")
+            record["root_realpath"] = bad_root
+            lifecycle._replace_record(record_path, record)
+            before = self._record("moved-bad")
+            ok, (line,) = self._retire(["moved-bad"], execute=True, workspace_root=new_tasks)
+            self.assertFalse(ok)
+            self.assertEqual((line["result"], line["reasons"]), ("BLOCKED", [reason]),
+                             bad_root)
+            self.assertEqual(self._record("moved-bad"), before)
+        # A recorded tasks_root owned by another user is refused as well.
+        record = self._record("moved-bad")
+        record["root_realpath"] = str(root)
+        lifecycle._replace_record(record_path, record)
+        with patch.object(lifecycle.os, "getuid", return_value=os.getuid() + 1):
+            self.assertIsNone(lifecycle._rotated_record_root(
+                record, "moved-bad", self.source, self.source / ".git"))
+        self.assertEqual(lifecycle._rotated_record_root(
+            record, "moved-bad", self.source, self.source / ".git"), root)
+        self.assertIsNone(lifecycle._rotated_record_root(
+            dict(record, git_common_dir=str(self.top / "other" / ".git")),
+            "moved-bad", self.source, self.source / ".git"))
+        # Every other identity gate still applies at the recorded root.
+        record = self._record("moved-bad")
+        record["root_realpath"] = str(root)
+        record["physical_identity"]["inode"] += 1
+        lifecycle._replace_record(record_path, record)
+        ok, (line,) = self._retire(["moved-bad"], execute=True, workspace_root=new_tasks)
+        self.assertEqual((line["result"], line["reasons"]),
+                         ("BLOCKED", ["D6_RETIRE_ROOT_IDENTITY_MISMATCH"]))
+        self.assertEqual(self._record("moved-bad")["state"], "ACTIVE")
         self.assertTrue(root.is_dir())
 
     def test_full_digest_only_change_still_retires_stamped_record(self):
@@ -463,9 +536,20 @@ class D6RetireTests(unittest.TestCase):
         elsewhere = self.top / "elsewhere"
         elsewhere.mkdir(mode=0o700)
         root, _head = self._task("outside-task", parent=elsewhere)
+        self._stamp("outside-task")
         ok, (line,) = self._retire(["outside-task"], execute=True)
         self.assertFalse(ok)
         self.assertEqual(line["reasons"], ["D6_RETIRE_ROOT_OUTSIDE_WORKSPACE"])
+        self.assertTrue((root / "tools" / "llmtool" / ".venv").is_dir())
+        # A legacy record outside the current tasks_root counts as rotated
+        # (7.4): it is kept at its recorded root as RETAIN_BLOCKED, never removed.
+        record = self._record("outside-task")
+        del record["trust_sha256"], record["trust_binding_sha256"]
+        lifecycle._replace_record(self.registry / "outside-task.json", record)
+        ok, (line,) = self._retire(["outside-task"], execute=True)
+        self.assertFalse(ok)
+        self.assertEqual((line["result"], line["reasons"]),
+                         ("RETAIN_BLOCKED", ["D6_TRUST_ROTATED"]))
         self.assertTrue((root / "tools" / "llmtool" / ".venv").is_dir())
 
     def test_symlinked_retention_path_is_refused(self):
