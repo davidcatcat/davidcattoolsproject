@@ -1699,8 +1699,6 @@ def _text_developer_rejection_detail(value, error_code, source_files):
     edits = []
     for index, body in hunks:
         old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
-        if not any(line.startswith(('+', '-')) for line in body):
-            return {'reason': 'NO_CHANGE', 'hunk': index}
         path = next((line[6:] for line in lines if line.startswith('--- a/')), None)
         source = source_files.get(path) if path is not None else None
         if type(source) is str and old_side:
@@ -1715,6 +1713,8 @@ def _text_developer_rejection_detail(value, error_code, source_files):
             if edits and start < edits[-1][1]:
                 return {'reason': 'HUNKS_OVERLAP', 'hunk': index}
             edits.append((start, end))
+        if not any(line.startswith(('+', '-')) for line in body):
+            return {'reason': 'NO_CHANGE', 'hunk': index}
     return {'reason': 'STRICT_PARSE', 'hunk': hunks[0][0] if hunks else None}
 def _ignored_file_fingerprints(root):
     """Fingerprint bounded ignored paths so replacement and in-place writes count."""
