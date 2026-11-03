@@ -48,6 +48,20 @@ class InstallSelftestTests(unittest.TestCase):
     def different_owner(self):
         return 'root' if self.user != 'root' else 'nobody'
 
+    def make_version_layout(self):
+        bin_dir = self.tree / 'bin.2.338.0'
+        (self.tree / 'bin').rename(bin_dir)
+        ext_dir = self.tree / 'externals.2.338.0'
+        node_dir = ext_dir / 'node20' / 'lib'
+        node_dir.mkdir(parents=True)
+        payload = node_dir / 'payload.js'
+        payload.write_text('fixture')
+        payload.chmod(0o644)
+        (node_dir / 'alias.js').symlink_to('payload.js')
+        (self.tree / 'bin').symlink_to('bin.2.338.0')
+        (self.tree / 'externals').symlink_to(ext_dir)
+        return bin_dir, ext_dir
+
     def test_correct_fixture_passes(self):
         result = self.run_selftest()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -89,6 +103,39 @@ class InstallSelftestTests(unittest.TestCase):
         for result in (self.run_installer(), self.run_selftest()):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn('refusing symlink', result.stderr)
+
+    def test_runner_version_symlinks_pass_dry_run_and_selftest(self):
+        self.make_version_layout()
+        (self.tree / '_work' / '_update').mkdir()
+        (self.tree / '_work' / '_update' / 'dangling').symlink_to('missing')
+        for result in (self.run_installer(), self.run_selftest()):
+            self.assertEqual(result.returncode, 0, result.stderr)
+        plan = self.run_installer()
+        self.assertNotIn(str(self.tree / 'bin'), plan.stdout)
+        self.assertNotIn(str(self.tree / 'externals'), plan.stdout)
+        self.assertNotIn(str(self.tree / '_work' / '_update'), plan.stdout)
+
+    def test_invalid_runner_symlink_targets_are_refused(self):
+        cases = ('escape', 'dangling', 'other-version', 'elsewhere')
+        for case in cases:
+            with self.subTest(case=case):
+                self.make_version_layout()
+                link = self.tree / 'externals.2.338.0' / 'node20' / 'lib' / case
+                if case == 'escape':
+                    link.symlink_to(self.temp.name)
+                elif case == 'dangling':
+                    link.symlink_to('missing')
+                elif case == 'other-version':
+                    other = self.tree / 'externals.2.339.0'
+                    other.mkdir()
+                    link.symlink_to(other)
+                else:
+                    link.symlink_to(self.tree / 'bin.2.338.0' / 'Runner.Listener')
+                for result in (self.run_installer(), self.run_selftest()):
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('refusing symlink', result.stderr)
+                self.tearDown()
+                self.setUp()
 
     def test_special_file_is_refused(self):
         os.mkfifo(self.tree / 'pipe')
