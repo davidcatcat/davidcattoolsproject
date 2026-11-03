@@ -5687,13 +5687,14 @@ class DiskUsageTests(unittest.TestCase):
                     monitor.refresh_disk_usage(now=0)
                 statvfs.assert_called_once_with("/home/test")
                 expected_free = fake.f_bavail * fake.f_frsize
+                free_label = f"{expected_free / (1024 ** 3):.1f}G free"
                 self.assertEqual(monitor.disk_usage, (percent, expected_free))
-                self.assertIn(f"disk {percent}% (6.0G free)", mon.disk_status(monitor.disk_usage))
+                self.assertIn(f"disk {percent}% ({free_label})", mon.disk_status(monitor.disk_usage))
                 alert = mon.disk_alert(monitor.disk_usage)
                 if label:
                     self.assertTrue(alert.startswith(label))
                     self.assertIn("old D6 worktrees under the workspace root", alert)
-                    self.assertIn("6.0G free", alert)
+                    self.assertIn(free_label, alert)
                 else:
                     self.assertEqual(alert, "")
 
