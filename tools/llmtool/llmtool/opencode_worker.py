@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Protocol
 from urllib.parse import quote, urlsplit
@@ -326,6 +327,50 @@ def _file_hash(path, deadline):
     return digest.hexdigest()
 
 
+def _scope_path_nofollow(root, name):
+    """Check a scoped path through anchored directory descriptors.
+
+    Each existing directory is opened relative to its already-open parent with
+    O_NOFOLLOW. Replacing a checked parent with a symlink cannot redirect later
+    components: the walk remains anchored to the opened directory inode.
+    """
+    if not root.is_absolute() or not hasattr(os, 'O_NOFOLLOW'):
+        reject('OPENCODE_SCOPE_INVALID')
+    flags = os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) | os.O_NOFOLLOW
+    descriptors = []
+    try:
+        current = os.open('/', flags)
+        descriptors.append(current)
+        for component in root.parts[1:]:
+            current = os.open(component, flags, dir_fd=current)
+            descriptors.append(current)
+        components = name.split('/')
+        for index, component in enumerate(components):
+            if index < len(components) - 1:
+                try:
+                    current = os.open(component, flags, dir_fd=current)
+                except FileNotFoundError:
+                    return
+                descriptors.append(current)
+            else:
+                try:
+                    info = os.stat(component, dir_fd=current, follow_symlinks=False)
+                except FileNotFoundError:
+                    return
+                if stat.S_ISLNK(info.st_mode):
+                    reject('OPENCODE_SCOPE_INVALID')
+    except WorkerError:
+        raise
+    except OSError:
+        reject('OPENCODE_SCOPE_INVALID')
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def _validate(job, deadline):
     if (type(job.task) is not TaskBinding or type(job.agent) is not AgentBinding or
             job.agent.role is not Role.DEVELOPER or type(job.runtime) is not RuntimePin or
@@ -339,16 +384,24 @@ def _validate(job, deadline):
     _hex(job.source_sha,(40,64)); _hex(job.runtime.executable_sha256)
     root = Path(job.agent.root)
     physical_directory(root)
+    all_spellings = {}
     for paths in (job.read_paths,job.write_paths):
         if type(paths) is not tuple or len(paths)>256 or tuple(sorted(set(paths)))!=paths:
             reject('OPENCODE_SCOPE_INVALID')
+        collision_keys = set()
         for name in paths:
-            _path(name)
-            p = root/name
-            for ancestor in (p,*p.parents):
-                if ancestor == root: break
-                if ancestor.is_symlink(): reject('OPENCODE_SCOPE_INVALID')
-            if root not in p.resolve().parents: reject('OPENCODE_SCOPE_INVALID')
+            try:
+                _path(name)
+            except LLMToolError:
+                reject('OPENCODE_SCOPE_INVALID')
+            key = unicodedata.normalize('NFC', name).casefold()
+            if key in collision_keys:
+                reject('OPENCODE_SCOPE_INVALID')
+            collision_keys.add(key)
+            if key in all_spellings and all_spellings[key] != name:
+                reject('OPENCODE_SCOPE_INVALID')
+            all_spellings[key] = name
+            _scope_path_nofollow(root, name)
     if job.phase == 'PREREVIEW' and job.write_paths:
         reject('OPENCODE_SCOPE_INVALID')
     if job.max_steps > job.budget.max_provider_calls-len(job.usage.calls):
