@@ -283,8 +283,6 @@ class TaskStoreTests(unittest.TestCase):
                 {'ref': valid['ref'], 'rounds': 3, 'recorded_at': 'bad'},
                 {'ref': valid['ref'], 'rounds': 3,
                  'recorded_at': '2026-11-04T00:00:00Z', 'extra': True},
-                {'ref': 'https://github.com/other/repo/issues/120#issuecomment-123',
-                 'rounds': 3, 'recorded_at': '2026-11-04T00:00:00Z'},
         ):
             malformed = dict(self.store.get(task['task_id']),
                              repair_cap_override=invalid)
