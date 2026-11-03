@@ -1191,7 +1191,8 @@ class CodexDelegateTests(unittest.TestCase):
             directory.chmod(0o700)
         if not write:
             return home, None
-        from tests.test_trust import _document
+        # Plain sibling import: CI runs from tests/ without a `tests` package.
+        from test_trust import _document
         raw = json.dumps(_document(*roots)).encode('utf-8')
         trust_path = trust_dir / 'trust.json'
         trust_path.write_bytes(raw)
@@ -1218,7 +1219,10 @@ class CodexDelegateTests(unittest.TestCase):
                 patch.object(task_submission_cli.trust, 'load_trust',
                              side_effect=lambda: original_load_trust(home=str(trust_home))), \
                 patch.object(task_submission_cli.subprocess, 'run',
-                             side_effect=capture_helper):
+                             side_effect=capture_helper), \
+                patch.dict(os.environ, {'HOME': str(trust_home)}):
+            # HOME also points at the temp trust home, so nothing reads the
+            # runner's real home even if a code path bypasses the loader seam.
             # Any Codex launch raises, so reaching Codex cannot look like a pass.
             result, saved, callback = self._dispatch(
                 task, bootstrap_error=real_bootstrap,
