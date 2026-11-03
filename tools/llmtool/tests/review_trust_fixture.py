@@ -12,8 +12,38 @@ OWNER_CANONICAL_ROOT = '/Users/davidsun/git/davidcataiporject/davidcattoolsproje
 OWNER_WORKSPACE_ROOT = '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject'
 
 
+def _frozen(value):
+    if type(value) is dict:
+        return MappingProxyType({key: _frozen(item) for key, item in value.items()})
+    if type(value) is list:
+        return tuple(_frozen(item) for item in value)
+    return value
+
+
+def owner_ci_trust_document():
+    """Owner-equivalent ``ci_trust`` (the legacy task_completion values, #369 PR-8)."""
+    return {
+        'mode': 'self-hosted',
+        'github_actions_app_id': 15368,
+        'workflows': [
+            {'path': '.github/workflows/llmtool-mac-ci.yml', 'name': 'llmtool Mac CI',
+             'runner_names': ['davidproject-self-action', 'davidproject-self-action-2'],
+             'runner_labels': None, 'code_check': 'check (macOS 3.13)', 'docs_check': None},
+            {'path': '.github/workflows/llmtool-linux-ci.yml', 'name': 'llmtool Linux CI',
+             'runner_names': ['ec2-self-runner', 'ec2-self-runner-2', 'ec2-self-runner-3'],
+             'runner_labels': None, 'code_check': 'check (Linux 3.14)',
+             'docs_check': 'check (docs)'},
+        ],
+        'not_run_checks': ['Linux Python 3.9', 'Windows CI'],
+    }
+
+
 def make_trust(slug=OWNER_SLUG, *, origins=None, host_policy_issue=120,
-               canonical_root=OWNER_CANONICAL_ROOT, workspace_root=OWNER_WORKSPACE_ROOT):
+               canonical_root=OWNER_CANONICAL_ROOT, workspace_root=OWNER_WORKSPACE_ROOT,
+               ci_trust=None):
+    """Fixture TrustConfig; ``ci_trust`` is a plain dict (frozen like load_trust)."""
+    if ci_trust is None:
+        ci_trust = owner_ci_trust_document()
     if origins is None:
         origins = (f'git@github.com:{slug}.git', f'https://github.com/{slug}.git')
     repository = MappingProxyType({
@@ -27,7 +57,7 @@ def make_trust(slug=OWNER_SLUG, *, origins=None, host_policy_issue=120,
         }),
     })
     return trust.TrustConfig(1, canonical_root, workspace_root, workspace_root + '/tasks',
-                             repository, MappingProxyType({}), None, '0' * 64, '1' * 64)
+                             repository, _frozen(ci_trust), None, '0' * 64, '1' * 64)
 
 
 def use_trust(config=None):
