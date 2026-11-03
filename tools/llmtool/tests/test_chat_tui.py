@@ -6898,7 +6898,7 @@ class DetailOpenPrUiTests(Base):
                     patch.object(chat_tui, '_open_pr_url', side_effect=fake_open):
                 ui, _ = self.drive(['o', lambda ui: self.assertEqual(ui.input.text, 'o'),
                                     '\x1bOR', listed, '\r', detail_hint, 'o', 'o', result],
-                                   size=(80, 24))
+                                   size=[Size(rows=24, columns=80)])
         self.assertEqual(ui.input.text, '')
 
     def test_panel_detail_uses_the_same_pane_hint_and_keeps_draft(self):
@@ -6921,7 +6921,7 @@ class DetailOpenPrUiTests(Base):
                 self.drive([lambda ui: (setattr(ui.input, 'text', 'draft'),
                                         ui._show_task_view('Task detail heading', self.TASK)),
                             lambda ui: self.assertIn('o 開啟 PR', ui.task_view.text),
-                            'o', opened], size=(80, 24))
+                            'o', opened], size=[Size(rows=24, columns=80)])
 
     def test_refusal_and_platform_results_are_rendered_and_single_group_pr_is_resolved(self):
         head = self.record()
@@ -6952,7 +6952,7 @@ class DetailOpenPrUiTests(Base):
                     ui.set_detail('Task: ' + self.TASK, task_id=self.TASK)
                     ui.finish_open_detail_pr(ui.pr_open_seq, self.TASK, False, result)
                     self.assertIn('o 開啟 PR：' + label, ui.detail_view.text)
-                self.drive([show], size=(80, 24))
+                self.drive([show], size=[Size(rows=24, columns=80)])
 
         for platform, expected in (('linux', '僅 macOS 可用'), ('darwin', '開啟失敗')):
             with self.subTest(platform=platform):
@@ -6961,7 +6961,7 @@ class DetailOpenPrUiTests(Base):
                     ui.finish_open_detail_pr(ui.pr_open_seq, self.TASK, False,
                                              'NON_DARWIN' if platform == 'linux' else 'OPEN_FAILED')
                     self.assertIn('o 開啟 PR：' + expected, ui.detail_view.text)
-                self.drive([finish], size=(80, 24))
+                self.drive([finish], size=[Size(rows=24, columns=80)])
 
 
 if __name__ == '__main__':
