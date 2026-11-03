@@ -1185,7 +1185,7 @@ class TaskCompletionTests(unittest.TestCase):
         reviewer_root = self.base / 'reviewer-merged'
         self._git('worktree', 'add', '-b', 'review/merged-branch',
                   str(reviewer_root), result_sha)
-        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+        self._write_registration('reviewer-task', 'claude-reviewer', 'Reviewer session',
             reviewer_root, 'review/merged-branch', result_sha, result_sha,
             native_session_id='native-reviewer', github_login='reviewer-user',
             state='REVIEW_PENDING')
@@ -1426,7 +1426,7 @@ class TaskCompletionTests(unittest.TestCase):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'
         self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
-        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+        self._write_registration('reviewer-task', 'claude-reviewer', 'Reviewer session',
             reviewer_root, 'review/branch', result_sha, result_sha,
             native_session_id='native-reviewer', github_login='reviewer-user')
         pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
