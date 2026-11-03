@@ -52,9 +52,10 @@ def _comment_verdict(comment, *, head, version, task):
     codex_bound = False
     if marker is not None and marker.group(1) == 'Codex':
         if (type(developer) is not dict or
-                developer.get('provider_profile') in ('codex', 'claude') or
+                developer.get('provider_profile') == 'codex' or
                 developer.get('provider_profile') not in
-                ('opencode', 'agy', 'company-gw', 'company-gw-agent', 'gw-agent')):
+                ('claude', 'opencode', 'agy', 'company-gw',
+                 'company-gw-agent', 'gw-agent')):
             return None
         binding = next((match for line in lines[1:]
                         if (match := _CODEX_BINDING.fullmatch(line)) is not None), None)

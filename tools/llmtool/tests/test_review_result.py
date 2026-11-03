@@ -241,7 +241,8 @@ class ReviewResultTests(unittest.TestCase):
         handler.assert_called_once()
 
     def test_review_dispatch_cli_accepts_explicit_reviewer(self):
-        with patch.object(task_submission_cli, 'run_task_review_dispatch', return_value=17) as handler:
+        with patch('llmtool.source_freshness.require_fresh_source', return_value='OK'), \
+                patch.object(task_submission_cli, 'run_task_review_dispatch', return_value=17) as handler:
             self.assertEqual(cli.main(['task', 'review-dispatch', TASK,
                                        '--executor-task', EXECUTOR, '--pr', str(PR),
                                        '--reviewer', 'codex-reviewer']), 17)

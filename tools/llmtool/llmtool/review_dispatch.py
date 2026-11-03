@@ -51,8 +51,9 @@ def _select_reviewer(task, requested=None):
     """Choose the default or explicit Reviewer and enforce family separation."""
     developer = task.get('developer') if type(task) is dict else None
     family = developer.get('provider_profile') if type(developer) is dict else None
-    if family not in ('codex', 'claude', 'opencode', 'agy', 'company-gw',
-                      'company-gw-agent', 'gw-agent'):
+    supported_families = ('codex', 'claude', 'opencode', 'agy', 'company-gw',
+                          'company-gw-agent', 'gw-agent')
+    if family is not None and family not in supported_families:
         _refuse('REVIEWER_FAMILY_UNSUPPORTED')
     reviewer_key = requested
     if reviewer_key is None:
@@ -60,7 +61,7 @@ def _select_reviewer(task, requested=None):
     if reviewer_key not in ('claude-reviewer', 'codex-reviewer'):
         _refuse('REVIEWER_INVALID')
     reviewer_family = 'claude' if reviewer_key == 'claude-reviewer' else 'codex'
-    if reviewer_family == family:
+    if family is not None and reviewer_family == family:
         _refuse('REVIEWER_SAME_FAMILY')
     policy = _policy(task, reviewer_key)
     if not policy.allowed:
@@ -384,6 +385,11 @@ def dispatch_review(*, store, task_id, executor_task, pr_number, version=1,
     _, executor, head, _base, reviewer_key = _preflight(
         store, task_id, executor_task, pr_number, version, task=task,
         reviewer=reviewer)
+    # Authorization must be checked before a durable claim is created. The
+    # policy is re-read again immediately before each external side effect.
+    gate = _policy(task, reviewer_key)
+    if not gate.allowed:
+        _refuse('REVIEWER_NOT_ALLOWED')
     stored_claims = task.get('review_dispatch_claim')
     claims = ([stored_claims] if type(stored_claims) is dict else
               list(stored_claims) if type(stored_claims) is list else [])
