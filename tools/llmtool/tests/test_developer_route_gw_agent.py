@@ -82,6 +82,26 @@ class GwAgentRouteTests(unittest.TestCase):
         with credential_loader, value_loader:
             return run_route(*args, **kwargs)
 
+    def test_invalid_package_paths_raise_route_error(self):
+        package_file = Path(self.temp.name) / 'package-file'
+        package_file.write_text('not a directory')
+        cases = (
+            str(Path(self.temp.name) / 'missing-package'),
+            str(package_file),
+        )
+        for package_path in cases:
+            config = dict(self.route.config, package_path=package_path)
+            with self.subTest(package_path=package_path):
+                with self.assertRaises(RouteError) as caught:
+                    GwAgentRoute(config)
+                self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
+
+        config = dict(self.route.config)
+        with mock.patch.object(Path, 'is_dir', side_effect=PermissionError):
+            with self.assertRaises(RouteError) as caught:
+                GwAgentRoute(config)
+        self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
+
     @staticmethod
     def _write_json(path, value):
         Path(path).write_text(json.dumps(value, sort_keys=True))
