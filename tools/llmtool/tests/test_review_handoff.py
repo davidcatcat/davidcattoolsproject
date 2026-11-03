@@ -542,17 +542,18 @@ class ReviewHandoffTests(unittest.TestCase):
             h.ledger_path, clock=h.clock.utc, kind='PROVIDER_REVIEW',
             creation_nonce=h.ledger.creation_nonce)
         self.addCleanup(reopened.close)
-        rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
-        self.assertEqual(len(rows), 1)
-        nonce, status = rows[0]
-        self.assertEqual(status, 'CONSUMED')
         h.observer = FixtureObserver(h.pin, h.expect, h.events, h.clock,
                                      baseline_check=lambda reg, facts: True,
                                      writers_check=lambda reg, facts: True)
         h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
+        # Recovery is serialized with the handoff and runs before its first
+        # receipt redemption, so assert the recovered state after dispatch.
         receipt, _ = rh.dispatch_review_handoff(
             h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
-        self.assertEqual(reopened.status(nonce), 'EFFECT_UNKNOWN')
+        rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
+        self.assertEqual(len(rows), 1)
+        nonce, status = rows[0]
+        self.assertEqual(status, 'EFFECT_UNKNOWN')
         self.assertEqual(receipt.recovered_receipts, 1)
         self.assertEqual(marker.read_text(), str(reviewer_pid))
         second, _ = rh.dispatch_review_handoff(
