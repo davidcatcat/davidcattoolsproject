@@ -1927,6 +1927,32 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         status = None if len(raw_lines) < 2 else _VERDICT_STATUS.fullmatch(raw_lines[1])
         standard = (marker is not None and status is not None and
                     status.group(1) == marker.group(2) and status.group(2) == result_sha)
+        accepted_claude = False
+        if standard and marker.group(1) == 'Claude' and marker.group(2) == 'PASS':
+            try:
+                if not codex_task_record_loaded:
+                    from .task_store import TaskStore
+                    codex_task_record = TaskStore().get(task_id)
+                    codex_task_record_loaded = True
+                developer = (codex_task_record.get('developer')
+                             if type(codex_task_record) is dict else None)
+                developer_family = (developer.get('provider_profile')
+                                    if type(developer) is dict else None)
+                supported_families = {
+                    'codex', 'claude', 'agy', 'opencode', 'company-gw',
+                    'company-gw-agent', 'gw-agent',
+                }
+                accepted_claude = (
+                    reviewer.trusted_agent_id == 'claude-reviewer' and
+                    type(codex_task_record) is dict and
+                    codex_task_record.get('task_id') == task_id and
+                    codex_task_record.get('run_id') == run_id and
+                    type(codex_task_record.get('task_binding')) is dict and
+                    codex_task_record['task_binding'].get('contract_digest') ==
+                    contract_digest and developer_family in supported_families and
+                    developer_family != 'claude')
+            except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
+                accepted_claude = False
         if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
             accepted_codex = False
             if reviewer.trusted_agent_id == 'codex-reviewer':
@@ -1990,7 +2016,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             (marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
              is_formal_claude_pass(
                  body, task_id=task_id, run_id=run_id,
-                 contract_digest=contract_digest, result_sha=result_sha)) or
+                 contract_digest=contract_digest, result_sha=result_sha) and
+             accepted_claude) or
             (marker.group(1) == 'Codex' and marker.group(2) == 'PASS' and
              accepted_codex)))
         if type(comment.get('id')) is not int:

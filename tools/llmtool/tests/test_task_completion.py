@@ -943,7 +943,10 @@ class TaskCompletionTests(unittest.TestCase):
                                              comments=comments)
         with patch('llmtool.task_completion._github_get', side_effect=api):
             evidence = task_completion.collect_github_evidence(
-                **self._github_kwargs(result_sha))
+                **self._github_kwargs(result_sha, task_record={
+                    'task_id': '1' * 32, 'run_id': '2' * 32,
+                    'task_binding': {'contract_digest': '3' * 64},
+                    'developer': {'provider_profile': 'codex'}}))
         self.assertEqual(evidence['evidence']['review_source'], 'PR_COMMENT')
         self.assertEqual(evidence['evidence']['formal_review_state'], 'ACCEPTED')
         self.assertEqual(evidence['evidence']['reviewer_github_login'], 'reviewer-user')
@@ -959,11 +962,15 @@ class TaskCompletionTests(unittest.TestCase):
         checks = {'total_count': 1, 'check_runs': [
             {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
-        comment_body = (
-            '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
-            f'Verdict: PASS | Version: v1 | HEAD: {result_sha}\n'
-            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
-            self._review_binding(head=result_sha))
+        def make_comment_body(reviewer):
+            actor = 'Codex' if reviewer == 'codex-reviewer' else 'Claude'
+            return (
+                f'<!-- activity: type=review_verdict actor={actor} target=PM status=PASS -->\n'
+                f'Verdict: PASS | Version: v1 | HEAD: {result_sha}\n'
+                'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                self._review_binding(head=result_sha))
+
+        comment_body = make_comment_body('codex-reviewer')
         comment = {'id': 44, 'user': {'login': 'reviewer-user'},
                    'body': comment_body, 'created_at': '2026-10-21T10:00:00Z',
                    'updated_at': '2026-10-21T10:00:00Z'}
@@ -971,7 +978,7 @@ class TaskCompletionTests(unittest.TestCase):
         case_number = [0]
 
         def evaluate(*, reviewer='codex-reviewer', author='claude',
-                     review_text=comment_body, binding_body=comment_body,
+                     review_text=None, binding_body=None,
                      task_digest='3' * 64):
             case_number[0] += 1
             reviewer_root = self.base / ('reviewer-' + str(case_number[0]))
@@ -982,10 +989,16 @@ class TaskCompletionTests(unittest.TestCase):
                 'native-reviewer-session', reviewer_root, reviewer_branch,
                 result_sha, result_sha, native_session_id='native-reviewer-session',
                 github_login='reviewer-user', state='REVIEW_PENDING')
+            reviewer_body = make_comment_body(reviewer)
+            if binding_body is None:
+                binding_body = reviewer_body
+            if review_text is None:
+                review_text = reviewer_body
             current_comment = dict(comment, body=binding_body)
+            developer = {} if author is None else {'provider_profile': author}
             task = {'task_id': '1' * 32, 'run_id': '2' * 32,
                     'task_binding': {'contract_digest': task_digest},
-                    'developer': {'provider_profile': author},
+                    'developer': developer,
                     'review_dispatch_claim': [{
                         'pr': 10, 'head_sha': result_sha, 'reviewer_task': 'reviewer-task',
                         'version': 1, 'state': 'COMPLETED',
@@ -1003,9 +1016,20 @@ class TaskCompletionTests(unittest.TestCase):
         accepted = evaluate()
         self.assertEqual(accepted['evidence']['formal_review_state'], 'ACCEPTED')
         self.assertEqual(accepted['missing_gates'], [])
-        self.assertEqual(evaluate(author='codex')['evidence']['formal_review_state'], 'UNVERIFIED')
-        self.assertEqual(evaluate(reviewer='claude-reviewer')['evidence']['formal_review_state'],
-                         'UNVERIFIED')
+        families = ('codex', 'claude', 'agy', 'opencode', 'company-gw',
+                    'company-gw-agent', 'gw-agent')
+        for author in families:
+            for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                with self.subTest(author=author, reviewer=reviewer):
+                    state = evaluate(author=author, reviewer=reviewer)[
+                        'evidence']['formal_review_state']
+                    self.assertEqual(state, 'UNVERIFIED' if author == reviewer.split('-')[0]
+                                     else 'ACCEPTED')
+        for author in (None, 'unknown'):
+            for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                with self.subTest(author=author, reviewer=reviewer):
+                    self.assertEqual(evaluate(author=author, reviewer=reviewer)[
+                        'evidence']['formal_review_state'], 'UNVERIFIED')
         self.assertEqual(evaluate(binding_body=comment_body.replace('task=' + '1' * 32,
                            'task=' + '9' * 32))['evidence']['formal_review_state'], 'UNVERIFIED')
         self.assertEqual(evaluate(review_text=comment_body + '\nDifferent text')
