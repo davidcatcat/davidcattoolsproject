@@ -553,18 +553,22 @@ class ReviewHandoffTests(unittest.TestCase):
         # once-per-open recovery turns this abandoned CONSUMED row unknown
         # before attempting any redemption.
         self.assertEqual(status, 'CONSUMED')
-        receipt, _ = rh.dispatch_review_handoff(
-            h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
-        rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
-        self.assertEqual(len(rows), 1)
-        recovered_nonce, status = rows[0]
-        self.assertEqual(recovered_nonce, nonce)
-        self.assertEqual(status, 'EFFECT_UNKNOWN')
-        self.assertEqual(receipt.recovered_receipts, 1)
-        self.assertEqual(marker.read_text(), str(reviewer_pid))
-        second, _ = rh.dispatch_review_handoff(
-            h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
-        self.assertEqual(second.recovered_receipts, 1)
+        with patch.object(reopened, 'recover', wraps=reopened.recover) as recover:
+            recover.assert_not_called()
+            receipt, _ = rh.dispatch_review_handoff(
+                h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
+            rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
+            self.assertEqual(len(rows), 1)
+            recovered_nonce, status = rows[0]
+            self.assertEqual(recovered_nonce, nonce)
+            self.assertEqual(status, 'EFFECT_UNKNOWN')
+            self.assertEqual(receipt.recovered_receipts, 1)
+            recover.assert_called_once_with()
+            self.assertEqual(marker.read_text(), str(reviewer_pid))
+            second, _ = rh.dispatch_review_handoff(
+                h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
+            self.assertEqual(second.recovered_receipts, 1)
+            recover.assert_called_once_with()
         self.assertEqual(marker.read_text(), str(reviewer_pid))
 
     def test_timeout_nonzero_spoof_and_secret_failures_stay_unknown_or_blocked_without_leak(self):
