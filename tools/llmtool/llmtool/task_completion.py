@@ -1681,6 +1681,28 @@ def _review_time(review, field='submitted_at'):
         _stop('REVIEW_EVIDENCE_INVALID')
 
 
+def _review_family_compatible(developer, reviewer_identity):
+    """Require a known Developer family and the matching formal Reviewer family."""
+    if type(developer) is not dict:
+        return False
+    profile = developer.get('provider_profile')
+    if profile == 'claude':
+        developer_family = 'claude'
+    elif profile == 'codex':
+        developer_family = 'codex'
+    elif profile in ('agy', 'opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
+        developer_family = None
+    else:
+        return False
+    reviewer_family = {
+        'claude-reviewer': 'claude',
+        'codex-reviewer': 'codex',
+    }.get(reviewer_identity)
+    if reviewer_family is None:
+        return False
+    return developer_family is None or reviewer_family != developer_family
+
+
 def _review_binding_line(task_id, run_id, contract_digest, result_sha):
     return (f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
             f'contract={contract_digest} head={result_sha}')
@@ -1908,8 +1930,18 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
             type(comment) is not dict for comment in comments):
         _stop('REVIEW_EVIDENCE_INVALID')
     verdict = None
+    unsupported_family_comment = False
     codex_task_record = task_record
     codex_task_record_loaded = task_record is not None
+
+    def load_completion_task_record():
+        nonlocal codex_task_record, codex_task_record_loaded
+        if not codex_task_record_loaded:
+            from .task_store import TaskStore
+            codex_task_record = TaskStore().get(task_id)
+            codex_task_record_loaded = True
+        return codex_task_record
+
     for comment in comments:
         login = (comment.get('user') or {}).get('login')
         body = comment.get('body')
@@ -1927,6 +1959,12 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         status = None if len(raw_lines) < 2 else _VERDICT_STATUS.fullmatch(raw_lines[1])
         standard = (marker is not None and status is not None and
                     status.group(1) == marker.group(2) and status.group(2) == result_sha)
+        if standard and marker.group(2) == 'PASS':
+            pass_task = load_completion_task_record()
+            if (type(pass_task) is not dict or
+                    not _review_family_compatible(
+                        pass_task.get('developer'), reviewer.trusted_agent_id)):
+                unsupported_family_comment = True
         if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
             accepted_codex = False
             if reviewer.trusted_agent_id == 'codex-reviewer':
@@ -1938,9 +1976,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         continue
                     version = int(version_match.group(1))
                     if not codex_task_record_loaded:
-                        from .task_store import TaskStore
-                        codex_task_record = TaskStore().get(task_id)
-                        codex_task_record_loaded = True
+                        load_completion_task_record()
                     from . import review_result
                     classified = review_result._comment_verdict(
                         comment, head=result_sha,
@@ -1978,6 +2014,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         codex_task_record.get('run_id') == run_id and
                         type(classified) is tuple and len(classified) >= 3 and
                         classified[2] == 'REVIEW_PASS' and
+                        _review_family_compatible(
+                            codex_task_record.get('developer'), reviewer.trusted_agent_id) and
                         len(matching_claims) == 1 and claim_lines and
                         claim_lines == comment_lines)
                 except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
@@ -1986,11 +2024,21 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                 continue  # Unbound or otherwise unverified Codex PASS stays advisory.
         # Anything else that claims to be a verdict for this HEAD is a
         # disposition; only the exact standard Claude PASS form accepts.
+        if (standard and marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
+                is_formal_claude_pass(
+                    body, task_id=task_id, run_id=run_id,
+                    contract_digest=contract_digest, result_sha=result_sha)):
+            claude_task_record = load_completion_task_record()
+            claude_family_compatible = (
+                reviewer.trusted_agent_id == 'claude-reviewer' and
+                type(claude_task_record) is dict and
+                _review_family_compatible(claude_task_record.get('developer'),
+                                          reviewer.trusted_agent_id))
+        else:
+            claude_family_compatible = False
         accepted = (standard and (
             (marker.group(1) == 'Claude' and marker.group(2) == 'PASS' and
-             is_formal_claude_pass(
-                 body, task_id=task_id, run_id=run_id,
-                 contract_digest=contract_digest, result_sha=result_sha)) or
+             claude_family_compatible) or
             (marker.group(1) == 'Codex' and marker.group(2) == 'PASS' and
              accepted_codex)))
         if type(comment.get('id')) is not int:
@@ -2029,6 +2077,15 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     review_binding_verified = binding_line in body_lines
     accepting_states = ('APPROVED', 'VERDICT_COMMENT')
     missing = []
+    if unsupported_family_comment:
+        missing.append('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED')
+    if ('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED' not in missing and review is not None and
+            (review.get('state') in accepting_states or review_source == 'PR_COMMENT')):
+        completion_task = load_completion_task_record()
+        developer = (completion_task.get('developer')
+                     if type(completion_task) is dict else None)
+        if not _review_family_compatible(developer, reviewer.trusted_agent_id):
+            missing.append('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED')
     if review is None:
         missing.append('FORMAL_REVIEW_MISSING')
     elif review.get('state') not in accepting_states or not formal_marker.search(review_body):
@@ -2069,6 +2126,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
         'REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT',
         'REVIEWER_NATIVE_SESSION_UNVERIFIED',
         'FORMAL_REVIEW_BINDING_MISMATCH',
+        'REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
         'REVIEWER_ACTOR_D6_BINDING_MISSING',
         'REVIEWER_ACTOR_D6_BINDING_MISMATCH',
         'REVIEWER_D6_HEAD_MISMATCH', 'REVIEWER_D6_HEAD_UNAVAILABLE',
