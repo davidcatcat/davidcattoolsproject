@@ -3440,5 +3440,62 @@ class DispatcherGitTimeoutTests(unittest.TestCase):
         self.assertEqual(run.call_args.kwargs['timeout'], 120)
 
 
+class DispatcherPreflightRefusalTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name).resolve() / 'canonical'
+        self.helper = self.root / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_env.py'
+        self.dispatcher = (self.root / 'tools' / 'llmtool' / 'llmtool' /
+                           'task_submission_cli.py')
+        self.helper.parent.mkdir(parents=True)
+        self.dispatcher.parent.mkdir(parents=True)
+        self.helper.write_text('# trusted helper\n', encoding='utf-8')
+        self.dispatcher.write_text('# trusted dispatcher\n', encoding='utf-8')
+        subprocess.run(['/usr/bin/git', 'init', '-b', 'main'], cwd=self.root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.name', 'Dispatcher Fixture'],
+                       cwd=self.root, check=True)
+        subprocess.run(['/usr/bin/git', 'config', 'user.email', 'dispatcher@example.invalid'],
+                       cwd=self.root, check=True)
+        subprocess.run(['/usr/bin/git', 'remote', 'add', 'origin',
+                        'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                       cwd=self.root, check=True)
+        subprocess.run(['/usr/bin/git', 'add', 'tools'], cwd=self.root, check=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'trusted dispatcher fixture'],
+                       cwd=self.root, check=True, capture_output=True)
+        self.registration = type('Registration', (), {
+            'root': str(self.root), 'task_id': 'dispatcher-preflight-test'})()
+
+    def _refusal(self, code, dispatcher_file=None):
+        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', self.root), \
+                patch.object(submission_cli, '__file__',
+                             str(dispatcher_file or self.dispatcher)):
+            with self.assertRaises(DirectOpenCodeError) as raised:
+                submission_cli._bootstrap_registered_d6(self.registration)
+        self.assertEqual(raised.exception.direct_opencode_code, code)
+        return str(raised.exception)
+
+    def test_dispatcher_outside_canonical_checkout_has_safe_hint(self):
+        other = Path(self.temp.name).resolve() / 'd6' / 'task_submission_cli.py'
+        other.parent.mkdir()
+        message = self._refusal('ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL', other)
+        self.assertIn('Run llmtool from the canonical checkout', message)
+        self.assertIn('working directory may remain in the D6 worktree', message)
+        self.assertNotIn(str(self.root), message)
+
+    def test_dirty_canonical_dispatcher_has_distinct_refusal(self):
+        (self.root / 'untracked-note').write_text('dirty\n', encoding='utf-8')
+        message = self._refusal('ENV_BOOTSTRAP_DISPATCHER_DIRTY')
+        self.assertNotIn(str(self.root), message)
+
+    def test_dispatcher_origin_mismatch_has_distinct_refusal(self):
+        subprocess.run(['/usr/bin/git', 'remote', 'set-url', 'origin',
+                        'https://example.invalid/wrong.git'], cwd=self.root,
+                       check=True, capture_output=True)
+        message = self._refusal('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
+        self.assertNotIn(str(self.root), message)
+
+
 if __name__ == '__main__':
     unittest.main()

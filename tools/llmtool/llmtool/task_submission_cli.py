@@ -2047,6 +2047,14 @@ def _direct_result_callback(task, registration, source_sha, *, result_head=None,
     }
 
 
+class _DispatcherPreflightError(ValueError):
+    """A safe, path-free refusal from dispatcher checkout preflight."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
 def _trusted_d6_helper_source(registration=None, source_rel=None):
     """Return pinned helper/source bytes, using approved D6 blobs when present."""
     dispatcher_root = D6_INTEGRATOR_DISPATCHER_ROOT
@@ -2084,15 +2092,23 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
             raise ValueError('dispatcher Git preflight failed')
         return result.stdout
 
-    if (not dispatcher_root.is_absolute() or
-            Path(__file__).resolve() != dispatcher_root / dispatcher_rel or
+    if not dispatcher_root.is_absolute():
+        raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
+    dispatcher_file = Path(__file__).resolve()
+    try:
+        dispatcher_file.relative_to(dispatcher_root)
+    except ValueError:
+        raise _DispatcherPreflightError(
+            'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL') from None
+    if (dispatcher_file != dispatcher_root / dispatcher_rel or
             Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
             git('rev-parse', '--show-toplevel').decode().rstrip('\n') != str(dispatcher_root) or
             git('remote', 'get-url', 'origin').decode().strip() not in (
                 'git@github.com:davidcatcat/davidcattoolsproject.git',
-                'https://github.com/davidcatcat/davidcattoolsproject.git') or
-            git('status', '--porcelain=v1', '--untracked-files=all')):
-        raise ValueError('dispatcher checkout is not clean and trusted')
+                'https://github.com/davidcatcat/davidcattoolsproject.git')):
+        raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
+    if git('status', '--porcelain=v1', '--untracked-files=all'):
+        raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_DIRTY')
     pinned_head = git('rev-parse', 'HEAD').decode().strip()
     if re.fullmatch(r'[0-9a-f]{40}', pinned_head) is None:
         raise ValueError('dispatcher HEAD is invalid')
@@ -2176,9 +2192,15 @@ def _bootstrap_registered_d6(registration):
     except OSError:
         raise opencode_direct_developer.DirectOpenCodeError(
             'ENV_BOOTSTRAP_UNAVAILABLE') from None
-    except (UnicodeDecodeError, ValueError):
-        raise opencode_direct_developer.DirectOpenCodeError(
-            'ENV_BOOTSTRAP_SOURCE_UNTRUSTED') from None
+    except (UnicodeDecodeError, ValueError) as exc:
+        code = (exc.code if isinstance(exc, _DispatcherPreflightError)
+                else 'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        error = opencode_direct_developer.DirectOpenCodeError(code)
+        if code == 'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL':
+            error.args = (code +
+                          ': Run llmtool from the canonical checkout; the current '
+                          'working directory may remain in the D6 worktree.',)
+        raise error from None
     if result.returncode:
         raise opencode_direct_developer.DirectOpenCodeError(
             'ENV_BOOTSTRAP_REJECTED')
