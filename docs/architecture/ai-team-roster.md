@@ -2,6 +2,10 @@
 
 Status: Owner-approved **role / resource inventory**, 2026-10-27. This is not live attendance, provider availability, billing authority or proof of completed integration.
 
+## Management hierarchy (Owner decision D2, 2026-11-02)
+
+Owner → ChatGPT Coordinator (technical adviser and technical director) → Claude PM → sub-agent PMs, Developers and Reviewers. The Coordinator provides technical direction, architecture review and advice to help the Owner decide. The Claude PM owns day-to-day planning, dispatch, acceptance, tracking and integration.
+
 ## Office roles: who can do what
 
 | Role | Worker / actor | Authority source | Operation / limit |
