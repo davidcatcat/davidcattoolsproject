@@ -1534,11 +1534,11 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertFalse(any('--add-label' in call for call in calls))
 
         result, calls = run_case(current=labeled, checks=skipped_macos_checks)
-        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
         self.assertEqual(calls, [])
 
         result, calls = run_case(current=labeled, checks=linux_only_checks)
-        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(result['codes'], ['MERGE_REQUIRED_CHECK_MISSING'])
         self.assertEqual(calls, [])
 
         result, calls = run_case(verdict='FIX')

@@ -129,27 +129,38 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(result['steps'], 2)
         self.assertEqual([call['merge'] for call in calls], [False, True])
 
-    def test_merge_waits_for_mac_ci_then_retries_merge(self):
+    def test_merge_labels_once_then_waits_for_green_mac_ci_before_retry(self):
         pauses = []
         advance, calls = self.adapter([
             {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
             {'task_id': 't', 'step': 'WAITING_CI',
              'result': {'pr': 17, 'head': 'a' * 40}, 'codes': []},
-            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
-            {'task_id': 't', 'step': 'WAITING_CI',
-             'result': {'pr': 17, 'head': 'a' * 40}, 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
             {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
             {'task_id': 't', 'step': 'MERGED', 'codes': []},
         ])
 
-        result = task_drive.drive(task_id='t', merge=True, max_steps=8,
+        result = task_drive.drive(task_id='t', merge=True, max_steps=5,
                                   poll_seconds=0.25, advance_call=advance,
                                   sleep=pauses.append)
 
         self.assertEqual(result['step'], 'MERGED')
         self.assertEqual([call['merge'] for call in calls],
-                         [False, True, False, True, False, True])
+                         [False, True, False, False, True])
         self.assertEqual(pauses, [0.25, 0.25])
+
+    def test_merge_refusal_is_returned_without_polling(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGE_REFUSED',
+             'codes': ['MERGE_MACOS_CHECK_REQUIRED']},
+        ])
+
+        result = task_drive.drive(task_id='t', merge=True, advance_call=advance)
+
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
+        self.assertEqual([call['merge'] for call in calls], [False, True])
 
     def test_waiting_ci_without_merge_does_not_attempt_merge(self):
         advance, calls = self.adapter([
