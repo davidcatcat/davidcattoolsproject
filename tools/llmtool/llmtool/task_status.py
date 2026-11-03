@@ -99,19 +99,34 @@ def _summary(record):
     else:
         claim = None
         claim_state = 'NONE'
-    if claim_state == 'DISPATCHED' and type(claim.get('head_sha')) is str and \
-            type(claim.get('version')) is int:
-        reviewer_event = next((event for event in events
-                               if type(event) is dict and
-                               event.get('source') == 'REVIEWER' and
-                               event.get('source_sha') == claim['head_sha'] and
-                               event.get('version') == claim['version']), None)
-        if reviewer_event is not None:
-            outcome = reviewer_event.get('outcome') or reviewer_event.get('state')
-            if type(outcome) is str:
-                claim_state = outcome
     completion = record.get('completion')
     completion = completion if type(completion) is dict else {}
+    if claim_state == 'DISPATCHED' and type(claim.get('head_sha')) is str:
+        claim_head = claim['head_sha']
+        claim_reviewer_task = claim.get('reviewer_task')
+        reviewer_event = next((event for event in reversed(events)
+                               if type(event) is dict and
+                               event.get('source') == 'REVIEWER' and
+                               event.get('source_sha') == claim_head), None)
+        if reviewer_event is not None:
+            completion_evidence = completion.get('evidence')
+            completion_evidence = (completion_evidence
+                                   if type(completion_evidence) is dict else {})
+            review_evidence = completion_evidence.get('review_pr_ci')
+            if (type(review_evidence) is dict and
+                    review_evidence.get('head_sha') == claim_head and
+                    review_evidence.get('formal_review_state') == 'ACCEPTED' and
+                    type(claim_reviewer_task) is str and claim_reviewer_task and
+                    review_evidence.get('reviewer_task_id') == claim_reviewer_task):
+                claim_state = 'PASS'
+            elif (type(claim.get('version')) is int and
+                  reviewer_event.get('version') == claim['version']):
+                # Preserve legacy event-derived states when the event carries
+                # the old version/outcome fields. A PASS still requires the
+                # accepted completion evidence checked above.
+                outcome = reviewer_event.get('outcome') or reviewer_event.get('state')
+                if outcome == 'REVIEW_FAIL':
+                    claim_state = outcome
     return {
         'task_id': record['task_id'],
         'pm_session_id': record.get('pm_session_id'),
