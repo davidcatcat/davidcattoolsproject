@@ -55,6 +55,8 @@ def _developer_record(family):
         'provider_profile': family,
         'provider_type': {'claude': None, 'codex': 'codex-cli',
                           'company-gw': 'openai-compatible',
+                          'company-gw-agent': 'openai-compatible',
+                          'gw-agent': 'openai-compatible',
                           'opencode': 'opencode-cli', 'agy': 'agy-cli'}[family],
         'model': None if family in ('claude', 'company-gw') else 'gpt-6-luna',
         'backend_session_semantics': ('CLI_REPORTED_SESSION_ID' if cli_family
@@ -137,6 +139,10 @@ class ReviewResultTests(unittest.TestCase):
         self.assertEqual(event['source'], 'REVIEWER')
         self.assertEqual(event['source_sha'], HEAD)
 
+    def test_claude_pass_is_rejected_for_claude_developer_task(self):
+        self.store = FamilyStore(self.store, 'claude')
+        self.assertEqual(self.run_result([_comment(actor='Claude')])['state'], 'NOT_READY')
+
     def test_completed_codex_claim_is_recorded_without_github_fetch(self):
         codex_root = Path(self.temp.name) / 'codex'
         codex_root.mkdir(mode=0o700)
@@ -209,8 +215,14 @@ class ReviewResultTests(unittest.TestCase):
         comment['body'] = comment['body'].replace(f'run={RUN}', 'run=wrong')
         self.assertEqual(self.run_result([comment])['state'], 'NOT_READY')
 
-    def test_codex_pass_stays_advisory_for_codex_and_gw_tasks(self):
-        for family in ('codex', 'company-gw'):
+    def test_codex_pass_is_formal_for_other_developer_families(self):
+        for family in ('agy', 'opencode', 'company-gw', 'gw-agent'):
+            self.store = FamilyStore(self.store, family)
+            self.assertEqual(self.run_result([_comment(actor='Codex')])['state'],
+                             'REVIEW_PASS')
+
+    def test_codex_pass_stays_advisory_for_same_family_tasks(self):
+        for family in ('codex',):
             self.store = FamilyStore(self.store, family)
             self.assertEqual(self.run_result([_comment(actor='Codex')])['state'],
                              'NOT_READY')
@@ -227,4 +239,12 @@ class ReviewResultTests(unittest.TestCase):
             self.assertEqual(cli.main(['task', 'review-result', TASK,
                                        '--executor-task', EXECUTOR, '--pr', str(PR)]), 17)
         handler.assert_called_once()
+
+    def test_review_dispatch_cli_accepts_explicit_reviewer(self):
+        with patch('llmtool.source_freshness.require_fresh_source', return_value='OK'), \
+                patch.object(task_submission_cli, 'run_task_review_dispatch', return_value=17) as handler:
+            self.assertEqual(cli.main(['task', 'review-dispatch', TASK,
+                                       '--executor-task', EXECUTOR, '--pr', str(PR),
+                                       '--reviewer', 'codex-reviewer']), 17)
+        self.assertEqual(handler.call_args.args[0].reviewer, 'codex-reviewer')
 
