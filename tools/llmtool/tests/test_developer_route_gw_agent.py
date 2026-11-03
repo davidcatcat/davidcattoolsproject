@@ -1,5 +1,6 @@
 """Offline contract tests for the gw-agent Developer route."""
 
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -289,13 +290,6 @@ class GwAgentRouteTests(unittest.TestCase):
             private_dirs = []
             real_mkdtemp = tempfile.mkdtemp
 
-            setup_patches = {
-                'prepare_files': {},
-                'build_env': {'prepare_files': None},
-                'build_argv': {'prepare_files': None,
-                               'build_env': {'GW_AGENT_API_KEY': self.credential}},
-            }[method]
-
             def record_mkdtemp(*args, **kwargs):
                 path = real_mkdtemp(*args, **kwargs)
                 private_dirs.append(path)
@@ -306,10 +300,18 @@ class GwAgentRouteTests(unittest.TestCase):
                     mock.patch.dict(os.environ, {'HOME': isolated_home,
                                                  'TMPDIR': isolated_home}), \
                     mock.patch('tempfile.tempdir', None), \
-                    mock.patch.object(self.route, method, side_effect=failure), \
                     mock.patch('llmtool.developer_routes.base.tempfile.mkdtemp',
                                side_effect=record_mkdtemp), \
-                    mock.patch.multiple(self.route, **setup_patches):
+                    ExitStack() as setup:
+                if method in ('build_env', 'build_argv'):
+                    setup.enter_context(mock.patch.object(
+                        self.route, 'prepare_files', return_value=None))
+                if method == 'build_argv':
+                    setup.enter_context(mock.patch.object(
+                        self.route, 'build_env',
+                        return_value={'GW_AGENT_API_KEY': self.credential}))
+                setup.enter_context(mock.patch.object(
+                    self.route, method, side_effect=failure))
                 with self.assertRaises(RouteError) as caught:
                     run_route(self.route, self.request(), gate=lambda: True,
                               runner=lambda *args: (0, b'', b''),
