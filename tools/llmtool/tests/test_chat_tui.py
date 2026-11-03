@@ -2277,8 +2277,17 @@ class TaskListTests(Base):
             return [ui.list_view.text.splitlines()[row] for row in
                     range(view.top, min(view.top + height, len(view.text.splitlines())))]
 
-        async def first(ui):
+        async def wait_for(ui, condition):
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                render(ui)
+                if condition():
+                    return
+                await asyncio.sleep(0.01)
             render(ui)
+
+        async def first(ui):
+            await wait_for(ui, lambda: len(ui.list_view.text.splitlines()) == 2 + 40)
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
             self.assertEqual(len(ui.list_view.text.splitlines()), 2 + 40)   # every row
             self.assertNotIn(ids[39][:8], '\n'.join(shown(ui)))         # beyond the screen
@@ -2287,9 +2296,7 @@ class TaskListTests(Base):
         async def down_past_edge(ui):
             for _ in range(30):
                 ui.app.input.send_text('\x1b[B')
-                await asyncio.sleep(0.01)
-            await asyncio.sleep(0.1)
-            render(ui)
+            await wait_for(ui, lambda: ui.list_index == 30)
             self.assertEqual(ui.list_index, 30)
             self.assertGreater(ui.list_view.top, 0)                      # scrolled
             self.assertIn('▶ ' + ids[30][:8], '\n'.join(shown(ui)))     # selection on screen
@@ -2297,25 +2304,26 @@ class TaskListTests(Base):
         async def page_down(ui):
             before = ui.list_index
             ui.app.input.send_text('\x1b[6~')                            # PgDn
-            await asyncio.sleep(0.1)
-            render(ui)
+            await wait_for(ui, lambda: ui.list_index > before)
             self.assertGreater(ui.list_index, before)
             self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
+            before = ui.list_index
             ui.app.input.send_text('\x1b[5~')                            # PgUp
-            await asyncio.sleep(0.1)
-            render(ui)
+            await wait_for(ui, lambda: ui.list_index < before)
             self.assertLess(ui.list_index, 39)
             self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
 
         async def wheel(ui):
             top = ui.list_view.top
             ui.app.input.send_text(WHEEL_UP * 3)
-            await asyncio.sleep(0.1)
+            await wait_for(ui, lambda: ui.list_view.top < top)
             self.assertLess(ui.list_view.top, top)
 
         async def copy_all(ui):
+            copies = seen['copies']
+            previous_count = len(copies)
             ui.app.input.send_text('C')
-            await asyncio.sleep(0.1)
+            await wait_for(ui, lambda: len(copies) > previous_count)
             self.assertTrue(ui.list_view.wait_copy())
             text = seen['copies'][-1]
             for task in ids:
