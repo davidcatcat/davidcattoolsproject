@@ -2,6 +2,10 @@
 
 Reference detail for the normative [PM Continuation Contract](pm-continuation.md).
 
+## D8 Host/Worker admission and review
+
+For OpenCode Host/Worker jobs, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the actually-free, enabled route at admission (never infer current price from a historical `$0.00` record), D8-authorized non-sensitive data class, provider cap, retry stop and D6 write scope. The PM admits the task and screens each file set for secrets/restricted data; a file-set change within the authorized class needs no repeated per-file Owner approval ([Issue #120 direction](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6289116138)). Do not generalize D8 to another provider, paid route or data class. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker. These Host/Worker controls do not apply to normal direct Developer sessions; see the routing paragraph below.
+
 ## High Debug
 
 For substantial uncertainty or root-cause work beyond the ordinary Developer route, the PM should proactively select a suitable high-capability Debug Developer when an authorized Worker route and the existing budget permit, subject to evidence/egress permission and D6 availability. Do not wait for the Owner to name a model. A model identity grants no dispatch, data, write or approval authority. PM analysis, a generic sub-agent or a formal Reviewer is not a Debug Developer assignment; bind the selected model and provider to a separate Debug Task. Diagnosis is read-only by default and grants no write authority, dispatch key, model-default change, extra repair, provider fallback or acceptance.
