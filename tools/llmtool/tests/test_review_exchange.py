@@ -20,6 +20,29 @@ from llmtool import review_exchange as x
 from llmtool.errors import LLMToolError
 from llmtool import task_lifecycle as t, task_verification as v
 from test_review_bundle import records
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
+
+
+# Fixture trust roots: workspace_root + '/codex' and canonical_root (#369 PR-6, Q6).
+AUTHOR_ROOT = review_trust_fixture.OWNER_WORKSPACE_ROOT + '/codex'
+REVIEW_ROOT = review_trust_fixture.OWNER_CANONICAL_ROOT
+
+
+class TrustRootTests(unittest.TestCase):
+    def test_roots_are_read_from_trust_at_use_time(self):
+        self.assertEqual((x.author_root(), x.review_root()), (AUTHOR_ROOT, REVIEW_ROOT))
+        other = review_trust_fixture.make_trust(canonical_root='/fixture/canonical',
+                                                workspace_root='/fixture/workspace')
+        with review_trust_fixture.use_trust(other):
+            self.assertEqual((x.author_root(), x.review_root()),
+                             ('/fixture/workspace/codex', '/fixture/canonical'))
+
+    def test_no_legacy_root_constants_remain(self):
+        self.assertFalse(hasattr(x, 'AUTHOR_ROOT') or hasattr(x, 'REVIEW_ROOT'))
 
 
 class ExchangeTests(unittest.TestCase):
@@ -27,10 +50,10 @@ class ExchangeTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory(dir='/private/tmp' if sys.platform == 'darwin' else None)
         self.folder = Path(self.tmp.name); self.folder.chmod(0o700)
         self.root = Path.cwd()
-        contract, expect, events = records(Path(x.AUTHOR_ROOT),'1'*40,'feat/synthetic')
+        contract, expect, events = records(Path(AUTHOR_ROOT),'1'*40,'feat/synthetic')
         dev = replace(expect.agents[0],session_id=x.AUTHOR,
-                      common_dir=x.REVIEW_ROOT+'/.git')
-        reviewer = replace(expect.agents[1],session_id=x.REVIEWER,root=x.REVIEW_ROOT,
+                      common_dir=REVIEW_ROOT+'/.git')
+        reviewer = replace(expect.agents[1],session_id=x.REVIEWER,root=REVIEW_ROOT,
                            common_dir=dev.common_dir,branch='main')
         expect = replace(expect,agents=(dev,reviewer),authored_by=(dev,))
         changed = []
@@ -73,7 +96,7 @@ class ExchangeTests(unittest.TestCase):
 
     def prepare(self):
         # Synthetic original-Session DATA, not a production identity bypass.
-        with patch.object(x.Path,'cwd',return_value=Path(x.AUTHOR_ROOT)), \
+        with patch.object(x.Path,'cwd',return_value=Path(AUTHOR_ROOT)), \
              patch.dict(os.environ,{'CODEX_THREAD_ID':x.AUTHOR}):
             result = x.prepare_request(self.request_args,time.monotonic()+10)
         self.request = json.loads(self.request_path.read_text())
@@ -289,7 +312,7 @@ class ExchangeTests(unittest.TestCase):
 
     def test_request_or_result_output_cannot_overwrite_original(self):
         self.prepare()
-        with patch.object(x.Path,'cwd',return_value=Path(x.AUTHOR_ROOT)), \
+        with patch.object(x.Path,'cwd',return_value=Path(AUTHOR_ROOT)), \
              patch.dict(os.environ,{'CODEX_THREAD_ID':x.AUTHOR}):
             with self.assertRaises(OSError): x.prepare_request(self.request_args,time.monotonic()+1)
         self.write(self.wait_args.output,b'preserved')

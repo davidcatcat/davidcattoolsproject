@@ -21,6 +21,11 @@ from llmtool.providers.claude_cli import decode_review_envelope
 from test_review_authority import FAKE_SCRIPT, FixtureObserver, WorkerHarness
 from llmtool import task_completion
 from llmtool import worker_dispatch
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 
 class _TestDispatchStore:
@@ -67,6 +72,8 @@ class _TestDispatchStore:
 
 def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approval, packet_input, ledger_path, ledger_nonce, budget, barrier, result_queue):
     """Subprocess worker for cross-process / concurrent barrier replay test."""
+    # Spawned children do not inherit the parent's mock; never read a real trust.json.
+    review_trust_fixture.start_module()
     try:
         from test_task_review import FakeHost
         fclock = FakeHost(ready, final, expect, events).clock

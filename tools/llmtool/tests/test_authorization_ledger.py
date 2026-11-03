@@ -16,6 +16,11 @@ from unittest.mock import patch
 from llmtool import authorization_ledger as l
 from llmtool import authorization_policy as p
 from test_authorization_policy import REDEEM_RUN, allow, make_create, make_observed, make_policy
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 TESTS = Path(__file__).resolve().parent
 ROOT = TESTS.parent

@@ -10,6 +10,11 @@ from dataclasses import replace
 from llmtool import authorization_ledger as l,authorization_policy as p
 from llmtool.providers.cli_lifecycle import terminate
 from test_review_authority import Harness
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 CHILD=r'''
 import json,os,sys,sqlite3

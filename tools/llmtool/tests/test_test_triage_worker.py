@@ -13,6 +13,7 @@ from urllib.error import HTTPError, URLError
 from llmtool import test_triage_worker as w
 from llmtool.errors import LLMToolError
 from llmtool.review_authority import ProviderRoutePolicy
+import review_trust_fixture
 from test_test_output_excerpts import (FAIL_BODY, FAIL_ID, ERROR_BODY, ERROR_ID,
                                        SYNTHETIC_AWS_KEY, unittest_capture)
 
@@ -375,10 +376,11 @@ class WorkerTests(_WorkerFixture, unittest.TestCase):
                       fallback_count=0, per_call_cap=1, per_day_cap=10, unknown_cost_accepted=True,
                       not_before='2026-10-15T00:00:00Z', not_after='2026-10-16T00:00:00Z',
                       authorizer_ref='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-1')
-        with self.assertRaises(LLMToolError):
-            ProviderRoutePolicy(**fields)
-        # Control: the identical policy is accepted only for the claude-cli reviewer route.
-        self.assertEqual(ProviderRoutePolicy(**dict(fields, provider='claude-cli')).provider, 'claude-cli')
+        with review_trust_fixture.use_trust():
+            with self.assertRaises(LLMToolError):
+                ProviderRoutePolicy(**fields)
+            # Control: the identical policy is accepted only for the claude-cli reviewer route.
+            self.assertEqual(ProviderRoutePolicy(**dict(fields, provider='claude-cli')).provider, 'claude-cli')
 
     def test_exit_status_preserves_captured_failure(self):
         for code, status, expected in ((7, 'FAILED', 7), (-15, 'FAILED', 1), (0, 'FAILED', 1),
