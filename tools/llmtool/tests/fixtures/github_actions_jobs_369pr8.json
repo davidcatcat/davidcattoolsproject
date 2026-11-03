@@ -1,0 +1,51 @@
+{
+  "_comment": "Shape of GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs (REST 2022-11-28), #369 PR-8. Field set follows the documented job schema; values are fixture values, not a live capture. Q1 asks the Owner for a real GitHub-hosted capture to replace github_hosted_job.",
+  "self_hosted_mac_job": {
+    "id": 10, "run_id": 100,
+    "run_url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/actions/runs/100",
+    "node_id": "CR_fixture_mac", "head_sha": "RESULT_SHA",
+    "url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/actions/jobs/10",
+    "html_url": "https://github.com/davidcatcat/davidcattoolsproject/actions/runs/100/job/10",
+    "status": "completed", "conclusion": "success",
+    "created_at": "2026-11-03T00:00:00Z", "started_at": "2026-11-03T00:00:05Z",
+    "completed_at": "2026-11-03T00:05:00Z",
+    "name": "check (macOS 3.13)", "steps": [],
+    "check_run_url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/1",
+    "labels": ["self-hosted", "macOS", "ARM64"],
+    "runner_id": 7, "runner_name": "davidproject-self-action",
+    "runner_group_id": 1, "runner_group_name": "Default",
+    "workflow_name": "llmtool Mac CI", "head_branch": "feature/fixture"
+  },
+  "self_hosted_linux_job": {
+    "id": 51, "run_id": 200,
+    "run_url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/actions/runs/200",
+    "node_id": "CR_fixture_linux", "head_sha": "RESULT_SHA",
+    "url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/actions/jobs/51",
+    "html_url": "https://github.com/davidcatcat/davidcattoolsproject/actions/runs/200/job/51",
+    "status": "completed", "conclusion": "success",
+    "created_at": "2026-11-03T00:00:00Z", "started_at": "2026-11-03T00:00:05Z",
+    "completed_at": "2026-11-03T00:05:00Z",
+    "name": "check (Linux 3.14)", "steps": [],
+    "check_run_url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/61",
+    "labels": ["self-hosted", "Linux", "X64"],
+    "runner_id": 8, "runner_name": "ec2-self-runner",
+    "runner_group_id": 1, "runner_group_name": "Default",
+    "workflow_name": "llmtool Linux CI", "head_branch": "feature/fixture"
+  },
+  "github_hosted_job": {
+    "id": 71, "run_id": 300,
+    "run_url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/actions/runs/300",
+    "node_id": "CR_fixture_hosted", "head_sha": "RESULT_SHA",
+    "url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/actions/jobs/71",
+    "html_url": "https://github.com/davidcatcat/davidcattoolsproject/actions/runs/300/job/71",
+    "status": "completed", "conclusion": "success",
+    "created_at": "2026-11-03T00:00:00Z", "started_at": "2026-11-03T00:00:05Z",
+    "completed_at": "2026-11-03T00:05:00Z",
+    "name": "check (hosted)", "steps": [],
+    "check_run_url": "https://api.github.com/repos/davidcatcat/davidcattoolsproject/check-runs/81",
+    "labels": ["ubuntu-24.04"],
+    "runner_id": 1000003657, "runner_name": "GitHub Actions 1000003657",
+    "runner_group_id": 0, "runner_group_name": "GitHub Actions",
+    "workflow_name": "hosted CI", "head_branch": "feature/fixture"
+  }
+}

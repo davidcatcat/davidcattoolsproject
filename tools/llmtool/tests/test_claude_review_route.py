@@ -23,6 +23,12 @@ from llmtool.task_submission_cli import run_task_complete
 from llmtool import task_completion
 
 import test_task_completion as fixtures
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
+
 
 ACCEPT = 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT'
 
