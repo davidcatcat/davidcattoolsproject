@@ -3172,7 +3172,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'egress_basis': egress_basis, 'input_bytes': len(prompt.encode('utf-8')),
         'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
         'artifact_sha256': None, 'usage': None, 'error_code': None,
-        'created_at': _timestamp(),
+        'execution': None, 'created_at': _timestamp(),
         'direct_result_callback': _direct_result_callback(
             task, registration, snapshot.head, test_policy=test_policy),
     }
