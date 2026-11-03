@@ -39,6 +39,7 @@ app is shown as one line, without its many helper processes.
 from __future__ import annotations
 
 import argparse
+import ctypes
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
@@ -716,6 +717,54 @@ def disk_alert(usage: tuple[int, int] | None) -> str:
             "the PM can retire old D6 worktrees under the workspace root.")
 
 
+class _DarwinStatFS(ctypes.Structure):
+    """64-bit Darwin struct statfs layout (sys/mount.h)."""
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint64 * 7),
+    ]
+
+
+def _read_darwin_statfs(path: str) -> tuple[int, int, int, int]:
+    """Return blocks, free blocks, available blocks and block size via libc."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    statfs = libc.statfs
+    statfs.argtypes = (ctypes.c_char_p, ctypes.POINTER(_DarwinStatFS))
+    statfs.restype = ctypes.c_int
+    result = _DarwinStatFS()
+    encoded_path = os.fsencode(path)
+    if statfs(encoded_path, ctypes.byref(result)) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), path)
+    return result.f_blocks, result.f_bfree, result.f_bavail, result.f_bsize
+
+
+def _disk_volume_stats(path: str) -> tuple[int, int, int, int]:
+    """Use Darwin statfs (matching df on APFS), statvfs elsewhere or on error."""
+    if sys.platform == "darwin":
+        try:
+            return _read_darwin_statfs(path)
+        except Exception:
+            pass
+    usage = os.statvfs(path)
+    return usage.f_blocks, usage.f_bfree, usage.f_bavail, usage.f_frsize
+
+
 def table_lines(processes: list[Process]) -> list[str]:
     # Owner sits next to PID so it stays visible in an 80-column terminal.
     lines = [f"{'ROLE':<25} {'NAME':<12} {'PID':<7} {'OWNER':<30} {'PGID':<7} {'STATE':<5} ELAPSED"]
@@ -773,9 +822,10 @@ class Monitor:
             return
         self.disk_due = now + DISK_REFRESH_SECONDS
         try:
-            usage = os.statvfs(os.path.expanduser("~"))
-            used = (usage.f_blocks - usage.f_bfree) * usage.f_frsize
-            available = usage.f_bavail * usage.f_frsize
+            blocks, free_blocks, available_blocks, block_size = _disk_volume_stats(
+                os.path.expanduser("~"))
+            used = (blocks - free_blocks) * block_size
+            available = available_blocks * block_size
             total = used + available
             if total <= 0:
                 self.disk_usage = None

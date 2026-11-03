@@ -5741,7 +5741,7 @@ class DiskUsageTests(unittest.TestCase):
     @staticmethod
     def statvfs_for(used_percent):
         from types import SimpleNamespace
-        return SimpleNamespace(f_blocks=1000, f_bfree=1000 - used_percent,
+        return SimpleNamespace(f_blocks=100, f_bfree=100 - used_percent,
                                f_bavail=100 - used_percent, f_frsize=1024 ** 3)
 
     def test_home_volume_percentages_and_threshold_messages(self):
@@ -5750,7 +5750,8 @@ class DiskUsageTests(unittest.TestCase):
                 monitor = mon.Monitor()
                 fake = self.statvfs_for(percent)
                 with patch.object(mon.os, "statvfs", return_value=fake) as statvfs, \
-                        patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+                        patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                        patch.object(mon.sys, "platform", "linux"):
                     monitor.refresh_disk_usage(now=0)
                 statvfs.assert_called_once_with("/home/test")
                 expected_free = fake.f_bavail * fake.f_frsize
@@ -5767,19 +5768,25 @@ class DiskUsageTests(unittest.TestCase):
 
     def test_apfs_shared_container_uses_available_space_for_percentage(self):
         monitor = mon.Monitor()
-        # df-like volume: 233G total, 176G used, 6.3G available.
-        fake = type("StatVFS", (), {"f_blocks": 2330, "f_bfree": 570,
-                                    "f_bavail": 63, "f_frsize": 100_000_000})()
-        with patch.object(mon.os, "statvfs", return_value=fake) as statvfs, \
-                patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+        # Darwin df-like values for this Mac: 184924200K used, 1358817 blocks
+        # available, and 4096-byte blocks. APFS reports a shared container.
+        block_size = 4096
+        blocks = 61_202_533
+        used_blocks = (184_924_200 * 1024) // block_size
+        fake = (blocks, blocks - used_blocks, 1_358_817, block_size)
+        with patch.object(mon, "_read_darwin_statfs", return_value=fake) as statfs, \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "darwin"):
             monitor.refresh_disk_usage(now=0)
-        statvfs.assert_called_once_with("/home/test")
-        self.assertEqual(monitor.disk_usage, (97, 6_300_000_000))
+        statfs.assert_called_once_with("/home/test")
+        self.assertEqual(monitor.disk_usage,
+                         (98, 1_358_817 * block_size))
 
     def test_statvfs_failure_is_silent(self):
         monitor = mon.Monitor()
         with patch.object(mon.os, "statvfs", side_effect=OSError("unavailable")), \
-                patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "linux"):
             monitor.refresh_disk_usage(now=0)
         self.assertIsNone(monitor.disk_usage)
         self.assertEqual(mon.disk_status(monitor.disk_usage), "")
@@ -5788,7 +5795,8 @@ class DiskUsageTests(unittest.TestCase):
     def test_statvfs_is_limited_to_once_per_60_seconds(self):
         monitor = mon.Monitor()
         with patch.object(mon.os, "statvfs", return_value=self.statvfs_for(50)) as statvfs, \
-                patch.object(mon.os.path, "expanduser", return_value="/home/test"):
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "linux"):
             monitor.refresh_disk_usage(now=0)
             monitor.refresh_disk_usage(now=59.9)
             statvfs.assert_called_once_with("/home/test")
