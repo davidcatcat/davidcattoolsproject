@@ -26,6 +26,7 @@ from llmtool.task_submission_cli import TEXT_DEVELOPER_CONTEXT_SEPARATOR
 from llmtool import remote_test
 from llmtool import active_pm_inbox
 from llmtool import task_submission_cli as submission_cli
+from llmtool import trust as trust_module
 from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT, _record,
                                          _provider_route_binding, run_task_complete,
                                          run_task_delegate,
@@ -33,6 +34,20 @@ from llmtool.task_submission_cli import (REQUEST_LIMIT, RESPONSE_LIMIT, _record,
                                          run_task_record_pm, run_task_show,
                                          run_task_submit)
 from llmtool.opencode_direct_developer import DirectOpenCodeError, DirectResult
+
+FIXTURE_ORIGINS = ('git@github.com:davidcatcat/davidcattoolsproject.git',
+                   'https://github.com/davidcatcat/davidcattoolsproject.git')
+
+
+def dispatcher_trust(root, origins=FIXTURE_ORIGINS):
+    """Patch the dispatcher's trust.json read with a fixture root (#369 PR-5)."""
+    from types import MappingProxyType
+    loaded = trust_module.TrustConfig(
+        1, str(root), str(Path(root).parent / 'workspace'),
+        str(Path(root).parent / 'workspace' / 'tasks'),
+        MappingProxyType({'allowed_origins': tuple(origins)}),
+        MappingProxyType({}), MappingProxyType({}), 'a' * 64, 'b' * 64)
+    return patch.object(submission_cli.trust, 'load_trust', return_value=loaded)
 
 
 def config(provider_type='codex-cli', model='gpt-6-luna'):
@@ -230,14 +245,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'trusted dispatcher fixture'],
                        cwd=dispatcher_root, check=True, capture_output=True)
 
-        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher_root), \
+        with dispatcher_trust(dispatcher_root), \
                 patch.object(submission_cli, '__file__', str(dispatcher)):
             root, source = submission_cli._trusted_d6_helper_source()
         self.assertEqual(root, dispatcher_root)
         self.assertEqual(source, b"raise SystemExit(0)\n")
 
         helper.write_bytes(b"raise SystemExit(23)\n")
-        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher_root), \
+        with dispatcher_trust(dispatcher_root), \
                 patch.object(submission_cli, '__file__', str(dispatcher)):
             with self.assertRaises(ValueError):
                 submission_cli._trusted_d6_helper_source()
@@ -286,7 +301,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         registration = type('Registration', (), {
             'root': str(self.executor_root), 'task_id': 'executor-task-1'})()
         self.bootstrap_patch.stop()
-        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', trusted_root), \
+        with dispatcher_trust(trusted_root), \
                 patch.object(submission_cli, '__file__', str(task_dispatcher)):
             with self.assertRaises(DirectOpenCodeError) as raised:
                 submission_cli._bootstrap_registered_d6(registration)
@@ -351,7 +366,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
             'source_sha': base_sha, 'result_sha': approved_sha,
             'env2_approved_tooling_sha': approved_sha,
         })()
-        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', trusted_root), \
+        with dispatcher_trust(trusted_root), \
                 patch.object(submission_cli, '__file__', str(paths['dispatcher'])), \
                 patch.object(submission_cli.task_completion, 'read_d6_registration',
                              return_value=registration):
@@ -3435,7 +3450,7 @@ class DispatcherGitTimeoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(os.path.realpath(tmp))
             trusted = root / 'tools' / 'llmtool' / 'llmtool' / 'task_submission_cli.py'
-            with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', root), \
+            with dispatcher_trust(root), \
                     patch.object(submission_cli, '__file__', str(trusted)), \
                     patch.object(submission_cli.subprocess, 'run', side_effect=timeout) as run:
                 with self.assertRaisesRegex(ValueError, 'dispatcher Git preflight failed'):
@@ -3471,7 +3486,7 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
             'root': str(self.root), 'task_id': 'dispatcher-preflight-test'})()
 
     def _refusal(self, code, dispatcher_file=None):
-        with patch.object(submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', self.root), \
+        with dispatcher_trust(self.root), \
                 patch.object(submission_cli, '__file__',
                              str(dispatcher_file or self.dispatcher)):
             with self.assertRaises(DirectOpenCodeError) as raised:
@@ -3498,6 +3513,82 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
                        check=True, capture_output=True)
         message = self._refusal('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
         self.assertNotIn(str(self.root), message)
+
+    # #369 PR-5: the dispatcher root and origin allowlist come from trust.json.
+    def test_trust_root_matching_dispatcher_file_passes(self):
+        with dispatcher_trust(self.root), \
+                patch.object(submission_cli, '__file__', str(self.dispatcher)):
+            root, source = submission_cli._trusted_d6_helper_source()
+        self.assertEqual(root, self.root)
+        self.assertEqual(source, b'# trusted helper\n')
+
+    def test_trust_root_differing_from_dispatcher_file_is_refused(self):
+        other = Path(self.temp.name).resolve() / 'other-canonical'
+        other.mkdir()
+        with dispatcher_trust(other), \
+                patch.object(submission_cli, '__file__', str(self.dispatcher)):
+            with self.assertRaises(DirectOpenCodeError) as raised:
+                submission_cli._bootstrap_registered_d6(self.registration)
+        self.assertEqual(raised.exception.direct_opencode_code,
+                         'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL')
+        # A trust root that contains, but is not, the dispatcher checkout.
+        with dispatcher_trust(self.root.parent), \
+                patch.object(submission_cli, '__file__', str(self.dispatcher)):
+            with self.assertRaises(DirectOpenCodeError) as raised:
+                submission_cli._bootstrap_registered_d6(self.registration)
+        self.assertEqual(raised.exception.direct_opencode_code,
+                         'ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
+
+    def test_origin_outside_trust_allowlist_is_refused(self):
+        with dispatcher_trust(self.root, origins=FIXTURE_ORIGINS[1:]), \
+                patch.object(submission_cli, '__file__', str(self.dispatcher)):
+            with self.assertRaises(DirectOpenCodeError) as raised:
+                submission_cli._bootstrap_registered_d6(self.registration)
+        self.assertEqual(raised.exception.direct_opencode_code,
+                         'ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
+        subprocess.run(['/usr/bin/git', 'remote', 'set-url', 'origin',
+                        FIXTURE_ORIGINS[1]], cwd=self.root, check=True,
+                       capture_output=True)
+        with dispatcher_trust(self.root, origins=FIXTURE_ORIGINS[1:]), \
+                patch.object(submission_cli, '__file__', str(self.dispatcher)):
+            root, _source = submission_cli._trusted_d6_helper_source()
+        self.assertEqual(root, self.root)
+
+    def test_trust_missing_refuses_before_any_git_command(self):
+        for code in ('TRUST_MISSING', 'TRUST_MALFORMED'):
+            with patch.object(submission_cli.trust, 'load_trust',
+                              side_effect=trust_module.TrustError(code)), \
+                    patch.object(submission_cli, '__file__', str(self.dispatcher)), \
+                    patch.object(submission_cli.subprocess, 'run') as run:
+                with self.assertRaises(DirectOpenCodeError) as raised:
+                    submission_cli._bootstrap_registered_d6(self.registration)
+                self.assertEqual(raised.exception.direct_opencode_code, code)
+                registration = type('Registration', (), {
+                    'task_id': 'dispatcher-preflight-test',
+                    'env2_approved_tooling_sha': None})()
+                self.assertEqual(submission_cli._bind_codex_native_session(
+                    registration, 'thread-1'), code)
+                run.assert_not_called()
+
+    def test_helper_argv_carries_trust_sha256_from_same_trust(self):
+        captured = []
+        real_run = subprocess.run
+
+        def run(argv, *args, **kwargs):
+            if argv and argv[0] == sys.executable:
+                captured.append(argv)
+                return subprocess.CompletedProcess(argv, 0)
+            return real_run(argv, *args, **kwargs)
+
+        with dispatcher_trust(self.root), \
+                patch.object(submission_cli, '__file__', str(self.dispatcher)), \
+                patch.object(submission_cli.subprocess, 'run', side_effect=run):
+            submission_cli._bootstrap_registered_d6(type('Registration', (), {
+                'root': str(self.root), 'task_id': 'dispatcher-preflight-test',
+                'env2_approved_tooling_sha': None})())
+        self.assertEqual(len(captured), 1)
+        self.assertEqual(captured[0][-2:], ['--trust-sha256', 'a' * 64])
+        self.assertEqual(captured[0][4], '# trusted helper\n')
 
 
 if __name__ == '__main__':

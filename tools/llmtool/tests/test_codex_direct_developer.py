@@ -19,6 +19,20 @@ from llmtool.worker_dispatch import WorkerDispatchDenied
 from llmtool.providers.codex_cli import CodexCLIProvider
 from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool.cli import parser_for_cli
+from llmtool import trust as trust_module
+
+
+def _dispatcher_trust(root):
+    """Patch the dispatcher's trust.json read with a fixture root (#369 PR-5)."""
+    from types import MappingProxyType
+    loaded = trust_module.TrustConfig(
+        1, str(root), str(Path(root).parent / 'workspace'),
+        str(Path(root).parent / 'workspace' / 'tasks'),
+        MappingProxyType({'allowed_origins': (
+            'git@github.com:davidcatcat/davidcattoolsproject.git',
+            'https://github.com/davidcatcat/davidcattoolsproject.git')}),
+        MappingProxyType({}), MappingProxyType({}), 'a' * 64, 'b' * 64)
+    return patch.object(task_submission_cli.trust, 'load_trust', return_value=loaded)
 
 
 class CodexDirectDeveloperTests(unittest.TestCase):
@@ -513,7 +527,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, b'', b'')
             return real_run(command, **kwargs)
 
-        with patch.object(task_submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher), \
+        with _dispatcher_trust(dispatcher), \
              patch.object(task_submission_cli, '__file__', str(dispatcher_file)), \
              patch.object(task_submission_cli.subprocess, 'run', side_effect=run):
             result = task_submission_cli._bind_codex_native_session(registration, self.THREAD)
@@ -566,7 +580,7 @@ class CodexDirectDeveloperTests(unittest.TestCase):
             invocation.append(command)
             return real_run(command, **kwargs)
 
-        with patch.object(task_submission_cli, 'D6_INTEGRATOR_DISPATCHER_ROOT', dispatcher), \
+        with _dispatcher_trust(dispatcher), \
              patch.object(task_submission_cli, '__file__', str(dispatcher_file)), \
              patch.object(task_submission_cli.subprocess, 'run', side_effect=run):
             result = task_submission_cli._bind_codex_native_session(registration, self.THREAD)
