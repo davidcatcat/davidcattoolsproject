@@ -292,7 +292,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 submission_cli._bootstrap_registered_d6(registration)
 
         self.assertEqual(raised.exception.direct_opencode_code,
-                         'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+                         'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL')
         self.assertFalse(marker_path.exists())
 
     def test_integrator_approved_tooling_reads_exact_source_blobs_from_shared_store(self):
