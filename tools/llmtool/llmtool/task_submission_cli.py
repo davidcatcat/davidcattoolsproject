@@ -3280,7 +3280,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         usage = _normalize_agy_usage(result.usage)
         if usage is not None:
             usage['served_model'] = served_model
-        developer.update(state='DEVELOPER_RESPONDED', model=served_model, artifact=artifact,
+        developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
             artifact_sha256=hashlib.sha256(artifact.encode('utf-8')).hexdigest(),
             usage=usage, error_code=None,
             audit_sha256=audit_sha,

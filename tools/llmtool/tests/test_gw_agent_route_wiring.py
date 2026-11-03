@@ -308,6 +308,90 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                          'DEVELOPER_GW_AGENT_MODEL_ERROR')
         event.assert_not_called()
 
+    def test_gw_agent_success_persists_when_served_model_differs(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None, 'completion': None}
+
+        class Store:
+            def __init__(self):
+                self.value = copy.deepcopy(task)
+
+            def get(self, _task_id):
+                return copy.deepcopy(self.value)
+
+            def compare_and_update(self, _task_id, *, expected, **updates):
+                for key, value in expected.items():
+                    if self.value.get(key) != value:
+                        raise task_store.TaskStoreConflict('expected value changed')
+                denial = worker_dispatch.authorize_task_store_change(
+                    self.value, updates, expected)
+                if denial is not None:
+                    raise denial
+                self.value.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.value)
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40, root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch')
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        store = Store()
+        route = SimpleNamespace(validate_profile=lambda *_args: None,
+            audit_copy_path='/tmp/gw-agent-audit',
+            _result={'audit_sha256': 'e' * 64})
+        result = SimpleNamespace(model='real-served-model', usage={
+            'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2},
+            session_id='provider-session', exit_code=0, stdout_sha256='f' * 64,
+            elapsed_ms=10, cleanup_status='CLEAN')
+        decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
+                                                  'OWNER_POLICY_ALLOWED', 'f' * 64)
+
+        def run_route(_route, _request, *, gate, **_kwargs):
+            self.assertIs(gate(), decision)
+            return result
+
+        with patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_completion, 'bind_executor_task',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])), \
+             patch.object(task_submission_cli, '_remote_receipt_test_policy', return_value='REMOTE_RECEIPT'), \
+             patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
+             patch.object(task_submission_cli, 'load_route_config',
+                          return_value={'routes': {'gw-agent': {
+                              'allowed_data_classes': ['SYNTHETIC'],
+                              'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+             patch.object(worker_dispatch, 'authorize_dispatch'), \
+             patch.object(worker_dispatch, 'evaluate', return_value=decision), \
+             patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
+             patch.object(task_submission_cli, 'for_platform', return_value=object()), \
+             patch.object(task_submission_cli, 'capture_snapshot'), \
+             patch.object(task_submission_cli, 'cleanup_audit_copies'), \
+             patch.object(task_completion, 'read_d6_registration', return_value=registration), \
+             patch.object(task_completion, 'collect_git_snapshot', return_value=snapshot), \
+             patch.object(task_completion, '_worktree_diff', return_value=(['src.py'], b'diff')), \
+             patch.object(task_submission_cli, 'run_task_direct_result_event', return_value=0), \
+             patch.object(task_submission_cli, '_task_view', return_value={}):
+            status = task_submission_cli.run_task_gw_agent_delegate(
+                args, store=store, route_runner=run_route)
+
+        self.assertEqual(status, 0)
+        developer = store.value['developer']
+        self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
+        self.assertEqual(developer['model'], 'gw-agent-default')
+        self.assertEqual(developer['artifact'], 'diff')
+        self.assertEqual(developer['usage']['served_model'], 'real-served-model')
+
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
