@@ -455,7 +455,6 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 'pm_assignment': {'schema_version': 1, 'route': 'gw-agent', 'risk': 'LOW',
                     'goal': 'Run the bounded gw-agent task.',
                     'acceptance': ['Record the result.']},
-                'dispatch_audit': [],
             }
             record['record_sha256'] = task_store._digest(record)
             return record
