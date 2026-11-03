@@ -2,6 +2,7 @@
 from pathlib import Path
 import os
 import shlex
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -104,10 +105,14 @@ class InstallSelftestTests(unittest.TestCase):
 
     def test_missing_tmp_is_planned_without_mutation(self):
         tmp_path = self.tree / '_tmp'
-        tmp_path.rmdir()
+        shutil.rmtree(tmp_path)
         before = {p.relative_to(self.tree): (p.stat().st_mode & 0o777, p.stat().st_uid,
                   p.stat().st_gid, p.read_bytes() if p.is_file() else None)
                   for p in self.tree.rglob('*')}
+
+        selftest = self.run_selftest()
+        self.assertNotEqual(selftest.returncode, 0)
+        self.assertIn('missing runner directory _tmp', selftest.stderr)
 
         result = self.run_installer()
 
@@ -124,7 +129,7 @@ class InstallSelftestTests(unittest.TestCase):
 
     def test_tmp_symlink_or_regular_file_is_refused(self):
         tmp_path = self.tree / '_tmp'
-        tmp_path.rmdir()
+        shutil.rmtree(tmp_path)
         tmp_path.symlink_to(self.tree / '_work', target_is_directory=True)
         result = self.run_installer()
         self.assertNotEqual(result.returncode, 0)
