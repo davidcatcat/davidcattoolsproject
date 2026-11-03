@@ -3683,15 +3683,14 @@ class ChatTUI:
     def _history_segments(self, history):
         """Stored turns in the live layout (W57): a rule with the time, 「你」 and 「PM」
         labels, Markdown bodies, the turn's tools on one line and a short usage line."""
-        turns, total = chat_tui_pm.history_turns(history)
-        header = "PM 歷史（最近 %d 輪，存在本機）" % len(turns)
-        if total > len(turns):
-            header += "，共 %d 輪" % total
+        turns, _total = chat_tui_pm.history_turns(history)
+        header_time = turns[-1]["header_time"] if turns else "時間不明"
+        header = "上次對話（%s）" % header_time
         segments = [(header, "role.system")]
         if not turns:
             segments.append(("\n" + BODY_INDENT + "還沒有存下的對話", "text"))
         sources = []
-        for turn in turns:
+        for index, turn in enumerate(turns):
             segments += [("\n\n", "text"),
                          (chat_tui_view.RULE_CHAR * 2 + " " + turn["time"], "rule"),
                          ("\n", "text")]
@@ -3706,7 +3705,12 @@ class ChatTUI:
                 segments += [("\n" + BODY_INDENT + "▸ 用過的工具：" + "、".join(turn["tools"]),
                               "tool.summary"), ("\n", "text")]
             segments.append(("\n", "text"))
-            reply = terminal_safe_text(turn["reply"]) or "（沒有存下回覆文字）"
+            reply = terminal_safe_text(turn["reply"])
+            if not reply:
+                if index == len(turns) - 1 and turn["status"] == "INTERRUPTED":
+                    reply = "輸入「繼續」讓 PM 接著做"
+                else:
+                    reply = "（沒有存下回覆文字）"
             body, body_sources = self._body(reply, BODY_INDENT)
             offset = sum(len(part) for part, _token in segments)
             sources += [(low + offset, high + offset, *rest) for low, high, *rest in body_sources]

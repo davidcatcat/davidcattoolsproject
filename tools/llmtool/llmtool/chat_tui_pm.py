@@ -57,9 +57,10 @@ _RECOVERY = {
                           "unaffected",
     "PM_HISTORY_WRITE_FAILED": "pm_runtime could not save the turn history; check the llmtool state "
                                "directory",
-    "PM_CONFIG_INVALID": "pm_runtime.claude_config_dir or roles.pm in "
-                         "~/.config/llmtool/config.yaml is invalid; configure a Claude PM "
-                         "account and model, then connect again",
+    "PM_CONFIG_INVALID": "the selected PM runtime configuration in ~/.config/llmtool/config.yaml "
+                         "is invalid; check pm_runtime.claude_config_dir for Claude or "
+                         "pm_runtime.codex_config_dir for Codex and configure the matching "
+                         "roles.pm account and model, then connect again",
     "PM_STATE_INVALID": "the llmtool PM runtime state directory must be a plain user directory",
 }
 
@@ -351,6 +352,15 @@ def _local_time(value, now=None):
     return when.strftime("%H:%M" if when.date() == now.date() else "%m-%d %H:%M")
 
 
+def _local_history_time(value):
+    """A stored turn's local date and time for the replay header."""
+    try:
+        when = datetime.fromisoformat(value).astimezone()
+    except (TypeError, ValueError):
+        return "時間不明"
+    return when.strftime("%m-%d %H:%M")
+
+
 def _elapsed(turn):
     try:
         seconds = (datetime.fromisoformat(turn["ended_at"])
@@ -369,6 +379,7 @@ def history_turns(result, now=None):
         tools = turn.get("tool_names") if type(turn.get("tool_names")) is list else []
         shown.append({
             "time": _local_time(turn.get("started_at"), now),
+            "header_time": _local_history_time(turn.get("started_at")),
             "background": turn.get("origin") == "background",
             "owner": safe_text(turn.get("owner_text")),
             "status": safe_code(turn.get("status")),
