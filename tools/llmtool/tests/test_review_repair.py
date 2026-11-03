@@ -201,6 +201,44 @@ class ReviewRepairTests(unittest.TestCase):
         self.assertEqual(self.store.get(TASK)['review_repair_claims'][0]['repair_task_id'],
                          self.calls[0]['task']['task_id'])
 
+    def _add_review_claim_version(self, version):
+        record = self.store.get(TASK)
+        claim = dict(record['review_dispatch_claim'][0], version=version)
+        record['review_dispatch_claim'].append(claim)
+        self.store = TempTaskStore(self.temp.name, record)
+
+    @staticmethod
+    def _classified_verdict(comment, *, head, version, task):
+        body = comment['body']
+        if f'Version: v{version} | HEAD: {head}' not in body:
+            return None
+        outcome = 'REVIEW_PASS' if 'Verdict: PASS |' in body else 'REVIEW_FAIL'
+        return (comment['updated_at'], comment['id'], outcome, 1)
+
+    def test_failed_event_uses_highest_claim_version_for_same_head(self):
+        self._add_review_claim_version(2)
+        comments = [_comment(status='PASS', comment_id=9, version=1),
+                    _comment(status='FAIL', comment_id=10, version=2)]
+        with patch.object(review_repair.review_result, '_comment_verdict',
+                          side_effect=self._classified_verdict):
+            result = self.dispatch(github_get=lambda _path: comments)
+        packet = self.calls[0]['packet']
+        self.assertEqual(result['next_action'], 'review-dispatch --version 3')
+        self.assertEqual(packet['version'], 2)
+        self.assertEqual(packet['verdict_comment_id'], 10)
+
+    def test_failed_event_refuses_when_highest_claim_version_passes(self):
+        self._add_review_claim_version(2)
+        comments = [_comment(status='FAIL', comment_id=9, version=1),
+                    _comment(status='PASS', comment_id=10, version=2)]
+        with patch.object(review_repair.review_result, '_comment_verdict',
+                          side_effect=self._classified_verdict):
+            with self.assertRaises(LLMToolError) as caught:
+                self.dispatch(github_get=lambda _path: comments)
+        self.assertEqual(caught.exception.review_repair_code,
+                         'REVIEW_FAIL_EVENT_MISSING')
+        self.assertEqual(self.calls, [])
+
     def test_remote_test_fail_receipt_enters_real_repair_path(self):
         receipt = {
             'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
