@@ -39,6 +39,7 @@ def owner_ci_trust_document():
 
 
 def make_trust(slug=OWNER_SLUG, *, origins=None, host_policy_issue=120,
+               worker_dispatch_issue=289, worker_dispatch_evidence_pr=283,
                canonical_root=OWNER_CANONICAL_ROOT, workspace_root=OWNER_WORKSPACE_ROOT,
                ci_trust=None):
     """Fixture TrustConfig; ``ci_trust`` is a plain dict (frozen like load_trust)."""
@@ -51,8 +52,8 @@ def make_trust(slug=OWNER_SLUG, *, origins=None, host_policy_issue=120,
         'allowed_origins': tuple(origins),
         'approval_refs': MappingProxyType({
             'reviewer_host_policy_issue': host_policy_issue,
-            'worker_dispatch_issue': 289,
-            'worker_dispatch_evidence_pr': 283,
+            'worker_dispatch_issue': worker_dispatch_issue,
+            'worker_dispatch_evidence_pr': worker_dispatch_evidence_pr,
             'retain_release_issues': (289, 352),
         }),
     })

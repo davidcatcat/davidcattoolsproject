@@ -25,6 +25,17 @@ def _comment(status='FAIL', *, comment_id=9, actor='Claude', head=HEAD, version=
             'updated_at': '2026-10-27T01:00:00Z'}
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class TempTaskStore:
     """Small persistent TaskStore fake preserving compare-and-update semantics."""
 

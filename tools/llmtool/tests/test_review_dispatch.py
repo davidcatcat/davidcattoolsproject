@@ -20,6 +20,17 @@ def _runtime_parts(*pieces):
     return ''.join(pieces)
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class DurableFakeStore:
     """Small file-backed TaskStore seam for restart/idempotence tests."""
     def __init__(self, path):

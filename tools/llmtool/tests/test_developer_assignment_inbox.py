@@ -48,6 +48,17 @@ def owner_only(worker_key, owner_assignment_ref=None, task_id=None):
     return PolicyDecision(worker_key, False, 'OWNER_ASSIGNMENT_REQUIRED', POLICY)
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class DeveloperAssignmentInboxTests(unittest.TestCase):
     def setUp(self):
         temp = tempfile.TemporaryDirectory()

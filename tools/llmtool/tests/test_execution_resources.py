@@ -12,6 +12,17 @@ INVENTORY_PATH = REPOSITORY_ROOT / 'tools' / 'llmtool' / 'execution-resources.js
 POLICY_PATH = REPOSITORY_ROOT / 'tools' / 'llmtool' / 'worker-dispatch.json'
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class ExecutionResourcesTests(unittest.TestCase):
     def test_inventory_shape_and_runner_accounts(self):
         inventory = json.loads(INVENTORY_PATH.read_text(encoding='utf-8'))

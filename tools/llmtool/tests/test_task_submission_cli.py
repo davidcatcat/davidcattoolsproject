@@ -40,12 +40,19 @@ FIXTURE_ORIGINS = ('git@github.com:davidcatcat/davidcattoolsproject.git',
 
 
 def dispatcher_trust(root, origins=FIXTURE_ORIGINS):
-    """Patch the dispatcher's trust.json read with a fixture root (#369 PR-5)."""
+    """Patch dispatcher's trust read with fixture repository identity and approvals."""
     from types import MappingProxyType
+    fixture = review_trust_fixture.make_trust(
+        origins=origins, canonical_root=str(root),
+        workspace_root=str(Path(root).parent / 'workspace'))
+    repository = MappingProxyType({
+        'slug': fixture.repository['slug'],
+        'allowed_origins': fixture.repository['allowed_origins'],
+        'approval_refs': fixture.repository['approval_refs'],
+    })
     loaded = trust_module.TrustConfig(
-        1, str(root), str(Path(root).parent / 'workspace'),
-        str(Path(root).parent / 'workspace' / 'tasks'),
-        MappingProxyType({'allowed_origins': tuple(origins)}),
+        fixture.schema_version, str(root), str(Path(root).parent / 'workspace'),
+        str(Path(root).parent / 'workspace' / 'tasks'), repository,
         MappingProxyType({}), MappingProxyType({}), 'a' * 64, 'b' * 64)
     return patch.object(submission_cli.trust, 'load_trust', return_value=loaded)
 
@@ -66,6 +73,17 @@ def codex_developer_config():
         }},
         'generation': {'temperature': 0, 'max_tokens': 128},
     }
+
+
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
 
 
 class FakeClient:
