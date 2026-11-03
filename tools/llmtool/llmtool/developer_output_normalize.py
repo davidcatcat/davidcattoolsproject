@@ -207,7 +207,6 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
             return result(None, (), False)
 
         edits = []
-        result_has_final_newline = source_has_final_newline
         i = file_header_index + 2
         while i < len(section):
             hunk = _HUNK.fullmatch(section[i])
@@ -254,18 +253,6 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                     return result(None, (), False)
             old_count = sum(1 for line in body if line.startswith((' ', '-')))
             old_end = start + old_count
-            if old_end == len(source):
-                # A marker belongs to the old and/or new record immediately
-                # before it. The final new-side record determines the result
-                # newline state when this hunk reaches the source EOF.
-                new_record = None
-                for body_index in range(len(body) - 1, -1, -1):
-                    if body[body_index].startswith((' ', '+')):
-                        new_record = body_index
-                        break
-                if (new_record is not None and new_record + 1 < len(body) and
-                        body[new_record + 1] == r'\ No newline at end of file'):
-                    result_has_final_newline = False
             edits.append((start, cursor, target))
         if not edits:
             return result(None, (), False)
@@ -276,8 +263,15 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                 return result(None, (), False)
             modified[start:end] = target
             previous_end = start
-        diff_lines = list(difflib.unified_diff(
-            source, modified, fromfile='', tofile='', n=3, lineterm=''))
+        # A Developer marker is untrusted metadata. Keep the source's exact
+        # final-newline state on the reconstructed result's final record.
+        modified_lines = [line + '\n' for line in modified]
+        if modified_lines and not source_has_final_newline:
+            modified_lines[-1] = modified[-1]
+        diff_lines = [line[:-1] if line.endswith('\n') else line
+                      for line in difflib.unified_diff(
+                          [line + '\n' for line in source], modified_lines,
+                          fromfile='', tofile='', n=3, lineterm='')]
         hunks = [line for line in diff_lines if line.startswith('@@ ')]
         if not hunks:
             return result(None, (), False)
@@ -318,7 +312,7 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
             new_reaches_eof = new_end == len(modified)
             if source and not source_has_final_newline and old_reaches_eof and old_final is not None:
                 eof_insertions.add(old_final + 1)
-            if modified and not result_has_final_newline and new_reaches_eof and new_final is not None:
+            if modified and not source_has_final_newline and new_reaches_eof and new_final is not None:
                 eof_insertions.add(new_final + 1)
             body_offset = end
         for index in sorted(eof_insertions, reverse=True):

@@ -243,6 +243,45 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
             subprocess.run(['git', 'apply', '--check', '-'], cwd=temp_dir,
                            input=anchored, text=True, check=True)
 
+    def _assert_patch_applies_to_source(self, source, patch, expected):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir, self.PATH)
+            source_path.parent.mkdir(parents=True)
+            source_path.write_bytes(source.encode('utf-8'))
+            subprocess.run(['git', 'init', '-q'], cwd=temp_dir, check=True)
+            subprocess.run(['git', 'apply', '--check', '-'], cwd=temp_dir,
+                           input=patch, text=True, check=True)
+            subprocess.run(['git', 'apply', '-'], cwd=temp_dir,
+                           input=patch, text=True, check=True)
+            self.assertEqual(source_path.read_bytes(), expected.encode('utf-8'))
+
+    def test_source_anchor_appending_after_missing_final_newline_applies(self):
+        source = 'a\nb\nc'
+        raw = (self.HEADER + '@@ -1,3 +1,4 @@\n a\n b\n-c\n'
+               r'\ No newline at end of file' + '\n+c\n+tail\n'
+               r'\ No newline at end of file' + '\n')
+        anchored, _ = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: source})
+        self._assert_patch_applies_to_source(source, anchored, 'a\nb\nc\ntail')
+
+    def test_source_anchor_deleting_last_line_without_final_newline_applies(self):
+        source = 'a\nb\nc'
+        raw = (self.HEADER + '@@ -1,3 +1,2 @@\n a\n b\n-c\n'
+               r'\ No newline at end of file' + '\n')
+        anchored, _ = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: source})
+        self._assert_patch_applies_to_source(source, anchored, 'a\nb')
+
+    def test_source_anchor_preserves_newline_terminated_output_despite_marker(self):
+        source = 'a\nb\nc\n'
+        raw = (self.HEADER + '@@ -2,2 +2,2 @@\n b\n-c\n+C\n'
+               r'\ No newline at end of file' + '\n')
+        expected_patch = self.HEADER + '@@ -1,3 +1,3 @@\n a\n b\n-c\n+C\n'
+        anchored, _ = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: source})
+        self.assertEqual(anchored, expected_patch)
+        self._assert_patch_applies_to_source(source, anchored, 'a\nb\nC\n')
+
     def test_source_anchor_keeps_missing_newline_when_appending_at_eof(self):
         source = 'a\nb\nc'
         raw = (self.HEADER + '@@ -1,3 +1,4 @@\n a\n b\n-c\n'
