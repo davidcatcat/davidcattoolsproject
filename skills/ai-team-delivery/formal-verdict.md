@@ -27,12 +27,18 @@ FORMAL SECURITY/FUNCTIONAL/QA ACCEPT
   Reviewer (from `llmtool task show`) and the same HEAD.
 - The `FORMAL SECURITY/FUNCTIONAL/QA ACCEPT` line appears on formal Claude or Codex
   PASS comments.
-- A Claude PASS in this exact form, unedited, satisfies the gate. Under Owner
-  decision 035:A (#525, c6468216854), a Codex PASS satisfies it only for a
-  Claude-authored Task when the registered Reviewer is `codex-reviewer`, the
-  persisted Task classifies the comment as `REVIEW_PASS`, and exactly one matching
-  `COMPLETED` review dispatch claim records that PASS and the same non-empty review
-  text. Other Codex PASS comments are advisory and neither accept nor supersede.
+- A Claude PASS in this exact form, unedited, satisfies the gate. Under [Owner D6
+  (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), an
+  independent `codex-reviewer` PASS is eligible for Tasks authored through Claude,
+  AGY, OpenCode, company `gw` or `gw-agent`, but never for a Codex-authored Task.
+  All Codex PASS comments must meet the registered Reviewer,
+  independent D6 record and task-bound completion checks. Under Owner decision
+  035:A (#525, c6468216854), for a Claude-authored Task specifically,
+  `llmtool task complete` accepts that Codex PASS only when the persisted Task classifies the
+  comment as `REVIEW_PASS` and exactly one matching `COMPLETED` review dispatch
+  claim binds the PASS and identical non-empty review text to the PR, HEAD and
+  Reviewer Task. Other Codex PASS comments are advisory and neither accept nor
+  supersede.
   Any other verdict comment that names the HEAD
   (FIX, FAIL, BLOCKED or malformed), an edited verdict comment, or a later PR review
   supersedes an earlier PASS. A PR review and a verdict comment with the same timestamp
