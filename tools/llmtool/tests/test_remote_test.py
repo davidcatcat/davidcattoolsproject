@@ -41,6 +41,7 @@ class Store:
             }},
             'remote_test_receipts': [], 'completion_events': [],
             'completion_event_tombstones': [], 'remote_test_outcomes': [],
+            'published_pr': None,
         }
 
     def get(self, task_id):
@@ -51,6 +52,15 @@ class Store:
     def append_remote_test_receipt(self, task_id, receipt):
         self.task['remote_test_receipts'].append(receipt)
         return receipt
+
+    def record_published_pr(self, task_id, pr, head_sha):
+        existing = self.task.get('published_pr')
+        if (type(existing) is dict and existing.get('pr') == pr and
+                existing.get('head_sha') == head_sha):
+            return existing
+        self.task['published_pr'] = {
+            'pr': pr, 'head_sha': head_sha, 'recorded_at': '2026-10-27T00:00:00Z'}
+        return self.task['published_pr']
 
     def append_remote_test_outcome(self, task_id, outcome):
         if outcome in self.task['remote_test_outcomes']:
@@ -610,6 +620,50 @@ class RemoteTestTests(unittest.TestCase):
                 self.assertEqual((result['result'], result['code']),
                                  ('ADMISSION_DENIED', code))
         self.assertEqual(self.calls, [])
+
+    def test_pr_records_published_link_after_matching_head_admission(self):
+        with patch.object(remote_test, '_github_get',
+                          return_value={'number': 425, 'head': {'sha': SHA}}):
+            result = self.run_it(pr=425)
+
+        self.assertEqual(result['result'], 'PASS')
+        self.assertEqual(self.store.task['published_pr']['pr'], 425)
+        self.assertEqual(self.store.task['published_pr']['head_sha'], SHA)
+
+    def test_invalid_pr_mismatch_and_missing_pr_do_not_record_link(self):
+        invalid = self.run_it(pr=True)
+        self.assertEqual(invalid['code'], 'RECEIPT_HEAD_UNRECORDED')
+        self.assertIsNone(self.store.task['published_pr'])
+
+        self.store = Store()
+        with patch.object(remote_test, '_github_get',
+                          return_value={'number': 425, 'head': {'sha': OTHER}}):
+            mismatch = self.run_it(pr=425)
+        self.assertEqual(mismatch['code'], 'RECEIPT_HEAD_MISMATCH')
+        self.assertIsNone(self.store.task['published_pr'])
+
+        self.store = Store()
+        self.run_it()
+        self.assertIsNone(self.store.task['published_pr'])
+
+    def test_published_link_survives_ssh_failure_and_receipt_replay(self):
+        with patch.object(remote_test, '_github_get',
+                          return_value={'number': 425, 'head': {'sha': SHA}}):
+            failed = self.run_it(pr=425, error=OSError('offline'))
+        self.assertEqual(failed['result'], 'UNAVAILABLE')
+        saved = self.store.task['published_pr']
+        self.assertEqual((saved['pr'], saved['head_sha']), (425, SHA))
+
+        with patch.object(remote_test, '_github_get',
+                          return_value={'number': 425, 'head': {'sha': SHA}}):
+            passed = self.run_it(pr=425)
+        self.assertEqual(passed['result'], 'PASS')
+        saved = self.store.task['published_pr']
+        with patch.object(remote_test, '_github_get',
+                          return_value={'number': 425, 'head': {'sha': SHA}}):
+            replay = self.run_it(pr=425)
+        self.assertEqual(replay, passed)
+        self.assertEqual(self.store.task['published_pr'], saved)
 
     def test_pr_with_completion_review_keeps_existing_binding(self):
         self.store.task['completion']['evidence']['review_pr_ci'] = {
