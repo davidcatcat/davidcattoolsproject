@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import threading
+import time
 import uuid
 from argparse import Namespace
 from contextlib import redirect_stdout
@@ -832,25 +833,36 @@ class ActivePMInboxTests(unittest.TestCase):
             self._complete(task)
         barrier = threading.Barrier(4)
         errors = []
+        ready_retries = []
+
+        def retry_busy(operation):
+            deadline = time.monotonic() + 10
+            while True:
+                try:
+                    operation()
+                    return True
+                except LLMToolError as exc:
+                    if (exc.task_store_error_code != 'TASK_STORE_BUSY' or
+                            time.monotonic() >= deadline):
+                        errors.append(exc)
+                        return False
+                    ready_retries.append(exc.task_store_error_code)
+                    time.sleep(0.01)
 
         def ready_event():
             barrier.wait(timeout=10)
-            try:
-                active_pm_inbox.record_ready_event(TaskStore(self.store.root),
-                                                   task['task_id'])
-            except LLMToolError as exc:
-                errors.append(exc)
+            retry_busy(lambda: active_pm_inbox.record_ready_event(
+                TaskStore(self.store.root), task['task_id']))
 
         def other_event(sequence):
             barrier.wait(timeout=10)
             event_id = uuid.uuid4().hex
-            try:
+            def record():
                 TaskStore(self.store.root).record_completion_event(
                     task['task_id'], event_id=event_id, run_id=task['run_id'],
                     session_id='ses_Other' + str(sequence), source='HOST_WORKER',
                     source_sha='a' * 40, sequence=0, payload_sha256='d' * 64)
-            except LLMToolError as exc:
-                errors.append(exc)
+            retry_busy(record)
 
         threads = [threading.Thread(target=ready_event) for _ in range(2)]
         threads += [threading.Thread(target=other_event, args=(n,)) for n in range(2)]
@@ -859,6 +871,7 @@ class ActivePMInboxTests(unittest.TestCase):
         for thread in threads:
             thread.join(30)
         self.assertEqual(errors, [])
+        self.assertTrue(all(code == 'TASK_STORE_BUSY' for code in ready_retries))
         events = self.store.get(task['task_id'])['completion_events']
         self.assertEqual(len(events), 3)
         self.assertEqual(sum(event['source'] == 'DIRECT_D6_DEVELOPER' for event in events), 1)

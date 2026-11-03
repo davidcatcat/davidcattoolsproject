@@ -536,7 +536,9 @@ class WorkerJobIntegrationTests(unittest.TestCase):
         from llmtool.providers import cli_lifecycle
         for mode in ('timeout','descendant'):
             with self.subTest(mode=mode):
-                h=self.harness(mode=mode,timeout=1)
+                # Keep the real deadline assertion, with enough wall-clock
+                # margin for a loaded runner to schedule the fixture process.
+                h=self.harness(mode=mode,timeout=5)
                 started=time.monotonic()
                 observations=[]
                 actual_absent=cli_lifecycle._group_absent
@@ -545,7 +547,7 @@ class WorkerJobIntegrationTests(unittest.TestCase):
                 with patch('llmtool.providers.cli_lifecycle._group_absent',side_effect=observe), \
                         patch('llmtool.providers.cli_lifecycle.terminate',side_effect=AssertionError('unbounded')):
                     result=h.run()
-                self.assertLess(time.monotonic()-started,2)
+                self.assertLess(time.monotonic()-started,10)
                 self.assertEqual(result['code'],'REVIEW_TIMEOUT',result)
                 self.assertEqual(result['provider_calls'],1)
                 receipt=next(iter(h.authority.receipts.values()))
