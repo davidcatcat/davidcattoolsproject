@@ -14,7 +14,6 @@ import os
 import re
 import shlex
 import signal
-import subprocess
 import sys
 import threading
 import time
@@ -406,26 +405,83 @@ def fit_width(text, width, get_cwidth):
 
 
 def _source_revision():
-    """Read the source checkout revision and dirty state without using the user's CWD."""
-    source_dir = Path(__file__).resolve().parent
+    """Read a checkout revision from bounded Git metadata files, without running Git."""
+    source_dir = Path(__file__).resolve().parent.parent
+
+    def read_small(path, limit=4096):
+        with path.open("rb") as source:
+            data = source.read(limit + 1)
+        return data if len(data) <= limit else None
+
+    def ref_name(value):
+        prefix = b"ref: "
+        if not value.startswith(prefix):
+            return None
+        name = value[len(prefix):].strip().decode("ascii")
+        parts = name.split("/")
+        if (not name.startswith("refs/") or any(part in ("", ".", "..") for part in parts)
+                or "\\" in name):
+            return None
+        return name
+
+    def revision(value):
+        value = value.strip()
+        if re.fullmatch(rb"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value):
+            return value[:8].decode("ascii").lower()
+        return None
+
+    def packed_ref(path, name):
+        data = read_small(path, 4 * 1024 * 1024)
+        if data is None:
+            return None
+        for line in data.splitlines():
+            if line.endswith(b" " + name.encode("ascii")):
+                found = revision(line.split(b" ", 1)[0])
+                if found:
+                    return found
+        return None
+
     try:
-        revision = subprocess.run(
-            ["git", "rev-parse", "--short=8", "HEAD"], cwd=source_dir,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            timeout=2, check=False)
-        if revision.returncode != 0:
+        marker = source_dir / ".git"
+        if marker.is_dir():
+            git_dir = marker
+        else:
+            marker_data = read_small(marker)
+            if marker_data is None or not marker_data.startswith(b"gitdir: "):
+                return None
+            git_path = Path(marker_data[len(b"gitdir: "):].decode("utf-8").strip())
+            git_dir = git_path if git_path.is_absolute() else source_dir / git_path
+        head = read_small(git_dir / "HEAD")
+        if head is None:
             return None
-        short = revision.stdout.strip()
-        if not re.fullmatch(r"[0-9a-f]{8,}", short):
+        direct = revision(head)
+        if direct:
+            return direct
+        name = ref_name(head)
+        if name is None:
             return None
-        dirty = subprocess.run(
-            ["git", "status", "--porcelain", "--untracked-files=normal"], cwd=source_dir,
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            timeout=2, check=False)
-        if dirty.returncode != 0:
-            return None
-        return short[:8] + (", dirty" if dirty.stdout else "")
-    except (OSError, subprocess.SubprocessError):
+        common_data = read_small(git_dir / "commondir")
+        common_dir = git_dir
+        if common_data:
+            common_path = Path(common_data.decode("utf-8").strip())
+            common_dir = common_path if common_path.is_absolute() else git_dir / common_path
+        ref_path = Path(*name.split("/"))
+        for root in (git_dir, common_dir):
+            try:
+                found = revision(read_small(root / ref_path) or b"")
+            except OSError:
+                found = None
+            if found:
+                return found
+        for root in (common_dir, git_dir):
+            try:
+                found = packed_ref(root / "packed-refs", name)
+            except OSError:
+                found = None
+            if found:
+                return found
+        return None
+    except (OSError, UnicodeError, ValueError):
         return None
 
 

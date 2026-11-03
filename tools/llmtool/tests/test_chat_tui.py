@@ -257,11 +257,58 @@ class WidgetTests(Base):
             ui, _ = self.drive([])
         self.assertTrue(ui.conversation.text.startswith(
             'LLMTool ' + chat_tui.__version__ + ' interactive chat (full-screen)'))
-        with patch.object(chat_tui, '_source_revision', return_value='12345678, dirty'):
+        with patch.object(chat_tui, '_source_revision', return_value='12345678'):
             ui, _ = self.drive([])
         self.assertTrue(ui.conversation.text.startswith(
-            'LLMTool ' + chat_tui.__version__ + ' (12345678, dirty) interactive chat (full-screen)'))
+            'LLMTool ' + chat_tui.__version__ + ' (12345678) interactive chat (full-screen)'))
         self.assertNotIn(str(Path(__file__).resolve().parents[2]), ui.conversation.text)
+
+    def test_source_revision_reads_git_metadata_without_running_a_process(self):
+        revision = '1234567890abcdef1234567890abcdef12345678'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'source'
+            package = root / 'llmtool'
+            package.mkdir(parents=True)
+            module = package / 'chat_tui.py'
+            module.touch()
+            git = root / '.git'
+            git.mkdir()
+            (git / 'HEAD').write_text('ref: refs/heads/main\n')
+            ref = git / 'refs' / 'heads' / 'main'
+            ref.parent.mkdir(parents=True)
+            ref.write_text(revision + '\n')
+            with patch.object(chat_tui, '__file__', str(module)), \
+                    patch('subprocess.run', side_effect=AssertionError('must not run Git')):
+                self.assertEqual(chat_tui._source_revision(), '12345678')
+
+            ref.unlink()
+            (git / 'packed-refs').write_text('# pack-refs\n' + revision + ' refs/heads/main\n')
+            with patch.object(chat_tui, '__file__', str(module)), \
+                    patch('subprocess.run', side_effect=AssertionError('must not run Git')):
+                self.assertEqual(chat_tui._source_revision(), '12345678')
+
+            (git / 'HEAD').unlink()
+            (git / 'packed-refs').unlink()
+            (git / 'refs' / 'heads' / 'main').unlink()
+            (git / 'refs' / 'heads').rmdir()
+            (git / 'refs').rmdir()
+            git.rmdir()
+            worktree_git = Path(temp) / 'worktree-git'
+            worktree_git.mkdir()
+            (worktree_git / 'HEAD').write_text(revision + '\n')
+            (root / '.git').write_text('gitdir: ' + str(worktree_git) + '\n')
+            with patch.object(chat_tui, '__file__', str(module)):
+                self.assertEqual(chat_tui._source_revision(), '12345678')
+
+    def test_source_revision_is_omitted_when_git_metadata_is_unavailable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'source'
+            package = root / 'llmtool'
+            package.mkdir(parents=True)
+            module = package / 'chat_tui.py'
+            module.touch()
+            with patch.object(chat_tui, '__file__', str(module)):
+                self.assertIsNone(chat_tui._source_revision())
 
     def test_pm_ghost_hints_render_after_the_cursor_without_editing_input(self):
         seen = {}
