@@ -447,22 +447,32 @@ class ThemePTYTests(unittest.TestCase):
         terminal.send("\x1b[B")
         terminal.wait_text("背景工作 1 項", "↓ panel")
         terminal.send("\r")
-        rows = terminal.wait_text("證據與出處", "detail opened")
+        # The evidence section may be below the 24-row viewport; the detail header is visible.
+        rows = terminal.wait_text("Task 詳情（唯讀）", "detail opened")
         rows = terminal.wait_stable("detail drawn")
         self.assertTrue(rows[0].startswith("Task 詳情（唯讀）"))
         self.assertIn("C 複製全文", rows[0])                           # header: one row at 80
         # The status bar drops optional hints from the end when 80 columns are too few
         # ("暖機中…" here): Esc and c stay, C is named in the header.
         self.assertIn("Esc 返回 · c 複製 Task ID", rows[-1])
-        # Drag over row 2 (來源：TaskStore…): highlighted while held, copied on release.
-        terminal.press(1, 2)
-        terminal.drag(16, 2)
-        terminal.wait_for(lambda _rows: terminal.cell(1, 2).reverse or
-                          terminal.cell(1, 2).bg not in ("default",), "selection highlight")
-        terminal.release(16, 2)
+        # Summary rows can move the source below the old fixed row 2 at 80x24.
+        rows = terminal.wait_for(
+            lambda current: any(row.startswith("來源：TaskStore") for row in current),
+            "TaskStore source row visible")
+        rows = terminal.wait_stable("detail source row drawn")
+        source_row = next(index for index, row in enumerate(rows)
+                          if row.startswith("來源：TaskStore"))
+        mouse_row = source_row + 1  # screen coordinates are one-based
+        # Drag over the rendered 來源：TaskStore row: highlighted while held, copied on release.
+        terminal.press(1, mouse_row)
+        terminal.drag(16, mouse_row)
+        terminal.wait_for(lambda _rows: terminal.cell(mouse_row - 1, 1).reverse or
+                          terminal.cell(mouse_row - 1, 1).bg not in ("default",),
+                          "selection highlight")
+        terminal.release(16, mouse_row)
         copied = terminal.wait_clipboard()
         self.assertTrue(copied.startswith("來源：TaskStore"), copied)
-        self.assertTrue(rows[1].startswith(copied), (copied, rows[1]))
+        self.assertTrue(rows[source_row].startswith(copied), (copied, rows[source_row]))
         terminal.wait_text("已複製 %d 字" % len(copied), "copy result")
         # C: the whole detail, not only the 21 rows on screen.
         terminal.send("C")
@@ -481,7 +491,6 @@ class ThemePTYTests(unittest.TestCase):
         terminal.send("\t")
         terminal.send("cat Cat")
         terminal.wait_text("pm> cat Cat", "cat typed on the input line")
-        time.sleep(0.4)
         self.assertEqual(terminal.clipboard(), whole)                 # nothing copied
         terminal.esc()
         terminal.wait_for(lambda rows: "證據與出處" not in "\n".join(rows), "Esc closed")
