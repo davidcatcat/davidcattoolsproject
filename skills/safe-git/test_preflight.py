@@ -70,7 +70,11 @@ class PreflightTests(unittest.TestCase):
         subprocess.run(["/usr/bin/git", "-C", str(self.root), "worktree", "add",
                         "--detach", str(root), "HEAD"], check=True, capture_output=True)
         root.chmod(0o700)
-        (root / ".git/info/exclude").write_text("tools/\n")
+        gitdir = Path(gate.git(root, "rev-parse", "--path-format=absolute",
+                               "--absolute-git-dir").decode().strip())
+        exclude = gitdir / "info/exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("tools/\n")
         venv = root / "tools/llmtool/.venv"
         subprocess.run([sys.executable, "-B", "-I", "-m", "venv", "--without-pip",
                         str(venv)], check=True, capture_output=True)
