@@ -132,7 +132,7 @@ def _waiting_markers(comments: list) -> dict[str, tuple[int, int, str, str]]:
             fields = {}
             for key, value in OWNER_FIELD.findall(line):
                 value = value.rstrip("-")
-                fields.setdefault(key, value.casefold() if key in ("actor", "target") else value.upper())
+                fields.setdefault(key, value.casefold() if key in ("actor", "target") else value)
             marked.append((_github_time(comment.get("created_at")),
                            comment.get("id") if type(comment.get("id")) is int else 0,
                            number, fields))
@@ -143,9 +143,9 @@ def _waiting_markers(comments: list) -> dict[str, tuple[int, int, str, str]]:
             continue
         kind, actor = fields.get("type", ""), fields.get("actor", "")
         target, status = fields.get("target", ""), fields.get("status", "")
-        settles = actor == "owner" or (target == "owner" and status in OWNER_SETTLED)
-        if (settles and kind == "waiting_owner" and
-                status not in WAITING_OWNER_DIRECTIONS.get((actor, target), frozenset())):
+        settles = actor == "owner" or (target == "owner" and status.upper() in OWNER_SETTLED)
+        if (settles and kind.casefold() == "waiting_owner" and
+                status.upper() not in WAITING_OWNER_DIRECTIONS.get((actor, target), frozenset())):
             continue
         if settles:
             latest.pop(number, None)
