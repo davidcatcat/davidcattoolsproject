@@ -66,11 +66,29 @@ _CLI_BOOTSTRAP = (
     'review_trust_fixture.start_module()\n'
     'import llmtool\n'
     'assert llmtool.__file__.startswith({source!r} + "/"), "wrong llmtool source"\n'
+    '{hook}'
     'from llmtool.entrypoint import main\n'
     'raise SystemExit(main(sys.argv[1:]))\n'
-).format(source=_SOURCE_ROOT, tests=_TESTS_DIR)
+)
+# Test-only readiness marker: created once review-wait has validated the request
+# and is inside its polling loop, so a test can prove the child is really waiting.
+_WAIT_READY_HOOK = (
+    'from llmtool import review_exchange as _rx\n'
+    '_rx_committed = _rx._committed\n'
+    'def _rx_ready_committed(*a, **k):\n'
+    '    value = _rx_committed(*a, **k)\n'
+    '    try: open({ready!r}, "x").close()\n'
+    '    except FileExistsError: pass\n'
+    '    return value\n'
+    '_rx._committed = _rx_ready_committed\n'
+)
 
 
-def cli_command(*argv):
-    """Isolated ``llmtool`` CLI child command running under the fixture trust."""
-    return [sys.executable, '-B', '-I', '-c', _CLI_BOOTSTRAP, *argv]
+def cli_command(*argv, wait_ready_file=None):
+    """Isolated ``llmtool`` CLI child command running under the fixture trust.
+
+    ``wait_ready_file`` (tests only) is created once ``review-wait`` is polling.
+    """
+    hook = '' if wait_ready_file is None else _WAIT_READY_HOOK.format(ready=str(wait_ready_file))
+    bootstrap = _CLI_BOOTSTRAP.format(source=_SOURCE_ROOT, tests=_TESTS_DIR, hook=hook)
+    return [sys.executable, '-B', '-I', '-c', bootstrap, *argv]

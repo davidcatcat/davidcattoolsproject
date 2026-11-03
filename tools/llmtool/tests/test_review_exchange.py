@@ -218,24 +218,37 @@ class ExchangeTests(unittest.TestCase):
         self.assertLess(time.monotonic()-start,1.5)
 
     def test_owned_foreground_cli_interrupt_really_exits(self):
-        self.prepare()
+        self.prepare(); ready = self.folder/'wait-ready.marker'
         command = review_trust_fixture.cli_command('task','review-wait',
             '--request',str(self.request_path),'--request-sha256',self.request_sha,
             '--receipt',self.wait_args.receipt,'--verdict',self.wait_args.verdict,
-            '--output',self.wait_args.output,'--timeout','3','--json')
+            '--output',self.wait_args.output,'--timeout','30','--json',
+            wait_ready_file=ready)
         env = dict(os.environ,PYTHONDONTWRITEBYTECODE='1')
         child = subprocess.Popen(command,env=env,stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
         try:
-            time.sleep(0.3)
+            # The child must reach the review-wait polling loop (request and
+            # trust validated) and still be running before it is interrupted.
+            limit = time.monotonic()+10
+            while not ready.exists() and child.poll() is None and time.monotonic() < limit:
+                time.sleep(0.05)
+            self.assertIsNone(child.poll(),'child exited before it was interrupted')
+            self.assertTrue(ready.exists(),'child never reached the wait loop')
+            interrupted_at = time.monotonic()
             child.send_signal(signal.SIGINT)
-            child.communicate(timeout=5)
-            self.assertNotEqual(child.returncode,0)
+            stdout,_ = child.communicate(timeout=5)
+            self.assertLess(time.monotonic()-interrupted_at,5)
         finally:
             if child.poll() is None:
                 child.kill(); child.communicate(timeout=5)
             child.stdout.close(); child.stderr.close()
-        self.assertIsNotNone(child.poll())
+        self.assertEqual(child.returncode,130)
+        output = json.loads(stdout)
+        self.assertEqual(output['status'],'BLOCKED')
+        self.assertEqual(output['code'],'EXCHANGE_INTERRUPTED')
+        self.assertFalse(output['authorized'])
+        self.assertFalse(Path(self.wait_args.output).exists())
 
     def test_blocked_verdict_is_received_without_becoming_review_pass(self):
         self.prepare(); receipt,verdict = self.envelopes()
