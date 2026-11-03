@@ -3293,7 +3293,11 @@ class ChatTUI:
                 return
             try:
                 bindings = _pm_newest_first(self.pm_api.list_bindings())
-                number = int(parts[2]) - 1 if parts[2].isdigit() else None
+                # Short decimal tokens are list positions. An eight-character
+                # decimal token can also be a session ID prefix, so keep it in
+                # the prefix lookup below.
+                number = (int(parts[2]) - 1
+                          if parts[2].isdigit() and len(parts[2]) < 8 else None)
                 if number is not None:
                     session_id = (bindings[number]['native_session_id']
                                   if 0 <= number < len(bindings) else None)
