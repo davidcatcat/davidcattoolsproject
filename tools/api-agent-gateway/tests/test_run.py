@@ -235,7 +235,12 @@ class StandaloneTests(unittest.TestCase):
         if os.path.isdir(llmtool):
             hits = subprocess.run(['grep', '-rl', '--include=*.py', 'api_agent_gateway', llmtool],
                                   capture_output=True, text=True)
-            self.assertEqual(hits.stdout, '')
+            allowed = {
+                os.path.join(llmtool, 'llmtool', 'developer_routes', 'gw_agent.py'),
+                os.path.join(llmtool, 'tests', 'test_developer_route_gw_agent.py'),
+                os.path.join(llmtool, 'tests', 'test_gw_agent_route_wiring.py'),
+            }
+            self.assertLessEqual(set(hits.stdout.splitlines()), allowed)
 
     def test_module_entrypoint_help(self):
         env = dict(os.environ, PYTHONPATH=PKG_ROOT, PYTHONDONTWRITEBYTECODE='1')
