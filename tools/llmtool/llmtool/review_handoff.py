@@ -48,7 +48,7 @@ LEDGER_STATUSES = ('CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN', 'DENIED', 'EXPIR
 
 _ledger_recovery_guard = threading.Lock()
 _ledger_handoff_locks = weakref.WeakKeyDictionary()
-_recovered_ledgers = weakref.WeakSet()
+_recovered_ledgers = weakref.WeakKeyDictionary()
 
 
 @dataclass(frozen=True)
@@ -410,13 +410,14 @@ def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
         # SQLite transaction lock it remains held across the provider effect.
         fcntl.flock(ledger._fd, fcntl.LOCK_EX)
         try:
-            recovered = 0
             if ledger not in _recovered_ledgers:
-                recovered = ledger.recover()
-                _recovered_ledgers.add(ledger)
+                # Record the attempt before calling out so an error cannot make
+                # a later handoff retry recovery on the same open ledger.
+                _recovered_ledgers[ledger] = 0
+                _recovered_ledgers[ledger] = ledger.recover()
             return _dispatch_review_handoff(
                 issuer, ledger, budget=budget, dispatch_store=dispatch_store,
-                recovered_receipts=recovered)
+                recovered_receipts=_recovered_ledgers[ledger])
         finally:
             fcntl.flock(ledger._fd, fcntl.LOCK_UN)
 

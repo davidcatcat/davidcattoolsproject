@@ -546,19 +546,25 @@ class ReviewHandoffTests(unittest.TestCase):
                                      baseline_check=lambda reg, facts: True,
                                      writers_check=lambda reg, facts: True)
         h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
-        # Recovery is serialized with the handoff and runs before its first
-        # receipt redemption, so assert the recovered state after dispatch.
+        rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
+        self.assertEqual(len(rows), 1)
+        nonce, status = rows[0]
+        # Reopen itself leaves the live ledger state alone. The handoff's
+        # once-per-open recovery turns this abandoned CONSUMED row unknown
+        # before attempting any redemption.
+        self.assertEqual(status, 'CONSUMED')
         receipt, _ = rh.dispatch_review_handoff(
             h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
         rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
         self.assertEqual(len(rows), 1)
-        nonce, status = rows[0]
+        recovered_nonce, status = rows[0]
+        self.assertEqual(recovered_nonce, nonce)
         self.assertEqual(status, 'EFFECT_UNKNOWN')
         self.assertEqual(receipt.recovered_receipts, 1)
         self.assertEqual(marker.read_text(), str(reviewer_pid))
         second, _ = rh.dispatch_review_handoff(
             h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
-        self.assertEqual(second.recovered_receipts, 0)
+        self.assertEqual(second.recovered_receipts, 1)
         self.assertEqual(marker.read_text(), str(reviewer_pid))
 
     def test_timeout_nonzero_spoof_and_secret_failures_stay_unknown_or_blocked_without_leak(self):
