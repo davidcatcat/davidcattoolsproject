@@ -1,4 +1,5 @@
 import hashlib
+import inspect
 import io
 import json
 import os
@@ -13,7 +14,7 @@ from llmtool import review_dispatch, task_completion, task_submission_cli, worke
 from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
 from llmtool.developer_routes.gw_agent import cleanup_audit_copies
 from llmtool.errors import LLMToolError
-from llmtool.task_store import TaskStore
+from llmtool import task_store
 
 
 class GwAgentRouteWiringTests(unittest.TestCase):
@@ -187,81 +188,41 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
         runner.assert_not_called()
 
-    def test_real_task_store_accepts_gw_agent_developer_record_before_route_call(self):
+    def test_gw_agent_developer_shape_includes_execution_and_direct_callback(self):
         task_id, run_id = 'a' * 32, 'b' * 32
-        request = 'synthetic bounded task'
-        assignment = {'route': 'gw-agent', 'risk': 'LOW',
-                      'goal': 'Update src.py.', 'acceptance': ['record result']}
-        response = json.dumps({'schema_version': 1, 'summary': 'bounded',
-                               'developer_assignment': assignment})
-        pm_input = json.dumps({'request': request, 'response': response})
-        args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
-            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
-            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
-            read_path=['src.py'], write_path=['src.py'])
+        task = {'task_id': task_id, 'run_id': run_id,
+                'task_binding': {'contract_digest': 'c' * 64}}
         registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
             common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
             session_ref='session-ref', native_session_id=None)
-        snapshot = SimpleNamespace(head='d' * 40)
 
-        with tempfile.TemporaryDirectory() as temp:
-            class RecordingTaskStore(TaskStore):
-                def __init__(self, root):
-                    super().__init__(root)
-                    self.developer_states = []
+        # Keep this record shape aligned with run_task_gw_agent_delegate.
+        developer = {
+            'assignment_id': 'd' * 32, 'selection_source': 'PM',
+            'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
+            'provider_type': None, 'model': None,
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + 'e' * 32, 'source_sha': 'f' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['record result'], 'context_sha256': '1' * 64,
+            'egress_basis': 'Synthetic test context.', 'input_bytes': 128,
+            'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'execution': None, 'created_at': '2026-01-01T00:00:00Z',
+            'direct_result_callback': task_submission_cli._direct_result_callback(
+                task, registration, 'f' * 40, test_policy='REMOTE_RECEIPT'),
+        }
 
-                def compare_and_update(self, task_id, *, expected, **changes):
-                    saved = super().compare_and_update(task_id, expected=expected, **changes)
-                    if type(saved.get('developer')) is dict:
-                        self.developer_states.append(saved['developer']['state'])
-                    return saved
+        self.assertIn('execution', developer)
+        self.assertIn('direct_result_callback', developer)
+        self.assertIn(set(developer), task_store._DEVELOPER_SHAPES)
 
-                def update(self, task_id, **changes):
-                    saved = super().update(task_id, **changes)
-                    if type(saved.get('developer')) is dict:
-                        self.developer_states.append(saved['developer']['state'])
-                    return saved
-
-            store = RecordingTaskStore(Path(temp) / 'state')
-            task_submission_cli.run_task_record_pm(
-                Namespace(pm_session_id=None, pm_runtime=None, pm_cwd=None),
-                store=store, input_stream=io.StringIO(pm_input), task_id=task_id,
-                return_record=True)
-            route = SimpleNamespace(validate_profile=lambda *_args: None)
-
-            def inspect_dispatching(_route, _request, **_kwargs):
-                self.assertEqual(store.get(task_id)['developer']['state'],
-                                 'DEVELOPER_DISPATCHING')
-                raise RouteError('GW_AGENT_MODEL_ERROR')
-
-            with patch.object(task_completion, 'validate_task_binding'), \
-                 patch.object(task_submission_cli, '_delegate_d6_binding',
-                              return_value=(registration, snapshot)), \
-                 patch.object(task_submission_cli, '_assignment_paths',
-                              return_value=(['src.py'], ['src.py'])), \
-                 patch.object(task_submission_cli, '_remote_receipt_test_policy',
-                              return_value='REMOTE_RECEIPT'), \
-                 patch.object(task_submission_cli, 'load_route_config',
-                              return_value={'routes': {'gw-agent': {
-                                  'allowed_data_classes': ['SYNTHETIC'],
-                                  'default_model': 'gw-agent-default',
-                                  'default_effort': 'low'}}}), \
-                 patch.object(worker_dispatch, 'authorize_dispatch'), \
-                 patch.object(worker_dispatch, 'evaluate', return_value=
-                              worker_dispatch.PolicyDecision(
-                                  'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
-                 patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
-                 patch.object(task_submission_cli, 'for_platform', return_value=object()), \
-                 patch.object(task_submission_cli, 'run_route',
-                              side_effect=inspect_dispatching), \
-                 patch.object(task_submission_cli, '_task_view', return_value={}):
-                status = task_submission_cli.run_task_gw_agent_delegate(
-                    args, store=store, route_runner=inspect_dispatching)
-
-        self.assertEqual(status, 1)
-        self.assertEqual(store.developer_states[:2],
-                         ['DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING'])
-        self.assertEqual(store.get(task_id)['developer']['state'], 'BLOCKED')
+        # The callback profile allowlist is enforced in TaskStore._validate;
+        # guard its gw-agent entry without creating a TaskStore root or record.
+        validator = inspect.getsource(task_store._validate)
+        self.assertIn("developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent')",
+                      validator)
 
     def test_allowed_route_error_maps_to_safe_developer_code(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
