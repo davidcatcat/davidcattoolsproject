@@ -12,10 +12,9 @@ import re
 import unicodedata
 from datetime import datetime, timezone
 
+from . import trust
 from .chat_tui_task import NOT_AVAILABLE, PENDING_DISPATCH, UNKNOWN, retry_condition, value
 
-# Core gates bind PRs to this repository (task_completion, review_authority).
-PR_URL = "https://github.com/davidcatcat/davidcattoolsproject/pull/"
 LIST_LIMIT = 200  # Newest Tasks shown; matches the task status upper bound.
 REFRESH_SECONDS = 15  # Task list re-read interval while shown (local files only).
 NAME_WIDTH = 60
@@ -293,10 +292,23 @@ def pull_request(record):
     labels = {n: sorted({label for m, label in found if m == n}) for n in numbers}
     if len(numbers) == 1:
         number = numbers[0]
-        return ("#%d (from %s)" % (number, ", ".join(labels[number])), PR_URL + str(number))
+        url = pr_url()
+        return ("#%d (from %s)" % (number, ", ".join(labels[number])),
+                NOT_AVAILABLE if url is None else url + str(number))
+    url = pr_url()
+    links = NOT_AVAILABLE if url is None else " | ".join(url + str(n) for n in numbers)
     return ("CONFLICT: " + " vs ".join("#%d (from %s)" % (n, ", ".join(labels[n]))
                                        for n in numbers),
-            " | ".join(PR_URL + str(n) for n in numbers))
+            links)
+
+
+def pr_url():
+    """Current trusted repository's pull URL prefix, or None when trust is unavailable."""
+    try:
+        slug = trust.load_trust().repository["slug"]
+    except trust.TrustError:
+        return None
+    return "https://github.com/" + slug + "/pull/"
 
 
 def _usage(usage):

@@ -14,6 +14,8 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import review_trust_fixture
+review_trust_fixture.start_module()
 from llmtool import (chat_tui, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
                      chat_tui_view)
 from llmtool.chat import ChatSession
@@ -43,6 +45,17 @@ providers:
   second:
     type: claude-cli
 '''
+
+OWNER_SLUG = 'davidcatcat/davidcattoolsproject'
+OWNER_PR_URL = 'https://github.com/' + OWNER_SLUG + '/pull/'
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
 
 
 def core_view_json(task_id, **fields):
@@ -1955,10 +1968,10 @@ class StatusProjectionTests(unittest.TestCase):
         self.assertNotEqual(self.status.stage(rereview)[0], 'REPAIRING')
         self.assertEqual(self.status.pull_request(rereview),
                          ('#505 (from repair claim, review claim)',
-                          'https://github.com/davidcatcat/davidcattoolsproject/pull/505'))
+                          OWNER_PR_URL + '505'))
 
     def test_pr_number_sources_are_named_and_conflicts_shown(self):
-        url = 'https://github.com/davidcatcat/davidcattoolsproject/pull/'
+        url = OWNER_PR_URL
 
         def with_evidence(record, number):
             completion = {'state': 'WAITING_CI', 'pm_recommendation': None, 'pm_usage': None,
@@ -1985,6 +1998,32 @@ class StatusProjectionTests(unittest.TestCase):
         for bad in ('510', 0, True, None):
             self.assertEqual(self.status.pull_request(with_evidence(_record(), bad)),
                              ('NOT_AVAILABLE', 'NOT_AVAILABLE'))
+
+    def test_pull_request_and_linker_follow_current_trusted_repository(self):
+        from review_trust_fixture import make_trust, use_trust
+
+        slug = 'example-org/other'
+        url = 'https://github.com/' + slug + '/pull/'
+        record = _record(developer=_developer(), review_dispatch_claim=[
+            {'pr': 510, 'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'r'}])
+        with use_trust(make_trust(slug)):
+            self.assertEqual(self.status.pull_request(record),
+                             ('#510 (from review claim)', url + '510'))
+            text = 'PR: ' + url + '510'
+            links = chat_tui._TaskViewLinker(None).links(text, 0, len(text))
+            self.assertEqual([item[2] for item in links], [url + '510'])
+
+    def test_pr_link_unavailable_without_trust(self):
+        from llmtool.trust import TrustError
+
+        record = _record(developer=_developer(), review_dispatch_claim=[
+            {'pr': 510, 'version': 1, 'state': 'DISPATCHED', 'reviewer_task': 'r'}])
+        with patch.object(chat_tui_status.trust, 'load_trust',
+                          side_effect=TrustError('TRUST_MISSING')):
+            self.assertEqual(self.status.pull_request(record),
+                             ('#510 (from review claim)', 'NOT_AVAILABLE'))
+            text = 'PR: ' + OWNER_PR_URL + '510'
+            self.assertEqual(chat_tui._TaskViewLinker(None).links(text, 0, len(text)), [])
 
     def test_completion_ci_and_done(self):
         review_ci = {'stage': 'INTEGRATION', 'formal_review_state': 'ACCEPTED', 'ci_state': 'X',
@@ -4728,7 +4767,7 @@ class PMConversationTests(BoundedPMTest):
             self.assertRegex(text, '來源：TaskStore（本機）｜讀取於 [0-9]{2}:[0-9]{2}:[0-9]{2}')
             self.assertIn('Core 狀態：RUNNING（task_status.derive_state）', text)
             self.assertIn('W59 詳情測試', text)
-            self.assertIn(chat_tui_status.PR_URL + '661', text)
+            self.assertIn(OWNER_PR_URL + '661', text)
             self.assertNotIn('"task_id"', text)              # no raw JSON outside dev mode
             self.assertEqual(reads, [(self.W59_TASK_B, 'llmtool-chat-task-detail')])
             self.assertIn('Esc 返回', ui.status_text())
@@ -4855,18 +4894,18 @@ class PMConversationTests(BoundedPMTest):
             ui = chat_tui.ChatTUI(self.session, input=pipe, output=DummyOutput(), pm_api=self.api)
         ui.links_supported = True
         ui._linker = chat_tui_theme.Linker(str(self.temp_root), 'o/r')
-        text = 'PR: #661  ' + chat_tui_status.PR_URL + '661\nPR: #7'
+        text = 'PR: #661  ' + OWNER_PR_URL + '661\nPR: #7'
         links = ui.task_view_linker().links(text, 0, len(text))
         urls = [url for _low, _high, url in links]
-        self.assertEqual(urls, [chat_tui_status.PR_URL + '661'])   # never the cwd repo's #N
+        self.assertEqual(urls, [OWNER_PR_URL + '661'])   # never the cwd repo's #N
         low, high, _url = links[0]
-        self.assertEqual(text[low:high], chat_tui_status.PR_URL + '661')
+        self.assertEqual(text[low:high], OWNER_PR_URL + '661')
         wrapped = ui.task_view_linker().links(text, low + 5, low + 9)   # a row inside the URL
         self.assertEqual(wrapped, links)
         self.assertTrue(ui.task_view_linker().open_sequence(urls[0]).startswith('\x1b]8;id='))
         ui._linker = None                                       # repo lookup not finished
         self.assertEqual([url for _l, _h, url in ui.task_view_linker().links(text, 0, len(text))],
-                         [chat_tui_status.PR_URL + '661'])
+                         [OWNER_PR_URL + '661'])
         ui.settings['links'] = 'off'
         self.assertIsNone(ui.task_view_linker())
 
@@ -5376,7 +5415,7 @@ class PMConversationTests(BoundedPMTest):
                    '\x1b]8;;\x1b\\ \x9b31m \u202e')
 
     def w60_hostile_record(self, task_id):
-        hostile, url = self.W60_HOSTILE, chat_tui_status.PR_URL
+        hostile, url = self.W60_HOSTILE, OWNER_PR_URL
         return {'task_id': task_id, 'state': 'PM_RESPONDED',
                 'request': 'W60 惡意' + hostile,
                 'created_at': '2026-11-01T00:00:00Z', 'updated_at': '2026-11-01T00:01:00Z' + hostile,
@@ -5408,7 +5447,7 @@ class PMConversationTests(BoundedPMTest):
             self.assertNotIn('RUNNING', text)
             links = chat_tui._TaskViewLinker(None).links(text, 0, len(text))
             urls = sorted({url for _low, _high, url in links})
-            self.assertEqual(urls, [chat_tui_status.PR_URL + '661', chat_tui_status.PR_URL + '9'])
+            self.assertEqual(urls, [OWNER_PR_URL + '661', OWNER_PR_URL + '9'])
             self.assertNotIn('\x1b', ui.status_text())
 
         with patch.object(chat_tui_status, 'read_task_detail', side_effect=self.w60_hostile_record):
