@@ -14,6 +14,7 @@ from dataclasses import dataclass
 import fcntl
 import hashlib
 import json
+import os
 import threading
 from typing import Optional
 import weakref
@@ -390,12 +391,31 @@ def _dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None,
     return receipt, raw
 
 
+def _open_handoff_lock(ledger):
+    """Open the ledger's pinned directory as the cross-process handoff lock."""
+    flags = (os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+             getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0))
+    try:
+        fd = os.open(os.path.dirname(ledger._path), flags)
+    except OSError:
+        reject('REVIEW_HOST_SERVICES_INVALID')
+    try:
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) != ledger._directory:
+            reject('REVIEW_HOST_SERVICES_INVALID')
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
     """Recover stale redemptions once, then hold ownership through the handoff.
 
-    The advisory lock prevents concurrent review_handoff hosts from recovering
-    a receipt while another host is executing it. A process crash releases the
-    lock, allowing the next open ledger object to recover its CONSUMED rows.
+    The advisory flock on the ledger's directory prevents concurrent
+    review_handoff hosts from recovering a receipt while another host is
+    executing it. A process crash releases the lock, allowing the next open
+    ledger object to recover its CONSUMED rows.
     """
     if type(ledger) is not ReceiptLedger:
         return _dispatch_review_handoff(
@@ -408,8 +428,13 @@ def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
     with thread_lock:
         # flock is associated with the open file description, and unlike the
         # SQLite transaction lock it remains held across the provider effect.
-        fcntl.flock(ledger._fd, fcntl.LOCK_EX)
+        # Lock the ledger's directory, never the database file: on Darwin/BSD
+        # flock and SQLite's fcntl byte-range locks share one lock table, so a
+        # flock on the database makes every SQLite write (recover/redeem)
+        # fail LEDGER_LOCKED. Linux keeps the two lock kinds independent.
+        lock_fd = _open_handoff_lock(ledger)
         try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
             if ledger not in _recovered_ledgers:
                 # Record the attempt before calling out so an error cannot make
                 # a later handoff retry recovery on the same open ledger.
@@ -419,7 +444,7 @@ def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
                 issuer, ledger, budget=budget, dispatch_store=dispatch_store,
                 recovered_receipts=_recovered_ledgers[ledger])
         finally:
-            fcntl.flock(ledger._fd, fcntl.LOCK_UN)
+            os.close(lock_fd)  # releases the flock, as a crash would
 
 
 def task_completion_adapter(issuer, ledger, *, budget, dispatch_store=None):

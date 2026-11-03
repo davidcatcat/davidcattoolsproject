@@ -530,11 +530,16 @@ class ReviewHandoffTests(unittest.TestCase):
             time.sleep(0.02)
         self.assertTrue(marker.exists(), 'reviewer child did not launch')
         reviewer_pid = int(marker.read_text())
-        proc.terminate()
+        # A dead host is SIGKILL. SIGTERM is not: while the reviewer runs,
+        # CLIProcessLifecycle routes SIGTERM to an orderly cancel, and
+        # run_review's finally finalizes the receipt EFFECT_UNKNOWN itself
+        # before the host exits, leaving nothing for recovery to do.
+        proc.kill()
         proc.join(timeout=10)
         self.assertFalse(proc.is_alive())
+        self.assertEqual(proc.exitcode, -9)
         try:
-            os.kill(reviewer_pid, 15)
+            os.kill(reviewer_pid, 9)  # the reviewer runs in its own session
         except ProcessLookupError:
             pass
 
