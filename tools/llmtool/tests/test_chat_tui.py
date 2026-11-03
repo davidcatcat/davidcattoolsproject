@@ -15,7 +15,6 @@ from unittest.mock import Mock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import review_trust_fixture
-review_trust_fixture.start_module()
 from llmtool import (chat_tui, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
                      chat_tui_view)
 from llmtool.chat import ChatSession
