@@ -3665,6 +3665,15 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = TaskStore(Path(self.temp.name).resolve() / 'tasks')
+        # Creating a developer record runs the store's normal dispatch-policy
+        # authorization. Keep this test's policy deterministic across hosts;
+        # the cap behavior below still uses the real helper and TaskStore.
+        decision = worker_dispatch.PolicyDecision(
+            'codex-developer', True, 'TEST_POLICY_ALLOWED', 'a' * 64)
+        policy = patch.object(submission_cli.worker_dispatch, 'evaluate',
+                              return_value=decision)
+        policy.start()
+        self.addCleanup(policy.stop)
 
     def _task(self, *, executor='executor-task-1', developer=False, route='codex'):
         task_id, run_id = new_id(), new_id()
