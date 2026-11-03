@@ -42,7 +42,10 @@ commands. Review the read-only plan first with
 `ghrunner3`). The plan does not change files.
 The install root and its ordinary files/directories
 become `root:root`; executable files are `0755`, other files `0644`, and
-directories `0755`. `_work` and `_tmp` stay owned by the runner account with
+directories `0755`. `_work` and `_diag` must already exist. `_tmp` may be
+absent; the installer creates it as a directory owned by the runner account
+with mode `0700`. An existing `_tmp` must be a real directory, not a symlink
+or another file type. `_work` and `_tmp` stay owned by the runner account with
 `0700` directories. `_diag` stays account-owned with `0750` directories.
 Contents under those writable directories remain runner-managed. The runner's
 `bin` and `externals` links may point to their matching version directories,
