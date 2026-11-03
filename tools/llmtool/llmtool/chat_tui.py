@@ -404,9 +404,9 @@ def fit_width(text, width, get_cwidth):
     return "".join(result) + "…"
 
 
-def _source_revision():
+def _source_revision(source_file=None):
     """Read a checkout revision from bounded Git metadata files, without running Git."""
-    source_dir = Path(__file__).resolve().parent.parent
+    source_dir = Path(__file__ if source_file is None else source_file).resolve().parent.parent
 
     def read_small(path, limit=4096):
         with path.open("rb") as source:
@@ -442,15 +442,27 @@ def _source_revision():
         return None
 
     try:
-        marker = source_dir / ".git"
-        if marker.is_dir():
-            git_dir = marker
-        else:
-            marker_data = read_small(marker)
-            if marker_data is None or not marker_data.startswith(b"gitdir: "):
+        git_dir = None
+        for candidate in (source_dir, *source_dir.parents[:8]):
+            marker = candidate / ".git"
+            if marker.is_dir():
+                git_dir = marker
+                source_dir = candidate
+                break
+            try:
+                marker_data = read_small(marker)
+            except FileNotFoundError:
+                continue
+            if marker_data is None:
+                return None
+            if not marker_data.startswith(b"gitdir: "):
                 return None
             git_path = Path(marker_data[len(b"gitdir: "):].decode("utf-8").strip())
-            git_dir = git_path if git_path.is_absolute() else source_dir / git_path
+            git_dir = git_path if git_path.is_absolute() else candidate / git_path
+            source_dir = candidate
+            break
+        if git_dir is None:
+            return None
         head = read_small(git_dir / "HEAD")
         if head is None:
             return None

@@ -247,7 +247,8 @@ class WidgetTests(Base):
     def test_starts_without_provider_call_and_exits_cleanly(self):
         ui, result = self.drive([])
         self.assertEqual(result, 0)
-        self.assertIn('LLMTool interactive chat (full-screen)', ui.conversation.text)
+        self.assertTrue(ui.conversation.text.startswith('LLMTool ' + chat_tui.__version__))
+        self.assertIn('interactive chat (full-screen)', ui.conversation.text)
         self.assertIn('History stays in memory.', ui.conversation.text)
         self.assertIn('provider: first', ui.conversation.text)
         self.factory.assert_not_called()
@@ -267,7 +268,7 @@ class WidgetTests(Base):
         revision = '1234567890abcdef1234567890abcdef12345678'
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / 'source'
-            package = root / 'llmtool'
+            package = root / 'tools' / 'llmtool' / 'llmtool'
             package.mkdir(parents=True)
             module = package / 'chat_tui.py'
             module.touch()
@@ -277,15 +278,13 @@ class WidgetTests(Base):
             ref = git / 'refs' / 'heads' / 'main'
             ref.parent.mkdir(parents=True)
             ref.write_text(revision + '\n')
-            with patch.object(chat_tui, '__file__', str(module)), \
-                    patch('subprocess.run', side_effect=AssertionError('must not run Git')):
-                self.assertEqual(chat_tui._source_revision(), '12345678')
+            with patch('subprocess.run', side_effect=AssertionError('must not run Git')):
+                self.assertEqual(chat_tui._source_revision(module), '12345678')
 
             ref.unlink()
             (git / 'packed-refs').write_text('# pack-refs\n' + revision + ' refs/heads/main\n')
-            with patch.object(chat_tui, '__file__', str(module)), \
-                    patch('subprocess.run', side_effect=AssertionError('must not run Git')):
-                self.assertEqual(chat_tui._source_revision(), '12345678')
+            with patch('subprocess.run', side_effect=AssertionError('must not run Git')):
+                self.assertEqual(chat_tui._source_revision(module), '12345678')
 
             (git / 'HEAD').unlink()
             (git / 'packed-refs').unlink()
@@ -297,8 +296,7 @@ class WidgetTests(Base):
             worktree_git.mkdir()
             (worktree_git / 'HEAD').write_text(revision + '\n')
             (root / '.git').write_text('gitdir: ' + str(worktree_git) + '\n')
-            with patch.object(chat_tui, '__file__', str(module)):
-                self.assertEqual(chat_tui._source_revision(), '12345678')
+            self.assertEqual(chat_tui._source_revision(module), '12345678')
 
     def test_source_revision_is_omitted_when_git_metadata_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -307,8 +305,7 @@ class WidgetTests(Base):
             package.mkdir(parents=True)
             module = package / 'chat_tui.py'
             module.touch()
-            with patch.object(chat_tui, '__file__', str(module)):
-                self.assertIsNone(chat_tui._source_revision())
+            self.assertIsNone(chat_tui._source_revision(module))
 
     def test_pm_ghost_hints_render_after_the_cursor_without_editing_input(self):
         seen = {}
