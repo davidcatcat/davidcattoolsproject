@@ -22,13 +22,14 @@ stops at a picker, so a CLI exit is not delivery. This helper:
   entrypoint, so it never edits the registry).
 
 ``watch`` applies the same session rules while the PM waits for a report file.
-The account is ``CLAUDE_CONFIG_DIR``, then the configured worker role account,
-then ``~/.claude``; only transcript files under its ``projects`` directory
-are read, never credentials.
+Each dispatch or watch run uses one account: ``CLAUDE_CONFIG_DIR`` takes
+precedence over its configured role account, with ``~/.claude`` as the default
+for Developer roles. A Claude Reviewer must have an account. Only transcript
+files under that account's ``projects`` directory are read, never credentials.
 
 Cross-account delivery (#367 slice 2) never launches anything. ``dispatch``
-launches only under the caller's own account: a ``--worker-config-dir`` that
-is not the caller's ``CLAUDE_CONFIG_DIR`` is refused with
+launches only under the resolved role account: a ``--worker-config-dir`` that
+is not the resolved ``CLAUDE_CONFIG_DIR`` is refused with
 ``CROSS_ACCOUNT_LAUNCH_REFUSED`` before any gate or CLI call. Instead the PM
 runs ``llmtool task assign`` and then ``receipt --assignment-id ID
 --worker-config-dir DIR``, which reads the shared TaskStore and reports

@@ -34,7 +34,10 @@ FAKE_CLAUDE = r'''
 import json, os, sys, time
 from pathlib import Path
 home = Path(os.environ['FAKE_CLAUDE_DIR'])
-scenario = json.loads((home / 'scenario.json').read_text())
+account = Path(os.environ['CLAUDE_CONFIG_DIR'])
+account_scenario = account / 'fake-scenario.json'
+scenario_path = account_scenario if account_scenario.exists() else home / 'scenario.json'
+scenario = json.loads(scenario_path.read_text())
 state_path = home / 'state.json'
 state = json.loads(state_path.read_text()) if state_path.exists() else {'polls': 0}
 argv = sys.argv[1:]
@@ -174,8 +177,10 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.root = str(self.f.root)
         self.cwd = str(self.home)  # the session's recorded cwd must exist to launch there
 
-    def scenario(self, **value):
-        (self.home / 'scenario.json').write_text(json.dumps(value))
+    def scenario(self, *, account_dir=None, **value):
+        path = (Path(account_dir) / 'fake-scenario.json' if account_dir is not None
+                else self.home / 'scenario.json')
+        path.write_text(json.dumps(value))
 
     def calls(self):
         path = self.home / 'calls.jsonl'
@@ -313,15 +318,23 @@ class ClaudeBgDispatchTests(unittest.TestCase):
 
         reviewer_dir = self.home / 'reviewer-account'
         reviewer_dir.mkdir()
-        config_path = user_config_path(str(self.home / 'user-home'))
+        user_home = self.home / 'user-home'
+        user_home.mkdir()
+        temp_dir = self.home / 'tmp'
+        temp_dir.mkdir()
+        config_path = user_config_path(str(user_home))
         config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text(
             'accounts:\n  reviewer:\n    kind: claude\n    config_dir: %s\n'
             'roles:\n  reviewer:\n    provider: claude\n    account: reviewer\n' % reviewer_dir)
-        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)], before=[],
-                      after=[[row(TARGET, status='done', cwd=self.cwd)]])
-        with patch.dict(os.environ, {'HOME': str(self.home / 'user-home'),
-                                    'CLAUDE_CONFIG_DIR': '', 'ANTHROPIC_MODEL': ''}):
+        self.scenario(account_dir=reviewer_dir,
+                      all=[row(TARGET, status='done', state='done', cwd=self.cwd)], before=[],
+                      after=[[row(TARGET, status='done', state='done', cwd=self.cwd)]])
+        real_resolve_role = dispatch_tool.role_config.resolve_role
+        with patch.object(dispatch_tool.role_config, 'resolve_role',
+                          side_effect=lambda role: real_resolve_role(role, home=str(user_home))), \
+                patch.dict(os.environ, {'HOME': str(user_home), 'TMPDIR': str(temp_dir),
+                                        'CLAUDE_CONFIG_DIR': '', 'ANTHROPIC_MODEL': ''}):
             code, receipt = self.dispatch(name='claude-reviewer')
         self.assertEqual(code, 1, receipt)
         self.assertEqual(receipt['reason'], 'SESSION_DONE')
@@ -344,11 +357,20 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(self.calls(), [])
 
     def test_busy_resume_refuses_using_resolved_account(self):
-        self.scenario(all=[row(TARGET, status='busy', cwd=self.cwd)])
-        code, receipt = self.dispatch()
+        role_dir = self.home / 'developer-account'
+        role_dir.mkdir()
+        self.scenario(account_dir=role_dir,
+                      all=[row(TARGET, status='busy', cwd=self.cwd)],
+                      before=[row(TARGET, status='busy', cwd=self.cwd)])
+        with patch.object(dispatch_tool.role_config, 'resolve_role', return_value={
+                'role': 'claude-developer', 'provider': 'claude',
+                'config_dir': str(role_dir), 'model': None}), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
+            code, receipt = self.dispatch()
         self.assertEqual((code, receipt['reason']), (2, 'SESSION_BUSY'))
         self.assertEqual(self.launches(), [])
         self.assertEqual(len(self.calls()), 2)
+        self.assertTrue(all(call['config_dir'] == str(role_dir) for call in self.calls()))
 
     def test_busy_with_new_action_is_delivered_and_old_history_is_ignored(self):
         self.scenario(
