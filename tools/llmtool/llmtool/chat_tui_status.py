@@ -470,7 +470,9 @@ def group_rows(records, now, show_all):
         members = grouped[key]
         head = members[0]
         head_dict = _dict(head) or {}
-        current, _reason = stage(head)
+        # F3 can briefly render placeholder rows while the list is being replaced.
+        # Keep those rows independent and render their unknown stage without raising.
+        current, _reason = stage(head_dict)
         completion = _dict(head_dict.get("completion")) or {}
         developer = _dict(head_dict.get("developer")) or {}
         terminal_state = (current in terminal or head_dict.get("state") in terminal
@@ -503,7 +505,7 @@ def group_rows(records, now, show_all):
                 numbers.append(published_number)
         pr = "CONFLICT" if len(numbers) > 1 else ("#%d" % numbers[0] if numbers else "")
         visible.append({"record": head, "rounds": len(members) - 1, "pr": pr,
-                        "owner": _owner_decision(head) is not None})
+                        "owner": _owner_decision(head_dict) is not None})
     return visible, hidden
 
 

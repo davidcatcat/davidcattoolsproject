@@ -2359,15 +2359,13 @@ class ChatTUI:
         if self.list_loaded is None:
             state = "reading TaskStore…"
         else:
-            state = ("%d shown, %d hidden, %d unreadable; refreshed %s; auto every %ds"
-                     % (len(self.list_records), self.list_hidden_count, self.list_unreadable,
-                        self.list_loaded[1],
-                        chat_tui_status.REFRESH_SECONDS))
-        rows = [("class:menu.header", cut(" Tasks (TaskStore records; stage derived by the TUI) — "
-                                          + state + " — a show all, Enter detail, F5/r refresh, Esc close")),
+            state = ("%d shown, %d hidden, %d unreadable"
+                     % (len(self.list_records), self.list_hidden_count, self.list_unreadable))
+        rows = [("class:menu.header", cut(" Tasks (stage derived by the TUI) — "
+                                          + state + "; a show all")),
                 ("class:menu.header", cut("  " + "Task ID".ljust(8) + "  " + "Stage (derived)".ljust(26)
                                           + "Rounds".ljust(12) + "PR".ljust(12) + "Owner".ljust(8)
-                                          + "Request (Core, first line)"))]
+                                          + "Request (Core, first line) — Enter detail; F5/r refresh; Esc close"))]
         if self.unseen_output:
             rows.append(("class:menu.header", cut(" new conversation output — Esc shows it")))
         if self.list_error is not None:
