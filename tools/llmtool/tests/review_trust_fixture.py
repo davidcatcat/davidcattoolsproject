@@ -1,4 +1,6 @@
 """Fixture TrustConfig for review-path tests (#369 PR-6); never reads a real trust.json."""
+import sys
+from pathlib import Path
 from types import MappingProxyType
 from unittest.mock import patch
 
@@ -50,3 +52,25 @@ def stop_module():
     if _module_patcher is not None:
         _module_patcher.stop()
         _module_patcher = None
+
+
+_TESTS_DIR = str(Path(__file__).resolve().parent)
+_SOURCE_ROOT = str(Path(__file__).resolve().parents[1])
+# Child processes do not inherit the parent's mock. ``-I`` ignores PYTHONPATH and
+# would import whichever llmtool is installed, so pin this checkout and install
+# the fixture before the CLI runs; the child never reads a real trust.json.
+_CLI_BOOTSTRAP = (
+    'import sys\n'
+    'sys.path[:0] = [{source!r}, {tests!r}]\n'
+    'import review_trust_fixture\n'
+    'review_trust_fixture.start_module()\n'
+    'import llmtool\n'
+    'assert llmtool.__file__.startswith({source!r} + "/"), "wrong llmtool source"\n'
+    'from llmtool.entrypoint import main\n'
+    'raise SystemExit(main(sys.argv[1:]))\n'
+).format(source=_SOURCE_ROOT, tests=_TESTS_DIR)
+
+
+def cli_command(*argv):
+    """Isolated ``llmtool`` CLI child command running under the fixture trust."""
+    return [sys.executable, '-B', '-I', '-c', _CLI_BOOTSTRAP, *argv]

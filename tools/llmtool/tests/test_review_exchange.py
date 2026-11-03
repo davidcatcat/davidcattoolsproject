@@ -219,10 +219,10 @@ class ExchangeTests(unittest.TestCase):
 
     def test_owned_foreground_cli_interrupt_really_exits(self):
         self.prepare()
-        command = [sys.executable,'-B','-I','-m','llmtool','task','review-wait',
+        command = review_trust_fixture.cli_command('task','review-wait',
             '--request',str(self.request_path),'--request-sha256',self.request_sha,
             '--receipt',self.wait_args.receipt,'--verdict',self.wait_args.verdict,
-            '--output',self.wait_args.output,'--timeout','3','--json']
+            '--output',self.wait_args.output,'--timeout','3','--json')
         env = dict(os.environ,PYTHONDONTWRITEBYTECODE='1')
         child = subprocess.Popen(command,env=env,stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,stderr=subprocess.PIPE,start_new_session=True)
@@ -344,10 +344,10 @@ class ExchangeTests(unittest.TestCase):
         # Real local CLI; artifacts below are synthetic, not original Reviewer DATA.
         self.wait_args.output = str(self.folder/(label+'-report.json'))
         args = self.wait_args
-        child = subprocess.run([sys.executable,'-B','-I','-m','llmtool','task','review-wait',
+        child = subprocess.run(review_trust_fixture.cli_command('task','review-wait',
             '--request',args.request,'--request-sha256',args.request_sha256,
             '--receipt',args.receipt,'--verdict',args.verdict,'--timeout','0',
-            '--output',args.output,'--json'],capture_output=True,timeout=5,
+            '--output',args.output,'--json'),capture_output=True,timeout=5,
             env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1'))
         self.assertEqual(child.stderr,b'')
         public = json.loads(child.stdout)
