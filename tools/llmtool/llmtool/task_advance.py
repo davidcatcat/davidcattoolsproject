@@ -168,13 +168,11 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
         # run on the same head. Any successful exact-head macOS run is enough;
         # failures and in-progress runs have already been refused above.
         macos_not_green = not any(item.get('conclusion') == 'success' for item in mac_runs)
-        if macos_not_green:
+        if macos_not_green and mac_runs:
             if allow_missing_macos:
                 return 'MERGE_MACOS_CHECK_SKIPPED'
             return 'MERGE_MACOS_CHECK_REQUIRED'
     if missing_macos:
-        if allow_missing_macos:
-            return 'MERGE_MACOS_CHECK_MISSING'
         return 'MERGE_REQUIRED_CHECK_MISSING'
     return None
 
