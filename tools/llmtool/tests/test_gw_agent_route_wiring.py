@@ -1,3 +1,5 @@
+import hashlib
+import inspect
 import io
 import json
 import os
@@ -12,6 +14,7 @@ from llmtool import review_dispatch, task_completion, task_submission_cli, worke
 from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
 from llmtool.developer_routes.gw_agent import cleanup_audit_copies
 from llmtool.errors import LLMToolError
+from llmtool import task_store
 
 
 class GwAgentRouteWiringTests(unittest.TestCase):
@@ -184,6 +187,42 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
         runner.assert_not_called()
+
+    def test_gw_agent_developer_shape_includes_execution_and_direct_callback(self):
+        task_id, run_id = 'a' * 32, 'b' * 32
+        task = {'task_id': task_id, 'run_id': run_id,
+                'task_binding': {'contract_digest': 'c' * 64}}
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+
+        # Keep this record shape aligned with run_task_gw_agent_delegate.
+        developer = {
+            'assignment_id': 'd' * 32, 'selection_source': 'PM',
+            'state': 'DEVELOPER_PENDING', 'provider_profile': 'gw-agent',
+            'provider_type': None, 'model': None,
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'session_id': 'dev-' + 'e' * 32, 'source_sha': 'f' * 40,
+            'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+            'read_paths': ['src.py'], 'write_paths': ['src.py'],
+            'acceptance': ['record result'], 'context_sha256': '1' * 64,
+            'egress_basis': 'Synthetic test context.', 'input_bytes': 128,
+            'max_tokens': None, 'artifact_format': 'unified_diff',
+            'artifact': None, 'artifact_sha256': None, 'usage': None,
+            'error_code': None, 'execution': None, 'created_at': '2026-01-01T00:00:00Z',
+            'direct_result_callback': task_submission_cli._direct_result_callback(
+                task, registration, 'f' * 40, test_policy='REMOTE_RECEIPT'),
+        }
+
+        self.assertIn('execution', developer)
+        self.assertIn('direct_result_callback', developer)
+        self.assertIn(set(developer), task_store._DEVELOPER_SHAPES)
+
+        # The callback profile allowlist is enforced in TaskStore._validate;
+        # guard its gw-agent entry without creating a TaskStore root or record.
+        validator = inspect.getsource(task_store._validate)
+        self.assertIn("developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent')",
+                      validator)
 
     def test_allowed_route_error_maps_to_safe_developer_code(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
