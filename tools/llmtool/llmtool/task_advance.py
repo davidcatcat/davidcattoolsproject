@@ -15,7 +15,7 @@ from argparse import Namespace
 from . import active_pm_inbox, github_events, review_dispatch, review_repair, review_result
 from . import task_completion, task_submission_cli
 from .errors import LLMToolError
-from .task_store import TaskStore
+from .task_store import TaskStore, _json_bytes
 
 
 class _PublishRefusal(Exception):
@@ -156,19 +156,26 @@ def _merge_pass_claim(record, number, head, events):
     candidates = []
     for claim in _claims(record):
         if (type(claim) is not dict or claim.get('pr') != number or
-                claim.get('head_sha') != head or claim.get('state') != 'COMPLETED' or
+                claim.get('head_sha') != head or
+                claim.get('state') not in ('COMPLETED', 'DISPATCHED') or
                 type(claim.get('version')) is not int):
             continue
         result = claim.get('review_result')
-        if type(result) is not dict:
-            continue
         outcome = next((event.get('outcome') or event.get('state') for event in events
                         if type(event) is dict and event.get('source') == 'REVIEWER' and
                         event.get('source_sha') == head and
                         event.get('version') == claim['version']), None)
         if outcome is None:
             continue
-        candidates.append((claim['version'], result.get('verdict'), outcome))
+        if claim.get('state') == 'COMPLETED':
+            if type(result) is not dict:
+                continue
+            verdict = result.get('verdict')
+        else:
+            # Claude Reviewer dispatches remain DISPATCHED and keep the
+            # classified verdict only in the matching REVIEWER completion event.
+            verdict = 'PASS' if outcome == 'REVIEW_PASS' else None
+        candidates.append((claim['version'], verdict, outcome))
     if not candidates:
         return None
     latest = max(candidates, key=lambda item: item[0])
@@ -301,8 +308,10 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
     ignored = _publish_command(git_runner, root,
         ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])
     ignored_paths = [path for path in ignored.split('\0') if path]
-    if any(path == '__pycache__' or '/__pycache__/' in '/' + path + '/' or
-           path.endswith('.pyc') for path in ignored_paths):
+    if any((path == '__pycache__' or '/__pycache__/' in '/' + path + '/' or
+            path.endswith('.pyc')) and
+           not path.startswith('tools/llmtool/.venv/')
+           for path in ignored_paths):
         raise _PublishRefusal('PUBLISH_IGNORED_STRAY')
 
     tracked = _publish_command(git_runner, root,
@@ -395,9 +404,7 @@ def _remote_test_status(record, d6):
             continue
         digest_input = dict(receipt)
         claimed = digest_input.pop('receipt_digest', None)
-        digest = hashlib.sha256(json.dumps(
-            digest_input, ensure_ascii=True, sort_keys=True,
-            separators=(',', ':')).encode('utf-8')).hexdigest()
+        digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
         if type(claimed) is not str or claimed != digest:
             continue
         if receipt['result'] == 'PASS':
