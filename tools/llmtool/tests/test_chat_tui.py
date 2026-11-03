@@ -289,7 +289,7 @@ class WidgetTests(Base):
 
             (git / 'HEAD').unlink()
             (git / 'packed-refs').unlink()
-            (git / 'refs' / 'heads' / 'main').unlink()
+            (git / 'refs' / 'heads' / 'main').unlink(missing_ok=True)
             (git / 'refs' / 'heads').rmdir()
             (git / 'refs').rmdir()
             git.rmdir()
