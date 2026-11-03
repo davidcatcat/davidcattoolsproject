@@ -96,6 +96,7 @@ class Process:
     name: str = "?"   # executable basename only, never arguments
     owner: str = ""   # nearest agent this process belongs to / was started by
     job: tuple = ()   # a remote-test run: (source, task, sha, modules), validated tokens only
+    codex_exec: bool = False   # a Codex CLI started as `codex exec` (a one-shot run)
 
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
@@ -189,6 +190,13 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
     if exe == "Runner.Worker":
         return "Actions runner job"
     return None
+
+
+@functools.lru_cache(maxsize=1024)
+def _codex_exec_command(command: str) -> bool:
+    """Whether a Codex CLI command line runs `codex exec`. Only this one bit
+    is kept, never the arguments."""
+    return "exec" in command.split()[1:]
 
 
 @functools.lru_cache(maxsize=4096)
@@ -361,7 +369,8 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         if stat.startswith("Z"):
             role += " (zombie)"
         result.append(Process(pid, ppid, pgid, elapsed, stat, role, safe_name(command), owner,
-                              _remote_test_job(command)))
+                              _remote_test_job(command),
+                              role.startswith("Codex CLI") and _codex_exec_command(command)))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
@@ -3049,6 +3058,10 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
                 age = now - ended
             word = {"completed": "結束", "failed": "失敗", "interrupted": "被中斷"}[status]
             since = f"（上一輪 {_clock(ended)} {word}）" if ended else f"（上一輪{word}）"
+    # A `codex exec` run whose turn has not ended: only its process says
+    # whether it is still running (see _codex_rows).
+    exec_started = payload.get("originator") == "codex_exec" and (
+        last == "task_started" if turn is None else status == "inProgress")
     if subagent:
         # Codex names a spawned agent "/root/<short_task_name>"; anything else
         # could carry a private path, so it is shown as unnamed.
@@ -3108,8 +3121,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
                 OfficeRow(f"codex {role}", state, action or title or _place_label(place), age, 10,
                           key=key, tui=tui, role=role, task=f"task {place[1]}",
                           evidence="codex 紀錄", sid=sid,
-                          codex_exec_started=(payload.get("originator") == "codex_exec" and
-                                              last == "task_started"),
+                          codex_exec_started=exec_started,
                           exec_result=result))
     if payload.get("originator") == "codex_exec":
         # A `codex exec` run, like a `claude -p` run: one call that exits when
@@ -3117,7 +3129,7 @@ def _codex_row(path: str, now: float, canonical: str, history: dict | None = Non
         return ("sub", None, OfficeRow("codex 單次呼叫", state, (action or title or _place_label(place))
                                        + since, age, 30, key=key, kind="subagent",
                                        evidence="codex 紀錄", sid=sid,
-                                       codex_exec_started=last == "task_started"))
+                                       codex_exec_started=exec_started))
     if place[0] == "unregistered":
         return ("main", payload.get("id"),
                 OfficeRow("codex 對話", state, action or title or _place_label(place),
@@ -3473,11 +3485,13 @@ def _ended_calls(subs, live_calls) -> set:
 def codex_rows(now: float, root: str | None = None,
                canonical: str | None = None,
                live_calls: list[float] | None = None, verdicts: dict | None = None, *,
-               codex_running: bool = False) -> list[OfficeRow]:
+               codex_running: bool = False, codex_execs: int | None = None) -> list[OfficeRow]:
     """live_calls: how many seconds ago each Codex-started one-shot claude
     process now running started (as negative offsets from now), or None when
     the process table was not read. verdicts: review_verdicts() of the GitHub
-    comments read, or None when GitHub was not read."""
+    comments read, or None when GitHub was not read. codex_running: whether
+    any Codex CLI runs; codex_execs: how many `codex exec` CLIs run, or None
+    when not known (see _ended_exec_runs)."""
     root = CODEX_SESSIONS if root is None else root
     canonical = canonical or canonical_root()
     days = {time.strftime("%Y/%m/%d", time.localtime(now - d * 86400))
@@ -3489,15 +3503,47 @@ def codex_rows(now: float, root: str | None = None,
     history = {"db": open_codex_history(CODEX_HISTORY), "titles": open_codex_history(CODEX_STATE)}
     try:
         return _codex_rows(now, sorted(paths), canonical, history, mains, subs, scanned, actions,
-                           live_calls, verdicts, codex_running)
+                           live_calls, verdicts, codex_running, codex_execs)
     finally:
         for db in history.values():
             if db is not None:
                 db.close()
 
 
+EXEC_SILENT_END = 60 * 60   # a running `codex exec` turn silent this long is taken as ended
+
+
+def _ended_exec_runs(rows: list[OfficeRow], codex_running: bool,
+                     codex_execs: int | None) -> set[str]:
+    """Keys of 無回應 `codex exec` rows whose turn never ended in the session
+    file but whose run is taken as gone (killed, crashed or abandoned), so
+    they show as ended work instead. codex_execs: how many `codex exec` CLIs
+    are running (None: not known; then only whether any Codex CLI runs). With
+    N running, the N most recently active started runs may be live; any other
+    has no process left. A run silent for EXEC_SILENT_END is taken as ended
+    whatever runs. A run that wrote within OFFICE_STALL is WORKING, never
+    ended here."""
+    started = sorted((row for row in rows if row.codex_exec_started),
+                     key=lambda row: row.age if row.age is not None else 1e12)
+    if codex_execs is None:
+        live = {row.key for row in started} if codex_running else set()
+    else:
+        live = {row.key for row in started[:max(0, codex_execs)]}
+    return {row.key for row in started if row.state == STALLED and (
+        row.key not in live or (row.age is not None and row.age > EXEC_SILENT_END))}
+
+
+def _ended_exec_row(row: OfficeRow) -> OfficeRow | None:
+    """An ended `codex exec` row: done, and gone after OFFICE_DONE_WINDOW like
+    a completed run."""
+    if row.age is not None and row.age > OFFICE_DONE_WINDOW:
+        return None
+    return replace(row, state=DONE, detail=row.detail + "（推測 codex exec 已結束，未見結束標記）")
+
+
 def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
-                live_calls=None, verdicts=None, codex_running=False) -> list[OfficeRow]:
+                live_calls=None, verdicts=None, codex_running=False,
+                codex_execs=None) -> list[OfficeRow]:
     calls = {}   # id(review row) -> (pr, head, time)
     for path in paths:
         try:
@@ -3510,9 +3556,6 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
             continue
         scanned.add(path)
         kind, key, row = found[:3]
-        if (row.codex_exec_started and row.state == STALLED and
-                (not codex_running or (row.age is not None and row.age > 60 * 60))):
-            row = replace(row, state=DONE)
         if kind == "main":
             mains[key] = row
             actions[key] = found[3] if len(found) > 3 else ""
@@ -3521,6 +3564,18 @@ def _codex_rows(now, paths, canonical, history, mains, subs, scanned, actions,
         for review, pr, sha, when in _review_rows(path, now, row):
             calls[id(review)] = (pr, sha, when)
             subs.append((key if kind == "main" else None, review))
+    ended_exec = _ended_exec_runs(list(mains.values()) + [row for _, row in subs],
+                                  codex_running, codex_execs)
+    for key, row in list(mains.items()):
+        if row.key in ended_exec:
+            row = _ended_exec_row(row)
+            if row is None:
+                del mains[key]
+            else:
+                mains[key] = row
+    subs = [(parent, _ended_exec_row(row) if row.key in ended_exec else row)
+            for parent, row in subs]
+    subs = [(parent, row) for parent, row in subs if row is not None]
     forget_reviews(scanned)
     # A call has ended once its process is gone; without the process table it
     # is shown running until it is too old to matter.
@@ -5502,11 +5557,14 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     running = sorted(_one_shot_runs(processes, sessions), key=lambda p: p.pid)
     calls = [-(_elapsed_seconds(p.elapsed) or 0.0) for p in running]
     codex_running = any(p.role.startswith("Codex CLI") for p in processes)
-    rows = (codex_rows(now, codex_root, canonical, calls, verdicts,
-                       codex_running=codex_running)
-            + claude_rows(now, claude_root, canonical, live))
     # Each running CLI is attached to one thread.
     clis = agent_clis(processes, sessions)
+    # A `codex exec` run without a live process has ended, however its
+    # session file stops (Owner report 2026-11-03: killed runs showed 無回應).
+    codex_execs = sum(p.codex_exec and family(p.role) == "Codex" for p in clis)
+    rows = (codex_rows(now, codex_root, canonical, calls, verdicts,
+                       codex_running=codex_running, codex_execs=codex_execs)
+            + claude_rows(now, claude_root, canonical, live))
     rows = _closed_codex_cli(rows, sum(family(p.role) == "Codex" for p in clis))
     rows = _closed_claude_cli(rows, sessions, processes,
                               keep={f"claude:{sid}.jsonl" for sid in agents or {}})
