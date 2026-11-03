@@ -33,7 +33,10 @@ import json
 import os
 import sys
 import time
-sys.path.insert(0, os.environ["LLMTOOL_PACKAGE"])
+package = os.environ["LLMTOOL_PACKAGE"]
+sys.path[:0] = [os.path.join(package, "tests"), package]
+import review_trust_fixture
+review_trust_fixture.start_module()
 from llmtool import chat
 
 class FakeClient:
