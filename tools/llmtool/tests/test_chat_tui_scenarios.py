@@ -361,7 +361,7 @@ class TUIUserScenarioTests(TUIScenarioCase):
         terminal.submit("/pm disconnect")
         terminal.wait_text("PM disconnected", "disconnect")
         terminal.submit("/pm connect")
-        terminal.wait_text("PM 歷史（最近 2 輪，存在本機）", "restored history")
+        terminal.wait_text("上次對話（", "restored history")
         joined = "\n".join(terminal.wait_stable("history"))
         self.assertNotIn("(history)", joined)          # W57: the live layout, no prefix
         self.assertIn("已中斷 ·", joined)              # the interrupted turn's usage line
@@ -428,7 +428,7 @@ class TUIUserScenarioTests(TUIScenarioCase):
         self.assertNotIn("SECRET_OUTPUT", expanded)
         dump("F7 expanded")
         terminal.submit("/pm history")
-        terminal.wait_for(lambda rows: "PM 歷史（最近 1 輪，存在本機）" in
+        terminal.wait_for(lambda rows: "上次對話（" in
                           terminal.text().rsplit("> /pm history", 1)[-1], "/pm history")
         history = terminal.text()
         self.assertNotIn("(history)", history)
