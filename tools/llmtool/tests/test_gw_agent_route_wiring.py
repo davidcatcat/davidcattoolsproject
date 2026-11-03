@@ -521,7 +521,6 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             'developer': None, 'completion': None,
             'pm_assignment': {'schema_version': 1, 'route': 'gw-agent', 'risk': 'LOW',
                 'goal': 'Run the bounded gw-agent task.', 'acceptance': ['Record the result.']},
-            'dispatch_audit': [],
         }
         registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
             common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
