@@ -639,6 +639,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         options = [option for action in delegate.choices['delegate']._actions
                    for option in action.option_strings]
         self.assertIn('--executor-task', options)
+        self.assertIn('--high-debug-ref', options)
         self.assertNotIn('--source-sha', options)
 
     def test_record_pm_is_strict_offline_and_persists_truthful_provenance(self):

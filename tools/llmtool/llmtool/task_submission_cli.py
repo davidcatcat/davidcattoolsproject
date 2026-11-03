@@ -29,6 +29,7 @@ from .providers.cli_lifecycle import CLIHostTermination
 from .task_store import TaskStore, TaskStoreConflict, new_id, _json_bytes
 from . import active_pm_inbox
 from . import remote_test
+from . import run_budget
 from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
@@ -769,6 +770,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--write-path', action='append', required=True, help='authorized relative target path; repeat as needed')
     delegate.add_argument('--acceptance', action='append', required=True, help='bounded acceptance condition; repeat as needed')
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
+    delegate.add_argument('--high-debug-ref',
+                          help='trusted-repository GitHub comment URL for a repair-cap override')
     delegate.add_argument('--data-class', help='required data classification for gw-agent direct Tasks')
     delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY direct Tasks')
     delegate.add_argument('--context-stdin', action='store_true',
@@ -3965,8 +3968,61 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     return 1
 
 
+def _delegate_high_debug_ref(value):
+    if type(value) is not str:
+        return False
+    try:
+        parsed = urlsplit(value)
+        slug = trust.load_trust().repository['slug']
+    except Exception:
+        return False
+    path_prefix = '/' + slug
+    return (parsed.scheme == 'https' and parsed.netloc == 'github.com' and
+            parsed.path.startswith(path_prefix + '/') and
+            re.fullmatch(r'/(?:issues|pull)/[1-9][0-9]*',
+                         parsed.path[len(path_prefix):]) is not None and
+            re.fullmatch(r'issuecomment-[1-9][0-9]*', parsed.fragment) is not None and
+            parsed.query == '' and parsed.username is None and
+            parsed.password is None)
+
+
+def _enforce_delegate_repair_cap(args, store):
+    high_debug_ref = getattr(args, 'high_debug_ref', None)
+    if high_debug_ref is not None and not _delegate_high_debug_ref(high_debug_ref):
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_REF_INVALID')
+    executor_task = getattr(args, 'executor_task', None)
+    task_id = args.task_id
+    current = store.get(task_id)
+    completion = current.get('completion')
+    if (type(completion) is dict and
+            completion.get('executor_task_id') == executor_task and
+            type(current.get('developer')) is dict):
+        return
+    assignments = 0
+    for other_task_id in store.task_ids():
+        if other_task_id == task_id:
+            continue
+        other = store.get(other_task_id)
+        completion = other.get('completion')
+        if (type(completion) is dict and
+                completion.get('executor_task_id') == executor_task and
+                type(other.get('developer')) is dict):
+            assignments += 1
+    limit = 1 + run_budget.MAX_REPAIR_ATTEMPTS
+    if assignments < limit:
+        return
+    if high_debug_ref is None:
+        raise LLMToolError('DELEGATE_REPAIR_LIMIT_REACHED')
+    override = {'ref': high_debug_ref, 'rounds': assignments,
+                'recorded_at': _timestamp()}
+    store.compare_and_update(
+        task_id, expected={'record_sha256': current['record_sha256']},
+        repair_cap_override=override)
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
+    _enforce_delegate_repair_cap(args, store)
     if getattr(args, 'background', False):
         provider = getattr(args, 'provider', None)
         if provider == 'codex' and getattr(args, 'mode', 'proposal') != 'direct':
