@@ -534,6 +534,7 @@ class ReviewDispatchTests(unittest.TestCase):
         task = {
             'task_id': TASK, 'run_id': 'run',
             'task_binding': {'contract_digest': 'd' * 64},
+            'developer': {'provider_profile': 'codex'},
             'completion': {'executor_task_id': 'executor-d6',
                            'evidence': {'common_dir': '/repo/.git'}},
         }
