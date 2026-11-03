@@ -552,6 +552,8 @@ class ActivityViewTests(unittest.TestCase):
             def getmaxyx(self): return (40, 120)
             def erase(self): pass
             def refresh(self): pass
+            def move(self, *args): pass
+            def clearok(self, *args): pass
         mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         header_text = "".join(drawn[row] for row in sorted(drawn) if row >= 2)
@@ -588,6 +590,8 @@ class ActivityViewTests(unittest.TestCase):
             def getmaxyx(self): return (self.height, 120)
             def erase(self): pass
             def refresh(self): pass
+            def move(self, *args): pass
+            def clearok(self, *args): pass
         for height in (5, 4):
             drawn.clear()
             mon._paint_screen(Screen(height), monitor, "activity", 0, False, {},
@@ -5229,6 +5233,8 @@ class RefreshCostTests(unittest.TestCase):
             def erase(self): pass
             def addnstr(self, *args): pass
             def refresh(self): self.paints += 1
+            def move(self, *args): pass
+            def clearok(self, *args): pass
             def getch(self): return self.keys.pop(0) if self.keys else ord("q")
         screen = FakeScreen([-1] * 30 + [curses.KEY_DOWN] + [-1] * 30 + [ord("q")])
         monitor = mon.Monitor()

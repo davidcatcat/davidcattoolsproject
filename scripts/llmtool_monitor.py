@@ -6066,6 +6066,13 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         if key == -1:
             continue
         dirty = True
+        if key > 255 and key not in (curses.KEY_UP, curses.KEY_DOWN, curses.KEY_PPAGE,
+                                     curses.KEY_NPAGE, curses.KEY_END) or 127 < key <= 255:
+            # Unknown input such as committed input-method text: ignore it and
+            # redraw the whole screen, in case the terminal scrolled while
+            # composing.
+            stdscr.clearok(True)
+            continue
         if key in (ord("q"), ord("Q"), 27):
             return
         views = ("log", "tasks", "table", "activity", "office")
@@ -6179,6 +6186,13 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
             put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
         hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
     put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
+    # Park the (hidden) cursor at the top-left. macOS Terminal draws an input
+    # method's composing text (e.g. Zhuyin) at the cursor; left on the last
+    # row, that text runs past the edge and scrolls the whole screen up.
+    try:
+        stdscr.move(0, 0)
+    except curses.error:
+        pass
     stdscr.refresh()
     return offset
 
