@@ -982,7 +982,7 @@ class TaskCompletionTests(unittest.TestCase):
                      task_digest='3' * 64):
             case_number[0] += 1
             reviewer_root = self.base / ('reviewer-' + str(case_number[0]))
-            reviewer_branch = 'review/' + reviewer + '-' + author + '-' + str(case_number[0])
+            reviewer_branch = 'review/' + reviewer + '-' + str(author or 'none') + '-' + str(case_number[0])
             self._git('worktree', 'add', '-b', reviewer_branch,
                       str(reviewer_root), result_sha)
             self._write_registration('reviewer-task', reviewer,
