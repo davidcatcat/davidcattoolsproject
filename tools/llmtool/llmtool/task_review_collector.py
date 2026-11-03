@@ -18,7 +18,7 @@ from pathlib import Path
 from . import git_intel
 from .task_lifecycle import Role, utc_time
 from .task_review import reject, digest, scope_path, canonical, screen, SOURCE_LIMIT
-from .review_origins import REVIEW_ORIGINS
+from .review_origins import origin_allowed, trusted_slug
 from .providers.cli_lifecycle import terminate
 
 MAX_METADATA = 1024 * 1024
@@ -200,7 +200,7 @@ def collect_local_facts(root, *, reader=None):
                                     common+'/refs/heads/'+branch+'.lock')):
         reject('REVIEW_GIT_LOCKED')
     origin = text(('config','--get','remote.origin.url'))
-    if origin not in REVIEW_ORIGINS:
+    if not origin_allowed(origin):
         reject('REVIEW_REPOSITORY_INVALID')
     registration = reader.read(('worktree','list','--porcelain'))
     blocks = registration.decode().strip().split('\n\n')
@@ -219,7 +219,7 @@ def collect_local_facts(root, *, reader=None):
             reader.read(git_intel.STATUS) != status_raw or
             (root.stat().st_dev,root.stat().st_ino) != (before.st_dev,before.st_ino)):
         reject('REVIEW_SOURCE_DRIFT')
-    return LocalFacts(str(root),branch,head,common,'davidcatcat/davidcattoolsproject',
+    return LocalFacts(str(root),branch,head,common,trusted_slug(),
         hashlib.sha256(index).hexdigest(),hashlib.sha256(untracked+b'\0'+ignored).hexdigest(),
         hashlib.sha256(registration).hexdigest(),digest(runtime),
         not (status.staged or status.unstaged or status.conflicted))
@@ -389,7 +389,7 @@ class Observation:
         if (self.agents != expect.agents or self.authored_by != expect.authored_by or
                 self.source_sha != expect.source_sha or self.task != expect.task or
                 self.epoch != expect.epoch or self.events != events or
-                self.repository != 'davidcatcat/davidcattoolsproject' or not self.host_record or
+                self.repository != trusted_slug() or not self.host_record or
                 any(value is not True for value in (self.identity_attested,self.writers_clean,
                     self.locks_clear,self.baseline_valid,self.config_safe,self.registered_locked))):
             reject('REVIEW_IDENTITY_NOT_ATTESTED')

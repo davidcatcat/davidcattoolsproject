@@ -18,6 +18,11 @@ from llmtool import task_lifecycle as t, task_verification as v
 from llmtool.errors import LLMToolError
 from llmtool.task_review_collector import LocalFacts
 from llmtool import task_review_collector as c
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 
 def records(root, head='1'*40, branch='feat/bundle'):
@@ -200,6 +205,25 @@ class BundleTests(unittest.TestCase):
         data = json.loads(Path(self.args.output).read_text())
         self.assertIn(item['metadata']['url'],data['review_request'])
         self.assertFalse(data['artifacts'][0]['execution_verified'])
+
+    def test_ci_url_follows_trust_slug(self):
+        # #369 PR-6: the actions run URL is built from trust repository.slug.
+        other = review_trust_fixture.make_trust('otherorg/other-repo')
+        for slug, accepted in (('davidcatcat/davidcattoolsproject', False), ('otherorg/other-repo', True)):
+            with self.subTest(slug=slug):
+                Path(self.args.output).unlink(missing_ok=True)
+                index = json.loads(json.dumps(self.index)); item = index['artifacts'][0]
+                item['kind'] = 'CI'; item['metadata'] = {
+                    'url':f'https://github.com/{slug}/actions/runs/123',
+                    'head_sha':self.expect.source_sha, 'conclusion':'SUCCESS'}
+                self.private_file(self.args.evidence, json.dumps(index))
+                with review_trust_fixture.use_trust(other):
+                    if accepted:
+                        self.prepare()
+                        self.assertIn(item['metadata']['url'], Path(self.args.output).read_text())
+                    else:
+                        with self.assertRaises(LLMToolError) as caught: self.prepare()
+                        self.assertEqual(caught.exception.review_code, 'BUNDLE_EVIDENCE_INVALID')
 
     def test_duplicate_depth_unicode_and_index_limit_fail_before_git(self):
         for raw in ('{"schema_version":1,"schema_version":1}', '['*17+']'*17,
