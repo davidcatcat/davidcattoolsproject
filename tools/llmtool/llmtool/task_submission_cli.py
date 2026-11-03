@@ -3225,14 +3225,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     try:
         worker_dispatch.authorize_dispatch(store, task['task_id'], 'company-gw-agent', 'DISPATCH')
     except worker_dispatch.WorkerDispatchDenied as exc:
-        # The authorization gate appends a durable audit entry (including on
-        # denial). Bind failure persistence to the developer record currently
-        # stored after that transaction.
-        current = store.get(task['task_id'])
-        expected_developer = copy.deepcopy(current.get('developer'))
         return persist_failure('DEVELOPER_' + exc.dispatch_code)
-    current = store.get(task['task_id'])
-    expected_developer = copy.deepcopy(current.get('developer'))
     try:
         route = GwAgentRoute(route_config)
         route.validate_profile(model, effort)
@@ -3302,9 +3295,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'source_manifest_sha256': None})
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
-        return persist_failure(code, state='BLOCKED')
+        return persist_failure(code)
     except Exception:
-        return persist_failure('DEVELOPER_RESULT_UNKNOWN', state='BLOCKED')
+        return persist_failure('DEVELOPER_RESULT_UNKNOWN', state='DEVELOPER_OUTCOME_UNKNOWN')
     try:
         saved = store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
