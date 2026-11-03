@@ -1,4 +1,7 @@
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
 from llmtool.developer_output_normalize import normalize_developer_output
 from llmtool.developer_output_normalize import reanchor_developer_output
@@ -222,12 +225,23 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertIn(r'\ No newline at end of file', anchored)
 
     def test_source_anchor_does_not_mark_repeated_top_line_as_eof(self):
-        source = 'repeat\nmiddle\nrepeat'
-        raw = self.HEADER + '@@ -1 +1 @@\n-repeat\n+changed\n'
+        source = 'repeat\nmiddle\nline 3\nline 4\nline 5\nrepeat'
+        # The hunk header points one line too low. Its old-side context makes
+        # the top occurrence unique even though the final line repeats it.
+        raw = (self.HEADER + '@@ -2,2 +2,2 @@\n'
+               '-repeat\n+changed\n middle\n')
         anchored, tokens = reanchor_developer_output(
             raw, [self.PATH], {self.PATH: source})
         self.assertEqual(tokens, ('HUNK_REANCHORED',))
         self.assertNotIn(r'\ No newline at end of file', anchored)
+        self.assertIn('@@ -1,4 +1,4 @@', anchored)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            source_path = Path(temp_dir, self.PATH)
+            source_path.parent.mkdir(parents=True)
+            source_path.write_bytes(source.encode('utf-8'))
+            subprocess.run(['git', 'init', '-q'], cwd=temp_dir, check=True)
+            subprocess.run(['git', 'apply', '--check', '-'], cwd=temp_dir,
+                           input=anchored, text=True, check=True)
 
     def test_source_anchor_keeps_missing_newline_when_appending_at_eof(self):
         source = 'a\nb\nc'
