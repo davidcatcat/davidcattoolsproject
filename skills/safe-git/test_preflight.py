@@ -1,5 +1,6 @@
 """Same public CLI as daily use, real disposable Git repo and Python venv."""
 import importlib.util
+import argparse
 import json
 import os
 import pwd
@@ -63,6 +64,30 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, b"PASS: read-only preflight\n")
         self.assertEqual(result.stderr, b"")
+
+    def linked_worktree_args(self):
+        root = self.parent / "linked"
+        subprocess.run(["/usr/bin/git", "-C", str(self.root), "worktree", "add",
+                        "--detach", str(root), "HEAD"], check=True, capture_output=True)
+        root.chmod(0o700)
+        gitdir = Path(gate.git(root, "rev-parse", "--path-format=absolute",
+                               "--absolute-git-dir").decode().strip())
+        exclude = gitdir / "info/exclude"
+        exclude.parent.mkdir(parents=True, exist_ok=True)
+        exclude.write_text("tools/\n")
+        venv = root / "tools/llmtool/.venv"
+        subprocess.run([sys.executable, "-B", "-I", "-m", "venv", "--without-pip",
+                        str(venv)], check=True, capture_output=True)
+        site = next(venv.glob("lib/python*/site-packages"))
+        (site / "llmtool.py").write_text("# synthetic module, no product code\n")
+        baseline = self.parent / "linked-baseline.json"
+        baseline.write_text(json.dumps(gate.inventory(root)))
+        baseline.chmod(0o600)
+        args = self.args.copy()
+        values = {"--root": str(root), "--branch": "", "--baseline": str(baseline)}
+        for flag, value in values.items():
+            args[args.index(flag) + 1] = value
+        return root, args
 
     def test_positive_and_wrong_expected_identities(self):
         result = self.invoke()
@@ -208,6 +233,38 @@ class PreflightTests(unittest.TestCase):
         # Target this guard directly: no unrelated inventory or root-mode check.
         with self.assertRaises(gate.Rejected):
             gate.directory(self.root / ".git", os.getuid())
+
+    def test_linked_gitdir_is_validated_and_pinned(self):
+        root, args = self.linked_worktree_args()
+        gitdir = gate.git_directory(root)
+        self.assertEqual(gitdir, Path(self.git(
+            "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
+        ) / "worktrees" / gitdir.name)
+        result = self.invoke(args)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"PASS: read-only preflight\n")
+        self.assertEqual(result.stderr, b"")
+
+        gitdir.chmod(0o777)
+        self.assert_stop(self.invoke(args))
+        gitdir.chmod(0o700)
+
+        moved = gitdir.with_name(gitdir.name + "-target")
+        gitdir.rename(moved)
+        gitdir.symlink_to(moved, target_is_directory=True)
+        self.assert_stop(self.invoke(args))
+
+    def test_gitdir_change_between_reads_is_rejected(self):
+        parsed = argparse.Namespace(
+            root=str(self.root), uid=os.getuid(), root_mode="700", parent_mode="700",
+            branch="task", head=self.git("rev-parse", "HEAD").strip(),
+            common_dir=str(self.root / ".git"), origin="file://" + str(self.root),
+            write_candidate=None, baseline=str(self.baseline), report=None)
+        pinned = self.root / ".git"
+        with patch.object(gate, "git_directory",
+                          side_effect=[pinned, self.parent / "changed-gitdir"]):
+            with self.assertRaises(gate.Rejected):
+                gate.check(parsed)
 
     def test_tracked_parent_symlink_rejected_before_outside_read(self):
         folder = self.root / "a"
