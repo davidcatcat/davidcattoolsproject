@@ -1098,7 +1098,7 @@ class TaskCompletionTests(unittest.TestCase):
         profiles = ('claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent',
                     'company-gw-agent', None, 'unrecognized')
         for profile in profiles:
-            for reviewer in ('claude-reviewer', 'codex-reviewer'):
+            for reviewer in ('claude-reviewer', 'codex-reviewer', 'other-reviewer'):
                 with self.subTest(profile=profile, reviewer=reviewer):
                     self._write_registration(
                         'reviewer-task', reviewer, 'native-reviewer-session',
@@ -1131,11 +1131,15 @@ class TaskCompletionTests(unittest.TestCase):
                         evidence = task_completion.collect_github_evidence(
                             **self._github_kwargs(result_sha, task_record=task))
                     expected = (profile in ('agy', 'opencode', 'company-gw', 'gw-agent',
-                                             'company-gw-agent') or
+                                             'company-gw-agent') and
+                                reviewer in ('claude-reviewer', 'codex-reviewer') or
                                 profile == 'claude' and reviewer == 'codex-reviewer' or
                                 profile == 'codex' and reviewer == 'claude-reviewer')
                     self.assertEqual(evidence['evidence']['formal_review_state'],
                                      'ACCEPTED' if expected else 'UNVERIFIED')
+                    if not expected:
+                        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
+                                      evidence['missing_gates'])
 
     def test_review_binding_must_match_task_run_contract_and_result_head(self):
         result_sha, _ = self._make_result()
@@ -1207,7 +1211,7 @@ class TaskCompletionTests(unittest.TestCase):
         reviewer_root = self.base / 'reviewer-merged'
         self._git('worktree', 'add', '-b', 'review/merged-branch',
                   str(reviewer_root), result_sha)
-        self._write_registration('reviewer-task', 'codex-reviewer', 'Reviewer session',
+        self._write_registration('reviewer-task', 'claude-reviewer', 'Reviewer session',
             reviewer_root, 'review/merged-branch', result_sha, result_sha,
             native_session_id='native-reviewer', github_login='reviewer-user',
             state='REVIEW_PENDING')
@@ -1450,7 +1454,7 @@ class TaskCompletionTests(unittest.TestCase):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'
         self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
-        self._write_registration('reviewer-task', 'codex-reviewer', 'Reviewer session',
+        self._write_registration('reviewer-task', 'claude-reviewer', 'Reviewer session',
             reviewer_root, 'review/branch', result_sha, result_sha,
             native_session_id='native-reviewer', github_login='reviewer-user')
         pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},

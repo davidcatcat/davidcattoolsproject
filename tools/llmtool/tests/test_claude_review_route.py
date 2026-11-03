@@ -382,9 +382,6 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         task['completion']['evidence'].update(
             executor_native_session_id='native-executor', executor_native_session='VERIFIED')
         store.create(task)
-        stored = store.get(task['task_id'])
-        store.update(task['task_id'], developer={
-            **stored['developer'], 'provider_profile': 'codex'})
         binding = self.f._review_binding(task_id=task['task_id'], run_id=task['run_id'],
             contract_digest=task['task_binding']['contract_digest'], head=self.result_sha)
         comments = [self._comment('\n'.join((self._head(), ACCEPT, binding)))]
@@ -408,6 +405,7 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
              patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
                    return_value=tests), \
              patch('llmtool.task_completion._github_get', side_effect=api), \
+             patch('llmtool.task_store.default_root', return_value=store.root), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    return_value=fixtures.pm_config('original-pm')), \
              patch('llmtool.task_submission_cli.api_key', return_value='key-not-recorded'), \
