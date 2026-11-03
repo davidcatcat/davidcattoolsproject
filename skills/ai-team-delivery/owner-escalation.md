@@ -9,7 +9,7 @@ This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../
 | Ordinary defect, CI/test failure, Reviewer FAIL | Diagnose, bounded fix, relevant retest and exact-HEAD rereview. Do not weaken a gate. |
 | Worker quota, login, VPN, availability or temporary tool failure | Consult current Owner dispatch policy and real availability. Retry safely within task budget, isolate affected Task, or reassign only to an already-authorized qualified route after D6 Writer release. Keep independent work moving. |
 | Task splitting, review sequencing, compliant low-risk change, nonblocking LOW issue | Make and record the decision and next responsible Agent. |
-| Reviewer quota exhausted | Preserve cross-family and independent-review requirements; mark only that formal-review gate WAITING, continue unrelated work. Do not substitute a Reviewer, self-approve or merge while required PASS is missing. |
+| Reviewer route unavailable or pairing cannot be staffed | Under [Owner D6 (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), select any already-authorized, qualified formal Reviewer from a different model family. If none is qualified and authorized, mark only that review WAITING and ask the Owner to authorize an eligible pairing. Continue unrelated work; never use a same-family Reviewer or self-review. |
 | Existing eligible reviewed PR | May merge only after all review, exact-head CI, runtime and scope checks are satisfied. |
 
 ## Owner must decide before the dependent action
@@ -20,7 +20,7 @@ This is the operational decision boundary for the Integrator/PM. [AGENTS.md](../
 | New spend, billing/provider tier, paid fallback, export/egress beyond existing permission, credentials or dangerous permission, accepted material security risk | STOP **only the dependent action**; no response is not consent. |
 | Root/sudo or macOS core/system changes | Ask for explicit approval before execution, even if a technical fix would be convenient. |
 | Formal GO / LIMITED GO / NO-GO and major deployment or release decision | Owner decides based on evidence; technical PASS alone is not release approval. |
-| Change of formal Reviewer pairing due to quota or other unavailability | Owner authorization is required for the particular eligible cross-family pairing. No same-family or self-review; absence of a qualified Reviewer leaves the affected review waiting. |
+| No qualified and authorized cross-family formal Reviewer is available | Ask the Owner to authorize an eligible pairing; keep the affected review WAITING until one is available. Under [Owner D6 (#846)](https://github.com/davidcatcat/davidcattoolsproject/issues/846), the PM selects among already-authorized qualified Reviewers from a different model family without seeking separate Owner authorization for each pairing. No same-family or self-review. |
 | Assignment of `OWNER_ASSIGNMENT_ONLY` Workers | Require the specific Owner Task assignment and exact policy binding before dispatch; a chat suggestion or healthy provider alone does not authorize work. AGY is currently `ALLOWED` for PM-selected dispatch under its worker-dispatch entry. |
 
 ### macOS core/system boundary
