@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import inspect
 import io
@@ -145,7 +146,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 self.developer_states = []
 
             def get(self, _task_id):
-                return dict(self.value)
+                return copy.deepcopy(self.value)
 
             def compare_and_update(self, _task_id, *, expected, **updates):
                 self.claims += 1
@@ -156,14 +157,14 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                     self.value, updates, expected)
                 if denial is not None:
                     raise denial
-                self.value.update(updates)
+                self.value.update(copy.deepcopy(updates))
                 if type(self.value.get('developer')) is dict:
                     self.developer_states.append(self.value['developer']['state'])
-                return dict(self.value)
+                return copy.deepcopy(self.value)
 
             def update(self, _task_id, **updates):
-                self.value.update(updates)
-                return dict(self.value)
+                self.value.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.value)
 
         registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
             common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
@@ -195,7 +196,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_task_view', return_value={}):
             status = task_submission_cli.run_task_gw_agent_delegate(args, store=store)
         self.assertEqual(status, 1)
-        self.assertEqual(store.claims, 3)
+        # Failure persistence is now a bound CAS, adding one compare call after
+        # the initial claim, DISPATCHING transition, and dispatch audit claim.
+        self.assertEqual(store.claims, 4)
         self.assertEqual(store.developer_states,
                          ['DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
                           'DEVELOPER_UNAVAILABLE'])
