@@ -190,15 +190,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
     def test_real_task_store_accepts_gw_agent_developer_record_before_route_call(self):
         task_id, run_id = 'a' * 32, 'b' * 32
         request = 'synthetic bounded task'
-        request_sha = hashlib.sha256(request.encode('utf-8')).hexdigest()
         assignment = {'schema_version': 1, 'route': 'gw-agent', 'risk': 'LOW',
                       'goal': 'Update src.py.', 'acceptance': ['record result']}
         response = json.dumps({'schema_version': 1, 'summary': 'bounded',
                                'developer_assignment': assignment})
-        record = task_submission_cli._record(
-            task_id, run_id, 'pm-gw-agent-test', 'codex', request,
-            state='PM_RESPONDED', request_sha=request_sha)
-        record.update(response=response, pm_assignment=assignment)
+        pm_input = json.dumps({'request': request, 'response': response})
         args = Namespace(task_id=task_id, mode='direct', context_stdin=False,
             data_class='SYNTHETIC', egress_basis='Synthetic test context.',
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
@@ -227,7 +223,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                     return saved
 
             store = RecordingTaskStore(Path(temp) / 'state')
-            store.create(record)
+            task_submission_cli.run_task_record_pm(
+                Namespace(pm_session_id=None, pm_runtime=None, pm_cwd=None),
+                store=store, input_stream=io.StringIO(pm_input), task_id=task_id,
+                return_record=True)
             route = SimpleNamespace(validate_profile=lambda *_args: None)
 
             def inspect_dispatching(_route, _request, **_kwargs):

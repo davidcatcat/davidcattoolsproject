@@ -1714,7 +1714,7 @@ def _validate(record):
                     'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
-                if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
+                if (developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent') or
                         type(callback) is not dict or
                         set(callback) not in (callback_fields, callback_fields | {'review_handoff'},
                             callback_fields | {'review_handoff', 'review_return'}) or
