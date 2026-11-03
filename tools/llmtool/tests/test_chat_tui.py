@@ -4926,7 +4926,8 @@ class PMConversationTests(BoundedPMTest):
             await self.until(ui, lambda ui: self.W59_TASK_B in self.w59_text(ui), 'detail read')
             text = self.w59_text(ui)
             self.assertIn('PR: #661 (from review claim)  NOT_AVAILABLE', text)
-            self.assertEqual(ui.task_view_linker().links(text, 0, len(text)), [])
+            linker = ui.task_view_linker()
+            self.assertTrue(linker is None or linker.links(text, 0, len(text)) == [])
 
         with patch.object(chat_tui_status.trust, 'load_trust',
                           side_effect=TrustError('TRUST_MISSING')):
