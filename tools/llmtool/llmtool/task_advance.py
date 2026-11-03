@@ -1,4 +1,4 @@
-"""Advance one durable Task by exactly one review or closure action."""
+"""Advance one durable Task by one step: publish, EC2 remote test, review, repair, completion, merge or closure."""
 
 import hashlib
 import contextlib
