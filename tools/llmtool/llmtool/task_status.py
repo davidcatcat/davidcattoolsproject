@@ -3,7 +3,7 @@
 import json
 import re
 
-from .task_store import STATES, TaskStore
+from .task_store import PM_NATIVE_SESSION_ID, STATES, TaskStore
 from .task_index import TaskStatusIndex
 
 
@@ -130,9 +130,13 @@ def _summary(record):
 def task_status(*, pm_session=None, limit=20, store=None):
     if type(limit) is not int or not 1 <= limit <= 200:
         raise ValueError('limit must be between 1 and 200')
-    if pm_session is not None and (type(pm_session) is not str or
-                                   re.fullmatch(r'pm-[a-z0-9-]{1,60}', pm_session) is None):
-        raise ValueError('invalid PM session')
+    if pm_session is not None:
+        if type(pm_session) is not str:
+            raise ValueError('invalid PM session')
+        if PM_NATIVE_SESSION_ID.fullmatch(pm_session) is not None:
+            pm_session = 'pm-' + pm_session
+        elif re.fullmatch(r'pm-[a-z0-9-]{1,60}', pm_session) is None:
+            raise ValueError('invalid PM session')
     store = TaskStore() if store is None else store
     index = TaskStatusIndex(store)
     task_ids = store.task_ids()
