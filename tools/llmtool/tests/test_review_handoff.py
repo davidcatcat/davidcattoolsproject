@@ -6,6 +6,7 @@ import multiprocessing
 import os
 import sys
 import tempfile
+import time
 import unittest
 from copy import deepcopy
 from dataclasses import replace
@@ -492,6 +493,88 @@ class ReviewHandoffTests(unittest.TestCase):
         self.assertEqual(len(blocked), 1, results)
         lines = spawn_counter.read_text().splitlines() if spawn_counter.exists() else []
         self.assertEqual(len(lines), 1, 'Provider executable must be launched at most once across processes')
+
+    def test_killed_handoff_recovers_consumed_receipt_without_relaunch(self):
+        """A dead host leaves CONSUMED; the next open reports UNKNOWN and cannot relaunch."""
+        h = self.harness(mode='success')
+        marker = h.hostdir / 'reviewer-child.pid'
+        h.exe.write_text(
+            '#!' + sys.executable + '\nimport os,time\n'
+            f'open({str(marker)!r}, "w").write(str(os.getpid()))\n'
+            'time.sleep(60)\n'
+        )
+        exe_sha = hashlib.sha256(h.exe.read_bytes()).hexdigest()
+        h.hostdata['reviewer']['executable_sha256'] = exe_sha
+        runtime_reg = replace(a.load_host_registration(h.pin), reviewer_executable_digest=exe_sha)
+        h.policy = replace(h.policy, worker_runtime_digest=a.worker_runtime_pin(runtime_reg))
+        h.hostdata['route_policies'] = [dict(policy=h.policy.to_dict(), revoked=False)]
+        h.write_host()
+        h.pin = replace(h.pin, host_digest=hashlib.sha256(h.hostpath.read_bytes()).hexdigest())
+        h.ledger.close()
+
+        ctx = multiprocessing.get_context('spawn')
+        barrier = ctx.Barrier(2)
+        queue = ctx.Queue()
+        pin_args = (h.pin.path, h.pin.host_digest, h.pin.authorizer_ref,
+                    h.pin.pair_digest, h.pin.packet_input_digest, h.pin.repository_roots)
+        proc = ctx.Process(
+            target=_mp_worker_dispatch,
+            args=(str(h.hostpath), pin_args, h.ready, h.final, h.expect, h.events,
+                  h.fake.approval, h.packet_input, str(h.ledger_path),
+                  h.ledger.creation_nonce, h.fake.budget, barrier, queue)
+        )
+        proc.start()
+        barrier.wait(timeout=10)
+        deadline = time.monotonic() + 10
+        while not marker.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(marker.exists(), 'reviewer child did not launch')
+        reviewer_pid = int(marker.read_text())
+        # A dead host is SIGKILL. SIGTERM is not: while the reviewer runs,
+        # CLIProcessLifecycle routes SIGTERM to an orderly cancel, and
+        # run_review's finally finalizes the receipt EFFECT_UNKNOWN itself
+        # before the host exits, leaving nothing for recovery to do.
+        proc.kill()
+        proc.join(timeout=10)
+        self.assertFalse(proc.is_alive())
+        self.assertEqual(proc.exitcode, -9)
+        try:
+            os.kill(reviewer_pid, 9)  # the reviewer runs in its own session
+        except ProcessLookupError:
+            pass
+
+        reopened = l.ReceiptLedger.open(
+            h.ledger_path, clock=h.clock.utc, kind='PROVIDER_REVIEW',
+            creation_nonce=h.ledger.creation_nonce)
+        self.addCleanup(reopened.close)
+        h.observer = FixtureObserver(h.pin, h.expect, h.events, h.clock,
+                                     baseline_check=lambda reg, facts: True,
+                                     writers_check=lambda reg, facts: True)
+        h.issuer = a.ProductionReviewIssuer(h.pin, h.clock, h.observer, h.context)
+        rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
+        self.assertEqual(len(rows), 1)
+        nonce, status = rows[0]
+        # Reopen itself leaves the live ledger state alone. The handoff's
+        # once-per-open recovery turns this abandoned CONSUMED row unknown
+        # before attempting any redemption.
+        self.assertEqual(status, 'CONSUMED')
+        with patch.object(reopened, 'recover', wraps=reopened.recover) as recover:
+            recover.assert_not_called()
+            receipt, _ = rh.dispatch_review_handoff(
+                h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
+            rows = reopened._db.execute('SELECT nonce,status FROM receipts').fetchall()
+            self.assertEqual(len(rows), 1)
+            recovered_nonce, status = rows[0]
+            self.assertEqual(recovered_nonce, nonce)
+            self.assertEqual(status, 'EFFECT_UNKNOWN')
+            self.assertEqual(receipt.recovered_receipts, 1)
+            recover.assert_called_once_with()
+            self.assertEqual(marker.read_text(), str(reviewer_pid))
+            second, _ = rh.dispatch_review_handoff(
+                h.issuer, reopened, budget=h.fake.budget, dispatch_store=self.dispatch_store)
+            self.assertEqual(second.recovered_receipts, 1)
+            recover.assert_called_once_with()
+        self.assertEqual(marker.read_text(), str(reviewer_pid))
 
     def test_timeout_nonzero_spoof_and_secret_failures_stay_unknown_or_blocked_without_leak(self):
         for mode in ('timeout', 'exit', 'spoof', 'private'):
