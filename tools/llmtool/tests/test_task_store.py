@@ -256,12 +256,14 @@ class TaskStoreTests(unittest.TestCase):
             malformed['record_sha256'] = task_store_module._digest(malformed)
             with self.subTest(invalid=invalid), self.assertRaises(LLMToolError) as caught:
                 task_store_module._validate(malformed)
-            self.assertEqual(caught.exception.code, 'TASK_PUBLISHED_PR_INVALID')
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'TASK_PUBLISHED_PR_INVALID')
 
         for pr, head in ((True, 'a' * 40), (0, 'a' * 40), (425, 'bad')):
             with self.subTest(pr=pr, head=head), self.assertRaises(LLMToolError) as caught:
                 self.store.record_published_pr(task['task_id'], pr, head)
-            self.assertEqual(caught.exception.code, 'TASK_PUBLISHED_PR_INVALID')
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'TASK_PUBLISHED_PR_INVALID')
 
     def test_remote_test_receipt_accepts_missing_log_and_rejects_other_paths(self):
         task = self._codex_dispatch_task()
