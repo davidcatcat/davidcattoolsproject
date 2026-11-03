@@ -15,7 +15,7 @@ from argparse import Namespace
 from . import active_pm_inbox, github_events, review_dispatch, review_repair, review_result
 from . import task_completion, task_submission_cli
 from .errors import LLMToolError
-from .task_store import TaskStore
+from .task_store import TaskStore, _json_bytes
 
 
 class _PublishRefusal(Exception):
@@ -301,8 +301,10 @@ def _publish_task(record, d6, executor_task, *, git_runner=None, gh_runner=None,
     ignored = _publish_command(git_runner, root,
         ['ls-files', '--others', '--ignored', '--exclude-standard', '-z'])
     ignored_paths = [path for path in ignored.split('\0') if path]
-    if any(path == '__pycache__' or '/__pycache__/' in '/' + path + '/' or
-           path.endswith('.pyc') for path in ignored_paths):
+    if any((path == '__pycache__' or '/__pycache__/' in '/' + path + '/' or
+            path.endswith('.pyc')) and
+           not path.startswith('tools/llmtool/.venv/')
+           for path in ignored_paths):
         raise _PublishRefusal('PUBLISH_IGNORED_STRAY')
 
     tracked = _publish_command(git_runner, root,
@@ -395,9 +397,7 @@ def _remote_test_status(record, d6):
             continue
         digest_input = dict(receipt)
         claimed = digest_input.pop('receipt_digest', None)
-        digest = hashlib.sha256(json.dumps(
-            digest_input, ensure_ascii=True, sort_keys=True,
-            separators=(',', ':')).encode('utf-8')).hexdigest()
+        digest = hashlib.sha256(_json_bytes(digest_input)).hexdigest()
         if type(claimed) is not str or claimed != digest:
             continue
         if receipt['result'] == 'PASS':
