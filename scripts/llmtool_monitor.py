@@ -192,10 +192,11 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
     return None
 
 
-@functools.lru_cache(maxsize=1024)
 def _codex_exec_command(command: str) -> bool:
     """Whether a Codex CLI command line runs `codex exec`. Only this one bit
-    is kept, never the arguments."""
+    is kept, never the arguments: deliberately not cached, since a cache
+    keyed by the command line would retain prompts and other argv text. It
+    runs only for the few Codex CLI rows, once per Process built."""
     return "exec" in command.split()[1:]
 
 

@@ -2310,15 +2310,23 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(sorted(row.state for row in rows), sorted([mon.WORKING, mon.DONE, mon.DONE]))
 
     def test_codex_exec_command_flag_keeps_no_arguments(self):
+        secret = "CODEX-ARGV-SECRET-7f3a"   # unique: other tests cache "PROMPT-SECRET" files
         snap = mon.snapshot_from([
-            (90, 1, 90, "00:10", "S", "/opt/bin/codex exec --json PROMPT-SECRET"),
+            (90, 1, 90, "00:10", "S", f"/opt/bin/codex exec --json {secret}"),
             (91, 1, 91, "00:10", "S", "/opt/bin/codex --model x"),
             (92, 1, 92, "00:10", "S", "node /opt/lib/bin/codex exec"),
         ], self_pid=99999)
         flags = {p.pid: (p.role, p.codex_exec) for p in snap.processes}
         self.assertEqual(flags, {90: ("Codex CLI", True), 91: ("Codex CLI", False),
                                  92: ("Codex CLI (node launcher)", True)})
-        self.assertNotIn("PROMPT-SECRET", repr(snap.processes))
+        self.assertNotIn(secret, repr(snap.processes))
+        # The flag is derived without retaining the command line anywhere:
+        # no cache keyed by raw argv, and no module-level container holds it.
+        self.assertFalse(hasattr(mon._codex_exec_command, "cache_info"))
+        self.assertFalse(hasattr(mon._codex_exec_command, "__wrapped__"))
+        for name, value in vars(mon).items():
+            if isinstance(value, (dict, list, set, tuple, frozenset)):
+                self.assertNotIn(secret, repr(value), name)
 
     def test_codex_rows_show_what_they_do_like_claude_rows(self):
         path = self.codex.parent / "state.sqlite"
