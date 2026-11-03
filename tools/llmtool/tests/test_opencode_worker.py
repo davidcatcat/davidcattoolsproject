@@ -593,6 +593,45 @@ class OpenCodeWorkerTests(unittest.TestCase):
         self.assertEqual(scope_error.exception.worker_code,'OPENCODE_SCOPE_INVALID')
         self.assertFalse(bad_scope._attempted)
 
+    def test_scope_rejects_non_nfc_collisions_and_newly_denied_names(self):
+        invalid_paths = ('e\u0301.txt', '.gitmodules', '.gitattributes', '.lfsconfig',
+                         '.github/workflows/check.yml')
+        for path in invalid_paths:
+            with self.subTest(path=path):
+                job = replace(self.job(), read_paths=(path,))
+                with self.assertRaises(w.WorkerError) as caught:
+                    w.preflight(job)
+                self.assertEqual(caught.exception.worker_code, 'OPENCODE_SCOPE_INVALID')
+        collision = replace(self.job(), read_paths=('FILE.txt', 'file.txt'))
+        with self.assertRaises(w.WorkerError) as caught:
+            w.preflight(collision)
+        self.assertEqual(caught.exception.worker_code, 'OPENCODE_SCOPE_INVALID')
+
+    def test_scope_component_swap_to_symlink_is_refused_by_no_follow_walk(self):
+        job = self.job()
+        root = Path(job.agent.root)
+        parent = root/'parent'
+        parent.mkdir()
+        (parent/'file.txt').write_text('synthetic')
+        outside = root/'outside'
+        outside.mkdir()
+        original_open = os.open
+        swapped = False
+
+        def swap_before_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if path == 'parent' and not swapped:
+                parent.rename(root/'parent-original')
+                parent.symlink_to(outside, target_is_directory=True)
+                swapped = True
+            return original_open(path, flags, *args, **kwargs)
+
+        with patch.object(w.os, 'open', side_effect=swap_before_open):
+            with self.assertRaises(w.WorkerError) as caught:
+                w._scope_path_nofollow(root, 'parent/file.txt')
+        self.assertTrue(swapped)
+        self.assertEqual(caught.exception.worker_code, 'OPENCODE_SCOPE_INVALID')
+
     def test_preflight_uses_runtime_exception_mapping_without_converting_to_pin_failure(self):
         job=self.job()
         with patch.object(w,'_validate',side_effect=OSError('synthetic')):

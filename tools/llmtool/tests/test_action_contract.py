@@ -406,6 +406,16 @@ class StrictContractTests(unittest.TestCase):
             self.reject(changed_leaf(action, ('repository','canonical_root'), root))
         self.reject({**action, 'scope': ['file.txt']+[f'x{i}' for i in range(32)]})
 
+    def test_path_unicode_collisions_and_additional_git_metadata_denials(self):
+        action = make_action().to_dict()
+        for path in ('e\u0301.txt', '.gitmodules', '.gitattributes', '.lfsconfig',
+                     '.github/workflows/check.yml'):
+            with self.subTest(path=path):
+                raw = changed_leaf(action, ('payload','target','path'), path)
+                raw['scope'] = [path]
+                self.reject(raw)
+        self.reject({**action, 'scope': ['FILE.txt', 'file.txt']})
+
     def test_absent_regular_metadata_content_and_size_fail_closed(self):
         action = make_action().to_dict()
         for path, values in (
