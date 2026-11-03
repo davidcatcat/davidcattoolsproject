@@ -439,6 +439,7 @@ _PROVIDER_TYPES = {
     'opencode': 'opencode-cli',
     'claude': 'claude-cli',
     'agy': 'agy-cli',
+    'gw-agent': 'gw-agent-cli',
 }
 
 

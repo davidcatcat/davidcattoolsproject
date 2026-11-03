@@ -11,6 +11,17 @@ from llmtool.developer_routes.agy import owner_assignment_gate
 from llmtool.errors import LLMToolError
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class AgyRouteWiringTests(unittest.TestCase):
     def _run_agy_delegate(self, route_error=None, *, diff_bytes=b'diff --git a/src.py b/src.py\n',
                           decisions=None, repair_packet=None, usage=None,

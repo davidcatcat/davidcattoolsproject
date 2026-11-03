@@ -132,6 +132,17 @@ def row(session, *, name='claude-developer', status='busy', state=None, started=
     return value
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class ClaudeBgDispatchTests(unittest.TestCase):
     def setUp(self):
         self.f = fixtures.TaskCompletionTests('test_failed_test_subprocess_is_recorded_with_nonzero_status')
