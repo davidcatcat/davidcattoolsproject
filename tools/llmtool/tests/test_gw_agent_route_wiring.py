@@ -196,9 +196,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_task_view', return_value={}):
             status = task_submission_cli.run_task_gw_agent_delegate(args, store=store)
         self.assertEqual(status, 1)
-        # Failure persistence is now a bound CAS, adding one compare call after
-        # the initial claim, DISPATCHING transition, and dispatch audit claim.
-        self.assertEqual(store.claims, 4)
+        # The initial claim, DISPATCHING transition, and failure persistence each compare once.
+        self.assertEqual(store.claims, 3)
         self.assertEqual(store.developer_states,
                          ['DEVELOPER_PENDING', 'DEVELOPER_DISPATCHING',
                           'DEVELOPER_UNAVAILABLE'])
