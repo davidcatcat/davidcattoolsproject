@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 from pathlib import PurePosixPath
 import re
 import shlex
@@ -32,10 +33,166 @@ _LOCAL_INVENTORY_LIMIT = 16 * 1024 * 1024
 _BOOTSTRAP_OUTPUT_LIMIT = 2 * 1024 * 1024
 _BOOTSTRAP_REPORT_RELATIVE = Path("tools/llmtool/.d6-bootstrap-report.json")
 _VALID_STATES = frozenset(("ACTIVE", "REPAIR"))
-_EXPECTED_ORIGINS = frozenset((
-    "git@github.com:davidcatcat/davidcattoolsproject.git",
-    "https://github.com/davidcatcat/davidcattoolsproject.git",
-))
+class TrustError(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _fail(code):
+    raise TrustError(code)
+
+
+MAX_TRUST_BYTES = 16 * 1024
+_HAS_DIR_FD_SUPPORT = (os.name == "posix" and hasattr(os, "O_DIRECTORY") and
+                       hasattr(os, "O_NOFOLLOW"))
+
+
+# BEGIN llmtool-trust-reader v1
+def _check_directory(fd, uid, code, private=False):
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        _fail(code)
+    if private:
+        if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+            _fail("TRUST_DIRECTORY_NOT_PRIVATE")
+    elif (info.st_uid not in (0, uid) or
+          (stat.S_IMODE(info.st_mode) & 0o022 and not
+           (info.st_uid == 0 and (info.st_mode & stat.S_ISVTX)))):
+        _fail(code)
+    return info
+
+
+def _read_trust_bytes(home, uid):
+    if not _HAS_DIR_FD_SUPPORT:
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
+    flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags_file = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) |
+                  getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open("/", flags_dir)
+    except OSError:
+        _fail("TRUST_ANCESTOR_INVALID")
+    open_fds = [fd]
+    try:
+        _check_directory(fd, uid, "TRUST_ANCESTOR_INVALID")
+        components = [part for part in home.strip("/").split("/") if part] + [".config", "llmtool"]
+        current = ""
+        for index, part in enumerate(components):
+            current += "/" + part
+            try:
+                child = os.open(part, flags_dir, dir_fd=fd)
+            except FileNotFoundError:
+                _fail("TRUST_MISSING")
+            except OSError:
+                _fail("TRUST_ANCESTOR_INVALID")
+            open_fds.append(child)
+            os.close(fd)
+            open_fds.remove(fd)
+            fd = child
+            is_private = index == len(components) - 1
+            _check_directory(fd, uid, "TRUST_ANCESTOR_INVALID", is_private)
+            try:
+                os.stat(".git", dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                _fail("TRUST_ANCESTOR_INVALID")
+            else:
+                _fail("TRUST_INSIDE_WORKTREE")
+
+        try:
+            file_fd = os.open("trust.json", flags_file, dir_fd=fd)
+        except FileNotFoundError:
+            _fail("TRUST_MISSING")
+        except OSError:
+            _fail("TRUST_FILE_NOT_PRIVATE")
+        open_fds.append(file_fd)
+        before = os.fstat(file_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != uid or
+                stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1):
+            _fail("TRUST_FILE_NOT_PRIVATE")
+        if before.st_size < 1 or before.st_size > MAX_TRUST_BYTES:
+            _fail("TRUST_TOO_LARGE")
+        raw = os.read(file_fd, MAX_TRUST_BYTES + 1)
+        after = os.fstat(file_fd)
+        try:
+            path_info = os.stat("trust.json", dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            _fail("TRUST_CHANGED_DURING_READ")
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_uid, info.st_mode,
+                                 info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if len(raw) != before.st_size or identity(before) != identity(after) or identity(before) != identity(path_info):
+            _fail("TRUST_CHANGED_DURING_READ")
+        return raw
+    except TrustError:
+        raise
+    except (TypeError, NotImplementedError):
+        # POSIX platforms without dir_fd support must fail closed with a
+        # sanitized platform code, even if their function identities differ.
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
+    except OSError:
+        _fail("TRUST_ANCESTOR_INVALID")
+    finally:
+        for item in reversed(open_fds):
+            try:
+                os.close(item)
+            except OSError:
+                pass
+# END llmtool-trust-reader v1
+
+
+def _load_trust(home=None):
+    if os.name != "posix" or sys.platform.startswith("win"):
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
+    if os.getuid() != os.geteuid() or os.geteuid() == 0:
+        _fail("TRUST_IDENTITY_INVALID")
+    if home is None:
+        try:
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, OSError):
+            _fail("TRUST_HOME_INVALID")
+    if (not os.path.isabs(home) or os.path.normpath(home) != home or
+            os.path.realpath(home) != home):
+        _fail("TRUST_HOME_INVALID")
+    raw = _read_trust_bytes(home, os.getuid())
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                _fail("TRUST_MALFORMED")
+            result[key] = value
+        return result
+
+    try:
+        if raw.startswith(b"\xef\xbb\xbf"):
+            _fail("TRUST_MALFORMED")
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=unique_pairs,
+            parse_constant=lambda _value: _fail("TRUST_MALFORMED"))
+        roots = (value["canonical_root"], value["workspace_root"], value["tasks_root"])
+        repository = value["repository"]
+        slug = repository["slug"]
+        origins = repository["allowed_origins"]
+        allowed = {"git@github.com:" + slug + ".git",
+                   "https://github.com/" + slug + ".git"}
+        if (type(value) is not dict or
+                set(value) != {"schema_version", "canonical_root", "workspace_root",
+                               "tasks_root", "repository", "ci_trust", "tools"} or
+                type(repository) is not dict or
+                set(repository) != {"slug", "allowed_origins", "approval_refs"} or
+                type(value.get("schema_version")) is not int or value["schema_version"] != 1 or
+                any(not isinstance(path, str) or not os.path.isabs(path) for path in roots) or
+                not isinstance(origins, list) or not 1 <= len(origins) <= 2 or
+                len(origins) != len(set(origins)) or not set(origins) <= allowed):
+            _fail("TRUST_SCHEMA_INVALID")
+    except TrustError:
+        raise
+    except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
+        _fail("TRUST_MALFORMED")
+    return {"canonical_root": roots[0], "workspace_root": roots[1],
+            "tasks_root": roots[2], "origins": frozenset(origins),
+            "sha256": hashlib.sha256(raw).hexdigest()}
 
 
 class PreflightError(Exception):
@@ -377,8 +534,9 @@ def _worktree_entry(root: Path, common_dir: Path, head: str, branch: str) -> Non
         _reject("D6_WORKTREE_LOCK_MISMATCH")
 
 
-def validate_registered_worktree(task_id: str, root: Path | None = None) -> Path:
+def validate_registered_worktree(task_id: str, root: Path | None = None, trust=None) -> Path:
     """Validate task record and live Git identity before environment setup."""
+    trust = _load_trust() if trust is None else trust
     if type(task_id) is not str or _TASK_ID.fullmatch(task_id) is None:
         _reject("D6_TASK_ID_INVALID")
     root = Path(os.path.realpath(os.fspath(root or Path.cwd())))
@@ -432,7 +590,7 @@ def validate_registered_worktree(task_id: str, root: Path | None = None) -> Path
     head = _run_git(root, "rev-parse", "HEAD")
     origin = _run_git(root, "remote", "get-url", "origin")
     if (branch != record["branch"] or head != record["head_sha"] or
-            origin not in _EXPECTED_ORIGINS):
+            origin not in trust["origins"]):
         _reject("D6_SOURCE_BINDING_MISMATCH")
     try:
         _run_git(root, "merge-base", "--is-ancestor", record["base_sha"], head)
@@ -900,11 +1058,20 @@ def main(argv=None) -> int:
                         help="registered D6 task whose current worktree is being prepared")
     parser.add_argument("--worktree-root", required=True,
                         help="explicit root of the registered D6 worktree")
+    parser.add_argument("--trust-sha256", required=True,
+                        help="trust.json digest pinned by the parent lifecycle process")
     args = parser.parse_args(argv)
     try:
-        root = validate_registered_worktree(args.task_id, Path(args.worktree_root))
+        trust = _load_trust()
+        if args.trust_sha256 != trust["sha256"]:
+            _reject("TRUST_CHANGED_DURING_RUN")
+        root = validate_registered_worktree(args.task_id, Path(args.worktree_root), trust)
         return _invoke_bootstrap(root, args.task_id)
     except PreflightError as exc:
+        print("STOP: D6 environment preflight rejected (" + exc.code + ")",
+              file=sys.stderr)
+        return 1
+    except TrustError as exc:
         print("STOP: D6 environment preflight rejected (" + exc.code + ")",
               file=sys.stderr)
         return 1

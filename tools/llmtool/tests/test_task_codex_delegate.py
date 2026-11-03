@@ -645,7 +645,30 @@ class CodexDelegateTests(unittest.TestCase):
             registry_path.write_text(json.dumps(current), encoding='utf-8')
             registry_path.chmod(0o600)
 
+        # #369: the lifecycle reads trust.json; use a private temp trust home so
+        # the real ~/.config/llmtool/trust.json is never read.
+        trust_home = self.base / 'trust-home'
+        trust_dir = trust_home / '.config' / 'llmtool'
+        trust_dir.mkdir(parents=True, mode=0o700)
+        for directory in (trust_home, trust_home / '.config', trust_dir):
+            directory.chmod(0o700)
+        trust_path = trust_dir / 'trust.json'
+        trust_path.write_text(json.dumps({
+            'schema_version': 1, 'canonical_root': str(self.repo),
+            'workspace_root': str(self.workspace_root),
+            'tasks_root': str(self.workspace_root),
+            'repository': {'slug': 'davidcatcat/davidcattoolsproject',
+                           'allowed_origins': [
+                               'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                           'approval_refs': {}},
+            'ci_trust': {}, 'tools': {},
+        }), encoding='utf-8')
+        trust_path.chmod(0o600)
+        original_load_trust = lifecycle._load_trust
+
         with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
+                patch.object(lifecycle, '_load_trust',
+                             side_effect=lambda: original_load_trust(home=str(trust_home))), \
                 patch.object(lifecycle, '_bootstrap', side_effect=bootstrap_result):
             recorded_head = lifecycle.record_result(task_id='executor-task-1',
                 canonical_root=self.repo, root=self.root,

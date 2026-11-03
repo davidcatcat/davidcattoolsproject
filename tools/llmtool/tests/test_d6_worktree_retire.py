@@ -52,6 +52,29 @@ class D6RetireTests(unittest.TestCase):
         self.outside_file = self.top / "outside-keep.txt"
         self.outside_file.write_text("keep\n", encoding="utf-8")
         self.cwds = [("1", "/")]
+        # Temp trust home only: the real ~/.config/llmtool/trust.json is never read.
+        trust_home = self.top / "trust-home"
+        trust_dir = trust_home / ".config" / "llmtool"
+        trust_dir.mkdir(parents=True, mode=0o700)
+        for directory in (trust_home, trust_home / ".config", trust_dir):
+            directory.chmod(0o700)
+        trust_path = trust_dir / "trust.json"
+        trust_path.write_text(json.dumps({
+            "schema_version": 1, "canonical_root": str(self.source),
+            "workspace_root": str(self.top), "tasks_root": str(self.tasks),
+            "repository": {"slug": "davidcatcat/davidcattoolsproject",
+                           "allowed_origins": [
+                               "git@github.com:davidcatcat/davidcattoolsproject.git"],
+                           "approval_refs": {}},
+            "ci_trust": {}, "tools": {},
+        }), encoding="utf-8")
+        trust_path.chmod(0o600)
+        original_load_trust = lifecycle._load_trust
+        trust_patch = patch.object(
+            lifecycle, "_load_trust",
+            side_effect=lambda: original_load_trust(home=str(trust_home)))
+        trust_patch.start()
+        self.addCleanup(trust_patch.stop)
 
     def _task(self, task_id, *, parent=None, publish=True, reviewer=False):
         root = (parent or self.tasks) / task_id
