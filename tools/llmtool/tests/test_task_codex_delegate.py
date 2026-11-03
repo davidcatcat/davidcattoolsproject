@@ -1179,6 +1179,78 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(saved['developer']['error_code'], 'ENV_BOOTSTRAP_UNAVAILABLE')
         callback.assert_not_called()
 
+    def _bootstrap_trust_home(self, *, write=True):
+        """Build a private temp trust home for the llmtool.trust loader seam."""
+        home = self.base / 'bootstrap-trust-home'
+        trust_dir = home / '.config' / 'llmtool'
+        trust_dir.mkdir(parents=True, mode=0o700)
+        roots = (self.base / 'bootstrap-canonical', self.base / 'bootstrap-workspace',
+                 self.base / 'bootstrap-workspace' / 'tasks')
+        for directory in (home, home / '.config', trust_dir, *roots):
+            directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            directory.chmod(0o700)
+        if not write:
+            return home, None
+        from tests.test_trust import _document
+        raw = json.dumps(_document(*roots)).encode('utf-8')
+        trust_path = trust_dir / 'trust.json'
+        trust_path.write_bytes(raw)
+        trust_path.chmod(0o600)
+        return home, hashlib.sha256(raw).hexdigest()
+
+    def _dispatch_real_bootstrap(self, task, trust_home):
+        """Run the real bootstrap with a pinned fake helper and a temp trust home."""
+        from llmtool import trust as trust_module
+        real_bootstrap = task_submission_cli._bootstrap_registered_d6
+        original_load_trust = trust_module.load_trust
+        real_run = subprocess.run
+        helper_calls = []
+
+        def capture_helper(argv, *args, **kwargs):
+            if (isinstance(argv, list) and len(argv) > 4 and
+                    argv[0] == sys.executable and argv[3] == '-c'):
+                helper_calls.append(list(argv))
+                return subprocess.CompletedProcess(argv, 23)
+            return real_run(argv, *args, **kwargs)
+
+        with patch('llmtool.task_submission_cli._trusted_d6_helper_source',
+                   return_value=(self.root, b'raise SystemExit(0)')), \
+                patch.object(task_submission_cli.trust, 'load_trust',
+                             side_effect=lambda: original_load_trust(home=str(trust_home))), \
+                patch.object(task_submission_cli.subprocess, 'run',
+                             side_effect=capture_helper):
+            # Any Codex launch raises, so reaching Codex cannot look like a pass.
+            result, saved, callback = self._dispatch(
+                task, bootstrap_error=real_bootstrap,
+                codex_error=AssertionError('Codex must not run'))
+        return result, saved, callback, helper_calls
+
+    def test_bootstrap_passes_trust_digest_to_env_helper(self):
+        task = self._task()
+        trust_home, digest = self._bootstrap_trust_home()
+        result, saved, callback, helper_calls = self._dispatch_real_bootstrap(
+            task, trust_home)
+        self.assertEqual(len(helper_calls), 1)
+        argv = helper_calls[0]
+        self.assertEqual(argv[5:], ['--task-id', 'executor-task-1',
+                                    '--worktree-root', str(self.root),
+                                    '--trust-sha256', digest])
+        # The fake helper refuses, so the delegate stops before Codex.
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['error_code'], 'ENV_BOOTSTRAP_REJECTED')
+        callback.assert_not_called()
+
+    def test_missing_trust_refuses_bootstrap_before_helper_and_codex(self):
+        task = self._task()
+        trust_home, _digest = self._bootstrap_trust_home(write=False)
+        result, saved, callback, helper_calls = self._dispatch_real_bootstrap(
+            task, trust_home)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
+        self.assertEqual(saved['developer']['error_code'], 'ENV_BOOTSTRAP_TRUST_UNAVAILABLE')
+        self.assertEqual(helper_calls, [])
+        callback.assert_not_called()
+
     def _rebootstrap(self, **registry_changes):
         """Act like ENV-2: write a fresh report and rewrite the registry PASS marker."""
         registry_path = Path(self.common_dir) / 'llmtool-worktrees' / 'executor-task-1.json'
