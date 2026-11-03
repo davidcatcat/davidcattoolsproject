@@ -4825,11 +4825,15 @@ DISPATCH_VALUES = frozenset({"ALLOWED", "PAUSED", "OWNER_ASSIGNMENT_ONLY"})
 DISPATCH_WORKERS = frozenset({"codex-developer", "claude-developer", "opencode-developer", "agy",
                               "company-gw", "company-gw-agent", "claude-reviewer",
                               "codex-reviewer"})
-# The gw Agent route (#120 WP3b) is the one switch the gate accepts without an
-# Owner decision, and only while it stays PAUSED by the PM with exactly this
-# evidence, pending the Owner's decision. Every other key still needs Owner.
-DISPATCH_PENDING_OWNER = {"company-gw-agent": (
-    "PAUSED", "PM", "https://github.com/davidcatcat/davidcattoolsproject/issues/120")}
+# The gw Agent route (#120) accepts exactly one of two entries, as the gate
+# does: PAUSED by the PM with the bare issue as evidence (WP3b), or ALLOWED by
+# the Owner with exactly the D1 = A decision comment (synthetic content only).
+# Anything else for this key fails closed. Every other key still needs Owner.
+DISPATCH_EXACT_ENTRIES = {"company-gw-agent": frozenset({
+    ("PAUSED", "PM", "https://github.com/davidcatcat/davidcattoolsproject/issues/120"),
+    ("ALLOWED", "Owner",
+     "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520"),
+})}
 DISPATCH_FIELDS = (frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence"}),
                    frozenset({"dispatch", "decided_by", "decided_at", "reason", "evidence",
                               "owner_assignments"}))
@@ -4915,11 +4919,11 @@ def _dispatch_entry_ok(key, item) -> bool:
         return False
     assignments = item.get("owner_assignments", [])
     reason, evidence, when = item.get("reason"), item.get("evidence"), item.get("decided_at")
-    pending = DISPATCH_PENDING_OWNER.get(key)
-    if pending is not None:
+    exact = DISPATCH_EXACT_ENTRIES.get(key)
+    if exact is not None:
         authority_ok = (type(item.get("dispatch")) is str and type(item.get("decided_by")) is str and
                         type(evidence) is str and
-                        (item["dispatch"], item["decided_by"], evidence) == pending)
+                        (item["dispatch"], item["decided_by"], evidence) in exact)
     else:
         authority_ok = (item.get("decided_by") == "Owner" and type(evidence) is str and
                         DISPATCH_EVIDENCE.fullmatch(evidence) is not None)
