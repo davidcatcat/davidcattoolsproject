@@ -164,7 +164,10 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
     if not docs_only:
         mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
-        macos_not_green = any(item.get('conclusion') != 'success' for item in mac_runs)
+        # GitHub can retain the earlier skipped run after mac-ci starts a new
+        # run on the same head. Any successful exact-head macOS run is enough;
+        # failures and in-progress runs have already been refused above.
+        macos_not_green = not any(item.get('conclusion') == 'success' for item in mac_runs)
         if macos_not_green:
             if allow_missing_macos:
                 return 'MERGE_MACOS_CHECK_SKIPPED'
