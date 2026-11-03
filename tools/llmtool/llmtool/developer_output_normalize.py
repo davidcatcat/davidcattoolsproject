@@ -207,6 +207,7 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
             return result(None, (), False)
 
         edits = []
+        result_has_final_newline = source_has_final_newline
         i = file_header_index + 2
         while i < len(section):
             hunk = _HUNK.fullmatch(section[i])
@@ -251,6 +252,20 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                     target.append(line[1:])
                 else:
                     return result(None, (), False)
+            old_count = sum(1 for line in body if line.startswith((' ', '-')))
+            old_end = start + old_count
+            if old_end == len(source):
+                # A marker belongs to the old and/or new record immediately
+                # before it. The final new-side record determines the result
+                # newline state when this hunk reaches the source EOF.
+                new_record = None
+                for body_index in range(len(body) - 1, -1, -1):
+                    if body[body_index].startswith((' ', '+')):
+                        new_record = body_index
+                        break
+                if (new_record is not None and new_record + 1 < len(body) and
+                        body[new_record + 1] == r'\ No newline at end of file'):
+                    result_has_final_newline = False
             edits.append((start, cursor, target))
         if not edits:
             return result(None, (), False)
@@ -274,19 +289,40 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
         regenerated.extend([f'--- a/{path}', f'+++ b/{path}'])
         # The first two lines from unified_diff are empty-path file headers.
         body = diff_lines[2:]
-        # difflib omits Git's EOF markers. A text patch must preserve the
-        # source's final-newline state, so mark both affected sides as needed.
-        if source and modified and not source_has_final_newline:
-            eof_records = set()
-            for prefixes, final_line in (((' ', '-'), source[-1]),
-                                         ((' ', '+'), modified[-1])):
-                for index in range(len(body) - 1, -1, -1):
-                    if (body[index].startswith(prefixes) and
-                            body[index][1:] == final_line):
-                        eof_records.add(index)
-                        break
-            for index in sorted(eof_records, reverse=True):
-                body.insert(index + 1, r'\ No newline at end of file')
+        # difflib omits Git's EOF markers. Rebuild them from the hunk ranges,
+        # so repeated text elsewhere in the file cannot be mistaken for EOF.
+        eof_insertions = set()
+        body_offset = 0
+        while body_offset < len(body):
+            hunk_header = _HUNK.fullmatch(body[body_offset]) if body[body_offset].startswith('@@ ') else None
+            if hunk_header is None:
+                body_offset += 1
+                continue
+            old_start = int(hunk_header.group(1))
+            old_count = int(hunk_header.group(2) or 1)
+            new_start = int(hunk_header.group(3))
+            new_count = int(hunk_header.group(4) or 1)
+            end = body_offset + 1
+            while end < len(body) and not body[end].startswith('@@ '):
+                end += 1
+            records = body_offset + 1
+            old_final = new_final = None
+            for index in range(records, end):
+                if body[index].startswith((' ', '-')):
+                    old_final = index
+                if body[index].startswith((' ', '+')):
+                    new_final = index
+            old_end = old_start - 1 + old_count if old_count else old_start
+            new_end = new_start - 1 + new_count if new_count else new_start
+            old_reaches_eof = old_end == len(source)
+            new_reaches_eof = new_end == len(modified)
+            if source and not source_has_final_newline and old_reaches_eof and old_final is not None:
+                eof_insertions.add(old_final + 1)
+            if modified and not result_has_final_newline and new_reaches_eof and new_final is not None:
+                eof_insertions.add(new_final + 1)
+            body_offset = end
+        for index in sorted(eof_insertions, reverse=True):
+            body.insert(index, r'\ No newline at end of file')
         regenerated.extend(body)
     anchored = '\n'.join(regenerated) + '\n'
     tokens = ('HUNK_REANCHORED',) if anchored != value else ()

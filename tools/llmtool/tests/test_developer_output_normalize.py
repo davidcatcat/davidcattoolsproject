@@ -221,6 +221,25 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertIsNone(rejection)
         self.assertIn(r'\ No newline at end of file', anchored)
 
+    def test_source_anchor_does_not_mark_repeated_top_line_as_eof(self):
+        source = 'repeat\nmiddle\nrepeat'
+        raw = self.HEADER + '@@ -1 +1 @@\n-repeat\n+changed\n'
+        anchored, tokens = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: source})
+        self.assertEqual(tokens, ('HUNK_REANCHORED',))
+        self.assertNotIn(r'\ No newline at end of file', anchored)
+
+    def test_source_anchor_keeps_missing_newline_when_appending_at_eof(self):
+        source = 'a\nb\nc'
+        raw = (self.HEADER + '@@ -1,3 +1,4 @@\n a\n b\n-c\n'
+               r'\ No newline at end of file' + '\n+c\n+tail\n'
+               r'\ No newline at end of file' + '\n')
+        anchored, tokens = reanchor_developer_output(
+            raw, [self.PATH], {self.PATH: source})
+        self.assertEqual(tokens, ('HUNK_REANCHORED',))
+        self.assertEqual(anchored.count(r'\ No newline at end of file'), 2)
+        self.assertIn('+tail\n' + r'\ No newline at end of file', anchored)
+
     def test_source_anchor_rejects_invented_or_ambiguous_old_side(self):
         invented = (self.HEADER + '@@ -1 +1 @@\n-invented\n+replacement\n')
         ambiguous = (self.HEADER + '@@ -1 +1 @@\n-same\n+replacement\n')
