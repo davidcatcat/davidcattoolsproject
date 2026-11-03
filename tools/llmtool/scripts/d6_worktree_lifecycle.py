@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pwd
 import re
 import stat
 import subprocess
@@ -25,18 +26,8 @@ import threading
 import time
 
 
-TASKS_ROOT = Path(
-    "/Users/davidsun/.local/share/llmtool-dev-workspaces/"
-    "davidcattoolsproject/tasks"
-)
 TASK_ID_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,95}\Z")
 AGENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
-ORIGINS = frozenset((
-    "git@github.com:davidcatcat/davidcattoolsproject.git",
-    "https://github.com/davidcatcat/davidcattoolsproject.git",
-))
-D6_INTEGRATOR_DISPATCHER_ROOT = Path(
-    "/Users/davidsun/git/davidcataiporject/davidcattoolsproject")
 RETENTION_PATHS = [
     "tools/llmtool/.venv/",
     "tools/llmtool/.worktree-env.lock",
@@ -58,6 +49,168 @@ class LifecycleError(Exception):
 
 def _stop(code):
     raise LifecycleError(code)
+
+
+class TrustError(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def _fail(code):
+    raise TrustError(code)
+
+
+MAX_TRUST_BYTES = 16 * 1024
+_HAS_DIR_FD_SUPPORT = (os.name == "posix" and hasattr(os, "O_DIRECTORY") and
+                       hasattr(os, "O_NOFOLLOW"))
+
+
+# BEGIN llmtool-trust-reader v1
+def _check_directory(fd, uid, code, private=False):
+    info = os.fstat(fd)
+    if not stat.S_ISDIR(info.st_mode):
+        _fail(code)
+    if private:
+        if info.st_uid != uid or stat.S_IMODE(info.st_mode) != 0o700:
+            _fail("TRUST_DIRECTORY_NOT_PRIVATE")
+    elif (info.st_uid not in (0, uid) or
+          (stat.S_IMODE(info.st_mode) & 0o022 and not
+           (info.st_uid == 0 and (info.st_mode & stat.S_ISVTX)))):
+        _fail(code)
+    return info
+
+
+def _read_trust_bytes(home, uid):
+    if not _HAS_DIR_FD_SUPPORT:
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
+    flags_dir = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    flags_file = (os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0) |
+                  getattr(os, "O_CLOEXEC", 0))
+    try:
+        fd = os.open("/", flags_dir)
+    except OSError:
+        _fail("TRUST_ANCESTOR_INVALID")
+    open_fds = [fd]
+    try:
+        _check_directory(fd, uid, "TRUST_ANCESTOR_INVALID")
+        components = [part for part in home.strip("/").split("/") if part] + [".config", "llmtool"]
+        current = ""
+        for index, part in enumerate(components):
+            current += "/" + part
+            try:
+                child = os.open(part, flags_dir, dir_fd=fd)
+            except FileNotFoundError:
+                _fail("TRUST_MISSING")
+            except OSError:
+                _fail("TRUST_ANCESTOR_INVALID")
+            open_fds.append(child)
+            os.close(fd)
+            open_fds.remove(fd)
+            fd = child
+            is_private = index == len(components) - 1
+            _check_directory(fd, uid, "TRUST_ANCESTOR_INVALID", is_private)
+            try:
+                os.stat(".git", dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                _fail("TRUST_ANCESTOR_INVALID")
+            else:
+                _fail("TRUST_INSIDE_WORKTREE")
+
+        try:
+            file_fd = os.open("trust.json", flags_file, dir_fd=fd)
+        except FileNotFoundError:
+            _fail("TRUST_MISSING")
+        except OSError:
+            _fail("TRUST_FILE_NOT_PRIVATE")
+        open_fds.append(file_fd)
+        before = os.fstat(file_fd)
+        if (not stat.S_ISREG(before.st_mode) or before.st_uid != uid or
+                stat.S_IMODE(before.st_mode) != 0o600 or before.st_nlink != 1):
+            _fail("TRUST_FILE_NOT_PRIVATE")
+        if before.st_size < 1 or before.st_size > MAX_TRUST_BYTES:
+            _fail("TRUST_TOO_LARGE")
+        raw = os.read(file_fd, MAX_TRUST_BYTES + 1)
+        after = os.fstat(file_fd)
+        try:
+            path_info = os.stat("trust.json", dir_fd=fd, follow_symlinks=False)
+        except OSError:
+            _fail("TRUST_CHANGED_DURING_READ")
+        identity = lambda info: (info.st_dev, info.st_ino, info.st_uid, info.st_mode,
+                                 info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        if len(raw) != before.st_size or identity(before) != identity(after) or identity(before) != identity(path_info):
+            _fail("TRUST_CHANGED_DURING_READ")
+        return raw
+    except TrustError:
+        raise
+    except (TypeError, NotImplementedError):
+        # POSIX platforms without dir_fd support must fail closed with a
+        # sanitized platform code, even if their function identities differ.
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
+    except OSError:
+        _fail("TRUST_ANCESTOR_INVALID")
+    finally:
+        for item in reversed(open_fds):
+            try:
+                os.close(item)
+            except OSError:
+                pass
+# END llmtool-trust-reader v1
+
+
+def _load_trust(home=None):
+    if os.name != "posix" or sys.platform.startswith("win"):
+        _fail("TRUST_UNSUPPORTED_PLATFORM")
+    if os.getuid() != os.geteuid() or os.geteuid() == 0:
+        _fail("TRUST_IDENTITY_INVALID")
+    if home is None:
+        try:
+            home = pwd.getpwuid(os.getuid()).pw_dir
+        except (KeyError, OSError):
+            _fail("TRUST_HOME_INVALID")
+    if (not os.path.isabs(home) or os.path.normpath(home) != home or
+            os.path.realpath(home) != home):
+        _fail("TRUST_HOME_INVALID")
+    raw = _read_trust_bytes(home, os.getuid())
+    def unique_pairs(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                _fail("TRUST_MALFORMED")
+            result[key] = value
+        return result
+
+    try:
+        if raw.startswith(b"\xef\xbb\xbf"):
+            _fail("TRUST_MALFORMED")
+        value = json.loads(
+            raw.decode("utf-8"), object_pairs_hook=unique_pairs,
+            parse_constant=lambda _value: _fail("TRUST_MALFORMED"))
+        roots = (value["canonical_root"], value["workspace_root"], value["tasks_root"])
+        repository = value["repository"]
+        slug = repository["slug"]
+        origins = repository["allowed_origins"]
+        allowed = {"git@github.com:" + slug + ".git",
+                   "https://github.com/" + slug + ".git"}
+        if (type(value) is not dict or
+                set(value) != {"schema_version", "canonical_root", "workspace_root",
+                               "tasks_root", "repository", "ci_trust", "tools"} or
+                type(repository) is not dict or
+                set(repository) != {"slug", "allowed_origins", "approval_refs"} or
+                type(value.get("schema_version")) is not int or value["schema_version"] != 1 or
+                any(not isinstance(path, str) or not os.path.isabs(path) for path in roots) or
+                not isinstance(origins, list) or not 1 <= len(origins) <= 2 or
+                len(origins) != len(set(origins)) or not set(origins) <= allowed):
+            _fail("TRUST_SCHEMA_INVALID")
+    except TrustError:
+        raise
+    except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
+        _fail("TRUST_MALFORMED")
+    return {"canonical_root": roots[0], "workspace_root": roots[1],
+            "tasks_root": roots[2], "origins": frozenset(origins),
+            "sha256": hashlib.sha256(raw).hexdigest()}
 
 
 # A git lock or a stuck filesystem must not hang a read-only lookup forever.
@@ -218,7 +371,8 @@ def _read_registry_record(path):
 
 def _trusted_dispatcher_git():
     """Return pinned Git access after proving the caller is the clean Integrator checkout."""
-    dispatcher_root = D6_INTEGRATOR_DISPATCHER_ROOT
+    trust = _load_trust()
+    dispatcher_root = Path(trust["canonical_root"])
     lifecycle_rel = "tools/llmtool/scripts/d6_worktree_lifecycle.py"
     git_env = {
         "PATH": "/usr/bin:/bin", "HOME": os.path.expanduser("~"), "LC_ALL": "C",
@@ -249,7 +403,7 @@ def _trusted_dispatcher_git():
                 Path(__file__).resolve() != dispatcher_root / lifecycle_rel or
                 Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
                 git("rev-parse", "--show-toplevel").decode().rstrip("\n") != str(dispatcher_root) or
-                git("remote", "get-url", "origin").decode().strip() not in ORIGINS or
+                git("remote", "get-url", "origin").decode().strip() not in trust["origins"] or
                 git("status", "--porcelain=v1", "--untracked-files=all")):
             _stop("ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
         pinned_head = git("rev-parse", "HEAD").decode().strip()
@@ -339,6 +493,7 @@ def _run_approved_lifecycle(task_id, root, lifecycle_args):
     """Execute the exact Integrator-approved lifecycle blob without opening its task path."""
     try:
         dispatcher_root, _pinned_head, git, _helper_source = _trusted_dispatcher_git()
+        trust = _load_trust()
         lifecycle_rel = "tools/llmtool/scripts/d6_worktree_lifecycle.py"
         source = _approved_task_source(root, task_id, lifecycle_rel, dispatcher_root, git)
         if source is None:
@@ -357,7 +512,8 @@ def _run_approved_lifecycle(task_id, root, lifecycle_args):
             "GIT_NO_LAZY_FETCH": "1", "GIT_TERMINAL_PROMPT": "0",
         }
         result = subprocess.run(
-            [sys.executable, "-B", "-I", "-c", code, *lifecycle_args],
+            [sys.executable, "-B", "-I", "-c", code, *lifecycle_args,
+             "--trust-sha256", trust["sha256"]],
             cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL, check=False)
     except (OSError, UnicodeDecodeError):
         _stop("ENV_BOOTSTRAP_UNAVAILABLE")
@@ -366,6 +522,7 @@ def _run_approved_lifecycle(task_id, root, lifecycle_args):
 
 def _bootstrap(root, task_id):
     dispatcher_root, _pinned_head, git, helper_source = _trusted_dispatcher_git()
+    trust = _load_trust()
     helper_rel = "tools/llmtool/scripts/d6_worktree_env.py"
     try:
         approved_helper = _approved_task_source(
@@ -402,7 +559,8 @@ def _bootstrap(root, task_id):
         try:
             result = subprocess.run(
                 [sys.executable, "-B", "-I", "-c", helper_code,
-                 "--task-id", task_id, "--worktree-root", str(root)],
+                 "--task-id", task_id, "--worktree-root", str(root),
+                 "--trust-sha256", trust["sha256"]],
                 cwd=str(dispatcher_root), env=env, stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=stderr_write_fd, check=False,
             )
@@ -420,14 +578,15 @@ def _bootstrap(root, task_id):
 
 
 def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
-                    lease_ref, branch, base_sha, workspace_root=TASKS_ROOT,
+                    lease_ref, branch, base_sha, workspace_root=None,
                     github_login=None, native_session_id=None):
     """Create, register, lock and bootstrap one task-assigned D6 worktree.
 
     ``github_login`` and ``native_session_id`` are optional bindings that
     ``task complete`` needs for a Reviewer (and a natively pinned Executor).
     """
-    workspace_root = Path(workspace_root)
+    trust = _load_trust()
+    workspace_root = Path(trust["tasks_root"] if workspace_root is None else workspace_root)
     uid = os.getuid()
     # Pure input checks run before any filesystem access, so a bad value is
     # D6_TASK_INPUT_INVALID even where the canonical root does not exist.
@@ -445,7 +604,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
               any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in native_session_id)))):
         _stop("D6_TASK_INPUT_INVALID")
     canonical_root = Path(canonical_root).resolve(strict=True)
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     if _run_git(canonical_root, "rev-parse", "--show-toplevel").stdout.strip() != str(canonical_root):
         _stop("D6_REPOSITORY_INVALID")
@@ -455,8 +614,10 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
             Path(os.path.realpath(common_dir)) != common_dir):
         _stop("D6_COMMON_DIR_INVALID")
     origin = _run_git(canonical_root, "remote", "get-url", "origin").stdout.strip()
-    if origin not in ORIGINS:
+    if origin not in trust["origins"]:
         _stop("D6_ORIGIN_INVALID")
+    if not os.environ.get("LLMTOOL_D6_TESTING") and str(canonical_root) != trust["canonical_root"]:
+        _stop("D6_REPOSITORY_INVALID")
     if not _valid_branch(canonical_root, branch):
         _stop("D6_TASK_INPUT_INVALID")
     if _run_git(canonical_root, "cat-file", "-e", base_sha + "^{commit}", check=False).returncode:
@@ -601,11 +762,13 @@ def _validate_record_result_report_path(root):
             _stop("D6_RECORD_RESULT_ENV2_MARKER_INVALID")
 
 
-def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_ROOT):
+def record_result(*, task_id, canonical_root, root=None, workspace_root=None):
     """Advance a registered D6 result HEAD after commit, without changing Git."""
+    trust = _load_trust()
+    workspace_root = Path(trust["tasks_root"] if workspace_root is None else workspace_root)
     if not TASK_ID_RE.fullmatch(task_id or ""):
         _stop("D6_RECORD_RESULT_TASK_INVALID")
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_RECORD_RESULT_WORKSPACE_INVALID")
     try:
         canonical_root = Path(canonical_root).resolve(strict=True)
@@ -731,14 +894,16 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=TASKS_RO
 
 
 def bind_native_session(*, task_id, native_session_id, canonical_root,
-                        workspace_root=TASKS_ROOT):
+                        workspace_root=None):
     """Bind a native session to a registered D6 task exactly once."""
+    trust = _load_trust()
+    workspace_root = Path(trust["tasks_root"] if workspace_root is None else workspace_root)
     if (not TASK_ID_RE.fullmatch(task_id or "") or
             not isinstance(native_session_id, str) or not native_session_id or
             len(native_session_id) > 256 or
             any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in native_session_id)):
         _stop("D6_BIND_NATIVE_SESSION_INPUT_INVALID")
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_BIND_NATIVE_SESSION_WORKSPACE_INVALID")
     try:
         canonical_root = Path(canonical_root).resolve(strict=True)
@@ -1442,12 +1607,13 @@ REBIND_STATES = frozenset(("ACTIVE", "REPAIR", "RETIRE_READY", "INTEGRATED"))
 def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
                         workspace_root=None):
     """Audit and optionally repair only a D6 record's changed device number."""
+    trust = _load_trust()
     if (not task_ids or len(task_ids) != len(set(task_ids)) or
             any(not TASK_ID_RE.fullmatch(task_id or "") for task_id in task_ids)):
         _stop("D6_TASK_INPUT_INVALID")
     if workspace_root is None:
-        workspace_root = TASKS_ROOT
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+        workspace_root = trust["tasks_root"]
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     workspace_root = Path(os.path.realpath(workspace_root))
     canonical_root = Path(canonical_root).resolve(strict=True)
@@ -1458,7 +1624,7 @@ def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
     if (not common_dir.is_absolute() or common_dir.name != ".git" or
             Path(os.path.realpath(common_dir)) != common_dir):
         _stop("D6_COMMON_DIR_INVALID")
-    if _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS:
+    if _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in trust["origins"]:
         _stop("D6_ORIGIN_INVALID")
     registry = common_dir / "llmtool-worktrees"
     _safe_dir(registry, mode=0o700, uid=os.getuid())
@@ -1600,12 +1766,13 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                      train_evidence=None,
                      discard_uncommitted=(), unknown_evidence=None,
                      reviewed_pr_evidence=None,
-                     workspace_root=TASKS_ROOT):
+                     workspace_root=None):
     """Plan (default) or execute gated retirement; print one JSON line per task.
 
     Returns True only when every task is ready (dry run) or removed.
     """
-    workspace_root = Path(workspace_root)
+    trust = _load_trust()
+    workspace_root = Path(trust["tasks_root"] if workspace_root is None else workspace_root)
     squash_evidence = squash_evidence or {}
     train_evidence = train_evidence or {}
     unknown_evidence = unknown_evidence or {}
@@ -1619,7 +1786,7 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
             len(discard_uncommitted) != len(set(discard_uncommitted)) or
             not set(discard_uncommitted) <= set(task_ids)):
         _stop("D6_TASK_INPUT_INVALID")
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     workspace_root = Path(os.path.realpath(workspace_root))
     canonical_root = Path(canonical_root).resolve(strict=True)
@@ -1630,7 +1797,7 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
     if (not common_dir.is_absolute() or common_dir.name != ".git" or
             Path(os.path.realpath(common_dir)) != common_dir):
         _stop("D6_COMMON_DIR_INVALID")
-    if _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS:
+    if _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in trust["origins"]:
         _stop("D6_ORIGIN_INVALID")
     registry = common_dir / "llmtool-worktrees"
     _safe_dir(registry, mode=0o700, uid=os.getuid())
@@ -1742,10 +1909,11 @@ def _parse_train_evidence(values):
     return evidence
 
 
-def reconcile_registry(*, canonical_root, execute=False, workspace_root=TASKS_ROOT):
+def reconcile_registry(*, canonical_root, execute=False, workspace_root=None):
     """Report missing-worktree registry entries, optionally retire their records."""
-    workspace_root = Path(workspace_root)
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+    trust = _load_trust()
+    workspace_root = Path(trust["tasks_root"] if workspace_root is None else workspace_root)
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     workspace_root = Path(os.path.realpath(workspace_root))
     canonical_root = Path(canonical_root).resolve(strict=True)
@@ -1755,7 +1923,7 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=TASKS_RO
                                 "--git-common-dir").stdout.strip())
     if (not common_dir.is_absolute() or common_dir.name != ".git" or
             Path(os.path.realpath(common_dir)) != common_dir or
-            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS):
+            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in trust["origins"]):
         _stop("D6_COMMON_DIR_INVALID")
     registry = common_dir / "llmtool-worktrees"
     _safe_dir(registry, mode=0o700, uid=os.getuid())
@@ -1856,15 +2024,16 @@ def _parse_release_retain(values):
 
 def release_retained_records(*, canonical_root, approvals, workspace_root=None):
     """Release Owner-approved RETAIN_BLOCKED records for already absent trees."""
+    trust = _load_trust()
     if (type(approvals) is not dict or not approvals or
             any(not TASK_ID_RE.fullmatch(task_id or "") or
                 type(approval) is not str or not OWNER_APPROVAL_RE.fullmatch(approval)
                 for task_id, approval in approvals.items())):
         _stop("D6_TASK_INPUT_INVALID")
     if workspace_root is None:
-        workspace_root = TASKS_ROOT
+        workspace_root = trust["tasks_root"]
     workspace_root = Path(workspace_root)
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     workspace_root = Path(os.path.realpath(workspace_root))
     canonical_root = Path(canonical_root).resolve(strict=True)
@@ -1874,7 +2043,7 @@ def release_retained_records(*, canonical_root, approvals, workspace_root=None):
                                 "--git-common-dir").stdout.strip())
     if (not common_dir.is_absolute() or common_dir.name != ".git" or
             Path(os.path.realpath(common_dir)) != common_dir or
-            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS):
+            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in trust["origins"]):
         _stop("D6_COMMON_DIR_INVALID")
     registry = common_dir / "llmtool-worktrees"
     _safe_dir(registry, mode=0o700, uid=os.getuid())
@@ -1962,10 +2131,11 @@ def owner_approved_retain_release(*, canonical_root, approvals, execute=False,
                 not OWNER_APPROVED_RETAIN_RELEASE_RE.fullmatch(approval)
                 for task_id, approval in approvals.items())):
         _stop("D6_TASK_INPUT_INVALID")
+    trust = _load_trust()
     if workspace_root is None:
-        workspace_root = TASKS_ROOT
+        workspace_root = trust["tasks_root"]
     workspace_root = Path(workspace_root)
-    if workspace_root != TASKS_ROOT and not os.environ.get("LLMTOOL_D6_TESTING"):
+    if workspace_root != Path(trust["tasks_root"]) and not os.environ.get("LLMTOOL_D6_TESTING"):
         _stop("D6_WORKSPACE_ROOT_INVALID")
     workspace_root = Path(os.path.realpath(workspace_root))
     canonical_root = Path(canonical_root).resolve(strict=True)
@@ -1975,7 +2145,7 @@ def owner_approved_retain_release(*, canonical_root, approvals, execute=False,
                                 "--git-common-dir").stdout.strip())
     if (not common_dir.is_absolute() or common_dir.name != ".git" or
             Path(os.path.realpath(common_dir)) != common_dir or
-            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in ORIGINS):
+            _task_git(canonical_root, "remote", "get-url", "origin").stdout.strip() not in trust["origins"]):
         _stop("D6_COMMON_DIR_INVALID")
     registry = common_dir / "llmtool-worktrees"
     _safe_dir(registry, mode=0o700, uid=os.getuid())
@@ -2127,9 +2297,15 @@ def _main(argv=None):
                              "printed (also needed to retire a RETAIN_BLOCKED record)")
     parser.add_argument("--execute-approved-retire", action="store_true",
                         help="actually discard approved files and remove the worktrees")
-    parser.add_argument("--repo-root", default=str(D6_INTEGRATOR_DISPATCHER_ROOT))
+    parser.add_argument("--repo-root", default=None)
+    parser.add_argument("--trust-sha256")
     args = parser.parse_args(argv)
     try:
+        trust = _load_trust()
+        if args.trust_sha256 is not None and args.trust_sha256 != trust["sha256"]:
+            _stop("TRUST_CHANGED_DURING_RUN")
+        if args.repo_root is None:
+            args.repo_root = trust["canonical_root"]
         create_values = (args.task_id, args.agent_id, args.session_ref,
                          args.lease_ref, args.branch, args.base_sha)
         create_options = (args.github_login, args.native_session_id)
@@ -2250,7 +2426,7 @@ def _main(argv=None):
         if args.execute_approved_lifecycle:
             if (args.resume_task_id is None or args.resume_root is None or
                     any(value is not None for value in create_values + create_options) or
-                    args.repo_root != str(D6_INTEGRATOR_DISPATCHER_ROOT)):
+                    args.repo_root != trust["canonical_root"]):
                 _stop("D6_TASK_INPUT_INVALID")
             return _run_approved_lifecycle(
                 args.resume_task_id, Path(args.resume_root), [
@@ -2275,6 +2451,12 @@ def _main(argv=None):
         return 0
     except LifecycleError as exc:
         print("STOP: D6 lifecycle rejected (" + exc.code + ")", file=sys.stderr)
+        return 1
+    except TrustError as exc:
+        print("STOP: D6 lifecycle rejected (" + exc.code + ")", file=sys.stderr)
+        return 1
+    except FileNotFoundError:
+        print("STOP: D6 lifecycle rejected (D6_REPOSITORY_INVALID)", file=sys.stderr)
         return 1
 
 

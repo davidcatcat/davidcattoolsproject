@@ -1,6 +1,7 @@
 """Focused tests for ENV-2 D6 lifecycle integration; no pip/provider calls."""
 
 import json
+import io
 import os
 import platform
 from pathlib import Path
@@ -115,6 +116,29 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         os.chmod(lock_path, 0o600)
         self.record_path = self.registry / (self.task_id + ".json")
         self._write_record()
+        self.trust_home = base / "trust-home"
+        trust_dir = self.trust_home / ".config" / "llmtool"
+        trust_dir.mkdir(parents=True, mode=0o700)
+        for directory in (self.trust_home, self.trust_home / ".config", trust_dir):
+            os.chmod(directory, 0o700)
+        trust_value = {
+            "schema_version": 1, "canonical_root": str(self.source),
+            "workspace_root": str(base), "tasks_root": str(self.root.parent),
+            "repository": {"slug": "davidcatcat/davidcattoolsproject",
+                           "allowed_origins": [
+                               "git@github.com:davidcatcat/davidcattoolsproject.git"],
+                           "approval_refs": {}},
+            "ci_trust": {}, "tools": {},
+        }
+        trust_path = trust_dir / "trust.json"
+        trust_path.write_text(json.dumps(trust_value), encoding="utf-8")
+        os.chmod(trust_path, 0o600)
+        self._original_load_trust = d6env._load_trust
+        self._trust_patch = mock.patch.object(
+            d6env, "_load_trust",
+            side_effect=lambda: self._original_load_trust(home=str(self.trust_home)))
+        self._trust_patch.start()
+        self.addCleanup(self._trust_patch.stop)
 
     def _git_at(self, root, *args):
         return self._git_run(root, *args)
@@ -155,7 +179,8 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
             script_path = self.root / "tools" / "llmtool" / "scripts" / "d6_worktree_env.py"
             with mock.patch.object(d6env, "__file__", str(script_path)):
                 return d6env.main(["--task-id", self.task_id,
-                                   "--worktree-root", str(self.root)])
+                                   "--worktree-root", str(self.root),
+                                   "--trust-sha256", d6env._load_trust()["sha256"]])
         finally:
             os.chdir(previous)
 
@@ -190,6 +215,16 @@ class D6WorktreeEnvironmentTests(unittest.TestCase):
         with mock.patch.object(d6env, "_invoke_bootstrap", return_value=0) as invoke:
             self.assertEqual(self._main_at_root(), 0)
         invoke.assert_called_once_with(self.root, self.task_id)
+
+    def test_main_rejects_changed_trust_digest_before_bootstrap(self):
+        output = io.StringIO()
+        with mock.patch.object(d6env, "_invoke_bootstrap") as invoke, \
+                mock.patch("sys.stderr", output):
+            self.assertEqual(d6env.main([
+                "--task-id", self.task_id, "--worktree-root", str(self.root),
+                "--trust-sha256", "0" * 64]), 1)
+        self.assertIn("TRUST_CHANGED_DURING_RUN", output.getvalue())
+        invoke.assert_not_called()
 
     def test_bootstrap_invokes_existing_make_target_without_shell(self):
         makefile_dir = self.root / "tools" / "llmtool"

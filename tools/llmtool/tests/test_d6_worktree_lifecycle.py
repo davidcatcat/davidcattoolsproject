@@ -87,6 +87,55 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         registry = self.source / ".git" / "llmtool-worktrees"
         registry.mkdir(mode=0o700)
         registry.chmod(0o700)
+        self.trust_home = self.root / "trust-home"
+        trust_dir = self.trust_home / ".config" / "llmtool"
+        trust_dir.mkdir(parents=True, mode=0o700)
+        for directory in (self.trust_home, self.trust_home / ".config", trust_dir):
+            directory.chmod(0o700)
+        trust_path = trust_dir / "trust.json"
+        trust_path.write_text(json.dumps({
+            "schema_version": 1, "canonical_root": str(self.source),
+            "workspace_root": str(self.root), "tasks_root": str(self.tasks),
+            "repository": {"slug": "davidcatcat/davidcattoolsproject",
+                           "allowed_origins": [
+                               "git@github.com:davidcatcat/davidcattoolsproject.git"],
+                           "approval_refs": {}},
+            "ci_trust": {}, "tools": {},
+        }), encoding="utf-8")
+        trust_path.chmod(0o600)
+        self._original_load_trust = lifecycle._load_trust
+        self._trust_patch = patch.object(
+            lifecycle, "_load_trust",
+            side_effect=lambda: self._original_load_trust(home=str(self.trust_home)))
+        self._trust_patch.start()
+        self.addCleanup(self._trust_patch.stop)
+        self._script_path_patch = patch.object(
+            lifecycle, "__file__",
+            str(self.source / "tools" / "llmtool" / "scripts" /
+                "d6_worktree_lifecycle.py"))
+        self._script_path_patch.start()
+        self.addCleanup(self._script_path_patch.stop)
+
+    def test_main_refuses_changed_trust_digest(self):
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            result = lifecycle._main(["--trust-sha256", "0" * 64])
+        self.assertEqual(result, 1)
+        self.assertEqual(output.getvalue(),
+                         "STOP: D6 lifecycle rejected (TRUST_CHANGED_DURING_RUN)\n")
+
+    def test_create_worktree_requires_trusted_canonical_root_outside_test_mode(self):
+        trust = lifecycle._load_trust()
+        trust["canonical_root"] = str(self.root / "other-repository")
+        with patch.object(lifecycle, "_load_trust", return_value=trust):
+            with self.assertRaises(lifecycle.LifecycleError) as raised:
+                lifecycle.create_worktree(
+                    canonical_root=self.source, task_id="q5-root-check",
+                    agent_id="codex-test", session_ref="session", lease_ref="lease",
+                    branch="test/q5-root-check", base_sha=self.base,
+                    workspace_root=self.tasks)
+        self.assertEqual(raised.exception.code, "D6_REPOSITORY_INVALID")
+        self.assertFalse((self.tasks / "q5-root-check").exists())
 
     def _registered_result_fixture(self, task_id="record-result-test"):
         root = self.tasks / task_id
@@ -145,7 +194,6 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         if execute:
             argv.append("--execute-approved-rebind")
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "TASKS_ROOT", self.tasks), \
                 contextlib.redirect_stdout(output):
             result = lifecycle._main(argv)
         lines = [json.loads(line) for line in output.getvalue().splitlines()]
@@ -332,8 +380,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         lifecycle._replace_record(record_path, record)
         approval = "https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-12345"
 
-        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "TASKS_ROOT", self.tasks):
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
             error_output = io.StringIO()
             with contextlib.redirect_stderr(error_output):
                 self.assertEqual(lifecycle._main([
@@ -668,7 +715,6 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         trusted_lifecycle = (self.source / "tools" / "llmtool" / "scripts" /
                              "d6_worktree_lifecycle.py")
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
                 patch.object(lifecycle, "__file__", str(trusted_lifecycle)), \
                 contextlib.redirect_stdout(output):
             root = lifecycle.create_worktree(
@@ -711,7 +757,6 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         lifecycle._replace_record(record_path, record)
         resume_output = io.StringIO()
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
                 patch.object(lifecycle, "__file__", str(trusted_lifecycle)), \
                 contextlib.redirect_stdout(resume_output):
             self.assertEqual(lifecycle._main([
@@ -751,8 +796,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                         "committed task lifecycle descendant"],
                        cwd=task_root, check=True, capture_output=True)
 
-        with patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
-                patch.object(lifecycle, "__file__", str(task_lifecycle)):
+        with patch.object(lifecycle, "__file__", str(task_lifecycle)):
             with self.assertRaises(lifecycle.LifecycleError) as raised:
                 lifecycle._bootstrap(self.source, "test-task")
 
@@ -790,7 +834,6 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         trusted_lifecycle = (self.source / "tools" / "llmtool" / "scripts" /
                              "d6_worktree_lifecycle.py")
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
                 patch.object(lifecycle, "__file__", str(trusted_lifecycle)):
             root = lifecycle.create_worktree(
                 canonical_root=self.source, workspace_root=self.tasks,
@@ -835,8 +878,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0)
             return real_run(argv, *args, **kwargs)
 
-        with patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
-                patch.object(lifecycle, "__file__", str(trusted_lifecycle)), \
+        with patch.object(lifecycle, "__file__", str(trusted_lifecycle)), \
                 patch.object(lifecycle.subprocess, "run", side_effect=capture_candidate):
             lifecycle._bootstrap(root, task_id)
 
@@ -845,6 +887,9 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(argv[argv.index("-c") + 1], helper_bytes.decode())
         self.assertIn("--worktree-root", argv)
         self.assertEqual(argv[argv.index("--worktree-root") + 1], str(root))
+        self.assertIn("--trust-sha256", argv)
+        self.assertEqual(argv[argv.index("--trust-sha256") + 1],
+                         lifecycle._load_trust()["sha256"])
         self.assertEqual(Path(kwargs["cwd"]), self.source)
         self.assertFalse(marker_path.exists())
 
@@ -857,8 +902,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         finally:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
-        with patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
-                patch.object(lifecycle, "__file__", str(trusted_lifecycle)):
+        with patch.object(lifecycle, "__file__", str(trusted_lifecycle)):
             with self.assertRaises(lifecycle.LifecycleError) as raised:
                 lifecycle._bootstrap(root, task_id)
         self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
@@ -868,7 +912,6 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         trusted_lifecycle = (self.source / "tools" / "llmtool" / "scripts" /
                              "d6_worktree_lifecycle.py")
         with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
-                patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
                 patch.object(lifecycle, "__file__", str(trusted_lifecycle)):
             root = lifecycle.create_worktree(
                 canonical_root=self.source, workspace_root=self.tasks,
@@ -906,8 +949,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
             os.close(lock_fd)
 
-        with patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
-                patch.object(lifecycle, "__file__", str(trusted_lifecycle)):
+        with patch.object(lifecycle, "__file__", str(trusted_lifecycle)):
             self.assertEqual(lifecycle._main([
                 "--execute-approved-lifecycle",
                 "--resume-task-id", task_id, "--resume-root", str(root),
@@ -918,7 +960,9 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(route_output[0], str(trusted_lifecycle))
         self.assertEqual(route_output[1:], ["--resume-task-id", task_id,
                                              "--resume-root", str(root),
-                                             "--repo-root", str(self.source)])
+                                             "--repo-root", str(self.source),
+                                             "--trust-sha256",
+                                             lifecycle._load_trust()["sha256"]])
         self.assertFalse(str(lifecycle_path) in route_output)
 
         task_marker = self.root / "untrusted-task-lifecycle-ran"
@@ -931,8 +975,7 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                         "-c", "user.email=task@example.invalid", "commit", "-m",
                         "unapproved lifecycle descendant"], cwd=root, check=True,
                        capture_output=True)
-        with patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", self.source), \
-                patch.object(lifecycle, "__file__", str(lifecycle_path)):
+        with patch.object(lifecycle, "__file__", str(lifecycle_path)):
             with self.assertRaises(lifecycle.LifecycleError) as raised:
                 lifecycle._bootstrap(root, task_id)
         self.assertEqual(raised.exception.code, "ENV_BOOTSTRAP_SOURCE_UNTRUSTED")
@@ -1098,7 +1141,10 @@ class GitTimeoutTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(os.path.realpath(tmp))
             trusted = root / "tools" / "llmtool" / "scripts" / "d6_worktree_lifecycle.py"
-            with patch.object(lifecycle, "D6_INTEGRATOR_DISPATCHER_ROOT", root), \
+            with patch.object(lifecycle, "_load_trust", return_value={
+                    "canonical_root": str(root), "tasks_root": str(self.tasks),
+                    "origins": frozenset(("git@github.com:davidcatcat/davidcattoolsproject.git",)),
+                    "sha256": "a" * 64}), \
                     patch.object(lifecycle, "__file__", str(trusted)), \
                     patch.object(lifecycle.subprocess, "run", side_effect=self._timeout) as run:
                 with self.assertRaises(lifecycle.LifecycleError) as raised:
