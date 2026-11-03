@@ -693,21 +693,23 @@ def _row_identity(item):
 
 
 class _TaskViewLinker:
-    """W59: OSC 8 links on the detail's full PR URLs only (Core binds PRs to PR_URL's repo;
+    """W59: OSC 8 links on the detail's full PR URLs only (Core binds PRs to the repo;
     a bare #N would follow the cwd's git remote and could point at another repo)."""
-
-    PR_LINK = re.compile(re.escape(chat_tui_status.PR_URL) + r"\d{1,9}(?![\w/])")
 
     def __init__(self, base):
         self.base = base
         self._own = chat_tui_theme.Linker(os.getcwd(), None) if base is None else None
 
     def links(self, text, start, end):
+        url = chat_tui_status.pr_url()
+        if url is None:
+            return []
+        pr_link = re.compile(re.escape(url) + r"\d{1,9}(?![\w/])")
         found = []
         line_start = text.rfind("\n", 0, start) + 1
         line_end = text.find("\n", end)
         line_end = len(text) if line_end < 0 else line_end
-        for match in self.PR_LINK.finditer(text, line_start, line_end):
+        for match in pr_link.finditer(text, line_start, line_end):
             if match.end() > start and match.start() < end:
                 found.append((match.start(), match.end(), match.group(0)))
         result, last = [], -1
