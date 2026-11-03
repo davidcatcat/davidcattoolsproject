@@ -216,6 +216,10 @@ def _resolve_cache_root(cache_root, worktree):
     else:
         root = Path(default_cache_root())
     root = Path(os.path.abspath(str(root)))
+    # Inspect the final component before realpath: resolving first would hide
+    # a symlink supplied as the cache root.
+    if root.is_symlink():
+        raise EnvError("UNSAFE_CACHE_ROOT", "refusing symlinked cache root: %s" % root, 3)
     real_root = Path(os.path.realpath(str(root)))
     real_wt = Path(os.path.realpath(str(worktree)))
     if real_root == real_wt or real_wt in real_root.parents:
@@ -232,6 +236,23 @@ def _resolve_cache_root(cache_root, worktree):
             os.chmod(str(real_root), 0o700)
         except OSError:
             pass
+    try:
+        root_stat = os.lstat(str(real_root))
+    except OSError as exc:
+        raise EnvError("UNSAFE_CACHE_ROOT", "cannot inspect cache root %s: %s" % (real_root, exc), 3)
+    if root_stat.st_uid != os.getuid():
+        raise EnvError(
+            "UNSAFE_CACHE_ROOT",
+            "cache root is owned by uid %s, not current uid %s: %s"
+            % (root_stat.st_uid, os.getuid(), real_root),
+            3,
+        )
+    if root_stat.st_mode & 0o022:
+        raise EnvError(
+            "UNSAFE_CACHE_ROOT",
+            "cache root is group- or world-writable: %s" % real_root,
+            3,
+        )
     return real_root
 
 
@@ -245,6 +266,21 @@ def default_cache_root():
 # --------------------------------------------------------------------------
 # lock file
 # --------------------------------------------------------------------------
+
+
+def _open_cache_lock(cache_root):
+    """Open the shared cache lock without following a symlink."""
+
+    path = Path(cache_root) / ".lock"
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise EnvError("UNSAFE_CACHE_LOCK", "O_NOFOLLOW is unavailable for cache lock %s" % path, 3)
+    try:
+        return os.open(str(path), os.O_CREAT | os.O_RDWR | nofollow, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or path.is_symlink():
+            raise EnvError("UNSAFE_CACHE_LOCK", "refusing symlinked cache lock: %s" % path, 3)
+        raise
 
 
 class LockSections(dict):
@@ -1106,8 +1142,7 @@ def ensure_wheelhouse(
     tmp_root = Path(cache_root) / "tmp"
     _ensure_dir(tmp_root)
     _ensure_dir(Path(cache_root) / "wheels")
-    lock_path = Path(cache_root) / ".lock"
-    lock_fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+    lock_fd = _open_cache_lock(cache_root)
     try:
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         _reap_stale_staging(tmp_root)
