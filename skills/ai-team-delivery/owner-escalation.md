@@ -39,6 +39,8 @@ This applies to every Owner decision on every Issue/PR, not to one topic (#812):
 - Every Owner answer, including a decision the Owner raises first in chat, is recorded by one comment that quotes the Owner and carries the `ANSWERED` marker, on each Issue/PR the answer touches.
 - Every scheduled sweep lists all open Owner rows in the repository and either settles each one or confirms it is still pending.
 
+Use `python3 tools/llmtool/scripts/pm_owner_marker.py ask N --question Q [--sheet FILE]` to post the waiting marker before asking in chat, `answer N --owner-words W --pm-reading R` to record the relayed answer, and `open-rows` for a read-only sweep of pending rows. The script takes the repository slug from the `origin` remote and uses `gh` for GitHub access.
+
 ## Decision record and continuation
 
 For every reserved choice, PM presents the exact decision, alternatives, user impact, estimated cost/risk (or UNKNOWN), recommendation and HOLD-until-approved disposition. Record the Owner authorization on the Task/Issue; for dispatch switches, update [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) with the binding under its strict schema. Do not treat a comment, proposal or silence as implicit approval. Only the blocked dependency waits. Unrelated already-authorized work must continue under [PM Continuation](pm-continuation.md).

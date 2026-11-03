@@ -1,0 +1,4 @@
+interface:
+  display_name: "AGY Direct Developer"
+  short_description: "Dispatch and hand off bounded AGY Developer Tasks"
+  default_prompt: "Use $agy-direct-developer to verify the allowed dispatch route, bind the registered D6 worktree and exact file scope, check the actual AGY model, permissions and quota, then review the scoped result and hand it back for independent review."

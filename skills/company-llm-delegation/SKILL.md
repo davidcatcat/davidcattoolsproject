@@ -9,6 +9,8 @@ Use this only as a development-time dogfood workflow. It does not implement A11c
 production routing and does not grant execution, mutation, approval, retry, fallback,
 security sign-off, QA verdict, or merge authority.
 
+Research findings and benchmark history are preserved in [the 2026-11-03 history](../../docs/history/company-llm-delegation-research-20261103.md).
+
 ## Decision order
 
 1. **Deterministic first.** If a program can answer the question directly, do not call
@@ -40,9 +42,21 @@ security sign-off, QA verdict, or merge authority.
   lines, relevant file names and small necessary snippets. Do not send the whole
   repository or an entire CI log by default. **Do not infer token savings from this
   ordinary bounded-input mode**; the positive L01 result used a different large-input
-  benchmark pipeline described below.
+  benchmark pipeline described in the [L01 token-saving pipeline preconditions](../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions).
 - Preserve the original deterministic/raw evidence separately; the model output is a
   derived summary, not ground truth.
+
+## C1B Live Phase 0 safeguards
+
+- **Owner-only Live grants.** AI agents must not create, change or fabricate grants for
+  real Live execution; only the Owner supplies them.
+- **A grant is not authorization.** A real Phase 0 invocation requires the Owner's
+  authorization and a non-author check of its evidence.
+- **Off-repo only.** Live grant files must be outside every Git worktree.
+- **Company-only Phase 0 first.** A new or redesigned route must pass a pre-registered
+  Company-only reliability Phase 0 before any paired Codex benchmark.
+
+See the [C1B test-triage Worker history](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only) for the full grant safeguards and the [token-savings benchmark history](../../docs/history/company-llm-delegation-research-20261103.md#token-savings-benchmark) for the benchmark gate.
 
 ## Availability classification
 
@@ -65,114 +79,9 @@ Do not infer a layer from an earlier layer, and do not infer it from the VPN ser
 list (`scutil --nc list`). Use that list only as a hint for the Owner reminder in
 [WORKFLOW](../../tools/llmtool/WORKFLOW.md). A TCP `PASS` authorizes nothing. Layers
 2–4 require an llmtool call that the existing data-permission basis already covers,
-and C1B live calls also need the Phase 0 grant below. Without that authorization the
+and C1B live calls also need the [Phase 0 grant safeguards](../../docs/history/company-llm-delegation-research-20261103.md#c1b-test-triage-worker-sourcefake-only).
+Without that authorization the
 layer stays `UNKNOWN`. Never bypass a gate because TCP is reachable.
-
-## Evidence status by route
-
-Routing evidence is task-specific; a provider PASS in one skill does not authorize
-another skill.
-
-- **`test-triage` — only the L01 benchmark pipeline is VALIDATED for savings.** Two
-  independent run orderings preserved equivalent quality while reducing Codex tokens by
-  39.82% and 37.55%. The validated pipeline used ~48 KiB canonical `FAILURE id=` raw
-  output, complete deterministic failure-ID coverage, a ±2-line excerpt selector capped
-  at `min(32 KiB, 20%)`, and direct injection of selected raw text so Codex made 0 tool
-  calls and did not re-read the full output. Plain `ask --skill test-triage` has no
-  positive savings evidence; Round-1 B01's small-evidence configuration measured
-  −103.32% and first hit a length failure at the default output budget.
-- **`log-triage` — EXPERIMENTAL for savings/reliability claims.** Round 3 produced one
-  PASS and one `finish_reason=length` failure. It may still be used as bounded
-  development assistance, but do not call it a validated savings route.
-- **`context-pack` — EXPERIMENTAL for savings/reliability claims.** Round 3 replay had
-  clean structured provenance but only 3/7 target-record recall, and exposed an
-  instruction/gate semantic mismatch.
-
-P1 provider accounting is merged and can preserve a valid usage triplet on parseable
-failure responses. That improves telemetry only; the original model failure remains a
-failure.
-
-For a new or redesigned route, require a pre-registered **Company-only reliability
-Phase 0** before authorizing any paired Codex benchmark. If the Company-only gate fails
-or accounting is incomplete, stop; do not spend Codex tokens trying to measure savings.
-
-## L01 token-saving pipeline preconditions
-
-The positive 39.82% / 37.55% observations apply only to the frozen research pipeline,
-not to ordinary runtime skill invocation. A future reproducible/productionized version
-must preserve all of these conditions before inheriting the savings claim:
-
-1. Raw test output is large enough to justify delegation. The measured fixture was
-   approximately 48 KiB and used canonical `FAILURE id=` records. Small evidence is
-   not assumed beneficial; Round-1 B01 measured −103.32%.
-2. The company model receives the complete bounded raw test output needed for the
-   triage task, after deterministic permission/redaction checks.
-3. Returned failure IDs are checked for **complete set equality** against all expected
-   FAILURE IDs in the bounded fixture—no missing and no extra IDs.
-4. A deterministic selector extracts only the anchored original text (historically
-   ±2 lines), with a hard cap of `min(32 KiB, 20%)` of the original raw input.
-5. The strong model receives the company summary plus the selected original excerpts
-   inline and does **not** re-read the full raw output. Re-reading the full raw input
-   invalidates the historical savings comparison.
-6. Historical generation settings were temperature 0, `enable_thinking=false`,
-   `max_tokens=4096`, timeout 120. Ordinary llmtool defaults are not equivalent.
-7. Current coverage/selector code is frozen benchmark code and only supports the
-   canonical research format. Real pytest/unittest output has not passed this gate.
-
-Until a deterministic real-format selector and Company-only Phase 0 are implemented,
-ordinary `test-triage` remains useful for bounded triage but is **UNVALIDATED for
-token-saving claims**.
-
-## C1B test-triage Worker (source/fake only)
-
-`llmtool test-triage-worker --file … --exit-code … --profile … --json` (C1B, Issue #120)
-is a bounded advisory Worker over production `test-excerpts`. Status: **source and fake
-tests only; the public live route is BLOCKED** unless `--phase0-grant FILE
---phase0-grant-sha256 HEX` name a private 0600 grant whose pin, profile, origin, model,
-capture digest and UTC window all match. It does not reuse the frozen L01 selector or
-its savings claims.
-
-- **The grant is not authorization.** A same-UID process can write a grant file and
-  compute its pin. The seam only stops accidental or implicit live calls. A real Phase 0
-  run needs the owner's prior #120 grant record (field-for-field equal to the file), the
-  VPN step and a non-author check of the per-invocation evidence afterwards.
-- **Owner-only Live grants.** AI agents must not create, modify or fabricate any
-  grant file that could be used for real Live execution. Only the Owner supplies
-  real grants. Before each real Phase0 invocation a non-author must confirm that
-  authorizer_ref points to the Owner's actual #120 authorization comment, and
-  reconcile the exact grant hash, route/data/capture/time/call limits. URL-format
-  and SHA checks alone do not prove Owner authority. Isolated synthetic grants
-  are permitted only with fake openers/local synthetic servers, never real routes.
-- **Off-repo only.** Grant files inside any Git worktree are rejected, including
-  canonical/fixed roots and unrelated repositories, even in private0700 folders.
-  Bounded physical ancestor/.git checks are cooperative, not same-UID race isolation.
-- **Worker schema v2 (breaking).** Fixture and grant routes both return
-  `schema_version=2`. `digests.request_body` hashes actual HTTP wire bytes; the old
-  compact-message digests.prompt key is removed. Grant DATA remains schema_version1.
-- **One serialization.** The provider's own request bytes are capped (64 KiB),
-  re-scanned, digested and sent once through its own opener (no proxy, no redirect).
-- **`max_calls` is informational.** There is no store, so it cannot be enforced across
-  runs. Capture and `max_calls` limits are 1..7. The run report must list every invocation
-  with its request-body digest; no cross-process replay/call cap is claimed.
-
-- **Deterministic first.** The selector must be COMPLETE and every failure ID must have
-  a selected excerpt. Otherwise there are zero requests.
-- **Counts come from the selector.** Records, occurrences and unique IDs are computed
-  there; the model only classifies each ID with refs bound to that ID, and any model
-  totals or summaries are rejected.
-- **One call.** Explicit `openai-compatible` profile only (no active/default fallback),
-  one request, no retry or fallback.
-- **Usage.** It is a complete gateway-reported triplet or `UNKNOWN`. Unknown is never
-  replaced by 0; a reported, valid `(0,0,0)` is known.
-- **Advisory.** Output is `ADVISORY_WORKER_OUTPUT`: not review, QA, Security, merge,
-  egress or budget authority. It never turns a failed capture into a pass.
-- **Not measured.** Quality, fidelity and savings stay UNKNOWN until Phase 0.
-- **Exit status.** While the live route is blocked the command exits 1 after local
-  checks. With a valid grant it keeps the test-excerpts rule. A failed capture is never
-  reported as a pass.
-- **Phase 0 data.** `reports/company_phase0/` holds the C0–C6 generator and the
-  preregistration candidate (digests, gold labels, verdict and stop rules). That
-  candidate is not a grant.
 
 ## Runtime skill selection
 
@@ -180,7 +89,7 @@ Use the smallest applicable llmtool runtime skill:
 
 - `test-triage` — bounded development aid for test failures. Do not call the ordinary
   runtime skill a validated token-saving route. The savings claim applies only when the
-  L01 benchmark-pipeline preconditions below are reproduced.
+  [L01 benchmark-pipeline preconditions](../../docs/history/company-llm-delegation-research-20261103.md#l01-token-saving-pipeline-preconditions) are reproduced.
 - `log-triage` — bounded development aid for log compression only; EXPERIMENTAL for
   token-saving/reliability claims.
 - `context-pack` — existing evidence-first Context Packet for general evidence
@@ -253,39 +162,6 @@ For each delegation record only bounded metadata/reference data:
 
 Do not paste raw secrets or a full sensitive log into the report. Use a safe reference,
 small redacted excerpt, or digest when raw evidence must remain elsewhere.
-
-## Token-savings benchmark
-
-Ordinary delegation telemetry is not enough to claim Codex token savings. Existing
-positive savings evidence is limited to the full L01 research pipeline described above;
-the ordinary test-triage skill invocation itself is not validated for savings.
-For any **new or redesigned route**, do not start with a paired benchmark: first pass a
-pre-registered Company-only reliability Phase 0. Only after that PASS may a paired
-benchmark be authorized. When a paired benchmark is actually allowed:
-
-- same bounded fixture, repo/test revision, Codex model, reasoning effort/speed and
-  acceptance criteria;
-- fresh independent Codex session for control and dogfood variants;
-- control analyzes the original bounded evidence without company-model help;
-- dogfood uses this skill and the configured company provider; Codex starts from the
-  derived summary plus deterministic validation results, while the original bounded
-  evidence remains available by reference;
-- before Codex relies on a company-derived claim, it must compare that claim with the
-  relevant raw evidence; record raw ranges/bytes read, and invalidate a savings pair if
-  required verification was skipped;
-- record actual Codex usage for each variant and **all** company-provider attempts,
-  including failures/retries, with an explicit measurement source;
-- if exact/reported comparable Codex totals are unavailable, report savings as
-  `unknown`; do not convert bytes, quota percentage, credits or estimates into tokens;
-- pre-register fixture gold labels/digest and use deterministic grading where possible;
-  grade any semantic remainder independently without revealing variant identity;
-- record quality result, latency, run order and adopt/override alongside token usage.
-
-Report Codex-only savings as the primary result. A mixed Codex+company token-volume delta
-may also be shown, but because it mixes tokenizer/model units it is descriptive only and
-must not be presented as cost or compute savings. A negative result is valid.
-Do not select only favorable pairs or declare savings when the two variants did not
-solve the same task to comparable quality.
 
 ## Completion criteria
 

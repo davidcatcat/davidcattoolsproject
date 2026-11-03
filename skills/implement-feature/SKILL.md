@@ -6,11 +6,10 @@ description: Implement a feature or bug fix from an agreed requirement through t
 # Implement Feature
 
 For the requirements-owner/AI-team responsibility split, start with
-[ai-team-delivery](../ai-team-delivery/SKILL.md). Codex implements and
-tests the approved product goal; the coordinator owns routine technical
-decisions, independent reviewer handoff and eligible merges. The owner
-may be the Mac command operator but is not the technical PM or agent
-prompt courier.
+[ai-team-delivery](../ai-team-delivery/SKILL.md). The Developer implements and
+tests the approved product goal. The Claude PM dispatches the work, hands it off
+for independent review, and merges eligible changes. The owner may be the Mac
+command operator but is not the technical PM or agent prompt courier.
 
 Deliver a working change, not just code generation.
 

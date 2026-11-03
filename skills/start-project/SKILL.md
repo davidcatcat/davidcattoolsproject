@@ -15,7 +15,7 @@ Turn an idea into a small first release without over-building.
 4. Choose the simplest suitable stack based on the task and existing repo conventions.
 5. Define the public interface and the first testable user flows.
 6. Create or update project guidance only when it captures durable rules that are not obvious from the code.
-7. Implement in small vertical slices. Use the `tdd` skill when available and appropriate.
+7. Write a failing test first, then implement in small vertical slices.
 8. Run the repository's format, lint/static analysis, tests, and build commands.
 9. Use `review-change` before declaring the work ready.
 10. Use `safe-git` only when the user asks to commit, sync, or push.
