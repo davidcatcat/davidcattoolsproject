@@ -9,7 +9,7 @@
       "state_dirs": {"policy": "private-temp-only"}
     },
     "gw-agent": {
-      "package_path": "/usr/local/lib/api-agent-gateway",
+      "package_path": "~/.local/lib/api-agent-gateway",
       "default_model": "gw-agent-default",
       "default_effort": "low",
       "profile_name": "llmtool-direct",

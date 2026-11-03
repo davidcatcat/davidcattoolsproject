@@ -59,7 +59,9 @@ def load_route_config(path=None):
                        'profile_name', 'profile', 'authorization_ref',
                        'allowed_data_classes'}
         if (set(gw) != expected_gw or
-                type(gw.get('package_path')) is not str or not gw['package_path'].startswith('/') or
+                type(gw.get('package_path')) is not str or
+                not (gw['package_path'].startswith('/') or
+                     gw['package_path'].startswith('~/')) or
                 type(gw.get('default_model')) is not str or
                 re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', gw['default_model']) is None or
                 gw.get('default_effort') not in ('minimal', 'low', 'medium', 'high') or

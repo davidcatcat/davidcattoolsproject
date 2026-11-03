@@ -35,6 +35,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
 
     def test_route_config_and_data_class_are_validated(self):
         config = load_route_config()['routes']['gw-agent']
+        self.assertEqual(config['package_path'], '~/.local/lib/api-agent-gateway')
         self.assertEqual(config['allowed_data_classes'], ['SYNTHETIC'])
         self.assertEqual(config['authorization_ref'],
             'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520')
@@ -59,6 +60,17 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         request['task']['data_class'] = 'RESTRICTED'
         with self.assertRaises(LLMToolError):
             route.validate_request(request)
+
+    def test_real_route_config_expands_package_path_from_home(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / 'home'
+            package = home / '.local' / 'lib' / 'api-agent-gateway'
+            (package / 'api_agent_gateway').mkdir(parents=True)
+            with patch.dict(os.environ, {'HOME': str(home)}):
+                config = load_route_config()['routes']['gw-agent']
+                self.assertEqual(config['package_path'], '~/.local/lib/api-agent-gateway')
+                route = GwAgentRoute(config)
+            self.assertEqual(route.package_path, str(package.resolve()))
 
     def test_non_synthetic_delegate_is_refused_before_task_mutation(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
