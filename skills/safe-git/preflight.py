@@ -181,6 +181,24 @@ def repository_identity(root):
     return [git(root, *command).decode().strip() for command in commands]
 
 
+def git_directory(root):
+    return Path(os.fsdecode(git(
+        root, "rev-parse", "--path-format=absolute", "--absolute-git-dir"
+    ).strip()))
+
+
+def pin_git_directory(root, uid):
+    path = git_directory(root)
+    directory(path, uid)
+    return path
+
+
+def verify_git_directory(root, pinned, uid):
+    current = git_directory(root)
+    require(current == pinned)
+    directory(current, uid)
+
+
 def check(args):
     root = Path(args.root)
     require(args.uid == os.getuid())
@@ -190,11 +208,13 @@ def check(args):
     require(repository_identity(root) == expected_identity)
     common = Path(args.common_dir)
     directory(common, args.uid)
+    pinned_git_dir = pin_git_directory(root, args.uid)
     if args.write_candidate:
         observed = inventory(root)
         require(inventory(root) == observed)
         require(repository_identity(root) == expected_identity)
         private_write(args.write_candidate, observed, root, common, args.uid)
+        verify_git_directory(root, pinned_git_dir, args.uid)
         return "CANDIDATE: review required"
     baseline = Path(args.baseline)
     directory(baseline.parent, args.uid, 0o700)
@@ -233,6 +253,7 @@ def check(args):
     directory(common, args.uid)
     if args.report:
         private_write(args.report, delta(expected, observed), root, common, args.uid)
+    verify_git_directory(root, pinned_git_dir, args.uid)
     return "PASS: read-only preflight"
 
 
