@@ -3665,15 +3665,14 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.store = TaskStore(Path(self.temp.name).resolve() / 'tasks')
-        # Creating a developer record runs the store's normal dispatch-policy
-        # authorization. Keep this test's policy deterministic across hosts;
-        # the cap behavior below still uses the real helper and TaskStore.
-        decision = worker_dispatch.PolicyDecision(
-            'codex-developer', True, 'TEST_POLICY_ALLOWED', 'a' * 64)
-        policy = patch.object(submission_cli.worker_dispatch, 'evaluate',
-                              return_value=decision)
-        policy.start()
-        self.addCleanup(policy.stop)
+        # TaskStore still validates and persists each real record. Keep the
+        # dispatch authorization seam deterministic because policy differs by
+        # host and this class tests the cap, not worker authorization.
+        authorization = patch.object(
+            submission_cli.worker_dispatch, 'authorize_task_store_change',
+            return_value=None)
+        authorization.start()
+        self.addCleanup(authorization.stop)
 
     def _task(self, *, executor='executor-task-1', developer=False, route='codex'):
         task_id, run_id = new_id(), new_id()
@@ -3773,9 +3772,60 @@ class DelegateRepairCapTests(unittest.TestCase):
         route.assert_called_once()
 
     def test_same_task_replay_is_not_counted(self):
+        self._prior_assignments(2)
         task = self._task(executor='executor-task-1', developer=True)
         self.assertIsNone(submission_cli._check_delegate_repair_cap(
             self._args(task, 'opencode'), self.store))
+
+    def test_background_cap_refuses_codex_and_opencode_before_launch(self):
+        self._prior_assignments()
+        registration = Namespace(task_id='executor-task-1')
+        snapshot = Namespace(head='a' * 40)
+        for provider in ('codex', 'opencode'):
+            with self.subTest(provider=provider):
+                task = self._task(route=provider)
+                args = self._args(task, provider, background=True,
+                                  mode='direct', context_stdin=False)
+                decision = worker_dispatch.PolicyDecision(
+                    provider + '-developer', True, 'TEST_POLICY_ALLOWED', 'a' * 64)
+                with patch.object(submission_cli.worker_dispatch, 'evaluate',
+                                  return_value=decision), \
+                        patch.object(submission_cli, '_delegate_d6_binding',
+                                     return_value=(registration, snapshot)) as binding, \
+                        patch.object(submission_cli, '_run_background_delegate') as launch:
+                    with self.assertRaisesRegex(
+                            LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+                        run_task_delegate(args, store=self.store)
+                    binding.assert_called_once_with(args)
+                    launch.assert_not_called()
+
+        task = self._task(route='codex')
+        args = self._args(task, 'codex', background=True, mode='direct')
+        denied = worker_dispatch.PolicyDecision(
+            'codex-developer', False, 'TEST_POLICY_PAUSED', 'b' * 64)
+        with patch.object(submission_cli.worker_dispatch, 'evaluate',
+                          return_value=denied), \
+                patch.object(submission_cli, '_delegate_d6_binding') as binding, \
+                patch.object(submission_cli, '_run_background_delegate') as launch:
+            with self.assertRaisesRegex(LLMToolError, 'TEST_POLICY_PAUSED'):
+                run_task_delegate(args, store=self.store)
+        binding.assert_not_called()
+        launch.assert_not_called()
+
+    def test_proposal_cap_refuses_company_gw_and_codex(self):
+        self._prior_assignments()
+        registration = Namespace(task_id='executor-task-1')
+        snapshot = Namespace(head='a' * 40)
+        for provider in ('company-gw', 'codex'):
+            with self.subTest(provider=provider):
+                task = self._task(route=provider)
+                args = self._args(task, provider, mode='proposal')
+                with patch.object(submission_cli, '_delegate_d6_binding',
+                                  return_value=(registration, snapshot)) as binding:
+                    with self.assertRaisesRegex(
+                            LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+                        run_task_delegate(args, store=self.store)
+                binding.assert_called_once_with(args)
 
     def test_valid_high_debug_ref_stores_override(self):
         self._prior_assignments()
