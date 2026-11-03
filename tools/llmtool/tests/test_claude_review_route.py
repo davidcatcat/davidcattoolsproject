@@ -405,6 +405,7 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
              patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
                    return_value=tests), \
              patch('llmtool.task_completion._github_get', side_effect=api), \
+             patch('llmtool.task_store.default_root', return_value=store.root), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    return_value=fixtures.pm_config('original-pm')), \
              patch('llmtool.task_submission_cli.api_key', return_value='key-not-recorded'), \

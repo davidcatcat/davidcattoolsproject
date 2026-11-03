@@ -26,7 +26,8 @@ Run the permission installer on the EC2 host after a runner has been configured.
 Stop its service first. The installer also refuses to run while the service is
 active or any process remains under its account. It operates on one runner
 directory at a time and does not change the systemd units or their existing
-drop-ins:
+drop-ins. Before installing, set `disableUpdate` to `true` in that runner's
+`.runner` file (the runner configuration flag is also named `--disableupdate`):
 
 ```sh
 sudo systemctl stop actions.runner.davidcatcat-davidcattoolsproject.ec2-self-runner.service
@@ -43,9 +44,15 @@ The install root and its ordinary files/directories
 become `root:root`; executable files are `0755`, other files `0644`, and
 directories `0755`. `_work` and `_tmp` stay owned by the runner account with
 `0700` directories. `_diag` stays account-owned with `0750` directories.
-Contents under those writable directories remain runner-managed. `.runner` and credential files are account-owned
+Contents under those writable directories remain runner-managed. The runner's
+`bin` and `externals` links may point to their matching version directories,
+and links under `externals.<version>/node*/` may point within that same
+version directory. `_work/_update` is excluded from scanning and ownership
+changes; the runner recreates it only when updating, so keep `disableUpdate`
+enabled before installation. Other symlinks and special files are refused.
+`.runner` and credential files are account-owned
 `0600`; `.env` and `.path` are root-owned `0644`. The installer refuses
-symlinks, special files, and any account/path outside the fixed
+other symlinks, special files, and any account/path outside the fixed
 `/home/ghrunnerN/actions-runner` layout.
 
 The runner account still owns `/home/ghrunnerN` and can rename or replace its
@@ -67,7 +74,8 @@ For runners 2 and 3, substitute `ghrunner2`/`ghrunner3`, the matching
 `/home/ghrunnerN/actions-runner` path, and the matching service name ending in
 `ec2-self-runner-2.service` or `ec2-self-runner-3.service`. This restores
 account-only ownership and access. The existing systemd drop-ins remain
-installed.
+installed. The recursive commands do not follow the runner's version
+symlinks; inspect those links after rollback.
 
 ## Host files
 
