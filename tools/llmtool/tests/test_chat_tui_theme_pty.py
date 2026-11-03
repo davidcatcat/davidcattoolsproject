@@ -466,8 +466,8 @@ class ThemePTYTests(unittest.TestCase):
         # Drag over the rendered 來源：TaskStore row: highlighted while held, copied on release.
         terminal.press(1, mouse_row)
         terminal.drag(16, mouse_row)
-        terminal.wait_for(lambda _rows: terminal.cell(1, mouse_row).reverse or
-                          terminal.cell(1, mouse_row).bg not in ("default",),
+        terminal.wait_for(lambda _rows: terminal.cell(mouse_row - 1, 1).reverse or
+                          terminal.cell(mouse_row - 1, 1).bg not in ("default",),
                           "selection highlight")
         terminal.release(16, mouse_row)
         copied = terminal.wait_clipboard()
