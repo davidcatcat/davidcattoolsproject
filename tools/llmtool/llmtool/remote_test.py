@@ -434,6 +434,8 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
     if ((expected is not None and expected != recorded_head) or
             sha != recorded_head or (expected is not None and sha != expected)):
         return denied('RECEIPT_HEAD_MISMATCH')
+    if pr is not None:
+        store.record_published_pr(task_id, pr, recorded_head)
     admitted = _task_path_modules(task)
     selected = tuple(sorted(set(modules or admitted)))
     if (not selected or len(selected) > _MAX_REMOTE_MODULES or
