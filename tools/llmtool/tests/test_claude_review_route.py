@@ -434,6 +434,33 @@ class LifecycleReviewerBindingTests(unittest.TestCase):
         spec = importlib.util.spec_from_file_location('d6_lifecycle_under_test', path)
         lifecycle = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lifecycle)
+        # #369: _main reads trust.json before dispatching; point it at a
+        # private temp trust home so the real ~/.config/llmtool/trust.json is
+        # never read.
+        trust_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(trust_temp.cleanup)
+        trust_home = Path(trust_temp.name).resolve()
+        trust_dir = trust_home / '.config' / 'llmtool'
+        trust_dir.mkdir(parents=True, mode=0o700)
+        for directory in (trust_home, trust_home / '.config', trust_dir):
+            directory.chmod(0o700)
+        trust_path = trust_dir / 'trust.json'
+        trust_path.write_text(json.dumps({
+            'schema_version': 1, 'canonical_root': str(trust_home / 'missing-canonical'),
+            'workspace_root': str(trust_home), 'tasks_root': str(trust_home / 'tasks'),
+            'repository': {'slug': 'davidcatcat/davidcattoolsproject',
+                           'allowed_origins': [
+                               'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                           'approval_refs': {}},
+            'ci_trust': {}, 'tools': {},
+        }), encoding='utf-8')
+        trust_path.chmod(0o600)
+        original_load_trust = lifecycle._load_trust
+        trust_patch = patch.object(
+            lifecycle, '_load_trust',
+            side_effect=lambda: original_load_trust(home=str(trust_home)))
+        trust_patch.start()
+        self.addCleanup(trust_patch.stop)
         base = ['--task-id', 'issue352-reviewer', '--agent-id', 'claude-reviewer',
                 '--session-ref', 'claude-reviewer-session', '--lease-ref', 'lease',
                 '--branch', 'review/issue352', '--base-sha', 'a' * 40]
@@ -473,8 +500,9 @@ class LifecycleReviewerBindingTests(unittest.TestCase):
         harness.setUp()
         self.addCleanup(harness.doCleanups)
         trusted = harness.source / 'tools' / 'llmtool' / 'scripts' / 'd6_worktree_lifecycle.py'
+        # The harness setUp already points the lifecycle at a temp trust home
+        # whose canonical_root is harness.source (the trusted dispatcher root).
         with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
-                patch.object(d6.lifecycle, 'D6_INTEGRATOR_DISPATCHER_ROOT', harness.source), \
                 patch.object(d6.lifecycle, '__file__', str(trusted)), \
                 redirect_stdout(StringIO()):
             d6.lifecycle.create_worktree(

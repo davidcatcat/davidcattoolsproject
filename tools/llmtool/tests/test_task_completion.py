@@ -296,7 +296,29 @@ class TaskCompletionTests(unittest.TestCase):
                                     current_head=result_sha)
             d6_worktree_lifecycle._replace_record(registry_path, current)
 
+        # #369: the lifecycle reads trust.json; use a private temp trust home so
+        # the real ~/.config/llmtool/trust.json is never read.
+        trust_home = self.base / 'trust-home'
+        trust_dir = trust_home / '.config' / 'llmtool'
+        trust_dir.mkdir(parents=True, mode=0o700)
+        for directory in (trust_home, trust_home / '.config', trust_dir):
+            directory.chmod(0o700)
+        trust_path = trust_dir / 'trust.json'
+        trust_path.write_text(json.dumps({
+            'schema_version': 1, 'canonical_root': str(self.root),
+            'workspace_root': str(self.base), 'tasks_root': str(self.base),
+            'repository': {'slug': 'davidcatcat/davidcattoolsproject',
+                           'allowed_origins': [
+                               'git@github.com:davidcatcat/davidcattoolsproject.git'],
+                           'approval_refs': {}},
+            'ci_trust': {}, 'tools': {},
+        }), encoding='utf-8')
+        trust_path.chmod(0o600)
+        original_load_trust = d6_worktree_lifecycle._load_trust
+
         with patch.dict(os.environ, {'LLMTOOL_D6_TESTING': '1'}), \
+                patch.object(d6_worktree_lifecycle, '_load_trust',
+                             side_effect=lambda: original_load_trust(home=str(trust_home))), \
                 patch.object(d6_worktree_lifecycle, '_bootstrap',
                              side_effect=complete_bootstrap) as bootstrap:
             recorded = d6_worktree_lifecycle.record_result(
