@@ -307,7 +307,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 submission_cli._bootstrap_registered_d6(registration)
 
         self.assertEqual(raised.exception.direct_opencode_code,
-                         'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL')
+                         'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        self.assertIn('Run llmtool from the canonical checkout', str(raised.exception))
         self.assertFalse(marker_path.exists())
 
     def test_integrator_approved_tooling_reads_exact_source_blobs_from_shared_store(self):
@@ -3497,7 +3498,7 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
     def test_dispatcher_outside_canonical_checkout_has_safe_hint(self):
         other = Path(self.temp.name).resolve() / 'd6' / 'task_submission_cli.py'
         other.parent.mkdir()
-        message = self._refusal('ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL', other)
+        message = self._refusal('ENV_BOOTSTRAP_SOURCE_UNTRUSTED', other)
         self.assertIn('Run llmtool from the canonical checkout', message)
         self.assertIn('working directory may remain in the D6 worktree', message)
         self.assertNotIn(str(self.root), message)
@@ -3530,14 +3531,22 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
             with self.assertRaises(DirectOpenCodeError) as raised:
                 submission_cli._bootstrap_registered_d6(self.registration)
         self.assertEqual(raised.exception.direct_opencode_code,
-                         'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL')
+                         'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        self.assertIn('Run llmtool from the canonical checkout', str(raised.exception))
+        self.assertNotIn(str(other), str(raised.exception))
         # A trust root that contains, but is not, the dispatcher checkout.
         with dispatcher_trust(self.root.parent), \
                 patch.object(submission_cli, '__file__', str(self.dispatcher)):
             with self.assertRaises(DirectOpenCodeError) as raised:
                 submission_cli._bootstrap_registered_d6(self.registration)
         self.assertEqual(raised.exception.direct_opencode_code,
-                         'ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
+                         'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        # The helper-source entry point refuses with the same code.
+        with dispatcher_trust(other), \
+                patch.object(submission_cli, '__file__', str(self.dispatcher)):
+            with self.assertRaises(ValueError) as raised:
+                submission_cli._trusted_d6_helper_source()
+        self.assertEqual(raised.exception.code, 'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
 
     def test_origin_outside_trust_allowlist_is_refused(self):
         with dispatcher_trust(self.root, origins=FIXTURE_ORIGINS[1:]), \

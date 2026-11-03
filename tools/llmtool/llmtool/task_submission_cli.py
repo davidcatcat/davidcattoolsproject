@@ -2111,13 +2111,13 @@ def _trusted_d6_helper_source(registration=None, source_rel=None):
     if not dispatcher_root.is_absolute():
         raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
     dispatcher_file = Path(__file__).resolve()
-    try:
-        dispatcher_file.relative_to(dispatcher_root)
-    except ValueError:
-        raise _DispatcherPreflightError(
-            'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL') from None
-    if (dispatcher_file != dispatcher_root / dispatcher_rel or
-            Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
+    if dispatcher_file != dispatcher_root / dispatcher_rel:
+        # #369 PR-5: the trust.json root is not the checkout this dispatcher
+        # runs from (for example llmtool started from a D6 worktree).
+        error = _DispatcherPreflightError('ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
+        error.canonical_hint = True
+        raise error
+    if (Path(os.path.realpath(dispatcher_root)) != dispatcher_root or
             git('rev-parse', '--show-toplevel').decode().rstrip('\n') != str(dispatcher_root) or
             git('remote', 'get-url', 'origin').decode().strip() not in allowed_origins):
         raise _DispatcherPreflightError('ENV_BOOTSTRAP_DISPATCHER_IDENTITY')
@@ -2227,7 +2227,7 @@ def _bootstrap_registered_d6(registration):
         code = (exc.code if isinstance(exc, _DispatcherPreflightError)
                 else 'ENV_BOOTSTRAP_SOURCE_UNTRUSTED')
         error = opencode_direct_developer.DirectOpenCodeError(code)
-        if code == 'ENV_BOOTSTRAP_DISPATCHER_NOT_CANONICAL':
+        if getattr(exc, 'canonical_hint', False):
             error.args = (code +
                           ': Run llmtool from the canonical checkout; the current '
                           'working directory may remain in the D6 worktree.',)
