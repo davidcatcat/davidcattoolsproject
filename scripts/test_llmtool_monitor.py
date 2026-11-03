@@ -5686,7 +5686,8 @@ class DiskUsageTests(unittest.TestCase):
                         patch.object(mon.os.path, "expanduser", return_value="/home/test"):
                     monitor.refresh_disk_usage(now=0)
                 statvfs.assert_called_once_with("/home/test")
-                self.assertEqual(monitor.disk_usage, (percent, 6 * 1024 ** 3))
+                expected_free = fake.f_bavail * fake.f_frsize
+                self.assertEqual(monitor.disk_usage, (percent, expected_free))
                 self.assertIn(f"disk {percent}% (6.0G free)", mon.disk_status(monitor.disk_usage))
                 alert = mon.disk_alert(monitor.disk_usage)
                 if label:
