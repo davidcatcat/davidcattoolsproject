@@ -123,7 +123,7 @@ def _owner_acceptance_required(files):
     return False
 
 
-def _merge_checks(record, number, head, pr, github_get):
+def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=False):
     try:
         checks = github_get(f'commits/{head}/check-runs?per_page=100')
         files = github_get(f'pulls/{number}/files?per_page=100')
@@ -151,10 +151,14 @@ def _merge_checks(record, number, head, pr, github_get):
         return 'MERGE_CHECKS_UNAVAILABLE'
     docs_only = bool(paths) and all(path.endswith('.md') for path in paths)
     required_checks = ['check (docs)'] if docs_only else ['check (Linux 3.14)']
-    if not docs_only:
+    requires_macos = not docs_only
+    if requires_macos:
         required_checks.append('check (macOS 3.13)')
     names = {item['name'] for item in check_runs}
-    if any(name not in names for name in required_checks):
+    missing_macos = requires_macos and 'check (macOS 3.13)' not in names
+    other_missing = any(name not in names for name in required_checks
+                        if name != 'check (macOS 3.13)')
+    if other_missing or (missing_macos and not allow_missing_macos):
         return 'MERGE_REQUIRED_CHECK_MISSING'
     if not docs_only:
         mac_runs = [item for item in check_runs if item.get('name') == 'check (macOS 3.13)']
@@ -162,6 +166,8 @@ def _merge_checks(record, number, head, pr, github_get):
             return 'MERGE_MACOS_CHECK_REQUIRED'
     if _owner_acceptance_required(files):
         return 'MERGE_OWNER_ACCEPTANCE_MANUAL'
+    if missing_macos:
+        return 'MERGE_MACOS_CHECK_MISSING'
     return None
 
 
@@ -226,20 +232,23 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         return _merge_refusal('MERGE_STALE_HEAD')
     if current_pr.get('state') not in (None, 'open') or current_pr.get('merged') is True:
         return _merge_refusal('MERGE_PR_NOT_OPEN')
-    has_mac_ci = _has_pr_label(current_pr, 'mac-ci')
-    if has_mac_ci is None:
-        return _merge_refusal('MERGE_LABELS_UNAVAILABLE')
-    if not has_mac_ci:
-        try:
-            labeled = gh_runner(root, ['pr', 'edit', str(number), '--add-label', 'mac-ci'])
-        except Exception:
-            labeled = None
-        if labeled is None or getattr(labeled, 'returncode', 1) != 0:
-            return _merge_refusal('MERGE_MAC_CI_LABEL_FAILED')
-        return {'step': 'WAITING_CI', 'codes': [], 'result': {'pr': number, 'head': head}}
     if current_pr.get('mergeable') is not True:
         return _merge_refusal('MERGE_PR_NOT_MERGEABLE')
-    code = _merge_checks(record, number, head, pr, github_get)
+    code = _merge_checks(record, number, head, pr, github_get,
+                         allow_missing_macos=True)
+    if code == 'MERGE_MACOS_CHECK_MISSING':
+        has_mac_ci = _has_pr_label(current_pr, 'mac-ci')
+        if has_mac_ci is None:
+            return _merge_refusal('MERGE_LABELS_UNAVAILABLE')
+        if not has_mac_ci:
+            try:
+                labeled = gh_runner(root, ['pr', 'edit', str(number), '--add-label', 'mac-ci'])
+            except Exception:
+                labeled = None
+            if labeled is None or getattr(labeled, 'returncode', 1) != 0:
+                return _merge_refusal('MERGE_MAC_CI_LABEL_FAILED')
+            return {'step': 'WAITING_CI', 'codes': [], 'result': {'pr': number, 'head': head}}
+        code = 'MERGE_REQUIRED_CHECK_MISSING'
     if code:
         return _merge_refusal(code)
     prior = record.get('merge_attempt')

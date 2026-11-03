@@ -1461,13 +1461,17 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
                   'review_result': {'verdict': 'PASS'}}
         event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
                  'outcome': 'REVIEW_PASS'}
-        checks = {'total_count': 2, 'check_runs': [
+        linux_only_checks = {'total_count': 1, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'}]}
+        green_checks = {'total_count': 2, 'check_runs': [
             {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
              'conclusion': 'success'},
             {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
              'conclusion': 'success'}]}
 
-        def run_case(*, verdict='PASS', head=HEAD, current=None, gh_code=0):
+        def run_case(*, verdict='PASS', head=HEAD, current=None, gh_code=0,
+                     checks=linux_only_checks):
             record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
                       'review_dispatch_claim': [dict(review, head_sha=head,
                           review_result={'verdict': verdict})]}
@@ -1504,7 +1508,7 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
 
         labeled = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
                    'labels': [{'name': 'mac-ci'}]}
-        result, calls = run_case(current=labeled)
+        result, calls = run_case(current=labeled, checks=green_checks)
         self.assertEqual(result['step'], 'MERGED')
         self.assertFalse(any('--add-label' in call for call in calls))
 
