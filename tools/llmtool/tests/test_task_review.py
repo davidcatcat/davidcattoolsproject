@@ -12,6 +12,11 @@ from llmtool.task_review_collector import Observation
 from llmtool.run_budget import RunBudget
 from llmtool.providers.base import Reply
 from llmtool.errors import LLMToolError
+import review_trust_fixture
+
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
 
 NOW='2026-10-13T00:00:10Z'
 

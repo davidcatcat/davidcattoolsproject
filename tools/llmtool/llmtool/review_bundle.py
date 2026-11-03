@@ -16,6 +16,7 @@ from .errors import LLMToolError
 from .task_lifecycle import State, inspect_task, parse_events, parse_expectations
 from .task_verification import parse_task_contract
 from .task_review import canonical, load_json, reject, safe_id, screen
+from .review_origins import actions_run_pattern
 from .task_review_collector import (_LocalGit, collect_bundle_manifest,
     collect_local_facts, physical_directory, verify_bundle_facts)
 
@@ -125,8 +126,7 @@ def _artifacts(index, source, inputs):
         elif item['kind'] == 'CI':
             _keys(metadata, ('url','head_sha','conclusion'))
             if (type(metadata['url']) is not str or not re.fullmatch(
-                    r'https://github\.com/davidcatcat/davidcattoolsproject/actions/runs/[1-9][0-9]{0,19}',
-                    metadata['url']) or metadata['head_sha'] != source or
+                    actions_run_pattern(), metadata['url']) or metadata['head_sha'] != source or
                     metadata['conclusion'] not in ('SUCCESS','FAILURE','CANCELLED','PENDING','UNKNOWN')):
                 reject('BUNDLE_EVIDENCE_INVALID')
         else:
