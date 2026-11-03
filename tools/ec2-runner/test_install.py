@@ -91,13 +91,50 @@ class InstallSelftestTests(unittest.TestCase):
             path.chmod(original)
 
     def test_missing_writable_directories_fail(self):
-        for name in ('_work', '_tmp', '_diag'):
+        for name in ('_work', '_diag'):
             path = self.tree / name
             path.rename(self.tree / (name + '.saved'))
             result = self.run_selftest()
             self.assertNotEqual(result.returncode, 0, name)
             self.assertIn('missing runner directory ' + name, result.stderr)
+            result = self.run_installer()
+            self.assertNotEqual(result.returncode, 0, name)
+            self.assertIn('missing runner directory ' + str(self.tree / name), result.stderr)
             (self.tree / (name + '.saved')).rename(path)
+
+    def test_missing_tmp_is_planned_without_mutation(self):
+        tmp_path = self.tree / '_tmp'
+        tmp_path.rmdir()
+        before = {p.relative_to(self.tree): (p.stat().st_mode & 0o777, p.stat().st_uid,
+                  p.stat().st_gid, p.read_bytes() if p.is_file() else None)
+                  for p in self.tree.rglob('*')}
+
+        result = self.run_installer()
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        plan = [shlex.split(line) for line in result.stdout.splitlines()]
+        self.assertIn(['mkdir', '-m', '0700', '--', str(tmp_path)], plan)
+        self.assertIn(['chown', '-h', 'ghrunner:ghrunner', '--', str(tmp_path)], plan)
+        self.assertIn(['chmod', '0700', '--', str(tmp_path)], plan)
+        self.assertFalse(tmp_path.exists())
+        after = {p.relative_to(self.tree): (p.stat().st_mode & 0o777, p.stat().st_uid,
+                 p.stat().st_gid, p.read_bytes() if p.is_file() else None)
+                 for p in self.tree.rglob('*')}
+        self.assertEqual(before, after)
+
+    def test_tmp_symlink_or_regular_file_is_refused(self):
+        tmp_path = self.tree / '_tmp'
+        tmp_path.rmdir()
+        tmp_path.symlink_to(self.tree / '_work', target_is_directory=True)
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('refusing symlink', result.stderr)
+
+        tmp_path.unlink()
+        tmp_path.write_text('not a directory')
+        result = self.run_installer()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('refusing non-directory runner path', result.stderr)
 
     def test_symlink_is_refused_by_installer_and_selftest(self):
         (self.tree / 'linked').symlink_to(self.tree / '.runner')
