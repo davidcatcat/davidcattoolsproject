@@ -2274,13 +2274,59 @@ class OfficeViewTests(unittest.TestCase):
         self.assertTrue(row.codex_exec_started)
         self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows())))
 
-        codex = mon.Process(83, 1, 83, "00:30", "S", "Codex CLI", "codex", "")
+        # Only a running `codex exec` keeps it 無回應; an open Codex TUI does not.
+        tui = mon.Process(82, 1, 82, "00:30", "S", "Codex CLI", "codex", "")
+        row = self.by_name(self.rows([tui]))["codex developer"]
+        self.assertEqual(row.state, mon.DONE)
+        self.assertIn("推測 codex exec 已結束", row.detail)
+        codex = mon.Process(83, 1, 83, "00:30", "S", "Codex CLI", "codex", "", codex_exec=True)
         row = self.by_name(self.rows([codex]))["codex developer"]
         self.assertEqual(row.state, mon.STALLED)
 
+        # Silent for an hour: ended whatever runs, and past the done window it leaves.
         self._codex("exec", meta, ["task_started"], age=61 * 60)
-        row = self.by_name(self.rows([codex]))["codex developer"]
-        self.assertEqual(row.state, mon.DONE)
+        self.assertNotIn("codex developer", self.by_name(self.rows([codex])))
+
+    def test_abandoned_codex_exec_runs_are_not_stalled_beside_a_live_one(self):
+        # Owner report 2026-11-03: two `codex exec` runs started together and
+        # were killed; with another Codex CLI open both stayed 無回應.
+        for name, tid in (("a", "01a19f05-7146-7d71-bb94-8917a877e7ad"),
+                          ("b", "01a19f05-6b09-7763-9127-50d0922dfe1d")):
+            self._codex(name, {"id": tid, "cwd": str(self.task), "thread_source": "user",
+                               "originator": "codex_exec"}, ["task_started"], age=20 * 60)
+        tui = mon.Process(82, 1, 82, "00:30", "S", "Codex CLI", "codex", "")
+        states = sorted(row.state for row in self.rows([tui]) if row.name == "codex developer")
+        self.assertEqual(states, [mon.DONE, mon.DONE])
+        self.assertFalse(any(line.startswith("⚠") for line in mon.office_lines(self.rows([tui]))))
+        # One live `codex exec`: at most one of them may be the live, silent one.
+        live = mon.Process(83, 1, 83, "25:00", "S", "Codex CLI", "codex", "", codex_exec=True)
+        states = sorted(row.state for row in self.rows([tui, live]) if row.name == "codex developer")
+        self.assertEqual(states, sorted([mon.DONE, mon.STALLED]))
+        # A run that wrote recently is working, whatever the process table says.
+        self._codex("c", {"id": "01a19f05-0000-7000-8000-000000000001", "cwd": str(self.task),
+                          "thread_source": "user", "originator": "codex_exec"},
+                    ["task_started"], age=60)
+        rows = [row for row in self.rows([tui]) if row.name == "codex developer"]
+        self.assertEqual(sorted(row.state for row in rows), sorted([mon.WORKING, mon.DONE, mon.DONE]))
+
+    def test_codex_exec_command_flag_keeps_no_arguments(self):
+        secret = "CODEX-ARGV-SECRET-7f3a"   # unique: other tests cache "PROMPT-SECRET" files
+        snap = mon.snapshot_from([
+            (90, 1, 90, "00:10", "S", f"/opt/bin/codex exec --json {secret}"),
+            (91, 1, 91, "00:10", "S", "/opt/bin/codex --model x"),
+            (92, 1, 92, "00:10", "S", "node /opt/lib/bin/codex exec"),
+        ], self_pid=99999)
+        flags = {p.pid: (p.role, p.codex_exec) for p in snap.processes}
+        self.assertEqual(flags, {90: ("Codex CLI", True), 91: ("Codex CLI", False),
+                                 92: ("Codex CLI (node launcher)", True)})
+        self.assertNotIn(secret, repr(snap.processes))
+        # The flag is derived without retaining the command line anywhere:
+        # no cache keyed by raw argv, and no module-level container holds it.
+        self.assertFalse(hasattr(mon._codex_exec_command, "cache_info"))
+        self.assertFalse(hasattr(mon._codex_exec_command, "__wrapped__"))
+        for name, value in vars(mon).items():
+            if isinstance(value, (dict, list, set, tuple, frozenset)):
+                self.assertNotIn(secret, repr(value), name)
 
     def test_codex_rows_show_what_they_do_like_claude_rows(self):
         path = self.codex.parent / "state.sqlite"
@@ -3267,9 +3313,10 @@ class OfficeViewTests(unittest.TestCase):
         seen = {}
 
         def fake(now, root=None, canonical=None, live_calls=None, verdicts=None, *,
-                 codex_running=False):
+                 codex_running=False, codex_execs=None):
             seen["calls"] = live_calls
             seen["codex_running"] = codex_running
+            seen["codex_execs"] = codex_execs
             return []
         with patch.object(mon, "codex_rows", side_effect=fake):
             self.rows([run])
@@ -3280,6 +3327,10 @@ class OfficeViewTests(unittest.TestCase):
             codex = mon.Process(41, 1, 41, "00:12", "S", "Codex CLI", "codex", "")
             self.rows([codex])
             self.assertTrue(seen["codex_running"])
+            self.assertEqual(seen["codex_execs"], 0)
+            run = mon.Process(42, 1, 42, "00:12", "S", "Codex CLI", "codex", "", codex_exec=True)
+            self.rows([codex, run])
+            self.assertEqual(seen["codex_execs"], 1)
 
     def test_monitor_version_from_git(self):
         def run(results):
