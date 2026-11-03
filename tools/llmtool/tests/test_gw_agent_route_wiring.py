@@ -451,7 +451,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 'request': 'bounded request',
                 'request_sha256': hashlib.sha256(b'bounded request').hexdigest(),
                 'response': 'PM response', 'usage': None, 'error_code': None,
-                'developer': copy.deepcopy(developer),
+                'developer': None,
                 'pm_assignment': {'schema_version': 1, 'route': 'gw-agent', 'risk': 'LOW',
                     'goal': 'Run the bounded gw-agent task.',
                     'acceptance': ['Record the result.']},
@@ -460,31 +460,43 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             record['record_sha256'] = task_store._digest(record)
             return record
 
+        decision = worker_dispatch.PolicyDecision(
+            'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)
+
+        def seed_dispatching_developer(store):
+            current = store.get(task_id)
+            dispatching = copy.deepcopy(developer)
+            return store.compare_and_update(
+                task_id, expected={'developer': current['developer']},
+                developer=dispatching)
+
         for state, error_code in (
                 ('DEVELOPER_UNAVAILABLE', 'DEVELOPER_GW_AGENT_MODEL_ERROR'),
                 ('DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_RESULT_UNKNOWN')):
             with self.subTest(state=state), tempfile.TemporaryDirectory() as temp:
                 store = task_store.TaskStore(Path(temp) / 'tasks')
                 store.create(make_record())
-                current = store.get(task_id)
-                updated_developer = copy.deepcopy(current['developer'])
-                updated_developer.update(state=state, error_code=error_code)
-                saved = store.compare_and_update(
-                    task_id, expected={'developer': current['developer']},
-                    developer=updated_developer)
+                with patch.object(worker_dispatch, 'evaluate', return_value=decision):
+                    current = seed_dispatching_developer(store)
+                    updated_developer = copy.deepcopy(current['developer'])
+                    updated_developer.update(state=state, error_code=error_code)
+                    saved = store.compare_and_update(
+                        task_id, expected={'developer': current['developer']},
+                        developer=updated_developer)
                 self.assertEqual(saved['developer']['state'], state)
                 self.assertEqual(saved['developer']['error_code'], error_code)
 
         with tempfile.TemporaryDirectory() as temp:
             store = task_store.TaskStore(Path(temp) / 'tasks')
             store.create(make_record())
-            current = store.get(task_id)
-            blocked = copy.deepcopy(current['developer'])
-            blocked.update(state='BLOCKED', error_code='DEVELOPER_GW_AGENT_MODEL_ERROR')
-            # BLOCKED is reserved for AGY-specific conditions in TaskStore validation.
-            with self.assertRaises(LLMToolError):
-                store.compare_and_update(task_id,
-                    expected={'developer': current['developer']}, developer=blocked)
+            with patch.object(worker_dispatch, 'evaluate', return_value=decision):
+                current = seed_dispatching_developer(store)
+                blocked = copy.deepcopy(current['developer'])
+                blocked.update(state='BLOCKED', error_code='DEVELOPER_GW_AGENT_MODEL_ERROR')
+                # BLOCKED is reserved for AGY-specific conditions in TaskStore validation.
+                with self.assertRaises(LLMToolError):
+                    store.compare_and_update(task_id,
+                        expected={'developer': current['developer']}, developer=blocked)
 
     def test_gw_agent_success_persists_when_served_model_differs(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
