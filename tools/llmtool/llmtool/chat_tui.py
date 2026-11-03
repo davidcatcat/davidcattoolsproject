@@ -188,7 +188,7 @@ def _open_pr_url(url):
         raise OSError("browser opening is available only on macOS")
     subprocess.run(["/usr/bin/open", url], stdin=subprocess.DEVNULL,
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                   shell=False, check=True)
+                   shell=False, check=True, timeout=10)
 
 
 def key_help(dev):
@@ -1152,6 +1152,11 @@ class ChatTUI:
         def _task_view_open_pr(event):
             self.open_task_pr()
 
+        @keys.add("o", filter=dev_pane_shown & ~picker_shown & ~searching
+                  & (detail_focused | list_focused))
+        def _dev_pane_open_pr(event):
+            self.open_dev_task_pr()
+
         # W60: the same C in the developer panes (F2 detail, F3 whole list, F4 events).
         @keys.add("C", filter=dev_pane_shown & ~picker_shown & ~searching
                   & (detail_focused | list_focused | events_focused))
@@ -1422,7 +1427,9 @@ class ChatTUI:
             fields.update(self.pm_status_fields(compact))
             shown = ["mode", "identity", "session", "state", "keys", "scroll", "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
-        if self.busy or self.pm_turn_active or self.task_view_visible():
+        dev_detail_visible = self._mouse_view() in (self.detail_view, self.list_view)
+        if (self.busy or self.pm_turn_active or self.task_view_visible()
+                or dev_detail_visible):
             # Keep identity ahead of optional context while busy or in the Task detail;
             # Task detail key hints remain last so the copy/return actions stay visible.
             pm_drop_order = ("help", "identity", "scroll", "session", "mouse", "keys")
@@ -1432,9 +1439,10 @@ class ChatTUI:
         for name in pm_drop_order if self.pm_mode else STATUS_DROP_ORDER:
             if self._get_cwidth(STATUS_SEPARATOR.join(fields[key] for key in shown)) <= width:
                 break
-            if name == "keys" and "keys" in shown and self.task_view_visible():
-                # W60: in the detail the optional key hints go first (from the end), so
-                # "Esc 返回" stays as long as anything fits.
+            if name == "keys" and "keys" in shown and (
+                    self.task_view_visible() or dev_detail_visible):
+                # In read-only detail panes, optional hints go first (from the end), so
+                # the primary return/open action stays visible at narrow widths.
                 items = fields["keys"].split(" · ")
                 while len(items) > 1 and self._get_cwidth(STATUS_SEPARATOR.join(
                         fields[key] for key in shown)) > width:
@@ -1479,6 +1487,17 @@ class ChatTUI:
                 keys.append("拖曳即複製")
             else:
                 keys.append("Tab 回詳情（c/C 複製）")
+        elif self._mouse_view() in (self.detail_view, self.list_view):
+            view = self._mouse_view()
+            task_id = self.detail_task_id if view is self.detail_view else self.selected_task_id()
+            if task_id and task_id not in (chat_tui_task.UNKNOWN,
+                                            chat_tui_task.NOT_AVAILABLE):
+                keys.append("o 開啟 PR")
+                if self.task_pr_status:
+                    keys.append(self.task_pr_status)
+                if view is self.detail_view:
+                    keys.append("c 複製 Task ID")
+                keys.append(chat_tui_status.COPY_ALL_STATUS)
         elif self.pm_turn_active:
             keys.append("Esc 中斷")
         elif self.busy and self.worker_kind == "chat" and not self.send_interrupted:
@@ -2477,6 +2496,7 @@ class ChatTUI:
 
     def set_detail(self, text, task_id=None):
         self.detail_task_id = task_id
+        self.task_pr_status = None
         safe_text = terminal_safe_text(text)
         self._set_read_text(self.detail_view, safe_text, keep=False, highlight_lines=3)
         self.show_help = False
@@ -3141,6 +3161,18 @@ class ChatTUI:
     def open_task_pr(self):
         """Open the detail Task's single trusted PR on a background thread."""
         task_id = self.task_view_task_id
+        self._open_task_pr(task_id)
+
+    def open_dev_task_pr(self):
+        """Open the focused F2/F3 Task's single trusted PR on a background thread."""
+        view = self._mouse_view()
+        task_id = (self.detail_task_id if view is self.detail_view else
+                   self.selected_task_id() if view is self.list_view else None)
+        self._open_task_pr(task_id, dev_pane=True)
+
+    def _open_task_pr(self, task_id, dev_pane=False):
+        if getattr(self, "task_pr_inflight", False):
+            return
         if not task_id:
             self.task_pr_status = "沒有 Task，未開啟 PR"
             self.app.invalidate()
@@ -3150,18 +3182,34 @@ class ChatTUI:
             self.app.invalidate()
             return
         self.task_pr_status = "正在開啟 PR…"
+        self.task_pr_inflight = True
         self.app.invalidate()
         loop = asyncio.get_running_loop()
         seq = self.task_view_seq
-        threading.Thread(target=self._open_task_pr_worker, args=(loop, seq, task_id),
+        group_records = tuple(self.list_records_all) if dev_pane else ()
+        threading.Thread(target=self._open_task_pr_worker,
+                         args=(loop, seq, task_id, dev_pane, group_records),
                          name="llmtool-chat-open-pr", daemon=True).start()
 
-    def _open_task_pr_worker(self, loop, seq, task_id):
+    def _open_task_pr_worker(self, loop, seq, task_id, dev_pane=False, group_records=()):
         try:
             record = chat_tui_status.read_task_detail(task_id)
             sources = chat_tui_status._pr_sources(record) if type(record) is dict else []
             numbers = {number for number, _label in sources
                        if type(number) is int and 1 <= number <= 999999999}
+            if not numbers and dev_pane and type(record) is dict:
+                developer = record.get("developer")
+                executor = developer.get("executor_task_id") if type(developer) is dict else None
+                if type(executor) is str and executor:
+                    numbers = {
+                        number
+                        for member in group_records
+                        if type(member) is dict
+                        and type(member.get("developer")) is dict
+                        and member["developer"].get("executor_task_id") == executor
+                        for number, _label in chat_tui_status._pr_sources(member)
+                        if type(number) is int and 1 <= number <= 999999999
+                    }
             if not numbers:
                 status = "此 Task 沒有 PR，未開啟"
             elif len(numbers) != 1:
@@ -3172,7 +3220,10 @@ class ChatTUI:
                     status = "PR 信任來源不可用，未開啟"
                 else:
                     number = next(iter(numbers))
-                    _number_text, url = chat_tui_status.pull_request(record)
+                    url_record = record
+                    if not sources and dev_pane:
+                        url_record = {"published_pr": {"pr": number}}
+                    _number_text, url = chat_tui_status.pull_request(url_record)
                     expected = prefix + str(number)
                     if url != expected or not url.startswith(prefix):
                         status = "PR URL 不符合信任來源，未開啟"
@@ -3181,10 +3232,17 @@ class ChatTUI:
                         status = "已開啟 PR"
         except Exception:
             status = "開啟 PR 失敗"
-        self._post(loop, self.finish_open_task_pr, seq, task_id, status)
+        self._post(loop, self.finish_open_task_pr, seq, task_id, status, dev_pane)
 
-    def finish_open_task_pr(self, seq, task_id, status):
-        if seq != self.task_view_seq or not self.show_task_view or task_id != self.task_view_task_id:
+    def finish_open_task_pr(self, seq, task_id, status, dev_pane=False):
+        self.task_pr_inflight = False
+        if dev_pane:
+            view = self._mouse_view()
+            current_task_id = (self.detail_task_id if view is self.detail_view else
+                               self.selected_task_id() if view is self.list_view else None)
+            if current_task_id != task_id:
+                return
+        elif seq != self.task_view_seq or not self.show_task_view or task_id != self.task_view_task_id:
             return
         self.task_pr_status = status
         self.app.invalidate()

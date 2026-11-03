@@ -6935,6 +6935,51 @@ class OpenTaskPrKeyTests(Base):
 
             self.drive([self.open_detail, '\t', 'o', input_focused])
 
+    def test_f2_detail_o_uses_the_focused_task_and_shows_the_hint(self):
+        opened = []
+        head = {'task_id': 'a' * 32, 'developer': {'executor_task_id': 'shared'}}
+        older = {'task_id': 'b' * 32, 'developer': {'executor_task_id': 'shared'},
+                 'published_pr': {'pr': 456}}
+
+        def setup(ui):
+            ui.show_list = True
+            ui.list_records_all = [head, older]
+            ui.set_detail('Task 詳情（唯讀）', task_id='a' * 32)
+            self.assertIn('o 開啟 PR', ui.status_keys())
+
+        async def finished(ui):
+            await self.wait_for_open_status(ui)
+            self.assertEqual(ui.task_pr_status, '已開啟 PR')
+
+        with patch.object(chat_tui.sys, 'platform', 'darwin'), \
+                patch.object(chat_tui_status, 'read_task_detail', return_value=head), \
+                patch.object(chat_tui_status, 'pr_url', return_value=OWNER_PR_URL), \
+                patch.object(chat_tui, '_open_pr_url', side_effect=lambda url: opened.append(url)):
+            self.drive([setup, 'o', finished])
+        self.assertEqual(opened, [OWNER_PR_URL + '456'])
+
+    def test_f3_list_o_opens_the_selected_tasks_trusted_pr(self):
+        opened = []
+        record = {'task_id': 'a' * 32, 'published_pr': {'pr': 789}}
+
+        def setup(ui):
+            ui.list_records = [record]
+            ui.list_index = 0
+            ui.show_list = True
+            ui.app.layout.focus(ui.list_window)
+            self.assertIn('o 開啟 PR', ui.status_keys())
+
+        async def finished(ui):
+            await self.wait_for_open_status(ui)
+            self.assertEqual(ui.task_pr_status, '已開啟 PR')
+
+        with patch.object(chat_tui.sys, 'platform', 'darwin'), \
+                patch.object(chat_tui_status, 'read_task_detail', return_value=record), \
+                patch.object(chat_tui_status, 'pr_url', return_value=OWNER_PR_URL), \
+                patch.object(chat_tui, '_open_pr_url', side_effect=lambda url: opened.append(url)):
+            self.drive([setup, 'o', finished])
+        self.assertEqual(opened, [OWNER_PR_URL + '789'])
+
 
 if __name__ == '__main__':
     unittest.main()

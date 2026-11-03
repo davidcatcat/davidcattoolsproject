@@ -587,8 +587,8 @@ def task_detail_text(record, read_at, reason=None, copy_hint=False):
     """
     from .task_status import derive_state
     from .chat_tui_events import format_event, task_events
-    # Keep the heading short enough that the action hints, including the PR shortcut,
-    # stay on one row in an 80-column terminal (W60 mouse coordinates depend on this).
+    # Keep the original heading and copy hints on one row in an 80-column terminal
+    # (W60 mouse coordinates depend on this); the PR shortcut stays in the status bar.
     lines = ["Task 詳情（唯讀）— Esc 返回 · ↑↓ 捲動"
              + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT]
     lines += task_owner_summary(record)
