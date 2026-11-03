@@ -9,7 +9,6 @@ Use for Git synchronization and publication. [AGENTS.md](../../AGENTS.md) owns r
 
 ## Owner D6 — dynamic task-scoped worktrees
 
-<a id="owner-d6-2026-10-19-dynamic-task-scoped-worktree-lifecycle--new-normative-policy"></a>
 D6 permits additional registered, task-owned linked worktrees under the verified llmtool workspace parent; it removes the old two-root ceiling. Follow the normative [D6 lifecycle and registry reference](worktree-lifecycle.md) for all create, canonical-root handoff, retain and retire decisions. It does not permit independent clones, arbitrary checkout locations, or shared writers. A Developer worktree may check out only its registered task branch; never `main`, a peer task branch or `automation/ai-loop`. Developers and Reviewers do not fetch unclaimed Git in the canonical Integrator checkout.
 
 Before creating a worktree:
@@ -60,6 +59,10 @@ For GitHub API documentation edits, pin reads and the change branch to a known b
 ## PR review and merge
 
 Before merge, verify current base/head, exact-head CI, formal non-author review and every Task Contract-required Security/QA/runtime gate. A changed head invalidates affected evidence. Merge only when delegated authority covers the PR and all required gates pass; verify the resulting commit. Do not use paid fallback or force operations.
+
+## Done when
+
+The authorized Git operation is complete, its resulting repository state is verified, and required review and CI gates are recorded.
 
 ## Cloud and evidence
 

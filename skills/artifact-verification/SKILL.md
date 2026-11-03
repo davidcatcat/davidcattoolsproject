@@ -5,7 +5,7 @@ description: Verify JSON schemas, path constraints, role constants, external IDs
 
 # Artifact Verification
 
-Verify structured examples, paths, identifiers, and evidence labels against the real repository parsers before publishing a report, runbook, or handoff comment.
+Validate structured examples, paths, identifiers, and evidence labels against authoritative repository sources when preparing technical artifacts for publication.
 
 ## Process
 
