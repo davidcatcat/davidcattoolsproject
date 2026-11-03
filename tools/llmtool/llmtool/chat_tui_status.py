@@ -587,7 +587,9 @@ def task_detail_text(record, read_at, reason=None, copy_hint=False):
     """
     from .task_status import derive_state
     from .chat_tui_events import format_event, task_events
-    lines = ["Task 詳情（唯讀）— Esc 返回 · ↑↓ PgUp/PgDn 捲動"   # one row at 80 columns
+    # Keep the heading short enough that the action hints, including the PR shortcut,
+    # stay on one row in an 80-column terminal (W60 mouse coordinates depend on this).
+    lines = ["Task 詳情（唯讀）— Esc 返回 · ↑↓ 捲動"
              + (COPY_HINT if copy_hint else "") + COPY_ALL_HINT]
     lines += task_owner_summary(record)
     lines += ["來源：TaskStore（本機）｜讀取於 " + read_at]
