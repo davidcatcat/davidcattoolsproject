@@ -102,7 +102,6 @@ class Process:
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._+-]")
 
 
-@functools.lru_cache(maxsize=4096)
 def safe_name(command: str) -> str:
     """Executable basename only (no arguments, which may contain secrets)."""
     if command.startswith("(") and command.endswith(")"):
@@ -194,13 +193,11 @@ def _agent_role(exe: str, args: list[str], command: str) -> str | None:
 
 def _codex_exec_command(command: str) -> bool:
     """Whether a Codex CLI command line runs `codex exec`. Only this one bit
-    is kept, never the arguments: deliberately not cached, since a cache
-    keyed by the command line would retain prompts and other argv text. It
-    runs only for the few Codex CLI rows, once per Process built."""
+    is kept, never the arguments. Not cached itself: a cache keyed by the
+    command line would retain prompts and other argv text (see _row_facts)."""
     return "exec" in command.split()[1:]
 
 
-@functools.lru_cache(maxsize=4096)
 def classify(command: str) -> str | None:
     """Never return the command text; it might contain secrets."""
     if command.startswith("(") and command.endswith(")"):
@@ -250,7 +247,6 @@ HEX_SHA = re.compile(r"[0-9a-f]{40}")
 TEST_MODULE = re.compile(r"test_[a-z0-9_]{1,80}")
 
 
-@functools.lru_cache(maxsize=4096)
 def _remote_test_job(command: str) -> tuple:
     """(source, short task, short SHA, modules) of an `llmtool task remote-test`
     run ("cli") or of the ssh it starts ("ssh"); "" where unknown. Only tokens
@@ -292,6 +288,33 @@ def _remote_test_job(command: str) -> tuple:
     return ("cli", task, sha, tuple(modules))
 
 
+# What snapshot_from derives from a command line (role, executable name,
+# remote-test job, `codex exec` bit), computed once per distinct command and
+# reused on every later poll (~500 rows a second). The key is a keyed BLAKE2b
+# digest of the command, never the command itself: argv may hold prompts or
+# secrets, and a cache keyed by raw text (as lru_cache was) kept them in memory
+# long after the process exited. The random key, made per monitor run, means a
+# short, guessable argv cannot be confirmed by hashing candidates offline. The
+# cache is rebuilt from each snapshot's rows, so it holds only commands still
+# running (exited processes drop out on the next poll) and is capped as well.
+_ARGV_KEY = os.urandom(16)
+ROW_FACTS_MAX = 8192
+_row_facts_cache: dict = {}
+
+
+def _argv_digest(command: str) -> bytes:
+    return hashlib.blake2b(command.encode("utf-8", "surrogatepass"), digest_size=16,
+                           key=_ARGV_KEY).digest()
+
+
+def _row_facts(command: str) -> tuple:
+    """(role, safe name, remote-test job, codex exec) of a command line; only
+    these sanitized results are ever stored."""
+    role = classify(command)
+    return (role, safe_name(command), _remote_test_job(command),
+            role is not None and role.startswith("Codex CLI") and _codex_exec_command(command))
+
+
 def parse_processes(output: str, self_pid: int, remembered: dict | None = None) -> Snapshot:
     """remembered: {pgid: member PIDs} of agent-led groups seen in earlier polls.
 
@@ -316,18 +339,27 @@ def ps_rows(output: str) -> list[tuple]:
 def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Snapshot:
     """entries: (pid, ppid, pgid, etime, stat, command); etime may also be a
     callable returning it, formatted only for the processes kept."""
+    global _row_facts_cache
     remembered = remembered or {}
     rows = {}
     hosts = set()
+    previous, seen = _row_facts_cache, {}
     for pid, ppid, pgid, elapsed, stat, command in entries:
         if pid == self_pid or ppid == self_pid:  # this monitor and its own ps
             continue
-        role = classify(command)
+        digest = _argv_digest(command)
+        facts = seen.get(digest) or previous.get(digest)
+        if facts is None:
+            facts = _row_facts(command)
+        seen[digest] = facts
+        role = facts[0]
         if role == "llmtool HOST":
             job = _host_job(command)
             if job:
                 hosts.add(job)
-        rows[pid] = (ppid, pgid, elapsed, stat if ALLOWED_STATE.fullmatch(stat) else "?", role, command)
+        rows[pid] = (ppid, pgid, elapsed, stat if ALLOWED_STATE.fullmatch(stat) else "?", role, facts)
+    # Only commands in this snapshot are kept: an exited process's entry goes now.
+    _row_facts_cache = seen if len(seen) <= ROW_FACTS_MAX else {}
     matched = {pid for pid, row in rows.items()
                if row[4] is not None and row[4] not in NO_EXPAND}
     # Expand a whole process group only when the agent leads it (as llmtool's
@@ -351,7 +383,7 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         return None
 
     result = []
-    for pid, (ppid, pgid, elapsed, stat, role, command) in rows.items():
+    for pid, (ppid, pgid, elapsed, stat, role, facts) in rows.items():
         ancestor = agent_ancestor(pid)
         if role is None:
             if ancestor is not None:
@@ -369,9 +401,8 @@ def snapshot_from(entries, self_pid: int, remembered: dict | None = None) -> Sna
         elapsed = elapsed if len(elapsed) <= 18 else "UNKNOWN"
         if stat.startswith("Z"):
             role += " (zombie)"
-        result.append(Process(pid, ppid, pgid, elapsed, stat, role, safe_name(command), owner,
-                              _remote_test_job(command),
-                              role.startswith("Codex CLI") and _codex_exec_command(command)))
+        result.append(Process(pid, ppid, pgid, elapsed, stat, role, facts[1], owner, facts[2],
+                              facts[3]))
     watched = {g: {pid for pid, row in rows.items() if row[1] == g} for g in groups}
     watched.update(orphans)
     lingering = sorted(
