@@ -60,7 +60,7 @@ The Owner authorizes **incremental improvement on the already delivered TUI**, t
 
 - **Images:** clipboard/screenshot paste, explicit local-path/drag input, multiple images and mixed text + image prompts, with clear attachment status and unsupported-provider feedback.
 - **Text files:** explicit attach of TXT/MD/LOG/JSON/YAML/CSV and analysis alongside the user's prompt; validate source, size, permissions and content before transfer.
-- **Later optional documents:** evaluate PDF/DOCX/XLSX after the basic attachment workflow proves useful; do not promise unsupported native file or model capabilities.
+- **Later optional documents:** evaluate PDF/DOCX/XLSX after the first attachment workflow proves useful; do not promise unsupported native file or model capabilities.
 - **Architecture boundary:** TUI only collects/displays attachment references. Core owns authorized attachment access, lifetime, safety and provider capability checks; PM/runtime adapters deliver content to Claude/Codex/other providers only when supported and authorized. Never replace protected filesystem boundaries with arbitrary path access.
 - **Acceptance when resumed:** real macOS terminal paste/path UX plus proof that the target model actually received each attachment (not merely a displayed filename); multi-file and unsupported-provider/error cases must be explicit.
 
