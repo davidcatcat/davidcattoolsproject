@@ -11,9 +11,13 @@ created. Public `review_authority_factory()` remains `UnavailableReviewAuthority
 """
 
 from dataclasses import dataclass
+import fcntl
 import hashlib
 import json
+import os
+import threading
 from typing import Optional
+import weakref
 
 from .action_contract import ContractValue, _hex, _identifier, _integer, _typed
 from .authorization_ledger import ReceiptLedger
@@ -43,6 +47,10 @@ EXECUTION_STATUSES = ('SUCCEEDED', 'FAILED', 'BLOCKED', 'UNKNOWN')
 USAGE_STATUSES = ('KNOWN', 'UNKNOWN')
 LEDGER_STATUSES = ('CONSUMED', 'EFFECT_DONE', 'EFFECT_UNKNOWN', 'DENIED', 'EXPIRED', 'NOT_CONSUMED')
 
+_ledger_recovery_guard = threading.Lock()
+_ledger_handoff_locks = weakref.WeakKeyDictionary()
+_recovered_ledgers = weakref.WeakKeyDictionary()
+
 
 @dataclass(frozen=True)
 class ReviewHandoffReceipt(ContractValue):
@@ -66,6 +74,7 @@ class ReviewHandoffReceipt(ContractValue):
     redeem_run_id: str
     grant_nonce: Optional[str]
     ledger_status: str
+    recovered_receipts: int
     reviewer_role: str
     runtime_session_id: Optional[str]
     identity_source: Optional[str]
@@ -110,6 +119,7 @@ class ReviewHandoffReceipt(ContractValue):
             reject('REVIEW_HANDOFF_RECEIPT_INVALID')
         _integer(self.provider_calls, minimum=0, maximum=1)
         _integer(self.wrapper_launches, minimum=0, maximum=1)
+        _integer(self.recovered_receipts, minimum=0)
         _integer(self.findings_count, minimum=0, maximum=32)
         if self.usage_status == 'KNOWN':
             _integer(self.input_tokens, minimum=0, maximum=10**12)
@@ -180,7 +190,8 @@ def _classify_execution_status(code, provider_calls, ledger_status, cleanup_conf
     return 'UNKNOWN'
 
 
-def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
+def _dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None,
+                             recovered_receipts=0):
     """Execute one non-interactive Claude Reviewer handoff without manual Enter.
 
     Wraps the existing `run_foreground_review(issuer, ledger, budget=budget)`
@@ -264,6 +275,7 @@ def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
         }
 
     code = raw.get('code') if type(raw.get('code')) is str else 'REVIEW_BLOCKED'
+    raw['recovered_receipts'] = recovered_receipts
     raw_calls = raw.get('provider_calls')
     provider_calls = raw_calls if type(raw_calls) is int and raw_calls in (0, 1) else 0
     grant_nonce, ledger_status = _extract_grant_and_ledger_status(issuer, ledger, provider_calls=provider_calls)
@@ -364,6 +376,7 @@ def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
         redeem_run_id=redeem_run_id,
         grant_nonce=grant_nonce,
         ledger_status=ledger_status,
+        recovered_receipts=recovered_receipts,
         reviewer_role=REVIEWER_ROLES[1],
         runtime_session_id=runtime_session_id,
         identity_source=identity_source,
@@ -376,6 +389,62 @@ def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
         findings_count=findings_count,
     )
     return receipt, raw
+
+
+def _open_handoff_lock(ledger):
+    """Open the ledger's pinned directory as the cross-process handoff lock."""
+    flags = (os.O_RDONLY | getattr(os, 'O_DIRECTORY', 0) |
+             getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_CLOEXEC', 0))
+    try:
+        fd = os.open(os.path.dirname(ledger._path), flags)
+    except OSError:
+        reject('REVIEW_HOST_SERVICES_INVALID')
+    try:
+        st = os.fstat(fd)
+        if (st.st_dev, st.st_ino) != ledger._directory:
+            reject('REVIEW_HOST_SERVICES_INVALID')
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def dispatch_review_handoff(issuer, ledger, *, budget, dispatch_store=None):
+    """Recover stale redemptions once, then hold ownership through the handoff.
+
+    The advisory flock on the ledger's directory prevents concurrent
+    review_handoff hosts from recovering a receipt while another host is
+    executing it. A process crash releases the lock, allowing the next open
+    ledger object to recover its CONSUMED rows.
+    """
+    if type(ledger) is not ReceiptLedger:
+        return _dispatch_review_handoff(
+            issuer, ledger, budget=budget, dispatch_store=dispatch_store)
+    with _ledger_recovery_guard:
+        thread_lock = _ledger_handoff_locks.get(ledger)
+        if thread_lock is None:
+            thread_lock = threading.Lock()
+            _ledger_handoff_locks[ledger] = thread_lock
+    with thread_lock:
+        # flock is associated with the open file description, and unlike the
+        # SQLite transaction lock it remains held across the provider effect.
+        # Lock the ledger's directory, never the database file: on Darwin/BSD
+        # flock and SQLite's fcntl byte-range locks share one lock table, so a
+        # flock on the database makes every SQLite write (recover/redeem)
+        # fail LEDGER_LOCKED. Linux keeps the two lock kinds independent.
+        lock_fd = _open_handoff_lock(ledger)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            if ledger not in _recovered_ledgers:
+                # Record the attempt before calling out so an error cannot make
+                # a later handoff retry recovery on the same open ledger.
+                _recovered_ledgers[ledger] = 0
+                _recovered_ledgers[ledger] = ledger.recover()
+            return _dispatch_review_handoff(
+                issuer, ledger, budget=budget, dispatch_store=dispatch_store,
+                recovered_receipts=_recovered_ledgers[ledger])
+        finally:
+            os.close(lock_fd)  # releases the flock, as a crash would
 
 
 def task_completion_adapter(issuer, ledger, *, budget, dispatch_store=None):
