@@ -12,8 +12,8 @@ Hierarchy: Owner → ChatGPT Coordinator (technical adviser and technical direct
 
 Claude work defaults to the `claude2` account; this is a default, not a mandatory account. The Owner may name another account by explicit command. There is no automatic account rotation. A one-shot CLI flag or environment override does not change the stored default. Switching accounts never bypasses [worker-dispatch.json](tools/llmtool/worker-dispatch.json).
 
-Claude owns the local monitoring tool.
+Claude owns the local monitoring tool. As Reviewer, use a separate read-only context with its own D6 reviewer record, never review your own change, and post only the review-change verdict format.
 
-As Reviewer, use a separate read-only context with its own D6 reviewer record, never review your own change, and post only the review-change verdict format. Report exact reviewed SHA, actionable findings, severity, evidence, applicable gates and disposition. Keep review findings distinct from Owner product acceptance and Git execution. Do not claim Mac/runtime/provider work without evidence from the actual tested environment.
+Report exact reviewed SHA, actionable findings, severity, evidence, applicable gates and disposition. Keep review findings distinct from Owner product acceptance and Git execution. Do not claim Mac/runtime/provider work without evidence from the actual tested environment.
 
 When authoring skills, keep each skill focused on one workflow with trigger-oriented frontmatter, clear completion criteria and no duplicated rules. Inspect nearby guidance first and prefer the smallest reversible edit.
