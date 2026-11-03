@@ -17,6 +17,10 @@ import review_trust_fixture
 from test_test_output_excerpts import (FAIL_BODY, FAIL_ID, ERROR_BODY, ERROR_ID,
                                        SYNTHETIC_AWS_KEY, unittest_capture)
 
+
+def setUpModule(): review_trust_fixture.start_module()
+def tearDownModule(): review_trust_fixture.stop_module()
+
 PROFILE = 'company-test'
 CONFIG = '''active_provider: decoy
 providers:
@@ -641,9 +645,12 @@ class Phase0GrantTests(_WorkerFixture, unittest.TestCase):
             self.assert_live_blocked(raw,'phase0 grant invalid',pin=pin)
 
     def test_la2_known_roots_and_unknown_boundary_fail_closed(self):
-        roots=('/Users/davidsun/git/davidcataiporject/davidcattoolsproject',
-            '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex',
-            '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/claude')
+        # #369 PR-7: trust canonical_root and the whole workspace_root (stricter
+        # than the former codex/claude subdirectories; Q9).
+        canonical = review_trust_fixture.OWNER_CANONICAL_ROOT
+        workspace = review_trust_fixture.OWNER_WORKSPACE_ROOT
+        roots=(canonical, workspace, workspace+'/codex', workspace+'/claude',
+               workspace+'/tasks', workspace+'/tasks/some-task', workspace+'/other')
         for root in roots:
             with patch.object(w.os,'open',side_effect=AssertionError('must reject before open')):
                 with self.assertRaises(LLMToolError):
@@ -654,6 +661,29 @@ class Phase0GrantTests(_WorkerFixture, unittest.TestCase):
             return original(path,*args,**kwargs)
         with patch.object(w.os,'lstat',side_effect=denied):
             self.assert_live_blocked(raw,'phase0 grant invalid')
+
+    def test_grant_under_fixture_trust_roots_refused_and_outside_passes(self):
+        raw = self.two_failures(); original = self.grant_path
+        base = self.root / 'trust-roots'
+        canonical, workspace = base / 'canonical', base / 'workspace'
+        config = review_trust_fixture.make_trust(canonical_root=str(canonical),
+                                                 workspace_root=str(workspace))
+        with review_trust_fixture.use_trust(config):
+            for folder in (canonical / 'private', workspace / 'private',
+                           workspace / 'tasks' / 'task-a' / 'private'):
+                with self.subTest(folder=str(folder.relative_to(base))):
+                    folder.mkdir(parents=True, mode=0o700); folder.chmod(0o700)
+                    self.grant_path = folder / 'grant.json'
+                    self.assert_live_blocked(raw, 'phase0 grant invalid')
+            # Control: a private grant directory outside the trust roots passes.
+            self.grant_path = original
+            self.assertEqual(self.live(raw, self.valid_reply(raw))[1].open.call_count, 1)
+
+    def test_missing_trust_blocks_grant_before_any_request(self):
+        from llmtool import trust
+        raw = self.two_failures()
+        with patch.object(trust, 'load_trust', side_effect=trust.TrustError('TRUST_MISSING')):
+            self.assert_live_blocked(raw, 'phase0 grant invalid')
 
     def test_full_wire_actual_64k_boundary_and_identical_bytes_object(self):
         from llmtool.providers.openai_compatible import OpenAICompatibleClient

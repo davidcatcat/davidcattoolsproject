@@ -37,8 +37,8 @@ def _legacy_sources():
     except Exception:
         raise TrustError("TRUST_LEGACY_UNAVAILABLE")
     return {
-        "canonical_root": str(review_bundle.PROTECTED[0]),
-        "workspace_root": str(review_bundle.PROTECTED[1]),
+        "canonical_root": str(review_bundle.LEGACY_PROTECTED[0]),
+        "workspace_root": str(review_bundle.LEGACY_PROTECTED[1]),
         "tasks_root": str(lifecycle.TASKS_ROOT),
         "slug": repo["slug"],
         "allowed_origins": tuple(sorted(review_origins.REVIEW_ORIGINS)),
@@ -237,7 +237,7 @@ def _affected_active_records(home, new_binding):
     """Count active D6 registrations whose trust binding would rotate."""
     try:
         from . import review_bundle
-        root = Path(review_bundle.PROTECTED[0])
+        root = Path(review_bundle.LEGACY_PROTECTED[0])
         common = Path(_git("-C", str(root), "rev-parse", "--path-format=absolute",
                            "--git-common-dir", cwd=root))
         registry_dir = common / "llmtool-worktrees"

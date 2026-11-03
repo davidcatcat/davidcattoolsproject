@@ -24,6 +24,11 @@ class TrustReaderEmbeddingTests(unittest.TestCase):
             with self.subTest(script=name):
                 self.assertEqual(_reader((SCRIPTS / name).read_bytes()), canonical)
 
+    def test_safe_git_preflight_embeds_the_canonical_reader_byte_for_byte(self):
+        # #369 PR-7: the stdlib-only skill script reads trust for its deny-list.
+        preflight = ROOT / "skills" / "safe-git" / "preflight.py"
+        self.assertEqual(_reader(preflight.read_bytes()), _reader(TRUST.read_bytes()))
+
 
 if __name__ == "__main__":
     unittest.main()

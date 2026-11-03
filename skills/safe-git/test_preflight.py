@@ -15,6 +15,18 @@ SCRIPT = Path(__file__).with_name("preflight.py")
 spec = importlib.util.spec_from_file_location("preflight", SCRIPT)
 gate = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(gate)
+REAL_LOAD_TRUST = gate._load_trust
+
+# Child processes do not inherit an in-process patch. Load the same script and
+# point its real trust reader at the fixture home; it never reads a real trust.json.
+_CHILD_BOOTSTRAP = (
+    "import functools, importlib.util, sys\n"
+    "spec = importlib.util.spec_from_file_location('preflight', {script!r})\n"
+    "gate = importlib.util.module_from_spec(spec)\n"
+    "spec.loader.exec_module(gate)\n"
+    "gate._load_trust = functools.partial(gate._load_trust, home={home!r})\n"
+    "sys.exit(gate.main(sys.argv[1:]))\n"
+)
 
 
 class PreflightTests(unittest.TestCase):
@@ -22,6 +34,7 @@ class PreflightTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory(prefix="safe-git-preflight-")
         self.addCleanup(self.temp.cleanup)
         self.parent = Path(self.temp.name).resolve()
+        self.make_trust_fixture()
         self.root = self.parent / "repo"
         self.root.mkdir(mode=0o700)
         self.git("init", "--initial-branch=task")
@@ -46,11 +59,42 @@ class PreflightTests(unittest.TestCase):
                      "--baseline", str(self.baseline), "--uid", str(os.getuid()),
                      "--root-mode", "700", "--parent-mode", "700"]
 
+    def make_trust_fixture(self):
+        """Temporary owner home with a private trust.json; separate from self.parent."""
+        temp = tempfile.TemporaryDirectory(prefix="safe-git-trust-")
+        self.addCleanup(temp.cleanup)
+        base = Path(temp.name).resolve()
+        self.home = base / "home"
+        config = self.home / ".config" / "llmtool"
+        config.mkdir(mode=0o700, parents=True)
+        for path in (self.home, self.home / ".config", config):
+            path.chmod(0o700)
+        self.trust_canonical = base / "canonical"
+        self.trust_workspace = base / "workspace"
+        for path in (self.trust_canonical, self.trust_workspace / "tasks"):
+            path.mkdir(mode=0o700, parents=True)
+        self.trust_file = config / "trust.json"
+        self.write_trust({
+            "schema_version": 1, "canonical_root": str(self.trust_canonical),
+            "workspace_root": str(self.trust_workspace),
+            "tasks_root": str(self.trust_workspace / "tasks"),
+            "repository": {}, "ci_trust": {}, "tools": {}})
+        patcher = patch.object(gate, "_load_trust", lambda: REAL_LOAD_TRUST(home=str(self.home)))
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def write_trust(self, value):
+        if self.trust_file.exists():
+            self.trust_file.unlink()
+        self.trust_file.write_text(json.dumps(value))
+        self.trust_file.chmod(0o600)
+
     def git(self, *args):
         return gate.git(self.root, *args).decode()
 
     def invoke(self, args=None):
-        return subprocess.run([sys.executable, "-B", "-I", str(SCRIPT),
+        bootstrap = _CHILD_BOOTSTRAP.format(script=str(SCRIPT), home=str(self.home))
+        return subprocess.run([sys.executable, "-B", "-I", "-c", bootstrap,
                                *(self.args if args is None else args)],
                               capture_output=True, timeout=30)
 
@@ -284,6 +328,58 @@ class PreflightTests(unittest.TestCase):
                 gate.file_record(self.root, b"a/b.txt")
             opened.assert_not_called()
         self.assert_stop(self.invoke())
+
+    def test_private_write_into_trust_roots_rejected(self):
+        # #369 PR-7: canonical_root and workspace_root (incl. tasks/) come from trust.
+        targets = []
+        for folder in (self.trust_canonical / "private",
+                       self.trust_workspace / "private",
+                       self.trust_workspace / "tasks" / "private"):
+            folder.mkdir(mode=0o700)
+            folder.chmod(0o700)
+            targets.append(folder / "candidate.json")
+        for target in targets:
+            with self.subTest(target=target.parent.relative_to(self.trust_canonical.parent)):
+                self.assert_stop(self.invoke(self.candidate_args(target)))
+                self.assert_stop(self.invoke(self.args + ["--report", str(target)]))
+                self.assertFalse(target.exists())
+                with self.assertRaises(gate.Rejected):
+                    gate.private_write(target, {}, self.root, self.root / ".git", os.getuid(),
+                                       gate._load_trust())
+                self.assertFalse(target.exists())
+        # Control: the same private layout outside the trust roots is accepted.
+        outside = self.parent / "private"
+        outside.mkdir(mode=0o700)
+        outside.chmod(0o700)
+        result = self.invoke(self.candidate_args(outside / "candidate.json"))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, b"CANDIDATE: review required\n")
+
+    def test_missing_or_invalid_trust_fails_closed_before_git(self):
+        candidate = self.parent / "candidate.json"
+        self.trust_file.unlink()
+        for args in (self.args, self.candidate_args(candidate)):
+            result = self.invoke(args)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(result.stdout, b"")
+            self.assertEqual(result.stderr, b"STOP: preflight rejected (TRUST_MISSING)\n")
+        self.assertFalse(candidate.exists())
+        with patch.object(gate, "git", side_effect=AssertionError("git before trust")):
+            with self.assertRaises(gate.TrustError) as caught:
+                gate.check(argparse.Namespace(
+                    root=str(self.root), uid=os.getuid(), root_mode="700", parent_mode="700",
+                    branch="task", head="0" * 40, common_dir=str(self.root / ".git"),
+                    origin="file://" + str(self.root), write_candidate=str(candidate),
+                    baseline=None, report=None))
+        self.assertEqual(str(caught.exception), "TRUST_MISSING")
+        self.write_trust({"schema_version": 2})
+        result = self.invoke()
+        self.assertEqual(result.stderr, b"STOP: preflight rejected (TRUST_SCHEMA_INVALID)\n")
+        self.trust_file.chmod(0o644)
+        result = self.invoke()
+        self.assertEqual(result.stderr, b"STOP: preflight rejected (TRUST_FILE_NOT_PRIVATE)\n")
+        for output in (result.stdout, result.stderr):
+            self.assertNotIn(str(self.home).encode(), output)
 
     @unittest.skipUnless(sys.platform == "darwin", "native macOS ACL required")
     def test_mac_acl_write_grant_rejected(self):

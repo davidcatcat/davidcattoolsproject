@@ -78,8 +78,11 @@ baseline failures may stop before any trustworthy delta can be produced, so a
 report is not guaranteed on every rejection. A failed report write also STOPs.
 
 All new outputs require a nonsymlink owner-only 0700 parent, safe ancestors,
-and destinations outside canonical, the dedicated llmtool workspace parent, the inspected
-root and its common-dir. Files are created O_EXCL/O_NOFOLLOW with mode 0600.
+and destinations outside trust.json `canonical_root` and `workspace_root`, the inspected
+root and its common-dir. Every run first reads the owner's
+`~/.config/llmtool/trust.json` with the embedded llmtool trust reader; a missing
+or invalid trust file stops before any Git work with
+`STOP: preflight rejected (TRUST_<CODE>)` (for example `TRUST_MISSING`). Files are created O_EXCL/O_NOFOLLOW with mode 0600.
 Existing files/symlinks are never overwritten; partial evidence stays preserved
 on failure. Use a fresh filename for every attempt. Baseline and report paths,
 including sensitive filenames, stay local and must not be committed/uploaded.

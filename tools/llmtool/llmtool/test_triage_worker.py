@@ -24,6 +24,7 @@ import unicodedata
 from dataclasses import dataclass
 from urllib import request
 
+from . import trust
 from .config import api_key, resolve_profile_config
 from .diagnostics import PROVIDER_USAGE_FIELDS, validate_provider_usage
 from .errors import LLMToolError
@@ -170,9 +171,13 @@ def _grant(value, digest):
 
 def _grant_outside_worktree(path):
     """Bounded cooperative physical-ancestor check, not OS race isolation."""
-    known = ('/Users/davidsun/git/davidcataiporject/davidcattoolsproject',
-             '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/codex',
-             '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcattoolsproject/claude')
+    # #369 PR-7: whole trust roots (stricter than the former codex/claude
+    # subdirectories). Missing/invalid trust fails closed as an invalid grant.
+    try:
+        config = trust.load_trust()
+    except trust.TrustError:
+        raise ValueError('grant trust unavailable') from None
+    known = (config.canonical_root, config.workspace_root)
     if any(path == root or path.startswith(root + os.sep) for root in known):
         raise ValueError('grant in worktree')
     parent = os.path.dirname(path)
