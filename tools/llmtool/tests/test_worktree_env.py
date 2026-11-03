@@ -1178,19 +1178,25 @@ class CacheTest(EnvironmentTempCase):
     def test_unsafe_cache_root_owner_is_rejected_before_cache_work(self):
         worktree = self.make_worktree(self.tmp / "wt", "A")
         real_lstat = os.lstat
-        cache_root = str(self.cache)
+        # The product inspects the realpath'd root (macOS /var -> /private/var),
+        # so match both spellings of the cache root.
+        cache_roots = {str(self.cache), os.path.realpath(str(self.cache))}
+        foreign_calls = []
 
         def foreign_owner(path):
             result = real_lstat(path)
-            if os.fspath(path) == cache_root:
+            if os.fspath(path) in cache_roots:
+                foreign_calls.append(os.fspath(path))
                 result = mock.Mock(st_mode=result.st_mode, st_uid=os.getuid() + 1)
             return result
 
         with mock.patch.object(we.os, "lstat", side_effect=foreign_owner):
             with mock.patch.object(we, "ensure_wheelhouse") as ensure:
                 code, _, err = self.bootstrap(worktree)
+        self.assertTrue(foreign_calls, "foreign-owner lstat mock never matched the cache root")
         self.assertEqual(code, 3)
         self.assertIn("UNSAFE_CACHE_ROOT", err)
+        self.assertIn("owned by uid", err)
         ensure.assert_not_called()
         self.assertFalse((worktree / "tools" / "llmtool" / ".venv").exists())
 
