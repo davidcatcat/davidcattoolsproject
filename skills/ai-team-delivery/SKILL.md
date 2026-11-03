@@ -1,6 +1,6 @@
 ---
 name: ai-team-delivery
-description: Use when planning or carrying out product work, code changes, reviews, QA handoffs, repository publication, or safe PR merges.
+description: Use when the PM plans and coordinates product work, dispatches Developers, manages review and QA handoffs, or oversees safe PR publication and merges.
 ---
 
 # AI team delivery
@@ -19,7 +19,7 @@ Before dispatch, record:
 - provider output cap, native retry stop, timeout and cleanup requirements;
 - Mac/runtime evidence required, if any.
 
-For OpenCode Host/Worker jobs, D8 authorizes the PM to admit qualifying tasks without Owner-per-call approval. Confirm the actually-free, enabled route at admission (never infer current price from a historical `$0.00` record), D8-authorized non-sensitive data class, provider cap, retry stop and D6 write scope. The PM admits the task and screens each file set for secrets/restricted data; a file-set change within the authorized class needs no repeated per-file Owner approval ([Issue #120 direction](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6289116138)). Do not generalize D8 to another provider, paid route or data class. Any OpenCode-authored Host or Worker update requires a distinct review before use. Admission or containment changes require formal Security review before the updated Host admits another Worker. These Host/Worker controls do not apply to normal direct Developer sessions; see the routing paragraph below.
+For D8 Host/Worker admission and review controls, see the [D8 Host/Worker reference](pm-continuation-reference.md#d8-hostworker-admission-and-review).
 
 **Developer routing (Owner direction, 2026-10-21):** Codex and OpenCode are normal Developer routes selected by the PM. OpenCode uses a registered D6 worktree, task-local project permissions, a free DeepSeek model, a Task Contract, task-scoped writes, bounded repairs, self-review, PR and independent review/CI. Developers do not run tests in the D6; the PM runs admitted modules on EC2 through `llmtool task remote-test` and records its receipt. The earlier direct-session output-cap/retry-hook launch guard is superseded by the Owner's 2026-10-21 decision and is not a prerequisite for normal direct Developer work. D8 provider caps, retry stops, timeout and cleanup remain mandatory for llmtool Host/Worker jobs. For every Worker dispatch, reassignment, retry, repair, recovery or Reviewer handoff, apply the complete fail-closed policy in [AGENTS.md](../../AGENTS.md) and reread [worker-dispatch.json](../../tools/llmtool/worker-dispatch.json) before acting. Missing or unreadable data, malformed data, `schema_version` other than `1`, a missing Worker entry, or a missing or unrecognized exact-case `dispatch` value means refuse and record the reason. Only `PAUSED`, `OWNER_ASSIGNMENT_ONLY` and `ALLOWED` are valid. PAUSED refuses; OWNER_ASSIGNMENT_ONLY requires an explicit Owner assignment; ALLOWED retains task-scope, privacy, budget, live-availability and independent-review gates. A separate Codex advisory/pre-review Worker also needs an authorized entry; advisory output is never formal acceptance. D4 / llmtool-driven OpenCode through the D8a Host handoff remains background G3/M2 work and does not gate direct Developer sessions.
 
@@ -65,10 +65,7 @@ Fix reproducible user-impacting defects under the [normative Issue #92 triage po
 
 Before runtime acceptance, establish the tested checkout, exact HEAD, installed executable path/version and required feature ancestry. Run Mac-only checks only on the actual Mac. Record commands, exits, expected markers, usage/receipt/ACK and cleanup as applicable. A resident TUI PID, model assertion, fake fixture or GitHub event alone does not prove a Host-owned Worker launch. Keep source completion, CI, formal review and live acceptance separate.
 
-<a id="owner-approved-outcome-reporting-2026-10-19"></a>
 Evidence must not contain credentials or restricted logs. Use redacted identifiers and exact source hashes. Apply [Owner outcome reporting v1.1](../../docs/governance/llmtool_owner_outcome_reporting_v1_1_20261019.md) for G1–G4 milestone checkpoints. GitHub publication is durable evidence, not proof of Session wake or notification delivery; see the [dispatch receipt rule](pm-continuation.md#transition-record).
-
-<a id="mac-operator-handoff-controller-trust-and-privacy"></a>
 
 ## Interim controller changes
 
@@ -88,7 +85,6 @@ A Developer may use an in-session read-only Reviewer child only when the CLI sup
 
 Use the [normative Issue #92 policy](defect-triage.md); preserve this legacy anchor for existing links.
 
-<a id="owner-d7-2026-10-19-supersession-opencode-primary-developer"></a>
 <a id="2026-10-19-owner-direction--developer-owned-pre-review-economical-handoffs-and-s3-stop"></a>
 ### Historical D7 pre-review/S3 note
 
@@ -98,10 +94,13 @@ The former one-round S3 stop and paused-role assignments are historical. Current
 
 For a formal review, publish `CLAUDE-REVIEW-REQUEST: PR #N HEAD <SHA>` (Claude Reviewer) or `CODEX-REVIEW-REQUEST: PR #N HEAD <SHA>` (Codex Reviewer) with the exact source, scope, review type and questions. This is a handoff record, not evidence that an automated reviewer ran. End each Owner-facing update with exactly one practical line: `你需要做：無` or `你需要做：<一個必要的動作或白話 yes/no 問題>`. Put technical failures and AI-owned next steps in the task/PR record; do not ask the Owner to diagnose them or relay routine prompts.
 
-<a id="d8-task-admission-and-no-self-attestation"></a>
 ### D8 task admission and Host review
 
 Use the task admission fields above. An OpenCode-authored Host/containment change requires independent formal Security review before that Host version admits a new Worker. A manual TUI or resident PID is not launch evidence.
+
+## Done when
+
+A work package is ready for handoff when its scoped changes, required checks and Developer self-review are recorded, and any remaining independent review, CI, runtime or publication gates are identified with their evidence.
 
 ## References
 
