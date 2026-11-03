@@ -2287,7 +2287,11 @@ class TaskListTests(Base):
             render(ui)
 
         async def first(ui):
-            await wait_for(ui, lambda: len(ui.list_view.text.splitlines()) == 2 + 40)
+            await wait_for(ui, lambda: (
+                len(ui.list_view.text.splitlines()) == 2 + 40
+                and ui.app.layout.has_focus(ui.list_window)
+                and ids[39][:8] not in '\n'.join(shown(ui))
+            ))
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
             self.assertEqual(len(ui.list_view.text.splitlines()), 2 + 40)   # every row
             self.assertNotIn(ids[39][:8], '\n'.join(shown(ui)))         # beyond the screen
@@ -2296,7 +2300,11 @@ class TaskListTests(Base):
         async def down_past_edge(ui):
             for _ in range(30):
                 ui.app.input.send_text('\x1b[B')
-            await wait_for(ui, lambda: ui.list_index == 30)
+            await wait_for(ui, lambda: (
+                ui.list_index == 30
+                and ui.list_view.top > 0
+                and '▶ ' + ids[30][:8] in '\n'.join(shown(ui))
+            ))
             self.assertEqual(ui.list_index, 30)
             self.assertGreater(ui.list_view.top, 0)                      # scrolled
             self.assertIn('▶ ' + ids[30][:8], '\n'.join(shown(ui)))     # selection on screen
@@ -2304,12 +2312,18 @@ class TaskListTests(Base):
         async def page_down(ui):
             before = ui.list_index
             ui.app.input.send_text('\x1b[6~')                            # PgDn
-            await wait_for(ui, lambda: ui.list_index > before)
+            await wait_for(ui, lambda: (
+                ui.list_index > before
+                and '▶ ' + ids[ui.list_index][:8] in '\n'.join(shown(ui))
+            ))
             self.assertGreater(ui.list_index, before)
             self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
             before = ui.list_index
             ui.app.input.send_text('\x1b[5~')                            # PgUp
-            await wait_for(ui, lambda: ui.list_index < before)
+            await wait_for(ui, lambda: (
+                ui.list_index < before
+                and '▶ ' + ids[ui.list_index][:8] in '\n'.join(shown(ui))
+            ))
             self.assertLess(ui.list_index, 39)
             self.assertIn('▶ ' + ids[ui.list_index][:8], '\n'.join(shown(ui)))
 
