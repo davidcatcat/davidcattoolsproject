@@ -57,7 +57,7 @@ class PMConfigHintTests(unittest.TestCase):
         self.assertIn("~/.config/llmtool/config.yaml", hint)
         self.assertIn("pm_runtime.claude_config_dir for Claude", hint)
         self.assertIn("set roles.pm.account to an accounts.<name> entry with kind: codex and config_dir", hint)
-        self.assertIn("roles.pm account and model", hint)
+        self.assertIn("configure roles.pm.model", hint)
 
 
 if __name__ == "__main__":

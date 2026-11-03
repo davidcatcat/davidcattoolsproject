@@ -59,9 +59,8 @@ _RECOVERY = {
                                "directory",
     "PM_CONFIG_INVALID": "the selected PM runtime configuration in ~/.config/llmtool/config.yaml "
                          "is invalid; check pm_runtime.claude_config_dir for Claude or "
-                         "for Codex, set roles.pm.account to an accounts.<name> entry with kind: codex and "
-                         "config_dir, then configure the matching "
-                         "roles.pm account and model, then connect again",
+                         "for Codex, set roles.pm.account to an accounts.<name> entry with kind: codex "
+                         "and config_dir, then configure roles.pm.model and connect again",
     "PM_STATE_INVALID": "the llmtool PM runtime state directory must be a plain user directory",
 }
 
