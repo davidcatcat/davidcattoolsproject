@@ -14,6 +14,7 @@ import os
 import re
 import shlex
 import signal
+import stat
 import sys
 import threading
 import time
@@ -406,9 +407,16 @@ def fit_width(text, width, get_cwidth):
 
 def _source_revision(source_file=None):
     """Read a checkout revision from bounded Git metadata files, without running Git."""
-    source_dir = Path(__file__ if source_file is None else source_file).resolve().parent.parent
+    # Keep the lexical path: resolving it changes /var to /private/var on macOS and
+    # can make a temporary checkout fixture appear outside the source tree being read.
+    source_path = Path(os.path.abspath(os.fspath(
+        __file__ if source_file is None else source_file)))
+    source_dir = source_path.parent.parent
 
     def read_small(path, limit=4096):
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return None
         with path.open("rb") as source:
             data = source.read(limit + 1)
         return data if len(data) <= limit else None
@@ -445,14 +453,17 @@ def _source_revision(source_file=None):
         git_dir = None
         for candidate in (source_dir, *source_dir.parents[:8]):
             marker = candidate / ".git"
-            if marker.is_dir():
+            try:
+                marker_info = marker.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(marker_info.st_mode):
                 git_dir = marker
                 source_dir = candidate
                 break
-            try:
-                marker_data = read_small(marker)
-            except FileNotFoundError:
-                continue
+            if not stat.S_ISREG(marker_info.st_mode):
+                return None
+            marker_data = read_small(marker)
             if marker_data is None:
                 return None
             if not marker_data.startswith(b"gitdir: "):
@@ -472,7 +483,10 @@ def _source_revision(source_file=None):
         name = ref_name(head)
         if name is None:
             return None
-        common_data = read_small(git_dir / "commondir")
+        try:
+            common_data = read_small(git_dir / "commondir")
+        except FileNotFoundError:
+            common_data = None
         common_dir = git_dir
         if common_data:
             common_path = Path(common_data.decode("utf-8").strip())

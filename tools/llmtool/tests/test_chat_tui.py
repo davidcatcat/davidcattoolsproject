@@ -256,12 +256,13 @@ class WidgetTests(Base):
     def test_opening_banner_has_version_and_optional_source_revision(self):
         with patch.object(chat_tui, '_source_revision', return_value=None):
             ui, _ = self.drive([])
-        self.assertTrue(ui.conversation.text.startswith(
-            'LLMTool ' + chat_tui.__version__ + ' interactive chat (full-screen)'))
+        self.assertEqual(ui.conversation.text.splitlines()[0],
+                         'LLMTool ' + chat_tui.__version__ + ' interactive chat (full-screen)')
         with patch.object(chat_tui, '_source_revision', return_value='12345678'):
             ui, _ = self.drive([])
-        self.assertTrue(ui.conversation.text.startswith(
-            'LLMTool ' + chat_tui.__version__ + ' (12345678) interactive chat (full-screen)'))
+        self.assertEqual(ui.conversation.text.splitlines()[0],
+                         'LLMTool ' + chat_tui.__version__
+                         + ' (12345678) interactive chat (full-screen)')
         self.assertNotIn(str(Path(__file__).resolve().parents[2]), ui.conversation.text)
 
     def test_source_revision_reads_git_metadata_without_running_a_process(self):
@@ -297,6 +298,10 @@ class WidgetTests(Base):
             (worktree_git / 'HEAD').write_text(revision + '\n')
             (root / '.git').write_text('gitdir: ' + str(worktree_git) + '\n')
             self.assertEqual(chat_tui._source_revision(module), '12345678')
+
+            (root / '.git').unlink()
+            (root / '.git').symlink_to(worktree_git, target_is_directory=True)
+            self.assertIsNone(chat_tui._source_revision(module))
 
     def test_source_revision_is_omitted_when_git_metadata_is_unavailable(self):
         with tempfile.TemporaryDirectory() as temp:
