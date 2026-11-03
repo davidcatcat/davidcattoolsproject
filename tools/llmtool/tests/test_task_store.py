@@ -841,6 +841,51 @@ class TaskStoreTests(unittest.TestCase):
                 with self.assertRaises(LLMToolError):
                     self.store.update(task['task_id'], developer=outcome)
 
+    def test_rejection_detail_is_restricted_to_rejected_output_and_known_shape(self):
+        def persist(detail):
+            task = self._codex_dispatch_task()
+            self.store.create(task)
+            pending = self._developer_assignment(provider='codex', max_tokens=None)
+            pending['backend_session_semantics'] = 'CLI_REPORTED_SESSION_ID'
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=pending)
+            dispatching = {**pending, 'state': 'DEVELOPER_DISPATCHING',
+                'provider_type': 'codex-cli', 'model': 'gpt-6-luna'}
+            self.store.update(task['task_id'], developer=dispatching)
+            outcome = {**dispatching, 'state': 'DEVELOPER_OUTPUT_REJECTED',
+                'error_code': 'DEVELOPER_OUTPUT_INVALID_DIFF', 'artifact': None,
+                'artifact_sha256': None, 'usage': None,
+                'rejection_detail': detail}
+            return task, outcome
+
+        task, outcome = persist({'reason': 'HUNK_HEADER_INVALID', 'hunk': 0})
+        self.store.update(task['task_id'], developer=outcome)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['rejection_detail'],
+                         {'reason': 'HUNK_HEADER_INVALID', 'hunk': 0})
+
+        invalid_details = (
+            {'reason': 'NOT_A_REASON', 'hunk': 0},
+            {'reason': 'STRICT_PARSE', 'hunk': -1},
+            {'reason': 'STRICT_PARSE', 'hunk': True},
+            {'reason': 'STRICT_PARSE', 'hunk': None, 'extra': 'value'},
+        )
+        for detail in invalid_details:
+            task, outcome = persist(detail)
+            with self.subTest(detail=detail), self.assertRaises(LLMToolError):
+                self.store.update(task['task_id'], developer=outcome)
+
+        task, outcome = persist({'reason': 'STRICT_PARSE', 'hunk': None})
+        outcome['state'] = 'DEVELOPER_OUTCOME_UNKNOWN'
+        outcome['error_code'] = 'CODEX_TIMEOUT'
+        outcome['execution'] = {'status': 'UNKNOWN',
+            'native_session_id': '12345678-1234-4234-8234-123456789abc',
+            'process_exit_code': None, 'stdout_sha256': 'd' * 64,
+            'elapsed_ms': 25, 'cleanup_status': 'CONFIRMED',
+            'usage_source': 'UNKNOWN', 'source_bytes': None,
+            'source_file_count': None, 'source_manifest_sha256': None}
+        with self.assertRaises(LLMToolError):
+            self.store.update(task['task_id'], developer=outcome)
+
     def test_codex_delegate_screens_blocked_reason_before_persisting(self):
         self._allow_codex_dispatch()
         root = str(Path.cwd())
