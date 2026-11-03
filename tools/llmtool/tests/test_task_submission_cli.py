@@ -3694,11 +3694,17 @@ class DelegateRepairCapTests(unittest.TestCase):
         developer_record = None
         completion = None
         if developer:
+            registration = Namespace(
+                task_id=executor, trusted_agent_id='test-agent',
+                session_ref='test-session', native_session_id=None,
+                root='/tmp/repair-cap-d6', common_dir='/tmp/repair-cap-d6/.git',
+                branch='task/repair-cap',
+            )
             developer_record = {
                 'assignment_id': new_id(), 'selection_source': 'PM',
                 'state': 'DEVELOPER_PENDING', 'provider_profile': route,
-                'provider_type': 'codex-cli', 'model': 'fixture-model',
-                'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+                'provider_type': None, 'model': None,
+                'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
                 'session_id': 'dev-' + new_id(), 'source_sha': 'a' * 40,
                 'source_sha_binding': 'D6_REGISTRY_OBSERVED',
                 'read_paths': ['sample.py'], 'write_paths': ['sample.py'],
@@ -3706,7 +3712,10 @@ class DelegateRepairCapTests(unittest.TestCase):
                 'egress_basis': 'Approved synthetic test context.', 'input_bytes': 10,
                 'max_tokens': None, 'artifact_format': 'unified_diff', 'artifact': None,
                 'artifact_sha256': None, 'usage': None, 'error_code': None,
+                'execution': None,
                 'created_at': '2026-11-04T00:00:00Z',
+                'direct_result_callback': submission_cli._direct_result_callback(
+                    task, registration, 'a' * 40),
             }
             completion = {
                 'state': 'WAITING_EXECUTOR', 'executor_task_id': executor,
