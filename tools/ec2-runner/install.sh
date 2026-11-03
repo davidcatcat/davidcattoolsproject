@@ -26,6 +26,29 @@ else
   tree=$home/actions-runner
 fi
 
+tree_real=
+is_allowed_symlink() {
+  local path=$1 rel=$2 resolved version kind ext_real base
+  if [[ "$rel" =~ ^(bin|externals)$ ]]; then
+    kind=${BASH_REMATCH[1]}
+    resolved=$(realpath -e -- "$path") || return 1
+    [[ -d "$resolved" && "$(dirname -- "$resolved")" == "$tree_real" ]] || return 1
+    base=${resolved##*/}
+    [[ "$base" =~ ^$kind\.([0-9]+(\.[0-9]+){2})$ ]]
+    return
+  fi
+  if [[ "$rel" =~ ^externals\.([0-9]+(\.[0-9]+){2})/node[^/]*/.+$ ]]; then
+    resolved=$(realpath -e -- "$path") || return 1
+    ext_real="$tree_real/externals.${BASH_REMATCH[1]}"
+    [[ -d "$ext_real" && "$resolved" == "$ext_real"/* ]]
+    return
+  fi
+  return 1
+}
+check_link() {
+  local path=$1 rel=${1#"$tree"/}
+  [[ ! -L "$path" ]] || is_allowed_symlink "$path" "$rel" || fail "refusing symlink: $path"
+}
 check_no_links() {
   local path=$1
   [[ ! -L "$path" ]] || fail "refusing symlink path: $path"
@@ -33,11 +56,12 @@ check_no_links() {
 check_tree() {
   local path
   [[ -d "$tree" ]] || fail "expected existing runner directory $tree"
-  check_no_links "$tree"
-  while IFS= read -r -d '' path; do fail "refusing symlink: $path"; done < <(find -P "$tree" -type l -print0)
+  [[ ! -L "$tree" ]] || fail "refusing symlink path: $tree"
+  tree_real=$(realpath -e -- "$tree") || fail "cannot resolve runner directory $tree"
+  while IFS= read -r -d '' path; do check_link "$path"; done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o -type l -print0)
   while IFS= read -r -d '' path; do
     [[ -d "$path" || -f "$path" ]] || fail "refusing special file: $path"
-  done < <(find -P "$tree" ! -type d ! -type f -print0)
+  done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o ! -type d ! -type f ! -type l -print0)
   for directory in _work _tmp _diag; do
     [[ -d "$tree/$directory" && ! -L "$tree/$directory" ]] ||
       fail "missing runner directory $tree/$directory"
@@ -99,20 +123,20 @@ while IFS= read -r -d '' path; do
   plan_owner+=("$owner")
   plan_mode+=("$mode")
   plan_path+=("$path")
-done < <(find -P "$tree" -print0 | sort -z)
+done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o -print0 | sort -z)
 
 for index in "${!plan_path[@]}"; do
   owner=${plan_owner[$index]}; mode=${plan_mode[$index]}; path=${plan_path[$index]}
-  check_no_links "$path"
+  if [[ -L "$path" ]]; then continue; fi
   printf 'chown -h %s -- %q\nchmod %s -- %q\n' "$owner" "$path" "$mode" "$path"
 done
 (( dry_run )) && exit 0
 
 for index in "${!plan_path[@]}"; do
   owner=${plan_owner[$index]}; mode=${plan_mode[$index]}; path=${plan_path[$index]}
-  check_no_links "$path"
+  if [[ -L "$path" ]]; then continue; fi
   chown -h "$owner" -- "$path"
-  check_no_links "$path"
+  if [[ -L "$path" ]]; then fail "refusing symlink path: $path"; fi
   chmod "$mode" -- "$path"
 done
 printf 'installed root-owned permissions for %s\n' "$tree"

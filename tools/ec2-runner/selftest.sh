@@ -33,10 +33,32 @@ else
   [[ "$tree" != /home/* ]] || fail "--root is only for an offline fixture"
 fi
 [[ -d "$tree" && ! -L "$tree" ]] || fail "missing or symlink runner directory: $tree"
-while IFS= read -r -d '' path; do fail "refusing symlink: $path"; done < <(find -P "$tree" -type l -print0)
+tree_real=$(realpath -e -- "$tree") || fail "cannot resolve runner directory: $tree"
+is_allowed_symlink() {
+  local path=$1 rel=$2 resolved base kind ext_real
+  if [[ "$rel" =~ ^(bin|externals)$ ]]; then
+    kind=${BASH_REMATCH[1]}
+    resolved=$(realpath -e -- "$path") || return 1
+    [[ -d "$resolved" && "$(dirname -- "$resolved")" == "$tree_real" ]] || return 1
+    base=${resolved##*/}
+    [[ "$base" =~ ^$kind\.([0-9]+(\.[0-9]+){2})$ ]]
+    return
+  fi
+  if [[ "$rel" =~ ^externals\.([0-9]+(\.[0-9]+){2})/node[^/]*/.+$ ]]; then
+    resolved=$(realpath -e -- "$path") || return 1
+    ext_real="$tree_real/externals.${BASH_REMATCH[1]}"
+    [[ -d "$ext_real" && "$resolved" == "$ext_real"/* ]]
+    return
+  fi
+  return 1
+}
+while IFS= read -r -d '' path; do
+  rel=${path#"$tree"/}
+  is_allowed_symlink "$path" "$rel" || fail "refusing symlink: $path"
+done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o -type l -print0)
 while IFS= read -r -d '' path; do
   [[ -d "$path" || -f "$path" ]] || fail "unexpected special file: $path"
-done < <(find -P "$tree" ! -type d ! -type f -print0)
+done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o ! -type d ! -type f ! -type l -print0)
 for directory in _work _tmp _diag; do
   [[ -d "$tree/$directory" && ! -L "$tree/$directory" ]] || fail "missing runner directory $directory"
 done
@@ -52,6 +74,7 @@ check() {
   [[ "$mode" == "$expected_mode" ]] || fail "$path mode is $mode; expected $expected_mode"
 }
 while IFS= read -r -d '' path; do
+  [[ ! -L "$path" ]] || continue
   rel=${path#"$tree"/}
   if [[ "$rel" == "$tree" ]]; then rel=.; fi
   # Only the three writable directory roots have fixed metadata. Their
@@ -80,5 +103,5 @@ while IFS= read -r -d '' path; do
     fi
   fi
   check "$path" "$expected_owner" "$expected_mode"
-done < <(find -P "$tree" -print0 | sort -z)
+done < <(find -P "$tree" -path "$tree/_work/_update" -prune -o -print0 | sort -z)
 printf 'EC2 runner ownership and mode selftest passed: %s\n' "$tree"
