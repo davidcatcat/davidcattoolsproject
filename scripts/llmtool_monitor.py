@@ -773,7 +773,11 @@ def _disk_volume_stats(path: str) -> tuple[int, int, int, int]:
     """Use Darwin statfs (matching df on APFS), statvfs elsewhere or on error."""
     if sys.platform == "darwin":
         try:
-            return _read_darwin_statfs(path)
+            stats = _read_darwin_statfs(path)
+            blocks, free_blocks, available_blocks, block_size = stats
+            if (block_size <= 0 or available_blocks > blocks or free_blocks > blocks):
+                raise OSError("invalid Darwin statfs result")
+            return stats
         except Exception:
             pass
     usage = os.statvfs(path)
@@ -845,6 +849,8 @@ class Monitor:
             if total <= 0:
                 self.disk_usage = None
                 return
+            # On APFS, bfree == bavail, so this is (blocks - available) / blocks;
+            # it tracks df closely but can differ by about one percentage point.
             percent = max(0, min(100, math.ceil(used * 100 / total)))
             self.disk_usage = (percent, available)
         except Exception:
