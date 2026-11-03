@@ -99,19 +99,38 @@ def _summary(record):
     else:
         claim = None
         claim_state = 'NONE'
-    if claim_state == 'DISPATCHED' and type(claim.get('head_sha')) is str and \
-            type(claim.get('version')) is int:
-        reviewer_event = next((event for event in events
-                               if type(event) is dict and
-                               event.get('source') == 'REVIEWER' and
-                               event.get('source_sha') == claim['head_sha'] and
-                               event.get('version') == claim['version']), None)
-        if reviewer_event is not None:
-            outcome = reviewer_event.get('outcome') or reviewer_event.get('state')
-            if type(outcome) is str:
-                claim_state = outcome
     completion = record.get('completion')
     completion = completion if type(completion) is dict else {}
+    if claim_state == 'DISPATCHED' and type(claim.get('head_sha')) is str:
+        claim_head = claim['head_sha']
+        reviewer_event = next((event for event in reversed(events)
+                               if type(event) is dict and
+                               event.get('source') == 'REVIEWER' and
+                               event.get('source_sha') == claim_head), None)
+        if reviewer_event is not None:
+            # Completion evidence is authoritative for a PASS and must bind to
+            # the dispatched claim's head. Stored records may keep it directly,
+            # under ``evidence``, or under ``review_pr_ci``.
+            evidence_candidates = [record.get('review_pr_ci'), completion,
+                                   completion.get('evidence'),
+                                   completion.get('review_pr_ci')]
+            evidence_candidates.extend(
+                evidence.get('evidence') for evidence in tuple(evidence_candidates)
+                if type(evidence) is dict and type(evidence.get('evidence')) is dict)
+            review_evidence = next((evidence for evidence in evidence_candidates
+                                    if type(evidence) is dict and
+                                    evidence.get('head_sha') == claim_head and
+                                    evidence.get('formal_review_state') == 'ACCEPTED'), None)
+            if review_evidence is not None:
+                claim_state = 'PASS'
+            elif (type(claim.get('version')) is int and
+                  reviewer_event.get('version') == claim['version']):
+                # Preserve legacy event-derived states when the event carries
+                # the old version/outcome fields. A PASS still requires the
+                # accepted completion evidence checked above.
+                outcome = reviewer_event.get('outcome') or reviewer_event.get('state')
+                if type(outcome) is str and outcome not in ('PASS', 'REVIEW_PASS'):
+                    claim_state = outcome
     return {
         'task_id': record['task_id'],
         'pm_session_id': record.get('pm_session_id'),
