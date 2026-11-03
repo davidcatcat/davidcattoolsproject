@@ -390,7 +390,10 @@ def _validate(job, deadline):
             reject('OPENCODE_SCOPE_INVALID')
         collision_keys = set()
         for name in paths:
-            _path(name)
+            try:
+                _path(name)
+            except LLMToolError:
+                reject('OPENCODE_SCOPE_INVALID')
             key = unicodedata.normalize('NFC', name).casefold()
             if key in collision_keys:
                 reject('OPENCODE_SCOPE_INVALID')
