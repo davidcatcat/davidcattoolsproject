@@ -5735,3 +5735,117 @@ class PsArgvTests(unittest.TestCase):
         self.assertIn(os.getpid(), [row[0] for row in rows])
         mine, = [row for row in rows if row[0] == os.getpid()]
         self.assertEqual(mine[1:3], (os.getppid(), os.getpgrp()))
+
+
+class DiskUsageTests(unittest.TestCase):
+    @staticmethod
+    def statvfs_for(used_percent):
+        from types import SimpleNamespace
+        return SimpleNamespace(f_blocks=100, f_bfree=100 - used_percent,
+                               f_bavail=100 - used_percent, f_frsize=1024 ** 3)
+
+    def test_home_volume_percentages_and_threshold_messages(self):
+        for percent, label in ((50, ""), (91, "WARNING"), (97, "ATTENTION")):
+            with self.subTest(percent=percent):
+                monitor = mon.Monitor()
+                fake = self.statvfs_for(percent)
+                with patch.object(mon.os, "statvfs", return_value=fake) as statvfs, \
+                        patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                        patch.object(mon.sys, "platform", "linux"):
+                    monitor.refresh_disk_usage(now=0)
+                statvfs.assert_called_once_with("/home/test")
+                expected_free = fake.f_bavail * fake.f_frsize
+                free_label = f"{expected_free / (1024 ** 3):.1f}G free"
+                self.assertEqual(monitor.disk_usage, (percent, expected_free))
+                self.assertIn(f"disk {percent}% ({free_label})", mon.disk_status(monitor.disk_usage))
+                alert = mon.disk_alert(monitor.disk_usage)
+                if label:
+                    self.assertTrue(alert.startswith(label))
+                    self.assertIn("old D6 worktrees under the workspace root", alert)
+                    self.assertIn(free_label, alert)
+                else:
+                    self.assertEqual(alert, "")
+
+    def test_apfs_shared_container_uses_available_space_for_percentage(self):
+        monitor = mon.Monitor()
+        # Darwin df-like values for this Mac: 184924200K used, 1358817 blocks
+        # available, and 4096-byte blocks. APFS reports a shared container.
+        block_size = 4096
+        blocks = 61_202_533
+        used_blocks = (184_924_200 * 1024) // block_size
+        fake = (blocks, blocks - used_blocks, 1_358_817, block_size)
+        with patch.object(mon, "_read_darwin_statfs", return_value=fake) as statfs, \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "darwin"):
+            monitor.refresh_disk_usage(now=0)
+        statfs.assert_called_once_with("/home/test")
+        self.assertEqual(monitor.disk_usage,
+                         (98, 1_358_817 * block_size))
+
+    @staticmethod
+    def darwin_statfs_function(blocks=100, free=20, available=10, block_size=4096):
+        from unittest.mock import Mock
+
+        def fill_result(_path, pointer):
+            result = pointer._obj
+            result.f_blocks = blocks
+            result.f_bfree = free
+            result.f_bavail = available
+            result.f_bsize = block_size
+            return 0
+
+        return Mock(side_effect=fill_result)
+
+    def test_darwin_x86_64_uses_statfs64_symbol(self):
+        from types import SimpleNamespace
+
+        statfs64 = self.darwin_statfs_function()
+        libc = SimpleNamespace(statfs64=statfs64)
+        with patch.object(mon.ctypes, "CDLL", return_value=libc), \
+                patch.object(mon.platform, "machine", return_value="x86_64"):
+            result = mon._read_darwin_statfs("/home/test")
+        statfs64.assert_called_once()
+        self.assertEqual(result, (100, 20, 10, 4096))
+
+    def test_darwin_arm64_uses_statfs_symbol(self):
+        from types import SimpleNamespace
+
+        statfs = self.darwin_statfs_function()
+        libc = SimpleNamespace(statfs=statfs)
+        with patch.object(mon.ctypes, "CDLL", return_value=libc), \
+                patch.object(mon.platform, "machine", return_value="arm64"):
+            result = mon._read_darwin_statfs("/home/test")
+        statfs.assert_called_once()
+        self.assertEqual(result, (100, 20, 10, 4096))
+
+    def test_garbage_darwin_statfs_result_falls_back_to_statvfs(self):
+        monitor = mon.Monitor()
+        fallback = self.statvfs_for(91)
+        with patch.object(mon, "_read_darwin_statfs", return_value=(100, 20, 101, 0)), \
+                patch.object(mon.os, "statvfs", return_value=fallback) as statvfs, \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "darwin"):
+            monitor.refresh_disk_usage(now=0)
+        statvfs.assert_called_once_with("/home/test")
+        self.assertEqual(monitor.disk_usage, (91, 9 * (1024 ** 3)))
+
+    def test_statvfs_failure_is_silent(self):
+        monitor = mon.Monitor()
+        with patch.object(mon.os, "statvfs", side_effect=OSError("unavailable")), \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "linux"):
+            monitor.refresh_disk_usage(now=0)
+        self.assertIsNone(monitor.disk_usage)
+        self.assertEqual(mon.disk_status(monitor.disk_usage), "")
+        self.assertEqual(mon.disk_alert(monitor.disk_usage), "")
+
+    def test_statvfs_is_limited_to_once_per_60_seconds(self):
+        monitor = mon.Monitor()
+        with patch.object(mon.os, "statvfs", return_value=self.statvfs_for(50)) as statvfs, \
+                patch.object(mon.os.path, "expanduser", return_value="/home/test"), \
+                patch.object(mon.sys, "platform", "linux"):
+            monitor.refresh_disk_usage(now=0)
+            monitor.refresh_disk_usage(now=59.9)
+            statvfs.assert_called_once_with("/home/test")
+            monitor.refresh_disk_usage(now=60)
+        self.assertEqual(statvfs.call_count, 2)
