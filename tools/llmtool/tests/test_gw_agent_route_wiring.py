@@ -35,6 +35,9 @@ class GwAgentRouteWiringTests(unittest.TestCase):
 
     def test_route_config_and_data_class_are_validated(self):
         config = load_route_config()['routes']['gw-agent']
+        self.assertEqual(config['allowed_data_classes'], ['SYNTHETIC'])
+        self.assertEqual(config['authorization_ref'],
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520')
         with tempfile.TemporaryDirectory() as temp:
             package = Path(temp) / 'api_agent_gateway'
             package.mkdir()
@@ -51,11 +54,48 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 'max_input_tokens': 10000, 'max_output_tokens': 1000,
                 'max_wall_seconds': 60, 'max_tool_result_bytes': 4096,
                 'max_sent_bytes': 100000},
-            'egress_basis': 'Approved internal task context.', 'data_class': 'INTERNAL'}}
+            'egress_basis': 'Synthetic test content.', 'data_class': 'SYNTHETIC'}}
         route.validate_request(request)
         request['task']['data_class'] = 'RESTRICTED'
         with self.assertRaises(LLMToolError):
             route.validate_request(request)
+
+    def test_non_synthetic_delegate_is_refused_before_task_mutation(self):
+        task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
+            'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'synthetic task',
+            'task_binding': {'contract_digest': 'c' * 64},
+            'pm_assignment': {'route': 'gw-agent', 'risk': 'LOW', 'goal': 'goal',
+                              'acceptance': ['record result']},
+            'developer': None}
+
+        class Store:
+            def __init__(self):
+                self.mutations = 0
+
+            def get(self, _task_id):
+                return dict(task)
+
+            def update(self, _task_id, **_updates):
+                self.mutations += 1
+                raise AssertionError('disallowed data class must not mutate Task')
+
+        registration = SimpleNamespace(task_id='executor-d6', root='/repo/worktree',
+            common_dir='/repo/.git', branch='task-branch', trusted_agent_id='codex',
+            session_ref='session-ref', native_session_id=None)
+        snapshot = SimpleNamespace(head='d' * 40)
+        args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
+            data_class='INTERNAL', egress_basis='Synthetic test content only.',
+            acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
+            read_path=['src.py'], write_path=['src.py'])
+        store = Store()
+        with patch.object(task_completion, 'validate_task_binding'), \
+             patch.object(task_submission_cli, '_delegate_d6_binding',
+                          return_value=(registration, snapshot)), \
+             patch.object(task_submission_cli, '_assignment_paths',
+                          return_value=(['src.py'], ['src.py'])):
+            with self.assertRaises(LLMToolError):
+                task_submission_cli.run_task_gw_agent_delegate(args, store=store)
+        self.assertEqual(store.mutations, 0)
 
     def test_gw_agent_uses_claude_formal_reviewer(self):
         task = {'task_id': 'a' * 32, 'run_id': 'b' * 32,
@@ -105,7 +145,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             session_ref='session-ref', native_session_id=None)
         snapshot = SimpleNamespace(head='d' * 40)
         args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
-            data_class='INTERNAL', egress_basis='Approved internal context.',
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
         store = Store()
@@ -120,7 +160,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['PUBLIC', 'INTERNAL'],
+                              'allowed_data_classes': ['SYNTHETIC'],
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.object(worker_dispatch, 'authorize_dispatch',
                           side_effect=worker_dispatch.WorkerDispatchDenied('OWNER_PAUSED')), \
@@ -161,7 +201,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             session_ref='session-ref', native_session_id=None)
         snapshot = SimpleNamespace(head='d' * 40)
         args = Namespace(task_id='a' * 32, mode='direct', context_stdin=False,
-            data_class='INTERNAL', egress_basis='Approved internal context.',
+            data_class='SYNTHETIC', egress_basis='Synthetic test context.',
             acceptance=['record result'], selection_source='PM', executor_task='executor-d6',
             read_path=['src.py'], write_path=['src.py'])
         store = Store()
@@ -182,7 +222,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['PUBLIC', 'INTERNAL'],
+                              'allowed_data_classes': ['SYNTHETIC'],
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
