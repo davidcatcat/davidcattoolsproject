@@ -39,11 +39,13 @@ app is shown as one line, without its many helper processes.
 from __future__ import annotations
 
 import argparse
+import ctypes
 from collections import deque
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import math
 import os
+import platform
 import re
 import select
 import shutil
@@ -70,6 +72,9 @@ IGNORED = frozenset({"grep", "egrep", "fgrep", "pgrep", "ps"})
 PYTHON_VALUE_OPTIONS = frozenset({"-X", "-W", "-Q"})
 # Roles whose process groups are not expanded (GUI apps with many helpers).
 NO_EXPAND = frozenset({"Claude Desktop", "Antigravity App (AGY)"})
+DISK_REFRESH_SECONDS = 60.0
+DISK_WARNING_PERCENT = 90
+DISK_ATTENTION_PERCENT = 95
 
 
 @dataclass(frozen=True)
@@ -695,6 +700,90 @@ def _fit(text: str, width: int) -> str:
     return text if len(text) <= width else text[:width - 1] + "…"
 
 
+def disk_status(usage: tuple[int, int] | None) -> str:
+    if usage is None:
+        return ""
+    percent, free_bytes = usage
+    return f"disk {percent}% ({free_bytes / (1024 ** 3):.1f}G free)"
+
+
+def disk_alert(usage: tuple[int, int] | None) -> str:
+    if usage is None:
+        return ""
+    percent, free_bytes = usage
+    if percent < DISK_WARNING_PERCENT:
+        return ""
+    level = "ATTENTION" if percent >= DISK_ATTENTION_PERCENT else "WARNING"
+    return (f"{level}: disk {percent}% used ({free_bytes / (1024 ** 3):.1f}G free); "
+            "the PM can retire old D6 worktrees under the workspace root.")
+
+
+class _DarwinStatFS(ctypes.Structure):
+    """64-bit Darwin struct statfs layout (sys/mount.h)."""
+    _fields_ = [
+        ("f_bsize", ctypes.c_uint32),
+        ("f_iosize", ctypes.c_int32),
+        ("f_blocks", ctypes.c_uint64),
+        ("f_bfree", ctypes.c_uint64),
+        ("f_bavail", ctypes.c_uint64),
+        ("f_files", ctypes.c_uint64),
+        ("f_ffree", ctypes.c_uint64),
+        ("f_fsid", ctypes.c_int32 * 2),
+        ("f_owner", ctypes.c_uint32),
+        ("f_type", ctypes.c_uint32),
+        ("f_flags", ctypes.c_uint32),
+        ("f_fssubtype", ctypes.c_uint32),
+        ("f_fstypename", ctypes.c_char * 16),
+        ("f_mntonname", ctypes.c_char * 1024),
+        ("f_mntfromname", ctypes.c_char * 1024),
+        ("f_flags_ext", ctypes.c_uint32),
+        ("f_reserved", ctypes.c_uint64 * 7),
+    ]
+
+
+def _read_darwin_statfs(path: str) -> tuple[int, int, int, int]:
+    """Return blocks, free blocks, available blocks and block size via libc."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    machine = platform.machine()
+    if machine == "x86_64":
+        # On Intel macOS, statfs uses the legacy 32-bit-inode ABI. Its symbol
+        # cannot safely fill the 64-bit structure declared above.
+        statfs = getattr(libc, "statfs64", None)
+    elif machine == "arm64":
+        statfs = getattr(libc, "statfs", None)
+    else:
+        statfs = None
+    if statfs is None:
+        raise OSError("compatible Darwin statfs symbol is unavailable")
+    statfs.argtypes = (ctypes.c_char_p, ctypes.POINTER(_DarwinStatFS))
+    statfs.restype = ctypes.c_int
+    result = _DarwinStatFS()
+    encoded_path = os.fsencode(path)
+    if statfs(encoded_path, ctypes.byref(result)) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), path)
+    stats = result.f_blocks, result.f_bfree, result.f_bavail, result.f_bsize
+    blocks, free_blocks, available_blocks, block_size = stats
+    if (block_size <= 0 or available_blocks > blocks or free_blocks > blocks):
+        raise OSError("invalid Darwin statfs result")
+    return stats
+
+
+def _disk_volume_stats(path: str) -> tuple[int, int, int, int]:
+    """Use Darwin statfs (matching df on APFS), statvfs elsewhere or on error."""
+    if sys.platform == "darwin":
+        try:
+            stats = _read_darwin_statfs(path)
+            blocks, free_blocks, available_blocks, block_size = stats
+            if (block_size <= 0 or available_blocks > blocks or free_blocks > blocks):
+                raise OSError("invalid Darwin statfs result")
+            return stats
+        except Exception:
+            pass
+    usage = os.statvfs(path)
+    return usage.f_blocks, usage.f_bfree, usage.f_bavail, usage.f_frsize
+
+
 def table_lines(processes: list[Process]) -> list[str]:
     # Owner sits next to PID so it stays visible in an 80-column terminal.
     lines = [f"{'ROLE':<25} {'NAME':<12} {'PID':<7} {'OWNER':<30} {'PGID':<7} {'STATE':<5} ELAPSED"]
@@ -742,6 +831,30 @@ class Monitor:
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
         self.stale = False   # the file on disk changed since start: a restart is needed
+        self.disk_usage: tuple[int, int] | None = None  # used percent, available bytes
+        self.disk_due = 0.0
+
+    def refresh_disk_usage(self, now: float | None = None) -> None:
+        """Read the home volume at most once per minute; failure is silent."""
+        now = time.monotonic() if now is None else now
+        if now < self.disk_due:
+            return
+        self.disk_due = now + DISK_REFRESH_SECONDS
+        try:
+            blocks, free_blocks, available_blocks, block_size = _disk_volume_stats(
+                os.path.expanduser("~"))
+            used = (blocks - free_blocks) * block_size
+            available = available_blocks * block_size
+            total = used + available
+            if total <= 0:
+                self.disk_usage = None
+                return
+            # On APFS, bfree == bavail, so this is (blocks - available) / blocks;
+            # it tracks df closely but can differ by about one percentage point.
+            percent = max(0, min(100, math.ceil(used * 100 / total)))
+            self.disk_usage = (percent, available)
+        except Exception:
+            self.disk_usage = None
 
     def _flush_short_lived(self, stamp: str) -> list[tuple[str, str, str]]:
         out = []
@@ -755,6 +868,7 @@ class Monitor:
 
     def poll(self) -> list[tuple[str, str, str]]:
         self.polls += 1
+        self.refresh_disk_usage()
         now = time.monotonic()
         stamp = datetime.now().strftime("%H:%M:%S")
         try:
@@ -5782,8 +5896,13 @@ def run_once(github: "GitHubSource | None" = None) -> int:
         github.refresh()   # before the poll, so the D6 list can see PR states
         mon.github = github
     mon.poll()
-    print(f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
-          f"{summary(mon.processes, mon.lingering, ci_view=github.ci_view if github else None)}")
+    header = (f"AI agents · 監控版本 {mon.version} · {datetime.now():%Y-%m-%d %H:%M:%S} · "
+              f"{summary(mon.processes, mon.lingering, ci_view=github.ci_view if github else None)}")
+    disk = disk_status(mon.disk_usage)
+    print(header + (f"  ·  {disk}" if disk else ""))
+    alert = disk_alert(mon.disk_usage)
+    if alert:
+        print(alert)
     if mon.error:
         print(f"STATUS: UNKNOWN (unable to read process table: {mon.error})")
         return 1
@@ -5893,17 +6012,24 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
     h, w = stdscr.getmaxyx()
     body = max(1, h - 4)
     stdscr.erase()
-    put(0, f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}",
+    header = f"AI agents · 監控版本 {mon.version} · {datetime.now():%H:%M:%S} · polls {mon.polls}"
+    disk = disk_status(mon.disk_usage)
+    if disk:
+        header += f" · {disk}"
+    put(0, header,
         colors.get("title", 0) | curses.A_BOLD)
-    if mon.stale:
-        put(2, f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開",
-            colors.get("!", 0) | curses.A_BOLD)
     status = (f"STATUS UNKNOWN: {mon.error}" if mon.error
               else summary(mon.processes, mon.lingering,
                            ci_view=mon.github.ci_view if mon.github else None))
     running = running_stages(mon.tasks)
     status += f"  ·  llmtool stages running: {running}" if running else ""
     put(1, status, colors.get("!", 0) if (mon.error or mon.lingering) else 0)
+    alert = disk_alert(mon.disk_usage)
+    stale = (f"⚠ 監控程式已更新，這個畫面還是舊版（{mon.version}），請按 q 後重開"
+             if mon.stale else "")
+    if alert or stale:
+        put(2, "  ·  ".join(item for item in (stale, alert) if item),
+            colors.get("!", 0) | curses.A_BOLD)
     if view == "log":
         entries = list(mon.log)
         offset = max(0, min(offset, len(entries) - body))
