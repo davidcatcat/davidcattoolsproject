@@ -26,8 +26,13 @@ OWNER_SETTLED = frozenset({
     "RESOLVED", "DONE", "CLOSED", "CANCELLED", "WITHDRAWN", "AUTHORIZED",
     "ACCEPTED", "ACKNOWLEDGED", "SUPERSEDED",
 })
+WAITING_OWNER_DIRECTIONS = {
+    ("integrator", "owner"): frozenset({"BLOCKED", "WAITING", "UNKNOWN"}),
+    ("pm", "owner"): frozenset({"BLOCKED", "WAITING", "UNKNOWN"}),
+    ("owner", "pm"): frozenset({"ANSWERED"}),
+    ("owner", "integrator"): frozenset({"ANSWERED"}),
+}
 TRUSTED_ASSOCIATION = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
-WAITING_ASK = frozenset({"BLOCKED", "WAITING", "UNKNOWN"})
 
 
 class MarkerError(Exception):
@@ -80,7 +85,7 @@ def _post(number: str, body: str, repo: str) -> str:
 
 
 def _github_json(repo: str, endpoint: str) -> list:
-    result = _run(["gh", "api", "--paginate", "--slurp", "--jq", "add",
+    result = _run(["gh", "api", "--paginate", "--slurp",
                    f"repos/{repo}/{endpoint}"])
     if result.returncode:
         raise MarkerError("gh failed to read repository data")
@@ -88,9 +93,9 @@ def _github_json(repo: str, endpoint: str) -> list:
         payload = json.loads(result.stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise MarkerError("gh returned invalid JSON") from exc
-    if type(payload) is not list:
+    if type(payload) is not list or any(type(page) is not list for page in payload):
         raise MarkerError("gh returned unexpected JSON")
-    return payload
+    return [item for page in payload for item in page]
 
 
 def _github_time(value) -> int:
@@ -109,7 +114,7 @@ def _issue_number(url) -> str:
     return found.group(1) if found else ""
 
 
-def _waiting_markers(comments: list) -> dict[str, tuple[int, int, str]]:
+def _waiting_markers(comments: list) -> dict[str, tuple[int, int, str, str]]:
     """Mirror monitor.owner_pending marker, trust, ordering and settlement rules."""
     marked = []
     for comment in comments:
@@ -138,34 +143,38 @@ def _waiting_markers(comments: list) -> dict[str, tuple[int, int, str]]:
             continue
         kind, actor = fields.get("type", ""), fields.get("actor", "")
         target, status = fields.get("target", ""), fields.get("status", "")
-        if kind == "waiting_owner" and not (
-                (actor in {"pm", "integrator"} and target == "owner" and status in WAITING_ASK)
-                or (actor == "owner" and target in {"pm", "integrator"} and status == "ANSWERED")):
-            continue
         settles = actor == "owner" or (target == "owner" and status in OWNER_SETTLED)
+        if (settles and kind == "waiting_owner" and
+                status not in WAITING_OWNER_DIRECTIONS.get((actor, target), frozenset())):
+            continue
         if settles:
             latest.pop(number, None)
         elif target == "owner" and when:
-            latest[number] = (when, order, status)
+            latest[number] = (when, order, kind or "unknown", status or "UNKNOWN")
     return latest
 
 
-def open_rows(repo: str) -> list[str]:
-    comments = _github_json(repo, "issues/comments?per_page=100")
-    pulls = _github_json(repo, "pulls?state=all&per_page=100")
-    latest = _waiting_markers(comments)
+def open_rows_from_latest(latest: dict, pulls: list) -> list[str]:
     closed = {}
     for pull in pulls:
         if type(pull) is dict and type(pull.get("number")) is int:
             closed[str(pull["number"])] = max(_github_time(pull.get("merged_at")),
                                                 _github_time(pull.get("closed_at")))
-    return sorted((number for number, (when, _, status) in latest.items()
-                   if status == "WAITING" and closed.get(number, 0) <= when),
+    return sorted((number for number, (when, _, _, _) in latest.items()
+                   if closed.get(number, 0) <= when),
                   key=lambda number: (latest[number][0], int(number)))
 
 
+def open_rows(repo: str) -> list[tuple[str, str, str]]:
+    comments = _github_json(repo, "issues/comments?per_page=100")
+    pulls = _github_json(repo, "pulls?state=all&per_page=100")
+    latest = _waiting_markers(comments)
+    return [(number, latest[number][2], latest[number][3])
+            for number in open_rows_from_latest(latest, pulls)]
+
+
 def _body_ask(question: str, sheet: str | None) -> str:
-    body = f"{MARKER_ASK}\n{question.strip()}"
+    body = f"{MARKER_ASK}\n\n{question.strip()}"
     if sheet:
         body += "\n\n" + sheet.rstrip()
     return body
@@ -197,7 +206,7 @@ def main(argv=None) -> int:
         repo = repository_slug(args.repo)
         if args.command == "ask":
             question = args.question.strip()
-            if not question:
+            if not question or question.startswith("<!--"):
                 raise MarkerError("question is required")
             sheet = Path(args.sheet).read_text(encoding="utf-8") if args.sheet else None
             print(_post(args.number, _body_ask(question, sheet), repo))
@@ -206,8 +215,8 @@ def main(argv=None) -> int:
                 raise MarkerError("Owner words and PM reading are required")
             print(_post(args.number, _body_answer(args.owner_words, args.pm_reading), repo))
         else:
-            for number in open_rows(repo):
-                print(number)
+            for number, kind, status in open_rows(repo):
+                print(f"{number} {kind} {status}")
     except (MarkerError, OSError, UnicodeError) as exc:
         print(f"pm_owner_marker: {exc}", file=sys.stderr)
         return 1

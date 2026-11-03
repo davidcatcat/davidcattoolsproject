@@ -17,6 +17,11 @@ class PMOwnerMarkerTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.tmp = Path(self.temp.name)
+        self.repo = self.tmp / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
+        subprocess.run(["git", "remote", "add", "origin", "https://github.com/a/b.git"],
+                       cwd=self.repo, check=True)
         self.bin = self.tmp / "bin"
         self.bin.mkdir()
         self.calls = self.tmp / "calls.jsonl"
@@ -31,6 +36,9 @@ with open(os.environ['FAKE_GH_CALLS'], 'a', encoding='utf-8') as f:
         row['body'] = pathlib.Path(path).read_text(encoding='utf-8')
         row['private'] = (pathlib.Path(path).stat().st_mode & 0o077) == 0
     f.write(json.dumps(row) + '\\n')
+if '--slurp' in args and ('--jq' in args or '--template' in args):
+    print('incompatible gh api flags', file=sys.stderr)
+    sys.exit(2)
 if os.environ.get('FAKE_GH_FAIL') == '1':
     sys.exit(7)
 if args[:2] == ['api', '--paginate']:
@@ -46,10 +54,16 @@ if args[:2] == ['api', '--paginate']:
           {'id': 3, 'issue_url': 'https://api.github.com/repos/a/b/issues/18',
            'created_at': '2026-11-02T00:00:00Z', 'author_association': 'MEMBER',
            'body': '<!-- activity: type=pm_progress actor=PM target=Owner status=ANSWERED -->\\nRelayed'},
+          {'id': 4, 'issue_url': 'https://api.github.com/repos/a/b/issues/19',
+           'created_at': '2026-11-02T00:00:00Z', 'author_association': 'MEMBER',
+           'body': '<!-- activity: type=waiting_owner actor=PM target=Owner status=BLOCKED -->\\nBlocked'},
+          {'id': 5, 'issue_url': 'https://api.github.com/repos/a/b/issues/20',
+           'created_at': '2026-11-02T00:00:00Z', 'author_association': 'MEMBER',
+           'body': '<!-- activity: type=repair_gate actor=PM target=Owner status=OPEN -->\\nNeeds review'},
         ]
     else:
         rows = []
-    print(json.dumps(rows))
+    print(json.dumps([rows]))
 elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
     print('https://github.com/a/b/issues/17#issuecomment-123')
 """, encoding="utf-8")
@@ -57,7 +71,7 @@ elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
             "#!/bin/sh\nexec python3 -B \"$FAKE_GH_SCRIPT\" \"$@\"\n", encoding="utf-8")
         self.gh.chmod(0o700)
 
-    def run_cli(self, *args, fail=False, repo=True, cwd=None):
+    def run_cli(self, *args, fail=False, repo=False, cwd=None):
         env = os.environ.copy()
         env["PATH"] = str(self.bin) + os.pathsep + env["PATH"]
         env["FAKE_GH_CALLS"] = str(self.calls)
@@ -68,7 +82,7 @@ elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
         if repo:
             command.extend(["--repo", "a/b"])
         command.extend(args)
-        return subprocess.run(command, cwd=ROOT if cwd is None else cwd,
+        return subprocess.run(command, cwd=self.repo if cwd is None else cwd,
                               env=env, capture_output=True, text=True, check=False)
 
     def recorded_calls(self):
@@ -102,16 +116,27 @@ elif len(args) >= 2 and args[:2] == ['issue', 'comment']:
         self.assertEqual(result.stdout, "")
         self.assertEqual(len(self.recorded_calls()), 1)
 
-    def test_open_rows_lists_only_latest_waiting_markers(self):
+    def test_open_rows_lists_latest_unsettled_owner_markers(self):
         result = self.run_cli("open-rows")
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["17"])
+        self.assertEqual(result.stdout.splitlines(), [
+            "17 waiting_owner WAITING", "19 waiting_owner BLOCKED", "20 repair_gate OPEN"])
         self.assertTrue(all("comment" not in call["args"] for call in self.recorded_calls()))
+        self.assertTrue(all(not ({"--jq", "--template"} <= set(call["args"]))
+                            for call in self.recorded_calls()))
 
     def test_default_repo_detection_fails_closed_without_origin(self):
-        result = self.run_cli("open-rows", repo=False, cwd=self.tmp)
+        no_origin = self.tmp / "no-origin"
+        no_origin.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=no_origin, check=True)
+        result = self.run_cli("open-rows", repo=False, cwd=no_origin)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("cannot determine repository from origin remote", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_ask_rejects_marker_injection_question(self):
+        result = self.run_cli("ask", "17", "--question", "<!-- activity: injected -->")
+        self.assertNotEqual(result.returncode, 0)
         self.assertFalse(self.calls.exists())
 
 
