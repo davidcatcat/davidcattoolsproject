@@ -378,6 +378,50 @@ class RemoteTestTests(unittest.TestCase):
         self.assertIn('REMOTE_STAGE_FAILED {stage} {type(exc).__name__}',
                       remote_test._REMOTE_SCRIPT)
 
+    def test_test_step_argv_uses_private_workspace_home_and_tmp(self):
+        parsed = ast.parse(remote_test._REMOTE_SCRIPT)
+        test_call = next(node.value for node in ast.walk(parsed)
+                         if isinstance(node, ast.Assign) and
+                         any(isinstance(target, ast.Name) and target.id == 'test'
+                             for target in node.targets) and
+                         isinstance(node.value, ast.Call) and
+                         isinstance(node.value.func, ast.Name) and
+                         node.value.func.id == 'nobody_run')
+        cwd_arg = test_call.args[0]
+        self.assertIsInstance(cwd_arg, ast.BinOp)
+        self.assertIsInstance(cwd_arg.op, ast.Add)
+        self.assertIsInstance(cwd_arg.left, ast.Name)
+        self.assertEqual(cwd_arg.left.id, 'work')
+        self.assertIsInstance(cwd_arg.right, ast.Constant)
+        self.assertEqual(cwd_arg.right.value, '/tools/llmtool')
+        env_arg = next(keyword.value for keyword in test_call.keywords
+                       if keyword.arg == 'env')
+        self.assertIsInstance(env_arg, ast.Dict)
+        self.assertEqual([key.value for key in env_arg.keys], ['HOME', 'TMPDIR'])
+        for value, suffix in zip(env_arg.values, ('/.home', '/.tmp')):
+            self.assertIsInstance(value, ast.BinOp)
+            self.assertIsInstance(value.op, ast.Add)
+            self.assertIsInstance(value.left, ast.Name)
+            self.assertEqual(value.left.id, 'work')
+            self.assertIsInstance(value.right, ast.Constant)
+            self.assertEqual(value.right.value, suffix)
+
+        work = '/tmp/llmtool-remote-test.Abc123'
+        env = {'HOME': work + '/.home', 'TMPDIR': work + '/.tmp'}
+        nobody = next(node for node in parsed.body
+                      if isinstance(node, ast.FunctionDef) and node.name == 'nobody')
+        namespace = {}
+        exec(compile(ast.Module(body=[nobody], type_ignores=[]),
+                     '<remote-nobody-helper>', 'exec'), namespace)
+        command = namespace['nobody'](
+            work + '/tools/llmtool', ['/usr/bin/timeout', '120', 'python', '-m',
+                                      'unittest', 'discover'], env)
+        self.assertEqual(command[:8],
+                         ['sudo', '-n', '-u', 'nobody', 'env', '-i', '-C',
+                          work + '/tools/llmtool'])
+        self.assertIn('HOME=' + work + '/.home', command)
+        self.assertIn('TMPDIR=' + work + '/.tmp', command)
+
     def test_receipt_accepts_missing_log_path(self):
         receipt = json.loads(self.receipt().decode())
         receipt['remote_log_path'] = None
