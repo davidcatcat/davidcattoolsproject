@@ -966,6 +966,16 @@ class ActivePMInboxTests(unittest.TestCase):
                 native, str(self.pm_cwd), {'HOME': str(home)})
             self.assertEqual(path.parents[2], home / '.claude')
 
+    def test_session_lookup_propagates_pm_role_configuration_errors(self):
+        native = str(uuid.uuid4())
+        error = LLMToolError('invalid role config')
+        error.role_config_code = 'ROLE_CONFIG_INVALID'
+        with patch.object(role_config, 'resolve_role', side_effect=error):
+            with self.assertRaises(LLMToolError) as caught:
+                active_pm_inbox.claude_session_file(
+                    native, str(self.pm_cwd), {'HOME': str(self.base / 'home')})
+        self.assertEqual(caught.exception.role_config_code, 'ROLE_CONFIG_INVALID')
+
     def test_cwd_encoding_matches_claude_code_project_directories(self):
         base = active_pm_inbox.claude_session_file('x', '/').parent.parent
         cases = {

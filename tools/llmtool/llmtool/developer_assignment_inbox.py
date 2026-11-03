@@ -158,7 +158,9 @@ def claim(store, assignment_id, *, worker, d6_task_id, session_id, environ=None,
         from . import active_pm_inbox
         try:
             active_pm_inbox.observe_claude_session(session_id, item['d6_root'], environ)
-        except LLMToolError:
+        except LLMToolError as error:
+            if getattr(error, 'role_config_code', None):
+                raise
             return entry, AssignmentRefused('ASSIGNMENT_SESSION_NOT_FOUND')
         return entry, None
 

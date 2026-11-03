@@ -22,8 +22,9 @@ stops at a picker, so a CLI exit is not delivery. This helper:
   entrypoint, so it never edits the registry).
 
 ``watch`` applies the same session rules while the PM waits for a report file.
-The account is ``CLAUDE_CONFIG_DIR`` (default ``~/.claude``); only transcript
-files under its ``projects`` directory are read, never credentials.
+The account is ``CLAUDE_CONFIG_DIR``, then the configured worker role account,
+then ``~/.claude``; only transcript files under its ``projects`` directory
+are read, never credentials.
 
 Cross-account delivery (#367 slice 2) never launches anything. ``dispatch``
 launches only under the caller's own account: a ``--worker-config-dir`` that
@@ -114,6 +115,27 @@ def config_dir(role_settings=None):
     return Path(value or os.path.expanduser("~/.claude"))
 
 
+def _role_key(role):
+    if role in ("claude-reviewer", "codex-reviewer"):
+        return "reviewer"
+    if type(role) is str and CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role):
+        return "claude-developer"
+    return role
+
+
+def _account_environment(role):
+    """Resolve one CLI account for a run, preserving environment precedence."""
+    environ = os.environ.copy()
+    configured = role_config.resolve_role(_role_key(role))
+    if configured.get("provider") not in (None, "claude"):
+        raise DispatchError("ROLE_PROVIDER_UNSUPPORTED")
+    selected = environ.get("CLAUDE_CONFIG_DIR") or configured.get("config_dir")
+    if role == "claude-reviewer" and not selected:
+        raise DispatchError("REVIEWER_ACCOUNT_UNCONFIGURED")
+    environ["CLAUDE_CONFIG_DIR"] = str(selected or os.path.expanduser("~/.claude"))
+    return configured, environ
+
+
 def _run(argv, *, cwd=None, timeout=CLI_TIMEOUT, env=None):
     try:
         proc = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
@@ -125,9 +147,9 @@ def _run(argv, *, cwd=None, timeout=CLI_TIMEOUT, env=None):
     return proc.returncode, proc.stdout.decode("utf-8", "replace")
 
 
-def list_agents(claude, *, include_done=False):
+def list_agents(claude, *, include_done=False, env=None):
     argv = [claude, "agents", "--json"] + (["--all"] if include_done else [])
-    code, out = _run(argv)
+    code, out = _run(argv, env=env)
     if code != 0:
         raise DispatchError("CLAUDE_AGENTS_FAILED", "exit %d" % code)
     try:
@@ -280,10 +302,10 @@ def identify_started(rows, *, expected, before_ids, launch_ms, launch_output):
     return named[0] if len(named) == 1 else None
 
 
-def stop_session(claude, row_or_id):
+def stop_session(claude, row_or_id, *, env=None):
     ref = row_or_id["sessionId"] if type(row_or_id) is dict else row_or_id
     try:
-        code, _ = _run([claude, "stop", ref], timeout=15)
+        code, _ = _run([claude, "stop", ref], timeout=15, env=env)
     except DispatchError as exc:
         return {"attempted": True, "session": ref, "exit": None, "error": exc.code}
     return {"attempted": True, "session": ref, "exit": code}
@@ -326,26 +348,29 @@ def worker_config_dir(value):
     return path
 
 
-def refuse_cross_account_launch(worker_dir):
+def refuse_cross_account_launch(worker_dir, *, account_env=None):
     """A launch acts as the account it runs under, so only the caller's own is allowed."""
     if worker_dir is None:
         return
     if not os.path.isabs(worker_dir) or (
-            os.path.normpath(worker_dir) != os.path.normpath(str(config_dir()))):
+            os.path.normpath(worker_dir) != os.path.normpath(str(
+                (account_env or os.environ).get("CLAUDE_CONFIG_DIR") or config_dir()))):
         raise DispatchError("CROSS_ACCOUNT_LAUNCH_REFUSED")
 
 
 def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_interval,
              new_session=False, owner_assignment_ref=None, worker_dir=None):
-    refuse_cross_account_launch(worker_dir)
     is_claude_developer_role = (type(role) is str and
                                 CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role) is not None)
     if not is_claude_developer_role and not ROLE_RE.fullmatch(role or ""):
         raise DispatchError("ROLE_NAME_INVALID")
     try:
-        role_settings = role_config.resolve_role(role)
+        role_settings, account_env = _account_environment(role)
     except LLMToolError as exc:
         raise DispatchError(getattr(exc, "role_config_code", "ROLE_CONFIG_INVALID")) from None
+    refuse_cross_account_launch(worker_dir, account_env=account_env)
+    if role_settings.get("provider") not in (None, "claude"):
+        raise DispatchError("ROLE_PROVIDER_UNSUPPORTED")
     worker_key = {"claude-reviewer": "claude-reviewer",
                   "codex-reviewer": "codex-reviewer"}.get(role)
     if worker_key is None and is_claude_developer_role:
@@ -358,20 +383,20 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
     if not prompt or len(prompt.encode("utf-8")) > PROMPT_LIMIT or prompt.startswith("-"):
         raise DispatchError("PROMPT_INVALID")
     registration = _registration(task_id, repo_root)
-    rows = list_agents(claude, include_done=True)
+    rows = list_agents(claude, include_done=True, env=account_env)
     if new_session:
         expected = str(uuid.uuid4())
         cwd = registration.root
         session_args = ["--session-id", expected]
     else:
         expected = resolve_session(target, rows, role_settings)
-        current = _row(list_agents(claude), expected)
+        current = _row(list_agents(claude, env=account_env), expected)
         if current is not None and current.get("status") == "busy":
             # Resuming a busy session starts a second writer for the same task.
             raise DispatchError("SESSION_BUSY", expected)
         cwd = session_cwd(expected, rows, role_settings)
         session_args = ["--resume", expected]
-    before_ids = {row["sessionId"] for row in list_agents(claude)}
+    before_ids = {row["sessionId"] for row in list_agents(claude, env=account_env)}
     receipt = {
         "schema_version": 1, "result": "NOT_DELIVERED", "reason": None,
         "requested_session": None if new_session else target,
@@ -387,10 +412,8 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
             ["-n", role, "--add-dir", registration.root, "--", prompt])
     launch_ms = _now_ms()
     receipt["launched_at"] = _iso(launch_ms)
-    launch_env = os.environ.copy()
-    if not launch_env.get("CLAUDE_CONFIG_DIR") and role_settings.get("config_dir"):
-        launch_env["CLAUDE_CONFIG_DIR"] = role_settings["config_dir"]
-    if "ANTHROPIC_MODEL" not in launch_env and role_settings.get("model"):
+    launch_env = account_env.copy()
+    if not launch_env.get("ANTHROPIC_MODEL") and role_settings.get("model"):
         launch_env["ANTHROPIC_MODEL"] = role_settings["model"]
     code, output = _run(argv, cwd=cwd, env=launch_env)
     if code != 0:
@@ -401,7 +424,7 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
     started = None
     offsets = {}
     while True:
-        rows = list_agents(claude)
+        rows = list_agents(claude, env=account_env)
         if started is None:
             found = identify_started(rows, expected=expected, before_ids=before_ids,
                                      launch_ms=launch_ms, launch_output=output)
@@ -411,7 +434,7 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
         row = None if started is None else _row(rows, started)
         if started is not None and row is None:
             receipt["reason"] = "SESSION_GONE"
-            receipt["stop"] = stop_session(claude, started)
+            receipt["stop"] = stop_session(claude, started, env=account_env)
             return receipt
         if row is not None:
             receipt["status"], receipt["state"] = row.get("status"), row.get("state")
@@ -430,7 +453,7 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
             reason = "PROMPT_NOT_DELIVERED" if no_prompt else _failure_reason(row)
             if reason is not None:
                 receipt["reason"] = reason
-                receipt["stop"] = stop_session(claude, row)
+                receipt["stop"] = stop_session(claude, row, env=account_env)
                 return receipt
             if row.get("status") in RECEIPT_STATUSES:
                 action = first_action_since(started, launch_ms, offsets,
@@ -480,7 +503,8 @@ def _report_signature(path):
     return (info.st_ino, info.st_size, info.st_mtime_ns)
 
 
-def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=None):
+def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=None,
+          role="pm"):
     """Wait for a new report file while the session stays healthy.
 
     With ``since_ms`` (the receipt's ``launched_at``) a report counts when it
@@ -489,6 +513,10 @@ def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=N
     """
     if not UUID_RE.fullmatch(session_id or ""):
         raise DispatchError("SESSION_ID_INVALID")
+    try:
+        _, account_env = _account_environment(role)
+    except LLMToolError as exc:
+        raise DispatchError(getattr(exc, "role_config_code", "ROLE_CONFIG_INVALID")) from None
     result = {"schema_version": 1, "result": "WAITING", "reason": None,
               "session_id": session_id, "report_file": str(report_file),
               "status": None, "state": None, "stop": {"attempted": False}}
@@ -507,7 +535,7 @@ def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=N
         if fresh_report():
             result["result"] = "REPORT_PRESENT"
             return result
-        row = _row(list_agents(claude), session_id)
+        row = _row(list_agents(claude, env=account_env), session_id)
         if row is None or row.get("state") == "done":
             if fresh_report():  # it may have written the report and then finished
                 result["result"] = "REPORT_PRESENT"
@@ -516,14 +544,15 @@ def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=N
                 # Same rule as dispatch: a vanished session is stopped by full id
                 # in case it is still running outside the agents list.
                 result.update(result="FAILED", reason="SESSION_GONE",
-                              stop=stop_session(claude, session_id))
+                              stop=stop_session(claude, session_id, env=account_env))
             else:
                 result.update(result="FAILED", reason="SESSION_DONE")
             return result
         result["status"], result["state"] = row.get("status"), row.get("state")
         reason = _failure_reason(row)
         if reason is not None:
-            result.update(result="FAILED", reason=reason, stop=stop_session(claude, row))
+            result.update(result="FAILED", reason=reason,
+                          stop=stop_session(claude, row, env=account_env))
             return result
         if time.monotonic() >= deadline:
             result.update(result="FAILED", reason="REPORT_TIMEOUT")
