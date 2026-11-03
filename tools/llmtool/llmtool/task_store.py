@@ -88,7 +88,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
     'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
     'review_repair_claims', 'high_debug', 'abandonment', 'pm_session_adoptions',
-    'pm_provenance', 'merge_attempt'))
+    'pm_provenance', 'merge_attempt', 'published_pr'))
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
@@ -797,7 +797,9 @@ def _validate_remote_test_outcomes(record):
 def _validate(record):
     keys = set(record) - {'abandonment'} if type(record) is dict else set()
     merge_attempt = record.get('merge_attempt') if type(record) is dict else None
+    published_pr = record.get('published_pr') if type(record) is dict else None
     keys.discard('merge_attempt')
+    keys.discard('published_pr')
     if type(record) is dict and 'pm_session_adoptions' in record:
         keys.discard('pm_session_adoptions')
     if (type(record) is not dict or
@@ -839,6 +841,15 @@ def _validate(record):
                 merge_attempt.get('state') not in ('CLAIMED', 'UNKNOWN', 'MERGED') or
                 type(merge_attempt.get('claimed_at')) is not str):
             _fail('TASK_MERGE_ATTEMPT_INVALID')
+    if published_pr is not None:
+        if (type(published_pr) is not dict or
+                set(published_pr) != frozenset(('pr', 'head_sha', 'recorded_at')) or
+                type(published_pr.get('pr')) is not int or
+                not 1 <= published_pr['pr'] <= 9999999 or
+                type(published_pr.get('head_sha')) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', published_pr['head_sha']) is None or
+                not _valid_utc_seconds(published_pr.get('recorded_at'))):
+            _fail('TASK_PUBLISHED_PR_INVALID')
     if (type(record['schema_version']) is not int or record['schema_version'] not in (1, 2) or
             not _safe_identifier(record['task_id'], TASK_ID) or
             not _safe_identifier(record['run_id'], TASK_ID) or
@@ -2314,6 +2325,31 @@ class TaskStore:
         if type(expected) is not dict or not expected:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
+
+    def record_published_pr(self, task_id, pr, head_sha):
+        """Record or replace the PR linked to this Task's published HEAD."""
+        if (type(pr) is not int or not 1 <= pr <= 9999999 or
+                type(head_sha) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', head_sha) is None):
+            _fail('TASK_PUBLISHED_PR_INVALID')
+        for _ in range(5):
+            current = self.get(task_id)
+            existing = current.get('published_pr')
+            if (type(existing) is dict and existing.get('pr') == pr and
+                    existing.get('head_sha') == head_sha):
+                return existing
+            published = {
+                'pr': pr, 'head_sha': head_sha,
+                'recorded_at': datetime.now(timezone.utc).replace(
+                    microsecond=0).strftime('%Y-%m-%dT%H:%M:%SZ'),
+            }
+            try:
+                self._update(task_id, expected={'record_sha256': current['record_sha256']},
+                             changes={'published_pr': published})
+                return published
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
 
     def record_codex_launch(self, task_id, *, assignment_id, pid, start_time, pgid):
         """Persist the direct Codex child identity through the trusted launch path."""
