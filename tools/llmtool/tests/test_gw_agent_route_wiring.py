@@ -342,14 +342,21 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 self.value = dict(task)
 
             def get(self, _task_id):
-                return dict(self.value)
+                return copy.deepcopy(self.value)
 
             def compare_and_update(self, _task_id, *, expected, **updates):
                 for key, value in expected.items():
                     if self.value.get(key) != value:
                         raise task_store.TaskStoreConflict('expected value changed')
-                self.value.update(updates)
-                return dict(self.value)
+                self.value.update(copy.deepcopy(updates))
+                return copy.deepcopy(self.value)
+
+            def append_dispatch_audit(self, _task_id, entry, *, expected):
+                for key, value in expected.items():
+                    if self.value.get(key) != value:
+                        raise task_store.TaskStoreConflict('expected value changed')
+                self.value.setdefault('dispatch_audit', []).append(copy.deepcopy(entry))
+                return copy.deepcopy(self.value)
 
             def update(self, _task_id, **updates):
                 self.value.update(updates)
@@ -370,6 +377,14 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         def fail_runner(_route, _request, *, gate, **_kwargs):
             self.assertIs(gate(), decision)
             raise RouteError('GW_AGENT_MODEL_ERROR')
+
+        def authorize_and_audit(_store, _task_id, _worker_key, action):
+            store.append_dispatch_audit(_task_id, {
+                'decision': 'ALLOWED', 'action': action,
+            }, expected={
+                'developer': store.value['developer'],
+                'dispatch_audit': store.value.get('dispatch_audit'),
+            })
         with patch.object(task_completion, 'validate_task_binding'), \
              patch.object(task_completion, 'bind_executor_task',
                           return_value=(registration, snapshot)), \
@@ -383,7 +398,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['SYNTHETIC'],
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
-             patch.object(worker_dispatch, 'authorize_dispatch'), \
+             patch.object(worker_dispatch, 'authorize_dispatch',
+                          side_effect=authorize_and_audit), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
              patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
              patch.object(task_submission_cli, 'for_platform', return_value=object()), \
@@ -419,6 +435,13 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 self.value.update(copy.deepcopy(updates))
                 return copy.deepcopy(self.value)
 
+            def append_dispatch_audit(self, _task_id, entry, *, expected):
+                for key, value in expected.items():
+                    if self.value.get(key) != value:
+                        raise task_store.TaskStoreConflict('expected value changed')
+                self.value.setdefault('dispatch_audit', []).append(copy.deepcopy(entry))
+                return copy.deepcopy(self.value)
+
             def update(self, _task_id, **updates):
                 self.value.update(copy.deepcopy(updates))
                 return copy.deepcopy(self.value)
@@ -435,7 +458,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
 
         def authorize_and_rewrite(_store, _task_id, _worker_key, _action):
             # The real authorization gate persists its audit before returning.
-            store.value['dispatch_audit'] = [{'decision': 'ALLOWED'}]
+            store.append_dispatch_audit(_task_id, {'decision': 'ALLOWED'}, expected={
+                'developer': store.value['developer'],
+                'dispatch_audit': store.value.get('dispatch_audit'),
+            })
 
         def invalid_profile(*_args):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
