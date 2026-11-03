@@ -58,6 +58,12 @@ class ReviewDispatchTests(unittest.TestCase):
         self.executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git')
         self.preflight = (TASK, self.executor, HEAD, 'd' * 40, 'claude-reviewer')
         self.created, self.sent, self.bound = [], [], []
+        self.reviewer_role_patch = patch.object(
+            review_dispatch.role_config, 'resolve_role',
+            return_value={'config_dir': '/private/test-reviewer-account',
+                          'source': 'roles'})
+        self.reviewer_role_patch.start()
+        self.addCleanup(self.reviewer_role_patch.stop)
 
     def tearDown(self):
         self.temp.cleanup()
