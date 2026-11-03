@@ -105,17 +105,8 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         trust_dir.mkdir(parents=True, mode=0o700)
         for directory in (self.trust_home, self.trust_home / ".config", trust_dir):
             directory.chmod(0o700)
-        trust_path = trust_dir / "trust.json"
-        trust_path.write_text(json.dumps({
-            "schema_version": 1, "canonical_root": str(self.source),
-            "workspace_root": str(self.root), "tasks_root": str(self.tasks),
-            "repository": {"slug": "davidcatcat/davidcattoolsproject",
-                           "allowed_origins": [
-                               "git@github.com:davidcatcat/davidcattoolsproject.git"],
-                           "approval_refs": {}},
-            "ci_trust": {}, "tools": {},
-        }), encoding="utf-8")
-        trust_path.chmod(0o600)
+        self.trust_path = trust_path = trust_dir / "trust.json"
+        self._write_trust()
         self._original_load_trust = lifecycle._load_trust
         self._trust_patch = patch.object(
             lifecycle, "_load_trust",
@@ -152,6 +143,21 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self._script_path_patch.start()
         self.addCleanup(self._script_path_patch.stop)
 
+    def _write_trust(self, *, retain_release_issues=(289, 352), origins=None,
+                     ci_trust=None):
+        """(Re)write the temp trust.json; never the real Owner file."""
+        self.trust_path.write_text(json.dumps({
+            "schema_version": 1, "canonical_root": str(self.source),
+            "workspace_root": str(self.root), "tasks_root": str(self.tasks),
+            "repository": {"slug": "davidcatcat/davidcattoolsproject",
+                           "allowed_origins": list(origins or [
+                               "git@github.com:davidcatcat/davidcattoolsproject.git"]),
+                           "approval_refs": {
+                               "retain_release_issues": list(retain_release_issues)}},
+            "ci_trust": ci_trust or {}, "tools": {},
+        }), encoding="utf-8")
+        self.trust_path.chmod(0o600)
+
     def test_main_refuses_changed_trust_digest(self):
         output = io.StringIO()
         with contextlib.redirect_stderr(output):
@@ -172,6 +178,259 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
                     workspace_root=self.tasks)
         self.assertEqual(raised.exception.code, "D6_REPOSITORY_INVALID")
         self.assertFalse((self.tasks / "q5-root-check").exists())
+
+    # --- #369 PR-4: registry trust stamps and rotation -------------------
+
+    HTTPS_ORIGIN = "https://github.com/davidcatcat/davidcattoolsproject.git"
+    SSH_ORIGIN = "git@github.com:davidcatcat/davidcattoolsproject.git"
+
+    def _rotate_trust_binding(self):
+        # Adding the HTTPS origin changes allowed_origins, so the binding digest.
+        self._write_trust(origins=[self.SSH_ORIGIN, self.HTTPS_ORIGIN])
+
+    def _stamp(self, record_path):
+        trust = lifecycle._load_trust()
+        record = lifecycle._read_registry_record(record_path)
+        record.update(trust_sha256=trust["sha256"],
+                      trust_binding_sha256=trust["binding_sha256"])
+        lifecycle._replace_record(record_path, record)
+        return record
+
+    def _record_result(self, task_id, root):
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            return lifecycle.record_result(task_id=task_id, canonical_root=self.source,
+                                           root=root, workspace_root=self.tasks)
+
+    def _bind(self, task_id):
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            return lifecycle.bind_native_session(
+                task_id=task_id, native_session_id="native-session-pr4",
+                canonical_root=self.source, workspace_root=self.tasks)
+
+    def test_binding_digest_matches_trust_module(self):
+        from llmtool import trust as trust_module
+        for origins in ([self.SSH_ORIGIN], [self.HTTPS_ORIGIN, self.SSH_ORIGIN]):
+            self._write_trust(origins=origins)
+            value = json.loads(self.trust_path.read_text(encoding="utf-8"))
+            loaded = lifecycle._load_trust()
+            self.assertEqual(loaded["binding_sha256"], trust_module._binding(value))
+            self.assertEqual(loaded["slug"], "davidcatcat/davidcattoolsproject")
+            self.assertEqual(loaded["retain_release_issues"], (289, 352))
+
+    def test_trust_loader_rejects_invalid_retain_release_issues(self):
+        for issues in ([], [0], [True], [5, 5], list(range(1, 10)), ["289"]):
+            self._write_trust(retain_release_issues=issues)
+            with self.assertRaises(lifecycle.TrustError) as raised:
+                lifecycle._load_trust()
+            self.assertEqual(str(raised.exception), "TRUST_SCHEMA_INVALID")
+
+    def test_record_result_allows_full_digest_change_and_refuses_rotation(self):
+        root, record_path = self._registered_result_fixture("stamp-result")
+        stamped = self._stamp(record_path)
+        self._write_trust(ci_trust={"mode": "self-hosted"})
+        self.assertNotEqual(lifecycle._load_trust()["sha256"], stamped["trust_sha256"])
+        head = self._commit_file(root, "result\n", "developer result")
+
+        def complete_bootstrap(_root, _task_id):
+            current = lifecycle._read_registry_record(record_path)
+            current["env2_pass_marker"] = dict(current["env2_pass_marker"],
+                                               submitted_head_sha=head,
+                                               current_head_sha=head)
+            lifecycle._replace_record(record_path, current)
+
+        with patch.object(lifecycle, "_bootstrap", side_effect=complete_bootstrap), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(self._record_result("stamp-result", root), head)
+        after = lifecycle._read_registry_record(record_path)
+        # Stamps are never rewritten by a later lifecycle step.
+        self.assertEqual((after["trust_sha256"], after["trust_binding_sha256"]),
+                         (stamped["trust_sha256"], stamped["trust_binding_sha256"]))
+
+        self._rotate_trust_binding()
+        self._commit_file(root, "second\n", "second result")
+        before = lifecycle._read_registry_record(record_path)
+        with patch.object(lifecycle, "_bootstrap") as bootstrap, \
+                self.assertRaises(lifecycle.LifecycleError) as raised:
+            self._record_result("stamp-result", root)
+        self.assertEqual(raised.exception.code, "D6_TRUST_ROTATED")
+        bootstrap.assert_not_called()
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+    def test_bind_native_session_refuses_rotated_binding(self):
+        _root, record_path = self._registered_result_fixture("stamp-bind")
+        self._stamp(record_path)
+        self._rotate_trust_binding()
+        before = lifecycle._read_registry_record(record_path)
+        with self.assertRaises(lifecycle.LifecycleError) as raised:
+            self._bind("stamp-bind")
+        self.assertEqual(raised.exception.code, "D6_TRUST_ROTATED")
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+    def test_partial_or_invalid_stamps_are_treated_as_rotated(self):
+        _root, record_path = self._registered_result_fixture("stamp-partial")
+        trust = lifecycle._load_trust()
+        for stamps in ({"trust_sha256": trust["sha256"]},
+                       {"trust_binding_sha256": None},
+                       {"trust_sha256": trust["sha256"],
+                        "trust_binding_sha256": trust["binding_sha256"].upper()}):
+            record = lifecycle._read_registry_record(record_path)
+            for key in ("trust_sha256", "trust_binding_sha256"):
+                record.pop(key, None)
+            record.update(stamps)
+            lifecycle._replace_record(record_path, record)
+            with self.assertRaises(lifecycle.LifecycleError) as raised:
+                self._bind("stamp-partial")
+            self.assertEqual(raised.exception.code, "D6_TRUST_ROTATED")
+
+    def test_legacy_record_follows_current_trust_path_rules(self):
+        # Fixture records carry no stamps: matching paths pass unchanged.
+        _root, record_path = self._registered_result_fixture("legacy-bind")
+        with contextlib.redirect_stdout(io.StringIO()):
+            self._bind("legacy-bind")
+        after = lifecycle._read_registry_record(record_path)
+        self.assertNotIn("trust_sha256", after)
+        self.assertNotIn("trust_binding_sha256", after)
+
+        root, record_path = self._registered_result_fixture("legacy-moved")
+        trust = lifecycle._load_trust()
+        for changed in (dict(trust, canonical_root=str(self.root / "other-canonical")),
+                        dict(trust, tasks_root=str(self.root / "other-tasks"))):
+            before = lifecycle._read_registry_record(record_path)
+            with patch.object(lifecycle, "_load_trust", return_value=changed):
+                with self.assertRaises(lifecycle.LifecycleError) as raised:
+                    self._bind("legacy-moved")
+                self.assertEqual(raised.exception.code, "D6_TRUST_ROTATED")
+                with patch.object(lifecycle, "_bootstrap") as bootstrap, \
+                        self.assertRaises(lifecycle.LifecycleError) as raised:
+                    self._record_result("legacy-moved", root)
+                self.assertEqual(raised.exception.code, "D6_TRUST_ROTATED")
+                bootstrap.assert_not_called()
+            self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+    def test_trust_change_after_lock_stops_record_result_and_bind(self):
+        root, record_path = self._registered_result_fixture("stamp-toctou")
+        self._commit_file(root, "result\n", "developer result")
+        before = lifecycle._read_registry_record(record_path)
+        trust = lifecycle._load_trust()
+        for call in (lambda: self._record_result("stamp-toctou", root),
+                     lambda: self._bind("stamp-toctou")):
+            changed = dict(trust, sha256="0" * 64)
+            with patch.object(lifecycle, "_load_trust", side_effect=[trust, changed]), \
+                    patch.object(lifecycle, "_bootstrap") as bootstrap, \
+                    self.assertRaises(lifecycle.TrustError) as raised:
+                call()
+            self.assertEqual(str(raised.exception), "TRUST_CHANGED_DURING_RUN")
+            bootstrap.assert_not_called()
+            self.assertEqual(lifecycle._read_registry_record(record_path), before)
+
+    def test_device_rebind_refuses_rotated_binding(self):
+        _root, record_path = self._registered_result_fixture("stamp-rebind")
+        record = self._stamp(record_path)
+        record["physical_identity"]["device"] += 1
+        lifecycle._replace_record(record_path, record)
+        self._rotate_trust_binding()
+        for execute in (False, True):
+            result, line = self._rebind("stamp-rebind", execute=execute)
+            self.assertEqual(result, 1)
+            self.assertEqual((line["result"], line["reasons"]),
+                             ("BLOCKED", ["D6_TRUST_ROTATED"]))
+        self.assertEqual(lifecycle._read_registry_record(record_path), record)
+
+    def test_reconcile_retain_blocks_rotated_absent_record_and_reports_legacy(self):
+        rotated_root, rotated_path = self._registered_result_fixture("stamp-reconcile")
+        legacy_root, legacy_path = self._registered_result_fixture("legacy-reconcile")
+        self._stamp(rotated_path)
+        for root in (rotated_root, legacy_root):
+            subprocess.run(["/usr/bin/git", "worktree", "unlock", str(root)],
+                           cwd=self.source, check=True, capture_output=True)
+            shutil.rmtree(root)
+        subprocess.run(["/usr/bin/git", "worktree", "prune"], cwd=self.source,
+                       check=True, capture_output=True)
+        self._rotate_trust_binding()
+
+        def reconcile(execute):
+            output = io.StringIO()
+            with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                    contextlib.redirect_stdout(output):
+                lifecycle.reconcile_registry(canonical_root=self.source, execute=execute,
+                                             workspace_root=self.tasks)
+            return {item["task_id"]: item for item in json.loads(output.getvalue())["records"]}
+
+        dry = reconcile(False)
+        self.assertEqual((dry["stamp-reconcile"]["result"], dry["stamp-reconcile"]["reason"]),
+                         ("BLOCKED", "D6_TRUST_ROTATED"))
+        self.assertEqual(dry["legacy-reconcile"]["result"], "RECONCILE_READY")
+        self.assertIs(dry["legacy-reconcile"]["legacy_unstamped"], True)
+        self.assertEqual(lifecycle._read_registry_record(rotated_path)["state"], "ACTIVE")
+
+        executed = reconcile(True)
+        self.assertEqual(executed["stamp-reconcile"]["result"], "RETAIN_BLOCKED")
+        self.assertEqual(executed["legacy-reconcile"]["result"], "RETIRED_EXTERNALLY")
+        rotated = lifecycle._read_registry_record(rotated_path)
+        self.assertEqual(rotated["state"], "RETAIN_BLOCKED")
+        self.assertIn("trust rotation", rotated["evidence_refs"][-1])
+        self.assertNotIn("trust_sha256", lifecycle._read_registry_record(legacy_path))
+
+        # The rotated record is released only with an approval from the new trust.
+        self._write_trust(origins=[self.SSH_ORIGIN, self.HTTPS_ORIGIN],
+                          retain_release_issues=[900])
+        old = "https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-1"
+        new = "https://github.com/davidcatcat/davidcattoolsproject/issues/900#issuecomment-2"
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}):
+            error = io.StringIO()
+            with contextlib.redirect_stderr(error):
+                self.assertEqual(lifecycle._main([
+                    "--release-retain", "stamp-reconcile=" + old,
+                    "--repo-root", str(self.source)]), 1)
+            self.assertEqual(error.getvalue(),
+                             "STOP: D6 lifecycle rejected (D6_TASK_INPUT_INVALID)\n")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(lifecycle._main([
+                    "--release-retain", "stamp-reconcile=" + new,
+                    "--repo-root", str(self.source)]), 0)
+        (released,) = json.loads(output.getvalue())["records"]
+        self.assertEqual(released["result"], "RETIRED_EXTERNALLY")
+        self.assertIs(released["trust_rotated"], True)
+        self.assertEqual(lifecycle._read_registry_record(rotated_path)["owner_approval_ref"], new)
+
+    def test_release_retain_requires_trust_retain_release_issues(self):
+        self._write_trust()
+        value = json.loads(self.trust_path.read_text(encoding="utf-8"))
+        del value["repository"]["approval_refs"]["retain_release_issues"]
+        self.trust_path.write_text(json.dumps(value), encoding="utf-8")
+        approval = "https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-1"
+        error = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                contextlib.redirect_stderr(error):
+            self.assertEqual(lifecycle._main([
+                "--release-retain", "any-task=" + approval,
+                "--repo-root", str(self.source)]), 1)
+        self.assertEqual(error.getvalue(),
+                         "STOP: D6 lifecycle rejected (TRUST_SCHEMA_INVALID)\n")
+        with self.assertRaises(lifecycle.TrustError):
+            lifecycle.release_retained_records(canonical_root=self.source,
+                                               approvals={"any-task": approval},
+                                               workspace_root=self.tasks)
+
+    def test_release_retain_pattern_and_help_derive_from_trust(self):
+        self._write_trust(retain_release_issues=[900, 901])
+        pattern = lifecycle._retain_release_re(lifecycle._load_trust())
+        self.assertTrue(pattern.fullmatch(
+            "https://github.com/davidcatcat/davidcattoolsproject/issues/901#issuecomment-7"))
+        for rejected in (
+                "https://github.com/davidcatcat/davidcattoolsproject/issues/352#issuecomment-7",
+                "https://github.com/davidcatcatXdavidcattoolsproject/issues/900#issuecomment-7",
+                "https://github.com/davidcatcat/davidcattoolsproject/issues/9001#issuecomment-7"):
+            self.assertIsNone(pattern.fullmatch(rejected))
+        self.assertIn("issue 900 or 901 of davidcatcat/davidcattoolsproject",
+                      lifecycle._release_retain_help())
+        with patch.object(lifecycle, "_load_trust",
+                          side_effect=lifecycle.TrustError("TRUST_MISSING")):
+            self.assertIn("trust.json approval_refs.retain_release_issues",
+                          lifecycle._release_retain_help())
+        # The legacy constant stays only for `llmtool trust verify-legacy`.
+        self.assertIn("(?:289|352)", lifecycle.OWNER_APPROVAL_RE.pattern)
 
     def _registered_result_fixture(self, task_id="record-result-test"):
         root = self.tasks / task_id
@@ -827,6 +1086,15 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         self.assertEqual(record["head_sha"], self.base)
         self.assertEqual(record["branch"], "test/d6-integration-test")
         self.assertEqual(record["root_realpath"], str(root))
+        trust = lifecycle._load_trust()
+        self.assertEqual(record["trust_sha256"], trust["sha256"])
+        self.assertEqual(record["trust_binding_sha256"], trust["binding_sha256"])
+        # ENV-2 (d6_worktree_env) just accepted this stamped record; the
+        # task_completion reader used by review dispatch accepts it as well.
+        from llmtool import task_completion
+        registration = task_completion.read_d6_registration(
+            "d6-integration-test", str(self.source / ".git"))
+        self.assertEqual(registration.root, str(root))
         marker = record["env2_pass_marker"]
         self.assertEqual(marker["result"], "PASS")
         self.assertEqual(marker["task_id"], "d6-integration-test")
@@ -867,6 +1135,22 @@ class D6WorktreeLifecycleTests(unittest.TestCase):
         with contextlib.redirect_stderr(output):
             self.assertEqual(self._revalidate_d6(root, "d6-integration-test"), 1)
         self.assertIn("D6_UNREGISTERED_LOCAL_STATE", output.getvalue())
+
+        # After a trust rotation the stamped worktree is never resumed (7.3).
+        self._rotate_trust_binding()
+        before = lifecycle._read_registry_record(record_path)
+        error_output = io.StringIO()
+        with patch.dict(os.environ, {"LLMTOOL_D6_TESTING": "1"}), \
+                patch.object(lifecycle, "_bootstrap") as bootstrap, \
+                contextlib.redirect_stderr(error_output):
+            self.assertEqual(lifecycle._main([
+                "--resume-task-id", "d6-integration-test",
+                "--resume-root", str(root), "--repo-root", str(self.source),
+            ]), 1)
+        bootstrap.assert_not_called()
+        self.assertEqual(error_output.getvalue(),
+                         "STOP: D6 lifecycle rejected (D6_TRUST_ROTATED)\n")
+        self.assertEqual(lifecycle._read_registry_record(record_path), before)
 
     def test_committed_task_tree_lifecycle_cannot_bootstrap_from_itself(self):
         task_root = self.tasks / "committed-task-tree"

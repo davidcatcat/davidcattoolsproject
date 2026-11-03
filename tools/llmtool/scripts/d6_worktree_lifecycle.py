@@ -217,13 +217,81 @@ def _load_trust(home=None):
                 not isinstance(origins, list) or not 1 <= len(origins) <= 2 or
                 len(origins) != len(set(origins)) or not set(origins) <= allowed):
             _fail("TRUST_SCHEMA_INVALID")
+        refs = repository["approval_refs"]
+        if type(refs) is not dict:
+            _fail("TRUST_SCHEMA_INVALID")
+        # Read lazily: only --release-retain needs these issue numbers, and it
+        # fails closed (TRUST_SCHEMA_INVALID) when the field is absent.
+        retain_issues = refs.get("retain_release_issues")
+        if retain_issues is not None and (
+                type(retain_issues) is not list or not 1 <= len(retain_issues) <= 8 or
+                any(type(item) is not int or not 1 <= item <= 10 ** 9
+                    for item in retain_issues) or
+                len(retain_issues) != len(set(retain_issues))):
+            _fail("TRUST_SCHEMA_INVALID")
+        # Same canonical identity JSON as llmtool.trust._binding (#369 section 7.2).
+        binding = hashlib.sha256(json.dumps(
+            {"canonical_root": roots[0], "workspace_root": roots[1],
+             "tasks_root": roots[2], "slug": slug, "allowed_origins": origins},
+            sort_keys=True, ensure_ascii=True, separators=(",", ":")).encode("ascii")).hexdigest()
     except TrustError:
         raise
     except (KeyError, TypeError, ValueError, UnicodeError, RecursionError):
         _fail("TRUST_MALFORMED")
     return {"canonical_root": roots[0], "workspace_root": roots[1],
             "tasks_root": roots[2], "origins": frozenset(origins),
-            "sha256": hashlib.sha256(raw).hexdigest()}
+            "slug": slug,
+            "retain_release_issues": (None if retain_issues is None
+                                      else tuple(retain_issues)),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "binding_sha256": binding}
+
+
+def _recheck_trust_after_lock(trust):
+    """Re-read trust under the lifecycle lock; a changed file stops the run (7.1)."""
+    current = _load_trust()
+    if current["sha256"] != trust["sha256"]:
+        _fail("TRUST_CHANGED_DURING_RUN")
+    return current
+
+
+def _trust_binding_status(record, trust):
+    """Return ``stamped``, ``legacy`` or ``rotated`` for one registry record.
+
+    A stamped record must carry the current ``trust_binding_sha256``; only the
+    audit-only ``trust_sha256`` may differ. A legacy record (neither stamp) is
+    judged by the current trust path rules and is never stamped here (7.4).
+    """
+    if "trust_sha256" not in record and "trust_binding_sha256" not in record:
+        root = record.get("root_realpath")
+        common_dir = record.get("git_common_dir")
+        tasks_prefix = trust["tasks_root"].rstrip("/") + "/"
+        if (type(root) is str and type(common_dir) is str and
+                os.path.normpath(root) == root and root.startswith(tasks_prefix) and
+                common_dir == os.path.join(trust["canonical_root"], ".git")):
+            return "legacy"
+        return "rotated"
+    binding = record.get("trust_binding_sha256")
+    if type(binding) is str and binding == trust["binding_sha256"]:
+        return "stamped"
+    return "rotated"
+
+
+def _require_trust_binding(record, trust):
+    status = _trust_binding_status(record, trust)
+    if status == "rotated":
+        _stop("D6_TRUST_ROTATED")
+    return status
+
+
+def _retain_release_re(trust):
+    """Owner approval comment URLs accepted by --release-retain, from trust."""
+    issues = trust.get("retain_release_issues")
+    if not issues or type(trust.get("slug")) is not str:
+        _fail("TRUST_SCHEMA_INVALID")
+    return re.compile(
+        r"https://github\.com/" + re.escape(trust["slug"]) + r"/issues/(?:" +
+        "|".join(str(issue) for issue in issues) + r")#issuecomment-[0-9]+\Z")
 
 
 # A git lock or a stuck filesystem must not hang a read-only lookup forever.
@@ -652,6 +720,7 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
     root = workspace_root / task_id
     record_path = registry / (task_id + ".json")
     try:
+        trust = _recheck_trust_after_lock(trust)
         _safe_dir(workspace_root, mode=0o700, uid=uid)
         if root.exists() or root.is_symlink() or record_path.exists() or record_path.is_symlink():
             _stop("D6_TASK_ALREADY_EXISTS")
@@ -689,6 +758,10 @@ def create_worktree(*, canonical_root, task_id, agent_id, session_ref,
                 "retention_paths": RETENTION_PATHS,
                 "lock_state": "UNLOCKED",
                 "disposition": "ACTIVE_TASK",
+                # Registry stamps (#369 section 7.2): the full file digest is
+                # audit-only; the binding digest is enforced by later steps.
+                "trust_sha256": trust["sha256"],
+                "trust_binding_sha256": trust["binding_sha256"],
             }
             if github_login is not None:
                 record["github_login"] = github_login
@@ -757,6 +830,14 @@ def resume_worktree(*, task_id, root):
         _stop("D6_ROOT_INVALID")
     if not root.is_absolute():
         _stop("D6_ROOT_INVALID")
+    # A record stamped under another trust binding is never resumed (7.3).
+    # A missing record is left to ENV-2, which reports it with its own code.
+    trust = _load_trust()
+    common_dir = _task_git(Path(trust["canonical_root"]), "rev-parse",
+                           "--path-format=absolute", "--git-common-dir").stdout.strip()
+    record_path = Path(common_dir) / "llmtool-worktrees" / (task_id + ".json")
+    if os.path.lexists(record_path):
+        _require_trust_binding(_read_registry_record(record_path), trust)
     # ENV-2 validates the owner-only record, ACTIVE/REPAIR state, physical
     # root, clean executable sources, exact HEAD and live worktree lock.
     _bootstrap(root, task_id)
@@ -812,6 +893,7 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None):
     except OSError:
         _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
     try:
+        trust = _recheck_trust_after_lock(trust)
         record_path = registry / (task_id + ".json")
         if not os.path.lexists(record_path):
             _stop("D6_RECORD_RESULT_UNKNOWN_TASK")
@@ -852,6 +934,7 @@ def record_result(*, task_id, canonical_root, root=None, workspace_root=None):
                 _task_git(root, "rev-parse", "--path-format=absolute",
                           "--git-common-dir").stdout.strip() != str(common_dir)):
             _stop("D6_RECORD_RESULT_ROOT_MISMATCH")
+        _require_trust_binding(record, trust)
         _validate_record_result_report_path(root)
         branch = record.get("branch")
         if (type(branch) is not str or not _valid_branch(canonical_root, branch) or
@@ -947,6 +1030,7 @@ def bind_native_session(*, task_id, native_session_id, canonical_root,
     except OSError:
         _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
     try:
+        trust = _recheck_trust_after_lock(trust)
         record_path = registry / (task_id + ".json")
         if not os.path.lexists(record_path):
             _stop("D6_BIND_NATIVE_SESSION_UNKNOWN_TASK")
@@ -978,6 +1062,7 @@ def bind_native_session(*, task_id, native_session_id, canonical_root,
                 _task_git(root, "rev-parse", "--path-format=absolute",
                           "--git-common-dir").stdout.strip() != str(common_dir)):
             _stop("D6_BIND_NATIVE_SESSION_ROOT_MISMATCH")
+        _require_trust_binding(record, trust)
         branch = record.get("branch")
         if (type(branch) is not str or not _valid_branch(canonical_root, branch) or
                 _task_git(root, "branch", "--show-current").stdout.strip() != branch):
@@ -1330,7 +1415,7 @@ def _is_reviewer_record(record):
 def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root, squash,
                  train_squash=None,
                  discard_uncommitted=False, unknown_evidence=None,
-                 reviewed_pr_evidence=None):
+                 reviewed_pr_evidence=None, trust=None):
     """Evaluate every retire gate for one task without changing anything.
 
     With ``discard_uncommitted`` (an Owner-approved task), tracked changes and
@@ -1355,6 +1440,15 @@ def _retire_plan(task_id, record, *, canonical_root, common_dir, workspace_root,
     if reasons:
         plan["reasons"].extend(reasons)
         return plan
+    # A rotated trust binding never lets retire remove the tree; the caller
+    # turns this sole reason into a durable RETAIN_BLOCKED on execute (7.3).
+    trust_status = _trust_binding_status(record, _load_trust() if trust is None else trust)
+    if trust_status == "rotated":
+        plan["reasons"].append("D6_TRUST_ROTATED")
+        plan["trust_rotated"] = True
+        return plan
+    if trust_status == "legacy":
+        plan["legacy_unstamped"] = True
     branch = record["branch"]
     head = _task_git(root, "rev-parse", "HEAD").stdout.strip()
     plan.update(branch=branch, head=head)
@@ -1605,12 +1699,25 @@ def _execute_retire(plan, record, record_path, canonical_root, common_dir, works
     return []
 
 
-def _mark_retain_blocked(record_path, record, reasons):
+def _rotation_note(record, trust):
+    """Evidence text for a record whose trust binding no longer matches."""
+    binding = record.get("trust_binding_sha256")
+    if "trust_sha256" not in record and "trust_binding_sha256" not in record:
+        label = "legacy-unstamped"
+    elif type(binding) is str and re.fullmatch(r"[0-9a-f]{64}", binding):
+        label = binding
+    else:
+        label = "invalid"
+    return (" (trust rotation: record binding " + label + " != current " +
+            trust["binding_sha256"] + "; tree kept, retire and recreate)")
+
+
+def _mark_retain_blocked(record_path, record, reasons, note="", action="Retire"):
     updated = dict(record)
     now = _now()
     updated.update(state="RETAIN_BLOCKED", last_verified_at=now,
                    evidence_refs=list(record.get("evidence_refs") or []) + [
-                       "Retire refused " + now + ": " + ",".join(reasons)])
+                       action + " refused " + now + ": " + ",".join(reasons) + note])
     _replace_record(record_path, updated)
 
 
@@ -1682,6 +1789,8 @@ def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
             return "D6_REBIND_STATE_REFUSED", None
         if record.get("lock_state") != "LOCKED":
             return "D6_REBIND_LOCK_STATE_MISMATCH", None
+        if _trust_binding_status(record, trust) == "rotated":
+            return "D6_TRUST_ROTATED", None
         root_text = record["root_realpath"]
         try:
             root = Path(root_text)
@@ -1724,6 +1833,8 @@ def rebind_device_tasks(*, canonical_root, task_ids, execute=False,
 
     all_ok = True
     try:
+        if execute:
+            trust = _recheck_trust_after_lock(trust)
         for task_id in task_ids:
             result = {"task_id": task_id, "mode": "execute" if execute else "dry-run"}
             record_path = registry / (task_id + ".json")
@@ -1827,6 +1938,8 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
             _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
     all_ok = True
     try:
+        if execute:
+            trust = _recheck_trust_after_lock(trust)
         for task_id in task_ids:
             record_path = registry / (task_id + ".json")
             result = {"task_id": task_id, "mode": "execute" if execute else "dry-run"}
@@ -1838,7 +1951,8 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                                     train_squash=train_evidence.get(task_id),
                                     discard_uncommitted=task_id in discard_uncommitted,
                                     unknown_evidence=unknown_evidence.get(task_id),
-                                    reviewed_pr_evidence=reviewed_pr_evidence.get(task_id))
+                                    reviewed_pr_evidence=reviewed_pr_evidence.get(task_id),
+                                    trust=trust)
             except LifecycleError as exc:
                 record, plan = None, {"root": str(workspace_root / task_id),
                                       "reasons": [exc.code], "content_block": False,
@@ -1855,6 +1969,8 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                 result["publication_note"] = "HEAD is reachable from a published origin PR head ref"
             if plan.get("accepted_unknown"):
                 result["unknown_accepted"] = True
+            if plan.get("legacy_unstamped"):
+                result["legacy_unstamped"] = True
             result["git_removes_retention_paths"] = [relative + ("/" if is_dir else "")
                                        for relative, is_dir in plan["targets"]]
             result["pycache_discard_count"] = len(plan["pycache"])
@@ -1863,9 +1979,11 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                 result["discard_uncommitted_paths"] = uncommitted
             reasons = plan["reasons"]
             # RETAIN_BLOCKED is durable, so it is written only when every other
-            # gate passed and unknown or unsafe content is the sole problem.
-            retain_blocked = (plan["content_block"] and record is not None and
-                              set(reasons) <= CONTENT_REASONS)
+            # gate passed and unknown or unsafe content is the sole problem, or
+            # when the record's trust binding rotated (the tree is kept, 7.3).
+            trust_rotated = plan.get("trust_rotated") is True and record is not None
+            retain_blocked = ((plan["content_block"] and record is not None and
+                               set(reasons) <= CONTENT_REASONS) or trust_rotated)
             if not reasons and execute:
                 reasons = _execute_retire(plan, record, record_path, canonical_root,
                                           common_dir, workspace_root)
@@ -1876,8 +1994,9 @@ def retire_worktrees(*, canonical_root, task_ids, execute=False, squash_evidence
                 if (retain_blocked and execute and
                         record.get("state") != "RETAIN_BLOCKED"):
                     try:
-                        _mark_retain_blocked(record_path, _read_registry_record(record_path),
-                                             reasons)
+                        _mark_retain_blocked(
+                            record_path, _read_registry_record(record_path), reasons,
+                            _rotation_note(record, trust) if trust_rotated else "")
                         result["registry_updated"] = True
                     except LifecycleError as exc:
                         result["reasons"].append(exc.code)
@@ -1951,6 +2070,8 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=None):
         except OSError:
             _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
     try:
+        if execute:
+            trust = _recheck_trust_after_lock(trust)
         raw = _task_git(canonical_root, "worktree", "list", "--porcelain").stdout
         listed = set()
         for stanza in raw.split("\n\n"):
@@ -1982,7 +2103,22 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=None):
         for task_id, record_path, record in candidates:
             result = {"task_id": task_id, "mode": "execute" if execute else "dry-run",
                       "result": "RETIRED_EXTERNALLY" if execute else "RECONCILE_READY"}
-            if execute:
+            trust_status = _trust_binding_status(record, trust)
+            if trust_status == "legacy":
+                result["legacy_unstamped"] = True
+            if trust_status == "rotated":
+                # A rotated record is never retired by reconcile. Execute keeps
+                # it as RETAIN_BLOCKED, so only --release-retain with an Owner
+                # approval from the current trust can release it (7.3).
+                result.update(result="BLOCKED", reason="D6_TRUST_ROTATED")
+                if execute:
+                    if _read_registry_record(record_path) != record:
+                        result["reason"] = "D6_REGISTRY_CHANGED"
+                    else:
+                        _mark_retain_blocked(record_path, record, ["D6_TRUST_ROTATED"],
+                                             _rotation_note(record, trust), "Reconcile")
+                        result["result"] = "RETAIN_BLOCKED"
+            elif execute:
                 # Recheck both independent absence signals while holding the registry lock.
                 latest_listing = _task_git(canonical_root, "worktree", "list",
                                            "--porcelain").stdout
@@ -2018,17 +2154,22 @@ def reconcile_registry(*, canonical_root, execute=False, workspace_root=None):
             os.close(lock_fd)
 
 
+# Legacy-only (#369): --release-retain now builds its pattern from trust.json
+# (repository.slug and approval_refs.retain_release_issues, see
+# _retain_release_re). This pre-trust value stays until PR-10 only so
+# `llmtool trust verify-legacy` can compare against it.
 OWNER_APPROVAL_RE = re.compile(
     r"https://github\.com/davidcatcat/davidcattoolsproject/issues/(?:289|352)"
     r"#issuecomment-[0-9]+\Z")
 
 
-def _parse_release_retain(values):
+def _parse_release_retain(values, trust=None):
+    approval_re = _retain_release_re(_load_trust() if trust is None else trust)
     approvals = {}
     for value in values or []:
         task_id, separator, approval = value.partition("=")
         if (not separator or not TASK_ID_RE.fullmatch(task_id or "") or
-                task_id in approvals or not OWNER_APPROVAL_RE.fullmatch(approval)):
+                task_id in approvals or not approval_re.fullmatch(approval)):
             _stop("D6_TASK_INPUT_INVALID")
         approvals[task_id] = approval
     if not approvals:
@@ -2037,12 +2178,19 @@ def _parse_release_retain(values):
 
 
 def release_retained_records(*, canonical_root, approvals, workspace_root=None):
-    """Release Owner-approved RETAIN_BLOCKED records for already absent trees."""
+    """Release Owner-approved RETAIN_BLOCKED records for already absent trees.
+
+    This is the release path for a record whose trust binding rotated (7.3),
+    so a rotated record is reported, not refused: the gate is an Owner
+    approval URL from the current trust's retain_release_issues.
+    """
     trust = _load_trust()
-    if (type(approvals) is not dict or not approvals or
-            any(not TASK_ID_RE.fullmatch(task_id or "") or
-                type(approval) is not str or not OWNER_APPROVAL_RE.fullmatch(approval)
-                for task_id, approval in approvals.items())):
+    if type(approvals) is not dict or not approvals:
+        _stop("D6_TASK_INPUT_INVALID")
+    approval_re = _retain_release_re(trust)
+    if any(not TASK_ID_RE.fullmatch(task_id or "") or
+           type(approval) is not str or not approval_re.fullmatch(approval)
+           for task_id, approval in approvals.items()):
         _stop("D6_TASK_INPUT_INVALID")
     if workspace_root is None:
         workspace_root = trust["tasks_root"]
@@ -2069,12 +2217,21 @@ def release_retained_records(*, canonical_root, approvals, workspace_root=None):
     except OSError:
         _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
     try:
+        trust = _recheck_trust_after_lock(trust)
+        approval_re = _retain_release_re(trust)
+        if any(not approval_re.fullmatch(approval) for approval in approvals.values()):
+            _stop("D6_TASK_INPUT_INVALID")
         results = []
         for task_id, approval in sorted(approvals.items()):
             record_path = registry / (task_id + ".json")
             result = {"task_id": task_id, "result": "BLOCKED"}
             try:
                 record = _read_registry_record(record_path)
+                trust_status = _trust_binding_status(record, trust)
+                if trust_status == "rotated":
+                    result["trust_rotated"] = True
+                elif trust_status == "legacy":
+                    result["legacy_unstamped"] = True
                 root = workspace_root / task_id
                 if (record.get("schema_version") != 1 or
                         record.get("task_id") != task_id or
@@ -2173,6 +2330,8 @@ def owner_approved_retain_release(*, canonical_root, approvals, execute=False,
         except OSError:
             _stop("D6_REGISTRY_LOCK_UNAVAILABLE")
     try:
+        if execute:
+            _recheck_trust_after_lock(trust)
         results = []
         for task_id, approval in sorted(approvals.items()):
             record_path = registry / (task_id + ".json")
@@ -2258,6 +2417,24 @@ def _parse_reviewed_pr_evidence(values):
     return evidence
 
 
+def _release_retain_help():
+    """--release-retain help derived from trust; generic if trust is unusable."""
+    text = ("release an absent RETAIN_BLOCKED record with an Owner approval "
+            "comment URL from ")
+    try:
+        trust = _load_trust()
+    except TrustError:
+        trust = None
+    issues = trust.get("retain_release_issues") if isinstance(trust, dict) else None
+    slug = trust.get("slug") if isinstance(trust, dict) else None
+    if issues and type(slug) is str:
+        text += ("issue " + " or ".join(str(issue) for issue in issues) +
+                 " of " + slug)
+    else:
+        text += "an issue in trust.json approval_refs.retain_release_issues"
+    return text + " (repeatable)"
+
+
 def _main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--task-id")
@@ -2295,8 +2472,7 @@ def _main(argv=None):
                         help="mark absent worktree records RETIRED_EXTERNALLY")
     parser.add_argument("--release-retain", action="append",
                         metavar="TASK_ID=OWNER_APPROVAL_URL",
-                        help="release an absent RETAIN_BLOCKED record with an Owner approval "
-                             "comment URL from issue 289 or 352 (repeatable)")
+                        help=_release_retain_help())
     parser.add_argument("--owner-approved-retain-release", action="append",
                         metavar="TASK_ID=OWNER_COMMENT_URL",
                         help="release an absent RETAIN_BLOCKED record with an Owner approval "
@@ -2415,7 +2591,7 @@ def _main(argv=None):
                 _stop("D6_TASK_INPUT_INVALID")
             return 0 if release_retained_records(
                 canonical_root=args.repo_root,
-                approvals=_parse_release_retain(args.release_retain)) else 1
+                approvals=_parse_release_retain(args.release_retain, trust)) else 1
         if args.owner_approved_retain_release is not None:
             if (args.retire_task_id is not None or args.squash_evidence or
                     args.train_evidence or args.discard_uncommitted or
