@@ -3,6 +3,8 @@
 Every case drives a fake `claude` executable from a scenario file; no real
 session, model or network call is made.
 """
+
+import review_trust_fixture
 import importlib.util
 import json
 import os
@@ -829,3 +831,11 @@ class CrossAccountDeliveryReceiptTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

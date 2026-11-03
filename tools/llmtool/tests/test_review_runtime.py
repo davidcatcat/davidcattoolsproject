@@ -1,5 +1,7 @@
 """Focused tests for the original Task's production Reviewer adapter boundary."""
 
+import review_trust_fixture
+
 import importlib
 import unittest
 from unittest.mock import patch
@@ -42,3 +44,11 @@ class ReviewerGateIntegrationTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

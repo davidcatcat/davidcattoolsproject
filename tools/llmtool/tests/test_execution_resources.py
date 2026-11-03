@@ -1,5 +1,7 @@
 """Shape checks for the informational execution-resource inventory."""
 
+import review_trust_fixture
+
 import json
 from pathlib import Path
 import unittest
@@ -59,3 +61,11 @@ class ExecutionResourcesTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

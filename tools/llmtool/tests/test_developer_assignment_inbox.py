@@ -7,6 +7,8 @@ on the live Owner policy file; no provider, network, session or model is used.
 Matrix numbers refer to the #367 Task Contract offline test matrix.
 """
 
+import review_trust_fixture
+
 import fcntl
 import json
 import os
@@ -515,3 +517,11 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

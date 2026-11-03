@@ -1,5 +1,7 @@
 """Minimal dispatch-check output for PM policy gates."""
 
+import review_trust_fixture
+
 import json
 import unittest
 from contextlib import redirect_stdout
@@ -46,3 +48,11 @@ class DispatchCheckTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

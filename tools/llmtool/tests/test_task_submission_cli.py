@@ -1,3 +1,4 @@
+import review_trust_fixture
 import io
 import hashlib
 import json
@@ -42,10 +43,16 @@ FIXTURE_ORIGINS = ('git@github.com:davidcatcat/davidcattoolsproject.git',
 def dispatcher_trust(root, origins=FIXTURE_ORIGINS):
     """Patch the dispatcher's trust.json read with a fixture root (#369 PR-5)."""
     from types import MappingProxyType
+    fixture_repository = review_trust_fixture.make_trust(origins=origins).repository
+    repository = MappingProxyType({
+        'slug': fixture_repository['slug'],
+        'allowed_origins': tuple(origins),
+        'approval_refs': fixture_repository['approval_refs'],
+    })
     loaded = trust_module.TrustConfig(
         1, str(root), str(Path(root).parent / 'workspace'),
         str(Path(root).parent / 'workspace' / 'tasks'),
-        MappingProxyType({'allowed_origins': tuple(origins)}),
+        repository,
         MappingProxyType({}), MappingProxyType({}), 'a' * 64, 'b' * 64)
     return patch.object(submission_cli.trust, 'load_trust', return_value=loaded)
 
@@ -3640,3 +3647,11 @@ class DispatcherPreflightRefusalTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

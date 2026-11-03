@@ -1,3 +1,4 @@
+import review_trust_fixture
 import io
 import json
 import unittest
@@ -322,3 +323,11 @@ class AgyRouteWiringTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

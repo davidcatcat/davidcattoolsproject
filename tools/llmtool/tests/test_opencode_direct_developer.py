@@ -1,3 +1,4 @@
+import review_trust_fixture
 import json
 from datetime import datetime
 import os
@@ -725,3 +726,11 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

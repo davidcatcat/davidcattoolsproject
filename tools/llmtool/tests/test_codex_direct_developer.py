@@ -1,3 +1,4 @@
+import review_trust_fixture
 import hashlib
 import json
 import os
@@ -25,12 +26,16 @@ from llmtool import trust as trust_module
 def _dispatcher_trust(root):
     """Patch the dispatcher's trust.json read with a fixture root (#369 PR-5)."""
     from types import MappingProxyType
+    fixture_repository = review_trust_fixture.make_trust().repository
+    repository = MappingProxyType({
+        'slug': fixture_repository['slug'],
+        'allowed_origins': fixture_repository['allowed_origins'],
+        'approval_refs': fixture_repository['approval_refs'],
+    })
     loaded = trust_module.TrustConfig(
         1, str(root), str(Path(root).parent / 'workspace'),
         str(Path(root).parent / 'workspace' / 'tasks'),
-        MappingProxyType({'allowed_origins': (
-            'git@github.com:davidcatcat/davidcattoolsproject.git',
-            'https://github.com/davidcatcat/davidcattoolsproject.git')}),
+        repository,
         MappingProxyType({}), MappingProxyType({}), 'a' * 64, 'b' * 64)
     return patch.object(task_submission_cli.trust, 'load_trust', return_value=loaded)
 
@@ -767,3 +772,11 @@ class CodexDirectDeveloperTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()

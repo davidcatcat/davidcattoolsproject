@@ -1,3 +1,4 @@
+import review_trust_fixture
 import errno
 import hashlib
 import json
@@ -245,3 +246,11 @@ class WorkerAvailabilityStoreTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
