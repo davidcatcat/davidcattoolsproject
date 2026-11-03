@@ -31,10 +31,41 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
     pr_number = adapters.get('pr_number')
     completed = 0
     attempts = 0
+    mac_ci_pending = False
 
     # Polls consume the bounded call budget so a permanently pending Task
     # cannot spin forever, but they do not count as completed workflow steps.
     while attempts < max_steps:
+        if mac_ci_pending:
+            advance_adapters = dict(adapters)
+            advance_adapters['pr_number'] = pr_number
+            merged = invoke(task_id=task_id, store=store, merge=True,
+                            **advance_adapters)
+            attempts += 1
+            completed += 1
+            if type(merged) is not dict:
+                return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
+                        'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
+            codes = merged.get('codes', [])
+            if type(codes) is not list or any(type(code) is not str for code in codes):
+                return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
+                        'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
+            if type(merged.get('step')) is not str:
+                return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
+                        'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
+            waiting_for_mac = (
+                merged.get('step') == 'WAITING_CI' or
+                (merged.get('step') == 'MERGE_REFUSED' and any(
+                    code in ('MERGE_CHECKS_NOT_GREEN', 'MERGE_MACOS_CHECK_REQUIRED')
+                    for code in codes))
+            )
+            if waiting_for_mac:
+                if attempts >= max_steps:
+                    break
+                pause(poll_seconds)
+                continue
+            return dict(merged, steps=completed)
+
         advance_adapters = dict(adapters)
         advance_adapters['pr_number'] = pr_number
         result = invoke(task_id=task_id, store=store,
@@ -61,6 +92,17 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         if type(step) is not str:
             return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
                     'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
+        # Completion can stop on invalid job evidence for a skipped Mac job
+        # before the workflow reaches READY_FOR_INTEGRATION. Ask the existing
+        # merge path to decide whether this is the missing/skipped Mac case and
+        # perform its idempotent mac-ci labeling.
+        if (merge and step == 'WAITING_CI' and
+                'CI_WORKFLOW_JOBS_INVALID' in codes):
+            mac_ci_pending = True
+            if attempts >= max_steps:
+                break
+            pause(poll_seconds)
+            continue
         waiting = (
             step in _WAITING_STEPS or
             (step == 'RECORD_REVIEW_RESULT' and
@@ -92,9 +134,10 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
                 return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
                         'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
             # A skipped or missing Mac check asks the existing merge path to
-            # apply mac-ci and wait for the replacement run. Poll the Task
-            # again so a later successful exact-head Mac run can reach merge.
+            # apply mac-ci. Keep polling that merge path so READY_FOR_INTEGRATION
+            # from the non-merge path cannot immediately retry the merge.
             if merged.get('step') == 'WAITING_CI':
+                mac_ci_pending = True
                 if attempts >= max_steps:
                     break
                 pause(poll_seconds)
