@@ -870,7 +870,8 @@ class ActivePMInboxTests(unittest.TestCase):
             thread.start()
         for thread in threads:
             thread.join(30)
-        self.assertEqual(errors, [])
+        error_codes = [error.task_store_error_code for error in errors]
+        self.assertEqual(errors, [], f'collected task-store error codes: {error_codes}')
         self.assertTrue(all(code == 'TASK_STORE_BUSY' for code in ready_retries))
         events = self.store.get(task['task_id'])['completion_events']
         self.assertEqual(len(events), 3)
