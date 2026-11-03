@@ -3295,9 +3295,10 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'source_manifest_sha256': None})
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
-        return persist_failure(code, state='BLOCKED')
+        return persist_failure(code)
     except Exception:
-        return persist_failure('DEVELOPER_RESULT_UNKNOWN', state='BLOCKED')
+        return persist_failure('DEVELOPER_RESULT_UNKNOWN',
+                               state='DEVELOPER_OUTCOME_UNKNOWN')
     try:
         saved = store.compare_and_update(
             task['task_id'], expected={'developer': expected_developer},
