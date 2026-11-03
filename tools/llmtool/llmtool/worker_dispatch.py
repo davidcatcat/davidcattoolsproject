@@ -89,6 +89,11 @@ except LLMToolError as error:
     _OWNER_COMMENT_REF = re.compile(r'(?!)')
     _POLICY_EVIDENCE_REF = re.compile(r'(?!)')
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
+_GW_AGENT_PAUSED_REF = (
+    'https://github.com/davidcatcat/davidcattoolsproject/issues/120')
+_GW_AGENT_OWNER_REF = (
+    'https://github.com/davidcatcat/davidcattoolsproject/'
+    'issues/120#issuecomment-6594101520')
 
 
 class WorkerDispatchDenied(LLMToolError):
@@ -149,9 +154,13 @@ def _parse_policy(raw):
                 not worker['reason'] or len(worker['reason']) > 512 or
                 type(worker.get('evidence')) is not str or
                 (_POLICY_EVIDENCE_REF.fullmatch(worker['evidence']) is None and not (
-                    key == 'company-gw-agent' and worker.get('dispatch') == 'PAUSED' and
-                    worker['evidence'] ==
-                    'https://github.com/davidcatcat/davidcattoolsproject/issues/120')) or
+                    key == 'company-gw-agent' and (
+                        (worker.get('dispatch') == 'PAUSED' and
+                         worker.get('decided_by') == 'PM' and
+                         worker['evidence'] == _GW_AGENT_PAUSED_REF) or
+                        (worker.get('dispatch') == 'ALLOWED' and
+                         worker.get('decided_by') == 'Owner' and
+                         worker['evidence'] == _GW_AGENT_OWNER_REF)))) or
                 type(assignments) is not list or
                 any(type(assignment) is not dict or
                     set(assignment) != {'task_id', 'owner_assignment_ref'} or
@@ -164,15 +173,12 @@ def _parse_policy(raw):
                      for assignment in assignments}) != len(assignments)):
             raise ValueError('invalid worker policy')
         if key == 'company-gw-agent':
-            paused_ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120'
-            owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
-                         'issues/120#issuecomment-6594101520')
             is_pm_paused = (worker.get('dispatch') == 'PAUSED' and
                             worker.get('decided_by') == 'PM' and
-                            worker.get('evidence') == paused_ref)
+                            worker.get('evidence') == _GW_AGENT_PAUSED_REF)
             is_owner_allowed = (worker.get('dispatch') == 'ALLOWED' and
                                 worker.get('decided_by') == 'Owner' and
-                                worker.get('evidence') == owner_ref)
+                                worker.get('evidence') == _GW_AGENT_OWNER_REF)
             if not (is_pm_paused or is_owner_allowed):
                 raise ValueError('gw-agent requires the exact paused or Owner-authorized entry')
         if date.fromisoformat(worker['decided_at']).isoformat() != worker['decided_at']:
