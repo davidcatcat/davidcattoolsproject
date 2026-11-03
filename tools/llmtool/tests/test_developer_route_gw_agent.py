@@ -289,15 +289,27 @@ class GwAgentRouteTests(unittest.TestCase):
             private_dirs = []
             real_mkdtemp = tempfile.mkdtemp
 
+            setup_patches = {
+                'prepare_files': {},
+                'build_env': {'prepare_files': None},
+                'build_argv': {'prepare_files': None,
+                               'build_env': {'GW_AGENT_API_KEY': self.credential}},
+            }[method]
+
             def record_mkdtemp(*args, **kwargs):
                 path = real_mkdtemp(*args, **kwargs)
                 private_dirs.append(path)
                 return path
 
-            with self.subTest(method=method), \
+            with tempfile.TemporaryDirectory() as isolated_home, \
+                    self.subTest(method=method), \
+                    mock.patch.dict(os.environ, {'HOME': isolated_home,
+                                                 'TMPDIR': isolated_home}), \
+                    mock.patch('tempfile.tempdir', None), \
                     mock.patch.object(self.route, method, side_effect=failure), \
                     mock.patch('llmtool.developer_routes.base.tempfile.mkdtemp',
-                               side_effect=record_mkdtemp):
+                               side_effect=record_mkdtemp), \
+                    mock.patch.multiple(self.route, **setup_patches):
                 with self.assertRaises(RouteError) as caught:
                     run_route(self.route, self.request(), gate=lambda: True,
                               runner=lambda *args: (0, b'', b''),
