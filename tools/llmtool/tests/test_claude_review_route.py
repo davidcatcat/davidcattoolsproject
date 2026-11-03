@@ -382,6 +382,9 @@ class ClaudeReviewerVerdictTests(unittest.TestCase):
         task['completion']['evidence'].update(
             executor_native_session_id='native-executor', executor_native_session='VERIFIED')
         store.create(task)
+        stored = store.get(task['task_id'])
+        store.update(task['task_id'], developer={
+            **stored['developer'], 'provider_profile': 'codex'})
         binding = self.f._review_binding(task_id=task['task_id'], run_id=task['run_id'],
             contract_digest=task['task_binding']['contract_digest'], head=self.result_sha)
         comments = [self._comment('\n'.join((self._head(), ACCEPT, binding)))]

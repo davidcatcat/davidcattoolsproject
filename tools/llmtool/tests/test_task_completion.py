@@ -92,7 +92,8 @@ class TaskCompletionTests(unittest.TestCase):
                   'executor_identity': 'executor-agent',
                   'executor_session_ref': 'Executor D6 session',
                   'executor_native_session_id': 'native-executor',
-                  'reviewer_task_id': 'reviewer-task', 'common_dir': self.common}
+                  'reviewer_task_id': 'reviewer-task', 'common_dir': self.common,
+                  'task_record': {'developer': {'provider_profile': 'codex'}}}
         kwargs.update(overrides)
         return kwargs
 
@@ -896,7 +897,7 @@ class TaskCompletionTests(unittest.TestCase):
         reviewer_root = self.base / 'reviewer'
         self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
         reviewer_head = result_sha
-        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+        self._write_registration('reviewer-task', 'claude-reviewer', 'Reviewer session',
             reviewer_root, 'review/branch', reviewer_head, reviewer_head,
             native_session_id='native-reviewer', github_login='reviewer-user',
             state='REVIEW_PENDING')
@@ -1020,7 +1021,7 @@ class TaskCompletionTests(unittest.TestCase):
                 task_store.return_value.get.return_value = task
                 with patch('llmtool.task_completion._github_get', side_effect=api):
                     return task_completion.collect_github_evidence(
-                        **self._github_kwargs(result_sha))
+                        **self._github_kwargs(result_sha, task_record=task))
 
         accepted = evaluate()
         self.assertEqual(accepted['evidence']['formal_review_state'], 'ACCEPTED')
@@ -1038,6 +1039,103 @@ class TaskCompletionTests(unittest.TestCase):
                                   binding_body=mismatched_contract_body,
                                   review_text=mismatched_contract_body)
                          ['evidence']['formal_review_state'], 'UNVERIFIED')
+
+    def test_approved_review_family_matrix_fails_closed(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer-family-matrix'
+        self._git('worktree', 'add', '-b', 'review/family-matrix',
+                  str(reviewer_root), result_sha)
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        profiles = ('claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent',
+                    'company-gw-agent', None, 'unrecognized')
+        reviewers = ('claude-reviewer', 'codex-reviewer', 'other-reviewer')
+        for profile in profiles:
+            for reviewer in reviewers:
+                with self.subTest(profile=profile, reviewer=reviewer):
+                    self._write_registration(
+                        'reviewer-task', reviewer, 'native-reviewer-session',
+                        reviewer_root, 'review/family-matrix', result_sha, result_sha,
+                        native_session_id='native-reviewer-session',
+                        github_login='reviewer-user', state='REVIEW_PENDING')
+                    review = [{'state': 'APPROVED', 'commit_id': result_sha,
+                               'user': {'login': 'reviewer-user'},
+                               'submitted_at': '2026-10-21T10:00:00Z',
+                               'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
+                                       self._review_binding(head=result_sha)}]
+                    task = ({} if profile is None else
+                            {'developer': {'provider_profile': profile}})
+                    api = self._github_response_sequence(result_sha, pr, review, checks)
+                    with patch('llmtool.task_completion._github_get', side_effect=api):
+                        evidence = task_completion.collect_github_evidence(
+                            **self._github_kwargs(result_sha, task_record=task))
+                    expected = (profile in ('agy', 'opencode', 'company-gw', 'gw-agent',
+                                             'company-gw-agent') and
+                                reviewer in ('claude-reviewer', 'codex-reviewer')) or (
+                                profile == 'claude' and reviewer == 'codex-reviewer') or (
+                                profile == 'codex' and reviewer == 'claude-reviewer')
+                    self.assertEqual(evidence['evidence']['formal_review_state'],
+                                     'ACCEPTED' if expected else 'UNVERIFIED')
+                    if not expected:
+                        self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
+                                      evidence['missing_gates'])
+
+    def test_pr_comment_family_matrix_matches_formal_verdict_classifier(self):
+        result_sha, _ = self._make_result()
+        reviewer_root = self.base / 'reviewer-comment-family-matrix'
+        self._git('worktree', 'add', '-b', 'review/comment-family-matrix',
+                  str(reviewer_root), result_sha)
+        pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
+              'base': {'repo': {'full_name': 'davidcatcat/davidcattoolsproject'}},
+              'user': {'login': 'author-user'}}
+        checks = {'total_count': 1, 'check_runs': [
+            {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
+             'status': 'completed', 'conclusion': 'success'}]}
+        profiles = ('claude', 'codex', 'agy', 'opencode', 'company-gw', 'gw-agent',
+                    'company-gw-agent', None, 'unrecognized')
+        for profile in profiles:
+            for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                with self.subTest(profile=profile, reviewer=reviewer):
+                    self._write_registration(
+                        'reviewer-task', reviewer, 'native-reviewer-session',
+                        reviewer_root, 'review/comment-family-matrix', result_sha,
+                        result_sha, native_session_id='native-reviewer-session',
+                        github_login='reviewer-user', state='REVIEW_PENDING')
+                    actor = 'Claude' if reviewer == 'claude-reviewer' else 'Codex'
+                    binding = self._review_binding(head=result_sha)
+                    body = (f'<!-- activity: type=review_verdict actor={actor} target=PM status=PASS -->\n'
+                            f'Verdict: PASS | Version: v1 | HEAD: {result_sha}\n'
+                            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' + binding)
+                    task = {'task_id': '1' * 32, 'run_id': '2' * 32,
+                            'task_binding': {'contract_digest': '3' * 64}}
+                    if profile is not None:
+                        task['developer'] = {'provider_profile': profile}
+                    if reviewer == 'codex-reviewer':
+                        task['review_dispatch_claim'] = [{
+                            'pr': 10, 'head_sha': result_sha,
+                            'reviewer_task': 'reviewer-task', 'version': 1,
+                            'state': 'COMPLETED', 'review_result': {
+                                'task_id': task['task_id'], 'run_id': task['run_id'],
+                                'contract_digest': '3' * 64, 'head': result_sha,
+                                'verdict': 'PASS', 'review_text': body}}]
+                    api = self._github_response_sequence(
+                        result_sha, pr, [], checks, comments=[{
+                            'id': 51, 'user': {'login': 'reviewer-user'}, 'body': body,
+                            'created_at': '2026-10-21T10:00:00Z',
+                            'updated_at': '2026-10-21T10:00:00Z'}])
+                    with patch('llmtool.task_completion._github_get', side_effect=api):
+                        evidence = task_completion.collect_github_evidence(
+                            **self._github_kwargs(result_sha, task_record=task))
+                    expected = (profile in ('agy', 'opencode', 'company-gw', 'gw-agent',
+                                             'company-gw-agent') or
+                                profile == 'claude' and reviewer == 'codex-reviewer' or
+                                profile == 'codex' and reviewer == 'claude-reviewer')
+                    self.assertEqual(evidence['evidence']['formal_review_state'],
+                                     'ACCEPTED' if expected else 'UNVERIFIED')
 
     def test_review_binding_must_match_task_run_contract_and_result_head(self):
         result_sha, _ = self._make_result()
@@ -1109,7 +1207,7 @@ class TaskCompletionTests(unittest.TestCase):
         reviewer_root = self.base / 'reviewer-merged'
         self._git('worktree', 'add', '-b', 'review/merged-branch',
                   str(reviewer_root), result_sha)
-        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+        self._write_registration('reviewer-task', 'codex-reviewer', 'Reviewer session',
             reviewer_root, 'review/merged-branch', result_sha, result_sha,
             native_session_id='native-reviewer', github_login='reviewer-user',
             state='REVIEW_PENDING')
@@ -1135,7 +1233,9 @@ class TaskCompletionTests(unittest.TestCase):
                 'full_name': 'davidcatcat/davidcattoolsproject'}
         with patch('llmtool.task_completion._github_get', side_effect=api):
             evidence = task_completion.collect_github_evidence(
-                **self._github_kwargs(result_sha))
+                **self._github_kwargs(
+                    result_sha,
+                    task_record={'developer': {'provider_profile': 'codex'}}))
         self.assertEqual(evidence['missing_gates'], [])
         self.assertEqual(evidence['evidence']['pr_state'], 'MERGED')
         self.assertEqual(evidence['evidence']['merge_commit_sha'], 'b' * 40)
@@ -1350,7 +1450,7 @@ class TaskCompletionTests(unittest.TestCase):
         result_sha, _ = self._make_result()
         reviewer_root = self.base / 'reviewer'
         self._git('worktree', 'add', '-b', 'review/branch', str(reviewer_root), result_sha)
-        self._write_registration('reviewer-task', 'review-agent', 'Reviewer session',
+        self._write_registration('reviewer-task', 'codex-reviewer', 'Reviewer session',
             reviewer_root, 'review/branch', result_sha, result_sha,
             native_session_id='native-reviewer', github_login='reviewer-user')
         pr = {'state': 'open', 'merged': False, 'head': {'sha': result_sha},
@@ -1384,7 +1484,8 @@ class TaskCompletionTests(unittest.TestCase):
         api = self._github_response_sequence(result_sha, pr, reviews, checks,
                                              runs=runs, jobs=jobs)
         with patch('llmtool.task_completion._github_get', side_effect=api) as github_get:
-            evidence = task_completion.collect_github_evidence(**self._github_kwargs(result_sha))
+            evidence = task_completion.collect_github_evidence(**self._github_kwargs(
+                result_sha, task_record={'developer': {'provider_profile': 'codex'}}))
         self.assertEqual(evidence['evidence']['ci_run_id'], 101)
         self.assertEqual(evidence['evidence']['ci_run_attempt'], 2)
         self.assertEqual(evidence['evidence']['ci_check_ids'],
