@@ -47,6 +47,15 @@ class DeveloperOutputNormalizeTests(unittest.TestCase):
         self.assertEqual(artifact, valid)
         self.assertEqual(tokens, ())
 
+    def test_text_route_records_pre_recount_token_on_accepted_diff(self):
+        wrong_counts = (self.HEADER + '@@ -1,9 +1,8 @@\n'
+                        ' VALUE = 1\n+# updated\n')
+        accepted, tokens, rejection = _developer_normalized_output(
+            wrong_counts, [self.PATH], source_files={self.PATH: 'VALUE = 1\n'})
+        self.assertIsNone(rejection)
+        self.assertEqual(accepted.count('@@ -1 +1,2 @@'), 1)
+        self.assertIn('HUNK_COUNTS_RECOUNTED', tokens)
+
     def test_missing_final_newline_keeps_normalization_behavior(self):
         raw = self.HEADER + '@@ -1,8 +1,8 @@\n-old\n+new'
         normalized, tokens = normalize_developer_output(raw, [self.PATH])

@@ -248,6 +248,14 @@ _DEVELOPER_REPORTED_SHAPES = tuple(
         *_DEVELOPER_BLOCKED_REASON_SHAPES, *_DEVELOPER_PROGRESS_SHAPES,
         *_DEVELOPER_CLAUDE_RESULT_SHAPES, *_DEVELOPER_INVALID_FINAL_SHAPES)
 )
+_DEVELOPER_ALL_SHAPES = (*_DEVELOPER_BASE_SHAPES, *_DEVELOPER_EXTENSION_SHAPES,
+                         *_DEVELOPER_BLOCKED_REASON_SHAPES,
+                         *_DEVELOPER_PROGRESS_SHAPES,
+                         *_DEVELOPER_CLAUDE_RESULT_SHAPES,
+                         *_DEVELOPER_INVALID_FINAL_SHAPES,
+                         *_DEVELOPER_REPORTED_SHAPES)
+_DEVELOPER_REJECTION_DETAIL_SHAPES = tuple(
+    shape | frozenset(('rejection_detail',)) for shape in _DEVELOPER_ALL_SHAPES)
 _DIRECT_EXECUTION_FIELDS = frozenset((
     'status', 'native_session_id', 'process_exit_code', 'stdout_sha256',
     'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
@@ -1263,7 +1271,8 @@ def _validate(record):
                                  *_DEVELOPER_PROGRESS_SHAPES,
                                  *_DEVELOPER_CLAUDE_RESULT_SHAPES,
                                  *_DEVELOPER_INVALID_FINAL_SHAPES,
-                                 *_DEVELOPER_REPORTED_SHAPES)
+                                 *_DEVELOPER_REPORTED_SHAPES,
+                                 *_DEVELOPER_REJECTION_DETAIL_SHAPES)
             if type(developer) is not dict or set(developer) not in assignment_shapes:
                 _fail()
             if ('account' in developer and
@@ -1359,6 +1368,19 @@ def _validate(record):
                                           'HUNK_COUNTS_RECOUNTED',
                                           'HUNK_REANCHORED') for token in tokens) or
                         len(tokens) != len(set(tokens))):
+                    _fail()
+            if 'rejection_detail' in developer:
+                detail = developer['rejection_detail']
+                if (developer['state'] != 'DEVELOPER_OUTPUT_REJECTED' or
+                        type(detail) is not dict or set(detail) != {'reason', 'hunk'} or
+                        detail['reason'] not in (
+                            'SOURCE_UNREADABLE', 'SECTION_HEADER_INVALID',
+                            'HUNK_HEADER_INVALID', 'HUNK_LINE_UNPREFIXED',
+                            'OLD_SIDE_NOT_FOUND', 'OLD_SIDE_AMBIGUOUS',
+                            'HUNKS_OVERLAP', 'NO_CHANGE', 'STRICT_PARSE',
+                            'APPLY_CHECK_FAILED') or
+                        (detail['hunk'] is not None and
+                         (type(detail['hunk']) is not int or detail['hunk'] < 0))):
                     _fail()
             if 'rejected_output_capture' in developer:
                 capture = developer['rejected_output_capture']

@@ -33,6 +33,7 @@ from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
+from .developer_output_normalize import _HUNK
 from . import role_config
 from . import trust
 from .developer_routes import (AgyRoute, GwAgentRoute, RouteError, capture_snapshot,
@@ -1430,7 +1431,10 @@ def _strict_developer_output_rejection(value, write_paths, *, allow_new_files=Tr
 
 def _developer_normalized_output(value, write_paths, *, source_files=None):
     """Normalize salvageable text, then preserve strict rejection categories."""
+    original_value = value
     value = _recount_developer_hunks(value) if type(value) is str else value
+    recount_tokens = (('HUNK_COUNTS_RECOUNTED',)
+                      if value != original_value else ())
     original_rejection = _strict_developer_output_rejection(value, write_paths)
     if (original_rejection is not None and original_rejection not in
             ('DEVELOPER_OUTPUT_INVALID_ENVELOPE', 'DEVELOPER_OUTPUT_INVALID_DIFF')):
@@ -1472,7 +1476,7 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
         if special:
             # The source-pinned apply check validates deletion content and the
             # empty source side of additions below.
-            return normalized, tuple(tokens), None
+            return normalized, tuple(dict.fromkeys((*recount_tokens, *tokens))), None
         anchored, anchor_tokens, valid_anchor = reanchor_developer_output(
             normalized, write_paths, dict(source_files), return_valid=True)
         if not valid_anchor:
@@ -1481,7 +1485,9 @@ def _developer_normalized_output(value, write_paths, *, source_files=None):
         if anchored_rejection is not None:
             return None, (), anchored_rejection
         normalized = anchored
-        tokens = tuple(dict.fromkeys((*tokens, *anchor_tokens)))
+        tokens = tuple(dict.fromkeys((*recount_tokens, *tokens, *anchor_tokens)))
+    else:
+        tokens = tuple(dict.fromkeys((*recount_tokens, *tokens)))
     return normalized, tokens, None
 
 
@@ -1648,6 +1654,64 @@ def _persist_developer_output_rejection(store, task_id, developer, error_code,
             return store.update(task_id, developer=developer)
         return store.compare_and_update(
             task_id, expected={'developer': expected_developer}, developer=developer)
+
+
+def _text_developer_rejection_detail(value, error_code, source_files):
+    """Return a bounded structural rejection label and zero-based hunk index."""
+    if source_files is None:
+        return {'reason': 'SOURCE_UNREADABLE', 'hunk': None}
+    if error_code == 'DEVELOPER_OUTPUT_APPLY_FAILED':
+        return {'reason': 'APPLY_CHECK_FAILED', 'hunk': None}
+    if type(value) is not str:
+        return {'reason': 'STRICT_PARSE', 'hunk': None}
+    lines = _recount_developer_hunks(value).splitlines()
+    current_hunk = None
+    current_path = None
+    hunk_index = -1
+    hunks = []
+    for line in lines:
+        if line.startswith('--- a/'):
+            current_path = line[6:]
+            current_hunk = None
+        elif line.startswith('@@'):
+            hunk_index += 1
+            current_hunk = hunk_index
+            if _HUNK.fullmatch(line) is None:
+                return {'reason': 'HUNK_HEADER_INVALID', 'hunk': current_hunk}
+            hunks.append((current_hunk, current_path, []))
+        elif current_hunk is not None:
+            if line.startswith(('diff --git ', '--- ', '+++ ')):
+                current_hunk = None
+            elif line.startswith('\\ No newline at end of file'):
+                continue
+            elif not line.startswith((' ', '+', '-')):
+                return {'reason': 'HUNK_LINE_UNPREFIXED', 'hunk': current_hunk}
+            else:
+                hunks[-1][2].append(line)
+    if error_code == 'DEVELOPER_OUTPUT_INVALID_ENVELOPE':
+        return {'reason': 'SECTION_HEADER_INVALID', 'hunk': None}
+    if not hunks:
+        return {'reason': 'SECTION_HEADER_INVALID', 'hunk': None}
+    edits = {}
+    for index, path, body in hunks:
+        old_side = [line[1:] for line in body if line.startswith((' ', '-'))]
+        source = source_files.get(path) if path is not None else None
+        if type(source) is str and old_side:
+            source_lines = source.splitlines()
+            matches = [pos for pos in range(len(source_lines) - len(old_side) + 1)
+                       if source_lines[pos:pos + len(old_side)] == old_side]
+            if not matches:
+                return {'reason': 'OLD_SIDE_NOT_FOUND', 'hunk': index}
+            if len(matches) > 1:
+                return {'reason': 'OLD_SIDE_AMBIGUOUS', 'hunk': index}
+            start, end = matches[0], matches[0] + len(old_side)
+            file_edits = edits.setdefault(path, [])
+            if file_edits and start < file_edits[-1][1]:
+                return {'reason': 'HUNKS_OVERLAP', 'hunk': index}
+            file_edits.append((start, end))
+        if not any(line.startswith(('+', '-')) for line in body):
+            return {'reason': 'NO_CHANGE', 'hunk': index}
+    return {'reason': 'STRICT_PARSE', 'hunk': hunks[0][0] if hunks else None}
 
 
 def _ignored_file_fingerprints(root):
@@ -4116,20 +4180,26 @@ def run_task_delegate(args, *, store=None):
     if source_files is None:
         saved = _persist_developer_output_rejection(
             store, task['task_id'], developer, 'DEVELOPER_OUTPUT_INVALID_DIFF',
-            usage, result.content)
+            usage, result.content,
+            rejection_detail=_text_developer_rejection_detail(
+                result.content, 'DEVELOPER_OUTPUT_INVALID_DIFF', None))
         _print(_task_view(saved))
         return 1
     artifact, normalization_tokens, rejection_code = _developer_normalized_output(
         result.content, write_paths, source_files=source_files)
     if rejection_code is not None:
         saved = _persist_developer_output_rejection(
-            store, task['task_id'], developer, rejection_code, usage, result.content)
+            store, task['task_id'], developer, rejection_code, usage, result.content,
+            rejection_detail=_text_developer_rejection_detail(
+                result.content, rejection_code, source_files))
         _print(_task_view(saved))
         return 1
     if not _text_developer_apply_check(registration.root, source_sha, artifact):
         saved = _persist_developer_output_rejection(
             store, task['task_id'], developer, 'DEVELOPER_OUTPUT_APPLY_FAILED',
-            usage, result.content)
+            usage, result.content,
+            rejection_detail=_text_developer_rejection_detail(
+                result.content, 'DEVELOPER_OUTPUT_APPLY_FAILED', source_files))
         _print(_task_view(saved))
         return 1
     developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
