@@ -173,7 +173,8 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
                 return 'MERGE_MACOS_CHECK_SKIPPED'
             return 'MERGE_MACOS_CHECK_REQUIRED'
     if missing_macos:
-        return 'MERGE_REQUIRED_CHECK_MISSING'
+        return ('MERGE_MACOS_CHECK_MISSING' if allow_missing_macos else
+                'MERGE_REQUIRED_CHECK_MISSING')
     return None
 
 
