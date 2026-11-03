@@ -14,13 +14,15 @@ import os
 import re
 import shlex
 import signal
+import stat
 import sys
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 
-from . import (chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
+from . import (__version__, chat_tui_events, chat_tui_pm, chat_tui_status, chat_tui_task, chat_tui_theme,
                chat_tui_view, pm_runtime)
 from .chat import HELP, run_chat
 from .config import selected_provider
@@ -388,6 +390,8 @@ def history_matches(entries, query):
 
 def fit_width(text, width, get_cwidth):
     """Cut text to at most width terminal cells, ending with an ellipsis when cut."""
+    if width <= 0:
+        return ""
     if get_cwidth(text) <= width:
         return text
     result = []
@@ -399,6 +403,112 @@ def fit_width(text, width, get_cwidth):
         result.append(char)
         used += char_width
     return "".join(result) + "…"
+
+
+def _source_revision(source_file=None):
+    """Read a checkout revision from bounded Git metadata files, without running Git."""
+    # Keep the lexical path: resolving it changes /var to /private/var on macOS and
+    # can make a temporary checkout fixture appear outside the source tree being read.
+    source_path = Path(os.path.abspath(os.fspath(
+        __file__ if source_file is None else source_file)))
+    source_dir = source_path.parent.parent
+
+    def read_small(path, limit=4096):
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            return None
+        with path.open("rb") as source:
+            data = source.read(limit + 1)
+        return data if len(data) <= limit else None
+
+    def ref_name(value):
+        prefix = b"ref: "
+        if not value.startswith(prefix):
+            return None
+        name = value[len(prefix):].strip().decode("ascii")
+        parts = name.split("/")
+        if (not name.startswith("refs/") or any(part in ("", ".", "..") for part in parts)
+                or "\\" in name):
+            return None
+        return name
+
+    def revision(value):
+        value = value.strip()
+        if re.fullmatch(rb"[0-9a-fA-F]{40}|[0-9a-fA-F]{64}", value):
+            return value[:8].decode("ascii").lower()
+        return None
+
+    def packed_ref(path, name):
+        data = read_small(path, 4 * 1024 * 1024)
+        if data is None:
+            return None
+        for line in data.splitlines():
+            if line.endswith(b" " + name.encode("ascii")):
+                found = revision(line.split(b" ", 1)[0])
+                if found:
+                    return found
+        return None
+
+    try:
+        git_dir = None
+        for candidate in (source_dir, *source_dir.parents[:8]):
+            marker = candidate / ".git"
+            try:
+                marker_info = marker.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISDIR(marker_info.st_mode):
+                git_dir = marker
+                source_dir = candidate
+                break
+            if not stat.S_ISREG(marker_info.st_mode):
+                return None
+            marker_data = read_small(marker)
+            if marker_data is None:
+                return None
+            if not marker_data.startswith(b"gitdir: "):
+                return None
+            git_path = Path(marker_data[len(b"gitdir: "):].decode("utf-8").strip())
+            git_dir = git_path if git_path.is_absolute() else candidate / git_path
+            source_dir = candidate
+            break
+        if git_dir is None:
+            return None
+        head = read_small(git_dir / "HEAD")
+        if head is None:
+            return None
+        direct = revision(head)
+        if direct:
+            return direct
+        name = ref_name(head)
+        if name is None:
+            return None
+        try:
+            common_data = read_small(git_dir / "commondir")
+        except FileNotFoundError:
+            common_data = None
+        common_dir = git_dir
+        if common_data:
+            common_path = Path(common_data.decode("utf-8").strip())
+            common_dir = common_path if common_path.is_absolute() else git_dir / common_path
+        ref_path = Path(*name.split("/"))
+        for root in (git_dir, common_dir):
+            try:
+                found = revision(read_small(root / ref_path) or b"")
+            except OSError:
+                found = None
+            if found:
+                return found
+        for root in (common_dir, git_dir):
+            try:
+                found = packed_ref(root / "packed-refs", name)
+            except OSError:
+                found = None
+            if found:
+                return found
+        return None
+    except (OSError, UnicodeError, ValueError):
+        return None
 
 
 FAILED = "llmtool: chat terminal UI failed; details omitted"
@@ -641,6 +751,7 @@ class ChatTUI:
         self._app_styles = {}
         self._get_cwidth = get_cwidth
         self.session = session
+        self.source_revision = _source_revision()
         self.dev = dev_enabled() if dev is None else dev   # W57: Task mode only with the flag
         self.busy = False
         self.quit_pending = False
@@ -802,7 +913,9 @@ class ChatTUI:
             linker=self.task_view_linker)
         history_text = ("History is stored locally." if session.history_saved
                         else "History stays in memory.")
-        opening = ("LLMTool interactive chat (full-screen)\n" + session.status()
+        revision_label = (" (" + self.source_revision + ")" if self.source_revision else "")
+        opening = ("LLMTool " + __version__ + revision_label
+                   + " interactive chat (full-screen)\n" + session.status()
                    + "\n" + history_text + " F1 or /help for help; Ctrl-C exits.")
         if session.history_notice:
             opening += "\nllmtool: " + session.history_notice
@@ -820,7 +933,13 @@ class ChatTUI:
                 if (document.cursor_position != len(document.text) or
                         document.cursor_position_row != transformation_input.lineno):
                     return Transformation(transformation_input.fragments)
-                hint = self.pm_ghost_hint(document.text)
+                size = self.app.output.get_size()
+                line = document.current_line_before_cursor
+                prompt_width = get_cwidth("pm> " if self.pm_mode else
+                                          "task> " if self.task_profile else "> ")
+                hint = self.pm_ghost_hint(document.text,
+                                          size.columns - prompt_width - get_cwidth(line),
+                                          get_cwidth)
                 if not hint:
                     return Transformation(transformation_input.fragments)
                 fragments = list(transformation_input.fragments)
@@ -3071,7 +3190,7 @@ class ChatTUI:
         self.app.invalidate()
 
     @staticmethod
-    def pm_ghost_hint(text):
+    def pm_ghost_hint(text, width=None, get_cwidth=None):
         """Display-only completion for the PM command prefixes accepted by the TUI."""
         hints = {
             "/pm ": "new | list [--all] | use N|SESSION | accounts [--check] | "
@@ -3081,7 +3200,10 @@ class ChatTUI:
             "/pm use ": "N|SESSION",
             "/pm connect ": "[SESSION [CWD]]",
         }
-        return hints.get(text, "")
+        hint = hints.get(text, "")
+        if width is not None and get_cwidth is not None:
+            return fit_width(hint, width, get_cwidth)
+        return hint
 
     def run_pm_command(self, text):
         # Shell-style words, so a CWD with spaces can be quoted or escaped (W52 B3).
@@ -3171,7 +3293,11 @@ class ChatTUI:
                 return
             try:
                 bindings = _pm_newest_first(self.pm_api.list_bindings())
-                number = int(parts[2]) - 1 if parts[2].isdigit() else None
+                # Short decimal tokens are list positions. An eight-character
+                # decimal token can also be a session ID prefix, so keep it in
+                # the prefix lookup below.
+                number = (int(parts[2]) - 1
+                          if parts[2].isdigit() and len(parts[2]) < 8 else None)
                 if number is not None:
                     session_id = (bindings[number]['native_session_id']
                                   if 0 <= number < len(bindings) else None)
@@ -3191,7 +3317,7 @@ class ChatTUI:
                 return
             self.append("PM selected: " + chat_tui_pm.safe_text(binding.get('runtime', 'claude-code'))
                         + " account " + chat_tui_pm.safe_text(binding.get('account') or 'default')
-                        + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))
+                        + " · " + chat_tui_pm.safe_text(binding.get('native_session_id'))[:8]
                         + "; /pm connect to connect")
             return
         if parts[1:2] == ["accounts"]:

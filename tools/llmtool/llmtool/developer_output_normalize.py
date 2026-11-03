@@ -251,6 +251,8 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                     target.append(line[1:])
                 else:
                     return result(None, (), False)
+            old_count = sum(1 for line in body if line.startswith((' ', '-')))
+            old_end = start + old_count
             edits.append((start, cursor, target))
         if not edits:
             return result(None, (), False)
@@ -261,8 +263,19 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
                 return result(None, (), False)
             modified[start:end] = target
             previous_end = start
-        diff_lines = list(difflib.unified_diff(
-            source, modified, fromfile='', tofile='', n=3, lineterm=''))
+        # A Developer marker is untrusted metadata. Keep the source's exact
+        # final-newline state on the reconstructed result's final record.
+        source_records = [line + '\n' for line in source]
+        if source_records and not source_has_final_newline:
+            source_records[-1] = source[-1]
+        modified_records = [line + '\n' for line in modified]
+        if modified_records and not source_has_final_newline:
+            modified_records[-1] = modified[-1]
+        diff_records = list(difflib.unified_diff(
+            source_records, modified_records,
+            fromfile='', tofile='', n=3, lineterm=''))
+        diff_lines = [line[:-1] if line.endswith('\n') else line
+                      for line in diff_records]
         hunks = [line for line in diff_lines if line.startswith('@@ ')]
         if not hunks:
             return result(None, (), False)
@@ -273,20 +286,17 @@ def reanchor_developer_output(value, write_paths, source_files, *, return_valid=
             regenerated.append(section[1])
         regenerated.extend([f'--- a/{path}', f'+++ b/{path}'])
         # The first two lines from unified_diff are empty-path file headers.
-        body = diff_lines[2:]
-        # difflib omits Git's EOF markers. A text patch must preserve the
-        # source's final-newline state, so mark both affected sides as needed.
-        if source and modified and not source_has_final_newline:
-            eof_records = set()
-            for prefixes, final_line in (((' ', '-'), source[-1]),
-                                         ((' ', '+'), modified[-1])):
-                for index in range(len(body) - 1, -1, -1):
-                    if (body[index].startswith(prefixes) and
-                            body[index][1:] == final_line):
-                        eof_records.add(index)
-                        break
-            for index in sorted(eof_records, reverse=True):
-                body.insert(index + 1, r'\ No newline at end of file')
+        body_records = diff_records[2:]
+        # difflib retains each record's newline state. Convert that state into
+        # Git's marker immediately after the affected record; text equality
+        # alone cannot tell an unchanged EOF line from a repeated line above.
+        body_with_markers = []
+        for record in body_records:
+            line = record[:-1] if record.endswith('\n') else record
+            body_with_markers.append(line)
+            if line.startswith((' ', '-', '+')) and not record.endswith('\n'):
+                body_with_markers.append(r'\ No newline at end of file')
+        body = body_with_markers
         regenerated.extend(body)
     anchored = '\n'.join(regenerated) + '\n'
     tokens = ('HUNK_REANCHORED',) if anchored != value else ()
