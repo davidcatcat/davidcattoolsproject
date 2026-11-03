@@ -87,11 +87,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "company-gw-agent": {
-      "dispatch": "PAUSED",
-      "decided_by": "PM",
+      "dispatch": "ALLOWED",
+      "decided_by": "Owner",
       "decided_at": "2026-11-03",
-      "reason": "Paused pending the Owner decision tracked by #120; no Owner authorization for this route is recorded",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120"
+      "reason": "Owner decision D1 = A permits synthetic-only test-content agent-mode Developer use; pause after two consecutive failed runs, a write outside allowed paths, a credential or audit finding, or HTTP 429",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520"
     },
     "claude-reviewer": {
       "dispatch": "ALLOWED",

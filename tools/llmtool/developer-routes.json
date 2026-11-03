@@ -14,8 +14,8 @@
       "default_effort": "low",
       "profile_name": "llmtool-direct",
       "profile": {"auth_env": "GW_AGENT_API_KEY", "model": "gw-agent-default"},
-      "authorization_ref": "Owner decision pending (#120)",
-      "allowed_data_classes": ["PUBLIC", "INTERNAL"]
+      "authorization_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520",
+      "allowed_data_classes": ["SYNTHETIC"]
     }
   }
 }

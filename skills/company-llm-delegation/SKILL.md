@@ -9,6 +9,11 @@ Use this only as a development-time dogfood workflow. It does not implement A11c
 production routing and does not grant execution, mutation, approval, retry, fallback,
 security sign-off, QA verdict, or merge authority.
 
+Company `gw` may act as an agent-mode Developer through `gw-agent` only for synthetic
+test content, and every result receives formal Claude review. Pause after two
+consecutive failed runs, a write outside allowed paths, a credential or audit finding,
+or HTTP 429; real repository work needs a new Owner decision.
+
 ## Decision order
 
 1. **Deterministic first.** If a program can answer the question directly, do not call
