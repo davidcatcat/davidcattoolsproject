@@ -1028,8 +1028,10 @@ class TaskCompletionTests(unittest.TestCase):
         for author in (None, 'unknown'):
             for reviewer in ('claude-reviewer', 'codex-reviewer'):
                 with self.subTest(author=author, reviewer=reviewer):
-                    self.assertEqual(evaluate(author=author, reviewer=reviewer)[
-                        'evidence']['formal_review_state'], 'UNVERIFIED')
+                    with self.assertRaises(LLMToolError) as rejected:
+                        evaluate(author=author, reviewer=reviewer)
+                    self.assertEqual(rejected.exception.completion_code,
+                                     'REVIEW_DEVELOPER_FAMILY_UNSUPPORTED')
         self.assertEqual(evaluate(binding_body=comment_body.replace('task=' + '1' * 32,
                            'task=' + '9' * 32))['evidence']['formal_review_state'], 'UNVERIFIED')
         self.assertEqual(evaluate(review_text=comment_body + '\nDifferent text')

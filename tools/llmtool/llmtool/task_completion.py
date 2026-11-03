@@ -1703,6 +1703,19 @@ def is_formal_claude_pass(body, *, task_id, run_id, contract_digest, result_sha)
             _FORMAL_ACCEPT in lines and binding_line in lines)
 
 
+def _formal_review_developer_family(task_record):
+    """Return a supported Developer family or fail with a stable code."""
+    developer = (task_record.get('developer')
+                 if type(task_record) is dict else None)
+    family = (developer.get('provider_profile')
+              if type(developer) is dict else None)
+    if family not in {
+            'codex', 'claude', 'agy', 'opencode', 'company-gw',
+            'company-gw-agent', 'gw-agent'}:
+        _stop('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED')
+    return family
+
+
 def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
                              workflow_name, check_name, runner_names,
                              pr_merged=False, pr_head_ref=None):
@@ -1934,14 +1947,8 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     from .task_store import TaskStore
                     codex_task_record = TaskStore().get(task_id)
                     codex_task_record_loaded = True
-                developer = (codex_task_record.get('developer')
-                             if type(codex_task_record) is dict else None)
-                developer_family = (developer.get('provider_profile')
-                                    if type(developer) is dict else None)
-                supported_families = {
-                    'codex', 'claude', 'agy', 'opencode', 'company-gw',
-                    'company-gw-agent', 'gw-agent',
-                }
+                developer_family = _formal_review_developer_family(
+                    codex_task_record)
                 accepted_claude = (
                     reviewer.trusted_agent_id == 'claude-reviewer' and
                     type(codex_task_record) is dict and
@@ -1949,9 +1956,13 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                     codex_task_record.get('run_id') == run_id and
                     type(codex_task_record.get('task_binding')) is dict and
                     codex_task_record['task_binding'].get('contract_digest') ==
-                    contract_digest and developer_family in supported_families and
-                    developer_family != 'claude')
-            except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
+                    contract_digest and developer_family != 'claude')
+            except LLMToolError as exc:
+                if getattr(exc, 'completion_code', None) == \
+                        'REVIEW_DEVELOPER_FAMILY_UNSUPPORTED':
+                    raise
+                accepted_claude = False
+            except (KeyError, TypeError, ValueError, IndexError):
                 accepted_claude = False
         if standard and marker.group(1) == 'Codex' and marker.group(2) == 'PASS':
             accepted_codex = False
@@ -1967,6 +1978,7 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         from .task_store import TaskStore
                         codex_task_record = TaskStore().get(task_id)
                         codex_task_record_loaded = True
+                    _formal_review_developer_family(codex_task_record)
                     from . import review_result
                     classified = review_result._comment_verdict(
                         comment, head=result_sha,
@@ -2006,7 +2018,12 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
                         classified[2] == 'REVIEW_PASS' and
                         len(matching_claims) == 1 and claim_lines and
                         claim_lines == comment_lines)
-                except (LLMToolError, KeyError, TypeError, ValueError, IndexError):
+                except LLMToolError as exc:
+                    if getattr(exc, 'completion_code', None) == \
+                            'REVIEW_DEVELOPER_FAMILY_UNSUPPORTED':
+                        raise
+                    accepted_codex = False
+                except (KeyError, TypeError, ValueError, IndexError):
                     accepted_codex = False
             if not accepted_codex:
                 continue  # Unbound or otherwise unverified Codex PASS stays advisory.
