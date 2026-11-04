@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import runpy
+import re
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -15,6 +16,14 @@ REPO = 'davidcatcat/davidcattoolsproject'
 
 
 class JobAdmissionTests(unittest.TestCase):
+
+    def test_linux_workflow_admits_exactly_both_trusted_actors_in_all_six_checks(self):
+        workflow = Path(__file__).parents[2] / '.github/workflows/llmtool-linux-ci.yml'
+        contents = workflow.read_text()
+        actors = re.findall(r"github\.actor == '([^']+)'", contents)
+        self.assertEqual(actors.count('davidcatcat'), 6)
+        self.assertEqual(actors.count('ddavidccatssun'), 6)
+        self.assertEqual(len(actors), 12)
 
     def run_hook(self, account='ghrunner', event=None, **env):
         with tempfile.TemporaryDirectory() as temporary:
@@ -50,6 +59,25 @@ class JobAdmissionTests(unittest.TestCase):
         self.assertEqual(code, 0, out)
         self.assertIn('EC2_HOST_ADMISSION_PASS runner=ec2-self-runner event=push', out)
 
+    def test_second_trusted_actor_is_admitted_on_push(self):
+        event = {'repository': {'full_name': REPO}, 'sender': {'login': 'ddavidccatssun'},
+                 'ref': 'refs/heads/main'}
+        code, out = self.run_hook(event=event, GITHUB_ACTOR='ddavidccatssun',
+                                  GITHUB_TRIGGERING_ACTOR='ddavidccatssun')
+        self.assertEqual(code, 0, out)
+
+    def test_second_trusted_actor_is_admitted_on_pull_request(self):
+        merge = 'refs/pull/7/merge'
+        event = {'repository': {'full_name': REPO}, 'sender': {'login': 'ddavidccatssun'},
+                 'pull_request': {'head': {'repo': {'full_name': REPO}},
+                                  'user': {'login': 'ddavidccatssun'},
+                                  'base': {'ref': 'main'}}}
+        code, out = self.run_hook(event=event, GITHUB_ACTOR='ddavidccatssun',
+                                  GITHUB_TRIGGERING_ACTOR='ddavidccatssun',
+                                  GITHUB_EVENT_NAME='pull_request', GITHUB_REF=merge,
+                                  GITHUB_WORKFLOW_REF=REPO + '/.github/workflows/llmtool-linux-ci.yml@' + merge)
+        self.assertEqual(code, 0, out)
+
     def test_each_runner_must_run_under_its_own_account(self):
         self.refused('service account', account='ghrunner2')
         self.refused('service account', account='david.s')
@@ -70,6 +98,20 @@ class JobAdmissionTests(unittest.TestCase):
         self.refused('commit SHA', GITHUB_SHA='main')
         self.refused('event type', GITHUB_EVENT_NAME='pull_request_target')
         self.refused('event sender', event={'repository': {'full_name': REPO}, 'sender': {'login': 'x'}})
+
+    def test_untrusted_logins_are_refused_in_each_identity_field(self):
+        merge = 'refs/pull/7/merge'
+        base_event = {'repository': {'full_name': REPO}, 'sender': {'login': 'davidcatcat'},
+                      'pull_request': {'head': {'repo': {'full_name': REPO}},
+                                       'user': {'login': 'davidcatcat'}, 'base': {'ref': 'main'}}}
+        pr_env = {'GITHUB_EVENT_NAME': 'pull_request', 'GITHUB_REF': merge,
+                  'GITHUB_WORKFLOW_REF': REPO + '/.github/workflows/llmtool-linux-ci.yml@' + merge}
+        self.refused('actor', GITHUB_ACTOR='someone')
+        self.refused('triggering actor', GITHUB_TRIGGERING_ACTOR='someone')
+        event = dict(base_event, sender={'login': 'someone'})
+        self.refused('event sender', event=event)
+        event = dict(base_event, pull_request=dict(base_event['pull_request'], user={'login': 'someone'}))
+        self.refused('pull request author', event=event, **pr_env)
 
     def test_pushes_and_manual_runs_only_from_main(self):
         other = REPO + '/.github/workflows/llmtool-linux-ci.yml@refs/heads/other'
