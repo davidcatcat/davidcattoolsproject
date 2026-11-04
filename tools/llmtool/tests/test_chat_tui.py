@@ -2201,7 +2201,7 @@ class TaskListTests(Base):
             self.assertFalse(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.input))
 
-        def list_open(ui):
+        def assert_list_visible(ui):
             self.assertTrue(ui.show_list)
 
         calls = self.pm.complete.call_count
@@ -2215,7 +2215,7 @@ class TaskListTests(Base):
                             'c', list_copied, '\r', self.idle, detail_open, 'c', detail_copied,
                             '\x1b', self.esc_settled, back_to_list,
                             '\x1b', self.esc_settled, back_to_chat,
-                            '\x1bOR', list_open, self.listed,
+                            '\x1bOR', assert_list_visible, self.listed,
                             '\x1bOR', back_to_chat])
         self.assertEqual(self.pm.complete.call_count, self.calls)
         self.factory.assert_not_called()
@@ -3010,6 +3010,7 @@ class FakeClaudeGateTests(unittest.TestCase):
                 self.unlocked = threading.Event()
                 self.resume = threading.Event()
                 self.first_thread = None
+                self.resume_wait_succeeded = None
 
             def __enter__(self):
                 self.lock.acquire()
@@ -3020,7 +3021,8 @@ class FakeClaudeGateTests(unittest.TestCase):
                 self.lock.release()
                 if is_first:
                     self.unlocked.set()
-                    self.resume.wait(FakeClaudeGateTests.HOLD_WAIT)
+                    self.resume_wait_succeeded = self.resume.wait(
+                        FakeClaudeGateTests.HOLD_WAIT)
 
         for retiring_kind in ('user', 'unsolicited'):
             for running_kind in ('user', 'unsolicited'):
@@ -3030,38 +3032,47 @@ class FakeClaudeGateTests(unittest.TestCase):
                     fake = FakeClaude(user_scripts)
                     barrier = PostUnlockBarrier()
                     fake.turn_lock = barrier
-                    if retiring_kind == 'user':
-                        fake.write((fake._json.dumps({'type': 'user', 'uuid': 'retiring'})
-                                     + '\n').encode('utf-8'))
-                        retiring_thread = fake.threads[0]
-                    else:
-                        fake.unsolicited([])
-                        retiring_thread = fake.threads[0]
-                    barrier.first_thread = retiring_thread
-                    barrier_waited = barrier.unlocked.wait(self.HOLD_WAIT)
+                    try:
+                        barrier.lock.acquire()
+                        try:
+                            if retiring_kind == 'user':
+                                fake.write((fake._json.dumps({'type': 'user', 'uuid': 'retiring'})
+                                             + '\n').encode('utf-8'))
+                                retiring_thread = fake.threads[0]
+                            else:
+                                fake.unsolicited([])
+                                retiring_thread = fake.threads[0]
+                            barrier.first_thread = retiring_thread
+                        finally:
+                            barrier.lock.release()
 
-                    if running_kind == 'user':
-                        fake.write((fake._json.dumps({'type': 'user', 'uuid': 'running'})
-                                     + '\n').encode('utf-8'))
-                    else:
-                        fake.unsolicited(['HOLD'])
-                    running_turn = fake._all_turns[1]
-                    running_started = running_turn['started'].wait(self.HOLD_WAIT)
-                    if running_kind == 'user':
+                        barrier_waited = barrier.unlocked.wait(self.HOLD_WAIT)
+
+                        if running_kind == 'user':
+                            fake.write((fake._json.dumps({'type': 'user', 'uuid': 'running'})
+                                         + '\n').encode('utf-8'))
+                        else:
+                            fake.unsolicited(['HOLD'])
+                        running_turn = fake._all_turns[1]
+                        running_started = running_turn['started'].wait(self.HOLD_WAIT)
                         fake.write((fake._json.dumps({'type': 'user', 'uuid': 'later'})
                                      + '\n').encode('utf-8'))
-                    else:
-                        fake.write((fake._json.dumps({'type': 'user', 'uuid': 'later'})
-                                     + '\n').encode('utf-8'))
-                    later_turn = fake._all_turns[2]
+                        later_turn = fake._all_turns[2]
 
-                    self.control(fake)
-                    selected_running_gate = running_turn['gate'].is_set()
-                    later_gate_untouched = not later_turn['gate'].is_set()
-                    barrier.resume.set()
-                    self.release_and_join(fake)
+                        self.control(fake)
+                        selected_running_gate = running_turn['gate'].is_set()
+                        later_gate_untouched = not later_turn['gate'].is_set()
+                    finally:
+                        barrier.resume.set()
+                        fake.gate.set()
+                        for thread in fake.threads:
+                            thread.join(self.HOLD_WAIT)
+                        fake._end()
+                        fake.stdout.close()
 
                     self.assertTrue(barrier_waited, 'retiring turn did not reach post-unlock barrier')
+                    self.assertTrue(barrier.resume_wait_succeeded,
+                                    'retiring turn timed out at the post-unlock barrier')
                     self.assertTrue(running_started, 'next turn did not start')
                     self.assertTrue(selected_running_gate, 'control request missed the running turn')
                     self.assertTrue(later_gate_untouched, 'control request released a later queued turn')
