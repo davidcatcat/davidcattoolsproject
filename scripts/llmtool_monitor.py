@@ -3677,7 +3677,7 @@ def _claude_state(entry: dict, who: str, task: str, detail: str, age: float | No
         # Stopped at a prompt or menu only a person or its driving agent can answer.
         state = ATTENTION
         word = ("等人確認權限" if entry.get("waitingFor") == "permission prompt" else "等人回覆"
-                if status == "waiting" else "等人操作")
+                if status == "waiting" and job != "blocked" else "等人操作")
         detail = f"{word}，要{who}回{suffix}"
     elif status == "busy" or job == "working":
         state = WORKING
@@ -5320,7 +5320,9 @@ def parse_claude_agents(text) -> dict[str, dict]:
         if "waiting" in words:
             entry["status"] = "waiting"
         else:
-            entry["status"], entry["jobState"] = "busy", "blocked"
+            entry["status"] = "busy"
+        if "blocked" in words:
+            entry["jobState"] = "blocked"
         cwd = item.get("cwd")
         if type(cwd) is str and cwd.startswith(os.sep) and len(cwd) <= 4096:
             entry["cwd"] = cwd
@@ -5457,7 +5459,9 @@ def _closed_claude_cli(rows: list[OfficeRow], sessions,
     record behind. Each running CLI names its session in the registry; a CLI
     without a readable entry keeps the most recently active unnamed session.
     Any other CLI session shows as closed for a while, then leaves with its
-    subagents. keep: keys of sessions `claude agents` still lists."""
+    subagents. A stale waiting-only `claude agents` listing cannot keep a CLI
+    transcript open after its process exits; blocked listings still require a
+    person's attention. keep: keys of sessions `claude agents` reports blocked."""
     found = _claude_live_sessions(sessions, processes)
     if found is None:
         return rows
@@ -5473,7 +5477,16 @@ def _closed_claude_cli(rows: list[OfficeRow], sessions,
         elif row.age is not None and row.age > OFFICE_DONE_WINDOW:
             gone.add(row.key)
         else:
-            out.append(replace(row, state=CLOSED, detail=f"推測 Claude CLI 已關閉（{row.detail}）"))
+            detail = row.detail
+            if row.state == ATTENTION:
+                before_launcher, separator, launcher = detail.partition("｜")
+                before_launcher = before_launcher.replace("等人回覆", "先前等人回覆")
+                before_launcher = before_launcher.replace("等人確認權限", "先前等人確認權限")
+                before_launcher = before_launcher.replace("等人操作", "先前等人操作")
+                before_launcher = re.sub(r"，要.*?回", "", before_launcher)
+                detail = before_launcher + (separator + launcher if separator else "")
+            out.append(replace(row, state=CLOSED,
+                               detail=f"推測 Claude CLI 已關閉（{detail}）"))
     return [row for row in out if row.group not in gone]
 
 
@@ -5562,9 +5575,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     canonical = canonical or canonical_root()
     sessions = claude_sessions(claude_root)
     owners = {p.pid: p.owner if type(p.owner) is str else "" for p in processes}
-    # Who must answer a waiting CLI: the Codex PM that launched it, you when
-    # no agent did (your own terminal or a background session), else whatever
-    # agent started it.
+    # Blocked listings still need attention; waiting-only CLIs need a reply
+    # from the Codex PM that launched them, you when no agent did, or that agent.
     def answerer(owner: str) -> str:
         if owner.startswith("Codex"):
             return "PM（Codex）"
@@ -5573,9 +5585,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     live = {sid: (entry, answerer(owners.get(entry.get("pid"), "")))
             for sid, entry in _live_by_session(_claude_registered(sessions, processes)).items()}
     for sid, listed in (agents or {}).items():
-        # What `claude agents` says beats the registry's own status word unless
-        # the registry is more urgent; a session it lists but no running CLI
-        # names waits for you.
+        # What `claude agents` says beats the registry's own status word unless the registry is more urgent.
+        # A session it lists with no running CLI is answered by you; waiting alone does not keep an exited CLI transcript open (see _closed_claude_cli), only a blocked listing does.
         entry, who = live.get(sid, ({}, "你"))
         if entry and _live_rank(entry) < _live_rank(listed):
             listed = {key: value for key, value in listed.items()
@@ -5599,7 +5610,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             + claude_rows(now, claude_root, canonical, live))
     rows = _closed_codex_cli(rows, sum(family(p.role) == "Codex" for p in clis))
     rows = _closed_claude_cli(rows, sessions, processes,
-                              keep={f"claude:{sid}.jsonl" for sid in agents or {}})
+                              keep={f"claude:{sid}.jsonl" for sid, entry in (agents or {}).items()
+                                    if entry.get("jobState") == "blocked"})
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)

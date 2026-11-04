@@ -2214,6 +2214,7 @@ class OfficeViewTests(unittest.TestCase):
         self._codex("app", {"id": "T2", "cwd": str(self.task), "thread_source": "user",
                             "originator": "codex_vscode"}, ["task_complete"], age=60)
         cli = mon.Process(9, 1, 9, "01:00", "S+", "Codex CLI (node launcher)", "node", "")
+        # The same completed transcript means waiting only while a CLI is live.
         self.assertEqual(self.by_name(self.rows([cli]))["codex 主對話"].state, mon.IDLE)
         rows = self.by_name(self.rows())
         self.assertEqual(rows["codex 主對話"].state, mon.CLOSED)
@@ -2736,6 +2737,33 @@ class OfficeViewTests(unittest.TestCase):
         rows = {row.detail: row.state for row in self.rows([cli, *helpers])}
         self.assertEqual(rows["推測 Claude CLI 已關閉（title recent）"], mon.CLOSED)
 
+    def test_exited_claude_pm_session_ignores_stale_waiting_listing_but_live_one_waits(self):
+        sid = "pm-session"
+        self._write(self.claude / "proj" / f"{sid}.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "agent-name", "agentName": "claude-pm"},
+            {"type": "ai-title", "aiTitle": "handoff"}], age=300)
+        (self.claude.parent / "sessions").mkdir()
+        listed = {sid: {"sessionId": sid, "status": "waiting", "listed": True,
+                        "cwd": self.canonical, "name": "claude-pm"}}
+        kwargs = {"codex_root": str(self.codex), "claude_root": str(self.claude),
+                  "canonical": self.canonical, "agents": listed}
+
+        with patch.object(mon, "_pm_runtime_bindings", return_value={}):
+            exited = mon.office_rows([], self.NOW, **kwargs)
+        self.assertEqual([(row.name, row.state, row.detail) for row in exited if row.kind != "worker"],
+                         [("claude pm（互動）", mon.CLOSED,
+                           "推測 Claude CLI 已關閉（先前等人回覆｜claude-pm）")])
+
+        live_cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
+        (self.claude.parent / "sessions" / "41.json").write_text(
+            json.dumps({"pid": 41, "sessionId": sid, "status": "waiting",
+                        "name": "claude-pm"}), encoding="utf-8")
+        with patch.object(mon, "_pm_runtime_bindings", return_value={}):
+            live = mon.office_rows([live_cli], self.NOW, **kwargs)
+        self.assertEqual([(row.name, row.state) for row in live if row.kind != "worker"],
+                         [("claude pm（互動）", mon.ATTENTION)])
+
     def test_launcher_named_claude_session_shows_its_role(self):
         for sid, name in (("r", "claude-reviewer"), ("p", "claude-pm"),
                           ("d", "claude-developer-ui"), ("x", "claude-reviewers"),
@@ -2881,7 +2909,10 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "ai-title", "aiTitle": "title a"}], age=600)
         (self.claude.parent / "sessions").mkdir(exist_ok=True)   # registry readable, no CLI in it
         listed = mon.parse_claude_agents(json.dumps(
-            [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "cwd": self.canonical}]))
+            [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "status": "waiting",
+              "cwd": self.canonical}]))
+        self.assertEqual((listed["aaaaaaaa-0001"]["status"],
+                          listed["aaaaaaaa-0001"]["jobState"]), ("waiting", "blocked"))
         rows = [row for row in mon.office_rows(
             [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
             canonical=self.canonical, agents=listed) if row.kind != "worker"]
