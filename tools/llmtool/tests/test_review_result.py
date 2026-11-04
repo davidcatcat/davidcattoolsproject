@@ -58,7 +58,8 @@ def _developer_record(family):
                           'company-gw-agent': 'openai-compatible',
                           'gw-agent': 'openai-compatible',
                           'opencode': 'opencode-cli', 'agy': 'agy-cli'}[family],
-        'model': None if family in ('claude', 'company-gw') else 'gpt-6-luna',
+        'model': ('claude-sonnet-5-5-medium' if family == 'agy' else
+                  None if family in ('claude', 'company-gw') else 'gpt-6-luna'),
         'backend_session_semantics': ('CLI_REPORTED_SESSION_ID' if cli_family
                                       else 'NO_NATIVE_SESSION_ID_EXPOSED'),
         'session_id': 'developer-session', 'source_sha': HEAD,
@@ -130,6 +131,7 @@ class ReviewResultTests(unittest.TestCase):
             **kwargs)
 
     def test_formal_claude_pass_is_recorded_and_replay_is_idempotent(self):
+        self.store = FamilyStore(self.store, 'codex')
         first = self.run_result([_comment()])
         second = self.run_result([_comment()])
         self.assertEqual(first['state'], 'REVIEW_PASS')

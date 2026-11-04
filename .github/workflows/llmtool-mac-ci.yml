@@ -20,6 +20,7 @@ on:
       - 'scripts/test_llmtool_monitor.py'
       - '.github/workflows/llmtool-mac-ci.yml'
       - 'tools/mac-runner/**'
+      - 'tools/safe-git/**'
   workflow_dispatch:
 
 permissions:
