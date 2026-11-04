@@ -64,9 +64,10 @@ class ClaudePMCodexFlowTests(unittest.TestCase):
     _git = completion_fixture.TaskCompletionTests._git
     _write_registration = completion_fixture.TaskCompletionTests._write_registration
     _write_env2_marker = completion_fixture.TaskCompletionTests._write_env2_marker
+    _trusted_main_ref = completion_fixture.TaskCompletionTests._trusted_main_ref
 
     @contextmanager
-    def _trusted_main_ref(self):
+    def _trusted_completion_refs(self):
         """Provide an authenticated fixture main pin for task completion."""
         with patch('llmtool.task_submission_cli.task_completion._github_get',
                    return_value={'ref': 'refs/heads/main', 'object': {
@@ -179,7 +180,7 @@ class ClaudePMCodexFlowTests(unittest.TestCase):
 
         # 4. Executor-result callback: real D6/Git/test evidence, no PM provider call.
         out = StringIO()
-        with self._trusted_main_ref(), \
+        with self._trusted_completion_refs(), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    side_effect=forbidden), \
              patch('llmtool.task_submission_cli.create_client', side_effect=forbidden), \
