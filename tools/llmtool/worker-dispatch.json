@@ -13,11 +13,11 @@
       "decided_by": "Owner",
       "decided_at": "2026-11-04",
       "reason": "Owner assigned only the gw-agent repair to Claude Developer; all other Claude Developer work stays paused",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6641086731",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6641326482",
       "owner_assignments": [
         {
           "task_id": "14ffbf93461373873bb32fbdb83924a0",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6641086731"
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6641326482"
         }
       ]
     },

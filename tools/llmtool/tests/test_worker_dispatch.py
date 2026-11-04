@@ -264,7 +264,7 @@ class WorkerDispatchTests(unittest.TestCase):
     def test_real_claude_developer_policy_matches_only_owner_assigned_task(self):
         task_id = '14ffbf93461373873bb32fbdb83924a0'
         ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
-               'issues/120#issuecomment-6641086731')
+               'issues/289#issuecomment-6641326482')
         with patch.object(worker_dispatch, '_POLICY_PATH',
                           Path(worker_dispatch._DEFAULT_POLICY_PATH)):
             decision = worker_dispatch.evaluate('claude-developer', ref, task_id)
