@@ -398,6 +398,11 @@ def _protected_gates(command):
             index += 1
         return result
 
+    def strip_assignments(words):
+        while words and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[0]):
+            words.pop(0)
+        return words
+
     def scan(segment, depth=0):
         if depth > 8:
             return
@@ -408,6 +413,7 @@ def _protected_gates(command):
             # Shell control words and command wrappers may precede the real
             # executable. env/sudo accept option arguments before it.
             while words:
+                strip_assignments(words)
                 while words and words[0] in ('if', 'then', 'while', 'do', '!'):
                     words.pop(0)
                 if not words or words[0] not in wrappers:
@@ -428,8 +434,7 @@ def _protected_gates(command):
                     while words and words[0].startswith('-'):
                         words.pop(0)
                 else:
-                    while words and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[0]):
-                        words.pop(0)
+                    strip_assignments(words)
             if not words or words[0] in ('echo', 'printf'):
                 continue
             executable = os.path.basename(words[0])
