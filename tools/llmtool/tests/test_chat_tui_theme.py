@@ -62,9 +62,12 @@ class ThemeChoiceTests(unittest.TestCase):
                 self.assertNotIn("ansibrightblack", style)
 
     def test_trusted_pr_url_style_is_blue_and_disabled_without_colour(self):
-        self.assertIn("blue", chat_tui_view.token_style("ui.pr.url", True, "dark"))
-        self.assertIn("blue", chat_tui_view.token_style("ui.pr.url", True, "light"))
-        self.assertEqual(chat_tui_view.token_style("ui.pr.url", False, "dark"), "")
+        self.assertEqual(chat_tui_view.token_style("ui.pr.url", True, "dark"),
+                         chat_tui_view.THEME_DARK["ui.pr.url"])
+        self.assertEqual(chat_tui_view.token_style("ui.pr.url", True, "light"),
+                         chat_tui_view.THEME_LIGHT["ui.pr.url"])
+        self.assertEqual(chat_tui_view.token_style("ui.pr.url", False, "dark"),
+                         chat_tui_view.THEME_MONO["ui.pr.url"])
 
 
 class SettingsFileTests(unittest.TestCase):
@@ -309,7 +312,8 @@ class PaneLinkTests(unittest.TestCase):
                             if token == "ui.pr.url"]
                 self.assertEqual(pr_spans, [(trusted + "123", "ui.pr.url")])
                 rendered = [(style, value) for style, value in pieces]
-                self.assertTrue(any(value == trusted + "123" and "blue" in style
+                pr_style = chat_tui_view.token_style("ui.pr.url", True, theme)
+                self.assertTrue(any(value == trusted + "123" and style == pr_style
                                     for style, value in rendered))
                 rendered_text = "\n".join("".join(value for _style, value in content.get_line(index))
                                            for index in range(content.line_count))
