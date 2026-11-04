@@ -714,6 +714,50 @@ class ReaderTests(unittest.TestCase):
         value = self.reader.inspect_store()
         self.assertTrue(value['staging_scan_limited'])
 
+    def test_inspect_store_accounts_unusual_stage_children_without_refusal(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        stage = self.home / ('.run-init-' + 'c' * 32)
+        stage.mkdir(mode=0o700)
+        plain = stage / 'plain'
+        plain.write_bytes(b'plain')
+        plain.chmod(0o644)
+        hardlink = stage / 'hardlink'
+        os.link(plain, hardlink)
+        external = self.base / 'external'
+        external.write_bytes(b'not followed')
+        (stage / 'symlink').symlink_to(external)
+        value = self.reader.inspect_store()
+        self.assertEqual(value['staging_count'], 1)
+        self.assertEqual(value['staging_bytes'], len(b'plain') * 2 + len(str(external)))
+
+    def test_inspect_store_unknown_scan_errors_and_depth_are_capacity_limited(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        unknown = self.home / 'unmanaged'
+        unknown.mkdir(mode=0o700)
+        with patch.object(r, '_account_entry', side_effect=PermissionError('unreadable')):
+            value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
+
+        current = unknown
+        for _ in range(r.ACCOUNT_DEPTH_LIMIT + 2):
+            current = current / 'd'
+            current.mkdir(mode=0o700)
+        value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
+
+    def test_inspect_store_charges_run_files_to_shared_scan_budget(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        for number in range(8500):
+            (self.home / ('.run-init-' + format(number, '032x'))).mkdir(mode=0o700)
+        runs = self.home / 'runs'
+        for number in range(499):
+            directory = runs / format(number + 1, '032x')
+            directory.mkdir(mode=0o700)
+            for name in ('.run.lock', '.reservation', 'trace.partial.jsonl'):
+                (directory / name).touch(mode=0o600)
+        value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
+
     def test_inspect_store_empty_stage_and_unsafe_stage(self):
         DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
         stage = self.home / ('.run-init-' + 'b' * 32)

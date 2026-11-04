@@ -226,6 +226,30 @@ class DoctorTests(DoctorFixture):
         self.assertEqual(snapshot(self.state), before)
         self.assert_safe(result)
 
+    def test_unmanaged_scan_errors_and_depth_block_without_changing_exit(self):
+        self.write_config(policy='diagnostics:\n  persist_metadata: true\n'
+                          '  max_total_bytes: 1048576\n  max_run_bytes: 65536\n')
+        self.state.mkdir(mode=0o700)
+        (self.state / 'runs').mkdir(mode=0o700)
+        (self.state / '.store.lock').touch(mode=0o600)
+        unmanaged = self.state / 'unmanaged'
+        unmanaged.mkdir(mode=0o700)
+        with patch.object(r, '_account_entry', side_effect=PermissionError('unreadable')):
+            unreadable = self.invoke()
+        self.assertEqual((unreadable[0], unreadable[2]), (0, ''))
+        self.assertIn('capacity=blocked\n', unreadable[1])
+        self.assertIn('nothing deleted; manual review required\n', unreadable[1])
+
+        current = unmanaged
+        for _ in range(r.ACCOUNT_DEPTH_LIMIT + 2):
+            current = current / 'd'
+            current.mkdir(mode=0o700)
+        deep = self.invoke()
+        self.assertEqual((deep[0], deep[2]), (0, ''))
+        self.assertIn('capacity=blocked\n', deep[1])
+        self.assertIn('nothing deleted; manual review required\n', deep[1])
+        self.assert_safe(deep)
+
     def test_credential_key_iteration_only_not_values_or_default_contains(self):
         self.write_config(extra='    api_key_env: DOCTOR_SECRET\n')
         for present in (False, True):

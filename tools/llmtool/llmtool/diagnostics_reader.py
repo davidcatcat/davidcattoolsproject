@@ -17,6 +17,7 @@ from .errors import LLMToolError
 
 RUN_SCAN_LIMIT = 1000
 ROOT_SCAN_LIMIT = SCAN_LIMIT
+ACCOUNT_DEPTH_LIMIT = 32
 RUN_FILE_SCAN_LIMIT = 16
 RUN_OUTPUT_LIMIT = 100
 RUNS_READ_MAX_BYTES = 4 * 1024 * 1024
@@ -200,8 +201,10 @@ def _names(directory, limit):
     return names
 
 
-def _account_bytes(parent, budget, *, skip=()):
+def _account_bytes(parent, budget, *, skip=(), depth=0):
     """Stat-only recursive accounting, bounded like the diagnostics writer."""
+    if depth > ACCOUNT_DEPTH_LIMIT:
+        raise ReaderError('LIMIT_EXCEEDED')
     total = 0
     names = _names(parent, budget[0] + 1)
     budget[0] -= len(names)
@@ -210,18 +213,20 @@ def _account_bytes(parent, budget, *, skip=()):
     for name in names:
         if name in skip:
             continue
-        total += _account_entry(parent, name, budget)
+        total += _account_entry(parent, name, budget, depth=depth)
     return total
 
 
-def _account_entry(parent, name, budget):
+def _account_entry(parent, name, budget, *, depth=0):
     info = os.stat(name, dir_fd=parent, follow_symlinks=False)
     if stat.S_ISDIR(info.st_mode):
+        if depth >= ACCOUNT_DEPTH_LIMIT:
+            raise ReaderError('LIMIT_EXCEEDED')
         child = _directory(parent, name, private=False)
         try:
             if _identity(info) != _identity(os.fstat(child)):
                 raise ReaderError('STORE_UNAVAILABLE')
-            total = _account_bytes(child, budget)
+            total = _account_bytes(child, budget, depth=depth + 1)
         finally:
             os.close(child)
     elif stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
@@ -543,16 +548,24 @@ class DiagnosticsReader:
                                     if budget[0] < 0:
                                         raise ReaderError('LIMIT_EXCEEDED')
                                     for filename in files:
-                                        child = os.stat(filename, dir_fd=stage,
-                                                        follow_symlinks=False)
-                                        _private(child, stat.S_ISDIR(child.st_mode))
-                                        result['staging_bytes'] += _account_entry(
-                                            stage, filename, budget)
+                                        try:
+                                            result['staging_bytes'] += _account_entry(
+                                                stage, filename, budget)
+                                        except ReaderError as exc:
+                                            if exc.code == 'LIMIT_EXCEEDED':
+                                                result['staging_scan_limited'] = True
+                                                break
+                                            raise
+                                        except OSError:
+                                            result['staging_scan_limited'] = True
+                                            break
                                 except ReaderError as exc:
                                     if exc.code == 'LIMIT_EXCEEDED':
                                         result['staging_scan_limited'] = True
                                     else:
                                         raise
+                                except OSError:
+                                    result['staging_scan_limited'] = True
                                 result['staging_count'] += 1
                                 _check_link(root, name, stage, True)
                             finally:
@@ -570,7 +583,13 @@ class DiagnosticsReader:
                             result['staging_scan_limited'] = True
                         else:
                             raise
+                    except OSError:
+                        result['staging_scan_limited'] = True
                 names = _names(runs, RUN_SCAN_LIMIT)
+                budget[0] -= len(names)
+                if budget[0] < 0:
+                    result['staging_scan_limited'] = True
+                    budget[0] = 0
                 for name in names:
                     try:
                         d.validate_run_id(name)
@@ -579,6 +598,10 @@ class DiagnosticsReader:
                         continue
                     with self._run(runs, name) as (directory, files, acquired):
                         result['run_count'] += 1
+                        budget[0] -= len(files)
+                        if budget[0] < 0:
+                            result['staging_scan_limited'] = True
+                            budget[0] = 0
                         if not acquired:
                             result['active_count'] += 1
                             continue
