@@ -3032,6 +3032,7 @@ class ChatTUI:
                     newline = safe_text.find("\n", end)
                     end = len(safe_text) if newline < 0 else newline + 1
                 view._add_segments(start, [(safe_text[start:end], "role.pm")])
+        chat_tui_view.add_pr_url_styles(view, chat_tui_status.pr_url())
         view.top = view.top_offset = 0          # a detail is read from its first line
         view.following = view.unseen = False
 
@@ -3188,6 +3189,8 @@ class ChatTUI:
                 newline = text.find("\n", end)
                 end = len(text) if newline < 0 else newline + 1
             view._add_segments(0, [(text[:end], "role.pm")])
+        if view is self.detail_view:
+            chat_tui_view.add_pr_url_styles(view, chat_tui_status.pr_url())
         if not keep:
             view.top = view.top_offset = 0
         else:
