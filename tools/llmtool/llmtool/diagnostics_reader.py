@@ -10,12 +10,12 @@ from dataclasses import fields
 
 from . import diagnostics as d
 from .diagnostics_settings import resolve_diagnostics_home
-from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES
+from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES, SCAN_LIMIT
 from .diagnostics_summary import (RunSummary, SUMMARY_MAX_BYTES, MAX_STORED_RUN_BYTES,
                                   parse_run_summary, strict_object)
 from .errors import LLMToolError
 
-RUN_SCAN_LIMIT = 1000
+RUN_SCAN_LIMIT = SCAN_LIMIT
 RUN_FILE_SCAN_LIMIT = 16
 RUN_OUTPUT_LIMIT = 100
 RUNS_READ_MAX_BYTES = 4 * 1024 * 1024
@@ -197,6 +197,40 @@ def _names(directory, limit):
                 raise ReaderError('LIMIT_EXCEEDED')
             names.append(item.name)
     return names
+
+
+def _account_bytes(parent, budget, *, skip=()):
+    """Stat-only recursive accounting, bounded like the diagnostics writer."""
+    total = 0
+    names = _names(parent, budget[0] + 1)
+    budget[0] -= len(names)
+    if budget[0] < 0:
+        raise ReaderError('LIMIT_EXCEEDED')
+    for name in names:
+        if name in skip:
+            continue
+        total += _account_entry(parent, name, budget)
+    return total
+
+
+def _account_entry(parent, name, budget):
+    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if stat.S_ISDIR(info.st_mode):
+        child = _directory(parent, name, private=False)
+        try:
+            if _identity(info) != _identity(os.fstat(child)):
+                raise ReaderError('STORE_UNAVAILABLE')
+            total = _account_bytes(child, budget)
+        finally:
+            os.close(child)
+    elif stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        # st_size for a symlink is its link text length; never follow it.
+        total = info.st_size
+    else:
+        raise ReaderError('LIMIT_EXCEEDED')
+    if _snapshot(info) != _snapshot(os.stat(name, dir_fd=parent, follow_symlinks=False)):
+        raise ReaderError('STORE_UNAVAILABLE')
+    return total
 
 
 def _read(parent, name, limit):
@@ -466,6 +500,7 @@ class DiagnosticsReader:
         result = {'state': 'absent', 'run_count': 0, 'active_count': 0,
                   'unknown_count': 0, 'damaged_count': 0, 'metadata': 'ok',
                   'staging_count': 0, 'staging_bytes': 0, 'root_unknown_count': 0,
+                  'root_unknown_bytes': 0,
                   'staging_scan_limited': False}
         if not persistence_supported(self.platform):
             result.update(state='unsupported', metadata='unsupported')
@@ -480,6 +515,10 @@ class DiagnosticsReader:
                             result['staging_scan_limited'] = True
                             break
                         root_names.append(item.name)
+                budget = [SCAN_LIMIT - len(root_names)]
+                if budget[0] < 0:
+                    result['staging_scan_limited'] = True
+                    budget[0] = 0
                 for name in root_names:
                     if name in ('.store.lock', 'runs'):
                         continue
@@ -497,11 +536,22 @@ class DiagnosticsReader:
                             try:
                                 if _identity(info) != _identity(os.fstat(stage)):
                                     raise ReaderError('STORE_UNAVAILABLE')
-                                files = _names(stage, RUN_FILE_SCAN_LIMIT)
-                                for filename in files:
-                                    child = os.stat(filename, dir_fd=stage, follow_symlinks=False)
-                                    _private(child)
-                                    result['staging_bytes'] += child.st_size
+                                try:
+                                    files = _names(stage, budget[0] + 1)
+                                    budget[0] -= len(files)
+                                    if budget[0] < 0:
+                                        raise ReaderError('LIMIT_EXCEEDED')
+                                    for filename in files:
+                                        child = os.stat(filename, dir_fd=stage,
+                                                        follow_symlinks=False)
+                                        _private(child, stat.S_ISDIR(child.st_mode))
+                                        result['staging_bytes'] += _account_entry(
+                                            stage, filename, budget)
+                                except ReaderError as exc:
+                                    if exc.code == 'LIMIT_EXCEEDED':
+                                        result['staging_scan_limited'] = True
+                                    else:
+                                        raise
                                 result['staging_count'] += 1
                                 _check_link(root, name, stage, True)
                             finally:
@@ -512,6 +562,13 @@ class DiagnosticsReader:
                             raise ReaderError('STORE_UNAVAILABLE') from None
                         continue
                     result['root_unknown_count'] += 1
+                    try:
+                        result['root_unknown_bytes'] += _account_entry(root, name, budget)
+                    except ReaderError as exc:
+                        if exc.code == 'LIMIT_EXCEEDED':
+                            result['staging_scan_limited'] = True
+                        else:
+                            raise
                 names = _names(runs, RUN_SCAN_LIMIT)
                 for name in names:
                     try:

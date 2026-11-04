@@ -683,12 +683,35 @@ class ReaderTests(unittest.TestCase):
         with reservation.open('wb') as stream:
             stream.truncate(1024 * 1024)
         reservation.chmod(0o600)
-        (self.home / 'unmanaged').write_text('opaque')
+        unknown = self.home / 'unmanaged'
+        (unknown / 'nested').mkdir(parents=True, mode=0o700)
+        (unknown / 'nested' / 'payload').write_text('opaque')
         before = snapshot(self.home)
         value = self.reader.inspect_store()
         self.assertEqual((value['staging_count'], value['staging_bytes'],
-                          value['root_unknown_count']), (1, 1024 * 1024, 1))
+                          value['root_unknown_count'], value['root_unknown_bytes']),
+                         (1, 1024 * 1024, 1, 6))
         self.assertEqual(snapshot(self.home), before)
+
+    def test_inspect_store_uses_writer_scan_limit_for_many_empty_stages(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        for number in range(1500):
+            (self.home / ('.run-init-' + format(number, '032x'))).mkdir(mode=0o700)
+        with patch.object(r, '_read', side_effect=AssertionError('contents read')):
+            value = self.reader.inspect_store()
+        self.assertEqual(value['staging_count'], 1500)
+        self.assertFalse(value['staging_scan_limited'])
+
+    def test_inspect_store_shares_scan_budget_across_stage_contents(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        for number in range(2600):
+            stage = self.home / ('.run-init-' + format(number, '032x'))
+            stage.mkdir(mode=0o700)
+            for part in range(3):
+                file_path = stage / ('f' + str(part))
+                file_path.touch(mode=0o600)
+        value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
 
     def test_inspect_store_empty_stage_and_unsafe_stage(self):
         DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()

@@ -54,7 +54,8 @@ def doctor_output():
                  ' unknown_count=' + str(store['unknown_count']) +
                  ' root_unknown_count=' + str(store['root_unknown_count']))
     capacity_blocked = (store['staging_scan_limited'] or
-                        store['staging_bytes'] + settings.max_run_bytes > settings.max_total_bytes)
+                        store['staging_bytes'] + store['root_unknown_bytes'] +
+                        settings.max_run_bytes > settings.max_total_bytes)
     lines.append('staging_count=' + str(store['staging_count']) +
                  ' capacity=' + ('blocked' if capacity_blocked else 'ok'))
     if capacity_blocked:
