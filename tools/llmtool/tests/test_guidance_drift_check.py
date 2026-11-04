@@ -175,7 +175,7 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         self.assertTrue(any("CONFIG_SCHEMA" in item for item in check(self.repo)))
 
     def test_deeply_nested_duplicate_and_unknown_config_are_invalid(self):
-        depth = sys.getrecursionlimit() + 100
+        depth = max(10_000, sys.getrecursionlimit() * 10)
         nested_json = "[" * depth + "0" + "]" * depth
         self.write_raw_config(nested_json)
         findings = check(self.repo)
