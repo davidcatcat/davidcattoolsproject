@@ -5585,9 +5585,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
     live = {sid: (entry, answerer(owners.get(entry.get("pid"), "")))
             for sid, entry in _live_by_session(_claude_registered(sessions, processes)).items()}
     for sid, listed in (agents or {}).items():
-        # What `claude agents` says beats the registry's own status word unless
-        # the registry is more urgent; a session it lists but no running CLI
-        # names waits for you.
+        # What `claude agents` says beats the registry's own status word unless the registry is more urgent.
+        # A session it lists with no running CLI is answered by you; waiting alone does not keep an exited CLI transcript open (see _closed_claude_cli), only a blocked listing does.
         entry, who = live.get(sid, ({}, "你"))
         if entry and _live_rank(entry) < _live_rank(listed):
             listed = {key: value for key, value in listed.items()
