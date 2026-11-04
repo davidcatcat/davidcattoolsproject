@@ -9,65 +9,11 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "claude-developer": {
-      "dispatch": "OWNER_ASSIGNMENT_ONLY",
+      "dispatch": "PAUSED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-31",
-      "reason": "Owner allows Claude Developer, including Claude Code Cloud, only for explicitly assigned Tasks; the PM confirms execution environment, ownership, Task ID, write scope and the formal record; earlier Task assignments were inventoried and are not restored",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656",
-      "owner_assignments": [
-        {
-          "task_id": "85247d6fa90a41c4bc8c7a71414b008b",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
-        },
-        {
-          "task_id": "781631c40a944385b7853394f8155ec6",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
-        },
-        {
-          "task_id": "e54b6705042c464295d9779588476b44",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
-        },
-        {
-          "task_id": "bc48a57e6b6546d5925d162f57a8ed38",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
-        },
-        {
-          "task_id": "b6b2a0d05ab649a48d5d05bb30209c8e",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6544359656"
-        },
-        {
-          "task_id": "7387ffdbbfa749aebbdf99a4f149d18c",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6559180964"
-        },
-        {
-          "task_id": "a1ecb15e26ad4a92b815d6012673a8ae",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6559226030"
-        },
-        {
-          "task_id": "f8711927dfd7499a891fbd10b757fce2",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6561354943"
-        },
-        {
-          "task_id": "43ec01ae2ef646d887703ff57198aed5",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6559226030"
-        },
-        {
-          "task_id": "0c1d294c20aa4b70a9c72af21263169b",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6572045734"
-        },
-        {
-          "task_id": "c87152007ee4494683a7e60444b7cb63",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6572045734"
-        },
-        {
-          "task_id": "366abbf20d334cd0a52837bd64ce525f",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6572045734"
-        },
-        {
-          "task_id": "15d62f81ebba48298af57abcef7d1446",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6604597992"
-        }
-      ]
+      "decided_at": "2026-11-04",
+      "reason": "Owner paused Claude Developer dispatch",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6631965348"
     },
     "opencode-developer": {
       "dispatch": "ALLOWED",
@@ -100,9 +46,9 @@
     "claude-reviewer": {
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
-      "decided_at": "2026-10-31",
-      "reason": "fixed formal Reviewer using the role-configured Claude account (claude2); use a separate read-only context",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
+      "decided_at": "2026-11-04",
+      "reason": "fixed formal Reviewer using the role-configured default claude account; use a separate read-only context",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6632007080"
     },
     "codex-reviewer": {
       "dispatch": "ALLOWED",
