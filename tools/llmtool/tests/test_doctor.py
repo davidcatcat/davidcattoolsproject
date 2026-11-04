@@ -200,7 +200,7 @@ class DoctorTests(DoctorFixture):
         stage.mkdir(mode=0o700)
         result = self.invoke()
         self.assertIn('staging_count=1 capacity=ok\n', result[1])
-        with patch.object(r, 'RUN_SCAN_LIMIT', 1):
+        with patch.object(r, 'ROOT_SCAN_LIMIT', 1):
             limited = self.invoke()
         self.assertEqual(limited[0], 0)
         self.assertIn('capacity=blocked\n', limited[1])

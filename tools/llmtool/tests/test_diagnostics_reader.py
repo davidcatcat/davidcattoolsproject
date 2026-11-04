@@ -694,6 +694,7 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(snapshot(self.home), before)
 
     def test_inspect_store_uses_writer_scan_limit_for_many_empty_stages(self):
+        self.assertEqual(r.ROOT_SCAN_LIMIT, diagnostics_store.SCAN_LIMIT)
         DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
         for number in range(1500):
             (self.home / ('.run-init-' + format(number, '032x'))).mkdir(mode=0o700)
@@ -719,6 +720,21 @@ class ReaderTests(unittest.TestCase):
         stage.mkdir(mode=0o700)
         value = self.reader.inspect_store()
         self.assertEqual((value['staging_count'], value['staging_bytes']), (1, 0))
+        stage.chmod(0o755)
+        with self.assertRaises(r.ReaderError) as caught:
+            self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
+        stage.chmod(0o700)
+        stage_info = stage.lstat()
+        original_private = r._private
+        def foreign_owner(info, directory=False):
+            if (info.st_dev, info.st_ino) == (stage_info.st_dev, stage_info.st_ino):
+                raise r.ReaderError('STORE_UNSAFE')
+            return original_private(info, directory)
+        with patch.object(r, '_private', side_effect=foreign_owner):
+            with self.assertRaises(r.ReaderError) as caught:
+                self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
         stage.rmdir()
         stage.symlink_to(self.base, target_is_directory=True)
         with self.assertRaises(r.ReaderError) as caught:

@@ -15,7 +15,8 @@ from .diagnostics_summary import (RunSummary, SUMMARY_MAX_BYTES, MAX_STORED_RUN_
                                   parse_run_summary, strict_object)
 from .errors import LLMToolError
 
-RUN_SCAN_LIMIT = SCAN_LIMIT
+RUN_SCAN_LIMIT = 1000
+ROOT_SCAN_LIMIT = SCAN_LIMIT
 RUN_FILE_SCAN_LIMIT = 16
 RUN_OUTPUT_LIMIT = 100
 RUNS_READ_MAX_BYTES = 4 * 1024 * 1024
@@ -511,7 +512,7 @@ class DiagnosticsReader:
                 root_names = []
                 with os.scandir(root) as entries:
                     for item in entries:
-                        if len(root_names) >= RUN_SCAN_LIMIT:
+                        if len(root_names) >= ROOT_SCAN_LIMIT:
                             result['staging_scan_limited'] = True
                             break
                         root_names.append(item.name)
