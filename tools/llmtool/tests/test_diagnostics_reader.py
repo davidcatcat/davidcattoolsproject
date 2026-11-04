@@ -675,6 +675,116 @@ class ReaderTests(unittest.TestCase):
                           value['unknown_count'], value['damaged_count'], value['metadata']),
                          ('present', 1, 1, 1, 0, 'ok'))
 
+    def test_inspect_store_counts_staging_bytes_without_reading_contents(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        stage = self.home / ('.run-init-' + 'b' * 32)
+        stage.mkdir(mode=0o700)
+        reservation = stage / '.reservation'
+        with reservation.open('wb') as stream:
+            stream.truncate(1024 * 1024)
+        reservation.chmod(0o600)
+        unknown = self.home / 'unmanaged'
+        (unknown / 'nested').mkdir(parents=True, mode=0o700)
+        (unknown / 'nested' / 'payload').write_text('opaque')
+        before = snapshot(self.home)
+        value = self.reader.inspect_store()
+        self.assertEqual((value['staging_count'], value['staging_bytes'],
+                          value['root_unknown_count'], value['root_unknown_bytes']),
+                         (1, 1024 * 1024, 1, 6))
+        self.assertEqual(snapshot(self.home), before)
+
+    def test_inspect_store_uses_writer_scan_limit_for_many_empty_stages(self):
+        self.assertEqual(r.ROOT_SCAN_LIMIT, diagnostics_store.SCAN_LIMIT)
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        for number in range(1500):
+            (self.home / ('.run-init-' + format(number, '032x'))).mkdir(mode=0o700)
+        with patch.object(r, '_read', side_effect=AssertionError('contents read')):
+            value = self.reader.inspect_store()
+        self.assertEqual(value['staging_count'], 1500)
+        self.assertFalse(value['staging_scan_limited'])
+
+    def test_inspect_store_shares_scan_budget_across_stage_contents(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        for number in range(2600):
+            stage = self.home / ('.run-init-' + format(number, '032x'))
+            stage.mkdir(mode=0o700)
+            for part in range(3):
+                file_path = stage / ('f' + str(part))
+                file_path.touch(mode=0o600)
+        value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
+
+    def test_inspect_store_accounts_unusual_stage_children_without_refusal(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        stage = self.home / ('.run-init-' + 'c' * 32)
+        stage.mkdir(mode=0o700)
+        plain = stage / 'plain'
+        plain.write_bytes(b'plain')
+        plain.chmod(0o644)
+        hardlink = stage / 'hardlink'
+        os.link(plain, hardlink)
+        external = self.base / 'external'
+        external.write_bytes(b'not followed')
+        (stage / 'symlink').symlink_to(external)
+        value = self.reader.inspect_store()
+        self.assertEqual(value['staging_count'], 1)
+        self.assertEqual(value['staging_bytes'], len(b'plain') * 2 + len(str(external)))
+
+    def test_inspect_store_unknown_scan_errors_and_depth_are_capacity_limited(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        unknown = self.home / 'unmanaged'
+        unknown.mkdir(mode=0o700)
+        with patch.object(r, '_account_entry', side_effect=PermissionError('unreadable')):
+            value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
+
+        current = unknown
+        for _ in range(r.ACCOUNT_DEPTH_LIMIT + 2):
+            current = current / 'd'
+            current.mkdir(mode=0o700)
+        value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
+
+    def test_inspect_store_charges_run_files_to_shared_scan_budget(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        for number in range(8500):
+            (self.home / ('.run-init-' + format(number, '032x'))).mkdir(mode=0o700)
+        runs = self.home / 'runs'
+        for number in range(499):
+            directory = runs / format(number + 1, '032x')
+            directory.mkdir(mode=0o700)
+            for name in ('.run.lock', '.reservation', 'trace.partial.jsonl'):
+                (directory / name).touch(mode=0o600)
+        value = self.reader.inspect_store()
+        self.assertTrue(value['staging_scan_limited'])
+
+    def test_inspect_store_empty_stage_and_unsafe_stage(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        stage = self.home / ('.run-init-' + 'b' * 32)
+        stage.mkdir(mode=0o700)
+        value = self.reader.inspect_store()
+        self.assertEqual((value['staging_count'], value['staging_bytes']), (1, 0))
+        stage.chmod(0o755)
+        with self.assertRaises(r.ReaderError) as caught:
+            self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
+        stage.chmod(0o700)
+        stage_info = stage.lstat()
+        original_private = r._private
+        def foreign_owner(info, directory=False):
+            if (info.st_dev, info.st_ino) == (stage_info.st_dev, stage_info.st_ino):
+                raise r.ReaderError('STORE_UNSAFE')
+            return original_private(info, directory)
+        with patch.object(r, '_private', side_effect=foreign_owner):
+            with self.assertRaises(r.ReaderError) as caught:
+                self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
+        stage.rmdir()
+        stage.symlink_to(self.base, target_is_directory=True)
+        with self.assertRaises(r.ReaderError) as caught:
+            self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
+
     def test_inspect_store_absent_and_unsupported_metadata_states(self):
         value = self.reader.inspect_store()
         self.assertEqual((value['state'], value['metadata'], value['damaged_count'],

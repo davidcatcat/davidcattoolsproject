@@ -67,7 +67,8 @@ def load_route_config(path=None):
                 gw.get('default_effort') not in ('minimal', 'low', 'medium', 'high') or
                 type(gw.get('profile_name')) is not str or not gw['profile_name'] or
                 type(gw.get('profile')) is not dict or
-                gw['profile'].get('auth_env') != 'GW_AGENT_API_KEY' or
+                'auth_env' not in gw['profile'] or
+                gw['profile'].get('auth_env') not in (None, 'GW_AGENT_API_KEY') or
                 gw['profile'].get('model') != gw['default_model'] or
                 type(gw.get('allowed_data_classes')) is not list or
                 not gw['allowed_data_classes'] or
