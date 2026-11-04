@@ -5459,13 +5459,12 @@ def _closed_claude_cli(rows: list[OfficeRow], sessions,
     Any other CLI session shows as closed for a while, then leaves with its
     subagents. A stale `claude agents` listing cannot keep a CLI transcript
     open after its process exits. keep: keys of sessions `claude agents`
-    still lists, except CLI sessions whose process is gone."""
+    reports as blocked, which still require a person's attention."""
     found = _claude_live_sessions(sessions, processes)
     if found is None:
         return rows
     live, unnamed = found
-    cli_keys = {row.key for row in rows if row.cli}
-    keys = {f"claude:{sid}.jsonl" for sid in live} | (set(keep) - cli_keys)
+    keys = {f"claude:{sid}.jsonl" for sid in live} | set(keep)
     rest = sorted((row for row in rows if row.cli and row.key not in keys),
                   key=lambda row: row.age if row.age is not None else 1e12)
     keys |= {row.key for row in rest[:unnamed]}
@@ -5602,7 +5601,8 @@ def office_rows(processes: list[Process], now: float | None = None, *,
             + claude_rows(now, claude_root, canonical, live))
     rows = _closed_codex_cli(rows, sum(family(p.role) == "Codex" for p in clis))
     rows = _closed_claude_cli(rows, sessions, processes,
-                              keep={f"claude:{sid}.jsonl" for sid in agents or {}})
+                              keep={f"claude:{sid}.jsonl" for sid, entry in (agents or {}).items()
+                                    if entry.get("jobState") == "blocked"})
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)
