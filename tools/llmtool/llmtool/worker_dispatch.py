@@ -222,7 +222,7 @@ def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
     """Read the one policy for the detected layout on every call; never cache decisions."""
     try:
         patterns = _build_reference_patterns(repository_config())
-    except Exception:
+    except LLMToolError:
         key = worker_key if type(worker_key) is str else 'unknown'
         return PolicyDecision(key, False, 'WORKER_REPOSITORY_CONFIG_INVALID', None)
     if type(worker_key) is not str or re.fullmatch(r'[a-z][a-z0-9-]{0,63}', worker_key) is None:

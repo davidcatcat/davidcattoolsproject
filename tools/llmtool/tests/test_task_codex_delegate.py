@@ -1209,13 +1209,28 @@ class CodexDelegateTests(unittest.TestCase):
         trust_path.chmod(0o600)
         return home, hashlib.sha256(raw).hexdigest()
 
-    def _dispatch_real_bootstrap(self, task, trust_home):
+    def _dispatch_real_bootstrap(self, task, trust_home, *, repository_config=True):
         """Run the real bootstrap with a pinned fake helper and a temp trust home."""
         from llmtool import trust as trust_module
         real_bootstrap = task_submission_cli._bootstrap_registered_d6
         original_load_trust = trust_module.load_trust
         real_run = subprocess.run
         helper_calls = []
+
+        # The dispatch gate evaluates repository identity before bootstrap.
+        # Give it the same explicit, owner-equivalent repository fixture used
+        # by the trust document, so this test reaches the bootstrap digest check.
+        repository = {
+            'slug': 'davidcatcat/davidcattoolsproject',
+            'dispatch_issue': 289,
+            'dispatch_evidence_pr': 283,
+        }
+        repository_patch = (
+            patch.object(task_submission_cli.worker_dispatch, 'repository_config',
+                         return_value=repository)
+            if repository_config else patch.object(
+                task_submission_cli.worker_dispatch, 'repository_config',
+                side_effect=task_submission_cli.LLMToolError('TRUST_PATH_INVALID')))
 
         def capture_helper(argv, *args, **kwargs):
             if (isinstance(argv, list) and len(argv) > 4 and
@@ -1228,6 +1243,7 @@ class CodexDelegateTests(unittest.TestCase):
                    return_value=(self.root, b'raise SystemExit(0)')), \
                 patch.object(task_submission_cli.trust, 'load_trust',
                              side_effect=lambda: original_load_trust(home=str(trust_home))), \
+                repository_patch, \
                 patch.object(task_submission_cli.subprocess, 'run',
                              side_effect=capture_helper), \
                 patch.dict(os.environ, {'HOME': str(trust_home)}):
@@ -1258,10 +1274,13 @@ class CodexDelegateTests(unittest.TestCase):
         task = self._task()
         trust_home, _digest = self._bootstrap_trust_home(write=False)
         result, saved, callback, helper_calls = self._dispatch_real_bootstrap(
-            task, trust_home)
+            task, trust_home, repository_config=False)
         self.assertEqual(result, 1)
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
-        self.assertEqual(saved['developer']['error_code'], 'ENV_BOOTSTRAP_TRUST_UNAVAILABLE')
+        # Dispatch refusal is correct here: the repository trust gate runs
+        # before bootstrap and must stop the request without invoking helpers.
+        self.assertEqual(saved['developer']['error_code'],
+                         'WORKER_REPOSITORY_CONFIG_INVALID')
         self.assertEqual(helper_calls, [])
         callback.assert_not_called()
 

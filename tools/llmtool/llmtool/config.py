@@ -156,7 +156,7 @@ class RepositoryConfigError(LLMToolError):
 
 
 def legacy_repository_config(home=None):
-    """Return pre-trust defaults for trust init and verify-legacy only."""
+    """Return pre-trust defaults for trust init (via _legacy_sources) and verify-legacy."""
     defaults = {
         "slug": "davidcatcat/davidcattoolsproject",
         "dispatch_issue": 289,
@@ -175,8 +175,11 @@ def repository_config(home=None):
     path = user_config_path(home)
     try:
         user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
-        if "repository" in user:
-            raise RepositoryConfigError("TRUST_LEGACY_REPOSITORY_CONFIG")
+    except LLMToolError:
+        raise RepositoryConfigError("TRUST_REPOSITORY_CONFIG_INVALID") from None
+    if "repository" in user:
+        raise RepositoryConfigError("TRUST_LEGACY_REPOSITORY_CONFIG")
+    try:
         trusted = load_trust(home=home)
         repository = trusted.repository
         approval_refs = repository["approval_refs"]
@@ -185,8 +188,6 @@ def repository_config(home=None):
             "dispatch_issue": approval_refs["worker_dispatch_issue"],
             "dispatch_evidence_pr": approval_refs["worker_dispatch_evidence_pr"],
         }
-    except RepositoryConfigError:
-        raise
     except TrustError as error:
         raise RepositoryConfigError(error.code) from None
     except LLMToolError:
