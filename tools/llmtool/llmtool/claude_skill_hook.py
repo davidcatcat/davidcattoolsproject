@@ -437,7 +437,7 @@ def _protected_gates(command):
                     strip_assignments(words)
             if not words or words[0] in ('echo', 'printf'):
                 continue
-            executable = os.path.basename(words[0])
+            executable = os.path.basename(words[0]).casefold()
             args = words[1:]
             if executable in ('bash', 'sh', 'zsh'):
                 try:
@@ -450,6 +450,13 @@ def _protected_gates(command):
             if executable == 'git':
                 args = strip_value_options(args, {'-c', '-C', '--git-dir', '--work-tree',
                                                   '--namespace', '--exec-path'})
+                git_flag_options = {'--paginate', '-p', '-P', '--no-pager',
+                                    '--no-replace-objects', '--bare',
+                                    '--literal-pathspecs', '--glob-pathspecs',
+                                    '--noglob-pathspecs', '--icase-pathspecs',
+                                    '--no-optional-locks'}
+                while args and args[0] in git_flag_options:
+                    args.pop(0)
                 if args and args[0] == 'push':
                     gates.append('publish')
             elif executable == 'gh':

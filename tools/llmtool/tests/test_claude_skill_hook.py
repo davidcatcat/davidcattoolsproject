@@ -226,6 +226,14 @@ class ClaudeSkillHookTests(unittest.TestCase):
     def test_protected_word_matcher(self):
         cases = {
             'git push origin topic': ['publish'],
+            'git --no-pager push origin t': ['publish'],
+            'git -P push': ['publish'],
+            'git --paginate push': ['publish'],
+            'git --no-replace-objects push': ['publish'],
+            'git --bare push': ['publish'],
+            'git --literal-pathspecs push': ['publish'],
+            'git --no-optional-locks push': ['publish'],
+            'GIT push origin t': ['publish'],
             'git -C /repo push': ['publish'],
             'git -c user.name=Test push': ['publish'],
             'command git push': ['publish'],
@@ -246,6 +254,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
             'gh pr --repo=o/r merge 1': ['merge'],
             'gh --repo=o/r pr merge 1': ['merge'],
             'gh pr merge 12': ['merge'],
+            'Gh pr merge 1': ['merge'],
             'gh pr comment 12 --body x': ['review'],
             'gh pr review 12': ['review'],
             'gh issue comment 12': ['review'],
