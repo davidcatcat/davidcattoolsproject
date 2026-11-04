@@ -16,7 +16,7 @@ URL = re.compile(r"https://[^\s`<>\[\]{}]+", re.IGNORECASE)
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 MODEL_NAME = re.compile(
     r"(?<![\w./-])(?:opencode/)?(?:gpt|claude|deepseek|gemini|grok|llama|mistral|"
-    r"qwen\d*|kimi)(?:-[\w.]+)+(?![\w.-])",
+    r"qwen\d*|kimi)(?:-[\w.]*\w)+(?![\w.-])",
     re.IGNORECASE,
 )
 CHECK_NAME = re.compile(r"^check\s+\([^)]+\)$")
@@ -37,6 +37,16 @@ def _hard_values(source: str) -> set[str]:
     values.update(match.group(0) for match in MODEL_NAME.finditer(source))
     values.update(value for value in inline_values if CHECK_NAME.fullmatch(value))
     return values
+
+
+def _comparison_value(value: str) -> str:
+    """Normalize URL scheme and authority case for cross-file comparisons."""
+    return re.sub(
+        r"^(https?)://([^/?#]+)",
+        lambda match: f"{match.group(1).lower()}://{match.group(2).lower()}",
+        value,
+        flags=re.IGNORECASE,
+    )
 
 
 def _finding(path: str, kind: str, value: str) -> str:
@@ -128,9 +138,16 @@ def check(repo: str | Path = REPO) -> list[str]:
 
     hard_values = _hard_values(sources["AGENTS.md"])
     codex_only = {entry["value"] for entry in config["codex_only"]}
-    for value in sorted(codex_only - hard_values):
+    normalized_hard_values = {_comparison_value(value) for value in hard_values}
+    exceptions = {_comparison_value(value) for value in codex_only}
+    for value in sorted(codex_only):
+        if _comparison_value(value) in normalized_hard_values:
+            continue
         findings.append(_finding("tools/llmtool/guidance-drift.json", "STALE_EXCEPTION", value))
-    for value in sorted(hard_values - _hard_values(sources["CLAUDE.md"]) - codex_only):
+    claude_values = {_comparison_value(value) for value in _hard_values(sources["CLAUDE.md"])}
+    for value in sorted(hard_values):
+        if _comparison_value(value) in claude_values or _comparison_value(value) in exceptions:
+            continue
         findings.append(_finding("AGENTS.md", "MISSING_IN_CLAUDE", value))
     return findings
 
