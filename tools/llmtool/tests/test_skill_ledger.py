@@ -158,6 +158,7 @@ class SkillLedgerTests(unittest.TestCase):
         self.path.chmod(0o600)
         self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
         self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+
         self.path.write_text('{"schema_version":1,"prev_sha256":"' +
                              '0' * 64 + '","entry_sha256":"x","value":"\\ud800"}\n')
         self.path.chmod(0o600)
@@ -203,6 +204,15 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
         self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
 
+        anchor = Path(str(self.path) + '.head')
+        anchor_before = anchor.read_bytes()
+        for operation in (lambda: self.record(run_id='after-removal'),
+                          lambda: ledger.revoke(receipt, 'again')):
+            with self.assertRaises(ledger.SkillLedgerError) as caught:
+                operation()
+            self.assertEqual(caught.exception.skill_ledger_code, 'CHAIN_BROKEN')
+            self.assertEqual(anchor.read_bytes(), anchor_before)
+
     def test_skill_revision_change_invalidates_receipt(self):
         self.record()
         self.assertEqual(self.check(manifest_sha256='manifest-revised')['reason'],
@@ -226,14 +236,20 @@ class SkillLedgerTests(unittest.TestCase):
         for index in range(3):
             self.record(run_id='run-' + str(index))
         rows = self.path.read_text().splitlines()
-        self.path.write_text('\n'.join((rows[0], rows[2], rows[1])) + '\n')
+        self.path.write_text('\n'.join((rows[1], rows[0], rows[2])) + '\n')
         self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
-        self.path.write_text(rows[0] + '\n' + rows[1] + '\n' + rows[2] + '\n')
+
+        # Update the sole row's hash and anchor so schema validation rejects it.
+        self.path.write_text(rows[0] + '\n')
+        self.path.chmod(0o600)
         value = json.loads(rows[0])
         value['schema_version'] = ledger.SCHEMA_VERSION + 1
-        self.path.write_text(json.dumps(value, separators=(',', ':')) + '\n' +
-                             '\n'.join(rows[1:]) + '\n')
+        value['entry_sha256'] = ledger._entry_hash(value)
+        self.path.write_text(json.dumps(value, separators=(',', ':')) + '\n')
         self.path.chmod(0o600)
+        Path(str(self.path) + '.head').write_text(json.dumps({
+            'count': 1, 'last_sha256': value['entry_sha256']}))
+        Path(str(self.path) + '.head').chmod(0o600)
         self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
 
     def test_missing_anchor_with_live_ledger_breaks_chain(self):
@@ -245,18 +261,63 @@ class SkillLedgerTests(unittest.TestCase):
         receipt = self.record()
         self.path.write_text(self.path.read_text().replace('head-a', 'head-x'))
         self.path.chmod(0o600)
+        damaged = self.path.read_bytes()
         for operation in (lambda: self.record(run_id='run-b'),
                           lambda: ledger.revoke(receipt, 'withdrawn')):
             with self.assertRaises(ledger.SkillLedgerError) as caught:
                 operation()
             self.assertEqual(caught.exception.skill_ledger_code, 'CHAIN_BROKEN')
+            self.assertEqual(self.path.read_bytes(), damaged)
+
+    def test_pending_intent_refusal_does_not_change_ledger_bytes(self):
+        receipt = self.record()
+        records = ledger._read(self.path)
+        Path(str(self.path) + '.head').write_text(json.dumps({
+            'count': len(records), 'last_sha256': 'e' * 64,
+            'intent': {'count': len(records) + 1, 'last_sha256': 'f' * 64}}))
+        Path(str(self.path) + '.head').chmod(0o600)
+        damaged = self.path.read_bytes()
+        anchor = Path(str(self.path) + '.head')
+        pending_anchor = anchor.read_bytes()
+        for operation in (lambda: self.record(run_id='pending'),
+                          lambda: ledger.revoke(receipt, 'withdrawn')):
+            with self.assertRaises(ledger.SkillLedgerError) as caught:
+                operation()
+            self.assertEqual(caught.exception.skill_ledger_code, 'CHAIN_BROKEN')
+            self.assertEqual(self.path.read_bytes(), damaged)
+            self.assertEqual(anchor.read_bytes(), pending_anchor)
+
+    def test_torn_tail_refusal_does_not_truncate_for_record_or_revoke(self):
+        receipt = self.record()
+        with self.path.open('ab') as stream:
+            stream.write(b'{"torn":')
+        damaged = self.path.read_bytes()
+        for operation in (lambda: self.record(run_id='torn'),
+                          lambda: ledger.revoke(receipt, 'withdrawn')):
+            with self.assertRaises(ledger.SkillLedgerError) as caught:
+                operation()
+            self.assertEqual(caught.exception.skill_ledger_code, 'LEDGER_UNREADABLE')
+            self.assertEqual(self.path.read_bytes(), damaged)
+
+    def test_verify_chain_refuses_torn_tail_without_repair(self):
+        self.record()
+        with self.path.open('ab') as stream:
+            stream.write(b'{"torn":')
+        damaged = self.path.read_bytes()
+        self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
+        self.assertEqual(self.path.read_bytes(), damaged)
 
     def test_symlink_ledger_is_refused(self):
+        self.record()
         target = self.path.parent / 'target'
-        target.write_text('')
+        self.path.rename(target)
+        target.chmod(0o600)
         self.path.symlink_to(target)
         with self.assertRaises(ledger.SkillLedgerError) as caught:
-            self.record()
+            ledger._read(self.path)
+        self.assertEqual(caught.exception.skill_ledger_code, 'LEDGER_UNREADABLE')
+        with self.assertRaises(ledger.SkillLedgerError) as caught:
+            self.record(run_id='symlink')
         self.assertEqual(caught.exception.skill_ledger_code, 'LEDGER_UNREADABLE')
 
     def test_parallel_writers_keep_a_valid_chain(self):
@@ -328,6 +389,12 @@ class SkillLedgerTests(unittest.TestCase):
         stale.write_text('incomplete')
         self.record()
         self.assertFalse(stale.exists())
+
+    def test_lock_cleanup_ignores_directory_named_like_stale_temp(self):
+        stale = Path(str(self.path) + '.head.x.tmp')
+        stale.mkdir()
+        self.assertTrue(self.record())
+        self.assertTrue(stale.is_dir())
 
     def test_lock_symlink_is_refused(self):
         target = self.path.parent / 'lock-target'

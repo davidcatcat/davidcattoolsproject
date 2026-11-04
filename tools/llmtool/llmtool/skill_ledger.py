@@ -109,7 +109,9 @@ def _locked(path):
         for temp in path.parent.glob(path.name + '.head.*.tmp'):
             try:
                 temp.unlink()
-            except FileNotFoundError:
+            except OSError:
+                # Stale cleanup is opportunistic: a directory, permission
+                # change, or racing removal must not leak the acquired lock.
                 pass
         return fd
     except SkillLedgerError:
@@ -322,7 +324,8 @@ def verify_chain():
 
     Same-user tampering is detectable only up to rewriting the whole chain:
     removing entries and rewriting .head is undetected, and deleting both
-    files reads empty.
+    files reads empty. A torn final line is refused as LEDGER_UNREADABLE and
+    is never repaired by verification.
     """
     path = _path()
     try:
