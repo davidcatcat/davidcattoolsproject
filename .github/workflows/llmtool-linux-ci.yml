@@ -23,6 +23,7 @@ on:
       - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
+      - 'tools/safe-git/**'
       - 'tools/api-agent-gateway/**'
       - 'tools/ai-loop/**'
       - 'AGENTS.md'
@@ -38,6 +39,7 @@ on:
       - '!tools/llmtool/*.md'
       - '.github/workflows/llmtool-linux-ci.yml'
       - 'tools/ec2-runner/**'
+      - 'tools/safe-git/**'
       - 'tools/api-agent-gateway/**'
       - 'tools/ai-loop/**'
       - 'AGENTS.md'
@@ -334,6 +336,11 @@ jobs:
         if: matrix.shard == 1
         run: |
           "$JOB_PYTHON" -B -m unittest discover -s tools/ec2-runner -p 'test_*.py'
+      - name: Safe-git preflight tests
+        if: matrix.shard == 1
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: "$JOB_PYTHON" -B -m unittest discover -s tools/safe-git -p test_preflight.py
       - name: Working tree is clean
         shell: bash
         run: |
