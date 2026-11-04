@@ -318,6 +318,9 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                       transcripts=[{'session': TARGET, 'new_action': True}])
         with patch.object(dispatch_tool.pwd, 'getpwuid',
                           return_value=SimpleNamespace(pw_dir=str(self.home))), \
+                patch.object(dispatch_tool.role_config, 'resolve_role', return_value={
+                    'role': 'claude-developer', 'provider': 'claude',
+                    'config_dir': str(self.default_config), 'model': None}), \
                 patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
             code, _ = self.dispatch()
         self.assertEqual(code, 0)
