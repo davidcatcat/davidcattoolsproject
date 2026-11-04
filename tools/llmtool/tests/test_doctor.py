@@ -167,6 +167,43 @@ class DoctorTests(DoctorFixture):
         (self.project / '.llmtool.yaml').write_text('diagnostics:\n  persist_metadata: false\n')
         self.assert_safe(self.invoke(), 'CONFIG_INVALID')
 
+    def test_staging_capacity_blocks_without_changing_exit_or_store(self):
+        self.write_config(policy='diagnostics:\n  persist_metadata: true\n'
+                          '  max_total_bytes: 1048576\n  max_run_bytes: 65536\n')
+        self.state.mkdir(mode=0o700)
+        (self.state / 'runs').mkdir(mode=0o700)
+        (self.state / '.store.lock').touch(mode=0o600)
+        stage = self.state / ('.run-init-' + 'b' * 32)
+        stage.mkdir(mode=0o700)
+        reservation = stage / '.reservation'
+        with reservation.open('wb') as stream:
+            stream.truncate(1024 * 1024)
+        reservation.chmod(0o600)
+        before = snapshot(self.state)
+        result = self.invoke()
+        self.assertEqual((result[0], result[2]), (0, ''))
+        self.assertIn('staging_count=1 capacity=blocked\n', result[1])
+        self.assertIn('nothing deleted; manual review required\n', result[1])
+        self.assertEqual(snapshot(self.state), before)
+        self.assert_safe(result)
+
+    def test_empty_staging_directory_is_capacity_ok_and_scan_limit_blocks(self):
+        self.write_config(policy='diagnostics:\n  persist_metadata: true\n'
+                          '  max_total_bytes: 1048576\n  max_run_bytes: 65536\n')
+        self.state.mkdir(mode=0o700)
+        (self.state / 'runs').mkdir(mode=0o700)
+        (self.state / '.store.lock').touch(mode=0o600)
+        stage = self.state / ('.run-init-' + 'c' * 32)
+        stage.mkdir(mode=0o700)
+        result = self.invoke()
+        self.assertIn('staging_count=1 capacity=ok\n', result[1])
+        with patch.object(r, 'RUN_SCAN_LIMIT', 1):
+            limited = self.invoke()
+        self.assertEqual(limited[0], 0)
+        self.assertIn('capacity=blocked\n', limited[1])
+        self.assertIn('nothing deleted; manual review required\n', limited[1])
+        self.assert_safe(limited)
+
     def test_credential_key_iteration_only_not_values_or_default_contains(self):
         self.write_config(extra='    api_key_env: DOCTOR_SECRET\n')
         for present in (False, True):

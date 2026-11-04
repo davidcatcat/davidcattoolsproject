@@ -675,6 +675,33 @@ class ReaderTests(unittest.TestCase):
                           value['unknown_count'], value['damaged_count'], value['metadata']),
                          ('present', 1, 1, 1, 0, 'ok'))
 
+    def test_inspect_store_counts_staging_bytes_without_reading_contents(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        stage = self.home / ('.run-init-' + 'b' * 32)
+        stage.mkdir(mode=0o700)
+        reservation = stage / '.reservation'
+        with reservation.open('wb') as stream:
+            stream.truncate(1024 * 1024)
+        reservation.chmod(0o600)
+        (self.home / 'unmanaged').write_text('opaque')
+        before = snapshot(self.home)
+        value = self.reader.inspect_store()
+        self.assertEqual((value['staging_count'], value['staging_bytes'],
+                          value['root_unknown_count']), (1, 1024 * 1024, 1))
+        self.assertEqual(snapshot(self.home), before)
+
+    def test_inspect_store_empty_stage_and_unsafe_stage(self):
+        DiagnosticsStore(DiagnosticsSettings(persist_metadata=True), home=self.home).start(RUN_ID).close()
+        stage = self.home / ('.run-init-' + 'b' * 32)
+        stage.mkdir(mode=0o700)
+        value = self.reader.inspect_store()
+        self.assertEqual((value['staging_count'], value['staging_bytes']), (1, 0))
+        stage.rmdir()
+        stage.symlink_to(self.base, target_is_directory=True)
+        with self.assertRaises(r.ReaderError) as caught:
+            self.reader.inspect_store()
+        self.assertEqual(caught.exception.code, 'STORE_UNAVAILABLE')
+
     def test_inspect_store_absent_and_unsupported_metadata_states(self):
         value = self.reader.inspect_store()
         self.assertEqual((value['state'], value['metadata'], value['damaged_count'],

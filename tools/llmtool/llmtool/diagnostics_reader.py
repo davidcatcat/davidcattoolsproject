@@ -358,7 +358,7 @@ class DiagnosticsReader:
         self.home, self.platform = home, platform
 
     @contextmanager
-    def _store(self):
+    def _store(self, *, include_root=False):
         if not persistence_supported(self.platform):
             raise ReaderError('STORE_UNAVAILABLE')
         try:
@@ -376,7 +376,7 @@ class DiagnosticsReader:
                 with _lock(root, '.store.lock') as acquired:
                     if not acquired:
                         raise ReaderError('STORE_UNAVAILABLE')
-                    yield runs
+                    yield (root, runs) if include_root else runs
                     _check_link(root, 'runs', runs, True)
             finally:
                 os.close(runs)
@@ -464,13 +464,54 @@ class DiagnosticsReader:
         instead of healthy.
         """
         result = {'state': 'absent', 'run_count': 0, 'active_count': 0,
-                  'unknown_count': 0, 'damaged_count': 0, 'metadata': 'ok'}
+                  'unknown_count': 0, 'damaged_count': 0, 'metadata': 'ok',
+                  'staging_count': 0, 'staging_bytes': 0, 'root_unknown_count': 0,
+                  'staging_scan_limited': False}
         if not persistence_supported(self.platform):
             result.update(state='unsupported', metadata='unsupported')
             return result
         try:
-            with self._store() as runs:
+            with self._store(include_root=True) as (root, runs):
                 result['state'] = 'present'
+                root_names = []
+                with os.scandir(root) as entries:
+                    for item in entries:
+                        if len(root_names) >= RUN_SCAN_LIMIT:
+                            result['staging_scan_limited'] = True
+                            break
+                        root_names.append(item.name)
+                for name in root_names:
+                    if name in ('.store.lock', 'runs'):
+                        continue
+                    if name.startswith('.eviction-') and name.endswith('.json'):
+                        try:
+                            d.validate_run_id(name[len('.eviction-'):-len('.json')])
+                            continue
+                        except ValueError:
+                            pass
+                    if re.fullmatch(r'\.run-init-[0-9a-f]{32}', name):
+                        try:
+                            info = os.stat(name, dir_fd=root, follow_symlinks=False)
+                            _private(info, True)
+                            stage = _directory(root, name)
+                            try:
+                                if _identity(info) != _identity(os.fstat(stage)):
+                                    raise ReaderError('STORE_UNAVAILABLE')
+                                files = _names(stage, RUN_FILE_SCAN_LIMIT)
+                                for filename in files:
+                                    child = os.stat(filename, dir_fd=stage, follow_symlinks=False)
+                                    _private(child)
+                                    result['staging_bytes'] += child.st_size
+                                result['staging_count'] += 1
+                                _check_link(root, name, stage, True)
+                            finally:
+                                os.close(stage)
+                        except ReaderError:
+                            raise ReaderError('STORE_UNAVAILABLE') from None
+                        except OSError:
+                            raise ReaderError('STORE_UNAVAILABLE') from None
+                        continue
+                    result['root_unknown_count'] += 1
                 names = _names(runs, RUN_SCAN_LIMIT)
                 for name in names:
                     try:
