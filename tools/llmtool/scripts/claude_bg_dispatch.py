@@ -21,7 +21,8 @@ stops at a picker, so a CLI exit is not delivery. This helper:
   and when the D6 ``session_ref`` must be updated (the lifecycle has no update
   entrypoint, so it never edits the registry).
 
-``watch`` applies the same session rules while the PM waits for a report file.
+``watch --name ROLE`` applies the same session rules while waiting for a report
+file and resolves the explicitly named Worker role, just like ``dispatch``.
 Each dispatch or watch run uses one account: ``CLAUDE_CONFIG_DIR`` takes
 precedence over its configured role account, with ``~/.claude`` as the default
 for Developer roles. A Claude Reviewer must have an account. Only transcript
@@ -117,7 +118,7 @@ def config_dir(role_settings=None):
 
 
 def _role_key(role):
-    if role in ("claude-reviewer", "codex-reviewer"):
+    if role == "claude-reviewer":
         return "reviewer"
     if type(role) is str and CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role):
         return "claude-developer"
@@ -126,6 +127,8 @@ def _role_key(role):
 
 def _account_environment(role):
     """Resolve one CLI account for a run, preserving environment precedence."""
+    if role == "codex-reviewer":
+        raise DispatchError("ROLE_PROVIDER_UNSUPPORTED")
     environ = os.environ.copy()
     configured = role_config.resolve_role(_role_key(role))
     if configured.get("provider") not in (None, "claude"):
@@ -504,8 +507,7 @@ def _report_signature(path):
     return (info.st_ino, info.st_size, info.st_mtime_ns)
 
 
-def watch(*, claude, session_id, report_file, timeout, poll_interval, since_ms=None,
-          role="pm"):
+def watch(*, claude, session_id, report_file, timeout, poll_interval, role, since_ms=None):
     """Wait for a new report file while the session stays healthy.
 
     With ``since_ms`` (the receipt's ``launched_at``) a report counts when it
@@ -684,6 +686,7 @@ def _main(argv=None):
     proof.add_argument("--timeout", type=float, default=540.0)
     wait = sub.add_parser("watch")
     wait.add_argument("--session-id", required=True)
+    wait.add_argument("--name", required=True, help="Worker role whose account owns the session")
     wait.add_argument("--report-file", required=True)
     wait.add_argument("--timeout", type=float, default=3600.0)
     wait.add_argument("--since", help="the dispatch receipt's launched_at")
@@ -721,7 +724,7 @@ def _main(argv=None):
             result = watch(claude=args.claude, session_id=args.session_id,
                            report_file=args.report_file,
                            timeout=_bounded(args.timeout, 1, 86400, "--timeout"),
-                           poll_interval=poll, since_ms=since_ms)
+                           poll_interval=poll, since_ms=since_ms, role=args.name)
             ok = result["result"] == "REPORT_PRESENT"
     except DispatchError as exc:
         print(json.dumps({"schema_version": 1, "result": "REJECTED", "reason": exc.code,

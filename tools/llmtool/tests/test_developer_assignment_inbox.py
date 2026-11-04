@@ -523,6 +523,22 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
                                                   'llmtool' / 'tasks'), stdout=out)
         self.assertEqual(code, 0)
 
+    def test_claim_cli_preserves_specific_role_config_refusal_from_claim_gate(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        error = LLMToolError('role configuration is invalid')
+        error.role_config_code = 'ROLE_ACCOUNT_DIR_INVALID'
+        out = StringIO()
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': self.account_b}), \
+                patch.object(active_pm_inbox, 'observe_claude_session', side_effect=error):
+            code = run_task_claim(Namespace(assignment_id=assigned['assignment_id'],
+                                            worker=WORKER, d6=D6, session=session),
+                                  store=self.store, stdout=out)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out.getvalue()), {'code': 'ROLE_ACCOUNT_DIR_INVALID'})
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'ASSIGNED')
+
 
 if __name__ == '__main__':
     unittest.main()

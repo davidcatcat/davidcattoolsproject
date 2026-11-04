@@ -46,7 +46,8 @@ class AssignmentRefused(LLMToolError):
 
 def refusal_code(exc):
     """The stable refusal code carried by an assignment/claim error, if any."""
-    for name in ('assignment_code', 'dispatch_code', 'task_store_error_code'):
+    for name in ('assignment_code', 'dispatch_code', 'task_store_error_code',
+                 'role_config_code'):
         code = getattr(exc, name, None)
         if code:
             return code

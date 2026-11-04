@@ -356,6 +356,24 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual((code, receipt['reason']), (2, 'ROLE_PROVIDER_UNSUPPORTED'))
         self.assertEqual(self.calls(), [])
 
+    def test_codex_reviewer_is_refused_before_cli_with_or_without_account_config(self):
+        cases = (
+            ({'provider': 'codex', 'config_dir': str(self.config)},
+             {'CLAUDE_CONFIG_DIR': str(self.config)}),
+            ({'provider': 'claude', 'config_dir': None},
+             {'CLAUDE_CONFIG_DIR': ''}),
+        )
+        for configured, environment in cases:
+            with self.subTest(configured=configured, environment=environment):
+                self.reset()
+                with patch.object(dispatch_tool.role_config, 'resolve_role',
+                                  return_value=configured), \
+                        patch.dict(os.environ, environment):
+                    code, receipt = self.dispatch(name='codex-reviewer')
+                self.assertEqual((code, receipt['reason']),
+                                 (2, 'ROLE_PROVIDER_UNSUPPORTED'))
+                self.assertEqual(self.calls(), [])
+
     def test_busy_resume_refuses_using_resolved_account(self):
         role_dir = self.home / 'developer-account'
         role_dir.mkdir()
@@ -591,17 +609,20 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.scenario(after=[[row(TARGET)]])
         (self.home / 'state.json').write_text(json.dumps({'polls': 0, 'launch_ms': 1}))
         report.write_text('PASS')
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1', '--since', self.recent())
         self.assertEqual((code, result['result']), (0, 'REPORT_PRESENT'))
         report.unlink()
         self.scenario(after=[[row(TARGET, status='waiting')]])
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1')
         self.assertEqual((code, result['reason']), (1, 'SESSION_WAITING'))
         self.assertEqual(self.stops(), [TARGET])
         self.scenario(after=[[]])
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1')
         self.assertEqual((code, result['reason']), (1, 'SESSION_GONE'))
 
@@ -610,15 +631,47 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         (self.home / 'state.json').write_text(json.dumps({'polls': 0, 'launch_ms': 1}))
         # Healthy for two polls, then gone before any report is written.
         self.scenario(after=[[row(TARGET)], [row(TARGET)], []])
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '5')
         self.assertEqual((code, result['result'], result['reason']),
                          (1, 'FAILED', 'SESSION_GONE'))
         self.assertEqual(result['status'], 'busy')  # last healthy state seen
         self.assertEqual(result['stop']['session'], TARGET)
         self.assertEqual(self.stops(), [TARGET])
+        self.assertTrue(all(call['config_dir'] == str(self.config) for call in self.calls()))
         polls = [call for call in self.calls() if call['argv'][:2] == ['agents', '--json']]
         self.assertEqual(len(polls), 3)
+
+    def test_watch_requires_explicit_worker_role(self):
+        with self.assertRaises(SystemExit) as caught:
+            dispatch_tool._main(['--claude', str(self.claude), 'watch',
+                                 '--session-id', TARGET, '--report-file',
+                                 str(self.home / 'report.md')])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(self.calls(), [])
+
+    def test_watch_uses_worker_account_and_stops_there_instead_of_pm_account(self):
+        worker_dir = self.home / 'worker-account'
+        worker_dir.mkdir()
+        self.scenario(account_dir=worker_dir, after=[[row(TARGET, status='waiting')]])
+        def configured_role(role):
+            return {'role': role, 'provider': 'claude',
+                    'config_dir': str(worker_dir if role == 'claude-developer'
+                                     else self.config)}
+
+        with patch.object(dispatch_tool.role_config, 'resolve_role',
+                          side_effect=configured_role), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
+            _, pm_env = dispatch_tool._account_environment('pm')
+            self.assertEqual(pm_env['CLAUDE_CONFIG_DIR'], str(self.config))
+            code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                         '--session-id', TARGET, '--report-file',
+                                         str(self.home / 'worker-report.md'), '--timeout', '1')
+        self.assertEqual((code, result['reason']), (1, 'SESSION_WAITING'))
+        [stop] = [call for call in self.calls() if call['argv'][:1] == ['stop']]
+        self.assertEqual(stop['config_dir'], str(worker_dir))
+        self.assertTrue(all(call['config_dir'] == str(worker_dir) for call in self.calls()))
 
     def test_resumed_session_keeping_its_old_start_time_is_still_identified(self):
         # Not active before the launch, active after it: that is this launch.
@@ -726,17 +779,20 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.scenario(after=[[row(TARGET)]])
         for extra in ([], ['--since', self.recent()]):
             with self.subTest(extra=extra):
-                code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+                code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                             '--session-id', TARGET, '--report-file',
                                              str(report), '--timeout', '1', *extra)
                 self.assertEqual((code, result['reason']), (1, 'REPORT_TIMEOUT'))
         since = self.recent()
         stale = dispatch_tool._entry_ms({'timestamp': since}) / 1000 - 1
         os.utime(report, (stale, stale))  # one second before the dispatch
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1', '--since', since)
         self.assertEqual((code, result['reason']), (1, 'REPORT_TIMEOUT'))
         report.write_text('new round')  # mtime is now
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1', '--since', self.recent())
         self.assertEqual((code, result['result']), (0, 'REPORT_PRESENT'))
 

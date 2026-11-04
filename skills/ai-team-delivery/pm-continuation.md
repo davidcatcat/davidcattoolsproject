@@ -155,7 +155,7 @@ For other GitHub activity posts, begin the post with whole-line `<!-- activity: 
 - OpenCode or AGY direct: Task developer state `DEVELOPER_DISPATCHING` with provider `opencode-cli` or `agy-cli`, plus a running delegate process, or a result;
 - company `gw`: the recorded result.
 
-Confirm the receipt within 2 minutes of dispatch. Until then record only `DISPATCHED` / `UNKNOWN`, and never report the Worker as delivered, started or working. While waiting for a result, watch Worker state (`claude_bg_dispatch.py watch` for Claude); a blocked, waiting or gone Worker is handled under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
+Confirm the receipt within 2 minutes of dispatch. Until then record only `DISPATCHED` / `UNKNOWN`, and never report the Worker as delivered, started or working. While waiting for a result, watch Worker state (`claude_bg_dispatch.py watch --name <worker-role>` for Claude, using the same role as dispatch); a blocked, waiting or gone Worker is handled under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
 
 Formal verdicts are posted with `gh pr comment`, never `gh pr review`, because Task advance scans issue comments. Merge only when every exact-head check is `SUCCESS` or `SKIPPED`, with macOS `SUCCESS` where required; `CANCELLED` or pending checks block the merge.
 
