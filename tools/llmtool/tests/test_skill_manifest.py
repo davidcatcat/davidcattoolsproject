@@ -116,15 +116,25 @@ class SkillManifestTests(unittest.TestCase):
 
     def test_provider_selects_claude_entrypoint_and_preserves_default(self):
         default = self._manifest()
+        default_pm = self._manifest(role='pm')
         claude = self._manifest(provider='claude')
+        claude_pm = self._manifest(role='pm', provider='claude')
         default_paths = [entry['path'] for entry in default['entries']]
+        default_pm_paths = [entry['path'] for entry in default_pm['entries']]
         claude_paths = [entry['path'] for entry in claude['entries']]
+        claude_pm_paths = [entry['path'] for entry in claude_pm['entries']]
         self.assertIn('AGENTS.md', default_paths)
         self.assertNotIn('CLAUDE.md', default_paths)
         self.assertIn('CLAUDE.md', claude_paths)
         self.assertNotIn('AGENTS.md', claude_paths)
         self.assertIn('skills/ai-team-delivery/pm-continuation.md', claude_paths)
         self.assertIn('skills/ai-team-delivery/pm-continuation-reference.md', claude_paths)
+        self.assertIn('AGENTS.md', default_pm_paths)
+        self.assertNotIn('CLAUDE.md', default_pm_paths)
+        self.assertIn('CLAUDE.md', claude_pm_paths)
+        self.assertNotIn('AGENTS.md', claude_pm_paths)
+        self.assertIn('skills/ai-team-delivery/pm-continuation.md', claude_pm_paths)
+        self.assertIn('skills/ai-team-delivery/pm-continuation-reference.md', claude_pm_paths)
         self.assertNotEqual(default['manifest_sha256'], claude['manifest_sha256'])
 
     def test_injected_git_runner_is_used(self):
