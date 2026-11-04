@@ -192,11 +192,13 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
     def test_streaming_rejects_output_above_cap_and_cleans_up(self):
         cli = self.fake_cli('x' * 129)
-        with patch('llmtool.opencode_direct_developer.MAX_OUTPUT_BYTES', 128):
+        with patch('llmtool.opencode_direct_developer.MAX_OUTPUT_BYTES', 128), \
+                patch('llmtool.opencode_direct_developer.parse_json_events') as parser:
             with self.assertRaises(DirectOpenCodeError) as caught:
                 self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
                     write_paths=['source.py'], prompt='bounded task prompt',
                     timeout_seconds=5, executable=cli)
+        parser.assert_not_called()
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_OUTPUT_TOO_LARGE')
         self.assertEqual(caught.exception.cleanup_status, 'CONFIRMED')
@@ -290,15 +292,124 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertNotIn(marker, repr(error.args))
         self.assertNotIn(marker, repr(vars(error)))
 
-    def test_output_truncation_error_event_has_distinct_code(self):
+    def test_error_event_without_dict_payload_stays_provider_failed(self):
+        event = self.event('error', error='malformed provider payload')
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events((event + '\n').encode())
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_PROVIDER_FAILED')
+
+    def test_structured_provider_limit_and_rate_codes(self):
+        cases = (
+            ({'type': 'provider.free-limit', 'message': 'PRIVATE FREE MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.quota', 'message': 'PRIVATE QUOTA MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.rate-limit', 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
+            ({'statusCode': 429, 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
+            ({'type': 'provider.unavailable', 'message': 'PRIVATE UNKNOWN MESSAGE'},
+             'OPENCODE_PROVIDER_FAILED'),
+        )
+        for details, expected in cases:
+            with self.subTest(details=details):
+                event = self.event('error', error=details)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    parse_json_events((event + '\n').encode())
+                self.assertEqual(caught.exception.direct_opencode_code, expected)
+                self.assertNotIn('PRIVATE', repr(vars(caught.exception)))
+
+    def test_nonzero_structured_provider_limit_and_rate_codes(self):
+        cases = (
+            ({'type': 'provider.free-limit', 'message': 'PRIVATE FREE MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.quota', 'message': 'PRIVATE QUOTA MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.rate-limit', 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
+            ({'statusCode': 429, 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
+            ({'type': 'provider.unavailable', 'message': 'PRIVATE UNKNOWN MESSAGE'},
+             'OPENCODE_PROVIDER_FAILED'),
+        )
+        for details, expected in cases:
+            with self.subTest(details=details):
+                cli = self.fake_cli(self.event('error', error=details) + '\n', exit_code=7)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=cli)
+                self.assertEqual(caught.exception.direct_opencode_code, expected)
+                self.assertNotIn('PRIVATE', repr(vars(caught.exception)))
+
+    def test_output_limit_error_is_truncated_on_zero_and_nonzero_exits(self):
+        marker = 'PRIVATE OUTPUT MESSAGE'
         event = self.event('error', error={
-            'name': 'StepFailedError',
-            'message': 'Response still truncated after two output token limit continuations',
+            'type': 'output-limit', 'message': marker,
+        })
+        with self.assertRaises(DirectOpenCodeError) as parsed:
+            parse_json_events((event + '\n').encode())
+        self.assertEqual(parsed.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn(marker, repr(vars(parsed.exception)))
+        cli = self.fake_cli(event + '\n', exit_code=7)
+        with self.assertRaises(DirectOpenCodeError) as nonzero:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(nonzero.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn(marker, repr(vars(nonzero.exception)))
+
+    def test_unknown_output_limit_fallback_uses_real_cli_message(self):
+        marker = 'Response still truncated after two output token limit continuations'
+        event = self.event('error', error={
+            'type': 'unknown', 'message': marker,
         })
         with self.assertRaises(DirectOpenCodeError) as caught:
             parse_json_events((event + '\n').encode())
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertNotIn(marker, repr(vars(caught.exception)))
+        cli = self.fake_cli(event + '\n', exit_code=7)
+        with self.assertRaises(DirectOpenCodeError) as nonzero:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(nonzero.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn(marker, str(nonzero.exception))
+        self.assertNotIn(marker, repr(vars(nonzero.exception)))
+
+    def test_limit_classification_precedence_is_consistent_across_events(self):
+        output = self.event('error', error={
+            'type': 'output-limit', 'message': 'PRIVATE OUTPUT MESSAGE',
+        })
+        auth = self.event('error', error={
+            'type': 'provider.auth', 'message': 'PRIVATE AUTH MESSAGE',
+        })
+        denied = self.event('tool_use', part={
+            'state': {'status': 'denied'},
+        })
+        for events, expected in (((output, auth), 'OPENCODE_AUTH_REQUIRED'),
+                                 ((auth, output), 'OPENCODE_AUTH_REQUIRED'),
+                                 ((output, denied), 'TOOL_DENIED'),
+                                 ((denied, output), 'TOOL_DENIED')):
+            raw = ('\n'.join(events) + '\n').encode()
+            with self.subTest(expected=expected, events=events):
+                with self.assertRaises(DirectOpenCodeError) as parsed:
+                    parse_json_events(raw)
+                self.assertEqual(parsed.exception.direct_opencode_code, expected)
+                cli = self.fake_cli(raw.decode(), exit_code=7)
+                with self.assertRaises(DirectOpenCodeError) as nonzero:
+                    self.run_with_valid_binding(root=self.root,
+                        read_paths=['source.py'], write_paths=['source.py'],
+                        prompt='bounded task prompt', timeout_seconds=5,
+                        executable=cli)
+                self.assertEqual(nonzero.exception.direct_opencode_code, expected)
+                self.assertNotIn('PRIVATE', repr(vars(nonzero.exception)))
 
     def test_nonzero_structured_denial_has_bound_timing_and_no_secret_leak(self):
         task_id, run_id = 'a' * 32, 'b' * 32
