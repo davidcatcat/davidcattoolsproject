@@ -5189,7 +5189,12 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
             gone.add(row.key)
         else:
             found = TURN_LABEL.search(row.detail)
-            out.append(replace(row, state=CLOSED,
+            # An idle TUI transcript says it is waiting for the next prompt,
+            # but the CLI may already have exited. Keep that distinct from a
+            # live waiting session so the office view does not imply it can
+            # accept input.
+            state = STOPPED if row.state == IDLE else CLOSED
+            out.append(replace(row, state=state,
                                detail="推測 Codex CLI 已關閉" + (found.group(0) if found else "")))
     return [row for row in out if row.group not in gone]
 

@@ -2204,7 +2204,7 @@ class OfficeViewTests(unittest.TestCase):
         cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", None)
         self.assertIsInstance(self.rows([cli]), list)
 
-    def test_codex_cli_threads_show_closed_after_the_cli_exits_then_leave(self):
+    def test_codex_waiting_session_is_stopped_after_cli_exits_but_live_session_waits(self):
         self._codex("pm", {"id": "T1", "cwd": self.canonical, "thread_source": "user",
                            "originator": "codex-tui"}, ["task_started", "task_complete"], age=180)
         self._codex("dev", {"id": "S1", "cwd": self.canonical, "thread_source": "subagent",
@@ -2214,9 +2214,10 @@ class OfficeViewTests(unittest.TestCase):
         self._codex("app", {"id": "T2", "cwd": str(self.task), "thread_source": "user",
                             "originator": "codex_vscode"}, ["task_complete"], age=60)
         cli = mon.Process(9, 1, 9, "01:00", "S+", "Codex CLI (node launcher)", "node", "")
+        # The same completed transcript means waiting only while a CLI is live.
         self.assertEqual(self.by_name(self.rows([cli]))["codex 主對話"].state, mon.IDLE)
         rows = self.by_name(self.rows())
-        self.assertEqual(rows["codex 主對話"].state, mon.CLOSED)
+        self.assertEqual(rows["codex 主對話"].state, mon.STOPPED)
         self.assertTrue(rows["codex 主對話"].detail.startswith("推測 Codex CLI 已關閉"))
         self.assertEqual(rows["codex subagent Bacon"].state, mon.DONE)
         self.assertEqual(rows["codex developer"].state, mon.IDLE)   # not opened from the CLI
