@@ -28,12 +28,12 @@ class TrustReaderEmbeddingTests(unittest.TestCase):
 
     def test_safe_git_preflight_embeds_the_canonical_reader_byte_for_byte(self):
         # #369 PR-7: the stdlib-only skill script reads trust for its deny-list.
-        preflight = ROOT / "skills" / "safe-git" / "preflight.py"
+        preflight = ROOT / "tools" / "safe-git" / "preflight.py"
         self.assertEqual(_reader(preflight.read_bytes()), _reader(TRUST.read_bytes()))
 
     def test_safe_git_preflight_embeds_the_canonical_root_validation_byte_for_byte(self):
         # #369 PR-7 v1 FIX: preflight validates roots exactly like trust.load_trust.
-        preflight = ROOT / "skills" / "safe-git" / "preflight.py"
+        preflight = ROOT / "tools" / "safe-git" / "preflight.py"
         name = b"llmtool-trust-roots"
         canonical = _reader(TRUST.read_bytes(), name)
         self.assertIn(b"def _validate_roots(value, uid, home):", canonical)

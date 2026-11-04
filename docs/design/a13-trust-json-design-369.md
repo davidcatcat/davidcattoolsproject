@@ -11,7 +11,7 @@ Copied verbatim from https://github.com/davidcatcat/davidcattoolsproject/issues/
 # Task Contract／設計規格：Owner-only `trust.json`（取代寫死的信任錨點，issue #369）
 
 - Base commit：`e1387d896d8e6d352b9b9952e17b6181b7b88439`
-- 範圍：`tools/llmtool`、`skills/safe-git/preflight.py`
+- 範圍：`tools/llmtool`、`tools/safe-git/preflight.py`
 - 標記：**FACT** = 已在 base commit 原始碼中核對；**OPINION** = 設計建議，需 Coordinator／Owner 確認
 - 佔位符：`<OWNER_HOME>`、`<CANONICAL_ROOT>`、`<WORKSPACE_ROOT>`、`<TASKS_ROOT>`、`<OWNER_REPO>`（`owner/name` slug）、`<RUNNER_MAC_*>`、`<RUNNER_LINUX_*>`
 - 原型：在 Linux 上驗證過 dirfd 走訪讀取演算法可以實作，14 個正負案例都回傳預期的錯誤碼。原型沒有加入 repo。macOS 尚未驗證，不宣稱 Mac 上的行為。
@@ -82,7 +82,7 @@ Copied verbatim from https://github.com/davidcatcat/davidcattoolsproject/issues/
 9. 依第 3 節檢查 load-time invariants。
 10. 回傳 frozen 的 `TrustConfig`（dataclass，`frozen=True`，容器一律用 tuple 或 frozenset），附帶 `sha256` 與 `binding_sha256`（見 7.2）。
 
-**OPINION**：macOS 的 ACL 檢查可以比照 `skills/safe-git/preflight.py:52-` 的 `ls -lde` 先例。PR-1 不做，列為 Q8。
+**OPINION**：macOS 的 ACL 檢查可以比照 `tools/safe-git/preflight.py:52-` 的 `ls -lde` 先例。PR-1 不做，列為 Q8。
 
 ---
 
@@ -197,7 +197,7 @@ Copied verbatim from https://github.com/davidcatcat/davidcattoolsproject/issues/
 
 **FACT**：有些腳本在隔離的子程序中執行，無法 import 套件 `llmtool`：
 - `d6_worktree_lifecycle.py` 和 `d6_worktree_env.py` 以 `python -B -I -c <source>` 執行（`d6_worktree_lifecycle.py:345-358`、`task_submission_cli.py:1883-1887`）。
-- `skills/safe-git/preflight.py` 是只用 stdlib 的獨立腳本。
+- `tools/safe-git/preflight.py` 是只用 stdlib 的獨立腳本。
 
 **OPINION**：配置方案如下。
 - `tools/llmtool/llmtool/trust.py` 是 canonical 實作，只用 stdlib，提供 `load_trust()`、`verify_repository()`、`TrustConfig` 和 `TrustError(code)`。
@@ -274,7 +274,7 @@ Copied verbatim from https://github.com/davidcatcat/davidcattoolsproject/issues/
 - `review_bundle.py:24-26` 的 `PROTECTED` 改為 `(canonical_root, workspace_root)`，維持原本兩項的語意。
 - `test_triage_worker.py:173-176` 的 `known` 原本是 dispatcher root，加上 workspace 下的 `codex` 和 `claude`，改為 `(canonical_root, workspace_root)`。
   - **行為會變得更嚴格**：workspace 底下的其他子目錄也會被拒（OPINION：可以接受，見 Q9）。
-- `skills/safe-git/preflight.py:143-147` 的 `protected` 改為讀 trust（內嵌 reader 區塊）。trust 缺失時 fail closed，回傳 `TRUST_MISSING`。
+- `tools/safe-git/preflight.py:143-147` 的 `protected` 改為讀 trust（內嵌 reader 區塊）。trust 缺失時 fail closed，回傳 `TRUST_MISSING`。
 
 **PR-8（CI）**
 - `task_completion.py:47-61` 的以下常數改由 `ci_trust` 產生：`_MAC_CHECK`、`_LINUX_CHECK`、`_DOCS_CHECK`、`_REQUIRED_CHECKS`、`_NOT_RUN_CHECKS`、`_CI_RUNNER_NAMES`、`_CI_WORKFLOW_*`、`_LINUX_CI_*`、`_GITHUB_ACTIONS_APP_ID`。
@@ -325,7 +325,7 @@ Copied verbatim from https://github.com/davidcatcat/davidcattoolsproject/issues/
 | `review_bundle.py:27-29,53` | `SECRET_PARTS`；blocked 清單包含 `root`、`root.parent`、`~/.config` |
 | `test_triage_worker.py:177-194` | 祖先的 owner、權限與 `.git` 掃描迴圈 |
 | `test_triage_worker.py:197-244` | `load_phase0_grant` 的 no-follow 讀取、0600、pin 機制 |
-| `skills/safe-git/preflight.py:42-60,141-155` | `directory()` 的 symlink、權限與 macOS ACL 檢查；`private_write` 使用 `O_EXCL` |
+| `tools/safe-git/preflight.py:42-60,141-155` | `directory()` 的 symlink、權限與 macOS ACL 檢查；`private_write` 使用 `O_EXCL` |
 | `remote_test.py:222-246` | remote-test 設定的讀取方式 |
 | `config.py:137-146` | slug regex（移入 trust 驗證後規則不變） |
 
