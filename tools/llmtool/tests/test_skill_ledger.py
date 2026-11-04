@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
-from tools.llmtool.llmtool import skill_ledger as ledger
+from llmtool import skill_ledger as ledger
 
 
 class SkillLedgerTests(unittest.TestCase):
@@ -48,6 +48,15 @@ class SkillLedgerTests(unittest.TestCase):
         row = json.loads(self.path.read_text().strip())
         self.assertEqual(row['receipt_id'], receipt)
         self.assertEqual(row['schema_version'], 1)
+        self.assertEqual(row['evidence_level'], 'OBSERVED_READ')
+        self.assertEqual(row['status'], 'ACTIVE')
+        self.assertEqual(row['prev_sha256'], '0' * 64)
+        self.assertEqual(len(row['entry_sha256']), 64)
+        self.assertTrue(row['created_at'])
+        self.assertTrue(row['expires_at'])
+        for field in ('task_id', 'run_id', 'session_id', 'agent_id', 'role',
+                      'provider', 'model', 'repo', 'head', 'manifest_sha256'):
+            self.assertEqual(row[field], self.entry[field])
         self.assertTrue(ledger.verify_chain()[0])
 
     def test_unknown_evidence_level_is_refused(self):
@@ -66,9 +75,17 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(ledger.check('x', 'y', 'z', 'q', 'r', 'h', 'm')['reason'],
                          'WRONG_TASK')
 
+    def test_not_found_on_empty_ledger_and_unreadable_ledger(self):
+        self.assertEqual(self.check()['reason'], 'NOT_FOUND')
+        target = self.path.parent / 'target'
+        target.write_text('')
+        self.path.symlink_to(target)
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
     def test_binding_mismatches_and_identity_replay(self):
         self.record()
         for field, reason in (('task_id', 'WRONG_TASK'), ('run_id', 'WRONG_RUN'),
+                              ('session_id', 'NOT_FOUND'),
                               ('agent_id', 'WRONG_AGENT'), ('role', 'WRONG_ROLE'),
                               ('head', 'WRONG_HEAD'),
                               ('manifest_sha256', 'MANIFEST_CHANGED')):
@@ -76,6 +93,20 @@ class SkillLedgerTests(unittest.TestCase):
                 self.assertEqual(self.check(**{field: 'other'})['reason'], reason)
         self.assertEqual(self.check(agent_id='child-agent')['reason'], 'WRONG_AGENT')
         self.assertEqual(self.check(role='Reviewer')['reason'], 'WRONG_ROLE')
+
+    def test_receipt_cannot_be_replayed_by_another_task(self):
+        self.record()
+        self.assertEqual(self.check(task_id='task-b')['reason'], 'WRONG_TASK')
+
+    def test_parent_child_and_developer_reviewer_receipts_are_distinct(self):
+        self.record()
+        self.assertEqual(self.check(agent_id='child-agent')['reason'], 'WRONG_AGENT')
+        self.assertEqual(self.check(role='Reviewer')['reason'], 'WRONG_ROLE')
+
+    def test_skill_revision_change_invalidates_receipt(self):
+        self.record()
+        self.assertEqual(self.check(manifest_sha256='manifest-revised')['reason'],
+                         'MANIFEST_CHANGED')
 
     def test_unverified_evidence_never_verifies(self):
         self.record(evidence_level='UNVERIFIED')
