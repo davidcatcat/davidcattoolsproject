@@ -25,7 +25,12 @@ class _Store:
             }
             for number in range(count)
         }
-        self.records[_HIGH_DEBUG_TASK] = diagnosis
+        if diagnosis is not None:
+            self.records[_HIGH_DEBUG_TASK] = diagnosis
+        elif unreadable:
+            # Keep the unreadable Task addressable without persisting a None
+            # record; get() raises for it below.
+            self.records[_HIGH_DEBUG_TASK] = {}
         self.unreadable = unreadable
         self.recorded = []
 
@@ -70,7 +75,7 @@ class DelegateRepairCapTests(unittest.TestCase):
     def setUp(self):
         self.trust_patch = patch.object(
             task_submission_cli.trust, 'load_trust',
-            return_value=SimpleNamespace(repository=SimpleNamespace(slug='example/project')))
+            return_value=SimpleNamespace(repository={'slug': 'example/project'}))
         self.trust_patch.start()
         self.addCleanup(self.trust_patch.stop)
 
