@@ -10,7 +10,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
-    AGENT, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL, DirectOpenCodeError, configuration,
+    AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL,
+    DirectOpenCodeError, configuration,
     parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
@@ -173,6 +174,32 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertEqual(text, 'change ready')
         self.assertEqual(usage, {'prompt_tokens': 11, 'completion_tokens': 7,
                                  'total_tokens': 18})
+
+    def test_output_cap_is_16_mib_and_parser_accepts_output_over_1_mib(self):
+        self.assertEqual(MAX_OUTPUT_BYTES, 16 * 1024 * 1024)
+        message = 'x' * (1024 * 1024 + 1)
+        raw = (self.event('text', part={'text': message}) + '\n').encode()
+        self.assertGreater(len(raw), 1024 * 1024)
+        self.assertLessEqual(len(raw), MAX_OUTPUT_BYTES)
+        self.assertEqual(parse_json_events(raw)[1], message)
+
+    def test_parser_rejects_output_above_cap_with_typed_error(self):
+        with patch('llmtool.opencode_direct_developer.MAX_OUTPUT_BYTES', 128):
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                parse_json_events(b'x' * 129)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TOO_LARGE')
+
+    def test_streaming_rejects_output_above_cap_and_cleans_up(self):
+        cli = self.fake_cli('x' * 129)
+        with patch('llmtool.opencode_direct_developer.MAX_OUTPUT_BYTES', 128):
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                    write_paths=['source.py'], prompt='bounded task prompt',
+                    timeout_seconds=5, executable=cli)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TOO_LARGE')
+        self.assertEqual(caught.exception.cleanup_status, 'CONFIRMED')
 
     def test_usage_missing_is_unknown_not_zero(self):
         raw = (self.event('step_start') + '\n' +

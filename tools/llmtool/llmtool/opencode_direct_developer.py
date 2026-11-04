@@ -30,7 +30,7 @@ from .test_output_excerpts import _emitted_sensitive
 MODEL = 'opencode/deepseek-v4.1-flash-free#high'
 AGENT = 'llmtool-direct-developer'
 MAX_WALL_CLOCK_SECONDS = 600
-MAX_OUTPUT_BYTES = 1024 * 1024
+MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 MAX_STDERR_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_OUTPUT_TOKENS = 32768
@@ -437,8 +437,10 @@ def _await_exit_without_reap(process, *, deadline):
 def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
     """Validate OpenCode's newline-delimited JSON output; never infer success from prose."""
     step_limit = _validate_steps(step_limit)
-    if type(raw) is not bytes or not raw or len(raw) > MAX_OUTPUT_BYTES:
+    if type(raw) is not bytes or not raw:
         _reject('OPENCODE_OUTPUT_INVALID')
+    if len(raw) > MAX_OUTPUT_BYTES:
+        _reject('OPENCODE_OUTPUT_TOO_LARGE')
     try:
         lines = raw.decode('utf-8').splitlines()
     except UnicodeError:
