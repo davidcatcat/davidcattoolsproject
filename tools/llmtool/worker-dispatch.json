@@ -9,11 +9,17 @@
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "claude-developer": {
-      "dispatch": "PAUSED",
+      "dispatch": "OWNER_ASSIGNMENT_ONLY",
       "decided_by": "Owner",
       "decided_at": "2026-11-04",
-      "reason": "Owner paused Claude Developer dispatch",
-      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6631965348"
+      "reason": "Owner assigned only the gw-agent repair to Claude Developer; all other Claude Developer work stays paused",
+      "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6641326482",
+      "owner_assignments": [
+        {
+          "task_id": "14ffbf93461373873bb32fbdb83924a0",
+          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6641326482"
+        }
+      ]
     },
     "opencode-developer": {
       "dispatch": "ALLOWED",
