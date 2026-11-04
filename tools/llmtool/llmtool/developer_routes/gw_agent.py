@@ -102,7 +102,8 @@ class GwAgentRoute(DeveloperRoute):
                  (type(expected) is not str or _MODEL.fullmatch(expected) is None)) or
                 type(default_model) is not str or _MODEL.fullmatch(default_model) is None):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
-        if (profile.get('auth_env') != 'GW_AGENT_API_KEY' or
+        if ('auth_env' not in profile or
+                profile['auth_env'] not in (None, 'GW_AGENT_API_KEY') or
                 type(profile.get('model')) is not str or
                 _MODEL.fullmatch(profile['model']) is None or
                 (expected is not None and profile['model'] != expected)):
@@ -235,11 +236,17 @@ class GwAgentRoute(DeveloperRoute):
             return self._credential
         try:
             config_value = llm_config.resolve_profile_config('company-gw')
-            credential = llm_config.api_key(config_value)
+            provider = llm_config.selected_provider(config_value)
+            key_env = provider.get('api_key_env')
+            if key_env and not os.environ.get(key_env):
+                credential = None
+            else:
+                credential = llm_config.api_key(config_value)
         except Exception:
             raise RouteError('GW_AGENT_CREDENTIAL_MISSING') from None
-        if (type(credential) is not str or not credential or '\x00' in credential or
-                len(credential) > 8192):
+        if (credential is not None and
+                (type(credential) is not str or not credential or '\x00' in credential or
+                 len(credential) > 8192)):
             raise RouteError('GW_AGENT_CREDENTIAL_MISSING')
         self._credential = credential
         self._credential_resolved = True

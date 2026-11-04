@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from llmtool.developer_routes import GwAgentRoute, RouteError
+from llmtool.developer_routes import GwAgentRoute, RouteError, load_route_config
 from llmtool.developer_routes import gw_agent
 from llmtool.developer_routes.gw_agent import _scope_digest
 from llmtool.developer_routes.base import capture_snapshot, run_route
@@ -99,6 +99,29 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertIsNone(profile['auth_env'])
         self.assertNotIn('GW_AGENT_API_KEY', env)
 
+    def test_missing_or_empty_configured_key_writes_unauthenticated_profile(self):
+        for configured_value in (None, ''):
+            with self.subTest(configured_value='missing' if configured_value is None else 'empty'), \
+                    tempfile.TemporaryDirectory() as tmpdir, \
+                    mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
+                                      return_value={}), \
+                    mock.patch.object(gw_agent.llm_config, 'selected_provider',
+                                      return_value={'api_key_env': 'GW_AGENT_API_KEY'}), \
+                    mock.patch.object(gw_agent.llm_config, 'api_key',
+                                      side_effect=RuntimeError('missing key')):
+                if configured_value is None:
+                    with mock.patch.dict(os.environ, {}, clear=False):
+                        os.environ.pop('GW_AGENT_API_KEY', None)
+                        self.route.prepare_files(tmpdir, self.request())
+                        env = self.route.build_env(tmpdir)
+                else:
+                    with mock.patch.dict(os.environ, {'GW_AGENT_API_KEY': ''}):
+                        self.route.prepare_files(tmpdir, self.request())
+                        env = self.route.build_env(tmpdir)
+                profile_file = json.loads((Path(tmpdir) / 'profiles.json').read_text())
+                self.assertIsNone(profile_file['profiles']['fake']['auth_env'])
+                self.assertNotIn('GW_AGENT_API_KEY', env)
+
     def test_configured_key_remains_bound_to_gateway_environment(self):
         with tempfile.TemporaryDirectory() as tmpdir, \
                 mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
@@ -113,11 +136,9 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(env['GW_AGENT_API_KEY'], self.credential)
         self.assertNotIn(self.credential, json.dumps(profile_file))
 
-    def test_invalid_or_unresolvable_credentials_fail_closed_without_disclosure(self):
+    def test_malformed_or_unresolvable_credentials_fail_closed_without_disclosure(self):
         cases = (
-            ('missing-env', None, RuntimeError('missing configured key')),
-            ('empty-env', None, RuntimeError('empty configured key')),
-            ('invalid', 'bad\nsecret', None),
+            ('nul', 'bad\x00secret', None),
             ('overlong', 'x' * 8193, None),
             ('config-error', None, RuntimeError('private configuration detail')),
         )
@@ -140,6 +161,55 @@ class GwAgentRouteTests(unittest.TestCase):
                 self.assertEqual(caught.exception.code, 'GW_AGENT_CREDENTIAL_MISSING')
                 self.assertNotIn('private configuration detail', str(caught.exception))
                 self.assertEqual(list(Path(tmpdir).iterdir()), [])
+
+    def test_route_config_accepts_only_supported_auth_env_values(self):
+        route_config = {
+            'schema_version': 1,
+            'routes': {
+                'agy': {'executable': 'agy', 'default_model': 'agy-model',
+                        'default_effort': 'low', 'denied_dirs': ['.gemini'],
+                        'state_dirs': {'policy': 'private-temp-only'}},
+                'gw-agent': {
+                    'package_path': str(Path(self.temp.name) / 'gateway'),
+                    'default_model': 'fake-model', 'default_effort': 'low',
+                    'profile_name': 'fake',
+                    'profile': {'model': 'fake-model', 'auth_env': None},
+                    'authorization_ref': 'pm-task-ref',
+                    'allowed_data_classes': ['synthetic'],
+                },
+            },
+        }
+        path = Path(self.temp.name) / 'developer-routes.json'
+        for auth_env in (None, 'GW_AGENT_API_KEY'):
+            route_config['routes']['gw-agent']['profile']['auth_env'] = auth_env
+            path.write_text(json.dumps(route_config))
+            self.assertEqual(load_route_config(path)['routes']['gw-agent']['profile']['auth_env'],
+                             auth_env)
+        for auth_env in ('OTHER_KEY', '', 7, False):
+            route_config['routes']['gw-agent']['profile']['auth_env'] = auth_env
+            path.write_text(json.dumps(route_config))
+            with self.subTest(auth_env=auth_env), self.assertRaises(RouteError) as caught:
+                load_route_config(path)
+            self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+        route_config['routes']['gw-agent']['profile'].pop('auth_env')
+        path.write_text(json.dumps(route_config))
+        with self.assertRaises(RouteError) as caught:
+            load_route_config(path)
+        self.assertEqual(caught.exception.code, 'ROUTE_CONFIG_INVALID')
+
+        null_profile = dict(self.route.profile, auth_env=None)
+        self.assertIsInstance(GwAgentRoute(dict(self.route.config, profile=null_profile)),
+                              GwAgentRoute)
+        for auth_env in ('OTHER_KEY', '', 7, False):
+            with self.subTest(route_auth_env=auth_env), self.assertRaises(RouteError) as caught:
+                GwAgentRoute(dict(self.route.config,
+                                  profile=dict(self.route.profile, auth_env=auth_env)))
+            self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
+        profile_without_auth_env = dict(self.route.profile)
+        profile_without_auth_env.pop('auth_env')
+        with self.assertRaises(RouteError) as caught:
+            GwAgentRoute(dict(self.route.config, profile=profile_without_auth_env))
+        self.assertEqual(caught.exception.code, 'GW_AGENT_CONFIG_INVALID')
 
     def test_invalid_package_paths_raise_route_error(self):
         package_file = Path(self.temp.name) / 'package-file'
@@ -420,6 +490,7 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(result.changed_files, ('source.py',))
         self.assertEqual((self.root / 'source.py').read_text(), 'changed\n')
         self.assertEqual(len(server.requests), 2)
+        self.assertNotIn('authorization', repr(server.requests).lower())
         audit_records = [json.loads(line) for line in Path(self.route.audit_copy_path).read_text().splitlines()]
         self.assertTrue(any(record.get('type') == 'tool'
                             and record.get('tool') == 'apply_edit'
