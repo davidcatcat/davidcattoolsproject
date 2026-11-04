@@ -301,6 +301,33 @@ def _bytes(parent, budget, skip=()):
     return total
 
 
+def _cleanup_empty_stages(root, names):
+    """Remove only exact-name, private, same-user empty init stages.
+
+    The caller holds the exclusive store lock, serializing this pass with init.
+    Unknown, non-empty, or unsafe stages remain untouched.
+    """
+    prefix = '.run-init-'
+    for name in names:
+        if len(name) != len(prefix) + 32 or not name.startswith(prefix):
+            continue
+        try:
+            d.validate_run_id(name[len(prefix):])
+            directory = _directory(root, name)
+            try:
+                opened = os.fstat(directory)
+                current = os.stat(name, dir_fd=root, follow_symlinks=False)
+                _private(current, True)
+                if _inode(opened) != _inode(current) or os.listdir(directory):
+                    continue
+                os.rmdir(name, dir_fd=root)
+            finally:
+                os.close(directory)
+        except (OSError, ValueError, _Unsafe):
+            # Cleanup is opportunistic; never make a diagnostics run fail.
+            continue
+
+
 class DiagnosticsStore:
     """Construction is pure; start() alone creates/cleans an explicitly enabled store."""
 
@@ -346,7 +373,7 @@ class DiagnosticsStore:
                         raise _Collision()
                     identity = d.new_run_id()
                 # mkdir cannot return a creation-bound inode. Initialize outside
-                # runs, never rmdir this unknown staging namespace, even on failure.
+                # runs; incomplete or unprovable stages remain for guarded cleanup.
                 # Root byte/scan accounting still includes every retained stage.
                 import secrets
                 stage = '.run-init-' + secrets.token_hex(16)
@@ -443,7 +470,8 @@ class DiagnosticsStore:
                     return
                 os.unlink(filename, dir_fd=directory)
             _sync_directory(directory)
-            # Never rmdir stage: even the initial open cannot prove mkdir identity.
+            # Incomplete stages remain; guarded cleanup removes only empty,
+            # private stages while holding the exclusive store lock.
         except (OSError, _Unsafe):
             pass  # Preserve unprovable data and the original warning.
 
@@ -726,6 +754,7 @@ class DiagnosticsStore:
                     continue  # Unknown names are capacity-accounted, never deleted.
                 if not self._evict(root, runs, name):
                     raise _Full()
+        _cleanup_empty_stages(root, root_names)
         names = os.listdir(runs)
         if len(names) > SCAN_LIMIT:
             raise _Full()
