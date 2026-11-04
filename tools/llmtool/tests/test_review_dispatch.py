@@ -76,7 +76,10 @@ class ReviewDispatchTests(unittest.TestCase):
         for family in families:
             for reviewer in ('claude-reviewer', 'codex-reviewer'):
                 with self.subTest(family=family, reviewer=reviewer):
-                    task = {'task_id': TASK, 'developer': {'provider_profile': family}}
+                    developer = {'provider_profile': family}
+                    if family == 'agy':
+                        developer['model'] = 'gemini-2.5-pro'
+                    task = {'task_id': TASK, 'developer': developer}
                     reviewer_family = reviewer.removesuffix('-reviewer')
                     if reviewer_family == family:
                         for allowed in (True, False):
@@ -117,6 +120,56 @@ class ReviewDispatchTests(unittest.TestCase):
                         review_dispatch.worker_dispatch, 'evaluate',
                         return_value=SimpleNamespace(allowed=True)):
                     self.assertEqual(review_dispatch._select_reviewer(task), expected)
+
+    def test_agy_reviewer_selection_uses_model_family_and_fails_closed(self):
+        cases = (
+            ('claude-sonnet-5-5-medium', 'codex-reviewer'),
+            ('gemini-2.5-pro', 'claude-reviewer'),
+        )
+        for model, expected in cases:
+            task = {'task_id': TASK, 'developer': {
+                'provider_profile': 'agy', 'model': model}}
+            with self.subTest(model=model), patch.object(
+                    review_dispatch.worker_dispatch, 'evaluate',
+                    return_value=SimpleNamespace(allowed=True)) as evaluate:
+                self.assertEqual(review_dispatch._select_reviewer(task), expected)
+                refused = 'claude-reviewer' if expected == 'codex-reviewer' else 'codex-reviewer'
+                with self.assertRaises(LLMToolError) as raised:
+                    review_dispatch._select_reviewer(task, refused)
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'REVIEWER_SAME_FAMILY')
+                evaluate.assert_called_once()
+        for developer in (
+                {'provider_profile': 'agy'},
+                {'provider_profile': 'agy', 'model': 'other-model'}):
+            with self.subTest(developer=developer), patch.object(
+                    review_dispatch.worker_dispatch, 'evaluate') as evaluate:
+                with self.assertRaises(LLMToolError) as raised:
+                    review_dispatch._select_reviewer(
+                        {'task_id': TASK, 'developer': developer})
+                self.assertEqual(raised.exception.review_dispatch_code,
+                                 'REVIEWER_FAMILY_UNSUPPORTED')
+                evaluate.assert_not_called()
+
+    def test_review_result_drops_claude_verdict_for_agy_claude_model(self):
+        task = {'task_id': TASK, 'run_id': 'c' * 32,
+                'task_binding': {'contract_digest': 'd' * 64}}
+        body = (
+            '<!-- activity: type=review_verdict actor=Claude target=PM status=PASS -->\n'
+            f'Verdict: PASS | Version: v1 | HEAD: {HEAD}\n'
+            'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+            f'LLMTOOL-REVIEW-BINDING v1 task={TASK} run={task["run_id"]} '
+            f'contract={task["task_binding"]["contract_digest"]} head={HEAD}')
+        comment = {'id': 1, 'body': body, 'created_at': '2026-10-21T10:00:00Z'}
+        for model, expected in (
+                ('claude-sonnet-5-5-medium', None),
+                ('gemini-2.5-pro', 'REVIEW_PASS'),
+                ('unknown-model', 'REVIEW_FAIL')):
+            task['developer'] = {'provider_profile': 'agy', 'model': model}
+            with self.subTest(model=model):
+                result = review_result._comment_verdict(
+                    comment, head=HEAD, version=1, task=task)
+                self.assertEqual(None if result is None else result[2], expected)
 
     def invoke(self, *, create=None, preflight=None, policy=True, codex_runner=None,
                reviewer_role=None):

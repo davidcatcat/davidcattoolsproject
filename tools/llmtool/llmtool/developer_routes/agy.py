@@ -26,7 +26,6 @@ def _unique_pairs(pairs):
 class AgyRoute(DeveloperRoute):
     name = 'agy'
     worker_key = 'agy'
-    family = 'gemini'
 
     def validate_profile(self, model, effort):
         if (type(model) is not str or _MODEL.fullmatch(model) is None or
