@@ -128,16 +128,60 @@ class SkillLedgerTests(unittest.TestCase):
                 self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
                 # Restore both files for the next independent tampering case.
                 self.path.write_text('\n'.join(rows) + '\n')
+                self.path.chmod(0o600)
                 self.record(run_id='run-c')
                 rows = self.path.read_text().splitlines()
 
     def test_malformed_json_and_noncanonical_values_return_chain_code(self):
         self.record()
         # The stored end marker remains intact, so verification reaches parsing.
-        self.path.write_text('{"value": NaN}\n')
+        self.path.write_text('{"schema_version":1,"prev_sha256":"' +
+                             '0' * 64 + '","entry_sha256":"x","value":NaN}\n')
+        self.path.chmod(0o600)
         self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
         self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
-        self.path.write_text('{"value":"\\ud800"}\n')
+        self.path.write_text('{"schema_version":1,"prev_sha256":"' +
+                             '0' * 64 + '","entry_sha256":"x","value":"\\ud800"}\n')
+        self.path.chmod(0o600)
+        self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
+        self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+
+    def test_invalid_evidence_types_and_utf8_are_refused_before_filesystem_access(self):
+        for evidence_level in ([], {}):
+            with self.subTest(evidence_level=evidence_level):
+                with mock.patch.object(ledger, '_path', side_effect=AssertionError(
+                        'filesystem path accessed')):
+                    with self.assertRaises(ledger.SkillLedgerError) as caught:
+                        ledger.record({**self.entry, 'evidence_level': evidence_level})
+                self.assertEqual(caught.exception.skill_ledger_code,
+                                 'INVALID_EVIDENCE_LEVEL')
+        with mock.patch.object(ledger, '_path', side_effect=AssertionError(
+                'filesystem path accessed')):
+            with self.assertRaises(ledger.SkillLedgerError) as caught:
+                ledger.record({**self.entry, 'head': '\ud800'})
+        self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+
+    def test_wrong_head_selection_prefers_matching_run_in_either_order(self):
+        for matching_first in (True, False):
+            with self.subTest(matching_first=matching_first):
+                for suffix in ('', '.head', '.lock'):
+                    target = Path(str(self.path) + suffix)
+                    if target.exists() or target.is_symlink():
+                        target.unlink()
+                matching = {'run_id': 'run-match', 'head': 'old-head'}
+                other = {'run_id': 'run-other', 'head': 'requested-head'}
+                ordered = (matching, other) if matching_first else (other, matching)
+                for row in ordered:
+                    self.record(**row)
+                result = self.check(run_id='run-match', head='requested-head')
+                self.assertEqual(result['reason'], 'WRONG_HEAD')
+
+    def test_removing_revocation_tail_breaks_chain(self):
+        receipt = self.record()
+        ledger.revoke(receipt, 'withdrawn')
+        rows = self.path.read_text().splitlines()
+        self.path.write_text(rows[0] + '\n')
+        self.path.chmod(0o600)
         self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
         self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
 

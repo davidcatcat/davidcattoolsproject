@@ -277,7 +277,8 @@ def record(entry, *, ttl_seconds=86400):
     """Append an observed delivery record; evidence level must be explicit."""
     if type(entry) is not dict or type(ttl_seconds) is not int or ttl_seconds <= 0:
         _fail('INVALID_ENTRY')
-    if entry.get('evidence_level') not in EVIDENCE_LEVELS:
+    evidence_level = entry.get('evidence_level')
+    if type(evidence_level) is not str or evidence_level not in EVIDENCE_LEVELS:
         _fail('INVALID_EVIDENCE_LEVEL')
     if any(type(entry.get(key)) is not str or not entry[key] for key in _BINDING_FIELDS):
         _fail('INVALID_ENTRY')
@@ -293,6 +294,9 @@ def record(entry, *, ttl_seconds=86400):
             'expires_at': (created + timedelta(seconds=ttl_seconds)).isoformat(
                 timespec='seconds').replace('+00:00', 'Z'),
         })
+        # Reject strings that cannot be encoded as canonical UTF-8 before any
+        # filesystem access, rather than misclassifying them as ledger damage.
+        _canonical(value)
     except (TypeError, ValueError, UnicodeError, OverflowError):
         _fail('INVALID_ENTRY')
     path = _path()
@@ -350,11 +354,17 @@ def check(task_id, run_id, session_id, agent_id, role, provider, model, repo,
                 return {'status': 'VERIFIED', 'reason': None,
                         'receipt_id': item['receipt_id'],
                         'evidence_level': item['evidence_level']}
-        # Classify the receipt matching the greatest number of supplied fields.
+        # Prefer a receipt with matching identity fields before considering its
+        # revision bindings. This makes a wrong HEAD classify consistently even
+        # when another run happens to match more of the trailing fields.
         if by_id:
-            item = max(by_id, key=lambda row: sum(
-                type(value) is str and bool(value) and row.get(key) == value
-                for key, value in zip(fields, supplied)))
+            identity_fields = fields[:-2]
+            identity_values = supplied[:-2]
+            item = max(by_id, key=lambda row: (
+                sum(type(value) is str and bool(value) and row.get(key) == value
+                    for key, value in zip(identity_fields, identity_values)),
+                sum(type(value) is str and bool(value) and row.get(key) == value
+                    for key, value in zip(fields, supplied))))
             for reason, key, value in (
                     ('WRONG_TASK', 'task_id', task_id), ('WRONG_RUN', 'run_id', run_id),
                     ('WRONG_AGENT', 'agent_id', agent_id), ('WRONG_ROLE', 'role', role),
