@@ -642,6 +642,9 @@ def decide(record, d6, pr, related):
             return 'REPAIR_REVIEW'
         if remote_status not in ('PASS', 'ADMISSION_DENIED'):
             return 'RUN_REMOTE_TEST'
+        if type(pr) is dict and pr.get('merged') is True:
+            # The code is already merged; a Reviewer must never start for it.
+            return 'PR_MERGED_NO_REVIEW'
         return 'DISPATCH_REVIEW'
     claim = max(matching, key=lambda item: item.get('version', 0))
     if claim.get('state') in ('CLAIMED', 'UNKNOWN'):
@@ -1175,6 +1178,8 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
         remote_status, _, _ = _remote_test_status(record, d6)
         codes.append('REMOTE_TEST_' + remote_status if remote_status in
                      ('TIMEOUT', 'SHA_MISMATCH') else 'NEEDS_ATTENTION')
+    elif step == 'PR_MERGED_NO_REVIEW':
+        codes.append('PR_MERGED_NO_REVIEW')
     elif step in ('REVIEW_OUTCOME_UNKNOWN', 'WAITING_REPAIR',
                   'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
         codes.append(step)

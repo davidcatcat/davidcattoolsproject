@@ -155,6 +155,34 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(result, {'task_id': record['task_id'], 'codes': [],
                                   'pr': 17, 'head': HEAD})
 
+    def _advance_no_claim(self, pr):
+        record = base_record()
+        store = type('S', (), {'get': lambda self, _id: record})()
+        dispatched = []
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(task_id=record['task_id'], store=store,
+                pr_number=17, github_get=lambda _path: pr,
+                dispatch_review_call=lambda **kwargs: dispatched.append(kwargs) or {})
+        return result, dispatched
+
+    def test_advance_merged_pr_without_claim_never_dispatches_review(self):
+        merged = dict(PR, merged=True, merge_commit_sha='c' * 40)
+        self.assertEqual(task_advance.decide(base_record(), d6(), merged, {}),
+                         'PR_MERGED_NO_REVIEW')
+        result, dispatched = self._advance_no_claim(merged)
+        self.assertEqual(dispatched, [])
+        self.assertEqual(result['step'], 'PR_MERGED_NO_REVIEW')
+        self.assertNotEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertIn('PR_MERGED_NO_REVIEW', result['codes'])
+        self.assertIsNone(result['result'])
+
+    def test_advance_open_pr_without_claim_still_dispatches_review(self):
+        result, dispatched = self._advance_no_claim(dict(PR))
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(dispatched[0]['pr_number'], 17)
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+
     def test_dispatch_unknown_result_and_review_outcomes(self):
         self.assertEqual(task_advance.decide(base_record(), d6(), PR, {}), 'DISPATCH_REVIEW')
         claim = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'CLAIMED'}
