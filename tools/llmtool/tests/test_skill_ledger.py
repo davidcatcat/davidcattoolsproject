@@ -36,7 +36,8 @@ class SkillLedgerTests(unittest.TestCase):
 
     def check(self, **changes):
         args = dict(task_id='task-a', run_id='run-a', session_id='session-a',
-                    agent_id='agent-a', role='Developer', head='head-a',
+                    agent_id='agent-a', role='Developer', provider='local',
+                    model='model-a', repo='repo-a', head='head-a',
                     manifest_sha256='manifest-a')
         args.update(changes)
         return ledger.check(**args)
@@ -72,8 +73,8 @@ class SkillLedgerTests(unittest.TestCase):
         ledger.revoke(receipt, 'withdrawn')
         self.assertEqual(self.check()['reason'], 'REVOKED')
         self.assertEqual(self.check(task_id='missing')['reason'], 'WRONG_TASK')
-        self.assertEqual(ledger.check('x', 'y', 'z', 'q', 'r', 'h', 'm')['reason'],
-                         'WRONG_TASK')
+        self.assertEqual(ledger.check('x', 'y', 'z', 'q', 'r', 'p', 'm', 'repo',
+                                      'h', 'digest')['reason'], 'WRONG_TASK')
 
     def test_not_found_on_empty_ledger_and_unreadable_ledger(self):
         self.assertEqual(self.check()['reason'], 'NOT_FOUND')
@@ -87,6 +88,8 @@ class SkillLedgerTests(unittest.TestCase):
         for field, reason in (('task_id', 'WRONG_TASK'), ('run_id', 'WRONG_RUN'),
                               ('session_id', 'NOT_FOUND'),
                               ('agent_id', 'WRONG_AGENT'), ('role', 'WRONG_ROLE'),
+                              ('provider', 'WRONG_PROVIDER'), ('model', 'WRONG_MODEL'),
+                              ('repo', 'WRONG_REPO'),
                               ('head', 'WRONG_HEAD'),
                               ('manifest_sha256', 'MANIFEST_CHANGED')):
             with self.subTest(field=field):
@@ -102,6 +105,41 @@ class SkillLedgerTests(unittest.TestCase):
         self.record()
         self.assertEqual(self.check(agent_id='child-agent')['reason'], 'WRONG_AGENT')
         self.assertEqual(self.check(role='Reviewer')['reason'], 'WRONG_ROLE')
+
+    def test_none_and_empty_binding_values_never_match(self):
+        self.record()
+        for field in ('task_id', 'run_id', 'session_id', 'agent_id', 'role',
+                      'provider', 'model', 'repo', 'head', 'manifest_sha256'):
+            for value in (None, ''):
+                with self.subTest(field=field, value=value):
+                    self.assertEqual(self.check(**{field: value})['status'], 'UNVERIFIED')
+
+    def test_head_anchor_detects_tail_removal_empty_and_deleted_ledger(self):
+        self.record()
+        self.record(run_id='run-b')
+        rows = self.path.read_text().splitlines()
+        for damaged in ('\n'.join(rows[:-1]) + '\n', '', None):
+            with self.subTest(damaged=damaged):
+                if damaged is None:
+                    self.path.unlink()
+                else:
+                    self.path.write_text(damaged)
+                self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
+                self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+                # Restore both files for the next independent tampering case.
+                self.path.write_text('\n'.join(rows) + '\n')
+                self.record(run_id='run-c')
+                rows = self.path.read_text().splitlines()
+
+    def test_malformed_json_and_noncanonical_values_return_chain_code(self):
+        self.record()
+        # The stored end marker remains intact, so verification reaches parsing.
+        self.path.write_text('{"value": NaN}\n')
+        self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
+        self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+        self.path.write_text('{"value":"\\ud800"}\n')
+        self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
+        self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
 
     def test_skill_revision_change_invalidates_receipt(self):
         self.record()
