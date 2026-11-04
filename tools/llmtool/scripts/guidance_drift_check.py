@@ -15,8 +15,12 @@ CONFIG_PATH = Path("tools/llmtool/guidance-drift.json")
 URL = re.compile(r"https://[^\s`<>\[\]{}]+", re.IGNORECASE)
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 MODEL_NAME = re.compile(
-    r"(?<![\w./-])(?:opencode/)?(?:gpt|claude|deepseek|gemini|grok|llama|mistral|"
-    r"qwen\d*|kimi)(?:-[\w.]*\w)+(?![\w-]|\.\w)",
+    r"(?<![\w./-])(?:(?:anthropic|openrouter|opencode|openai|google|deepinfra|together)/)?"
+    r"(?:gpt-?\d+(?:\.\d+)*(?:-[\w.]*\w)?|"
+    r"claude-(?:opus|sonnet|haiku)-[\w.-]*\w|"
+    r"(?:deepseek|gemini|grok|llama|mistral|qwen\d*|kimi)-[\w.-]*\w|"
+    r"o\d+-[\w.-]*\w|glm-\d+(?:-[\w.-]*\w)?|minimax-m\d+(?:-[\w.-]*\w)?)"
+    r"(?![\w-]|\.\w|/)",
     re.IGNORECASE,
 )
 CHECK_NAME = re.compile(r"^check\s+\([^)]+\)$")
@@ -24,9 +28,13 @@ DISPATCH_VALUES = {"PAUSED", "OWNER_ASSIGNMENT_ONLY", "ALLOWED"}
 
 
 def _clean_url(value: str) -> str:
-    value = value.rstrip(".,;:!?*_")
-    while value.endswith(")") and value.count(")") > value.count("("):
-        value = value[:-1]
+    while True:
+        cleaned = value.rstrip(".,;:!?*_\"'”’")
+        if cleaned.endswith(")") and cleaned.count(")") > cleaned.count("("):
+            cleaned = cleaned[:-1]
+        if cleaned == value:
+            break
+        value = cleaned
     return value
 
 

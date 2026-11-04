@@ -30,6 +30,10 @@ _BASE_PATHS = (
     'AGENTS.md',
     'skills/ai-team-delivery/SKILL.md',
 )
+_CLAUDE_BASE_PATHS = (
+    'CLAUDE.md',
+    'skills/ai-team-delivery/SKILL.md',
+)
 _PM_PATHS = (
     'skills/ai-team-delivery/pm-continuation.md',
     'skills/ai-team-delivery/pm-continuation-reference.md',
@@ -194,7 +198,8 @@ def _read_blob(git_runner, repo_root, commit, path):
     return content
 
 
-def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run):
+def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run,
+                   provider='codex'):
     """Build a deterministic manifest using only blobs reachable at ``commit``.
 
     ``git_runner`` is injectable for focused tests and receives subprocess.run
@@ -203,6 +208,9 @@ def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run):
     if type(commit) is not str or _COMMIT_RE.fullmatch(commit) is None:
         _raise(SKILL_MANIFEST_COMMIT_INVALID)
     paths = resolve(role, gate)
+    if provider == 'claude':
+        task_paths = tuple(path for path in paths if path not in _BASE_PATHS)
+        paths = tuple(sorted(_CLAUDE_BASE_PATHS + task_paths))
 
     top = _run_git(
         git_runner, repo_root,
@@ -249,3 +257,24 @@ def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run):
     ).encode('utf-8')
     manifest['manifest_sha256'] = hashlib.sha256(canonical).hexdigest()
     return manifest
+
+
+def read_manifest_files(repo_root, manifest, git_runner=subprocess.run):
+    """Read manifest file text from the commit named by a built manifest."""
+    if type(manifest) is not dict or type(manifest.get('commit')) is not str:
+        _raise(SKILL_MANIFEST_COMMIT_INVALID)
+    entries = manifest.get('entries')
+    if type(entries) is not list:
+        _raise(SKILL_MANIFEST_PATH_MISSING)
+    result = []
+    for entry in entries:
+        if (type(entry) is not dict or type(entry.get('path')) is not str or
+                type(entry.get('sha256')) is not str):
+            _raise(SKILL_MANIFEST_PATH_MISSING)
+        content = _read_blob(
+            git_runner, repo_root, manifest['commit'], entry['path'],
+        )
+        if hashlib.sha256(content).hexdigest() != entry['sha256']:
+            _raise(SKILL_MANIFEST_PATH_MISSING)
+        result.append((entry['path'], content.decode('utf-8')))
+    return result
