@@ -145,9 +145,8 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             if type(merged) is not dict:
                 return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
                         'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
-            # A skipped or missing Mac check asks the existing merge path to
-            # apply mac-ci. Keep polling that merge path so READY_FOR_INTEGRATION
-            # from the non-merge path cannot immediately retry the merge.
+            # A pending exact-head Mac check keeps the existing merge path
+            # active; READY_FOR_INTEGRATION alone cannot retry the merge.
             if merged.get('step') == 'WAITING_CI':
                 last_result = merged
                 mac_ci_pending = True

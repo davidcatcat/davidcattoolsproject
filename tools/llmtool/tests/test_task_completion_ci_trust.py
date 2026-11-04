@@ -104,6 +104,8 @@ class OwnerValuesGoldenTests(unittest.TestCase):
             'workflow_id': 42, 'run_id': 100, 'run_attempt': 1, 'run_number': 5,
             'successful_checks': ['check (Linux 3.14)', 'check (macOS 3.13)'],
             'check_ids': {'check (macOS 3.13)': 1, 'check (Linux 3.14)': 61},
+            'check_outcomes': {'check (macOS 3.13)': 'SUCCESS',
+                               'check (Linux 3.14)': 'SUCCESS'},
             'linux_required': True, 'docs_only': False,
             'required_checks': ['check (Linux 3.14)', 'check (macOS 3.13)'],
             'workflow_path': MAC, 'workflow_name': 'llmtool Mac CI'})
@@ -124,6 +126,7 @@ class OwnerValuesGoldenTests(unittest.TestCase):
         self.assertEqual(result, {
             'workflow_id': 43, 'run_id': 200, 'run_attempt': 1, 'run_number': 8,
             'successful_checks': ['check (docs)'], 'check_ids': {'check (docs)': 61},
+            'check_outcomes': {'check (docs)': 'SUCCESS'},
             'linux_required': True, 'docs_only': True,
             'required_checks': ['check (docs)'],
             'workflow_path': LINUX, 'workflow_name': 'llmtool Linux CI'})
@@ -137,9 +140,50 @@ class OwnerValuesGoldenTests(unittest.TestCase):
         self.assertEqual(result, {
             'workflow_id': 42, 'run_id': None, 'run_attempt': None, 'run_number': None,
             'successful_checks': [], 'check_ids': {}, 'linux_required': True,
+            'check_outcomes': {'check (macOS 3.13)': 'MISSING',
+                               'check (Linux 3.14)': 'MISSING'},
             'docs_only': False,
             'required_checks': ['check (Linux 3.14)', 'check (macOS 3.13)'],
             'workflow_path': MAC, 'workflow_name': 'llmtool Mac CI'})
+
+    def test_required_check_outcomes_distinguish_failed_pending_and_untrusted(self):
+        def collect_one(api):
+            with patch('llmtool.task_completion._github_get', side_effect=api):
+                return task_completion._collect_one_ci_workflow(
+                    pr_number=10, result_sha=SHA, workflow_path=LINUX,
+                    workflow_name='llmtool Linux CI', check_name='check (docs)',
+                    runner_names=task_completion._CI_RUNNER_NAMES)
+
+        failed = _linux_docs()
+        failed[1]['workflow_runs'][0]['conclusion'] = 'failure'
+        failed[2]['jobs'][0].update(status='completed', conclusion='failure')
+        failed[3]['check_runs'][0]['conclusion'] = 'failure'
+        result = collect_one(failed)
+        self.assertEqual(result['check_outcomes'], {'check (docs)': 'FAILED'})
+
+        pending = _linux_docs()
+        pending[1]['workflow_runs'][0].update(status='in_progress', conclusion=None)
+        pending[2]['jobs'][0].update(status='in_progress', conclusion=None)
+        pending[3]['check_runs'][0].update(status='in_progress', conclusion=None)
+        result = collect_one(pending)
+        self.assertEqual(result['check_outcomes'], {'check (docs)': 'PENDING'})
+
+        untrusted = _linux_docs()
+        untrusted[3]['check_runs'][0]['app']['id'] = 999
+        result = collect_one(untrusted)
+        self.assertEqual(result['check_outcomes'], {'check (docs)': 'MISSING'})
+
+    def test_linux_failure_is_reported_when_mac_jobs_are_invalid(self):
+        invalid_mac = _mac()
+        invalid_mac[2]['jobs'][0]['runner_name'] = 'untrusted-runner'
+        failed_linux = _linux()
+        failed_linux[1]['workflow_runs'][0]['conclusion'] = 'failure'
+        failed_linux[2]['jobs'][0]['conclusion'] = 'failure'
+        failed_linux[3]['check_runs'][0]['conclusion'] = 'failure'
+        result, _ = _collect(invalid_mac + failed_linux, CODE_PATHS)
+        self.assertEqual(result['check_outcomes'], {'check (Linux 3.14)': 'FAILED'})
+        self.assertIn('check (Linux 3.14)', result['required_checks'])
+        self.assertEqual(result['workflow_path'], LINUX)
 
     def test_not_run_checks_match_legacy_display(self):
         self.assertEqual(task_completion._not_run_checks(False),

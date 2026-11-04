@@ -233,9 +233,8 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
                          allow_missing_macos=True)
     if code and code not in ('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'):
         if code == 'MERGE_CHECKS_NOT_GREEN':
-            # Preserve the merge refusal while telling the foreground driver
-            # whether the exact-head Mac check is still running. Completed
-            # failures remain ordinary refusals and are never polled as waits.
+            # Preserve the merge refusal while identifying an exact-head
+            # pending Mac check. Completed failures remain ordinary refusals.
             try:
                 checks = github_get(f'commits/{head}/check-runs?per_page=100')
             except Exception:

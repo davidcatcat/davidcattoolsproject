@@ -1913,12 +1913,55 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
     selected = [workflow for workflow in ci_trust['workflows'] if workflow[field] is not None]
     if not selected:
         _stop('TRUST_CI_INVALID')
-    results = [_collect_one_ci_workflow(
-        pr_number=pr_number, result_sha=result_sha, workflow_path=workflow['path'],
-        workflow_name=workflow['name'], check_name=workflow[field],
-        runner_names=workflow['runner_names'], runner_labels=workflow['runner_labels'],
-        mode=ci_trust['mode'], app_id=ci_trust['github_actions_app_id'],
-        pr_merged=pr_merged, pr_head_ref=pr_head_ref) for workflow in selected]
+    results = []
+    for index, workflow in enumerate(selected):
+        try:
+            result = _collect_one_ci_workflow(
+                pr_number=pr_number, result_sha=result_sha,
+                workflow_path=workflow['path'], workflow_name=workflow['name'],
+                check_name=workflow[field], runner_names=workflow['runner_names'],
+                runner_labels=workflow['runner_labels'], mode=ci_trust['mode'],
+                app_id=ci_trust['github_actions_app_id'], pr_merged=pr_merged,
+                pr_head_ref=pr_head_ref)
+        except LLMToolError as exc:
+            # A malformed Mac job can otherwise mask a completed Linux failure.
+            # Read the later required workflow only to surface that failure; if
+            # it is not confirmed, preserve the original fail-closed error.
+            if (index != 0 or exc.completion_code != 'CI_WORKFLOW_JOBS_INVALID' or
+                    len(selected) < 2):
+                raise
+            later = []
+            for later_workflow in selected[index + 1:]:
+                later.append(_collect_one_ci_workflow(
+                    pr_number=pr_number, result_sha=result_sha,
+                    workflow_path=later_workflow['path'],
+                    workflow_name=later_workflow['name'],
+                    check_name=later_workflow[field],
+                    runner_names=later_workflow['runner_names'],
+                    runner_labels=later_workflow['runner_labels'],
+                    mode=ci_trust['mode'], app_id=ci_trust['github_actions_app_id'],
+                    pr_merged=pr_merged, pr_head_ref=pr_head_ref))
+            if not any('FAILED' in item['check_outcomes'].values() for item in later):
+                raise
+            successful = set()
+            check_ids = {}
+            check_outcomes = {}
+            for item in later:
+                successful.update(item['successful_checks'])
+                check_ids.update(item['check_ids'])
+                check_outcomes.update(item['check_outcomes'])
+            primary_index = index + 1
+            primary = later[0]
+            primary_workflow = selected[primary_index]
+            return {'workflow_id': primary['workflow_id'], 'run_id': primary['run_id'],
+                    'run_attempt': primary['run_attempt'], 'run_number': primary['run_number'],
+                    'successful_checks': sorted(successful), 'check_ids': check_ids,
+                    'check_outcomes': check_outcomes, 'linux_required': True,
+                    'docs_only': docs_only,
+                    'required_checks': sorted(item[field] for item in selected),
+                    'workflow_path': primary_workflow['path'],
+                    'workflow_name': primary_workflow['name']}
+        results.append(result)
     successful, check_ids, check_outcomes = set(), {}, {}
     for result in results:
         successful.update(result['successful_checks'])

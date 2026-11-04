@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from llmtool import task_drive
+from llmtool import task_advance
 from llmtool import task_submission_cli
 from llmtool.cli import parser_for_cli
 
@@ -226,6 +227,71 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(len(label_calls), 2)
         self.assertEqual(label_mutations, ['mac-ci'])
         self.assertEqual(sum(call['merge'] for call in calls[:3]), 0)
+
+    def test_real_skipped_mac_helper_rechecks_then_labels_before_ready_only(self):
+        record = {'task_id': 't', 'completion': {'executor_task_id': 'executor'}}
+
+        class Store:
+            def get(self, _task_id):
+                return record
+
+        calls = []
+        results = [
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGE_REFUSED',
+             'codes': ['MERGE_MACOS_CHECK_REQUIRED']},
+        ]
+
+        def advance(**kwargs):
+            calls.append(kwargs)
+            return results.pop(0)
+
+        pr_reads = 0
+        label_mutations = []
+        pr = {'number': 17, 'head': {'sha': 'a' * 40}, 'state': 'open',
+              'merged': False, 'mergeable': True, 'labels': []}
+        skipped_checks = {'total_count': 2, 'check_runs': [
+            {'head_sha': 'a' * 40, 'name': 'check (Linux 3.14)',
+             'status': 'completed', 'conclusion': 'success'},
+            {'head_sha': 'a' * 40, 'name': 'check (macOS 3.13)',
+             'status': 'completed', 'conclusion': 'skipped'},
+        ]}
+
+        def github_get(path):
+            nonlocal pr_reads
+            if path == 'pulls/17':
+                pr_reads += 1
+                current = dict(pr)
+                current['head'] = dict(pr['head'])
+                if pr_reads == 1:
+                    current['mergeable'] = False
+                return current
+            if path.startswith('commits/'):
+                return skipped_checks
+            if path == 'pulls/17/files?per_page=100':
+                return [{'filename': 'src/module.py'}]
+            return []
+
+        def runner(_root, args):
+            label_mutations.append(args)
+            return type('R', (), {'returncode': 0})()
+
+        d6 = {'result_head': 'a' * 40, 'recorded_result_head': 'a' * 40,
+              'dirty': False, 'state': 'CLEAN', 'root': '/synthetic/repo'}
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6):
+            result = task_drive.drive(task_id='t', store=Store(), pr_number=17,
+                merge=True, max_steps=4, advance_call=advance,
+                github_get=github_get, merge_gh_runner=runner,
+                sleep=lambda _seconds: None)
+
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual([call['merge'] for call in calls], [False, False, False, True])
+        self.assertEqual(label_mutations,
+                         [['pr', 'edit', '17', '--add-label', 'mac-ci']])
 
     def test_invalid_completion_evidence_without_skipped_mac_does_not_label(self):
         calls = []
