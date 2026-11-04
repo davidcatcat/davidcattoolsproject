@@ -22,10 +22,20 @@ from llmtool.task_store import TaskStore
 from llmtool.task_submission_cli import (
     _EXECUTOR_RESULT_SYSTEM, run_task_complete, run_task_delegate,
     run_task_record_pm, run_task_show)
+from review_trust_fixture import start_module as _start_trust_fixture
+from review_trust_fixture import stop_module as _stop_trust_fixture
 
 # Reuse the registered-D6 Executor fixture (temp Git repo, D6 registration and
 # ENV-2 marker) without re-collecting its tests in this module.
 import test_task_completion as completion_fixture
+
+
+def setUpModule():
+    _start_trust_fixture()
+
+
+def tearDownModule():
+    _stop_trust_fixture()
 
 _NEW_TEST = ('import unittest\nclass Fixture(unittest.TestCase):\n'
              '    def test_ok(self): self.assertEqual(2, 1 + 1)\n')

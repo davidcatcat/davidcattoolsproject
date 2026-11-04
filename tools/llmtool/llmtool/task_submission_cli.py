@@ -2909,7 +2909,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
     owner_ref = getattr(args, 'owner_ref', None)
     if (type(owner_ref) is not str or
-            worker_dispatch._OWNER_COMMENT_REF.fullmatch(owner_ref) is None):
+            worker_dispatch.owner_comment_ref().fullmatch(owner_ref) is None):
         raise LLMToolError('--provider agy requires a valid --owner-ref before Task mutation')
     if getattr(args, 'mode', None) != 'direct':
         raise LLMToolError('--provider agy requires --mode direct')

@@ -9,7 +9,8 @@ from io import StringIO
 import yaml
 
 from llmtool.config import (
-    DEFAULTS, api_key, codex_direct_timeout, init_config, pm_claude_config_dir, repository_config,
+    DEFAULTS, api_key, codex_direct_timeout, init_config, legacy_repository_config,
+    pm_claude_config_dir, repository_config,
     resolve_config, show_config, user_config_path,
 )
 from llmtool.errors import LLMToolError
@@ -59,16 +60,24 @@ class ConfigTests(unittest.TestCase):
         self.user.write_text("generation:\n  max_tokens: 321\n", encoding="utf-8")
         self.assertEqual(self.resolve()["generation"]["max_tokens"], 321)
 
-    def test_repository_identity_uses_trusted_user_config_and_defaults(self):
-        self.assertEqual(repository_config(self.home), {
-            "slug": "davidcatcat/davidcattoolsproject",
-            "dispatch_issue": 289,
-            "dispatch_evidence_pr": 283,
-        })
+    def test_repository_identity_comes_from_trust_and_legacy_values_are_isolated(self):
+        trusted = type("Trust", (), {"repository": {
+            "slug": "example-org/repo.name",
+            "approval_refs": {"worker_dispatch_issue": 12,
+                              "worker_dispatch_evidence_pr": 34}}})()
+        with patch("llmtool.trust.load_trust", return_value=trusted):
+            self.assertEqual(repository_config(self.home), {
+                "slug": "example-org/repo.name",
+                "dispatch_issue": 12,
+                "dispatch_evidence_pr": 34,
+            })
         self.user.write_text("repository:\n  slug: example-org/repo.name\n"
                              "  dispatch_issue: 12\n  dispatch_evidence_pr: 34\n",
                              encoding="utf-8")
-        self.assertEqual(repository_config(self.home), {
+        with self.assertRaisesRegex(LLMToolError, "^TRUST_LEGACY_REPOSITORY_CONFIG$") as caught:
+            repository_config(self.home)
+        self.assertEqual(str(caught.exception), "TRUST_LEGACY_REPOSITORY_CONFIG")
+        self.assertEqual(legacy_repository_config(self.home), {
             "slug": "example-org/repo.name",
             "dispatch_issue": 12,
             "dispatch_evidence_pr": 34,
@@ -78,9 +87,20 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaisesRegex(LLMToolError, "project config: forbidden or unsupported field"):
             self.resolve()
 
-    def test_repository_identity_without_user_config_does_not_load_yaml(self):
+    def test_load_config_without_trust_and_repository_key_succeeds(self):
+        self.assertEqual(self.resolve(), DEFAULTS)
+
+    def test_repository_config_sanitizes_trust_errors(self):
+        from llmtool.trust import TrustError
+        with patch("llmtool.trust.load_trust", side_effect=TrustError("TRUST_PATH_INVALID")):
+            with self.assertRaisesRegex(LLMToolError, "^TRUST_PATH_INVALID$") as caught:
+                repository_config(self.home)
+        self.assertEqual(str(caught.exception), "TRUST_PATH_INVALID")
+        self.assertNotIn(str(self.home), str(caught.exception))
+
+    def test_legacy_repository_identity_without_user_config_does_not_load_yaml(self):
         with patch("llmtool.config.yaml_module", side_effect=LLMToolError("yaml unavailable")):
-            self.assertEqual(repository_config(self.home), {
+            self.assertEqual(legacy_repository_config(self.home), {
                 "slug": "davidcatcat/davidcattoolsproject",
                 "dispatch_issue": 289,
                 "dispatch_evidence_pr": 283,
@@ -89,7 +109,7 @@ class ConfigTests(unittest.TestCase):
         self.user.write_text("repository: {}\n", encoding="utf-8")
         with patch("llmtool.config.yaml_module", side_effect=LLMToolError("yaml unavailable")):
             with self.assertRaisesRegex(LLMToolError, "yaml unavailable"):
-                repository_config(self.home)
+                legacy_repository_config(self.home)
 
     def test_invalid_repository_identity_is_rejected_with_fixed_message(self):
         for repository in (
@@ -104,8 +124,10 @@ class ConfigTests(unittest.TestCase):
         ):
             with self.subTest(repository=repository):
                 self.user.write_text(yaml.safe_dump({"repository": repository}), encoding="utf-8")
-                with self.assertRaisesRegex(LLMToolError, "^user repository: invalid configuration$"):
+                with self.assertRaisesRegex(LLMToolError, "^TRUST_LEGACY_REPOSITORY_CONFIG$"):
                     repository_config(self.home)
+                with self.assertRaisesRegex(LLMToolError, "^user repository: invalid configuration$"):
+                    legacy_repository_config(self.home)
                 with self.assertRaisesRegex(LLMToolError, "^user repository: invalid configuration$"):
                     self.resolve()
 

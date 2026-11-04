@@ -52,6 +52,7 @@ def pm_config(profile, require_configured=True):
 
 class TaskCompletionTests(unittest.TestCase):
     def setUp(self):
+        review_trust_fixture.install_for_case(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()

@@ -80,14 +80,11 @@ def _build_reference_patterns(repository=None):
     )
 
 
-_REPOSITORY_CONFIG_ERROR = None
-try:
-    _OWNER_COMMENT_REF, _POLICY_EVIDENCE_REF = _build_reference_patterns()
-except LLMToolError as error:
-    # Invalid trusted config must make every configured reference fail closed.
-    _REPOSITORY_CONFIG_ERROR = error
-    _OWNER_COMMENT_REF = re.compile(r'(?!)')
-    _POLICY_EVIDENCE_REF = re.compile(r'(?!)')
+def owner_comment_ref():
+    """Return the current trust-bound owner assignment reference pattern."""
+    return _build_reference_patterns()[0]
+
+
 _TASK_ID = re.compile(r'[0-9a-f]{32}\Z')
 _GW_AGENT_PAUSED_REF = (
     'https://github.com/davidcatcat/davidcattoolsproject/issues/120')
@@ -121,7 +118,10 @@ def _unique_pairs(pairs):
     return result
 
 
-def _parse_policy(raw):
+def _parse_policy(raw, patterns=None):
+    if patterns is None:
+        patterns = _build_reference_patterns()
+    owner_comment_ref, policy_evidence_ref = patterns
     value = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
                        parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
     if (type(value) is not dict or set(value) != {'schema_version', 'workers'} or
@@ -153,7 +153,7 @@ def _parse_policy(raw):
                 type(worker.get('reason')) is not str or
                 not worker['reason'] or len(worker['reason']) > 512 or
                 type(worker.get('evidence')) is not str or
-                (_POLICY_EVIDENCE_REF.fullmatch(worker['evidence']) is None and not (
+                (policy_evidence_ref.fullmatch(worker['evidence']) is None and not (
                     key == 'company-gw-agent' and (
                         (worker.get('dispatch') == 'PAUSED' and
                          worker.get('decided_by') == 'PM' and
@@ -167,7 +167,7 @@ def _parse_policy(raw):
                     type(assignment.get('task_id')) is not str or
                     _TASK_ID.fullmatch(assignment['task_id']) is None or
                     type(assignment.get('owner_assignment_ref')) is not str or
-                    _OWNER_COMMENT_REF.fullmatch(assignment['owner_assignment_ref']) is None
+                    owner_comment_ref.fullmatch(assignment['owner_assignment_ref']) is None
                     for assignment in assignments) or
                 len({(assignment['task_id'], assignment['owner_assignment_ref'])
                      for assignment in assignments}) != len(assignments)):
@@ -220,7 +220,9 @@ def _read_policy_file(path):
 
 def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
     """Read the one policy for the detected layout on every call; never cache decisions."""
-    if _REPOSITORY_CONFIG_ERROR is not None:
+    try:
+        patterns = _build_reference_patterns(repository_config())
+    except LLMToolError:
         key = worker_key if type(worker_key) is str else 'unknown'
         return PolicyDecision(key, False, 'WORKER_REPOSITORY_CONFIG_INVALID', None)
     if type(worker_key) is not str or re.fullmatch(r'[a-z][a-z0-9-]{0,63}', worker_key) is None:
@@ -239,7 +241,7 @@ def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
                     return PolicyDecision(worker_key, False,
                                           'WORKER_POLICY_AMBIGUOUS', None)
         digest = hashlib.sha256(raw).hexdigest()
-        policy = _parse_policy(raw)
+        policy = _parse_policy(raw, patterns)
     except FileNotFoundError:
         return PolicyDecision(worker_key, False, 'WORKER_POLICY_MISSING', None)
     except RuntimeError:
@@ -256,7 +258,7 @@ def evaluate(worker_key, owner_assignment_ref=None, task_id=None):
         assignments = policy['workers'][worker_key].get('owner_assignments', [])
         if (type(task_id) is str and _TASK_ID.fullmatch(task_id) is not None and
                 type(owner_assignment_ref) is str and
-                _OWNER_COMMENT_REF.fullmatch(owner_assignment_ref) is not None and
+                patterns[0].fullmatch(owner_assignment_ref) is not None and
                 {'task_id': task_id, 'owner_assignment_ref': owner_assignment_ref} in assignments):
             return PolicyDecision(worker_key, True, 'OWNER_ASSIGNMENT_MATCHED', digest)
         return PolicyDecision(worker_key, False, 'OWNER_ASSIGNMENT_REQUIRED', digest)

@@ -67,6 +67,14 @@ def use_trust(config=None):
     return patch.object(trust, 'load_trust', return_value=config)
 
 
+def install_for_case(case):
+    """Install fixture trust for one test case, with case-owned cleanup."""
+    patcher = use_trust()
+    case.addCleanup(patcher.stop)
+    patcher.start()
+    return patcher
+
+
 _module_patcher = None
 
 
