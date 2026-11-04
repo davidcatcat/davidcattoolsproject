@@ -10,12 +10,14 @@ from dataclasses import fields
 
 from . import diagnostics as d
 from .diagnostics_settings import resolve_diagnostics_home
-from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES
+from .diagnostics_store import persistence_supported, RESERVATION_MAX_BYTES, SCAN_LIMIT
 from .diagnostics_summary import (RunSummary, SUMMARY_MAX_BYTES, MAX_STORED_RUN_BYTES,
                                   parse_run_summary, strict_object)
 from .errors import LLMToolError
 
 RUN_SCAN_LIMIT = 1000
+ROOT_SCAN_LIMIT = SCAN_LIMIT
+ACCOUNT_DEPTH_LIMIT = 32
 RUN_FILE_SCAN_LIMIT = 16
 RUN_OUTPUT_LIMIT = 100
 RUNS_READ_MAX_BYTES = 4 * 1024 * 1024
@@ -199,6 +201,44 @@ def _names(directory, limit):
     return names
 
 
+def _account_bytes(parent, budget, *, skip=(), depth=0):
+    """Stat-only recursive accounting, bounded like the diagnostics writer."""
+    if depth > ACCOUNT_DEPTH_LIMIT:
+        raise ReaderError('LIMIT_EXCEEDED')
+    total = 0
+    names = _names(parent, budget[0] + 1)
+    budget[0] -= len(names)
+    if budget[0] < 0:
+        raise ReaderError('LIMIT_EXCEEDED')
+    for name in names:
+        if name in skip:
+            continue
+        total += _account_entry(parent, name, budget, depth=depth)
+    return total
+
+
+def _account_entry(parent, name, budget, *, depth=0):
+    info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    if stat.S_ISDIR(info.st_mode):
+        if depth >= ACCOUNT_DEPTH_LIMIT:
+            raise ReaderError('LIMIT_EXCEEDED')
+        child = _directory(parent, name, private=False)
+        try:
+            if _identity(info) != _identity(os.fstat(child)):
+                raise ReaderError('STORE_UNAVAILABLE')
+            total = _account_bytes(child, budget, depth=depth + 1)
+        finally:
+            os.close(child)
+    elif stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        # st_size for a symlink is its link text length; never follow it.
+        total = info.st_size
+    else:
+        raise ReaderError('LIMIT_EXCEEDED')
+    if _snapshot(info) != _snapshot(os.stat(name, dir_fd=parent, follow_symlinks=False)):
+        raise ReaderError('STORE_UNAVAILABLE')
+    return total
+
+
 def _read(parent, name, limit):
     fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
     try:
@@ -358,7 +398,7 @@ class DiagnosticsReader:
         self.home, self.platform = home, platform
 
     @contextmanager
-    def _store(self):
+    def _store(self, *, include_root=False):
         if not persistence_supported(self.platform):
             raise ReaderError('STORE_UNAVAILABLE')
         try:
@@ -376,7 +416,7 @@ class DiagnosticsReader:
                 with _lock(root, '.store.lock') as acquired:
                     if not acquired:
                         raise ReaderError('STORE_UNAVAILABLE')
-                    yield runs
+                    yield (root, runs) if include_root else runs
                     _check_link(root, 'runs', runs, True)
             finally:
                 os.close(runs)
@@ -464,14 +504,92 @@ class DiagnosticsReader:
         instead of healthy.
         """
         result = {'state': 'absent', 'run_count': 0, 'active_count': 0,
-                  'unknown_count': 0, 'damaged_count': 0, 'metadata': 'ok'}
+                  'unknown_count': 0, 'damaged_count': 0, 'metadata': 'ok',
+                  'staging_count': 0, 'staging_bytes': 0, 'root_unknown_count': 0,
+                  'root_unknown_bytes': 0,
+                  'staging_scan_limited': False}
         if not persistence_supported(self.platform):
             result.update(state='unsupported', metadata='unsupported')
             return result
         try:
-            with self._store() as runs:
+            with self._store(include_root=True) as (root, runs):
                 result['state'] = 'present'
+                root_names = []
+                with os.scandir(root) as entries:
+                    for item in entries:
+                        if len(root_names) >= ROOT_SCAN_LIMIT:
+                            result['staging_scan_limited'] = True
+                            break
+                        root_names.append(item.name)
+                budget = [SCAN_LIMIT - len(root_names)]
+                if budget[0] < 0:
+                    result['staging_scan_limited'] = True
+                    budget[0] = 0
+                for name in root_names:
+                    if name in ('.store.lock', 'runs'):
+                        continue
+                    if name.startswith('.eviction-') and name.endswith('.json'):
+                        try:
+                            d.validate_run_id(name[len('.eviction-'):-len('.json')])
+                            continue
+                        except ValueError:
+                            pass
+                    if re.fullmatch(r'\.run-init-[0-9a-f]{32}', name):
+                        try:
+                            info = os.stat(name, dir_fd=root, follow_symlinks=False)
+                            _private(info, True)
+                            stage = _directory(root, name)
+                            try:
+                                if _identity(info) != _identity(os.fstat(stage)):
+                                    raise ReaderError('STORE_UNAVAILABLE')
+                                try:
+                                    files = _names(stage, budget[0] + 1)
+                                    budget[0] -= len(files)
+                                    if budget[0] < 0:
+                                        raise ReaderError('LIMIT_EXCEEDED')
+                                    for filename in files:
+                                        try:
+                                            result['staging_bytes'] += _account_entry(
+                                                stage, filename, budget)
+                                        except ReaderError as exc:
+                                            if exc.code == 'LIMIT_EXCEEDED':
+                                                result['staging_scan_limited'] = True
+                                                break
+                                            raise
+                                        except OSError:
+                                            result['staging_scan_limited'] = True
+                                            break
+                                except ReaderError as exc:
+                                    if exc.code == 'LIMIT_EXCEEDED':
+                                        result['staging_scan_limited'] = True
+                                    else:
+                                        raise
+                                except OSError:
+                                    result['staging_scan_limited'] = True
+                                result['staging_count'] += 1
+                                _check_link(root, name, stage, True)
+                            finally:
+                                os.close(stage)
+                        except ReaderError:
+                            raise ReaderError('STORE_UNAVAILABLE') from None
+                        except OSError:
+                            raise ReaderError('STORE_UNAVAILABLE') from None
+                        continue
+                    result['root_unknown_count'] += 1
+                    try:
+                        result['root_unknown_bytes'] += _account_entry(root, name, budget)
+                    except ReaderError as exc:
+                        if exc.code == 'LIMIT_EXCEEDED':
+                            result['staging_scan_limited'] = True
+                        else:
+                            raise
+                    except OSError:
+                        result['staging_scan_limited'] = True
                 names = _names(runs, RUN_SCAN_LIMIT)
+                budget[0] -= len(names)
+                if budget[0] < 0:
+                    result['staging_scan_limited'] = True
+                    budget[0] = 0
                 for name in names:
                     try:
                         d.validate_run_id(name)
@@ -480,6 +598,10 @@ class DiagnosticsReader:
                         continue
                     with self._run(runs, name) as (directory, files, acquired):
                         result['run_count'] += 1
+                        budget[0] -= len(files)
+                        if budget[0] < 0:
+                            result['staging_scan_limited'] = True
+                            budget[0] = 0
                         if not acquired:
                             result['active_count'] += 1
                             continue

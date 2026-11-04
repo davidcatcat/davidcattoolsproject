@@ -51,7 +51,15 @@ def doctor_output():
     lines.append('overall=' + overall)
     lines.append('store=' + store['state'] + ' run_count=' + str(store['run_count']) +
                  ' active_count=' + str(store['active_count']) +
-                 ' unknown_count=' + str(store['unknown_count']))
+                 ' unknown_count=' + str(store['unknown_count']) +
+                 ' root_unknown_count=' + str(store['root_unknown_count']))
+    capacity_blocked = (store['staging_scan_limited'] or
+                        store['staging_bytes'] + store['root_unknown_bytes'] +
+                        settings.max_run_bytes > settings.max_total_bytes)
+    lines.append('staging_count=' + str(store['staging_count']) +
+                 ' capacity=' + ('blocked' if capacity_blocked else 'ok'))
+    if capacity_blocked:
+        lines.append('nothing deleted; manual review required')
     lines.append('metadata=' + store['metadata'] + ' damaged_count=' +
                  str(store['damaged_count']))
     lines.append('Damaged diagnostics metadata reported; nothing repaired, '
