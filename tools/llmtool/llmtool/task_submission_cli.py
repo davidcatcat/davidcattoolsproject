@@ -39,7 +39,8 @@ from . import role_config
 from . import trust
 from .developer_routes import (AgyRoute, GwAgentRoute, RouteError, capture_snapshot,
                                for_platform, load_route_config, run_route)
-from .developer_routes.gw_agent import cleanup_audit_copies
+from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
+                                        cleanup_audit_copies)
 from .developer_routes.agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
@@ -3170,16 +3171,70 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     route_config = load_route_config()['routes'].get('gw-agent')
-    if type(route_config) is not dict or data_class not in route_config['allowed_data_classes']:
+    route_profile = (route_config.get('profile')
+                     if type(route_config) is dict else None)
+    data_class_map = (route_profile.get('data_class_map')
+                      if type(route_profile) is dict else None)
+    if data_class_map is None:
+        data_class_map = _GATEWAY_DATA_CLASS
+    gateway_data_class = (data_class_map.get(data_class)
+                          if type(data_class_map) is dict and
+                          data_class_map == _GATEWAY_DATA_CLASS else None)
+    if (type(route_config) is not dict or gateway_data_class is None or
+            gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')
-    model = route_config['default_model']
+    try:
+        company_config = resolve_profile_config('company-gw', require_configured=True)
+        company_provider = selected_provider(company_config)
+        generation = company_config.get('generation')
+        model = company_provider.get('model')
+        base_url = company_provider.get('base_url')
+        profile = route_config.get('profile')
+        max_output_tokens = generation.get('max_tokens') if type(generation) is dict else None
+        context_cap_tokens = (profile.get('context_cap_tokens')
+                              if type(profile) is dict else None)
+        route_output_cap = (profile.get('max_output_tokens')
+                            if type(profile) is dict else None)
+        if (company_provider.get('type') != 'openai-compatible' or
+                type(model) is not str or not model or type(base_url) is not str or
+                not base_url or type(max_output_tokens) is not int or
+                type(context_cap_tokens) is not int or
+                type(route_output_cap) is not int or
+                type(profile) is not dict):
+            raise ValueError
+        endpoint = urlsplit(base_url)
+        if (endpoint.scheme not in ('http', 'https') or not endpoint.hostname or
+                endpoint.username is not None or endpoint.password is not None or
+                endpoint.path not in ('', '/') or '?' in base_url or '#' in base_url):
+            raise ValueError
+        # llmtool stores an origin; the gateway OpenAI adapter appends
+        # /chat/completions, so preserve the provider API prefix here.
+        gateway_base_url = base_url.rstrip('/') + '/v1'
+        # The provider's generation limit may exceed the gateway's context cap.
+        # Keep the effective output budget below both route-owned limits.
+        max_output_tokens = min(max_output_tokens, route_output_cap,
+                                context_cap_tokens - 1)
+        route_config = copy.deepcopy(route_config)
+        route_config['default_model'] = model
+        route_config['expected_served_model'] = model
+        route_config['profile'].update(base_url=gateway_base_url, model=model,
+            max_output_tokens=max_output_tokens,
+            context_cap_tokens=context_cap_tokens)
+        route_config['profile'].pop('http_allow_hosts', None)
+        if urlsplit(base_url).scheme == 'http':
+            host = urlsplit(base_url).hostname
+            if not host:
+                raise ValueError
+            route_config['profile']['http_allow_hosts'] = [host]
+    except Exception:
+        raise LLMToolError('authorized company-gw profile is unavailable or invalid') from None
     effort = route_config['default_effort']
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
         'task_contract_digest': binding['contract_digest'], 'source_sha': snapshot.head,
         'goal': assignment['goal'], 'acceptance': acceptance,
         'read_paths': read_paths, 'write_paths': write_paths,
-        'egress_basis': egress_basis, 'data_class': data_class,
+        'egress_basis': egress_basis, 'data_class': gateway_data_class,
     }
     prompt = ('You are the Gw Agent Developer for this bounded llmtool Task. Work only in the '
               'registered D6 worktree. Read only read_paths and edit only write_paths. '
@@ -3190,11 +3245,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     if len(prompt.encode('utf-8')) > 48 * 1024:
         raise LLMToolError('gw-agent request exceeds the supported size')
     task_input = {
+        'schema_version': 1,
         'task_id': task['task_id'], 'source_sha': snapshot.head,
+        'goal': assignment['goal'], 'acceptance': acceptance,
         'read_paths': read_paths, 'write_paths': write_paths,
-        'budgets': {'wall_clock_seconds': 600, 'stdout_bytes': 1024 * 1024,
-                    'stderr_bytes': 65536},
-        'egress_basis': egress_basis, 'data_class': data_class,
+        'budgets': {'max_turns': 16, 'max_input_tokens': 32768,
+                    'max_output_tokens': 8192, 'max_wall_seconds': 600,
+                    'max_tool_result_bytes': 262144,
+                    'max_sent_bytes': 16 * 1024 * 1024},
+        'egress_basis': egress_basis, 'data_class': gateway_data_class,
+        'findings': [],
     }
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
     developer = {
@@ -3315,7 +3375,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         artifact = raw.decode('utf-8', 'strict')
         audit_sha = route._result['audit_sha256']
         served_model = result.model
-        usage = _normalize_agy_usage(result.usage)
+        usage = _normalize_gw_agent_usage(result.usage)
         if usage is not None:
             usage['served_model'] = served_model
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
@@ -3327,11 +3387,19 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             execution={'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
-                'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+                'usage_source': ('CLI_REPORTED' if result.usage is not None and
+                                 usage.get('status') != 'UNKNOWN' else 'UNKNOWN'),
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
+        gateway_code = exc.facts.get('gateway_code') if type(exc.facts) is dict else None
+        if (not owner_gate_denied and type(gateway_code) is str and
+                re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code) and
+                exc.code.startswith('GW_AGENT_')):
+            if not code.endswith('_' + gateway_code):
+                code = (code + '_' + gateway_code)[:64]
+        code = code[:64]
         return persist_failure(code)
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',

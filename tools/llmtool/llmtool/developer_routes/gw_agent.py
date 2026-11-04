@@ -14,15 +14,48 @@ import shutil
 import stat
 import sys
 import tempfile
+from urllib.parse import urlsplit
 
 from .base import DeveloperRoute, RouteError
 from .. import config as llm_config
 
 _MODEL = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z')
 _TASK_ID = re.compile(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}\Z')
+_SOURCE_SHA = re.compile(r'(?:[0-9a-f]{40}|[0-9a-f]{64})\Z')
+_GATEWAY_DATA_CLASS = {'SYNTHETIC': 'synthetic'}
+_GATEWAY_BUDGETS = {
+    'max_turns': (1, 500), 'max_input_tokens': (1, 50_000_000),
+    'max_output_tokens': (1, 5_000_000), 'max_wall_seconds': (1, 86_400),
+    'max_tool_result_bytes': (256, 1_048_576),
+    'max_sent_bytes': (1024, 512 * 1024 * 1024),
+}
 _STATUS_EXIT = {'DONE': 0, 'BLOCKED': 3, 'MODEL_ERROR': 4,
                 'POLICY_REFUSED': 5, 'BUDGET_EXCEEDED': 6}
 _AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
+
+
+def _normalize_gw_agent_usage(value):
+    """Keep gateway UNKNOWN and partial counters without AGY's all-fields rule."""
+    allowed = {'status', 'calls', 'calls_without_usage', 'input_tokens',
+               'output_tokens', 'total_tokens'}
+    unknown = {'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
+               'input_tokens': None, 'output_tokens': None}
+    if type(value) is not dict:
+        return unknown
+    normalized = {}
+    for key, item in value.items():
+        if key not in allowed:
+            continue
+        if key == 'status':
+            if type(item) is str and len(item) <= 32:
+                normalized[key] = item
+        elif item is None and key in ('input_tokens', 'output_tokens', 'total_tokens'):
+            normalized[key] = None
+        elif type(item) is int and 0 <= item <= 50_000_000:
+            normalized[key] = item
+    if not normalized:
+        return unknown
+    return normalized
 
 
 def cleanup_audit_copies(*, now=None, temp_root=None):
@@ -104,9 +137,26 @@ class GwAgentRoute(DeveloperRoute):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         if ('auth_env' not in profile or
                 profile['auth_env'] not in (None, 'GW_AGENT_API_KEY') or
+                profile.get('adapter') != 'openai-chat-tools' or
+                type(profile.get('base_url')) is not str or
+                type(profile.get('context_cap_tokens')) is not int or
+                type(profile.get('max_output_tokens')) is not int or
+                type(profile.get('allowed_data_classes')) is not list or
                 type(profile.get('model')) is not str or
                 _MODEL.fullmatch(profile['model']) is None or
                 (expected is not None and profile['model'] != expected)):
+            raise RouteError('GW_AGENT_CONFIG_INVALID')
+        profile_classes = profile['allowed_data_classes']
+        base_url = profile.get('base_url')
+        parts = urlsplit(base_url) if type(base_url) is str else None
+        if (not profile_classes or any(type(item) is not str or not item
+                                       for item in profile_classes) or
+                len(set(profile_classes)) != len(profile_classes) or
+                parts is None or parts.scheme not in ('http', 'https') or
+                not parts.hostname or parts.username is not None or parts.password is not None or
+                '?' in base_url or '#' in base_url or
+                profile['context_cap_tokens'] < 256 or
+                not 1 <= profile['max_output_tokens'] < profile['context_cap_tokens']):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         try:
             expanded_package = os.path.expanduser(package) if package.startswith('~/') else package
@@ -127,11 +177,19 @@ class GwAgentRoute(DeveloperRoute):
         if not package_is_valid:
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         self.package_path = str(resolved_package)
-        self.profile = dict(profile)
+        self.profile = {key: value for key, value in profile.items()
+                        if key != 'data_class_map'}
         self.profile_name = profile_name
         self.authorization_ref = authorization_ref
         self.expected_served_model = expected
         self._default_model = default_model
+        data_class_map = profile.get('data_class_map', _GATEWAY_DATA_CLASS)
+        if (type(data_class_map) is not dict or data_class_map != _GATEWAY_DATA_CLASS or
+                any(type(key) is not str or not key or type(value) is not str or not value
+                    for key, value in data_class_map.items()) or
+                len(set(data_class_map.values())) != len(data_class_map)):
+            raise RouteError('GW_AGENT_CONFIG_INVALID')
+        self.data_class_map = dict(data_class_map)
         self._validated_request = None
         self._credential_resolved = False
         self._credential = None
@@ -164,19 +222,58 @@ class GwAgentRoute(DeveloperRoute):
         value = super().validate_request(request)
         self._validated_request = value
         task = value.get('task')
-        if (type(task) is not dict or
-                type(task.get('task_id')) is not str or _TASK_ID.fullmatch(task['task_id']) is None or
-                task.get('source_sha') != value['expected_head'] or
-                type(task.get('read_paths')) is not list or type(task.get('write_paths')) is not list or
-                tuple(task['write_paths']) != value['write_paths'] or
-                type(task.get('budgets')) is not dict or
-                any(type(budget) is not int for budget in task['budgets'].values()) or
-                type(task.get('egress_basis')) is not str or not task['egress_basis'] or
-                type(task.get('data_class')) is not str or
-                task.get('data_class') not in self.allowed_data_classes):
-            raise RouteError('GW_AGENT_REQUEST_INVALID')
-        if any(type(path) is not str for path in task['read_paths'] + task['write_paths']):
-            raise RouteError('GW_AGENT_REQUEST_INVALID')
+        if type(task) is not dict:
+            raise RouteError('GW_AGENT_TASK_INVALID')
+        required = {'schema_version', 'task_id', 'source_sha', 'goal', 'acceptance',
+                    'read_paths', 'write_paths', 'egress_basis', 'data_class',
+                    'budgets', 'findings'}
+        if set(task) - required:
+            raise RouteError('GW_AGENT_TASK_UNKNOWN_FIELDS')
+        for field in sorted(required - {'findings'} - set(task)):
+            raise RouteError('GW_AGENT_TASK_' + field.upper() + '_MISSING')
+        task.setdefault('findings', [])
+        if type(task.get('schema_version')) is not int or task['schema_version'] != 1:
+            raise RouteError('GW_AGENT_TASK_SCHEMA_VERSION_INVALID')
+        if (type(task.get('task_id')) is not str or
+                _TASK_ID.fullmatch(task['task_id']) is None):
+            raise RouteError('GW_AGENT_TASK_TASK_ID_INVALID')
+        if (type(task.get('source_sha')) is not str or
+                _SOURCE_SHA.fullmatch(task['source_sha']) is None or
+                task['source_sha'] != value['expected_head']):
+            raise RouteError('GW_AGENT_TASK_SOURCE_SHA_INVALID')
+        if (type(task.get('goal')) is not str or not task['goal'].strip() or
+                len(task['goal']) > 20000):
+            raise RouteError('GW_AGENT_TASK_GOAL_INVALID')
+        limits = {'acceptance': (50, 4000), 'read_paths': (500, 1024),
+                  'write_paths': (500, 1024), 'findings': (50, 8000)}
+        for field, (max_items, max_len) in limits.items():
+            entries = task[field]
+            if (type(entries) is not list or
+                    len(entries) > max_items or
+                    any(type(item) is not str or not item or len(item) > max_len
+                        for item in entries)):
+                raise RouteError('GW_AGENT_TASK_' + field.upper() + '_INVALID')
+        if not task['read_paths'] or tuple(task['write_paths']) != value['write_paths']:
+            raise RouteError('GW_AGENT_TASK_PATHS_INVALID')
+        if (type(task.get('egress_basis')) is not str or
+                not task['egress_basis'].strip() or len(task['egress_basis']) > 2000):
+            raise RouteError('GW_AGENT_TASK_EGRESS_BASIS_INVALID')
+        if type(task.get('data_class')) is not str:
+            raise RouteError('GW_AGENT_TASK_DATA_CLASS_INVALID')
+        mapped_data_class = self.data_class_map.get(task['data_class'])
+        effective_data_class = mapped_data_class or task['data_class']
+        if (effective_data_class not in self.allowed_data_classes or
+                effective_data_class not in self.profile['allowed_data_classes']):
+            raise RouteError('GW_AGENT_TASK_DATA_CLASS_INVALID')
+        budgets = task.get('budgets')
+        if type(budgets) is not dict:
+            raise RouteError('GW_AGENT_TASK_BUDGETS_INVALID')
+        for field, (minimum, maximum) in _GATEWAY_BUDGETS.items():
+            amount = budgets.get(field)
+            if type(amount) is not int or not minimum <= amount <= maximum:
+                raise RouteError('GW_AGENT_TASK_BUDGET_' + field.upper() + '_INVALID')
+        if set(budgets) != set(_GATEWAY_BUDGETS):
+            raise RouteError('GW_AGENT_TASK_BUDGETS_INVALID')
         return value
 
     def prepare_files(self, tmpdir, request):
@@ -195,8 +292,15 @@ class GwAgentRoute(DeveloperRoute):
                 private_tmp == root or root in private_tmp.parents):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         task = dict(request['task'])
+        gateway_data_class = self.data_class_map.get(
+            task.get('data_class'), task.get('data_class'))
+        if gateway_data_class not in self.allowed_data_classes:
+            raise RouteError('GW_AGENT_TASK_DATA_CLASS_INVALID')
+        task['data_class'] = gateway_data_class
         credential = self._load_credential()
         profile = dict(self.profile)
+        profile['allowed_data_classes'] = [
+            self.data_class_map.get(item, item) for item in profile['allowed_data_classes']]
         profile['auth_env'] = 'GW_AGENT_API_KEY' if credential is not None else None
         try:
             serialized_task = _canonical(task)
@@ -211,7 +315,7 @@ class GwAgentRoute(DeveloperRoute):
             'scope_digest': _scope_digest(task),
             'task_id': task['task_id'],
             'egress_basis': task['egress_basis'],
-            'data_class': task['data_class'],
+            'data_class': gateway_data_class,
             'profile': self.profile_name,
             'session_id': None,
         }
@@ -278,6 +382,9 @@ class GwAgentRoute(DeveloperRoute):
 
     def parse_output(self, stdout, stderr, log_text):
         result = self._result
+        self._gateway_code = (result.get('code') if type(result) is dict and
+                              type(result.get('code')) is str and
+                              re.fullmatch(r'[A-Z0-9_]{1,64}', result['code']) else None)
         required = {'schema_version', 'status', 'code', 'run_id', 'session_id', 'task_id',
                     'changed_paths', 'summary', 'served_model', 'usage', 'turns',
                     'budget_used', 'audit_sha256'}
@@ -294,7 +401,6 @@ class GwAgentRoute(DeveloperRoute):
                 type(result.get('summary')) is not str or
                 type(result.get('served_model')) is not str or
                 _MODEL.fullmatch(result['served_model']) is None or
-                result['served_model'] == 'UNKNOWN' or
                 type(result.get('task_id')) is not str or
                 type(result.get('run_id')) is not str or
                 re.fullmatch(r'[0-9a-f]{24}', result['run_id']) is None or
@@ -304,6 +410,9 @@ class GwAgentRoute(DeveloperRoute):
                 type(result.get('audit_sha256')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', result['audit_sha256']) is None):
             raise RouteError('GW_AGENT_OUTPUT_INVALID')
+        if result['served_model'] == 'UNKNOWN' and result['status'] == 'DONE':
+            raise RouteError('GW_AGENT_MODEL_UNVERIFIED', facts={
+                'gateway_code': self._gateway_code, 'gateway_status': result['status']})
         if ((result['status'] == 'DONE' and result['code'] is not None) or
                 (result['status'] != 'DONE' and
                  (type(result['code']) is not str or not result['code']))):
@@ -377,9 +486,23 @@ class GwAgentRoute(DeveloperRoute):
                 raise ValueError
             self._result = json.loads(raw.decode('utf-8'), object_pairs_hook=_unique_pairs,
                                       parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
-            if (type(self._result) is not dict or
-                    self._result.get('task_id') != request['task']['task_id']):
-                raise RouteError('GW_AGENT_OUTPUT_INVALID')
+            expected_task_id = (request.get('task', {}).get('task_id')
+                                if type(request.get('task')) is dict else None)
+            if (type(expected_task_id) is not str or
+                    _TASK_ID.fullmatch(expected_task_id) is None or
+                    type(self._result) is not dict or
+                    self._result.get('task_id') != expected_task_id):
+                code = (self._result.get('code') if type(self._result) is dict else None)
+                status = (self._result.get('status') if type(self._result) is dict else None)
+                suffix = (code if type(code) is str and
+                          re.fullmatch(r'[A-Z0-9_]{1,48}', code) else None)
+                diagnostic = 'GW_AGENT_TASK_ID_MISMATCH'
+                if suffix is not None:
+                    diagnostic += '_' + suffix
+                raise RouteError(diagnostic[:96], facts={
+                    'gateway_code': suffix,
+                    'gateway_status': status if type(status) is str and
+                    re.fullmatch(r'[A-Z_]{1,32}', status) else None})
             source = Path(tmpdir) / 'audit.jsonl'
             info = source.lstat()
             if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or

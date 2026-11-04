@@ -76,7 +76,8 @@ class GwAgentRouteTests(unittest.TestCase):
                      'egress_basis': 'authorized-task-ref', 'data_class': 'synthetic',
                      'budgets': {'max_turns': 4, 'max_input_tokens': 10000,
                                  'max_output_tokens': 1000, 'max_wall_seconds': 60,
-                                 'max_tool_result_bytes': 4096, 'max_sent_bytes': 100000}},
+                                 'max_tool_result_bytes': 4096, 'max_sent_bytes': 100000},
+                     'findings': []},
         }
 
     def run_route_with_credential(self, *args, **kwargs):
@@ -293,11 +294,15 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(validated['model'], 'provider/model-v2')
         self.assertEqual(parsed['status'], 'DONE')
 
-        for malformed in ('', 'bad model', 'UNKNOWN'):
+        for malformed in ('', 'bad model'):
             self.route._result = dict(result, served_model=malformed)
             with self.subTest(served_model=malformed), self.assertRaises(RouteError) as caught:
                 self.route.parse_output(b'', b'', '')
             self.assertEqual(caught.exception.code, 'GW_AGENT_OUTPUT_INVALID')
+        self.route._result = dict(result, served_model='UNKNOWN')
+        with self.assertRaises(RouteError) as caught:
+            self.route.parse_output(b'', b'', '')
+        self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_UNVERIFIED')
 
     @staticmethod
     def _write_json(path, value):
@@ -366,6 +371,63 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertNotIn(self.credential, Path(self.route.audit_copy_path).read_text())
         self.assertEqual(Path(self.route.audit_copy_path).parent.stat().st_mode & 0o777, 0o700)
         self.assertEqual(seen['auth']['scope_digest'], _scope_digest(seen['task']))
+
+    def test_gateway_data_class_mapping_is_applied_before_scope_digest(self):
+        request = self.request()
+        request['task']['data_class'] = 'SYNTHETIC'
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
+                                  return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            self.route._prepare_files(tmpdir, request)
+            task = json.loads((Path(tmpdir) / 'task.json').read_text())
+            authorization = json.loads((Path(tmpdir) / 'authorization.json').read_text())
+            profile = json.loads((Path(tmpdir) / 'profiles.json').read_text())['profiles']['fake']
+            self.assertEqual(task['data_class'], 'synthetic')
+            self.assertEqual(authorization['data_class'], 'synthetic')
+            self.assertEqual(profile['allowed_data_classes'], ['synthetic'])
+            self.assertEqual(authorization['scope_digest'], _scope_digest(task))
+
+    def test_omitted_findings_defaults_to_empty(self):
+        request = self.request()
+        request['task'].pop('findings')
+        validated = self.route.validate_request(request)
+        self.assertEqual(validated['task']['findings'], [])
+
+    def test_complete_gateway_task_contract_names_the_failing_field(self):
+        cases = (('schema_version', 2, 'GW_AGENT_TASK_SCHEMA_VERSION_INVALID'),
+                 ('goal', '', 'GW_AGENT_TASK_GOAL_INVALID'),
+                 ('acceptance', 'bad', 'GW_AGENT_TASK_ACCEPTANCE_INVALID'),
+                 ('data_class', 'INTERNAL', 'GW_AGENT_TASK_DATA_CLASS_INVALID'))
+        for field, value, code in cases:
+            request = self.request()
+            request['task'][field] = value
+            with self.subTest(field=field):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_request(request)
+            self.assertEqual(caught.exception.code, code)
+
+    def test_null_gateway_task_identity_retains_bounded_refusal_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result_path = Path(temp) / 'result.json'
+            result_path.write_text(json.dumps({
+                'schema_version': 1, 'status': 'POLICY_REFUSED', 'code': 'TASK_INVALID',
+                'task_id': None}))
+            result_path.chmod(0o600)
+            with self.assertRaises(RouteError) as caught:
+                self.route.collect(temp, {'root': str(self.root),
+                                          'task': {'task_id': 'task-001'}})
+        self.assertEqual(caught.exception.code,
+                         'GW_AGENT_TASK_ID_MISMATCH_TASK_INVALID')
+
+    def test_gateway_usage_keeps_unknown_and_partial_values(self):
+        self.assertEqual(gw_agent._normalize_gw_agent_usage(None), {
+            'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
+            'input_tokens': None, 'output_tokens': None})
+        self.assertEqual(gw_agent._normalize_gw_agent_usage({
+            'status': 'PARTIAL', 'input_tokens': 12, 'output_tokens': None,
+            'provider_private_field': 'discarded'}), {
+                'status': 'PARTIAL', 'input_tokens': 12, 'output_tokens': None})
 
     def test_status_exit_model_and_quota_mapping(self):
         for status, code, exit_code in (
@@ -515,6 +577,29 @@ class GwAgentRouteTests(unittest.TestCase):
                             and record.get('tool') == 'apply_edit'
                             and record.get('ok') is True
                             for record in audit_records))
+
+    def test_pinned_served_model_mismatch_is_refused_by_run_route(self):
+        gateway_tests = Path(self.route.package_path) / 'tests'
+        sys.path.insert(0, str(gateway_tests))
+        try:
+            from helpers import FakeServer, reply, tool_call
+        finally:
+            sys.path.remove(str(gateway_tests))
+        server = FakeServer()
+        self.addCleanup(server.close)
+        self.route.profile['base_url'] = f'http://127.0.0.1:{server.port}/v1'
+        self.route.expected_served_model = 'fake-model'
+        server.script.append(reply(tool_call('finish', summary='done'),
+                                   model='other-model'))
+
+        with self.assertRaises(RouteError) as caught:
+            self.run_route_with_credential(
+                self.route, self.request(), gate=lambda: True,
+                boundary=DirectBoundary(), snapshot=capture_snapshot)
+
+        self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_MISMATCH')
+        self.assertEqual((self.root / 'source.py').read_text(), 'original\n')
+        self.assertEqual(len(server.requests), 1)
 
 
 if __name__ == '__main__':
