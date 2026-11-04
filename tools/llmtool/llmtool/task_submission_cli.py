@@ -775,6 +775,10 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY direct Tasks')
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub comment URL authorizing a repair-cap override')
+    delegate.add_argument('--high-debug-task',
+                          help='32-character Task ID containing the confirmed High Debug diagnosis')
+    delegate.add_argument('--high-debug-family',
+                          help='root-cause family matching the confirmed High Debug diagnosis')
     delegate.add_argument('--context-stdin', action='store_true',
                           help='company-gw/codex only: read bounded, sensitive-screened context from stdin')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
@@ -4041,7 +4045,7 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     return 1
 
 
-def _check_delegate_repair_cap(args, store):
+def _check_delegate_repair_cap(args, store, d6_binding=None):
     """Fail closed before dispatch when this D6 has exhausted its repair rounds."""
     executor_task = getattr(args, 'executor_task', None)
     current_task_id = getattr(args, 'task_id', None)
@@ -4051,6 +4055,8 @@ def _check_delegate_repair_cap(args, store):
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
     count = 0
+    newest_assignment = None
+    high_debug_task = getattr(args, 'high_debug_task', None)
     for task_id in task_ids:
         if task_id == current_task_id:
             continue
@@ -4063,7 +4069,16 @@ def _check_delegate_repair_cap(args, store):
         if (type(completion) is dict and
                 completion.get('executor_task_id') == executor_task and
                 type(record.get('developer')) is dict):
+            created_at = record['developer'].get('created_at')
+            try:
+                stamp = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
+                if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != created_at:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise LLMToolError(
+                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
             count += 1
+            newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
     if count < 1 + MAX_REPAIR_ATTEMPTS:
         return
     ref = getattr(args, 'high_debug_ref', None)
@@ -4080,6 +4095,62 @@ def _check_delegate_repair_cap(args, store):
         code = ('DELEGATE_HIGH_DEBUG_REF_INVALID' if ref is not None else
                 'DELEGATE_REPAIR_LIMIT_REACHED')
         raise LLMToolError(code)
+    if high_debug_task is None:
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
+    if (type(high_debug_task) is not str or
+            re.fullmatch(r'[0-9a-f]{32}', high_debug_task) is None):
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
+    try:
+        diagnosis_task = store.get(high_debug_task)
+        entries = diagnosis_task.get('high_debug')
+        if (type(diagnosis_task) is not dict or
+                diagnosis_task.get('task_id') != high_debug_task or
+                type(entries) is not list or not entries):
+            raise ValueError
+        entry = entries[-1]
+        d6 = entry.get('d6')
+        examined_sha = entry.get('examined_sha')
+        family = entry.get('family')
+        family_arg = getattr(args, 'high_debug_family', None)
+        if (type(family) is not str or
+                re.fullmatch(r'[a-z0-9._-]{1,64}', family) is None or
+                type(family_arg) is not str or
+                re.fullmatch(r'[a-z0-9._-]{1,64}', family_arg) is None or
+                family_arg != family):
+            raise ValueError
+        recorded_at = entry.get('recorded_at')
+        try:
+            recorded_stamp = datetime.strptime(recorded_at, '%Y-%m-%dT%H:%M:%SZ')
+            if recorded_stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != recorded_at:
+                raise ValueError
+        except (TypeError, ValueError):
+            raise ValueError from None
+        if newest_assignment is None or recorded_stamp <= newest_assignment:
+            raise ValueError
+        # High Debug D6 names are derived from their executor D6, attempt
+        # number, and examined HEAD. Recompute the name to bind this entry to
+        # the executor D6 being repaired.
+        from .high_debug import _d6_name
+        match = (re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', d6)
+                 if type(d6) is str else None)
+        attempt_match = (re.search(r'-hd([1-9][0-9]*)-[0-9a-f]{7}\Z', d6)
+                         if match else None)
+        if (entry.get('status') != 'RCA_CONFIRMED' or
+                type(examined_sha) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', examined_sha) is None or
+                attempt_match is None or
+                d6 != _d6_name(executor_task, int(attempt_match.group(1)), examined_sha)):
+            raise ValueError
+    except Exception:
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
+    if d6_binding is None:
+        try:
+            d6_binding = _delegate_d6_binding(args)
+        except Exception:
+            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+    _registration, snapshot = d6_binding
+    if examined_sha != getattr(snapshot, 'head', None):
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
     try:
         store.record_repair_cap_override(
             current_task_id, ref=ref, rounds=max(3, count + 1))
@@ -4144,7 +4215,7 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
         if registration.task_id != getattr(args, 'executor_task', None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
-        _check_delegate_repair_cap(args, store)
+        _check_delegate_repair_cap(args, store, (registration, _snapshot))
         return _run_background_delegate(
             args, provider=provider, store=store,
             d6_binding=(registration, _snapshot))
@@ -4196,6 +4267,7 @@ def run_task_delegate(args, *, store=None):
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
     registration, snapshot = _delegate_d6_binding(args)
+    _check_delegate_repair_cap(args, store, (registration, snapshot))
     source_sha = snapshot.head
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
     if type(args.acceptance) is not list or not 1 <= len(args.acceptance) <= 16:
@@ -4253,7 +4325,7 @@ def run_task_delegate(args, *, store=None):
     }
     # Persist the one-shot claim before network I/O. A crash or ambiguous result
     # remains pending; this task cannot silently trigger a duplicate provider call.
-    _check_delegate_repair_cap(args, store)
+    _check_delegate_repair_cap(args, store, (registration, snapshot))
     try:
         store.compare_and_update(
             task['task_id'],

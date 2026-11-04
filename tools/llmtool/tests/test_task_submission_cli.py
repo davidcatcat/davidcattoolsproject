@@ -100,7 +100,7 @@ class FakeClient:
 class TaskSubmissionCLITests(unittest.TestCase):
     def setUp(self):
         cap_patch = patch.object(submission_cli, '_check_delegate_repair_cap',
-                                 lambda args, store: None)
+                                 lambda args, store, d6_binding=None: None)
         cap_patch.start()
         self.addCleanup(cap_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
@@ -3835,13 +3835,43 @@ class DelegateRepairCapTests(unittest.TestCase):
         self._prior_assignments()
         task = self._task()
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
-        args = self._args(task, 'opencode', high_debug_ref=ref)
+        diagnosis = self._task()
+        from llmtool.high_debug import _d6_name
+        report = 'Confirmed root cause.'
+        entry = {
+            'family': 'pr-938', 'failed_corrections': 2, 'early_reason': None,
+            'examined_sha': 'a' * 40,
+            'd6': _d6_name('executor-task-1', 1, 'a' * 40),
+            'model_requested': 'gpt-6.1-sol', 'model_observed': 'gpt-6.1-sol',
+            'effort_observed': 'high', 'status': 'RCA_CONFIRMED',
+            'report_sha256': hashlib.sha256(report.encode()).hexdigest(),
+            'report': report, 'usage': 'UNKNOWN',
+            'recorded_at': '2026-11-04T00:00:01Z',
+        }
+        self.store.append_high_debug(diagnosis['task_id'], entry)
+        args = self._args(task, 'opencode', high_debug_ref=ref,
+                          high_debug_task=diagnosis['task_id'],
+                          high_debug_family='pr-938')
         with patch.object(submission_cli.trust, 'load_trust') as trusted:
             trusted.return_value.repository = {'slug': 'davidcatcat/davidcattoolsproject'}
-            submission_cli._check_delegate_repair_cap(args, self.store)
+            with patch.object(submission_cli, '_delegate_d6_binding',
+                              return_value=(None, Namespace(head='a' * 40))):
+                submission_cli._check_delegate_repair_cap(args, self.store)
         override = self.store.get(task['task_id'])['repair_cap_override']
         self.assertEqual(override['ref'], ref)
         self.assertGreaterEqual(override['rounds'], 3)
+
+    def test_valid_high_debug_ref_without_task_is_task_required(self):
+        self._prior_assignments()
+        task = self._task()
+        ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123'
+        args = self._args(task, 'opencode', high_debug_ref=ref)
+        with patch.object(submission_cli.trust, 'load_trust') as trusted:
+            trusted.return_value.repository = {'slug': 'davidcatcat/davidcattoolsproject'}
+            with self.assertRaisesRegex(LLMToolError,
+                                        'DELEGATE_HIGH_DEBUG_TASK_REQUIRED'):
+                submission_cli._check_delegate_repair_cap(args, self.store)
+        self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
 
     def test_invalid_high_debug_refs_refuse(self):
         self._prior_assignments()
