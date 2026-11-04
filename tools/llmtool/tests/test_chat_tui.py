@@ -2858,14 +2858,14 @@ class FakeClaude:
         self.gate.finish_turn(turn['gate'])
 
     def _play_user(self, line, script, turn):
-        try:
-            with self.turn_lock:
+        with self.turn_lock:
+            try:
                 self._start_turn(turn)
                 self._lifecycle(line, 'started')
                 self._play(script, turn['gate'])
                 self._lifecycle(line, 'completed')
-        finally:
-            self._finish_turn(turn)
+            finally:
+                self._finish_turn(turn)
 
     def _play(self, script, gate):
         for item in script:
@@ -2908,19 +2908,32 @@ class FakeClaude:
         gate = self.gate.new_turn()
         turn = self._register_turn(gate)
         def play():
-            try:
-                time.sleep(delay)
-                with self.turn_lock:
+            time.sleep(delay)
+            with self.turn_lock:
+                try:
                     self._start_turn(turn)
                     self._play(script, gate)
-            finally:
-                self._finish_turn(turn)
+                finally:
+                    self._finish_turn(turn)
         thread = threading.Thread(target=play, name='fake-claude-play', daemon=True)
         self.threads.append(thread)
         thread.start()
 
 
 class FakeClaudeGateTests(unittest.TestCase):
+    HOLD_WAIT = 2
+
+    @staticmethod
+    def control(fake):
+        fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
+
+    def release_and_join(self, fake):
+        fake.gate.set()
+        for thread in fake.threads:
+            thread.join(self.HOLD_WAIT)
+        fake._end()
+        fake.stdout.close()
+
     def test_release_before_turn_playback_does_not_leak_to_next_turn(self):
         fake = FakeClaude([['HOLD'], ['HOLD']])
         first = {'type': 'user', 'uuid': 'first'}
@@ -2930,23 +2943,21 @@ class FakeClaudeGateTests(unittest.TestCase):
         try:
             fake.write((fake._json.dumps(first) + '\n').encode('utf-8'))
             first_thread = fake.threads[0]
-            fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
+            self.control(fake)
         finally:
             fake.turn_lock.release()
 
         first_turn = fake._all_turns[0]
-        first_released_promptly = first_turn['finished'].wait(1)
+        first_released_promptly = first_turn['finished'].wait(self.HOLD_WAIT)
 
         fake.write((fake._json.dumps(second) + '\n').encode('utf-8'))
         second_turn = fake._unfinished_turns[0]
-        second_turn['started'].wait(1)
+        second_started = second_turn['started'].wait(self.HOLD_WAIT)
         next_turn_still_holds = not second_turn['finished'].is_set()
-        fake.gate.set()
-        second_turn['finished'].wait(1)
-        fake._end()
-        fake.stdout.close()
+        self.release_and_join(fake)
 
         self.assertTrue(first_released_promptly, 'release before gate.clear was lost')
+        self.assertTrue(second_started, 'second turn did not start')
         self.assertTrue(next_turn_still_holds, 'an earlier interrupt released the next turn')
         self.assertFalse(first_thread.is_alive())
         self.assertFalse(fake.threads[1].is_alive())
@@ -2955,15 +2966,13 @@ class FakeClaudeGateTests(unittest.TestCase):
         fake = FakeClaude([])
         fake.unsolicited(['HOLD'])
         turn = fake._unfinished_turns[0]
-        self.assertTrue(turn['started'].wait(1), 'unsolicited turn did not start')
+        started = turn['started'].wait(self.HOLD_WAIT)
 
-        fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
-        released_promptly = turn['finished'].wait(1)
-        fake.gate.set()
-        turn['finished'].wait(1)
-        fake._end()
-        fake.stdout.close()
+        self.control(fake)
+        released_promptly = turn['finished'].wait(self.HOLD_WAIT)
+        self.release_and_join(fake)
 
+        self.assertTrue(started, 'unsolicited turn did not start')
         self.assertTrue(released_promptly, 'control request did not release unsolicited turn')
         self.assertFalse(fake.threads[0].is_alive())
 
@@ -2974,28 +2983,90 @@ class FakeClaudeGateTests(unittest.TestCase):
 
         fake.write((fake._json.dumps(first) + '\n').encode('utf-8'))
         first_turn = fake._unfinished_turns[0]
-        self.assertTrue(first_turn['started'].wait(1), 'first user turn did not start')
+        first_started = first_turn['started'].wait(self.HOLD_WAIT)
         fake.write((fake._json.dumps(second) + '\n').encode('utf-8'))
         second_turn = fake._unfinished_turns[1]
 
-        fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
-        first_released = first_turn['finished'].wait(1)
-        second_started = second_turn['started'].wait(1)
+        self.control(fake)
+        first_released = first_turn['finished'].wait(self.HOLD_WAIT)
+        second_started = second_turn['started'].wait(self.HOLD_WAIT)
         second_still_holds = not second_turn['finished'].is_set()
-        fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
-        second_released = second_turn['finished'].wait(1)
-        fake.gate.set()
-        first_turn['finished'].wait(1)
-        second_turn['finished'].wait(1)
-        fake._end()
-        fake.stdout.close()
+        self.control(fake)
+        second_released = second_turn['finished'].wait(self.HOLD_WAIT)
+        self.release_and_join(fake)
 
+        self.assertTrue(first_started, 'first user turn did not start')
         self.assertTrue(first_released, 'control request did not release running turn 1')
         self.assertTrue(second_started, 'queued turn 2 did not start after turn 1')
         self.assertTrue(second_still_holds, 'control request released queued turn 2 early')
         self.assertTrue(second_released, 'second control request did not release turn 2')
         self.assertFalse(fake.threads[0].is_alive())
         self.assertFalse(fake.threads[1].is_alive())
+
+    def test_retiring_turn_is_removed_before_the_next_turn_handoff(self):
+        class PostUnlockBarrier:
+            def __init__(self):
+                self.lock = threading.Lock()
+                self.unlocked = threading.Event()
+                self.resume = threading.Event()
+                self.first_thread = None
+
+            def __enter__(self):
+                self.lock.acquire()
+                return self
+
+            def __exit__(self, _kind, _value, _traceback):
+                is_first = threading.current_thread() is self.first_thread
+                self.lock.release()
+                if is_first:
+                    self.unlocked.set()
+                    self.resume.wait(FakeClaudeGateTests.HOLD_WAIT)
+
+        for retiring_kind in ('user', 'unsolicited'):
+            for running_kind in ('user', 'unsolicited'):
+                with self.subTest(retiring=retiring_kind, running=running_kind):
+                    user_scripts = ([[], ['HOLD'], ['HOLD']]
+                                    if retiring_kind == 'user' else [['HOLD'], ['HOLD']])
+                    fake = FakeClaude(user_scripts)
+                    barrier = PostUnlockBarrier()
+                    fake.turn_lock = barrier
+                    if retiring_kind == 'user':
+                        fake.write((fake._json.dumps({'type': 'user', 'uuid': 'retiring'})
+                                     + '\n').encode('utf-8'))
+                        retiring_thread = fake.threads[0]
+                    else:
+                        fake.unsolicited([])
+                        retiring_thread = fake.threads[0]
+                    barrier.first_thread = retiring_thread
+                    barrier_waited = barrier.unlocked.wait(self.HOLD_WAIT)
+
+                    if running_kind == 'user':
+                        fake.write((fake._json.dumps({'type': 'user', 'uuid': 'running'})
+                                     + '\n').encode('utf-8'))
+                    else:
+                        fake.unsolicited(['HOLD'])
+                    running_turn = fake._all_turns[1]
+                    running_started = running_turn['started'].wait(self.HOLD_WAIT)
+                    if running_kind == 'user':
+                        fake.write((fake._json.dumps({'type': 'user', 'uuid': 'later'})
+                                     + '\n').encode('utf-8'))
+                    else:
+                        fake.write((fake._json.dumps({'type': 'user', 'uuid': 'later'})
+                                     + '\n').encode('utf-8'))
+                    later_turn = fake._all_turns[2]
+
+                    self.control(fake)
+                    selected_running_gate = running_turn['gate'].is_set()
+                    later_gate_untouched = not later_turn['gate'].is_set()
+                    barrier.resume.set()
+                    self.release_and_join(fake)
+
+                    self.assertTrue(barrier_waited, 'retiring turn did not reach post-unlock barrier')
+                    self.assertTrue(running_started, 'next turn did not start')
+                    self.assertTrue(selected_running_gate, 'control request missed the running turn')
+                    self.assertTrue(later_gate_untouched, 'control request released a later queued turn')
+                    self.assertFalse(retiring_thread.is_alive())
+                    self.assertTrue(all(not thread.is_alive() for thread in fake.threads))
 
 
 def _delta(text, index=0):
