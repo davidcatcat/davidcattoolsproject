@@ -375,26 +375,26 @@ def _protected_gates(command):
 
     def parse(segment):
         try:
-            return [token.lower() for token in shlex.split(segment, posix=True)]
+            return [word.lower() for word in shlex.split(segment, posix=True)]
         except ValueError:
             # An unmatched quote should not hide a recognizable leading
             # command (for example a shell comment containing an apostrophe).
-            # This fallback deliberately applies the same token rules after
+            # This fallback deliberately applies the same word rules after
             # removing quote characters; it does not infer commands in prose.
             return re.sub(r'["\']', '', segment).split()
 
-    def strip_value_options(tokens, value_options):
+    def strip_value_options(words, value_options):
         result = []
         index = 0
-        while index < len(tokens):
-            token = tokens[index]
-            if token in value_options:
+        while index < len(words):
+            word = words[index]
+            if word in value_options:
                 index += 2
                 continue
-            if any(token.startswith(option + '=') for option in value_options):
+            if any(word.startswith(option + '=') for option in value_options):
                 index += 1
                 continue
-            result.append(token)
+            result.append(word)
             index += 1
         return result
 
@@ -402,38 +402,38 @@ def _protected_gates(command):
         if depth > 8:
             return
         for part in re.split(r'[\n;&|(){}]+', segment):
-            tokens = parse(part)
-            if not tokens:
+            words = parse(part)
+            if not words:
                 continue
             # Shell control words and command wrappers may precede the real
             # executable. env/sudo accept option arguments before it.
-            while tokens:
-                while tokens and tokens[0] in ('if', 'then', 'while', 'do', '!'):
-                    tokens.pop(0)
-                if not tokens or tokens[0] not in wrappers:
+            while words:
+                while words and words[0] in ('if', 'then', 'while', 'do', '!'):
+                    words.pop(0)
+                if not words or words[0] not in wrappers:
                     break
-                wrapper = tokens.pop(0)
+                wrapper = words.pop(0)
                 if wrapper == 'env':
-                    tokens = strip_value_options(tokens, {'-u', '--unset', '-C', '--chdir'})
-                    while tokens and (tokens[0].startswith('-') or
-                                      re.fullmatch(r'[a-z_][a-z0-9_]*=.*', tokens[0])):
-                        tokens.pop(0)
+                    words = strip_value_options(words, {'-u', '--unset', '-C', '--chdir'})
+                    while words and (words[0].startswith('-') or
+                                     re.fullmatch(r'[a-z_][a-z0-9_]*=.*', words[0])):
+                        words.pop(0)
                 elif wrapper == 'sudo':
-                    tokens = strip_value_options(tokens, {'-u', '--user', '-g', '--group',
-                                                          '-h', '--host', '-p', '--prompt',
-                                                          '-C', '--close-from', '-T', '--command-timeout'})
-                    while tokens and tokens[0].startswith('-'):
-                        tokens.pop(0)
+                    words = strip_value_options(words, {'-u', '--user', '-g', '--group',
+                                                        '-h', '--host', '-p', '--prompt',
+                                                        '-C', '--close-from', '-T', '--command-timeout'})
+                    while words and words[0].startswith('-'):
+                        words.pop(0)
                 elif wrapper == 'time':
-                    while tokens and tokens[0].startswith('-'):
-                        tokens.pop(0)
+                    while words and words[0].startswith('-'):
+                        words.pop(0)
                 else:
-                    while tokens and re.fullmatch(r'[a-z_][a-z0-9_]*=.*', tokens[0]):
-                        tokens.pop(0)
-            if not tokens or tokens[0] in ('echo', 'printf'):
+                    while words and re.fullmatch(r'[a-z_][a-z0-9_]*=.*', words[0]):
+                        words.pop(0)
+            if not words or words[0] in ('echo', 'printf'):
                 continue
-            executable = os.path.basename(tokens[0])
-            args = tokens[1:]
+            executable = os.path.basename(words[0])
+            args = words[1:]
             if executable in ('bash', 'sh', 'zsh'):
                 try:
                     c_index = args.index('-c')
