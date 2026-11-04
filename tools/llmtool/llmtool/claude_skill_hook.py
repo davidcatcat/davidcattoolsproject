@@ -15,6 +15,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import stat
 import subprocess
 import sys
@@ -29,6 +30,7 @@ _AGENT_ROLES = {
     'pm': 'pm', 'developer': 'developer', 'reviewer': 'reviewer',
     'high-debug': 'high-debug',
 }
+_failed_compactions = set()
 
 
 def _mode():
@@ -120,7 +122,8 @@ def _append_event(binding, event_type, **fields):
         entry.update({
             'schema_version': ledger.SCHEMA_VERSION,
             'receipt_id': secrets.token_hex(16),
-            'evidence_level': 'OBSERVED_READ', 'status': 'ACTIVE',
+            'evidence_level': ('OBSERVED_READ' if event_type == 'OBSERVED_READ'
+                               else 'BOUNDARY'), 'status': 'ACTIVE',
             'created_at': now.isoformat(timespec='microseconds').replace('+00:00', 'Z'),
             'expires_at': (now + timedelta(days=1)).isoformat(timespec='microseconds').replace('+00:00', 'Z'),
             'event_type': event_type,
@@ -190,7 +193,7 @@ def _safe_repo_file(repo, supplied):
 
 def _identity(record, binding, gate):
     return (all(record.get(key) == binding.get(key) for key in
-                ('session_id', 'agent_id', 'role', 'provider', 'model', 'repo')) and
+                ('session_id', 'agent_id', 'role', 'provider', 'repo')) and
             record.get('gate') == gate)
 
 
@@ -198,36 +201,94 @@ def _record_read(payload, role):
     repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
     gate = os.environ.get('LLMTOOL_GATE', 'develop')
     manifest = build_manifest(repo, _commit(repo), role, gate, provider='claude')
-    required = {entry['path'] for entry in manifest['entries']}
+    required = {entry['path']: entry['sha256'] for entry in manifest['entries']}
     tool_input = payload.get('tool_input')
     requested = tool_input.get('file_path') if type(tool_input) is dict else None
     resolved = _safe_repo_file(repo, requested)
     if resolved is None:
         return
     path, digest, line_count = resolved
-    if path not in required:
+    if path not in required or digest != required[path]:
         return
     tool_input = payload.get('tool_input') or {}
+    # Claude versions may encode the first line as offset 0 or 1.
     offset = tool_input.get('offset', 1)
     limit = tool_input.get('limit')
-    if (type(offset) is not int or offset != 1 or
+    if (type(offset) is not int or offset not in (0, 1) or
             (limit is not None and (type(limit) is not int or limit < line_count))):
         return
     binding = _binding(payload, role, repo)
-    if not binding['session_id'] or not binding['model']:
+    if not binding['session_id']:
         return
     _append_event(binding, 'OBSERVED_READ', gate=gate,
                   path=path, blob_sha256=digest)
+
+
+def _compaction_marker(identity):
+    payload = json.dumps(identity, separators=(',', ':'), ensure_ascii=True).encode('utf-8')
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _mark_compaction_failed(identity):
+    _failed_compactions.add(identity)
+    marker = str(skill_ledger._path()) + '.compaction-failed'
+    digest = (_compaction_marker(identity) + '\n').encode('ascii')
+    fd = os.open(marker, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o600:
+            raise OSError('unsafe compaction marker')
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, digest)
+        os.fsync(fd)
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        os.close(fd)
+
+
+def _compaction_failed(identity):
+    if identity in _failed_compactions:
+        return True
+    marker = str(skill_ledger._path()) + '.compaction-failed'
+    try:
+        fd = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_size > 1024 * 1024:
+            return True
+        chunks = []
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        return (_compaction_marker(identity) + '\n').encode('ascii') in b''.join(chunks).splitlines(keepends=True)
+    except OSError:
+        return True
+    finally:
+        os.close(fd)
 
 
 def _record_compaction(payload, role):
     repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
     gate = os.environ.get('LLMTOOL_GATE', 'develop')
     binding = _binding(payload, role, repo)
-    if not binding['session_id'] or not binding['model']:
+    if not binding['session_id']:
         return
-    _append_event(binding, 'COMPACTION', gate=gate,
-                  source=payload.get('source'))
+    identity = (binding['session_id'], binding['agent_id'], binding['repo'])
+    try:
+        _append_event(binding, 'COMPACTION', gate=gate,
+                      source=payload.get('source'))
+    except Exception:
+        _mark_compaction_failed(identity)
+        raise
 
 
 def _check(payload, gate):
@@ -237,8 +298,10 @@ def _check(payload, gate):
     repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
     manifest, _ = _manifest_context(repo, _commit(repo), role, gate)
     binding = _binding(payload, role, repo)
-    if not binding['session_id'] or not binding['model']:
+    if not binding['session_id']:
         return {'status': 'UNVERIFIED', 'reason': 'NOT_READ'}
+    if _compaction_failed((binding['session_id'], binding['agent_id'], binding['repo'])):
+        return {'status': 'UNVERIFIED', 'reason': 'COMPACTED'}
     ledger = skill_ledger
     fd = ledger._locked(ledger._path())
     try:
@@ -258,14 +321,24 @@ def _check(payload, gate):
     latest_boundary = max((skill_ledger._stamp(r.get('created_at')) for r in boundaries),
                           default=None)
     latest_boundary = latest_boundary or datetime.min.replace(tzinfo=timezone.utc)
-    required = {entry['path']: (_safe_repo_file(repo, entry['path']) or (None, None, None))[1]
-                for entry in manifest['entries']}
-    saw_stale = False
+    required = {}
+    for entry in manifest['entries']:
+        current = _safe_repo_file(repo, entry['path'])
+        current_hash = current[1] if current else None
+        required[entry['path']] = current_hash
+    saw_stale = any(
+        current_hash is None or current_hash != entry['sha256']
+        for entry in manifest['entries']
+        for current_hash in (required[entry['path']],)
+    )
     saw_compacted = False
     for path, current_hash in required.items():
         rows = [r for r in relevant if r.get('event_type') == 'OBSERVED_READ' and r.get('path') == path]
         fresh = [r for r in rows if (skill_ledger._stamp(r.get('created_at')) or
-                                     datetime.min.replace(tzinfo=timezone.utc)) > latest_boundary]
+                                     datetime.min.replace(tzinfo=timezone.utc)) > latest_boundary
+                 and r.get('status') == 'ACTIVE'
+                 and (skill_ledger._stamp(r.get('expires_at')) or
+                      datetime.min.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc)]
         if not fresh:
             if rows and boundaries:
                 saw_compacted = True
@@ -288,27 +361,40 @@ def _check(payload, gate):
 
 
 def _protected_gates(command):
-    # Conservative lexical matcher retained as the N3 protected-word boundary.
+    # N3 recognizes command forms, so quoted arguments and option values do
+    # not combine unrelated protected words into a match.
     gates = []
     for segment in re.split(r'[\n;&|(){}]+', command):
-        tokens = re.findall(r'[A-Za-z0-9_.-]+', segment.lower())
-        if not tokens:
+        try:
+            tokens = [token.lower() for token in shlex.split(segment, posix=True)]
+        except ValueError:
             continue
-        if tokens[0] in ('echo', 'printf') and '$(' not in segment and '`' not in segment:
+        while tokens and re.fullmatch(r'[a-z_][a-z0-9_]*=.*', tokens[0]):
+            tokens.pop(0)
+        if not tokens or tokens[0] in ('echo', 'printf'):
             continue
-        if 'git' in tokens and 'push' in tokens:
+        executable = os.path.basename(tokens[0])
+        args = tokens[1:]
+        if executable == 'git' and args and args[0] == 'push':
             gates.append('publish')
-        if 'gh' in tokens:
-            if 'pr' in tokens and 'merge' in tokens:
+        if executable == 'gh' and len(args) >= 2:
+            if args[:2] == ['pr', 'merge']:
                 gates.append('merge')
-            if 'pr' in tokens and ('comment' in tokens or 'review' in tokens):
+            if args[0] == 'pr' and args[1] in ('comment', 'review'):
                 gates.append('review')
-            if 'issue' in tokens and 'comment' in tokens:
+            if args[:2] == ['issue', 'comment']:
                 gates.append('review')
-        if 'task' in tokens and 'delegate' in tokens and ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens)):
-            gates.append('dispatch')
-        if 'task' in tokens and ('complete' in tokens or 'advance' in tokens) and ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens)):
-            gates.append('complete')
+        tool_args = None
+        if executable in ('llmtool', 'llmtool.exe'):
+            tool_args = args
+        elif (executable in ('python', 'python3', 'python.exe', 'python3.exe') and
+              len(args) >= 3 and args[:2] == ['-m', 'llmtool.cli']):
+            tool_args = args[2:]
+        if tool_args and len(tool_args) >= 2 and tool_args[0] == 'task':
+            if tool_args[1] == 'delegate':
+                gates.append('dispatch')
+            if tool_args[1] in ('complete', 'advance'):
+                gates.append('complete')
     return list(dict.fromkeys(gates))
 
 
@@ -316,6 +402,9 @@ def handle(payload):
     if type(payload) is not dict:
         return _deny('PreToolUse', 'INPUT_INVALID') if _mode() == 'enforce' else {}
     event = payload.get('hook_event_name') or payload.get('hookEventName')
+    if event is None and payload.get('tool_name') == 'Bash':
+        _log('INPUT_INVALID')
+        return _deny('PreToolUse', 'INPUT_INVALID') if _mode() == 'enforce' else {}
     if event in ('SessionStart', 'SubagentStart'):
         source = payload.get('source')
         if event == 'SessionStart' and source not in ('startup', 'resume', 'compact'):

@@ -15,6 +15,7 @@ from llmtool.skill_manifest import resolve
 
 class ClaudeSkillHookTests(unittest.TestCase):
     def setUp(self):
+        hook._failed_compactions.clear()
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
@@ -121,11 +122,15 @@ class ClaudeSkillHookTests(unittest.TestCase):
         self.assertEqual(rows[0]['path'], self.required_paths()[0])
         self.assertEqual(rows[0]['blob_sha256'], hook._safe_repo_file(str(self.repo), str(target))[1])
 
-    def test_partial_read_is_not_counted(self):
+    def test_partial_read_is_not_counted_and_zero_offset_is_start(self):
         target = self.repo / self.required_paths()[0]
         self.post_read(target, tool_input={'file_path': str(target), 'offset': 2})
         self.assertFalse(any(r.get('event_type') == 'OBSERVED_READ'
                              for r in hook.skill_ledger._read(self.ledger)))
+        self.post_read(target, tool_input={'file_path': str(target), 'offset': 0})
+        rows = [r for r in hook.skill_ledger._read(self.ledger)
+                if r.get('event_type') == 'OBSERVED_READ']
+        self.assertEqual(len(rows), 1)
 
     def test_nonrequired_missing_and_symlink_reads_record_nothing(self):
         extra = self.repo / 'extra.md'
@@ -152,6 +157,31 @@ class ClaudeSkillHookTests(unittest.TestCase):
     def test_all_required_reads_allow_protected_command(self):
         self.read_all()
         self.assertEqual(self.protected(), {})
+
+    def test_dirty_required_file_cannot_be_recorded_as_read(self):
+        target = self.repo / 'CLAUDE.md'
+        target.write_text('uncommitted replacement\n', encoding='utf-8')
+        self.post_read(target)
+        self.assertFalse(any(r.get('event_type') == 'OBSERVED_READ'
+                             for r in hook.skill_ledger._read(self.ledger)))
+        self.assertEqual(
+            self.protected()['hookSpecificOutput']['permissionDecisionReason'],
+            'STALE_BLOB',
+        )
+
+    def test_tool_events_need_no_repeated_session_model(self):
+        with mock.patch.dict(os.environ, {'LLMTOOL_MODEL': ''}):
+            self.event(self.session(model='claude-opus-5-5'))
+            for relative in self.required_paths():
+                self.post_read(self.repo / relative, model=None)
+            self.assertEqual(self.protected(model=None), {})
+
+    def test_compaction_append_failure_invalidates_session(self):
+        self.read_all()
+        with mock.patch.object(hook, '_append_event', side_effect=OSError('ledger unavailable')):
+            self.event(self.session('compact'))
+        denied = self.protected()
+        self.assertEqual(denied['hookSpecificOutput']['permissionDecisionReason'], 'COMPACTED')
 
     def test_changed_blob_denies_as_stale(self):
         target = self.repo / self.required_paths()[0]
@@ -194,10 +224,30 @@ class ClaudeSkillHookTests(unittest.TestCase):
             self.assertEqual(json.loads(stdout.getvalue()), {})
 
     def test_protected_word_matcher(self):
-        self.assertEqual(hook._protected_gates('gh pr merge 12'), ['merge'])
-        self.assertEqual(hook._protected_gates('git push origin topic'), ['publish'])
-        self.assertEqual(hook._protected_gates('llmtool task complete task-1'), ['complete'])
-        self.assertEqual(hook._protected_gates('echo git push origin topic'), [])
+        cases = {
+            'git push origin topic': ['publish'],
+            'gh pr merge 12': ['merge'],
+            'gh pr comment 12 --body x': ['review'],
+            'gh pr review 12': ['review'],
+            'gh issue comment 12': ['review'],
+            'llmtool task delegate task-1': ['dispatch'],
+            'llmtool task complete task-1': ['complete'],
+            'llmtool task advance task-1': ['complete'],
+            'python -m llmtool.cli task complete a': ['complete'],
+            'git commit -m "push fix"': [],
+            'git log --grep=push': [],
+            'grep -rn "git push" .': [],
+            'rg "gh pr merge" docs': [],
+            'echo git push origin topic': [],
+        }
+        for command, expected in cases.items():
+            with self.subTest(command=command):
+                self.assertEqual(hook._protected_gates(command), expected)
+
+    def test_missing_hook_event_for_bash_fails_closed(self):
+        result = hook.handle({'tool_name': 'Bash', 'tool_input': {'command': 'git push'}})
+        self.assertEqual(result['hookSpecificOutput']['permissionDecision'], 'deny')
+        self.assertEqual(result['hookSpecificOutput']['permissionDecisionReason'], 'INPUT_INVALID')
 
 
 if __name__ == '__main__':
