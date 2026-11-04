@@ -11,7 +11,7 @@
   - When an llmtool step fails, the PM records the defect and schedules its repair. Making the core llmtool flow work end to end is the priority.
   - Codex Developer (`gpt-6-luna`, high reasoning effort) remains a Developer route and self-reviews and self-repairs before hand-back.
   - OpenCode Developer remains a normal Developer route; the PM selects it from currently available Workers. Pause dispatch on a free-limit refusal or two consecutive route failures; no paid fallback.
-  - Claude Developer / UI Agent (`claude-developer`) is PAUSED by the Owner on 2026-11-04 ([#289](https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6631965348)).
+  - Claude Developer / UI Agent (`claude-developer`) stays paused except the one Owner gw-agent assignment recorded in [worker-dispatch.json](tools/llmtool/worker-dispatch.json) ([Owner assignment](https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6641086731)).
   - OpenCode and AGY are PM-selected direct CLI routes under their current [worker-dispatch.json](tools/llmtool/worker-dispatch.json) entries; see their sections below.
   - The first Mac OpenCode CLI launch may require the Owner to start the prepared session once; the Owner does not handle routine dispatch.
 

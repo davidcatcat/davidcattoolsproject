@@ -261,16 +261,28 @@ class WorkerDispatchTests(unittest.TestCase):
             worker_dispatch.evaluate('agy', None, task_id).reason_code,
             'OWNER_ASSIGNMENT_REQUIRED')
 
-    def test_real_claude_developer_policy_is_owner_paused(self):
+    def test_real_claude_developer_policy_matches_only_owner_assigned_task(self):
+        task_id = '14ffbf93461373873bb32fbdb83924a0'
+        ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+               'issues/120#issuecomment-6641086731')
         with patch.object(worker_dispatch, '_POLICY_PATH',
                           Path(worker_dispatch._DEFAULT_POLICY_PATH)):
-            decision = worker_dispatch.evaluate('claude-developer')
-        self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason_code, 'OWNER_PAUSED')
+            decision = worker_dispatch.evaluate('claude-developer', ref, task_id)
+            other_task = worker_dispatch.evaluate('claude-developer', ref, 'a' * 32)
+            missing_ref = worker_dispatch.evaluate('claude-developer', None, task_id)
+            wrong_ref = worker_dispatch.evaluate(
+                'claude-developer', ref + '0', task_id)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_MATCHED')
+        for denied in (other_task, missing_ref, wrong_ref):
+            self.assertFalse(denied.allowed)
+            self.assertEqual(denied.reason_code, 'OWNER_ASSIGNMENT_REQUIRED')
         real_policy = worker_dispatch._parse_policy(
             Path(worker_dispatch._DEFAULT_POLICY_PATH).read_bytes())
-        self.assertEqual(real_policy['workers']['claude-developer']['dispatch'], 'PAUSED')
-        self.assertNotIn('owner_assignments', real_policy['workers']['claude-developer'])
+        worker = real_policy['workers']['claude-developer']
+        self.assertEqual(worker['dispatch'], 'OWNER_ASSIGNMENT_ONLY')
+        self.assertEqual(worker['owner_assignments'], [{
+            'task_id': task_id, 'owner_assignment_ref': ref}])
 
     def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
         ref = 'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-9999999999'
