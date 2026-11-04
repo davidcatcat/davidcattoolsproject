@@ -1847,10 +1847,16 @@ class W57ChatTests(Base):
     def test_without_the_dev_flag_task_mode_is_hidden(self):
         os.environ.pop(chat_tui.DEV_ENV, None)
         with patch('llmtool.task_submission_cli.run_task_submit') as submit:
+            async def hidden(ui):
+                await self.until(ui, lambda ui: not ui.show_list and not ui.show_events,
+                                 'task panes hidden')
+                self.assertFalse(ui.show_list)
+                self.assertFalse(ui.show_events)
+
             ui, _ = self.drive(['/task mode profile first\r', '/task submit --provider x y\r',
                                 '/task\r', 'plain\r', self.idle,
-                                '\x1bOR', lambda ui: self.assertFalse(ui.show_list),
-                                '\x1bOS', lambda ui: self.assertFalse(ui.show_events),
+                                '\x1bOR', hidden,
+                                '\x1bOS', hidden,
                                 '/tas', lambda ui: self.assertEqual(ui.menu_items, [])])
         submit.assert_not_called()
         self.assertFalse(ui.dev)
@@ -2193,6 +2199,17 @@ class TaskListTests(Base):
             self.assertTrue(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
 
+        async def back_to_chat(ui):
+            await self.until(ui, lambda ui: not ui.show_list
+                             and ui.app.layout.has_focus(ui.input), 'list closed')
+            self.assertFalse(ui.show_list)
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+
+        async def list_open(ui):
+            await self.until(ui, lambda ui: ui.show_list
+                             and ui.app.layout.has_focus(ui.list_window), 'list opened')
+            self.assertTrue(ui.show_list)
+
         calls = self.pm.complete.call_count
         ui, _ = self.drive(['/task mode profile first\r', 'first task\r', self.idle,
                             '/task mode profile missing\r', 'second task\r', self.idle,
@@ -2203,10 +2220,9 @@ class TaskListTests(Base):
                                 '已建立／待派工'),
                             'c', list_copied, '\r', self.idle, detail_open, 'c', detail_copied,
                             '\x1b', self.esc_settled, back_to_list,
-                            '\x1b', self.esc_settled, lambda ui: self.assertFalse(ui.show_list),
-                            lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
-                            '\x1bOR', self.listed, lambda ui: self.assertTrue(ui.show_list),
-                            '\x1bOR', lambda ui: self.assertFalse(ui.show_list)])
+                            '\x1b', self.esc_settled, back_to_chat,
+                            '\x1bOR', list_open, self.listed,
+                            '\x1bOR', back_to_chat])
         self.assertEqual(self.pm.complete.call_count, self.calls)
         self.factory.assert_not_called()
 
@@ -2771,7 +2787,9 @@ class FakeClaude:
         self._json = _json
         self.turns = list(turns)        # one list of (stream object | 'HOLD') per user message
         self.gate = _FakeClaudeGate()
-        self._user_gate = None
+        self._turns_lock = threading.Lock()
+        self._unfinished_turns = []
+        self._all_turns = []
         self.written = []
         self.threads = []               # playback threads, joined by the test cleanup
         read, self._write = os.pipe()
@@ -2793,15 +2811,20 @@ class FakeClaude:
         if line.get('type') == 'user' and self.turns:
             self._lifecycle(line, 'queued')
             gate = self.gate.new_turn()
-            self._user_gate = gate
+            turn = self._register_turn(gate)
             thread = threading.Thread(target=self._play_user,
-                                      args=(line, self.turns.pop(0), gate),
+                                      args=(line, self.turns.pop(0), turn),
                                       name='fake-claude-play', daemon=True)
             self.threads.append(thread)
             thread.start()
         elif line.get('type') == 'control_request':
-            if self._user_gate is not None:
-                self._user_gate.set()
+            with self._turns_lock:
+                turn = next((turn for turn in self._unfinished_turns
+                             if turn['started'].is_set()), None)
+                if turn is None and self._unfinished_turns:
+                    turn = self._unfinished_turns[0]
+                if turn is not None:
+                    turn['gate'].set()
         return len(data)
 
     def flush(self):
@@ -2823,14 +2846,32 @@ class FakeClaude:
             self._emit({'type': 'command_lifecycle', 'command_uuid': line['uuid'],
                         'state': self.rewrite.get(state, state), 'uuid': 'frame'})
 
-    def _play_user(self, line, script, gate):
+    def _register_turn(self, gate):
+        turn = {'gate': gate, 'started': threading.Event(), 'finished': threading.Event()}
+        with self._turns_lock:
+            self._unfinished_turns.append(turn)
+            self._all_turns.append(turn)
+        return turn
+
+    def _start_turn(self, turn):
+        turn['started'].set()
+
+    def _finish_turn(self, turn):
+        with self._turns_lock:
+            if turn in self._unfinished_turns:
+                self._unfinished_turns.remove(turn)
+        turn['finished'].set()
+        self.gate.finish_turn(turn['gate'])
+
+    def _play_user(self, line, script, turn):
         try:
             with self.turn_lock:
+                self._start_turn(turn)
                 self._lifecycle(line, 'started')
-                self._play(script, gate)
+                self._play(script, turn['gate'])
                 self._lifecycle(line, 'completed')
         finally:
-            self.gate.finish_turn(gate)
+            self._finish_turn(turn)
 
     def _play(self, script, gate):
         for item in script:
@@ -2871,13 +2912,15 @@ class FakeClaude:
     def unsolicited(self, script, delay=0.0):
         """Play a turn Claude Code starts by itself (a background task notification)."""
         gate = self.gate.new_turn()
+        turn = self._register_turn(gate)
         def play():
             try:
                 time.sleep(delay)
                 with self.turn_lock:
+                    self._start_turn(turn)
                     self._play(script, gate)
             finally:
-                self.gate.finish_turn(gate)
+                self._finish_turn(turn)
         thread = threading.Thread(target=play, name='fake-claude-play', daemon=True)
         self.threads.append(thread)
         thread.start()
@@ -2897,26 +2940,68 @@ class FakeClaudeGateTests(unittest.TestCase):
         finally:
             fake.turn_lock.release()
 
-        started = time.monotonic()
-        first_thread.join(0.5)
-        first_released_promptly = not first_thread.is_alive() and time.monotonic() - started < 1
-        if first_thread.is_alive():
-            fake.gate.set()
-            first_thread.join(1)
+        first_turn = fake._all_turns[0]
+        first_released_promptly = first_turn['finished'].wait(1)
 
         fake.write((fake._json.dumps(second) + '\n').encode('utf-8'))
-        second_thread = fake.threads[1]
-        second_thread.join(0.1)
-        next_turn_still_holds = second_thread.is_alive()
+        second_turn = fake._unfinished_turns[0]
+        second_turn['started'].wait(1)
+        next_turn_still_holds = not second_turn['finished'].is_set()
         fake.gate.set()
-        second_thread.join(1)
+        second_turn['finished'].wait(1)
         fake._end()
         fake.stdout.close()
 
         self.assertTrue(first_released_promptly, 'release before gate.clear was lost')
         self.assertTrue(next_turn_still_holds, 'an earlier interrupt released the next turn')
         self.assertFalse(first_thread.is_alive())
-        self.assertFalse(second_thread.is_alive())
+        self.assertFalse(fake.threads[1].is_alive())
+
+    def test_control_request_releases_an_unsolicited_holding_turn(self):
+        fake = FakeClaude([])
+        fake.unsolicited(['HOLD'])
+        turn = fake._unfinished_turns[0]
+        self.assertTrue(turn['started'].wait(1), 'unsolicited turn did not start')
+
+        fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
+        released_promptly = turn['finished'].wait(1)
+        fake.gate.set()
+        turn['finished'].wait(1)
+        fake._end()
+        fake.stdout.close()
+
+        self.assertTrue(released_promptly, 'control request did not release unsolicited turn')
+        self.assertFalse(fake.threads[0].is_alive())
+
+    def test_control_request_releases_running_user_turn_before_queued_turn(self):
+        fake = FakeClaude([['HOLD'], ['HOLD']])
+        first = {'type': 'user', 'uuid': 'first'}
+        second = {'type': 'user', 'uuid': 'second'}
+
+        fake.write((fake._json.dumps(first) + '\n').encode('utf-8'))
+        first_turn = fake._unfinished_turns[0]
+        self.assertTrue(first_turn['started'].wait(1), 'first user turn did not start')
+        fake.write((fake._json.dumps(second) + '\n').encode('utf-8'))
+        second_turn = fake._unfinished_turns[1]
+
+        fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
+        first_released = first_turn['finished'].wait(1)
+        second_started = second_turn['started'].wait(1)
+        second_still_holds = not second_turn['finished'].is_set()
+        fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
+        second_released = second_turn['finished'].wait(1)
+        fake.gate.set()
+        first_turn['finished'].wait(1)
+        second_turn['finished'].wait(1)
+        fake._end()
+        fake.stdout.close()
+
+        self.assertTrue(first_released, 'control request did not release running turn 1')
+        self.assertTrue(second_started, 'queued turn 2 did not start after turn 1')
+        self.assertTrue(second_still_holds, 'control request released queued turn 2 early')
+        self.assertTrue(second_released, 'second control request did not release turn 2')
+        self.assertFalse(fake.threads[0].is_alive())
+        self.assertFalse(fake.threads[1].is_alive())
 
 
 def _delta(text, index=0):
