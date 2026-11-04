@@ -7,6 +7,7 @@ import unittest
 from types import SimpleNamespace
 
 from llmtool.skill_manifest import (
+    GIT_READ_TIMEOUT_SECONDS,
     MAX_SKILL_FILE_SIZE,
     SKILL_MANIFEST_COMMIT_INVALID,
     SKILL_MANIFEST_GATE_INVALID,
@@ -117,6 +118,19 @@ class SkillManifestTests(unittest.TestCase):
         self._manifest(runner=runner)
         self.assertGreater(len(calls), 1)
         self.assertEqual(calls[0][1:3], ('cat-file', '-e'))
+
+    def test_git_reads_disable_stdin_and_have_a_timeout(self):
+        observed = []
+
+        def runner(args, **kwargs):
+            observed.append(kwargs)
+            return subprocess.run(args, **kwargs)
+
+        self._manifest(runner=runner)
+        self.assertTrue(observed)
+        for kwargs in observed:
+            self.assertIs(kwargs['stdin'], subprocess.DEVNULL)
+            self.assertEqual(kwargs['timeout'], GIT_READ_TIMEOUT_SECONDS)
 
     def test_invalid_commit_format_or_missing_commit_is_refused(self):
         self._assert_code(SKILL_MANIFEST_COMMIT_INVALID, 'short', 'developer', 'develop')

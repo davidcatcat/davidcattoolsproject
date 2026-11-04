@@ -24,6 +24,7 @@ SKILL_MANIFEST_ROLE_INVALID = 'SKILL_MANIFEST_ROLE_INVALID'
 SKILL_MANIFEST_GATE_INVALID = 'SKILL_MANIFEST_GATE_INVALID'
 
 MAX_SKILL_FILE_SIZE = 1024 * 1024
+GIT_READ_TIMEOUT_SECONDS = 10
 
 _BASE_PATHS = (
     'AGENTS.md',
@@ -102,9 +103,11 @@ def _run_git(git_runner, repo_root, args):
             ['git', '--no-replace-objects'] + list(args),
             cwd=repo_root,
             env=env,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
+            timeout=GIT_READ_TIMEOUT_SECONDS,
         )
     except Exception:
         return None
