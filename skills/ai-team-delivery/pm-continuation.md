@@ -92,6 +92,14 @@ For the required remediation after an AI misses something, see [closing process 
 
 Follow the [quota and Reviewer continuation rules](pm-continuation-reference.md#quota-and-reviewer-continuation).
 
+## PM takeover
+
+1. Before any dispatch or merge, read [AGENTS.md](../../AGENTS.md), [ai-team-delivery](SKILL.md), this contract and the [continuation reference](pm-continuation-reference.md).
+2. Check that the schedule prompt says to reread [Scheduled sweep](#scheduled-sweep) from `main` on every sweep.
+3. List in-flight Tasks, open PRs and open Owner questions before choosing the next step; follow [Every result gets a next decision](#every-result-gets-a-next-decision) and [Queue and IDLE](#queue-and-idle).
+4. Before retiring a parked D6, record its Debug escalation disposition under [BLOCKED](#blocked-diagnose-then-retry-reassign-or-isolate).
+5. A handoff note or memory never replaces these documents. High Debug means a recorded `task high-debug` run, not a PM comment; follow [High Debug](pm-continuation-reference.md#high-debug).
+
 ## Queue and IDLE
 
 Authorized PM work scope covers open Issues already authorized, Roadmap work, in-flight Tasks, and unfinished PRs, reviews and CI (Owner 2026-11-02, #763). The single work source is the #763 backlog inventory (plus GitHub deltas) within this authorized scope. The PM may split work and choose Developers under current gates, but never expand product scope, permissions, data egress or paid use.
