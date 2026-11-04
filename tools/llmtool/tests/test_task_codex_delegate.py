@@ -1319,7 +1319,7 @@ class CodexDelegateTests(unittest.TestCase):
                 patch.object(task_submission_cli.subprocess, 'run') as launch:
             with self.assertRaises(DirectOpenCodeError) as caught:
                 task_submission_cli._bootstrap_registered_d6(registration)
-        self.assertEqual(caught.exception.code, 'ENV_BOOTSTRAP_TRUST_UNAVAILABLE')
+        self.assertEqual(caught.exception.direct_opencode_code, 'ENV_BOOTSTRAP_TRUST_UNAVAILABLE')
         launch.assert_not_called()
 
     def _rebootstrap(self, **registry_changes):
