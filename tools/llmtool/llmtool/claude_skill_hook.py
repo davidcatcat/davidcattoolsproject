@@ -135,21 +135,36 @@ def _append_event(binding, event_type, **fields):
 def _safe_repo_file(repo, supplied):
     if type(supplied) is not str or not supplied:
         return None
+    repo = os.path.realpath(repo)
     target = supplied if os.path.isabs(supplied) else os.path.join(repo, supplied)
     target = os.path.abspath(target)
     try:
-        if os.path.commonpath((repo, target)) != repo:
+        # Git reports a canonical root (for example /private/var/... on macOS),
+        # while Claude may report the same file through an alias such as /var/....
+        # Find the spelling of the repo root in the supplied path, then validate
+        # every in-repository component before opening the canonical path.
+        cursor = target
+        suffix = []
+        while os.path.realpath(cursor) != repo:
+            parent, name = os.path.split(cursor)
+            if parent == cursor or not name:
+                return None
+            suffix.insert(0, name)
+            cursor = parent
+        relative = os.path.join(*suffix) if suffix else ''
+        canonical_target = os.path.join(repo, relative)
+        if (os.path.realpath(target) != canonical_target or
+                os.path.commonpath((repo, canonical_target)) != repo):
             return None
-        relative = os.path.relpath(target, repo)
         cursor = repo
-        for component in relative.split(os.sep):
+        for component in suffix:
             if component in ('', '.'):
                 continue
             cursor = os.path.join(cursor, component)
             info = os.lstat(cursor)
             if stat.S_ISLNK(info.st_mode):
                 return None
-        fd = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        fd = os.open(canonical_target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode):
