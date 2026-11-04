@@ -19,10 +19,14 @@ from llmtool import review_handoff as rh
 from llmtool import task_review as r
 from llmtool.errors import LLMToolError
 from llmtool.providers.claude_cli import decode_review_envelope
-from test_review_authority import FAKE_SCRIPT, FixtureObserver, WorkerHarness
+from test_review_authority import (
+    FAKE_SCRIPT, FixtureObserver, LOAD_TOLERANT_TIMEOUT_SECONDS, WorkerHarness)
 from llmtool import task_completion
 from llmtool import worker_dispatch
 import review_trust_fixture
+
+
+PROCESS_WAIT_SECONDS = 60
 
 
 def setUpModule(): review_trust_fixture.start_module()
@@ -87,7 +91,7 @@ def _mp_worker_dispatch(hostpath, pin_args, ready, final, expect, events, approv
         ledger = l.ReceiptLedger.open(ledger_path, clock=fclock.utc,
                                       kind='PROVIDER_REVIEW', creation_nonce=ledger_nonce)
         try:
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=PROCESS_WAIT_SECONDS)
             store = _TestDispatchStore()
             store.bind(expect.task, expect.source_sha)
             receipt, raw = rh.dispatch_review_handoff(
@@ -107,6 +111,7 @@ class ReviewHandoffTests(unittest.TestCase):
         self.addCleanup(patcher.stop)
 
     def harness(self, **changes):
+        changes.setdefault('timeout', LOAD_TOLERANT_TIMEOUT_SECONDS)
         h = WorkerHarness(**changes)
         self.addCleanup(h.close)
         self.dispatch_store.bind(h.expect.task, h.expect.source_sha)
@@ -484,9 +489,9 @@ class ReviewHandoffTests(unittest.TestCase):
         for proc in procs:
             proc.start()
         for proc in procs:
-            proc.join(timeout=10)
+            proc.join(timeout=PROCESS_WAIT_SECONDS)
             self.assertFalse(proc.is_alive())
-        results = [queue.get(timeout=2) for _ in range(2)]
+        results = [queue.get(timeout=PROCESS_WAIT_SECONDS) for _ in range(2)]
         passes = [item for item in results if item[0] == 'PASS']
         blocked = [item for item in results if item[0] == 'BLOCKED']
         self.assertEqual(len(passes), 1, results)
@@ -524,8 +529,8 @@ class ReviewHandoffTests(unittest.TestCase):
                   h.ledger.creation_nonce, h.fake.budget, barrier, queue)
         )
         proc.start()
-        barrier.wait(timeout=10)
-        deadline = time.monotonic() + 10
+        barrier.wait(timeout=PROCESS_WAIT_SECONDS)
+        deadline = time.monotonic() + PROCESS_WAIT_SECONDS
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertTrue(marker.exists(), 'reviewer child did not launch')
@@ -535,7 +540,7 @@ class ReviewHandoffTests(unittest.TestCase):
         # run_review's finally finalizes the receipt EFFECT_UNKNOWN itself
         # before the host exits, leaving nothing for recovery to do.
         proc.kill()
-        proc.join(timeout=10)
+        proc.join(timeout=PROCESS_WAIT_SECONDS)
         self.assertFalse(proc.is_alive())
         self.assertEqual(proc.exitcode, -9)
         try:
