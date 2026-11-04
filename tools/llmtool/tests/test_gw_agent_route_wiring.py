@@ -233,7 +233,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertIsNone(store.developer_records[0]['provider_type'])
         self.assertIsNone(store.developer_records[0]['model'])
         self.assertEqual(store.developer_records[1]['provider_type'], 'gw-agent-cli')
-        self.assertEqual(store.developer_records[1]['model'], 'gw-agent-default')
+        self.assertEqual(store.developer_records[1]['model'], 'authorized-model')
         self.assertEqual(store.value['developer']['state'], 'DEVELOPER_UNAVAILABLE')
         self.assertEqual(store.value['developer']['error_code'], 'DEVELOPER_OWNER_PAUSED')
         self.assertEqual(store.value['dispatch_audit'][-1]['action'], 'DISPATCH')
@@ -399,7 +399,19 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['synthetic'],
+                              'profile': {'adapter': 'openai-chat-tools',
+                                  'base_url': 'https://api.openai.com/v1',
+                                  'model': 'gw-agent-default',
+                                  'context_cap_tokens': 32768,
+                                  'max_output_tokens': 8192,
+                                  'allowed_data_classes': ['synthetic']},
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+             patch.object(task_submission_cli, 'resolve_profile_config',
+                          return_value={'generation': {'max_tokens': 8192,
+                                                       'context_cap_tokens': 32768}}), \
+             patch.object(task_submission_cli, 'selected_provider', return_value={
+                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'base_url': 'https://authorized.example/v1'}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
              patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
