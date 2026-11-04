@@ -1152,18 +1152,14 @@ class TaskCompletionTests(unittest.TestCase):
                                       evidence['missing_gates'])
 
     def test_agy_review_family_uses_actual_model_and_unknown_fails_closed(self):
-        for model, compatible_reviewer in (
-                ('claude-sonnet-5-5-medium', 'codex-reviewer'),
-                ('gemini-2.5-pro', 'claude-reviewer')):
+        for model, compatible_reviewers in (
+                ('claude-sonnet-5-5-medium', ('codex-reviewer',)),
+                ('gemini-2.5-pro', ('claude-reviewer', 'codex-reviewer'))):
             developer = {'provider_profile': 'agy', 'model': model}
             with self.subTest(model=model):
-                self.assertTrue(task_completion._review_family_compatible(
-                    developer, compatible_reviewer))
-                refused_reviewer = ('claude-reviewer'
-                                    if compatible_reviewer == 'codex-reviewer'
-                                    else 'codex-reviewer')
-                self.assertFalse(task_completion._review_family_compatible(
-                    developer, refused_reviewer))
+                for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                    self.assertEqual(task_completion._review_family_compatible(
+                        developer, reviewer), reviewer in compatible_reviewers)
         for developer in ({'provider_profile': 'agy'},
                           {'provider_profile': 'agy', 'model': 'other-model'}):
             with self.subTest(developer=developer):

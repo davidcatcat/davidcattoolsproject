@@ -122,23 +122,26 @@ class ReviewDispatchTests(unittest.TestCase):
                     self.assertEqual(review_dispatch._select_reviewer(task), expected)
 
     def test_agy_reviewer_selection_uses_model_family_and_fails_closed(self):
-        cases = (
-            ('claude-sonnet-5-5-medium', 'codex-reviewer'),
-            ('gemini-2.5-pro', 'claude-reviewer'),
-        )
-        for model, expected in cases:
+        for model, expected in (
+                ('claude-sonnet-5-5-medium', 'codex-reviewer'),
+                ('gemini-2.5-pro', 'claude-reviewer')):
             task = {'task_id': TASK, 'developer': {
                 'provider_profile': 'agy', 'model': model}}
             with self.subTest(model=model), patch.object(
                     review_dispatch.worker_dispatch, 'evaluate',
                     return_value=SimpleNamespace(allowed=True)) as evaluate:
                 self.assertEqual(review_dispatch._select_reviewer(task), expected)
-                refused = 'claude-reviewer' if expected == 'codex-reviewer' else 'codex-reviewer'
-                with self.assertRaises(LLMToolError) as raised:
-                    review_dispatch._select_reviewer(task, refused)
-                self.assertEqual(raised.exception.review_dispatch_code,
-                                 'REVIEWER_SAME_FAMILY')
-                evaluate.assert_called_once()
+                if model.startswith('claude-'):
+                    with self.assertRaises(LLMToolError) as raised:
+                        review_dispatch._select_reviewer(task, 'claude-reviewer')
+                    self.assertEqual(raised.exception.review_dispatch_code,
+                                     'REVIEWER_SAME_FAMILY')
+                    evaluate.assert_called_once()
+                else:
+                    for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                        self.assertEqual(review_dispatch._select_reviewer(
+                            task, reviewer), reviewer)
+                    self.assertEqual(evaluate.call_count, 3)
         for developer in (
                 {'provider_profile': 'agy'},
                 {'provider_profile': 'agy', 'model': 'other-model'}):
@@ -564,6 +567,8 @@ class ReviewDispatchTests(unittest.TestCase):
                 self.store, TASK, 'executor-d6', 42, 1, task=task)[4], 'claude-reviewer')
             for family in ('opencode', 'company-gw', 'agy'):
                 task['developer']['provider_profile'] = family
+                if family == 'agy':
+                    task['developer']['model'] = 'gemini-2.5-pro'
                 self.assertEqual(review_dispatch._preflight(
                     self.store, TASK, 'executor-d6', 42, 1, task=task)[4],
                     'claude-reviewer')
