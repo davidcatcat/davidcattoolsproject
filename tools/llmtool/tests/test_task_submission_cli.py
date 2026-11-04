@@ -3814,7 +3814,11 @@ class DelegateRepairCapTests(unittest.TestCase):
 
     def test_proposal_cap_refuses_company_gw_and_codex(self):
         self._prior_assignments()
-        registration = Namespace(task_id='executor-task-1')
+        registration = Namespace(
+            task_id='executor-task-1', trusted_agent_id='test-agent',
+            session_ref='test-session', native_session_id=None,
+            root='/tmp/repair-cap-d6', common_dir='/tmp/repair-cap-d6/.git',
+            branch='task/repair-cap')
         snapshot = Namespace(head='a' * 40)
         for provider in ('company-gw', 'codex'):
             with self.subTest(provider=provider):
