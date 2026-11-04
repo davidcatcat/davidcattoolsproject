@@ -5,12 +5,21 @@ variable indirection, quote splitting, Claude's disableAllHooks setting, or
 Claude's --safe-mode option. An agent's own Bash can also run this module with
 synthetic stdin, so same-user forgery remains possible. These measured
 bypasses remain out of reach. Delivery markers use a short freshness window
-because separate hook processes have no shared delivery-run identifier; a
-failed redelivery is detected only when its part 1 arrives and revokes the
-prior receipt. One session satisfies one gate family. A gate mismatch reports
+because separate hook processes have no shared delivery-run identifier. An
+attempt key hashes the stable hook input (event, source, session, agent, role,
+repository, manifest content and part count); the first arriving part allocates
+a random attempt id under the ledger lock and siblings join it. A repeated part
+starts a new attempt and revokes the prior attempt's markers and receipt. Thus
+same-source attempts are distinguished when they overlap by repeating a part;
+identical same-source attempts with disjoint part sets cannot be distinguished
+from one out-of-order attempt because Claude supplies no invocation id. A
+failed output is not recorded; a later redelivery is recognized as a repeated
+part only if that part was previously recorded. One session satisfies one gate family. A gate mismatch reports
 WRONG_HEAD. Receipts bind a content digest, not the delivered Git commit.
 Partial-part markers use OBSERVED_READ because the ledger has no partial
-delivery evidence level; only a complete set creates HOOK_DELIVERED.
+delivery evidence level; only a complete set creates HOOK_DELIVERED. N4 and
+N5 remain deferred; enforce mode continues to block protected commands without
+a VERIFIED receipt.
 """
 
 import hashlib
@@ -190,47 +199,34 @@ def _part_binding(base, part, count, generation):
     return values
 
 
-def _revoke_delivery_receipts(base, count):
-    """Revoke every older complete receipt and partial marker for this session."""
-    path = skill_ledger._path()
-    lock_fd = skill_ledger._locked(path)
-    try:
-        records = skill_ledger._read(path, recover_torn=True)
-        if (not skill_ledger._chain(records) or
-                not skill_ledger._recover_anchor(path, records)):
-            raise ValueError('LEDGER_UNREADABLE')
-        revoked = {item.get('revokes_receipt_id') for item in records
-                   if item.get('entry_type') == 'REVOCATION'}
-        bindings = [base]
-        bindings.extend(
-            _part_binding(base, number, count, generation)
-            for generation in _DELIVERY_GENERATIONS
-            for number in range(1, count + 1)
-        )
-        for target in list(records):
-            if (target.get('entry_type') == 'REVOCATION' or
-                    target.get('receipt_id') in revoked or
-                    target.get('evidence_level') not in
-                    ('HOOK_DELIVERED', 'OBSERVED_READ')):
-                continue
-            if not any(all(target.get(key) == binding[key]
-                           for key in skill_ledger._BINDING_FIELDS)
-                       for binding in bindings):
-                continue
-            event = dict(target)
-            event.update(
-                entry_type='REVOCATION',
-                revokes_receipt_id=target['receipt_id'],
-                revocation_reason='DELIVERY_RESTARTED',
-                status='REVOKED', receipt_id=secrets.token_hex(16),
-                created_at=skill_ledger._now_text(),
-            )
-            skill_ledger._append_locked(path, records, event)
-            records.append(event)
-            revoked.add(target['receipt_id'])
-    finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+def _attempt_key(base, event_name, source, count):
+    value = {key: base[key] for key in skill_ledger._BINDING_FIELDS}
+    value.update(event_name=event_name, source=source, part_count=count)
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'))
+                          .encode('utf-8')).hexdigest()
+
+
+def _binding_key(base):
+    return hashlib.sha256(json.dumps(
+        {key: base[key] for key in skill_ledger._BINDING_FIELDS},
+        sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
+
+
+def _revoke_attempt(path, records, revoked, attempt_id):
+    for target in list(records):
+        if (target.get('delivery_attempt_id') != attempt_id or
+                target.get('entry_type') == 'REVOCATION' or
+                target.get('receipt_id') in revoked):
+            continue
+        event = dict(target)
+        event.update(entry_type='REVOCATION',
+                     revokes_receipt_id=target['receipt_id'],
+                     revocation_reason='DELIVERY_RESTARTED', status='REVOKED',
+                     receipt_id=secrets.token_hex(16),
+                     created_at=skill_ledger._now_text())
+        skill_ledger._append_locked(path, records, event)
+        records.append(event)
+        revoked.add(target['receipt_id'])
 
 
 def _finalize_delivery():
@@ -239,20 +235,11 @@ def _finalize_delivery():
     _PENDING_DELIVERY = None
     if pending is None:
         return
-    base = pending['base']
-    generation = pending['generation']
-    part_values = _part_binding(base, pending['part'], pending['count'], generation)
-    part_values['evidence_level'] = 'OBSERVED_READ'
-    try:
-        skill_ledger.record(part_values)
-    except Exception:
-        _log('LEDGER_UNREADABLE')
-        return
-    _finalize_if_complete(pending)
+    _record_delivery_part(pending)
 
 
-def _finalize_if_complete(pending):
-    """Append one complete receipt while holding the ledger's exclusive lock."""
+def _record_delivery_part(pending):
+    """Select/join an attempt, append its marker, and finalize under one lock."""
     ledger = skill_ledger
     path = ledger._path()
     try:
@@ -269,7 +256,9 @@ def _finalize_if_complete(pending):
         cutoff = now.timestamp() - _PART_FRESH_SECONDS
         revoked = {item.get('revokes_receipt_id') for item in records
                    if item.get('entry_type') == 'REVOCATION'}
-        candidates = {}
+        attempt_key = pending['attempt_key']
+        binding_key = _binding_key(pending['base'])
+        active = {}
         for item in records:
             if (item.get('evidence_level') != 'OBSERVED_READ' or
                     item.get('entry_type') == 'REVOCATION' or
@@ -277,31 +266,70 @@ def _finalize_if_complete(pending):
                 continue
             created = skill_ledger._stamp(item.get('created_at'))
             if created is None or created.timestamp() < cutoff:
+                if item.get('delivery_attempt_key') == attempt_key:
+                    _revoke_attempt(path, records, revoked,
+                                    item.get('delivery_attempt_id'))
                 continue
-            for number in range(1, pending['count'] + 1):
-                marker = _part_binding(pending['base'], number,
-                                       pending['count'], pending['generation'])
-                if all(item.get(key) == marker[key]
-                       for key in skill_ledger._BINDING_FIELDS):
-                    candidates[number] = created
-        if len(candidates) != pending['count']:
+            if item.get('delivery_attempt_key') == attempt_key:
+                active.setdefault(item.get('delivery_attempt_id'), {})[
+                    item.get('delivery_part')] = item
+        attempt_id = next(iter(active), None)
+        if attempt_id is None or pending['part'] in active[attempt_id]:
+            if attempt_id is not None:
+                _revoke_attempt(path, records, revoked, attempt_id)
+            # A new source/attempt invalidates earlier receipts for this exact
+            # session, role, agent, repository and manifest binding.
+            prior_ids = {item.get('delivery_attempt_id') for item in records
+                         if item.get('delivery_binding_key') == binding_key and
+                         item.get('receipt_id') not in revoked}
+            for prior_id in prior_ids:
+                if prior_id:
+                    _revoke_attempt(path, records, revoked, prior_id)
+            for target in list(records):
+                if (target.get('entry_type') == 'REVOCATION' or
+                        target.get('evidence_level') != 'HOOK_DELIVERED' or
+                        target.get('receipt_id') in revoked):
+                    continue
+                if all(target.get(key) == pending['base'][key]
+                       for key in ledger._BINDING_FIELDS):
+                    event = dict(target)
+                    event.update(entry_type='REVOCATION',
+                                 revokes_receipt_id=target['receipt_id'],
+                                 revocation_reason='DELIVERY_RESTARTED',
+                                 status='REVOKED', receipt_id=secrets.token_hex(16),
+                                 created_at=ledger._now_text())
+                    ledger._append_locked(path, records, event)
+                    records.append(event)
+                    revoked.add(target['receipt_id'])
+            attempt_id = secrets.token_hex(16)
+            active[attempt_id] = {}
+        part_values = _part_binding(
+            pending['base'], pending['part'], pending['count'], attempt_id,
+        )
+        part_values.update(
+            schema_version=ledger.SCHEMA_VERSION,
+            receipt_id=secrets.token_hex(16), evidence_level='OBSERVED_READ',
+            status='ACTIVE',
+            created_at=now.isoformat(timespec='seconds').replace('+00:00', 'Z'),
+            delivery_attempt_id=attempt_id,
+            delivery_attempt_key=attempt_key, delivery_binding_key=binding_key,
+            delivery_part=pending['part'],
+            delivery_part_count=pending['count'],
+        )
+        ledger._append_locked(path, records, part_values)
+        records.append(dict(part_values))
+        markers = active[attempt_id]
+        markers[pending['part']] = records[-1]
+        if len(markers) != pending['count']:
             return
-        times = [value.timestamp() for value in candidates.values()]
-        if max(times) - min(times) > _PART_FRESH_SECONDS:
-            return
-        base = pending['base']
-        # Another concurrent finalizer may have completed this same marker set.
-        for item in records:
-            if (item.get('evidence_level') == 'HOOK_DELIVERED' and
-                    all(item.get(key) == base[key]
-                        for key in skill_ledger._BINDING_FIELDS) and
-                    item.get('receipt_id') not in revoked):
-                return
-        value = {key: base[key] for key in skill_ledger._BINDING_FIELDS}
+        value = {key: pending['base'][key] for key in ledger._BINDING_FIELDS}
         value.update({
             'schema_version': skill_ledger.SCHEMA_VERSION,
             'receipt_id': secrets.token_hex(16),
             'evidence_level': 'HOOK_DELIVERED', 'status': 'ACTIVE',
+            'delivery_attempt_id': attempt_id,
+            'delivery_attempt_key': attempt_key,
+            'delivery_binding_key': binding_key,
             'created_at': now.isoformat(timespec='seconds').replace('+00:00', 'Z'),
             'expires_at': (now + timedelta(seconds=86400))
                           .isoformat(timespec='seconds').replace('+00:00', 'Z'),
@@ -345,19 +373,15 @@ def _delivery(payload, event_name, part):
                   else 'subagent-start')
     if generation not in _DELIVERY_GENERATIONS:
         generation = 'delivery'
-    if part == 1:
-        try:
-            _revoke_delivery_receipts(base, len(contexts))
-        except Exception:
-            _log('LEDGER_UNREADABLE')
-            if mode == 'enforce':
-                return _deny(event_name, 'LEDGER_UNREADABLE')
     global _PENDING_DELIVERY
     _PENDING_DELIVERY = {
         'base': base, 'part': part, 'count': len(contexts),
         'payload': payload, 'role': role, 'repo': repo,
         'content_digest': content_digest, 'manifest': manifest,
         'generation': generation,
+        'attempt_key': _attempt_key(
+            base, event_name, generation, len(contexts),
+        ),
         'event_name': event_name,
     }
     return {'hookSpecificOutput': {

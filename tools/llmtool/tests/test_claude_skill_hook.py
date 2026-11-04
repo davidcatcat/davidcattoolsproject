@@ -7,28 +7,31 @@ import os
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from llmtool import claude_skill_hook as hook
 
 
-def _concurrent_delivery_part(ledger_path, part):
+def _parallel_full_hook_part(ledger_path, part):
     from pathlib import Path
 
-    hook.skill_ledger._path = lambda: Path(ledger_path)
-    base = {
-        'task_id': 'task-1', 'run_id': 'run-1', 'session_id': 'session-main',
-        'agent_id': 'main', 'role': 'pm', 'provider': 'claude',
-        'model': 'claude-test', 'repo': '/repo', 'head': 'content-digest',
-        'manifest_sha256': 'content-digest',
+    payload = {
+        'hook_event_name': 'SessionStart', 'source': 'startup',
+        'session_id': 'session-main', 'cwd': '/repo', 'model': 'claude-test',
     }
-    hook._PENDING_DELIVERY = {
-        'base': base, 'part': part, 'count': 3, 'generation': 'delivery',
-        'payload': {}, 'role': 'pm', 'repo': '/repo',
-        'content_digest': 'content-digest', 'manifest': {},
-        'event_name': 'SessionStart',
-    }
-    hook._finalize_delivery()
+    with mock.patch.object(hook.skill_ledger, '_path',
+                           return_value=Path(ledger_path)), \
+            mock.patch.object(hook, '_commit', return_value='a' * 40), \
+            mock.patch.object(hook, 'build_manifest', return_value={
+                'manifest_sha256': 'd' * 64,
+                'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
+            }), \
+            mock.patch.object(hook, 'read_manifest_files',
+                              return_value=[('skill.md', 'x' * 20000)]), \
+            mock.patch.object(hook.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+            mock.patch.object(hook.sys, 'stdout', io.StringIO()):
+        hook.main(['--part', str(part)])
 
 
 class ClaudeSkillHookTests(unittest.TestCase):
@@ -75,13 +78,12 @@ class ClaudeSkillHookTests(unittest.TestCase):
     def test_context_is_split_to_limit_and_names_part_count(
             self, read_files, _build, _commit):
         read_files.return_value = [('skills.txt', 'x' * 20000)]
-        with mock.patch.object(hook, '_revoke_delivery_receipts'):
-            first = hook.handle(self._session(), part=1)
-            context = first['hookSpecificOutput']['additionalContext']
-            self.assertLessEqual(len(context), 9000)
-            self.assertIn('part 1 of 3', context)
-            second = hook.handle(self._session(), part=2)
-            third = hook.handle(self._session(), part=3)
+        first = hook.handle(self._session(), part=1)
+        context = first['hookSpecificOutput']['additionalContext']
+        self.assertLessEqual(len(context), 9000)
+        self.assertIn('part 1 of 3', context)
+        second = hook.handle(self._session(), part=2)
+        third = hook.handle(self._session(), part=3)
         self.assertIn('part 2 of 3', second['hookSpecificOutput']['additionalContext'])
         self.assertIn('part 3 of 3', third['hookSpecificOutput']['additionalContext'])
         self.assertIn('manifest_sha256=' + 'd' * 64, context)
@@ -92,7 +94,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files')
-    @mock.patch.object(hook, '_finalize_if_complete')
+    @mock.patch.object(hook, '_record_delivery_part')
     @mock.patch.object(hook.skill_ledger, 'record')
     @mock.patch.object(hook.skill_ledger, 'check', return_value={
         'status': 'UNVERIFIED', 'reason': 'NOT_FOUND',
@@ -109,7 +111,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files')
-    @mock.patch.object(hook, '_finalize_if_complete')
+    @mock.patch.object(hook, '_record_delivery_part')
     def test_missing_middle_part_does_not_record_delivery(
             self, finalize, read_files, _build, _commit):
         read_files.return_value = [('skills.txt', 'x' * 20000)]
@@ -122,8 +124,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
             return {'status': 'VERIFIED' if values[8] in seen else 'UNVERIFIED'}
 
         with mock.patch.object(hook.skill_ledger, 'record', side_effect=record), \
-                mock.patch.object(hook.skill_ledger, 'check', side_effect=check), \
-                mock.patch.object(hook, '_revoke_delivery_receipts'):
+                mock.patch.object(hook.skill_ledger, 'check', side_effect=check):
             self._run_hook(self._session(), part=1)
             self._run_hook(self._session(), part=3)
         finalize.assert_has_calls([mock.call(mock.ANY), mock.call(mock.ANY)])
@@ -175,13 +176,13 @@ class ClaudeSkillHookTests(unittest.TestCase):
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files', return_value=[('skill.md', 'required')])
-    @mock.patch.object(hook, '_finalize_if_complete')
+    @mock.patch.object(hook, '_record_delivery_part')
     def test_compact_redelivers_and_records_part(
             self, finalize, _files, _build, _commit):
         with mock.patch.object(hook.skill_ledger, 'record'), \
                 mock.patch.object(hook.skill_ledger, 'check', return_value={
                     'status': 'VERIFIED', 'reason': None,
-                }), mock.patch.object(hook, '_revoke_delivery_receipts'):
+                }):
             response = self._run_hook(self._session('compact'))
         self.assertIn('required', response['hookSpecificOutput']['additionalContext'])
         finalize.assert_called_once()
@@ -262,32 +263,18 @@ class ClaudeSkillHookTests(unittest.TestCase):
         self.assertEqual(response['hookSpecificOutput']['hookEventName'], 'PreToolUse')
 
     @mock.patch.object(hook, '_commit', return_value='a' * 40)
-    @mock.patch.object(hook, '_repo_root', return_value='/repo')
-    @mock.patch.object(hook, '_manifest_context', return_value=(
-        {'entries': [{'path': 'skill.md', 'sha256': 'b' * 64, 'size': 1}],
-         'manifest_sha256': 'c' * 64}, ['part']))
-    @mock.patch.object(hook, '_revoke_delivery_receipts')
-    def test_same_source_new_run_revokes_previous_part_markers(
-            self, revoke, _manifest, _root, _commit):
-        payload = self._session('compact')
-        hook._delivery(payload, 'SessionStart', 1)
-        hook._delivery(payload, 'SessionStart', 1)
-        self.assertEqual(revoke.call_count, 2)
-        self.assertEqual(revoke.call_args_list[0].args[1], 1)
-
-    @mock.patch.object(hook, '_commit', return_value='a' * 40)
     @mock.patch.object(hook, 'build_manifest', return_value={
         'manifest_sha256': 'd' * 64,
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files', return_value=[('skill.md', 'required')])
-    @mock.patch.object(hook, '_finalize_if_complete')
+    @mock.patch.object(hook, '_record_delivery_part')
     def test_parent_and_child_delivery_bind_separate_agent_ids(
             self, finalize, _files, _build, _commit):
         with mock.patch.dict(os.environ, {'LLMTOOL_ROLE': 'pm'}), \
                 mock.patch.object(hook.skill_ledger, 'check', return_value={
                     'status': 'VERIFIED', 'reason': None,
-                }), mock.patch.object(hook, '_revoke_delivery_receipts'):
+                }):
             self._run_hook(self._session())
             child = {
                 'hook_event_name': 'SubagentStart', 'session_id': 'session-main',
@@ -443,15 +430,15 @@ class ClaudeSkillHookTests(unittest.TestCase):
             self.assertEqual(hook.handle(payload), {})
         check.assert_called_once_with(payload, 'publish')
 
-    def test_concurrent_out_of_order_parts_create_one_receipt(self):
+    def test_parallel_full_hook_parts_create_one_receipt(self):
         from pathlib import Path
 
         with tempfile.TemporaryDirectory() as directory:
             ledger_path = Path(directory) / 'skill-ledger.jsonl'
-            context = multiprocessing.get_context('spawn')
+            context = multiprocessing.get_context('fork')
             processes = [context.Process(
-                target=_concurrent_delivery_part, args=(str(ledger_path), part),
-            ) for part in (3, 1, 2)]
+                target=_parallel_full_hook_part, args=(str(ledger_path), part),
+            ) for part in (3, 2, 1)]
             for process in processes:
                 process.start()
             for process in processes:
@@ -459,9 +446,116 @@ class ClaudeSkillHookTests(unittest.TestCase):
                 self.assertEqual(process.exitcode, 0)
             with mock.patch.object(hook.skill_ledger, '_path', return_value=ledger_path):
                 records = hook.skill_ledger._read(ledger_path)
-            receipts = [item for item in records
-                        if item.get('evidence_level') == 'HOOK_DELIVERED']
+            receipts = [item for item in records if
+                        item.get('evidence_level') == 'HOOK_DELIVERED' and
+                        item.get('entry_type') != 'REVOCATION' and
+                        not hook.skill_ledger._revoked(records, item['receipt_id'])]
             self.assertEqual(len(receipts), 1)
+
+    def test_full_hook_part_one_arrives_last(self):
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / 'skill-ledger.jsonl'
+            with mock.patch.object(hook.skill_ledger, '_path', return_value=ledger_path), \
+                    mock.patch.object(hook, '_commit', return_value='a' * 40), \
+                    mock.patch.object(hook, 'build_manifest', return_value={
+                        'manifest_sha256': 'd' * 64,
+                        'entries': [{'path': 'skill.md', 'sha256': 'e' * 64,
+                                    'size': 8}],
+                    }), \
+                    mock.patch.object(hook, 'read_manifest_files',
+                                      return_value=[('skill.md', 'x' * 20000)]):
+                for part in (3, 2, 1):
+                    self._run_hook(self._session(), part)
+                records = hook.skill_ledger._read(ledger_path)
+            receipts = [item for item in records
+                        if item.get('evidence_level') == 'HOOK_DELIVERED' and
+                        item.get('entry_type') != 'REVOCATION' and
+                        not hook.skill_ledger._revoked(records, item['receipt_id'])]
+            self.assertEqual(len(receipts), 1)
+
+    def test_repeated_same_source_part_starts_new_attempt(self):
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / 'skill-ledger.jsonl'
+            with mock.patch.object(hook.skill_ledger, '_path', return_value=ledger_path), \
+                    mock.patch.object(hook, '_commit', return_value='a' * 40), \
+                    mock.patch.object(hook, 'build_manifest', return_value={
+                        'manifest_sha256': 'd' * 64,
+                        'entries': [{'path': 'skill.md', 'sha256': 'e' * 64,
+                                    'size': 8}],
+                    }), \
+                    mock.patch.object(hook, 'read_manifest_files',
+                                      return_value=[('skill.md', 'x' * 20000)]):
+                for part in (1, 2, 3, 1, 2):
+                    self._run_hook(self._session('compact'), part)
+                records = hook.skill_ledger._read(ledger_path)
+            receipts = [item for item in records
+                        if item.get('evidence_level') == 'HOOK_DELIVERED' and
+                        item.get('entry_type') != 'REVOCATION']
+            active = [item for item in receipts
+                      if not hook.skill_ledger._revoked(records, item['receipt_id'])]
+            self.assertEqual(len(receipts), 1)
+            self.assertEqual(active, [])
+
+    def test_expired_markers_cannot_complete_a_new_attempt(self):
+        from pathlib import Path
+
+        class TestDateTime(datetime):
+            current = datetime(2026, 11, 4, tzinfo=timezone.utc)
+
+            @classmethod
+            def now(cls, tz=None):
+                return cls.current if tz else cls.current.replace(tzinfo=None)
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / 'skill-ledger.jsonl'
+            with mock.patch.object(hook.skill_ledger, '_path', return_value=ledger_path), \
+                    mock.patch.object(hook, '_commit', return_value='a' * 40), \
+                    mock.patch.object(hook, 'build_manifest', return_value={
+                        'manifest_sha256': 'd' * 64,
+                        'entries': [{'path': 'skill.md', 'sha256': 'e' * 64,
+                                    'size': 8}],
+                    }), \
+                    mock.patch.object(hook, 'read_manifest_files',
+                                      return_value=[('skill.md', 'x' * 20000)]), \
+                    mock.patch.object(hook, 'datetime', TestDateTime):
+                self._run_hook(self._session('compact'), 1)
+                self._run_hook(self._session('compact'), 2)
+                TestDateTime.current += timedelta(seconds=hook._PART_FRESH_SECONDS + 1)
+                self._run_hook(self._session('compact'), 3)
+                self._run_hook(self._session('compact'), 1)
+                self._run_hook(self._session('compact'), 2)
+                records = hook.skill_ledger._read(ledger_path)
+            receipts = [item for item in records
+                        if item.get('evidence_level') == 'HOOK_DELIVERED' and
+                        item.get('entry_type') != 'REVOCATION']
+            active = [item for item in receipts
+                      if not hook.skill_ledger._revoked(records, item['receipt_id'])]
+            self.assertEqual(len(active), 1)
+
+    def test_failed_hook_output_does_not_record_a_part(self):
+        from pathlib import Path
+
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / 'skill-ledger.jsonl'
+            with mock.patch.object(hook.skill_ledger, '_path', return_value=ledger_path), \
+                    mock.patch.object(hook, '_commit', return_value='a' * 40), \
+                    mock.patch.object(hook, 'build_manifest', return_value={
+                        'manifest_sha256': 'd' * 64,
+                        'entries': [{'path': 'skill.md', 'sha256': 'e' * 64,
+                                    'size': 8}],
+                    }), \
+                    mock.patch.object(hook, 'read_manifest_files',
+                                      return_value=[('skill.md', 'required')]), \
+                    mock.patch.object(hook, '_emit', return_value=False):
+                self._run_hook(self._session('compact'))
+                records = hook.skill_ledger._read(ledger_path)
+            self.assertFalse(any(item.get('evidence_level') in
+                                 ('OBSERVED_READ', 'HOOK_DELIVERED')
+                                 for item in records))
 
     @mock.patch.object(hook, '_commit', return_value='a' * 40)
     @mock.patch.object(hook, 'build_manifest', return_value={
