@@ -166,7 +166,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
                              for r in hook.skill_ledger._read(self.ledger)))
         self.assertEqual(
             self.protected()['hookSpecificOutput']['permissionDecisionReason'],
-            'STALE_BLOB',
+            'NOT_READ',
         )
 
     def test_tool_events_need_no_repeated_session_model(self):

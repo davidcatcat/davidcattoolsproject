@@ -2,7 +2,10 @@
 
 The hook verifies that each required file was observed through a Read tool in
 the same session and agent and still has the same content hash. This is
-evidence that the text reached that context, not that it was understood. The
+evidence that the text reached that context, not that it was understood. A
+Read whose working-tree hash differs from the manifest hash records no row, so
+the gate reports NOT_READ; a file changed after a valid Read reports
+STALE_BLOB. The
 N3 protected-word matcher is deliberately lexical and cannot block commands
 hidden in scripts, shell indirection, disabled hooks, or Claude safe mode.
 Same-user processes can forge hook input or ledger data. A Read event is
@@ -330,11 +333,7 @@ def _check(payload, gate):
         current = _safe_repo_file(repo, entry['path'])
         current_hash = current[1] if current else None
         required[entry['path']] = current_hash
-    saw_stale = any(
-        current_hash is None or current_hash != entry['sha256']
-        for entry in manifest['entries']
-        for current_hash in (required[entry['path']],)
-    )
+    saw_stale = False
     saw_compacted = False
     fresh_by_path = {}
     for path, current_hash in required.items():
