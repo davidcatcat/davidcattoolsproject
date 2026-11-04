@@ -252,8 +252,9 @@ def _outcome_status(report):
         if in_outcome and (stripped.startswith('## ') or
                            any(_has_report_section(stripped, h) for h in REPORT_SECTIONS)):
             in_outcome = False
-        if in_outcome and stripped in _STATUS_WORDS:
-            found.append(stripped)
+        word = stripped.strip('*').strip()
+        if in_outcome and word in _STATUS_WORDS:
+            found.append(word)
     return found[0] if len(found) == 1 else 'REPORT_INVALID'
 
 
