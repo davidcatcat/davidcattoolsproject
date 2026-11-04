@@ -117,7 +117,8 @@ class SkillManifestTests(unittest.TestCase):
 
         self._manifest(runner=runner)
         self.assertGreater(len(calls), 1)
-        self.assertEqual(calls[0][1:3], ('cat-file', '-e'))
+        self.assertIn(('git', '--no-replace-objects', 'rev-parse', '--verify', self.commit + '^{commit}'), calls)
+        self.assertTrue(any(call[2:4] == ('cat-file', 'blob') for call in calls))
 
     def test_git_reads_disable_stdin_and_have_a_timeout(self):
         observed = []
