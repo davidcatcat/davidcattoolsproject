@@ -4,17 +4,24 @@ The hook cannot block a script file that invokes a protected command, shell
 variable indirection, quote splitting, Claude's disableAllHooks setting, or
 Claude's --safe-mode option. An agent's own Bash can also run this module with
 synthetic stdin, so same-user forgery remains possible. These measured
-bypasses remain out of reach.
+bypasses remain out of reach. Delivery markers use a short freshness window
+because separate hook processes have no shared delivery-run identifier; a
+failed redelivery is detected only when its part 1 arrives and revokes the
+prior receipt. One session satisfies one gate family. A gate mismatch reports
+WRONG_HEAD. Receipts bind a content digest, not the delivered Git commit.
+Partial-part markers use OBSERVED_READ because the ledger has no partial
+delivery evidence level; only a complete set creates HOOK_DELIVERED.
 """
 
 import hashlib
 import json
 import os
 import re
-import shlex
+import secrets
 import subprocess
 import sys
-from datetime import datetime, timezone
+import fcntl
+from datetime import datetime, timedelta, timezone
 
 from . import skill_ledger
 from .skill_manifest import build_manifest, read_manifest_files
@@ -28,6 +35,8 @@ _AGENT_ROLES = {
     'high-debug': 'high-debug',
 }
 _PENDING_DELIVERY = None
+_PART_FRESH_SECONDS = 30
+_DELIVERY_GENERATIONS = ('startup', 'resume', 'compact', 'subagent-start', 'delivery')
 
 
 def _mode():
@@ -88,6 +97,17 @@ def _commit(repo):
     return head.lower()
 
 
+def _repo_root(repo):
+    result = subprocess.run(
+        ['git', 'rev-parse', '--show-toplevel'], cwd=repo,
+        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL, check=False, timeout=10,
+    )
+    if result.returncode != 0:
+        raise ValueError('REPOSITORY_UNAVAILABLE')
+    return os.path.realpath(result.stdout.decode('utf-8').strip())
+
+
 def _manifest_context(repo, head, role, gate):
     manifest = build_manifest(repo, head, role, gate, provider='claude')
     files = read_manifest_files(repo, manifest)
@@ -124,7 +144,7 @@ def _manifest_context(repo, head, role, gate):
     return manifest, contexts
 
 
-def _binding(payload, role, repo, content_digest, manifest):
+def _binding(payload, role, repo, content_digest):
     agent_id = payload.get('agent_id')
     if not agent_id:
         agent_id = 'main'
@@ -144,18 +164,6 @@ def _binding(payload, role, repo, content_digest, manifest):
         'head': content_digest,
         'manifest_sha256': content_digest,
     }
-
-
-def _record(payload, role, repo, content_digest, manifest, event_name):
-    values = _binding(payload, role, repo, content_digest, manifest)
-    values['evidence_level'] = 'HOOK_DELIVERED'
-    if any(type(value) is not str or not value for value in values.values()):
-        _log('DELIVERY_BINDING_MISSING')
-        return
-    try:
-        skill_ledger.record(values)
-    except Exception:
-        _log('LEDGER_UNREADABLE')
 
 
 def _content_digest(manifest):
@@ -182,6 +190,49 @@ def _part_binding(base, part, count, generation):
     return values
 
 
+def _revoke_delivery_receipts(base, count):
+    """Revoke every older complete receipt and partial marker for this session."""
+    path = skill_ledger._path()
+    lock_fd = skill_ledger._locked(path)
+    try:
+        records = skill_ledger._read(path, recover_torn=True)
+        if (not skill_ledger._chain(records) or
+                not skill_ledger._recover_anchor(path, records)):
+            raise ValueError('LEDGER_UNREADABLE')
+        revoked = {item.get('revokes_receipt_id') for item in records
+                   if item.get('entry_type') == 'REVOCATION'}
+        bindings = [base]
+        bindings.extend(
+            _part_binding(base, number, count, generation)
+            for generation in _DELIVERY_GENERATIONS
+            for number in range(1, count + 1)
+        )
+        for target in list(records):
+            if (target.get('entry_type') == 'REVOCATION' or
+                    target.get('receipt_id') in revoked or
+                    target.get('evidence_level') not in
+                    ('HOOK_DELIVERED', 'OBSERVED_READ')):
+                continue
+            if not any(all(target.get(key) == binding[key]
+                           for key in skill_ledger._BINDING_FIELDS)
+                       for binding in bindings):
+                continue
+            event = dict(target)
+            event.update(
+                entry_type='REVOCATION',
+                revokes_receipt_id=target['receipt_id'],
+                revocation_reason='DELIVERY_RESTARTED',
+                status='REVOKED', receipt_id=secrets.token_hex(16),
+                created_at=skill_ledger._now_text(),
+            )
+            skill_ledger._append_locked(path, records, event)
+            records.append(event)
+            revoked.add(target['receipt_id'])
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def _finalize_delivery():
     global _PENDING_DELIVERY
     pending = _PENDING_DELIVERY
@@ -197,24 +248,70 @@ def _finalize_delivery():
     except Exception:
         _log('LEDGER_UNREADABLE')
         return
-    if pending['part'] != pending['count']:
+    _finalize_if_complete(pending)
+
+
+def _finalize_if_complete(pending):
+    """Append one complete receipt while holding the ledger's exclusive lock."""
+    ledger = skill_ledger
+    path = ledger._path()
+    try:
+        lock_fd = ledger._locked(path)
+    except Exception:
+        _log('LEDGER_UNREADABLE')
         return
-    for number in range(1, pending['count'] + 1):
-        marker = _part_binding(base, number, pending['count'], generation)
-        try:
-            result = skill_ledger.check(
-                marker['task_id'], marker['run_id'], marker['session_id'],
-                marker['agent_id'], marker['role'], marker['provider'],
-                marker['model'], marker['repo'], marker['head'],
-                marker['manifest_sha256'], now=datetime.now(timezone.utc),
-            )
-        except Exception:
+    try:
+        records = ledger._read(path, recover_torn=True)
+        if not ledger._chain(records) or not ledger._recover_anchor(path, records):
             _log('LEDGER_UNREADABLE')
             return
-        if result.get('status') != 'VERIFIED':
+        now = datetime.now(timezone.utc)
+        cutoff = now.timestamp() - _PART_FRESH_SECONDS
+        revoked = {item.get('revokes_receipt_id') for item in records
+                   if item.get('entry_type') == 'REVOCATION'}
+        candidates = {}
+        for item in records:
+            if (item.get('evidence_level') != 'OBSERVED_READ' or
+                    item.get('entry_type') == 'REVOCATION' or
+                    item.get('receipt_id') in revoked):
+                continue
+            created = skill_ledger._stamp(item.get('created_at'))
+            if created is None or created.timestamp() < cutoff:
+                continue
+            for number in range(1, pending['count'] + 1):
+                marker = _part_binding(pending['base'], number,
+                                       pending['count'], pending['generation'])
+                if all(item.get(key) == marker[key]
+                       for key in skill_ledger._BINDING_FIELDS):
+                    candidates[number] = created
+        if len(candidates) != pending['count']:
             return
-    _record(pending['payload'], pending['role'], pending['repo'],
-            pending['content_digest'], pending['manifest'], pending['event_name'])
+        times = [value.timestamp() for value in candidates.values()]
+        if max(times) - min(times) > _PART_FRESH_SECONDS:
+            return
+        base = pending['base']
+        # Another concurrent finalizer may have completed this same marker set.
+        for item in records:
+            if (item.get('evidence_level') == 'HOOK_DELIVERED' and
+                    all(item.get(key) == base[key]
+                        for key in skill_ledger._BINDING_FIELDS) and
+                    item.get('receipt_id') not in revoked):
+                return
+        value = {key: base[key] for key in skill_ledger._BINDING_FIELDS}
+        value.update({
+            'schema_version': skill_ledger.SCHEMA_VERSION,
+            'receipt_id': secrets.token_hex(16),
+            'evidence_level': 'HOOK_DELIVERED', 'status': 'ACTIVE',
+            'created_at': now.isoformat(timespec='seconds').replace('+00:00', 'Z'),
+            'expires_at': (now + timedelta(seconds=86400))
+                          .isoformat(timespec='seconds').replace('+00:00', 'Z'),
+        })
+        ledger._append_locked(path, records, value)
+    except Exception:
+        _log('LEDGER_UNREADABLE')
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
 
 
 def _delivery(payload, event_name, part):
@@ -225,7 +322,7 @@ def _delivery(payload, event_name, part):
         return _deny(event_name, 'UNVERIFIED_ROLE') if mode == 'enforce' else {}
     repo = payload.get('cwd') or os.getcwd()
     try:
-        repo = os.path.realpath(repo)
+        repo = _repo_root(os.path.realpath(repo))
         head = _commit(repo)
         gate = os.environ.get('LLMTOOL_GATE', 'develop')
         manifest, contexts = _manifest_context(repo, head, role, gate)
@@ -243,30 +340,18 @@ def _delivery(payload, event_name, part):
             'hookEventName': event_name,
             'additionalContext': contexts[part - 1],
         }}
-    base = _binding(payload, role, repo, content_digest, manifest)
-    generation = payload.get('source') if event_name == 'SessionStart' else 'subagent-start'
-    if type(generation) is not str or not generation:
-        generation = 'unknown-start'
+    base = _binding(payload, role, repo, content_digest)
+    generation = (payload.get('source') if event_name == 'SessionStart'
+                  else 'subagent-start')
+    if generation not in _DELIVERY_GENERATIONS:
+        generation = 'delivery'
     if part == 1:
-        # A new first part invalidates a previous complete receipt and any
-        # same-generation observations, so later parts must belong to this run.
-        bindings = (base,) + tuple(
-            _part_binding(base, number, len(contexts), generation)
-            for number in range(1, len(contexts) + 1))
-        for binding in bindings:
-            try:
-                result = skill_ledger.check(
-                    *(binding[key] for key in (
-                        'task_id', 'run_id', 'session_id', 'agent_id', 'role',
-                        'provider', 'model', 'repo', 'head', 'manifest_sha256')),
-                    now=datetime.now(timezone.utc),
-                )
-                if result.get('status') == 'VERIFIED' and result.get('receipt_id'):
-                    skill_ledger.revoke(result['receipt_id'], 'DELIVERY_RESTARTED')
-            except Exception:
-                _log('LEDGER_UNREADABLE')
-                if mode == 'enforce':
-                    return _deny(event_name, 'LEDGER_UNREADABLE')
+        try:
+            _revoke_delivery_receipts(base, len(contexts))
+        except Exception:
+            _log('LEDGER_UNREADABLE')
+            if mode == 'enforce':
+                return _deny(event_name, 'LEDGER_UNREADABLE')
     global _PENDING_DELIVERY
     _PENDING_DELIVERY = {
         'base': base, 'part': part, 'count': len(contexts),
@@ -281,191 +366,37 @@ def _delivery(payload, event_name, part):
     }}
 
 
-def _shell_segments(command):
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=';&|()`,')
-    lexer.whitespace_split = True
-    lexer.commenters = ''
-    tokens = list(lexer)
-    segments, current = [], []
-    for token in tokens:
-        if token and all(char in ';&|()`,' for char in token):
-            if current:
-                segments.append(current)
-                current = []
-            continue
-        current.append(token)
-    if current:
-        segments.append(current)
-    return segments
-
-
-def _unwrap_words(words, depth=0):
-    if depth > 8:
-        raise ValueError('COMMAND_UNPARSEABLE')
-    result = []
-    index = 0
-    while index < len(words):
-        word = words[index]
-        base = os.path.basename(word)
-        if base == 'env':
-            index += 1
-            while index < len(words):
-                item = words[index]
-                if item == '--':
-                    index += 1
-                    break
-                if item.startswith('-'):
-                    index += 2 if item in ('-u', '--unset', '-C', '--chdir') else 1
-                    continue
-                if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', item):
-                    index += 1
-                    continue
-                break
-            continue
-        if base == 'sudo':
-            index += 1
-            while index < len(words) and words[index].startswith('-'):
-                option = words[index]
-                index += 2 if option in ('-u', '-g', '-h', '-p', '-C') else 1
-            continue
-        if base in ('bash', 'sh'):
-            index += 1
-            while index < len(words):
-                option = words[index]
-                if option == '--':
-                    index += 1
-                    break
-                if option.startswith('-') and len(option) > 1:
-                    if 'c' in option[1:]:
-                        index += 1
-                        if index >= len(words):
-                            raise ValueError('COMMAND_UNPARSEABLE')
-                        result.extend(_flatten_command(words[index], depth + 1))
-                        index += 1
-                        break
-                    index += 1
-                    continue
-                break
-            continue
-        result.append(word)
-        index += 1
-    return result
-
-
-def _flatten_command(command, depth=0):
-    if depth > 8:
-        raise ValueError('COMMAND_UNPARSEABLE')
-    flattened = []
-    for words in _shell_segments(command):
-        flattened.extend(_unwrap_words(words, depth))
-    return flattened
-
-
 def _protected_gates(command):
+    # This is intentionally a conservative lexical search, not a shell parser.
+    # It catches commands nested in wrappers, quotes, substitutions and -c args.
     gates = []
-    try:
-        for words in _commands(command):
-            name = os.path.basename(words[0])
-            args = words[1:]
-            if name == 'git' and args and args[0] == 'push':
-                gates.append('publish')
-            elif name == 'gh':
-                is_merge, _ = _gh_subcommand(args, 'merge')
-                is_comment, comment_args = _gh_subcommand(args, 'comment')
-                is_review, review_args = _gh_subcommand(args, 'review')
-                body_args = comment_args if is_comment else review_args
-                has_body_file = any(
-                    item in ('--body-file', '-F') or
-                    item.startswith('--body-file=') or
-                    (item.startswith('-F') and len(item) > 2)
-                    for item in body_args
-                )
-                if is_merge:
-                    gates.append('merge')
-                elif ((is_comment or is_review) and
-                      ('review_verdict' in command.lower() or has_body_file)):
-                    gates.append('review')
-            elif name == 'llmtool' and args[:2] == ['task', 'delegate']:
-                gates.append('dispatch')
-            elif name == 'llmtool' and args[:2] in (
-                    ['task', 'complete'], ['task', 'advance']):
-                gates.append('complete')
-    except (ValueError, TypeError):
-        return ['COMMAND_UNPARSEABLE']
-    return gates
+    for segment in re.split(r'[\n;&|(){}]+', command):
+        tokens = re.findall(r'[A-Za-z0-9_.-]+', segment.lower())
+        if not tokens:
+            continue
+        if tokens[0] in ('echo', 'printf') and '$(' not in segment and '`' not in segment:
+            continue
+        if 'git' in tokens and 'push' in tokens:
+            gates.append('publish')
+        if 'gh' in tokens:
+            if 'pr' in tokens and 'merge' in tokens:
+                gates.append('merge')
+            if 'pr' in tokens and ('comment' in tokens or 'review' in tokens):
+                gates.append('review')
+            if 'issue' in tokens and 'comment' in tokens:
+                gates.append('review')
+        if ('task' in tokens and 'delegate' in tokens and
+                ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens))):
+            gates.append('dispatch')
+        if ('task' in tokens and ('complete' in tokens or 'advance' in tokens) and
+                ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens))):
+            gates.append('complete')
+    # Preserve order while avoiding redundant checks from nested shell forms.
+    return list(dict.fromkeys(gates))
 
 
 def _protected(command):
     return bool(_protected_gates(command))
-
-
-def _commands(command, depth=0):
-    """Yield executable command word lists, including supported wrappers."""
-    if depth > 8:
-        raise ValueError('COMMAND_UNPARSEABLE')
-    for words in _shell_segments(command):
-        if not words:
-            continue
-        executable = os.path.basename(words[0])
-        if executable == 'env':
-            index = 1
-            while index < len(words):
-                item = words[index]
-                if item == '--':
-                    index += 1
-                    break
-                if item.startswith('-'):
-                    index += 2 if item in ('-u', '--unset', '-C', '--chdir') else 1
-                elif re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', item):
-                    index += 1
-                else:
-                    break
-            if index < len(words):
-                yield from _commands(shlex.join(words[index:]), depth + 1)
-        elif executable in ('bash', 'sh'):
-            index = 1
-            while index < len(words):
-                option = words[index]
-                if option == '--':
-                    index += 1
-                    break
-                if option.startswith('-') and len(option) > 1:
-                    index += 1
-                    if 'c' in option[1:]:
-                        if index >= len(words):
-                            raise ValueError('COMMAND_UNPARSEABLE')
-                        yield from _commands(words[index], depth + 1)
-                        break
-                    continue
-                break
-        elif executable == 'sudo':
-            index = 1
-            while index < len(words) and words[index].startswith('-'):
-                index += 2 if words[index] in ('-u', '-g', '-h', '-p', '-C') else 1
-            if index < len(words):
-                yield from _commands(shlex.join(words[index:]), depth + 1)
-        else:
-            yield words
-
-
-def _gh_subcommand(args, verb):
-    """Find a gh PR verb while accepting global options with attached values."""
-    index = 0
-    while index < len(args):
-        value = args[index]
-        if value == 'pr' and index + 1 < len(args):
-            return args[index + 1] == verb, args[index + 2:]
-        if value in ('-R', '--repo', '-c', '--config', '-H', '--hostname'):
-            index += 2
-        elif (value.startswith('--repo=') or value.startswith('--config=') or
-              value.startswith('--hostname=') or
-              (value.startswith('-R') and len(value) > 2)):
-            index += 1
-        elif value.startswith('-'):
-            index += 1
-        else:
-            break
-    return False, []
 
 
 def _check(payload, gate):
@@ -474,6 +405,7 @@ def _check(payload, gate):
         return {'status': 'UNVERIFIED', 'reason': 'UNVERIFIED_ROLE'}
     repo = os.path.realpath(payload.get('cwd') or os.getcwd())
     try:
+        repo = _repo_root(repo)
         head = _commit(repo)
         manifest, _ = _manifest_context(
             repo, head, role, gate,
@@ -563,10 +495,13 @@ def main(argv=None):
     except ValueError as exc:
         reason = str(exc) if str(exc) == 'PART_OUT_OF_RANGE' else 'INPUT_INVALID'
         _log(reason)
+        event_name = None
+        if type(locals().get('payload')) is dict:
+            event_name = payload.get('hook_event_name') or payload.get('hookEventName')
+        if event_name not in ('SessionStart', 'SubagentStart', 'PreToolUse'):
+            event_name = 'PreToolUse'
         response = _deny(
-            payload.get('hook_event_name') or payload.get('hookEventName')
-            if type(locals().get('payload')) is dict else 'PreToolUse',
-            reason,
+            event_name, reason,
         ) if (_mode() == 'enforce' or reason == 'PART_OUT_OF_RANGE') else {}
     except Exception:
         _log('INPUT_INVALID')

@@ -2,6 +2,7 @@
 
 import io
 import json
+import multiprocessing
 import os
 import subprocess
 import tempfile
@@ -9,6 +10,25 @@ import unittest
 from unittest import mock
 
 from llmtool import claude_skill_hook as hook
+
+
+def _concurrent_delivery_part(ledger_path, part):
+    from pathlib import Path
+
+    hook.skill_ledger._path = lambda: Path(ledger_path)
+    base = {
+        'task_id': 'task-1', 'run_id': 'run-1', 'session_id': 'session-main',
+        'agent_id': 'main', 'role': 'pm', 'provider': 'claude',
+        'model': 'claude-test', 'repo': '/repo', 'head': 'content-digest',
+        'manifest_sha256': 'content-digest',
+    }
+    hook._PENDING_DELIVERY = {
+        'base': base, 'part': part, 'count': 3, 'generation': 'delivery',
+        'payload': {}, 'role': 'pm', 'repo': '/repo',
+        'content_digest': 'content-digest', 'manifest': {},
+        'event_name': 'SessionStart',
+    }
+    hook._finalize_delivery()
 
 
 class ClaudeSkillHookTests(unittest.TestCase):
@@ -21,6 +41,13 @@ class ClaudeSkillHookTests(unittest.TestCase):
         }, clear=False)
         self.env.start()
         self.addCleanup(self.env.stop)
+        original_repo_root = hook._repo_root
+        self.repo_root_patch = mock.patch.object(
+            hook, '_repo_root',
+            side_effect=lambda repo: repo if repo == '/repo' else original_repo_root(repo),
+        )
+        self.repo_root_patch.start()
+        self.addCleanup(self.repo_root_patch.stop)
 
     @staticmethod
     def _session(source='startup', **values):
@@ -48,12 +75,13 @@ class ClaudeSkillHookTests(unittest.TestCase):
     def test_context_is_split_to_limit_and_names_part_count(
             self, read_files, _build, _commit):
         read_files.return_value = [('skills.txt', 'x' * 20000)]
-        first = hook.handle(self._session(), part=1)
-        context = first['hookSpecificOutput']['additionalContext']
-        self.assertLessEqual(len(context), 9000)
-        self.assertIn('part 1 of 3', context)
-        second = hook.handle(self._session(), part=2)
-        third = hook.handle(self._session(), part=3)
+        with mock.patch.object(hook, '_revoke_delivery_receipts'):
+            first = hook.handle(self._session(), part=1)
+            context = first['hookSpecificOutput']['additionalContext']
+            self.assertLessEqual(len(context), 9000)
+            self.assertIn('part 1 of 3', context)
+            second = hook.handle(self._session(), part=2)
+            third = hook.handle(self._session(), part=3)
         self.assertIn('part 2 of 3', second['hookSpecificOutput']['additionalContext'])
         self.assertIn('part 3 of 3', third['hookSpecificOutput']['additionalContext'])
         self.assertIn('manifest_sha256=' + 'd' * 64, context)
@@ -64,16 +92,16 @@ class ClaudeSkillHookTests(unittest.TestCase):
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files')
-    @mock.patch.object(hook, '_record')
+    @mock.patch.object(hook, '_finalize_if_complete')
     @mock.patch.object(hook.skill_ledger, 'record')
     @mock.patch.object(hook.skill_ledger, 'check', return_value={
         'status': 'UNVERIFIED', 'reason': 'NOT_FOUND',
     })
-    def test_last_part_alone_does_not_record_delivery(
-            self, _check, _progress, delivery, read_files, _build, _commit):
+    def test_last_part_alone_is_only_a_marker_until_ledger_completion(
+            self, _check, _progress, finalize, read_files, _build, _commit):
         read_files.return_value = [('skills.txt', 'x' * 20000)]
         self._run_hook(self._session(), part=3)
-        delivery.assert_not_called()
+        finalize.assert_called_once()
 
     @mock.patch.object(hook, '_commit', return_value='a' * 40)
     @mock.patch.object(hook, 'build_manifest', return_value={
@@ -81,9 +109,9 @@ class ClaudeSkillHookTests(unittest.TestCase):
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files')
-    @mock.patch.object(hook, '_record')
+    @mock.patch.object(hook, '_finalize_if_complete')
     def test_missing_middle_part_does_not_record_delivery(
-            self, delivery, read_files, _build, _commit):
+            self, finalize, read_files, _build, _commit):
         read_files.return_value = [('skills.txt', 'x' * 20000)]
         seen = set()
 
@@ -94,10 +122,11 @@ class ClaudeSkillHookTests(unittest.TestCase):
             return {'status': 'VERIFIED' if values[8] in seen else 'UNVERIFIED'}
 
         with mock.patch.object(hook.skill_ledger, 'record', side_effect=record), \
-                mock.patch.object(hook.skill_ledger, 'check', side_effect=check):
+                mock.patch.object(hook.skill_ledger, 'check', side_effect=check), \
+                mock.patch.object(hook, '_revoke_delivery_receipts'):
             self._run_hook(self._session(), part=1)
             self._run_hook(self._session(), part=3)
-        delivery.assert_not_called()
+        finalize.assert_has_calls([mock.call(mock.ANY), mock.call(mock.ANY)])
 
     def test_content_digest_ignores_commit_and_changes_with_required_content(self):
         first = {'commit': 'a' * 40, 'entries': [
@@ -146,16 +175,16 @@ class ClaudeSkillHookTests(unittest.TestCase):
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files', return_value=[('skill.md', 'required')])
-    @mock.patch.object(hook, '_record')
-    def test_compact_redelivers_and_records_last_part(
-            self, record, _files, _build, _commit):
+    @mock.patch.object(hook, '_finalize_if_complete')
+    def test_compact_redelivers_and_records_part(
+            self, finalize, _files, _build, _commit):
         with mock.patch.object(hook.skill_ledger, 'record'), \
                 mock.patch.object(hook.skill_ledger, 'check', return_value={
                     'status': 'VERIFIED', 'reason': None,
-                }):
+                }), mock.patch.object(hook, '_revoke_delivery_receipts'):
             response = self._run_hook(self._session('compact'))
         self.assertIn('required', response['hookSpecificOutput']['additionalContext'])
-        record.assert_called_once()
+        finalize.assert_called_once()
 
     @mock.patch.object(hook, '_commit', return_value='a' * 40)
     @mock.patch.object(hook, 'build_manifest', return_value={
@@ -163,26 +192,25 @@ class ClaudeSkillHookTests(unittest.TestCase):
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files')
-    @mock.patch.object(hook, '_record')
     def test_compact_and_resume_do_not_reuse_startup_part_markers(
-            self, delivery, read_files, _build, _commit):
+            self, read_files, _build, _commit):
+        from pathlib import Path
+
         read_files.return_value = [('skills.txt', 'x' * 20000)]
-        seen = set()
-
-        def record(values):
-            seen.add((values['head'], values['manifest_sha256']))
-
-        def check(*values, **_kwargs):
-            return {'status': 'VERIFIED' if (values[8], values[9]) in seen
-                    else 'UNVERIFIED'}
-
-        with mock.patch.object(hook.skill_ledger, 'record', side_effect=record), \
-                mock.patch.object(hook.skill_ledger, 'check', side_effect=check):
-            self._run_hook(self._session(), part=1)
-            self._run_hook(self._session(), part=2)
-            self._run_hook(self._session('compact'), part=3)
-            self._run_hook(self._session('resume'), part=3)
-        delivery.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / 'ledger.jsonl'
+            with mock.patch.object(hook.skill_ledger, '_path', return_value=ledger_path):
+                for part in (1, 2, 3):
+                    self._run_hook(self._session('compact'), part=part)
+                for part in (1, 2):
+                    self._run_hook(self._session('resume'), part=part)
+                for part in (2, 3):
+                    self._run_hook(self._session('compact'), part=part)
+                records = hook.skill_ledger._read(ledger_path)
+        receipts = [item for item in records
+                    if item.get('evidence_level') == 'HOOK_DELIVERED']
+        self.assertEqual(len(receipts), 1)
+        self.assertTrue(hook.skill_ledger._revoked(records, receipts[0]['receipt_id']))
 
     def test_emit_flushes_before_success(self):
         stream = mock.Mock()
@@ -220,19 +248,40 @@ class ClaudeSkillHookTests(unittest.TestCase):
         self.assertEqual(response['hookSpecificOutput']['hookEventName'], 'SessionStart')
         self.assertEqual(response['hookSpecificOutput']['error'], 'PART_OUT_OF_RANGE')
 
+    def test_bad_part_argument_with_missing_event_uses_pretool_event(self):
+        with mock.patch.object(hook.sys, 'stdin', io.StringIO('{}')), \
+                mock.patch.object(hook.sys, 'stdout', io.StringIO()) as stdout:
+            hook.main(['--part', 'bad'])
+        response = json.loads(stdout.getvalue())
+        self.assertEqual(response['hookSpecificOutput']['hookEventName'], 'PreToolUse')
+
+    @mock.patch.object(hook, '_commit', return_value='a' * 40)
+    @mock.patch.object(hook, '_repo_root', return_value='/repo')
+    @mock.patch.object(hook, '_manifest_context', return_value=(
+        {'entries': [{'path': 'skill.md', 'sha256': 'b' * 64, 'size': 1}],
+         'manifest_sha256': 'c' * 64}, ['part']))
+    @mock.patch.object(hook, '_revoke_delivery_receipts')
+    def test_same_source_new_run_revokes_previous_part_markers(
+            self, revoke, _manifest, _root, _commit):
+        payload = self._session('compact')
+        hook._delivery(payload, 'SessionStart', 1)
+        hook._delivery(payload, 'SessionStart', 1)
+        self.assertEqual(revoke.call_count, 2)
+        self.assertEqual(revoke.call_args_list[0].args[1], 1)
+
     @mock.patch.object(hook, '_commit', return_value='a' * 40)
     @mock.patch.object(hook, 'build_manifest', return_value={
         'manifest_sha256': 'd' * 64,
         'entries': [{'path': 'skill.md', 'sha256': 'e' * 64, 'size': 8}],
     })
     @mock.patch.object(hook, 'read_manifest_files', return_value=[('skill.md', 'required')])
-    @mock.patch.object(hook.skill_ledger, 'record')
+    @mock.patch.object(hook, '_finalize_if_complete')
     def test_parent_and_child_delivery_bind_separate_agent_ids(
-            self, ledger_record, _files, _build, _commit):
+            self, finalize, _files, _build, _commit):
         with mock.patch.dict(os.environ, {'LLMTOOL_ROLE': 'pm'}), \
                 mock.patch.object(hook.skill_ledger, 'check', return_value={
                     'status': 'VERIFIED', 'reason': None,
-                }):
+                }), mock.patch.object(hook, '_revoke_delivery_receipts'):
             self._run_hook(self._session())
             child = {
                 'hook_event_name': 'SubagentStart', 'session_id': 'session-main',
@@ -240,8 +289,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
                 'model': 'claude-test',
             }
             self._run_hook(child)
-        delivered = [call.args[0] for call in ledger_record.call_args_list
-                     if call.args[0]['evidence_level'] == 'HOOK_DELIVERED']
+        delivered = [call.args[0]['base'] for call in finalize.call_args_list]
         self.assertEqual(delivered[0]['agent_id'], 'main')
         self.assertEqual(delivered[1]['agent_id'], 'child-1')
         self.assertEqual(delivered[1]['role'], 'developer')
@@ -263,6 +311,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
             'git push origin topic',
             'gh pr comment 12 --body review_verdict=PASS',
             'gh pr review 12 --body review_verdict: FAIL',
+            'gh issue comment 932 --body-file v.md',
             'llmtool task delegate abc',
             'llmtool task complete abc',
             'llmtool task advance abc',
@@ -280,12 +329,37 @@ class ClaudeSkillHookTests(unittest.TestCase):
             'gh --repo=o/r pr merge 12',
             'gh -Ro/r pr merge 12',
             'echo ready; git push origin topic',
+            'echo hi\ngit push origin t',
+            'FOO=1 git push origin t',
+            'GH_CONFIG_DIR=/x gh pr merge 12',
+            'git -C repo push origin t',
+            'git -c http.x=y push origin t',
+            'git --git-dir=.git push origin t',
+            'if true; then git push origin t; fi',
+            '{ git push origin t; }',
+            '! git push origin t',
+            'command git push origin t',
+            'exec git push origin t',
+            'time git push origin t',
+            'nohup git push origin t',
+            'timeout 60 git push origin t',
+            'xargs git push origin t',
+            'eval git push origin t',
+            'echo "$(git push origin t)"',
+            'git push>/dev/null',
+            "zsh -c 'git push origin t'",
+            "dash -c 'git push origin t'",
+            'python -m llmtool task complete abc',
+            '.venv/bin/python -B -m llmtool task delegate x',
+            'llmtool --json task complete abc',
+            'gh pr -R o/r merge 12',
+            'gh pr review 12 --approve',
         )
         for command in protected:
             with self.subTest(command=command):
                 self.assertTrue(hook._protected(command))
         self.assertFalse(hook._protected('git status --short'))
-        self.assertFalse(hook._protected('gh pr comment 12 --body ordinary'))
+        self.assertTrue(hook._protected('gh pr comment 12 --body ordinary'))
         self.assertFalse(hook._protected('echo git push origin topic'))
         self.assertFalse(hook._protected('echo ready'))
 
@@ -297,6 +371,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
             'llmtool task complete abc': ['complete'],
             'llmtool task advance abc': ['complete'],
             'gh pr comment 12 --body review_verdict=PASS': ['review'],
+            'gh issue comment 932 --body-file v.md': ['review'],
         }
         for command, expected in cases.items():
             with self.subTest(command=command):
@@ -339,16 +414,15 @@ class ClaudeSkillHookTests(unittest.TestCase):
             self.assertEqual(hook.handle(payload), {})
         log.assert_called_once_with('BASH_INPUT_INVALID')
 
-    def test_malformed_shell_command_is_protected_and_fails_closed(self):
+    def test_malformed_shell_with_protected_words_still_checks_gate(self):
         payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
                    'tool_input': {'command': "git push origin topic 'unmatched"}}
         with mock.patch.dict(os.environ, {'LLMTOOL_HOOK_MODE': 'enforce'}):
             with mock.patch.object(hook, '_check') as check:
                 response = hook.handle(payload)
-        check.assert_not_called()
+        check.assert_called_once_with(payload, 'publish')
         self.assertEqual(
-            response['hookSpecificOutput']['permissionDecisionReason'],
-            'COMMAND_UNPARSEABLE',
+            response['hookSpecificOutput']['permissionDecisionReason'], 'WRONG_HEAD',
         )
 
     @mock.patch.object(hook, '_check', return_value={
@@ -361,28 +435,25 @@ class ClaudeSkillHookTests(unittest.TestCase):
             self.assertEqual(hook.handle(payload), {})
         check.assert_called_once_with(payload, 'publish')
 
-    def test_out_of_order_parts_need_all_current_generation_markers(self):
-        pending = {
-            'base': {'head': 'h', 'manifest_sha256': 'm'}, 'part': 3,
-            'count': 3, 'generation': 'compact', 'payload': {}, 'role': 'pm',
-            'repo': '/repo', 'content_digest': 'digest', 'manifest': {},
-            'event_name': 'SessionStart',
-        }
-        observed = set()
+    def test_concurrent_out_of_order_parts_create_one_receipt(self):
+        from pathlib import Path
 
-        def record(values):
-            observed.add((values['head'], values['manifest_sha256']))
-
-        def check(*values, **_kwargs):
-            return {'status': 'VERIFIED' if (values[8], values[9]) in observed
-                    else 'UNVERIFIED'}
-
-        with mock.patch.object(hook, '_PENDING_DELIVERY', pending), \
-                mock.patch.object(hook.skill_ledger, 'record', side_effect=record), \
-                mock.patch.object(hook.skill_ledger, 'check', side_effect=check), \
-                mock.patch.object(hook, '_record') as delivered:
-            hook._finalize_delivery()
-        delivered.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            ledger_path = Path(directory) / 'skill-ledger.jsonl'
+            context = multiprocessing.get_context('spawn')
+            processes = [context.Process(
+                target=_concurrent_delivery_part, args=(str(ledger_path), part),
+            ) for part in (3, 1, 2)]
+            for process in processes:
+                process.start()
+            for process in processes:
+                process.join(10)
+                self.assertEqual(process.exitcode, 0)
+            with mock.patch.object(hook.skill_ledger, '_path', return_value=ledger_path):
+                records = hook.skill_ledger._read(ledger_path)
+            receipts = [item for item in records
+                        if item.get('evidence_level') == 'HOOK_DELIVERED']
+            self.assertEqual(len(receipts), 1)
 
     @mock.patch.object(hook, '_commit', return_value='a' * 40)
     @mock.patch.object(hook, 'build_manifest', return_value={
