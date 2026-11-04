@@ -89,10 +89,26 @@ def _hosted(job=None, check=None):
 def _collect(api, changed_paths=None, config=None):
     trust_patch = (review_trust_fixture.use_trust(config) if config is not None
                    else contextlib.nullcontext())
-    with trust_patch, patch('llmtool.task_completion._github_get', side_effect=api) as get:
+    side_effect = (lambda path: api[path]) if isinstance(api, dict) else api
+    with trust_patch, patch('llmtool.task_completion._github_get', side_effect=side_effect) as get:
         result = task_completion._collect_ci_evidence(
             pr_number=10, result_sha=SHA, changed_paths=changed_paths)
     return result, get
+
+
+def _responses_by_request(*groups):
+    responses = {}
+    for workflow, runs, jobs, checks in groups:
+        responses[f"actions/workflows/{workflow['path'].rsplit('/', 1)[-1]}"] = workflow
+        run = runs['workflow_runs'][0]
+        responses[
+            f"actions/workflows/{workflow['id']}/runs?head_sha={SHA}&event=pull_request&per_page=100"
+        ] = runs
+        responses[
+            f"actions/runs/{run['id']}/attempts/{run['run_attempt']}/jobs?per_page=100"
+        ] = jobs
+        responses[f'commits/{SHA}/check-runs?per_page=100'] = checks
+    return responses
 
 
 class OwnerValuesGoldenTests(unittest.TestCase):
@@ -152,7 +168,7 @@ class OwnerValuesGoldenTests(unittest.TestCase):
                 return task_completion._collect_one_ci_workflow(
                     pr_number=10, result_sha=SHA, workflow_path=LINUX,
                     workflow_name='llmtool Linux CI', check_name='check (docs)',
-                    runner_names=task_completion._CI_RUNNER_NAMES)
+                    runner_names=task_completion._LINUX_CI_RUNNER_NAMES)
 
         failed = _linux_docs()
         failed[1]['workflow_runs'][0]['conclusion'] = 'failure'
@@ -180,7 +196,10 @@ class OwnerValuesGoldenTests(unittest.TestCase):
         failed_linux[1]['workflow_runs'][0]['conclusion'] = 'failure'
         failed_linux[2]['jobs'][0]['conclusion'] = 'failure'
         failed_linux[3]['check_runs'][0]['conclusion'] = 'failure'
-        result, _ = _collect(invalid_mac + failed_linux, CODE_PATHS)
+        result, _ = _collect(_responses_by_request(
+            (invalid_mac[0], invalid_mac[1], invalid_mac[2], invalid_mac[3]),
+            (failed_linux[0], failed_linux[1], failed_linux[2], failed_linux[3])),
+            CODE_PATHS)
         self.assertEqual(result['check_outcomes'], {'check (Linux 3.14)': 'FAILED'})
         self.assertIn('check (Linux 3.14)', result['required_checks'])
         self.assertEqual(result['workflow_path'], LINUX)

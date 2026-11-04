@@ -1927,32 +1927,43 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
             # A malformed Mac job can otherwise mask a completed Linux failure.
             # Read the later required workflow only to surface that failure; if
             # it is not confirmed, preserve the original fail-closed error.
-            if (index != 0 or exc.completion_code != 'CI_WORKFLOW_JOBS_INVALID' or
+            if (index != 0 or getattr(exc, 'completion_code', None) !=
+                    'CI_WORKFLOW_JOBS_INVALID' or
                     len(selected) < 2):
                 raise
             later = []
             for later_workflow in selected[index + 1:]:
-                later.append(_collect_one_ci_workflow(
-                    pr_number=pr_number, result_sha=result_sha,
-                    workflow_path=later_workflow['path'],
-                    workflow_name=later_workflow['name'],
-                    check_name=later_workflow[field],
-                    runner_names=later_workflow['runner_names'],
-                    runner_labels=later_workflow['runner_labels'],
-                    mode=ci_trust['mode'], app_id=ci_trust['github_actions_app_id'],
-                    pr_merged=pr_merged, pr_head_ref=pr_head_ref))
-            if not any('FAILED' in item['check_outcomes'].values() for item in later):
+                try:
+                    result = _collect_one_ci_workflow(
+                        pr_number=pr_number, result_sha=result_sha,
+                        workflow_path=later_workflow['path'],
+                        workflow_name=later_workflow['name'],
+                        check_name=later_workflow[field],
+                        runner_names=later_workflow['runner_names'],
+                        runner_labels=later_workflow['runner_labels'],
+                        mode=ci_trust['mode'], app_id=ci_trust['github_actions_app_id'],
+                        pr_merged=pr_merged, pr_head_ref=pr_head_ref)
+                except LLMToolError:
+                    # A secondary workflow cannot replace the original refusal
+                    # unless it independently supplies trusted FAILED evidence.
+                    continue
+                later.append((later_workflow, result))
+                if 'FAILED' in result['check_outcomes'].values():
+                    break
+            if not later or not any(
+                    'FAILED' in item['check_outcomes'].values()
+                    for _, item in later):
                 raise
             successful = set()
             check_ids = {}
             check_outcomes = {}
-            for item in later:
+            for _, item in later:
                 successful.update(item['successful_checks'])
                 check_ids.update(item['check_ids'])
                 check_outcomes.update(item['check_outcomes'])
-            primary_index = index + 1
-            primary = later[0]
-            primary_workflow = selected[primary_index]
+            primary_workflow, primary = next(
+                (workflow, item) for workflow, item in later
+                if 'FAILED' in item['check_outcomes'].values())
             return {'workflow_id': primary['workflow_id'], 'run_id': primary['run_id'],
                     'run_attempt': primary['run_attempt'], 'run_number': primary['run_number'],
                     'successful_checks': sorted(successful), 'check_ids': check_ids,
