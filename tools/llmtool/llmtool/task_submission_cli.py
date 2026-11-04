@@ -3166,12 +3166,15 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     route_config = load_route_config()['routes'].get('gw-agent')
-    data_class_map = (route_config.get('data_class_map')
-                      if type(route_config) is dict else None)
+    route_profile = (route_config.get('profile')
+                     if type(route_config) is dict else None)
+    data_class_map = (route_profile.get('data_class_map')
+                      if type(route_profile) is dict else None)
     if data_class_map is None:
         data_class_map = _GATEWAY_DATA_CLASS
     gateway_data_class = (data_class_map.get(data_class)
-                          if data_class_map == _GATEWAY_DATA_CLASS else None)
+                          if type(data_class_map) is dict and
+                          data_class_map == _GATEWAY_DATA_CLASS else None)
     if (type(route_config) is not dict or gateway_data_class is None or
             gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')

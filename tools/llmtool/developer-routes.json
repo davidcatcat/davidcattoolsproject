@@ -13,7 +13,6 @@
       "default_model": "gw-agent-default",
       "default_effort": "low",
       "profile_name": "llmtool-direct",
-      "data_class_map": {"SYNTHETIC": "synthetic"},
       "profile": {
         "adapter": "openai-chat-tools",
         "base_url": "https://api.openai.com/v1",
@@ -21,7 +20,8 @@
         "model": "gw-agent-default",
         "context_cap_tokens": 32768,
         "max_output_tokens": 8192,
-        "allowed_data_classes": ["synthetic"]
+        "allowed_data_classes": ["synthetic"],
+        "data_class_map": {"SYNTHETIC": "synthetic"}
       },
       "authorization_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520",
       "allowed_data_classes": ["synthetic"]

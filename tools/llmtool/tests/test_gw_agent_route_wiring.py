@@ -546,7 +546,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             elapsed_ms=10, cleanup_status='CLEAN')
         decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
-        gateway_profile = load_route_config()['routes']['gw-agent']['profile']
+        gateway_profile = dict(load_route_config()['routes']['gw-agent']['profile'])
+        gateway_profile.pop('data_class_map', None)
 
         seen = {}
         def run_route(_route, request, *, gate, **_kwargs):

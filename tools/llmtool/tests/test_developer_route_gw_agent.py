@@ -76,7 +76,8 @@ class GwAgentRouteTests(unittest.TestCase):
                      'egress_basis': 'authorized-task-ref', 'data_class': 'synthetic',
                      'budgets': {'max_turns': 4, 'max_input_tokens': 10000,
                                  'max_output_tokens': 1000, 'max_wall_seconds': 60,
-                                 'max_tool_result_bytes': 4096, 'max_sent_bytes': 100000}},
+                                 'max_tool_result_bytes': 4096, 'max_sent_bytes': 100000},
+                     'findings': []},
         }
 
     def run_route_with_credential(self, *args, **kwargs):
@@ -395,8 +396,9 @@ class GwAgentRouteTests(unittest.TestCase):
         for field, value, code in cases:
             request = self.request()
             request['task'][field] = value
-            with self.subTest(field=field), self.assertRaises(RouteError) as caught:
-                self.route.validate_request(request)
+            with self.subTest(field=field):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.validate_request(request)
             self.assertEqual(caught.exception.code, code)
 
     def test_null_gateway_task_identity_retains_bounded_refusal_diagnostic(self):

@@ -177,12 +177,13 @@ class GwAgentRoute(DeveloperRoute):
         if not package_is_valid:
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         self.package_path = str(resolved_package)
-        self.profile = dict(profile)
+        self.profile = {key: value for key, value in profile.items()
+                        if key != 'data_class_map'}
         self.profile_name = profile_name
         self.authorization_ref = authorization_ref
         self.expected_served_model = expected
         self._default_model = default_model
-        data_class_map = config.get('data_class_map', _GATEWAY_DATA_CLASS)
+        data_class_map = profile.get('data_class_map', _GATEWAY_DATA_CLASS)
         if (type(data_class_map) is not dict or data_class_map != _GATEWAY_DATA_CLASS or
                 any(type(key) is not str or not key or type(value) is not str or not value
                     for key, value in data_class_map.items()) or
@@ -256,9 +257,12 @@ class GwAgentRoute(DeveloperRoute):
         if (type(task.get('egress_basis')) is not str or
                 not task['egress_basis'].strip() or len(task['egress_basis']) > 2000):
             raise RouteError('GW_AGENT_TASK_EGRESS_BASIS_INVALID')
-        if (type(task.get('data_class')) is not str or
-                task['data_class'] not in self.allowed_data_classes or
-                task['data_class'] not in self.profile['allowed_data_classes']):
+        if type(task.get('data_class')) is not str:
+            raise RouteError('GW_AGENT_TASK_DATA_CLASS_INVALID')
+        mapped_data_class = self.data_class_map.get(task['data_class'])
+        effective_data_class = mapped_data_class or task['data_class']
+        if (effective_data_class not in self.allowed_data_classes or
+                effective_data_class not in self.profile['allowed_data_classes']):
             raise RouteError('GW_AGENT_TASK_DATA_CLASS_INVALID')
         budgets = task.get('budgets')
         if type(budgets) is not dict:
@@ -289,7 +293,8 @@ class GwAgentRoute(DeveloperRoute):
                 private_tmp == root or root in private_tmp.parents):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         task = dict(request['task'])
-        gateway_data_class = self.data_class_map.get(task.get('data_class'), task.get('data_class'))
+        gateway_data_class = self.data_class_map.get(
+            task.get('data_class'), task.get('data_class'))
         if gateway_data_class not in self.allowed_data_classes:
             raise RouteError('GW_AGENT_TASK_DATA_CLASS_INVALID')
         task['data_class'] = gateway_data_class
