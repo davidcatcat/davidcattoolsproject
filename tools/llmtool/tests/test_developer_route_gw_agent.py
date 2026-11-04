@@ -94,10 +94,10 @@ class GwAgentRouteTests(unittest.TestCase):
                 mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
             self.route.prepare_files(tmpdir, self.request())
             env = self.route.build_env(tmpdir)
-        profile_file = json.loads((Path(tmpdir) / 'profiles.json').read_text())
-        profile = profile_file['profiles']['fake']
-        self.assertIsNone(profile['auth_env'])
-        self.assertNotIn('GW_AGENT_API_KEY', env)
+            profile_file = json.loads((Path(tmpdir) / 'profiles.json').read_text())
+            profile = profile_file['profiles']['fake']
+            self.assertIsNone(profile['auth_env'])
+            self.assertNotIn('GW_AGENT_API_KEY', env)
 
     def test_missing_or_empty_configured_key_writes_unauthenticated_profile(self):
         for configured_value in (None, ''):
@@ -131,11 +131,11 @@ class GwAgentRouteTests(unittest.TestCase):
                                   return_value=self.credential):
             self.route.prepare_files(tmpdir, self.request())
             env = self.route.build_env(tmpdir)
-        profile_file = json.loads((Path(tmpdir) / 'profiles.json').read_text())
-        profile = profile_file['profiles']['fake']
-        self.assertEqual(profile['auth_env'], 'GW_AGENT_API_KEY')
-        self.assertEqual(env['GW_AGENT_API_KEY'], self.credential)
-        self.assertNotIn(self.credential, json.dumps(profile_file))
+            profile_file = json.loads((Path(tmpdir) / 'profiles.json').read_text())
+            profile = profile_file['profiles']['fake']
+            self.assertEqual(profile['auth_env'], 'GW_AGENT_API_KEY')
+            self.assertEqual(env['GW_AGENT_API_KEY'], self.credential)
+            self.assertNotIn(self.credential, json.dumps(profile_file))
 
     def test_malformed_or_unresolvable_credentials_fail_closed_without_disclosure(self):
         cases = (
