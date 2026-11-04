@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "guidance_drift_check.py"
 SPEC = importlib.util.spec_from_file_location("guidance_drift_check", SCRIPT)
@@ -174,12 +175,17 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         self.write_config(schema_version=2)
         self.assertTrue(any("CONFIG_SCHEMA" in item for item in check(self.repo)))
 
-    def test_deeply_nested_duplicate_and_unknown_config_are_invalid(self):
-        depth = max(10_000, sys.getrecursionlimit() * 10)
-        nested_json = "[" * depth + "0" + "]" * depth
-        self.write_raw_config(nested_json)
-        findings = check(self.repo)
-        self.assertTrue(any("CONFIG_INVALID RecursionError" in item for item in findings))
+    def test_config_decoder_recursion_error_fails_closed(self):
+        with patch.object(guidance_drift_check.json, "loads", side_effect=RecursionError) as loads:
+            findings = check(self.repo)
+        loads.assert_called_once()
+        self.assertTrue(callable(loads.call_args.kwargs["object_pairs_hook"]))
+        self.assertEqual(
+            findings,
+            ["tools/llmtool/guidance-drift.json: CONFIG_INVALID RecursionError"],
+        )
+
+    def test_duplicate_and_unknown_config_keys_are_invalid(self):
         self.write_raw_config('{"schema_version":1,"schema_version":1,"hashes":{},"codex_only":[]}')
         self.assertTrue(any("CONFIG_INVALID" in item for item in check(self.repo)))
         self.write_config()
