@@ -17,8 +17,8 @@ Owner → ChatGPT Coordinator (technical adviser and technical director) → Cla
 | Developer | `agy` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | **ALLOWED** (Owner 2026-10-31); PM-selected direct route, no individual Owner assignment or Host D4/G3/M2; verified D6 and auth/model/session/permission/quota checks, independent cross-family review and no automatic retry or paid fallback. |
 | Developer | `claude-developer` | [Worker dispatch](../../tools/llmtool/worker-dispatch.json) | **OWNER_ASSIGNMENT_ONLY**; dispatch only Task IDs registered in `worker-dispatch.json` owner assignments. |
 | Developer proposal route | `company-gw` | Worker dispatch + [company delegation](../../skills/company-llm-delegation/SKILL.md) | Low-risk via llmtool only; no shell/filesystem/Git authority; external input screened. |
-| Formal reviewer | `claude-reviewer` | Worker dispatch + [formal verdict](../../skills/ai-team-delivery/formal-verdict.md) | Separate read-only D6 reviewer for eligible cross-family Developer Tasks. |
-| Formal reviewer | `codex-reviewer` | Worker dispatch | Separate read-only D6 reviewer for Claude Developer / Claude PM changes. |
+| Formal reviewer | `claude-reviewer` | Worker dispatch + [formal verdict](../../skills/ai-team-delivery/formal-verdict.md) | Separate read-only D6 reviewer; PM selects when qualified, authorized and cross-family for the Task. |
+| Formal reviewer | `codex-reviewer` | Worker dispatch | Separate read-only D6 reviewer; PM may select for any task when qualified and cross-family. |
 
 An `ALLOWED` dispatch switch is authorization, **not** evidence that a Worker is reachable or qualified for the Task. `OWNER_ASSIGNMENT_ONLY` requires an exact authorized Task entry. Developer self-review and advisory pre-review never become formal acceptance merely by changing a name.
 
