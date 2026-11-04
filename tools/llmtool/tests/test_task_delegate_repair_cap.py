@@ -1,5 +1,6 @@
 """Tests for the High Debug evidence required beyond the delegate repair cap."""
 
+import hashlib
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -21,7 +22,8 @@ class _Store:
         self.records = {
             f'{number:032x}': {
                 'completion': {'executor_task_id': _EXECUTOR_TASK},
-                'developer': {'state': 'DEVELOPER_RESPONDED'},
+                'developer': {'state': 'DEVELOPER_RESPONDED',
+                              'created_at': '2026-11-04T00:00:00Z'},
             }
             for number in range(count)
         }
@@ -46,13 +48,25 @@ class _Store:
         self.recorded.append((task_id, ref, rounds))
 
 
-def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED'):
+def _entry(*, executor_task=_EXECUTOR_TASK, status='RCA_CONFIRMED',
+           examined_sha=_HEAD, family='pr-938', recorded_at='2026-11-04T00:00:01Z'):
     from llmtool.high_debug import _d6_name
 
     return {
         'status': status,
-        'd6': _d6_name(executor_task, 1, _HEAD),
-        'examined_sha': _HEAD,
+        'family': family,
+        'failed_corrections': 2,
+        'early_reason': None,
+        'd6': _d6_name(executor_task, 1, examined_sha),
+        'examined_sha': examined_sha,
+        'model_requested': 'gpt-6.1-sol',
+        'model_observed': 'gpt-6.1-sol',
+        'effort_observed': 'high',
+        'report': 'Confirmed root cause.',
+        'report_sha256': hashlib.sha256(
+            b'Confirmed root cause.').hexdigest(),
+        'usage': 'UNKNOWN',
+        'recorded_at': recorded_at,
     }
 
 
@@ -66,6 +80,7 @@ def _args(**overrides):
         'executor_task': _EXECUTOR_TASK,
         'high_debug_ref': _HIGH_DEBUG_REF,
         'high_debug_task': _HIGH_DEBUG_TASK,
+        'high_debug_family': 'pr-938',
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -78,6 +93,11 @@ class DelegateRepairCapTests(unittest.TestCase):
             return_value=SimpleNamespace(repository={'slug': 'example/project'}))
         self.trust_patch.start()
         self.addCleanup(self.trust_patch.stop)
+        self.binding_patch = patch.object(
+            task_submission_cli, '_delegate_d6_binding',
+            return_value=(None, SimpleNamespace(head=_HEAD)))
+        self.binding_patch.start()
+        self.addCleanup(self.binding_patch.stop)
 
     def _at_cap(self, **kwargs):
         return _Store(count=1 + MAX_REPAIR_ATTEMPTS, **kwargs)
@@ -88,6 +108,11 @@ class DelegateRepairCapTests(unittest.TestCase):
 
         task_submission_cli._check_delegate_repair_cap(args, store)
 
+        self.assertEqual(store.recorded, [])
+
+    def test_below_cap_ignores_unreadable_diagnosis(self):
+        store = _Store(count=MAX_REPAIR_ATTEMPTS, unreadable=True)
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
 
     def test_missing_high_debug_task_is_refused(self):
@@ -131,6 +156,54 @@ class DelegateRepairCapTests(unittest.TestCase):
         self.assertEqual(store.recorded, [(
             _CURRENT_TASK, _HIGH_DEBUG_REF,
             max(3, (1 + MAX_REPAIR_ATTEMPTS) + 1))])
+
+    def test_refusal_order_checks_reference_before_task(self):
+        store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref=None, high_debug_task=None), store)
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_REF_INVALID'):
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_ref='bad', high_debug_task=None), store)
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_REQUIRED'):
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_task=None), store)
+
+    def test_head_family_timestamp_and_reuse_are_rejected_without_override(self):
+        cases = (
+            (_entry(examined_sha='b' * 40), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
+            (_entry(family='other'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'other'),
+            (_entry(recorded_at='2026-11-04T00:00:00Z'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
+            (_entry(recorded_at='bad'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
+        )
+        for entry, code, family in cases:
+            store = self._at_cap(diagnosis=_diagnosis([entry]))
+            with self.subTest(entry=entry), self.assertRaisesRegex(LLMToolError, code):
+                task_submission_cli._check_delegate_repair_cap(
+                    _args(high_debug_family=family), store)
+            self.assertEqual(store.recorded, [])
+
+    def test_family_syntax_and_reuse_after_new_assignment_are_rejected(self):
+        invalid_family = _entry(family='Bad Family')
+        store = self._at_cap(diagnosis=_diagnosis([invalid_family]))
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+            task_submission_cli._check_delegate_repair_cap(
+                _args(high_debug_family='Bad Family'), store)
+        self.assertEqual(store.recorded, [])
+
+        store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+        store.records['00000000000000000000000000000000']['developer']['created_at'] = (
+            '2026-11-04T00:00:02Z')
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_malformed_assignment_time_is_count_unavailable(self):
+        store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+        store.records['00000000000000000000000000000000']['developer']['created_at'] = 'bad'
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
 
 
 if __name__ == '__main__':
