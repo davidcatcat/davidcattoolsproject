@@ -5,9 +5,13 @@ the same session and agent and still has the same content hash. This is
 evidence that the text reached that context, not that it was understood. The
 N3 protected-word matcher is deliberately lexical and cannot block commands
 hidden in scripts, shell indirection, disabled hooks, or Claude safe mode.
-Same-user processes can forge hook input or ledger data. N4/N5 are deferred;
-enforce mode blocks protected commands when required Read evidence is absent,
-stale, or invalidated by compaction. Observe mode remains the default.
+Same-user processes can forge hook input or ledger data. A Read event is
+evidence the hook saw the unchanged file contents at hook time, not that the
+text was understood; a file change between hashing and later use remains a
+race. Expired or inactive evidence is ignored. N4/N5 are deferred and block
+enforce mode; enforce mode blocks protected commands when required Read
+evidence is absent, stale, or invalidated by compaction. Observe mode remains
+the default.
 """
 
 import hashlib
@@ -332,6 +336,7 @@ def _check(payload, gate):
         for current_hash in (required[entry['path']],)
     )
     saw_compacted = False
+    fresh_by_path = {}
     for path, current_hash in required.items():
         rows = [r for r in relevant if r.get('event_type') == 'OBSERVED_READ' and r.get('path') == path]
         fresh = [r for r in rows if (skill_ledger._stamp(r.get('created_at')) or
@@ -339,6 +344,7 @@ def _check(payload, gate):
                  and r.get('status') == 'ACTIVE'
                  and (skill_ledger._stamp(r.get('expires_at')) or
                       datetime.min.replace(tzinfo=timezone.utc)) > datetime.now(timezone.utc)]
+        fresh_by_path[path] = fresh
         if not fresh:
             if rows and boundaries:
                 saw_compacted = True
@@ -349,10 +355,7 @@ def _check(payload, gate):
         reason = 'COMPACTED'
     elif saw_stale:
         reason = 'STALE_BLOB'
-    elif any(not any(r.get('event_type') == 'OBSERVED_READ' and r.get('path') == path and
-                      (skill_ledger._stamp(r.get('created_at')) or
-                       datetime.min.replace(tzinfo=timezone.utc)) > latest_boundary and
-                      r.get('blob_sha256') == digest for r in relevant)
+    elif any(not any(r.get('blob_sha256') == digest for r in fresh_by_path[path])
              for path, digest in required.items()):
         reason = 'NOT_READ'
     else:
