@@ -142,8 +142,10 @@ def _account_environment(role):
     selected = environ.get("CLAUDE_CONFIG_DIR") or configured.get("config_dir")
     if role == "claude-reviewer" and not selected:
         raise DispatchError("REVIEWER_ACCOUNT_UNCONFIGURED")
-    resolved = os.path.realpath(selected or _default_config_dir())
-    if resolved == os.path.realpath(_default_config_dir()):
+    default_dir = _default_config_dir()
+    resolved = os.path.realpath(selected or default_dir)
+    if resolved == os.path.realpath(default_dir):
+        environ["HOME"] = os.path.dirname(default_dir)
         environ.pop("CLAUDE_CONFIG_DIR", None)
     else:
         environ["CLAUDE_CONFIG_DIR"] = str(selected)

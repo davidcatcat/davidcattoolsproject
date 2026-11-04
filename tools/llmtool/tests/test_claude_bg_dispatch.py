@@ -36,8 +36,8 @@ FAKE_CLAUDE = r'''
 import json, os, sys, time
 from pathlib import Path
 home = Path(os.environ['FAKE_CLAUDE_DIR'])
-account = Path(os.environ.get('CLAUDE_CONFIG_DIR') or
-               os.environ['FAKE_DEFAULT_CLAUDE_CONFIG_DIR'])
+account = (Path(os.environ['CLAUDE_CONFIG_DIR']) if os.environ.get('CLAUDE_CONFIG_DIR')
+           else Path(os.environ['HOME']) / '.claude')
 account_scenario = account / 'fake-scenario.json'
 scenario_path = account_scenario if account_scenario.exists() else home / 'scenario.json'
 scenario = json.loads(scenario_path.read_text())
@@ -47,6 +47,8 @@ argv = sys.argv[1:]
 with open(home / 'calls.jsonl', 'a') as log:
     log.write(json.dumps({'argv': argv, 'cwd': os.getcwd(),
                           'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'),
+                          'home': os.environ.get('HOME'),
+                          'effective_account': str(account),
                           'model': os.environ.get('ANTHROPIC_MODEL')}) + '\n')
 
 def fill(value):
@@ -170,7 +172,7 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.claude.write_text('#!' + sys.executable + ' -B\n' + FAKE_CLAUDE)
         self.claude.chmod(0o700)
         env = patch.dict(os.environ, {'FAKE_CLAUDE_DIR': str(self.home),
-                                      'FAKE_DEFAULT_CLAUDE_CONFIG_DIR': str(self.default_config),
+                                      'HOME': str(self.home),
                                       'CLAUDE_CONFIG_DIR': str(self.config)})
         env.start()
         self.addCleanup(env.stop)
@@ -324,13 +326,15 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 patch.object(dispatch_tool.role_config, 'resolve_role', return_value={
                     'role': 'claude-developer', 'provider': 'claude',
                     'config_dir': str(self.default_config), 'model': None}), \
-                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': '', 'HOME': '/mismatched/home'}):
             code, _ = self.dispatch()
         self.assertEqual(code, 0)
         calls = self.calls()
         self.assertTrue(any('--bg' in call['argv'] for call in calls))
         self.assertTrue(any(call['argv'][:2] == ['agents', '--json'] for call in calls))
         self.assertTrue(all(call['config_dir'] is None for call in calls))
+        self.assertTrue(all(call['home'] == str(self.home) for call in calls))
+        self.assertTrue(all(call['effective_account'] == str(self.default_config) for call in calls))
 
     def test_account_environment_resolves_default_and_preserves_other_override(self):
         with patch.object(dispatch_tool.pwd, 'getpwuid',
@@ -346,6 +350,36 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                 patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(other)}):
             _, other_env = dispatch_tool._account_environment('claude-developer')
         self.assertEqual(other_env['CLAUDE_CONFIG_DIR'], str(other))
+
+    def test_default_account_sets_child_home_for_role_env_and_implicit_selection(self):
+        home_cases = {
+            'mismatched': {'HOME': '/different/home'},
+            'absent': {},
+            'empty': {'HOME': ''},
+        }
+        selections = {
+            'role': ({'role': 'claude-developer', 'provider': 'claude',
+                      'config_dir': str(self.default_config), 'model': None}, {}),
+            'environment': ({'role': 'claude-developer', 'provider': 'claude',
+                             'config_dir': None, 'model': None},
+                            {'CLAUDE_CONFIG_DIR': str(self.default_config)}),
+            'implicit': ({'role': 'claude-developer', 'provider': 'claude',
+                          'config_dir': None, 'model': None}, {}),
+        }
+        for selection_name, (configured, selection_env) in selections.items():
+            for home_name, home_env in home_cases.items():
+                with self.subTest(selection=selection_name, home=home_name):
+                    parent_env = {**selection_env, **home_env}
+                    with patch.object(dispatch_tool.pwd, 'getpwuid',
+                                      return_value=SimpleNamespace(pw_dir=str(self.home))), \
+                            patch.object(dispatch_tool.role_config, 'resolve_role',
+                                         return_value=configured), \
+                            patch.dict(os.environ, parent_env, clear=True):
+                        before = dict(os.environ)
+                        _, child_env = dispatch_tool._account_environment('claude-developer')
+                        self.assertEqual(dict(os.environ), before)
+                    self.assertEqual(child_env['HOME'], str(self.home))
+                    self.assertNotIn('CLAUDE_CONFIG_DIR', child_env)
 
     def test_default_account_cross_account_guard_compares_resolved_paths(self):
         alias = self.home / 'default-alias'
