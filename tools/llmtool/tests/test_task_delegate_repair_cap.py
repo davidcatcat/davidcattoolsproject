@@ -172,7 +172,7 @@ class DelegateRepairCapTests(unittest.TestCase):
     def test_head_family_timestamp_and_reuse_are_rejected_without_override(self):
         cases = (
             (_entry(examined_sha='b' * 40), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
-            (_entry(family='other'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'other'),
+            (_entry(family='other'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
             (_entry(recorded_at='2026-11-04T00:00:00Z'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
             (_entry(recorded_at='bad'), 'DELEGATE_HIGH_DEBUG_TASK_INVALID', 'pr-938'),
         )

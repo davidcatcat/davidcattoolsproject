@@ -100,7 +100,7 @@ class FakeClient:
 class TaskSubmissionCLITests(unittest.TestCase):
     def setUp(self):
         cap_patch = patch.object(submission_cli, '_check_delegate_repair_cap',
-                                 lambda args, store: None)
+                                 lambda args, store, d6_binding=None: None)
         cap_patch.start()
         self.addCleanup(cap_patch.stop)
         self.temp = tempfile.TemporaryDirectory()
