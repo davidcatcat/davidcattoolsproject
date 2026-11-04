@@ -30,6 +30,9 @@ FILES = {
     'skills/ai-team-delivery/formal-verdict.md': b'verdict\n',
     'skills/safe-git/SKILL.md': b'git\n',
 }
+GIT_READ_PREFIX = (
+    'git', '--no-replace-objects', '-c', 'core.useReplaceRefs=false',
+)
 
 
 class SkillManifestTests(unittest.TestCase):
@@ -117,18 +120,22 @@ class SkillManifestTests(unittest.TestCase):
 
         self._manifest(runner=runner)
         self.assertGreater(len(calls), 1)
-        self.assertIn(('git', '--no-replace-objects', 'rev-parse', '--verify', self.commit + '^{commit}'), calls)
-        self.assertTrue(any(call[2:4] == ('cat-file', 'blob') for call in calls))
+        self.assertTrue(all(call[:len(GIT_READ_PREFIX)] == GIT_READ_PREFIX for call in calls))
+        self.assertIn(GIT_READ_PREFIX + ('rev-parse', '--verify', self.commit + '^{commit}'), calls)
+        self.assertTrue(any(call[len(GIT_READ_PREFIX):len(GIT_READ_PREFIX) + 2] == ('cat-file', 'blob') for call in calls))
 
     def test_git_reads_disable_stdin_and_have_a_timeout(self):
         observed = []
+        calls = []
 
         def runner(args, **kwargs):
+            calls.append(tuple(args))
             observed.append(kwargs)
             return subprocess.run(args, **kwargs)
 
         self._manifest(runner=runner)
         self.assertTrue(observed)
+        self.assertTrue(all(call[:len(GIT_READ_PREFIX)] == GIT_READ_PREFIX for call in calls))
         for kwargs in observed:
             self.assertIs(kwargs['stdin'], subprocess.DEVNULL)
             self.assertEqual(kwargs['timeout'], GIT_READ_TIMEOUT_SECONDS)
@@ -149,24 +156,84 @@ class SkillManifestTests(unittest.TestCase):
 
     def test_replace_refs_do_not_change_commit_or_blob_contents(self):
         expected = self._manifest()
-
-        # Replacing a required blob must not alter the bytes attributed to the
-        # original commit.
         blob = self._git('rev-parse', self.commit + ':AGENTS.md').stdout.decode('ascii').strip()
         replacement_blob = subprocess.run(
             ['git', 'hash-object', '-w', '--stdin'], cwd=self.repo,
             input=b'replaced governance\n', stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, check=True,
         )
-        self._git('replace', blob, replacement_blob.stdout.decode('ascii').strip())
-        self.assertEqual(self._manifest(), expected)
-        self._git('replace', '-d', blob)
-
-        # Replacing the commit itself must not redirect the manifest either.
+        replacement_blob_oid = replacement_blob.stdout.decode('ascii').strip()
         self._write_files({'AGENTS.md': b'replacement commit\n'})
         replacement_commit = self._commit()
-        self._git('replace', self.commit, replacement_commit)
-        self.assertEqual(self._manifest(), expected)
+
+        for original, replacement in (
+            (blob, replacement_blob_oid),
+            (self.commit, replacement_commit),
+        ):
+            self._git('replace', original, replacement)
+            try:
+                self.assertEqual(self._manifest(), expected)
+            finally:
+                self._git('replace', '-d', original)
+
+        isolated_home = tempfile.TemporaryDirectory()
+        try:
+            for label, home in (
+                ('repository configuration', None),
+                ('isolated HOME configuration', isolated_home.name),
+            ):
+                with self.subTest(configuration=label):
+                    if home is None:
+                        self._git('config', 'core.useReplaceRefs', 'true')
+                    else:
+                        env = os.environ.copy()
+                        env['HOME'] = home
+                        subprocess.run(
+                            ['git', 'config', '--global', 'core.useReplaceRefs', 'true'],
+                            cwd=self.repo, env=env, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, check=True,
+                        )
+                    previous_home = os.environ.get('HOME')
+                    try:
+                        if home is not None:
+                            os.environ['HOME'] = home
+                            subprocess.run(
+                                ['git', 'config', '--unset-all', 'core.useReplaceRefs'],
+                                cwd=self.repo, env=os.environ.copy(),
+                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                check=False,
+                            )
+                        self.assertEqual(self._manifest(), expected)
+                    finally:
+                        if previous_home is None:
+                            os.environ.pop('HOME', None)
+                        else:
+                            os.environ['HOME'] = previous_home
+
+                    for original, replacement in (
+                        (blob, replacement_blob_oid),
+                        (self.commit, replacement_commit),
+                    ):
+                        self._git('replace', original, replacement)
+                        previous_home = os.environ.get('HOME')
+                        try:
+                            if home is not None:
+                                os.environ['HOME'] = home
+                                subprocess.run(
+                                    ['git', 'config', '--unset-all', 'core.useReplaceRefs'],
+                                    cwd=self.repo, env=os.environ.copy(),
+                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    check=False,
+                                )
+                            self.assertEqual(self._manifest(), expected)
+                        finally:
+                            if previous_home is None:
+                                os.environ.pop('HOME', None)
+                            else:
+                                os.environ['HOME'] = previous_home
+                            self._git('replace', '-d', original)
+        finally:
+            isolated_home.cleanup()
 
     def test_inherited_git_dir_does_not_redirect_repository_reads(self):
         expected = self._manifest()
@@ -194,18 +261,30 @@ class SkillManifestTests(unittest.TestCase):
         )
 
     def test_malformed_tree_object_id_is_a_code_only_failure(self):
-        def malformed_runner(args, **kwargs):
-            if 'ls-tree' in args:
-                return SimpleNamespace(
-                    returncode=0,
-                    stdout=b'100644 blob not-an-object-id\tAGENTS.md\0',
-                )
-            return subprocess.run(args, **kwargs)
-
-        self._assert_code(
-            SKILL_MANIFEST_PATH_MISSING, self.commit, 'developer', 'develop',
-            git_runner=malformed_runner,
+        malformed_outputs = (
+            b'100644 blob not-an-object-id\tAGENTS.md\0',
+            b'100644 blob ' + b'\xff' + b'\tAGENTS.md\0',
+            '\ud800',
         )
+        for output in malformed_outputs:
+            with self.subTest(output=type(output).__name__):
+                calls = []
+
+                def malformed_runner(args, **kwargs):
+                    calls.append(tuple(args))
+                    if 'ls-tree' in args:
+                        return SimpleNamespace(returncode=0, stdout=output)
+                    return subprocess.run(args, **kwargs)
+
+                self._assert_code(
+                    SKILL_MANIFEST_PATH_MISSING, self.commit, 'developer', 'develop',
+                    git_runner=malformed_runner,
+                )
+                self.assertTrue(calls)
+                self.assertTrue(all(
+                    call[:len(GIT_READ_PREFIX)] == GIT_READ_PREFIX
+                    for call in calls
+                ))
 
     def test_unknown_role_and_gate_are_refused(self):
         self._assert_code(SKILL_MANIFEST_ROLE_INVALID, self.commit, 'unknown', 'develop')

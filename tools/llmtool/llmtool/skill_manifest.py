@@ -100,7 +100,10 @@ def _run_git(git_runner, repo_root, args):
             if not key.startswith('GIT_')
         }
         result = git_runner(
-            ['git', '--no-replace-objects'] + list(args),
+            [
+                'git', '--no-replace-objects', '-c',
+                'core.useReplaceRefs=false',
+            ] + list(args),
             cwd=repo_root,
             env=env,
             stdin=subprocess.DEVNULL,
