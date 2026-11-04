@@ -29,11 +29,6 @@ DEFAULTS = {
 }
 CODEX_DIRECT_DEFAULT_TIMEOUT_SECONDS = 600
 CODEX_DIRECT_MAX_TIMEOUT_SECONDS = 1800
-REPOSITORY_DEFAULTS = {
-    "slug": "davidcatcat/davidcattoolsproject",
-    "dispatch_issue": 289,
-    "dispatch_evidence_pr": 283,
-}
 REPOSITORY_ERROR = "user repository: invalid configuration"
 # Paths beginning with 'provider' apply only to the explicitly selected profile.
 ENV_OPTIONS = {
@@ -130,27 +125,77 @@ def _provider_name(name):
         raise LLMToolError("provider name must use 1-64 letters, digits, underscores or hyphens")
 
 
-def _validate_repository(value):
-    if (type(value) is not dict or set(value) - set(REPOSITORY_DEFAULTS)):
+def _validate_repository(value, defaults=None, *, allow_partial=False):
+    defaults = {} if defaults is None else defaults
+    if type(value) is not dict or set(value) - {
+            "slug", "dispatch_issue", "dispatch_evidence_pr"}:
         raise LLMToolError(REPOSITORY_ERROR)
-    result = {**REPOSITORY_DEFAULTS, **value}
-    if (type(result["slug"]) is not str or
-            re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}",
-                         result["slug"]) is None or
-            result["slug"].split("/", 1)[1] in (".", "..") or
-            type(result["dispatch_issue"]) is not int or
-            not 1 <= result["dispatch_issue"] <= 10**9 or
-            type(result["dispatch_evidence_pr"]) is not int or
-            not 1 <= result["dispatch_evidence_pr"] <= 10**9):
+    result = {**defaults, **value}
+    if not allow_partial and set(result) != {"slug", "dispatch_issue", "dispatch_evidence_pr"}:
+        raise LLMToolError(REPOSITORY_ERROR)
+    slug = result.get("slug")
+    issue = result.get("dispatch_issue")
+    evidence_pr = result.get("dispatch_evidence_pr")
+    if (("slug" in result and (type(slug) is not str or
+             re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})/[A-Za-z0-9._-]{1,100}",
+                          slug) is None or slug.split("/", 1)[1] in (".", ".."))) or
+            ("dispatch_issue" in result and
+             (type(issue) is not int or not 1 <= issue <= 10**9)) or
+            ("dispatch_evidence_pr" in result and
+             (type(evidence_pr) is not int or not 1 <= evidence_pr <= 10**9))):
         raise LLMToolError(REPOSITORY_ERROR)
     return result
 
 
-def repository_config(home=None):
-    """Return validated repository identity from trusted user config only."""
+class RepositoryConfigError(LLMToolError):
+    """Sanitized repository trust/configuration rejection."""
+
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def legacy_repository_config(home=None):
+    """Return pre-trust repository defaults for trust verify-legacy only."""
+    defaults = {
+        "slug": "davidcatcat/davidcattoolsproject",
+        "dispatch_issue": 289,
+        "dispatch_evidence_pr": 283,
+    }
     path = user_config_path(home)
-    user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
-    return _validate_repository(user.get("repository", {}))
+    try:
+        user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
+        if "repository" not in user:
+            return dict(defaults)
+        return _validate_repository(user["repository"], defaults)
+    except LLMToolError:
+        raise
+
+
+def repository_config(home=None):
+    """Return repository identity from owner trust, never from config.yaml."""
+    from .trust import TrustError, load_trust
+    path = user_config_path(home)
+    try:
+        user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
+        if "repository" in user:
+            raise RepositoryConfigError("TRUST_LEGACY_REPOSITORY_CONFIG")
+        trusted = load_trust(home=home)
+        repository = trusted.repository
+        approval_refs = repository["approval_refs"]
+        return {
+            "slug": repository["slug"],
+            "dispatch_issue": approval_refs["worker_dispatch_issue"],
+            "dispatch_evidence_pr": approval_refs["worker_dispatch_evidence_pr"],
+        }
+    except RepositoryConfigError:
+        raise
+    except TrustError as error:
+        raise RepositoryConfigError(error.code) from None
+    except LLMToolError:
+        raise RepositoryConfigError("TRUST_REPOSITORY_CONFIG_INVALID") from None
+    except (KeyError, TypeError, AttributeError):
+        raise RepositoryConfigError("TRUST_REPOSITORY_CONFIG_INVALID") from None
 
 
 def _apply_user(config, fragment):
@@ -164,7 +209,7 @@ def _apply_user(config, fragment):
         # metadata checks until a role actually selects an account.
         validate_role_config(fragment)
     if "repository" in fragment:
-        _validate_repository(fragment["repository"])
+        _validate_repository(fragment["repository"], allow_partial=True)
     if "diagnostics" in fragment:
         from .diagnostics_settings import parse_diagnostics_settings
         parse_diagnostics_settings(fragment["diagnostics"])

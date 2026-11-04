@@ -1378,10 +1378,10 @@ def _validate(record):
                     type(developer['created_at']) is not str):
                 _fail()
             if 'owner_assignment_ref' in developer:
-                from .worker_dispatch import _OWNER_COMMENT_REF
+                from .worker_dispatch import owner_comment_ref
                 ref = developer['owner_assignment_ref']
                 if (developer['provider_profile'] not in ('claude', 'agy') or
-                        type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
+                        type(ref) is not str or owner_comment_ref().fullmatch(ref) is None):
                     _fail()
             if developer['provider_profile'] == 'agy' and 'owner_assignment_ref' not in developer:
                 _fail()
