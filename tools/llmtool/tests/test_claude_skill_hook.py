@@ -208,9 +208,15 @@ class ClaudeSkillHookTests(unittest.TestCase):
                     self._run_hook(self._session('compact'), part=part)
                 records = hook.skill_ledger._read(ledger_path)
         receipts = [item for item in records
-                    if item.get('evidence_level') == 'HOOK_DELIVERED']
+                    if item.get('evidence_level') == 'HOOK_DELIVERED'
+                    and item.get('entry_type') != 'REVOCATION']
         self.assertEqual(len(receipts), 1)
         self.assertTrue(hook.skill_ledger._revoked(records, receipts[0]['receipt_id']))
+        active_receipts = [item for item in receipts
+                           if not hook.skill_ledger._revoked(
+                               records, item['receipt_id'],
+                           )]
+        self.assertEqual(len(active_receipts), 0)
 
     def test_emit_flushes_before_success(self):
         stream = mock.Mock()
@@ -414,12 +420,14 @@ class ClaudeSkillHookTests(unittest.TestCase):
             self.assertEqual(hook.handle(payload), {})
         log.assert_called_once_with('BASH_INPUT_INVALID')
 
-    def test_malformed_shell_with_protected_words_still_checks_gate(self):
+    @mock.patch.object(hook, '_check', return_value={
+        'status': 'UNVERIFIED', 'reason': 'WRONG_HEAD',
+    })
+    def test_malformed_shell_with_protected_words_still_checks_gate(self, check):
         payload = {'hook_event_name': 'PreToolUse', 'tool_name': 'Bash',
                    'tool_input': {'command': "git push origin topic 'unmatched"}}
         with mock.patch.dict(os.environ, {'LLMTOOL_HOOK_MODE': 'enforce'}):
-            with mock.patch.object(hook, '_check') as check:
-                response = hook.handle(payload)
+            response = hook.handle(payload)
         check.assert_called_once_with(payload, 'publish')
         self.assertEqual(
             response['hookSpecificOutput']['permissionDecisionReason'], 'WRONG_HEAD',
