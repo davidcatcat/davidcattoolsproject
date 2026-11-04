@@ -35,7 +35,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
         self.commit()
         self.env = mock.patch.dict(os.environ, {
             'LLMTOOL_HOOK_MODE': 'enforce', 'LLMTOOL_ROLE': 'developer',
-            'LLMTOOL_GATE': 'develop', 'LLMTOOL_TASK_ID': 'task-1',
+            'LLMTOOL_GATE': 'publish', 'LLMTOOL_TASK_ID': 'task-1',
             'LLMTOOL_RUN_ID': 'run-1', 'LLMTOOL_MODEL': 'claude-test',
         }, clear=False)
         self.env.start()
@@ -74,8 +74,12 @@ class ClaudeSkillHookTests(unittest.TestCase):
         payload.update(values)
         return self.event(payload)
 
-    def required_paths(self, role='developer', gate='develop'):
-        return resolve(role, gate)
+    def required_paths(self, role='developer', gate='publish'):
+        manifest = hook.build_manifest(
+            str(self.repo), hook._commit(str(self.repo)), role, gate,
+            provider='claude',
+        )
+        return tuple(entry['path'] for entry in manifest['entries'])
 
     def read_all(self):
         for relative in self.required_paths():
@@ -113,7 +117,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
         self.assertEqual(rows[0]['role'], 'developer')
         self.assertEqual(rows[0]['provider'], 'claude')
         self.assertEqual(rows[0]['model'], 'claude-test')
-        self.assertEqual(rows[0]['repo'], str(self.repo))
+        self.assertEqual(rows[0]['repo'], os.path.realpath(self.repo))
         self.assertEqual(rows[0]['path'], self.required_paths()[0])
         self.assertEqual(rows[0]['blob_sha256'], hook._safe_repo_file(str(self.repo), str(target))[1])
 
