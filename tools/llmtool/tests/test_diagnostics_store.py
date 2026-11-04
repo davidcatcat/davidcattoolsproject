@@ -600,7 +600,7 @@ class StoreTests(unittest.TestCase):
                 if fault == 'mkdir':
                     self.assertEqual(stages, [])
                 else:
-                    self.assertEqual(len(stages), 1)  # Never rmdir an unprovable stage.
+                    self.assertEqual(len(stages), 1)  # Cleanup runs on the next store pass.
                     if fault == 'lock-acquire':
                         self.assertEqual(len(blocker), 1)
                         self.assertTrue((stages[0] / '.run.lock').exists())
@@ -668,7 +668,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(list(stage.iterdir()), [])
         self.assertTrue(saved.is_dir())
         self.complete(self.start(self.store(max_runs=1)))
-        self.assertEqual(stage.stat().st_ino, inode)
+        self.assertFalse(stage.exists())
+        self.assertTrue(saved.is_dir())
 
     def test_postpublication_fsync_failure_preserves_valid_run_until_grace(self):
         from llmtool import diagnostics_store as module
@@ -747,6 +748,43 @@ class StoreTests(unittest.TestCase):
         self.assertIsNone(store.start())
         self.assertEqual(store.warning.code, d.ErrorCode.DIAGNOSTICS_STORE_FULL)
         self.assertEqual(evidence.stat().st_size, 1048576)
+
+    def test_empty_private_stages_cleaned_but_other_stages_retained(self):
+        self.home.mkdir(mode=0o700)
+        prefix = '.run-init-'
+        empty = self.home / (prefix + 'a' * 32)
+        empty.mkdir(mode=0o700)
+        nonempty = self.home / (prefix + 'b' * 32)
+        nonempty.mkdir(mode=0o700)
+        (nonempty / 'keep').write_text('KEEP')
+        symlink = self.home / (prefix + 'c' * 32)
+        symlink.symlink_to(self.base, target_is_directory=True)
+        wrong_mode = self.home / (prefix + 'd' * 32)
+        wrong_mode.mkdir(mode=0o700)
+        wrong_mode.chmod(0o755)
+        malformed = self.home / (prefix + 'E' * 32)
+        malformed.mkdir(mode=0o700)
+        self.start()
+
+        self.assertFalse(empty.exists())
+        self.assertEqual((nonempty / 'keep').read_text(), 'KEEP')
+        self.assertTrue(symlink.is_symlink())
+        self.assertTrue(wrong_mode.is_dir())
+        self.assertTrue(malformed.is_dir())
+        other_owner = self.home / (prefix + 'f' * 32)
+        other_owner.mkdir(mode=0o700)
+        from llmtool.diagnostics_store import _cleanup_empty_stages
+        descriptor = os.open(self.home, os.O_RDONLY | os.O_DIRECTORY)
+        self.addCleanup(os.close, descriptor)
+        with patch('llmtool.diagnostics_store.os.geteuid', return_value=os.geteuid() + 1):
+            _cleanup_empty_stages(descriptor, [other_owner.name])
+        self.assertTrue(other_owner.is_dir())
+
+    def test_empty_stage_cleanup_failure_does_not_fail_start(self):
+        from llmtool import diagnostics_store as module
+        with patch.object(module.os, 'rmdir', side_effect=PermissionError('injected')):
+            writer = self.start()
+        self.assertIsNotNone(writer)
 
     def test_initialization_reservation_short_writes_complete(self):
         original = os.write
