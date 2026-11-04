@@ -50,10 +50,8 @@ def _policy(task, reviewer_key):
 def _select_reviewer(task, requested=None):
     """Choose the default or explicit Reviewer and enforce family separation."""
     developer = task.get('developer') if type(task) is dict else None
-    family = developer.get('provider_profile') if type(developer) is dict else None
-    supported_families = ('codex', 'claude', 'opencode', 'agy', 'company-gw',
-                          'company-gw-agent', 'gw-agent')
-    if type(family) is not str or family not in supported_families:
+    family = task_completion._reviewer_author_family(developer)
+    if family is None:
         _refuse('REVIEWER_FAMILY_UNSUPPORTED')
     reviewer_key = requested
     if reviewer_key is None:
@@ -61,7 +59,7 @@ def _select_reviewer(task, requested=None):
     if reviewer_key not in ('claude-reviewer', 'codex-reviewer'):
         _refuse('REVIEWER_INVALID')
     reviewer_family = 'claude' if reviewer_key == 'claude-reviewer' else 'codex'
-    if family is not None and reviewer_family == family:
+    if reviewer_family == family:
         _refuse('REVIEWER_SAME_FAMILY')
     policy = _policy(task, reviewer_key)
     if not policy.allowed:
