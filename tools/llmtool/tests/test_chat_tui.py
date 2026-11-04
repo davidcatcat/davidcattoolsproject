@@ -2197,15 +2197,11 @@ class TaskListTests(Base):
             self.assertTrue(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.list_window))
 
-        async def back_to_chat(ui):
-            await self.until(ui, lambda ui: not ui.show_list
-                             and ui.app.layout.has_focus(ui.input), 'list closed')
+        def back_to_chat(ui):
             self.assertFalse(ui.show_list)
             self.assertTrue(ui.app.layout.has_focus(ui.input))
 
-        async def list_open(ui):
-            await self.until(ui, lambda ui: ui.show_list
-                             and ui.app.layout.has_focus(ui.list_window), 'list opened')
+        def list_open(ui):
             self.assertTrue(ui.show_list)
 
         calls = self.pm.complete.call_count
@@ -5299,11 +5295,13 @@ class PMConversationTests(BoundedPMTest):
         await asyncio.sleep(1.2)
 
     def w59_refresh(self, items, error=None):
-        def step(ui):
+        async def step(ui):
+            previous_load = ui.background_loaded
             ui.finish_background(self.session_id, (items, error))
             ui.app.invalidate()
             ui.background_text()
-            return asyncio.sleep(0.1)
+            await self.until(ui, lambda ui: ui.background_loaded != previous_load,
+                             'background refresh')
         return step
 
     def w59_sent(self):
@@ -5541,6 +5539,10 @@ class PMConversationTests(BoundedPMTest):
             self.assertFalse(ui.show_task_view)
             self.assertNotIn('LATE', ui.task_view.text)
 
+        async def close_detail(ui):
+            ui.app.input.send_text('\x1b')
+            await self.until(ui, lambda ui: not ui.show_task_view, 'detail closed')
+
         streaming = lambda ui: self.until(ui, lambda ui: 'PM\n  Hello' in ui.conversation.text)
         with patch.object(chat_tui_status, 'read_task_detail',
                           side_effect=lambda task_id: self.w59_record(task_id)):
@@ -5548,7 +5550,7 @@ class PMConversationTests(BoundedPMTest):
                         '請問進度？\r', streaming, '\x1b[B', '\r', opened, '\t', '草稿', same,
                         self.w59_refresh([]), same, self.w59_refresh([], self.W59_ERROR), same,
                         self.w59_refresh(self.w59_items()), same, stale, same,
-                        streamed, same, self.w59_esc, closed_stale])
+                        streamed, same, close_detail, closed_stale])
 
     # -- W60: evidence and provenance in the Task detail; c copies the Task ID --------------
     def w60_copies(self, ui):
