@@ -298,6 +298,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
              'OPENCODE_FREE_LIMIT'),
             ({'type': 'provider.quota', 'message': 'PRIVATE QUOTA MESSAGE'},
              'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.rate-limit', 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
             ({'statusCode': 429, 'message': 'PRIVATE RATE MESSAGE'},
              'OPENCODE_RATE_LIMITED'),
             ({'type': 'provider.unavailable', 'message': 'PRIVATE UNKNOWN MESSAGE'},
@@ -317,6 +319,8 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
              'OPENCODE_FREE_LIMIT'),
             ({'type': 'provider.quota', 'message': 'PRIVATE QUOTA MESSAGE'},
              'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.rate-limit', 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
             ({'statusCode': 429, 'message': 'PRIVATE RATE MESSAGE'},
              'OPENCODE_RATE_LIMITED'),
             ({'type': 'provider.unavailable', 'message': 'PRIVATE UNKNOWN MESSAGE'},
@@ -332,16 +336,62 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 self.assertEqual(caught.exception.direct_opencode_code, expected)
                 self.assertNotIn('PRIVATE', repr(vars(caught.exception)))
 
-    def test_output_truncation_error_event_has_distinct_code(self):
+    def test_output_limit_error_is_truncated_on_zero_and_nonzero_exits(self):
+        marker = 'PRIVATE OUTPUT MESSAGE'
         event = self.event('error', error={
-            'name': 'StepFailedError',
-            'message': 'PRIVATE OUTPUT MESSAGE',
+            'type': 'output-limit', 'message': marker,
+        })
+        with self.assertRaises(DirectOpenCodeError) as parsed:
+            parse_json_events((event + '\n').encode())
+        self.assertEqual(parsed.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn(marker, repr(vars(parsed.exception)))
+        cli = self.fake_cli(event + '\n', exit_code=7)
+        with self.assertRaises(DirectOpenCodeError) as nonzero:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(nonzero.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn(marker, repr(vars(nonzero.exception)))
+
+    def test_unknown_output_limit_fallback_uses_fixed_marker_only(self):
+        event = self.event('error', error={
+            'type': 'unknown', 'message': 'Output limit exceeded: PRIVATE DETAILS',
         })
         with self.assertRaises(DirectOpenCodeError) as caught:
             parse_json_events((event + '\n').encode())
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_OUTPUT_TRUNCATED')
-        self.assertNotIn('PRIVATE', repr(vars(caught.exception)))
+        self.assertNotIn('PRIVATE DETAILS', repr(vars(caught.exception)))
+
+    def test_limit_classification_precedence_is_consistent_across_events(self):
+        output = self.event('error', error={
+            'type': 'output-limit', 'message': 'PRIVATE OUTPUT MESSAGE',
+        })
+        auth = self.event('error', error={
+            'type': 'provider.auth', 'message': 'PRIVATE AUTH MESSAGE',
+        })
+        denied = self.event('tool_use', part={
+            'state': {'status': 'denied'},
+        })
+        for events, expected in (((output, auth), 'OPENCODE_AUTH_REQUIRED'),
+                                 ((auth, output), 'OPENCODE_AUTH_REQUIRED'),
+                                 ((output, denied), 'TOOL_DENIED'),
+                                 ((denied, output), 'TOOL_DENIED')):
+            raw = ('\n'.join(events) + '\n').encode()
+            with self.subTest(expected=expected, events=events):
+                with self.assertRaises(DirectOpenCodeError) as parsed:
+                    parse_json_events(raw)
+                self.assertEqual(parsed.exception.direct_opencode_code, expected)
+                cli = self.fake_cli(raw.decode(), exit_code=7)
+                with self.assertRaises(DirectOpenCodeError) as nonzero:
+                    self.run_with_valid_binding(root=self.root,
+                        read_paths=['source.py'], write_paths=['source.py'],
+                        prompt='bounded task prompt', timeout_seconds=5,
+                        executable=cli)
+                self.assertEqual(nonzero.exception.direct_opencode_code, expected)
+                self.assertNotIn('PRIVATE', repr(vars(nonzero.exception)))
 
     def test_nonzero_structured_denial_has_bound_timing_and_no_secret_leak(self):
         task_id, run_id = 'a' * 32, 'b' * 32

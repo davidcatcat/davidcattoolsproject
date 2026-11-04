@@ -180,11 +180,12 @@ def _has_output_truncation(raw, *, stderr=False):
             error = event.get('error')
             if type(error) is not dict:
                 continue
-            # Error messages are provider prose. Only typed fields may select
-            # a stable failure code.
-            if (error.get('name') == 'StepFailedError' or
-                    error.get('type') == 'StepFailedError' or
-                    error.get('code') == 'OUTPUT_LIMIT_EXCEEDED'):
+            # Error messages are provider prose. Only the fixed CLI fallback
+            # marker may select a code when the provider type is unknown.
+            if (error.get('type') == 'output-limit' or
+                    (error.get('type') == 'unknown' and
+                     type(error.get('message')) is str and
+                     'Output limit exceeded' in error['message'])):
                 return True
     except (ValueError, RecursionError):
         return False
@@ -197,28 +198,40 @@ def _classify_provider_error(raw, *, stderr=b''):
         return 'TOOL_DENIED'
     if _has_provider_auth_error(raw):
         return 'OPENCODE_AUTH_REQUIRED'
+    has_error = False
+    has_free_limit = False
+    has_rate_limit = False
     try:
         for line in raw.decode('utf-8').splitlines():
             if not line:
                 continue
             event = json.loads(line)
+            if type(event) is not dict or event.get('type') != 'error':
+                continue
             error = event.get('error') if type(event) is dict else None
             if type(error) is not dict:
                 continue
+            has_error = True
             error_type = error.get('type')
             if error_type in ('provider.free-limit', 'provider.quota'):
-                return 'OPENCODE_FREE_LIMIT'
+                has_free_limit = True
+            if error_type == 'provider.rate-limit':
+                has_rate_limit = True
             status = error.get('status', error.get('statusCode',
                                 error.get('status_code')))
             code = error.get('code')
             if status == 429 or code == 429 or code == '429':
-                return 'OPENCODE_RATE_LIMITED'
+                has_rate_limit = True
     except (UnicodeError, ValueError, RecursionError):
         pass
+    if has_free_limit:
+        return 'OPENCODE_FREE_LIMIT'
+    if has_rate_limit:
+        return 'OPENCODE_RATE_LIMITED'
     if (_has_output_truncation(raw) or
             _has_output_truncation(stderr, stderr=True)):
         return 'OPENCODE_OUTPUT_TRUNCATED'
-    return 'OPENCODE_PROVIDER_FAILED'
+    return 'OPENCODE_PROVIDER_FAILED' if has_error else None
 
 
 def _observed_native_session(raw):
@@ -473,6 +486,9 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
         _reject('OPENCODE_OUTPUT_INVALID')
     if len(raw) > MAX_OUTPUT_BYTES:
         _reject('OPENCODE_OUTPUT_TOO_LARGE')
+    classified = _classify_provider_error(raw)
+    if classified is not None:
+        _reject(classified)
     try:
         lines = raw.decode('utf-8').splitlines()
     except UnicodeError:
@@ -493,8 +509,6 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
             _reject('OPENCODE_OUTPUT_INVALID')
         if _tool_denied(event):
             _reject('TOOL_DENIED')
-        if event.get('type') == 'error':
-            _reject(_classify_provider_error(json.dumps(event).encode('utf-8')))
         event_type = event.get('type')
         event_sid = event.get('sessionID')
         if (event_type not in ('step_start', 'step_finish', 'text', 'tool_use') or
@@ -807,7 +821,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   native_session_id=_observed_native_session(raw))
     if process.returncode != 0:
         raise DirectOpenCodeError(
-                                  _classify_provider_error(raw, stderr=bytes(stderr)), attempted=True,
+                                  _classify_provider_error(raw, stderr=bytes(stderr)) or
+                                  'OPENCODE_PROVIDER_FAILED', attempted=True,
                                   cleanup_status=cleanup, process_exit_code=process.returncode,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,
