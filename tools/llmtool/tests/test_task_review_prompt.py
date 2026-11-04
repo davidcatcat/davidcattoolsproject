@@ -49,9 +49,12 @@ class FakeStore:
         return self.task
 
 
-def registration(task_id):
+def registration(task_id, trusted_agent_id=None):
     return SimpleNamespace(task_id=task_id, root='/repo', common_dir=COMMON,
-                           branch='task-branch', source_sha=SOURCE, result_sha=HEAD)
+                           branch='task-branch', source_sha=SOURCE, result_sha=HEAD,
+                           trusted_agent_id=(trusted_agent_id or
+                                             ('codex-developer' if task_id == 'executor-d6'
+                                              else 'claude-reviewer')))
 
 
 def snapshot(head=HEAD):
@@ -65,8 +68,14 @@ class TaskReviewPromptTests(unittest.TestCase):
         args = Namespace(task_id=TASK_ID, executor_task='executor-d6',
                          reviewer_task='reviewer-d6', pr=42, version=version)
         output = io.StringIO()
+        store = store or FakeStore()
+        developer = store.task.get('developer', {})
+        author_family = task_completion._reviewer_author_family(developer)
+        reviewer_identity = ('codex-reviewer' if author_family == 'claude'
+                             else 'claude-reviewer')
         registrations = {'executor-d6': registration('executor-d6'),
-                          'reviewer-d6': registration('reviewer-d6')}
+                          'reviewer-d6': registration(
+                              'reviewer-d6', reviewer_identity)}
         if snapshots is None:
             snapshots = [snapshot(), snapshot()]
         with patch.object(task_completion, 'read_d6_registration',
@@ -76,7 +85,7 @@ class TaskReviewPromptTests(unittest.TestCase):
                     'number': 42, 'head': {'sha': pr_head},
                     'base': {'sha': pr_base}}), \
                 redirect_stdout(output):
-            code = task_submission_cli.run_task_review_prompt(args, store=store or FakeStore())
+            code = task_submission_cli.run_task_review_prompt(args, store=store)
         return code, output.getvalue()
 
     def test_success_prints_filled_exact_review_lines(self):
@@ -187,6 +196,15 @@ class TaskReviewPromptTests(unittest.TestCase):
         self.assertLess(output.index(task_completion._FORMAL_ACCEPT), output.index(binding))
         self.assertIn('contract_digest, head, verdict, review.', output)
         self.assertIn(f'"task_id":"{TASK_ID}"', output)
+
+    def test_agy_claude_model_uses_registered_codex_reviewer(self):
+        store = FakeStore(provider_profile='agy')
+        store.task['developer']['model'] = 'claude-sonnet-5-5-medium'
+        code, output = self.invoke(store=store)
+        self.assertEqual(code, 0)
+        actor = '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->'
+        self.assertIn(actor, output)
+        self.assertIn('contract_digest, head, verdict, review.', output)
 
     def test_refuses_unrecorded_executor_head_without_prompt(self):
         with self.assertRaises(LLMToolError) as raised:

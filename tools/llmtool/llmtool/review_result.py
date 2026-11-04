@@ -46,16 +46,13 @@ def _comment_verdict(comment, *, head, version, task):
     marker = task_completion._VERDICT_MARKER.fullmatch(lines[0])
     developer = task.get('developer')
     if (marker is not None and marker.group(1) == 'Claude' and
-            type(developer) is dict and developer.get('provider_profile') == 'claude'):
+            task_completion._reviewer_author_family(developer) == 'claude'):
         return None
     codex_formal_pass = False
     codex_bound = False
     if marker is not None and marker.group(1) == 'Codex':
-        if (type(developer) is not dict or
-                developer.get('provider_profile') == 'codex' or
-                developer.get('provider_profile') not in
-                ('claude', 'opencode', 'agy', 'company-gw',
-                 'company-gw-agent', 'gw-agent')):
+        developer_family = task_completion._reviewer_author_family(developer)
+        if developer_family is None or developer_family == 'codex':
             return None
         binding = next((match for line in lines[1:]
                         if (match := _CODEX_BINDING.fullmatch(line)) is not None), None)
@@ -90,6 +87,8 @@ def _comment_verdict(comment, *, head, version, task):
 
     formal_pass = (codex_formal_pass or
                    (marker_matches and marker.group(1) == 'Claude' and status == 'PASS' and
+                    task_completion._review_family_compatible(
+                        developer, 'claude-reviewer') and
                     task_completion.is_formal_claude_pass(
                         body, task_id=task['task_id'], run_id=task['run_id'],
                         contract_digest=task['task_binding']['contract_digest'],

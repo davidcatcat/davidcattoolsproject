@@ -26,7 +26,12 @@ def _unique_pairs(pairs):
 class AgyRoute(DeveloperRoute):
     name = 'agy'
     worker_key = 'agy'
-    family = 'gemini'
+
+    @property
+    def family(self):
+        # Route identity is not the model family; review separation uses the
+        # actual model recorded on the Developer Task.
+        return 'agy'
 
     def validate_profile(self, model, effort):
         if (type(model) is not str or _MODEL.fullmatch(model) is None or

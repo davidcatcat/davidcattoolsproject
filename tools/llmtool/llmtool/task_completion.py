@@ -1706,26 +1706,38 @@ def _review_time(review, field='submitted_at'):
         _stop('REVIEW_EVIDENCE_INVALID')
 
 
-def _review_family_compatible(developer, reviewer_identity):
-    """Require a known Developer family and the matching formal Reviewer family."""
+def _reviewer_author_family(developer):
+    """Return the known family relevant to formal Reviewer separation."""
     if type(developer) is not dict:
-        return False
+        return None
     profile = developer.get('provider_profile')
     if profile == 'claude':
-        developer_family = 'claude'
+        return 'claude'
     elif profile == 'codex':
-        developer_family = 'codex'
-    elif profile in ('agy', 'opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
-        developer_family = None
+        return 'codex'
+    elif profile == 'agy':
+        model = developer.get('model')
+        if type(model) is str and model.startswith('claude-'):
+            return 'claude'
+        if type(model) is str and model.startswith('gemini-'):
+            return 'other'
+        return None
+    elif profile in ('opencode', 'company-gw', 'company-gw-agent', 'gw-agent'):
+        return 'other'
     else:
-        return False
+        return None
+
+
+def _review_family_compatible(developer, reviewer_identity):
+    """Require a known Developer family and the matching formal Reviewer family."""
+    developer_family = _reviewer_author_family(developer)
     reviewer_family = {
         'claude-reviewer': 'claude',
         'codex-reviewer': 'codex',
     }.get(reviewer_identity)
-    if reviewer_family is None:
+    if developer_family is None or reviewer_family is None:
         return False
-    return developer_family is None or reviewer_family != developer_family
+    return reviewer_family != developer_family
 
 
 def _review_binding_line(task_id, run_id, contract_digest, result_sha):

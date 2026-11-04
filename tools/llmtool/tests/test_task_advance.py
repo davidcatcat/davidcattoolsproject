@@ -879,7 +879,8 @@ class TaskAdvanceTests(unittest.TestCase):
                  'native_session_id': 'session-1'}
         record = base_record(review_dispatch_claim=[claim], schema_version=2,
             run_id='2' * 32, pm_session_id='pm-session', task_binding={
-                'contract_digest': 'd' * 64})
+                'contract_digest': 'd' * 64}, developer={
+                    'state': 'DEVELOPER_RESPONDED', 'provider_profile': 'codex'})
         record['completion_events'] = []
 
         class Store:
