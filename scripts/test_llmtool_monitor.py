@@ -2753,7 +2753,7 @@ class OfficeViewTests(unittest.TestCase):
             exited = mon.office_rows([], self.NOW, **kwargs)
         self.assertEqual([(row.name, row.state, row.detail) for row in exited if row.kind != "worker"],
                          [("claude pm（互動）", mon.CLOSED,
-                           "推測 Claude CLI 已關閉（等人回覆，要你回｜claude-pm）")])
+                           "推測 Claude CLI 已關閉（先前等人回覆｜claude-pm）")])
 
         live_cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
         (self.claude.parent / "sessions" / "41.json").write_text(
@@ -2909,7 +2909,10 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "ai-title", "aiTitle": "title a"}], age=600)
         (self.claude.parent / "sessions").mkdir(exist_ok=True)   # registry readable, no CLI in it
         listed = mon.parse_claude_agents(json.dumps(
-            [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "cwd": self.canonical}]))
+            [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "status": "waiting",
+              "cwd": self.canonical}]))
+        self.assertEqual((listed["aaaaaaaa-0001"]["status"],
+                          listed["aaaaaaaa-0001"]["jobState"]), ("waiting", "blocked"))
         rows = [row for row in mon.office_rows(
             [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
             canonical=self.canonical, agents=listed) if row.kind != "worker"]
