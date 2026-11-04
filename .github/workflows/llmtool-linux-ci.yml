@@ -68,7 +68,7 @@ jobs:
     if: >-
       vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
-      && github.actor == 'davidcatcat'
+      && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
     runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
     outputs:
       code: ${{ steps.classify.outputs.code }}
@@ -110,7 +110,7 @@ jobs:
     if: >-
       vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
-      && github.actor == 'davidcatcat'
+      && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && needs.changes.outputs.ai_loop == 'true'
     runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
     timeout-minutes: 15
@@ -131,7 +131,7 @@ jobs:
     if: >-
       vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
-      && github.actor == 'davidcatcat'
+      && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && needs.changes.outputs.gateway == 'true'
     runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
     timeout-minutes: 15
@@ -226,7 +226,7 @@ jobs:
     if: >-
       vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
-      && github.actor == 'davidcatcat'
+      && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && (needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch')
     needs: changes
     strategy:
@@ -360,7 +360,7 @@ jobs:
       always()
       && vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
-      && github.actor == 'davidcatcat'
+      && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
       && (needs.changes.outputs.code == 'true' || github.event_name == 'workflow_dispatch')
     strategy:
       fail-fast: false
@@ -385,7 +385,7 @@ jobs:
       needs.changes.outputs.docs == 'true'
       && vars.LINUX_CI_ENABLED == 'true'
       && github.repository == 'davidcatcat/davidcattoolsproject'
-      && github.actor == 'davidcatcat'
+      && (github.actor == 'davidcatcat' || github.actor == 'ddavidccatssun')
     runs-on: [self-hosted, Linux, X64, local-ec2-linux-ci]
     steps:
       # Trusted inline checks before checkout, identical to the shards.
