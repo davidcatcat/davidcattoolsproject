@@ -120,7 +120,7 @@ class GuidanceDriftCheckTests(unittest.TestCase):
             value for value in guidance_drift_check._hard_values(source)
             if guidance_drift_check.MODEL_NAME.fullmatch(value)
         }
-        self.assertEqual(models, {"gpt-8-y", "kimi-k2", "gpt-5.5", "gpt-5.5.2"})
+        self.assertEqual(models, {"gpt-8-y", "kimi-k2", "gpt-5.5", "gpt-5.5.2", "gpt-8-y.2"})
 
     def test_stale_exception(self):
         self.write_config(codex_only=[{"value": "https://stale.invalid/value", "reason": "No longer in AGENTS.md."}])
