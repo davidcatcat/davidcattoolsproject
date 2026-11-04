@@ -1,7 +1,9 @@
 """Private local ledger for observed skill-manifest delivery.
 
 The hash chain detects edited, removed, or reordered lines. Same-user tampering
-can be detected only up to rewriting the whole chain.
+can be detected only up to rewriting the whole chain: removing entries and
+rewriting the separate .head anchor is undetected, and deleting both files
+reads as an empty ledger.
 """
 
 import fcntl
@@ -18,11 +20,6 @@ from .errors import LLMToolError
 SCHEMA_VERSION = 1
 EVIDENCE_LEVELS = frozenset((
     'CONTROLLER_DELIVERED', 'HOOK_DELIVERED', 'OBSERVED_READ', 'UNVERIFIED'))
-REASONS = frozenset((
-    'EXPIRED', 'REVOKED', 'WRONG_TASK', 'WRONG_RUN', 'WRONG_AGENT',
-    'WRONG_ROLE', 'WRONG_PROVIDER', 'WRONG_MODEL', 'WRONG_REPO',
-    'WRONG_HEAD', 'MANIFEST_CHANGED', 'NOT_FOUND',
-    'CHAIN_BROKEN', 'LEDGER_UNREADABLE'))
 _BINDING_FIELDS = ('task_id', 'run_id', 'session_id', 'agent_id', 'role',
                    'provider', 'model', 'repo', 'head', 'manifest_sha256')
 _GENESIS = '0' * 64
@@ -57,7 +54,10 @@ def _stamp(value):
         return None
     if dt.tzinfo is None:
         return None
-    return dt.astimezone(timezone.utc)
+    try:
+        return dt.astimezone(timezone.utc)
+    except (OverflowError, ValueError):
+        return None
 
 
 def _now_text():
@@ -158,8 +158,15 @@ def _anchor_path(path):
     return Path(str(path) + '.head')
 
 
-def _anchor_matches(path, records):
-    """Check the independently stored end marker against the ledger."""
+def _anchor_value(records, intent=None):
+    value = {'count': len(records),
+             'last_sha256': records[-1]['entry_sha256'] if records else _GENESIS}
+    if intent is not None:
+        value['intent'] = intent
+    return value
+
+
+def _read_anchor(path):
     anchor = _anchor_path(path)
     try:
         fd = os.open(anchor, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -167,7 +174,7 @@ def _anchor_matches(path, records):
         try:
             os.lstat(path)
         except FileNotFoundError:
-            return not records
+            return None if not os.path.lexists(path) else False
         except OSError:
             return False
         return False
@@ -182,11 +189,13 @@ def _anchor_matches(path, records):
         with os.fdopen(fd, 'rb') as stream:
             fd = None
             value = json.loads(stream.read(4097).decode('utf-8'))
-        expected = {'count': len(records),
-                    'last_sha256': records[-1]['entry_sha256'] if records else _GENESIS}
-        return (type(value) is dict and set(value) == {'count', 'last_sha256'} and
-                type(value.get('count')) is int and type(value.get('last_sha256')) is str and
-                value == expected)
+        if type(value) is not dict:
+            return False
+        if set(value) not in ({'count', 'last_sha256'}, {'count', 'last_sha256', 'intent'}):
+            return False
+        if type(value.get('count')) is not int or type(value.get('last_sha256')) is not str:
+            return False
+        return value
     except (OSError, ValueError, TypeError, UnicodeError, OverflowError):
         return False
     finally:
@@ -194,11 +203,46 @@ def _anchor_matches(path, records):
             os.close(fd)
 
 
-def _write_anchor(path, records):
+def _anchor_matches(path, records):
+    value = _read_anchor(path)
+    return value is None and not records or value == _anchor_value(records)
+
+
+def _recover_anchor(path, records):
+    """Complete or clear a pending anchor intent after a ledger interruption."""
+    value = _read_anchor(path)
+    if value is None:
+        return not records
+    if value is False:
+        return False
+    intent = value.get('intent')
+    if intent is None:
+        return _anchor_matches(path, records)
+    if (type(intent) is not dict or set(intent) != {'count', 'last_sha256'} or
+            type(intent.get('count')) is not int or
+            type(intent.get('last_sha256')) is not str):
+        return False
+    base_count = value['count']
+    base_hash = value['last_sha256']
+    actual_hash = records[-1]['entry_sha256'] if records else _GENESIS
+    if base_count == len(records) and base_hash == actual_hash:
+        # Intent was durable but its append was not.
+        _write_anchor(path, records)
+        return True
+    # A complete, valid line matching the pending intent was committed.
+    if (base_count + 1 == len(records) and
+            intent['count'] == len(records) and
+            base_hash == (records[-2]['entry_sha256'] if len(records) > 1 else _GENESIS) and
+            intent['last_sha256'] == actual_hash):
+        _write_anchor(path, records)
+        return True
+    return False
+
+
+def _write_anchor(path, records, intent=None):
     anchor = _anchor_path(path)
     temp = Path(str(anchor) + '.' + secrets.token_hex(8) + '.tmp')
-    payload = _canonical({'count': len(records),
-                          'last_sha256': records[-1]['entry_sha256'] if records else _GENESIS})
+    payload = _canonical(_anchor_value(records, intent))
     fd = None
     try:
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
@@ -227,15 +271,23 @@ def _write_anchor(path, records):
 
 
 def verify_chain():
-    """Return (valid, code); whole-chain rewriting by the same user is undetectable."""
+    """Return (valid, code).
+
+    Same-user tampering is detectable only up to rewriting the whole chain:
+    removing entries and rewriting .head is undetected, and deleting both
+    files reads empty.
+    """
     path = _path()
-    lock_fd = _locked(path)
+    try:
+        lock_fd = _locked(path)
+    except SkillLedgerError:
+        return False, 'LEDGER_UNREADABLE'
     try:
         try:
             records = _read(path)
         except SkillLedgerError:
             return False, 'LEDGER_UNREADABLE'
-        return ((True, None) if _chain(records) and _anchor_matches(path, records)
+        return ((True, None) if _chain(records) and _recover_anchor(path, records)
                 else (False, 'CHAIN_BROKEN'))
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
@@ -246,6 +298,8 @@ def _append(path, records, entry):
     entry['prev_sha256'] = records[-1]['entry_sha256'] if records else _GENESIS
     entry['entry_sha256'] = _entry_hash(entry)
     payload = _canonical(entry) + b'\n'
+    intent = {'count': len(records) + 1, 'last_sha256': entry['entry_sha256']}
+    _write_anchor(path, records, intent)
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         info = os.fstat(fd)
@@ -264,7 +318,7 @@ def _append(path, records, entry):
     return entry['receipt_id']
 
 
-def _append_locked(path, lock_fd, records, entry):
+def _append_locked(path, records, entry):
     try:
         return _append(path, records, entry)
     except SkillLedgerError:
@@ -303,9 +357,9 @@ def record(entry, *, ttl_seconds=86400):
     lock_fd = _locked(path)
     try:
         records = _read(path)
-        if not _chain(records) or not _anchor_matches(path, records):
+        if not _chain(records) or not _recover_anchor(path, records):
             _fail('CHAIN_BROKEN')
-        return _append_locked(path, lock_fd, records, value)
+        return _append_locked(path, records, value)
     except (TypeError, ValueError, UnicodeError, OverflowError):
         _fail('INVALID_ENTRY')
     finally:
@@ -345,7 +399,9 @@ def check(task_id, run_id, session_id, agent_id, role, provider, model, repo,
                     return {'status': 'UNVERIFIED', 'reason': 'REVOKED'}
                 current = _stamp(now) if now is not None else datetime.now(timezone.utc)
                 expiry = _stamp(item.get('expires_at'))
-                if current is None or expiry is None:
+                if current is None:
+                    return {'status': 'UNVERIFIED', 'reason': 'INVALID_NOW'}
+                if expiry is None:
                     return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
                 if current >= expiry:
                     return {'status': 'UNVERIFIED', 'reason': 'EXPIRED'}
@@ -388,7 +444,7 @@ def revoke(receipt_id, reason):
     lock_fd = _locked(path)
     try:
         records = _read(path)
-        if not _chain(records):
+        if not _chain(records) or not _recover_anchor(path, records):
             _fail('CHAIN_BROKEN')
         target = next((item for item in records if item.get('receipt_id') == receipt_id
                        and item.get('entry_type') != 'REVOCATION'), None)
@@ -400,9 +456,7 @@ def revoke(receipt_id, reason):
         event.update(entry_type='REVOCATION', revokes_receipt_id=receipt_id,
                      revocation_reason=reason, status='REVOKED',
                      receipt_id=secrets.token_hex(16), created_at=_now_text())
-        if not _anchor_matches(path, records):
-            _fail('CHAIN_BROKEN')
-        return _append_locked(path, lock_fd, records, event)
+        return _append_locked(path, records, event)
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)

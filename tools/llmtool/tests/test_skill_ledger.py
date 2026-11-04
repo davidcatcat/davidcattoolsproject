@@ -1,6 +1,8 @@
 """Focused tests for the local skill evidence ledger."""
 
+import errno
 import json
+import multiprocessing
 import os
 import tempfile
 import threading
@@ -10,6 +12,21 @@ from pathlib import Path
 from unittest import mock
 
 from llmtool import skill_ledger as ledger
+
+
+def _forked_writer(path, index, results):
+    ledger._path = lambda: path
+    try:
+        ledger.record({
+            'task_id': 'task-a', 'run_id': 'fork-' + str(index),
+            'session_id': 'session-a', 'agent_id': 'agent-a',
+            'role': 'Developer', 'provider': 'local', 'model': 'model-a',
+            'repo': 'repo-a', 'head': 'head-a', 'manifest_sha256': 'manifest-a',
+            'evidence_level': 'OBSERVED_READ',
+        })
+        results.put(None)
+    except Exception as exc:
+        results.put(type(exc).__name__)
 
 
 class SkillLedgerTests(unittest.TestCase):
@@ -229,6 +246,173 @@ class SkillLedgerTests(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(self.path.read_text().splitlines()), 12)
         self.assertTrue(ledger.verify_chain()[0])
+
+    def test_ledger_file_mode_is_private(self):
+        self.record()
+        self.assertEqual(os.stat(self.path).st_mode & 0o777, 0o600)
+
+    def test_hard_linked_ledger_is_refused(self):
+        self.record()
+        os.link(self.path, self.path.parent / 'ledger-link')
+        with self.assertRaises(ledger.SkillLedgerError) as caught:
+            self.record(run_id='other')
+        self.assertEqual(caught.exception.skill_ledger_code, 'LEDGER_UNREADABLE')
+
+    def test_fifo_ledger_is_refused(self):
+        os.mkfifo(self.path, 0o600)
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+    def test_torn_last_line_is_refused(self):
+        self.record()
+        with self.path.open('ab') as stream:
+            stream.write(b'{"torn":')
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+    def test_lock_file_mode_is_private(self):
+        self.record()
+        lock = Path(str(self.path) + '.lock')
+        self.assertEqual(os.stat(lock).st_mode & 0o777, 0o600)
+        lock.chmod(0o644)
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+    def test_lock_symlink_is_refused(self):
+        target = self.path.parent / 'lock-target'
+        target.write_text('')
+        Path(str(self.path) + '.lock').symlink_to(target)
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+    def test_parent_directory_mode_is_private(self):
+        self.path.parent.chmod(0o755)
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+    def test_parent_directory_symlink_is_refused(self):
+        real_parent = self.path.parent / 'real-parent'
+        real_parent.mkdir(mode=0o700)
+        link_parent = self.path.parent / 'link-parent'
+        link_parent.symlink_to(real_parent, target_is_directory=True)
+        self.path = link_parent / 'ledger.jsonl'
+        self.path_patch.return_value = self.path
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+    def test_missing_binding_fields_are_refused(self):
+        for field in ('task_id', 'run_id', 'session_id', 'agent_id', 'role',
+                      'provider', 'model', 'repo', 'head', 'manifest_sha256'):
+            with self.subTest(field=field):
+                value = dict(self.entry)
+                del value[field]
+                with self.assertRaises(ledger.SkillLedgerError) as caught:
+                    ledger.record(value)
+                self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+
+    def test_invalid_and_oversized_ttl_are_refused(self):
+        for ttl in (0, -1, 1.5, 10**100):
+            with self.subTest(ttl=ttl):
+                with self.assertRaises(ledger.SkillLedgerError) as caught:
+                    ledger.record(dict(self.entry), ttl_seconds=ttl)
+                self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+
+    def test_anchor_file_mode_is_private(self):
+        self.record()
+        anchor = Path(str(self.path) + '.head')
+        self.assertEqual(os.stat(anchor).st_mode & 0o777, 0o600)
+        anchor.chmod(0o644)
+        self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+
+    def test_anchor_binding_mismatch_is_refused(self):
+        self.record()
+        anchor = Path(str(self.path) + '.head')
+        anchor.write_text(json.dumps({'count': 99, 'last_sha256': 'f' * 64}))
+        anchor.chmod(0o600)
+        self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+
+    def test_anchor_symlink_hard_link_fifo_and_malformed_are_refused(self):
+        for kind in ('symlink', 'hardlink', 'fifo', 'malformed'):
+            with self.subTest(kind=kind):
+                self.record()
+                anchor = Path(str(self.path) + '.head')
+                if kind == 'symlink':
+                    anchor.unlink()
+                    target = self.path.parent / 'anchor-target'
+                    target.write_text('{}')
+                    anchor.symlink_to(target)
+                elif kind == 'hardlink':
+                    os.link(anchor, self.path.parent / 'anchor-link')
+                elif kind == 'fifo':
+                    anchor.unlink()
+                    os.mkfifo(anchor, 0o600)
+                else:
+                    anchor.write_text('{}')
+                    anchor.chmod(0o600)
+                self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+                for candidate in self.path.parent.iterdir():
+                    if candidate != self.path:
+                        if candidate.is_dir() and not candidate.is_symlink():
+                            continue
+                        candidate.unlink()
+                self.path.unlink(missing_ok=True)
+
+    def test_interrupted_anchor_replace_recovers_committed_receipt(self):
+        self.record()
+        original_replace = os.replace
+        calls = 0
+
+        def fail_final_replace(source, target):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise OSError(errno.ENOSPC, 'full')
+            return original_replace(source, target)
+
+        with mock.patch.object(ledger.os, 'replace', side_effect=fail_final_replace):
+            with self.assertRaises(ledger.SkillLedgerError):
+                self.record(run_id='run-b')
+        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.record(run_id='after-recovery')
+        self.assertTrue(ledger.verify_chain()[0])
+
+    def test_interrupted_anchor_fsync_recovers_committed_receipt(self):
+        self.record()
+        original_fsync = os.fsync
+        calls = 0
+
+        def fail_final_anchor_fsync(fd):
+            nonlocal calls
+            calls += 1
+            if calls == 3:
+                raise OSError(errno.ENOSPC, 'full')
+            return original_fsync(fd)
+
+        with mock.patch.object(ledger.os, 'fsync', side_effect=fail_final_anchor_fsync):
+            with self.assertRaises(ledger.SkillLedgerError):
+                self.record(run_id='run-b')
+        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.record(run_id='after-recovery')
+        self.assertTrue(ledger.verify_chain()[0])
+
+    def test_forked_process_writers_keep_a_valid_chain(self):
+        context = multiprocessing.get_context('fork')
+        results = context.Queue()
+        workers = [context.Process(target=_forked_writer,
+                                   args=(self.path, index, results))
+                   for index in range(8)]
+        for worker in workers:
+            worker.start()
+        for worker in workers:
+            worker.join(10)
+        self.assertTrue(all(not worker.is_alive() and worker.exitcode == 0
+                            for worker in workers))
+        self.assertEqual([results.get(timeout=2) for _ in workers], [None] * 8)
+        self.assertEqual(len(self.path.read_text().splitlines()), 8)
+        self.assertTrue(ledger.verify_chain()[0])
+
+    def test_extreme_now_is_not_misclassified_as_ledger_damage(self):
+        self.record()
+        self.assertEqual(self.check(now='999999-01-01T00:00:00+00:00')['reason'],
+                         'INVALID_NOW')
+
+    def test_verify_chain_parent_refusal_returns_ledger_code(self):
+        self.path.parent.chmod(0o755)
+        self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
 
 
 if __name__ == '__main__':
