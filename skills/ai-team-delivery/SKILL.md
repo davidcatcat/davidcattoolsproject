@@ -21,9 +21,9 @@ Before dispatch, record:
 
 For D8 Host/Worker admission and review controls, see the [D8 Host/Worker reference](pm-continuation-reference.md#d8-hostworker-admission-and-review).
 
-**Developer routing (Owner direction, 2026-10-21):** Codex, OpenCode and AGY are PM-selected Developer routes under the current policy. Work in a verified registered D6 worktree with the Task Contract's file scope, bounded repairs and required self-review. Developers do not run checks in the D6; the PM runs admitted tests on EC2 through `llmtool task remote-test` and records the receipt. D8 provider caps, retry stops, timeout and cleanup apply to llmtool Host/Worker jobs. For current dispatch, route-specific and Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
+**Developer routing (Owner direction, 2026-10-21):** Codex, OpenCode and AGY are PM-selected Developer routes under the current policy. Work in a verified registered D6 worktree with the Task Contract's file scope, bounded repairs and required self-review. D8 provider caps, retry stops, timeout and cleanup apply to llmtool Host/Worker jobs. For current dispatch, route-specific and Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
 
-**AGY direct Developer:** Follow the route authorization, D6, availability, quota and handoff requirements in [AGENTS.md](../../AGENTS.md).
+**AGY direct Developer:** Follow the [AGY direct Developer skill](../agy-direct-developer/SKILL.md) and the current route authorization in [AGENTS.md](../../AGENTS.md).
 
 ## Team and execution roster
 
@@ -35,22 +35,22 @@ For D8 Host/Worker admission and review controls, see the [D8 Host/Worker refere
 | AGY Developer | Implements and self-reviews the bounded Task | PM, through the current worker-dispatch gate (`ALLOWED` since 2026-10-31) | Verified D6; auth, actual model, session, quota and scoped permissions; no Host D4/G3/M2, automatic retry or paid fallback; formal review from another model family |
 | Company `gw` Developer | Proposes patches, tests and self-review; cannot execute them | PM, through llmtool for eligible small, low-risk Tasks | No shell, filesystem, Git, credentials or approval authority; authorized environment applies patches and checks; independent review and CI |
 | Claude Reviewer | Formal independent Reviewer for Codex-authored changes | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change |
-| Codex Reviewer (`codex-reviewer`) | Formal independent Reviewer for Claude Developer and Claude PM changes | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change |
+| Codex Reviewer (`codex-reviewer`) | Formal independent Reviewer | PM, after a pinned candidate is ready | Separate read-only context and D6 reviewer record; exact-head review; never reviews own change; must be qualified and cross-family |
 | EC2 remote-test runner | Runs focused remote test modules and returns a receipt via `llmtool task remote-test` | PM dispatches the task for selected focused modules | Focused modules only; receipt is required evidence and does not replace formal review or CI |
 | Self-hosted Mac CI | Runs Mac-relevant CI checks | PR workflow for PRs; PM adds `mac-ci` after formal PASS and manually dispatches the full suite after each merge train | Two runners on one host; 45-minute job limit set in the workflow; exact-head PR check; without `mac-ci`, the PR check is `NOT_RUN` |
 | Linux CI on EC2 | Runs the full Linux suite, sharded across runners | Automatically on each PR and main push | Three EC2 runners; exact-head `check (Linux 3.14)`; Linux 3.9 is manual pre-release only |
 
-The EC2 remote-test runner is invoked by the PM with `llmtool task remote-test` for selected focused modules; its receipt is required evidence and does not replace formal review or CI.
+The EC2 remote-test runner is invoked by the PM with `llmtool task remote-test` for selected focused modules; its receipt is required evidence and does not replace formal review or CI. The PM adds `mac-ci` after formal PASS; without that label, the Mac PR check is `NOT_RUN`.
 
 ## Developer convergence and formal review
 
-The Developer implements the bounded packet, performs a distinct-context self-review and fixes ordinary findings before formal review. OpenCode's additional pre-review requirement and its handling when no qualified route is available are defined in [AGENTS.md](../../AGENTS.md). Pre-review is not independent acceptance.
+The Developer implements the bounded packet, performs a distinct-context self-review and fixes ordinary findings before formal review. An OpenCode Developer must also complete a qualified, actually-free pre-reviewer from a different model family before handoff. If none is available, record the limitation and mark the OpenCode Task BLOCKED. This pre-review is not independent acceptance or the formal Reviewer gate. For other current dispatch, route-specific and formal Reviewer rules, follow [AGENTS.md](../../AGENTS.md).
 
 Submit one consolidated exact-SHA candidate to a qualified, authorized formal Reviewer from a different model family, following [AGENTS.md](../../AGENTS.md), with contract, diff, test results, CI provenance and applicable runtime evidence. Use a separate read-only Reviewer Session/context with its own D6 reviewer record, distinct from the Developer and the PM; nobody formally reviews their own change. Any other review is advisory only. The Reviewer reports severity, reproducibility, limitations and exact-SHA disposition on the PR or tracking Issue under the [Transition record](pm-continuation.md#transition-record) rule; an llmtool Task closed by `task complete --reviewer-task` uses the [formal verdict comment](formal-verdict.md). On FAIL, return bounded findings to the original Developer, rerun affected checks and request affected rereview ([continuation](pm-continuation.md)). Never merge on self-review, stale verdict or green CI alone.
 
 After review and exact-head CI pass, reconcile the tested SHA against the current target, assess integration changes, and merge only when every task-required gate passes under [safe-git](../safe-git/SKILL.md). A relevant source change invalidates affected checks and review.
 
-**Company LLM Developer route:** Follow the authority, eligible task scope, privacy, execution and acceptance requirements in [AGENTS.md](../../AGENTS.md).
+**Company LLM Developer route:** Follow the authority, eligible task scope, privacy, execution and acceptance requirements in [AGENTS.md](../../AGENTS.md). A `gw` assignment is not evidence of live dispatch, patch application, full formal review or Task closure. Do not claim quality or net savings from one trial.
 
 <a id="p0--sole-owner-escalation-rule-owner-decision-2026-10-10"></a>
 ### P0 owner escalation pointer (current in AGENTS)

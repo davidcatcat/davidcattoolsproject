@@ -46,7 +46,7 @@ Inspect the full diff and preserve unrelated work. Verify the published PR head 
 
 ## Fetch and synchronize
 
-Fetch only when remote state is required and the root/branch is verified. Developers and Reviewers must not perform unclaimed Git fetches in the canonical Integrator checkout. Compare local/remote refs; never infer remote state from stale tracking refs. Fast-forward only from a clean tree that is strictly behind. If histories diverge or a conflict appears, stop and report the exact state unless the user explicitly asked to resolve it; preserve both sides. Follow the [D6 hard Git limits](worktree-lifecycle.md#hard-git-safety-limits). Never use `git stash` in a D6: all worktrees share the stash list.
+Fetch only when remote state is required and the root/branch is verified. Developers and Reviewers must not perform unclaimed Git fetches in the canonical Integrator checkout. Compare local/remote refs; never infer remote state from stale tracking refs. Fast-forward only from a clean tree that is strictly behind. If histories diverge or a conflict appears, stop and report the exact state unless the user explicitly asked to resolve it; preserve both sides. Follow the [D6 hard Git limits](worktree-lifecycle.md#hard-git-safety-limits). Never use `git stash` in a D6 because every worktree shares the same stash list.
 
 ## Commit and publish
 
