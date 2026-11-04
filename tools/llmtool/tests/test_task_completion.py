@@ -227,6 +227,84 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result_sha
 
+    def _collect_registered_result(self, result_sha, write_paths):
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        return task_completion.collect_executor_result(
+            task_id=self.task_id, expected_common_dir=self.common,
+            expected_root=str(self.root), expected_branch='feat/executor',
+            source_sha=self.source_sha,
+            task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                          'contract_digest': '3' * 64},
+            expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+            expected_native_session_id='native-executor', write_paths=write_paths,
+            artifact=artifact,
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+
+    def test_main_merge_changes_are_excluded_from_developer_scope(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('Updated by main.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main documentation update')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer change')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge main')
+        # A single-parent tip after the merge still carries the same inherited tree.
+        target.write_text(target.read_text() + '# later developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'later developer change')
+
+        result = self._collect_registered_result(self._git('rev-parse', 'HEAD'),
+                                                 [self.source_path])
+        self.assertEqual(result['changed_paths'], [self.source_path])
+
+    def test_out_of_scope_developer_file_is_refused(self):
+        result_sha = self._make_path_result('README.md', 'Developer edit.\n')
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_registered_result(result_sha, [self.source_path])
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+    def test_out_of_scope_merge_resolution_is_refused(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        fixture = self.root / self.source_path
+        fixture.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                           '    def test_main(self): self.assertTrue(True)\n')
+        (self.root / 'README.md').write_text('Main version.\n')
+        self._git('add', self.source_path, 'README.md')
+        self._git('commit', '-m', 'main edits')
+        self._git('checkout', 'feat/executor')
+        fixture.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                           '    def test_developer(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'scoped developer edit')
+        merge = subprocess.run(['/usr/bin/git', 'merge', '--no-ff', 'main', '-m',
+                                'merge main'], cwd=self.root, text=True,
+                               capture_output=True)
+        self.assertNotEqual(merge.returncode, 0)
+        fixture.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                           '    def test_resolved(self): self.assertTrue(True)\n')
+        (self.root / 'README.md').write_text('Developer conflict-resolution edit.\n')
+        self._git('add', self.source_path, 'README.md')
+        self._git('commit', '-m', 'resolve merge')
+
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_registered_result(self._git('rev-parse', 'HEAD'),
+                                            [self.source_path])
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
     def test_advanced_registered_base_completes_from_dispatch_source(self):
         path = self.root / self.source_path
         path.write_text(path.read_text() + '\n# approved branch progress\n')
