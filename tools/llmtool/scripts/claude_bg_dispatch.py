@@ -47,6 +47,7 @@ import argparse
 import glob
 import json
 import os
+import pwd
 import re
 import shutil
 import stat
@@ -114,7 +115,12 @@ def config_dir(role_settings=None):
     value = os.environ.get("CLAUDE_CONFIG_DIR")
     if not value and role_settings is not None:
         value = role_settings.get("config_dir")
-    return Path(value or os.path.expanduser("~/.claude"))
+    return Path(value or _default_config_dir())
+
+
+def _default_config_dir():
+    """Return the default Claude account using the OS user's home directory."""
+    return os.path.join(pwd.getpwuid(os.getuid()).pw_dir, ".claude")
 
 
 def _role_key(role):
@@ -136,7 +142,11 @@ def _account_environment(role):
     selected = environ.get("CLAUDE_CONFIG_DIR") or configured.get("config_dir")
     if role == "claude-reviewer" and not selected:
         raise DispatchError("REVIEWER_ACCOUNT_UNCONFIGURED")
-    environ["CLAUDE_CONFIG_DIR"] = str(selected or os.path.expanduser("~/.claude"))
+    resolved = os.path.realpath(selected or _default_config_dir())
+    if resolved == os.path.realpath(_default_config_dir()):
+        environ.pop("CLAUDE_CONFIG_DIR", None)
+    else:
+        environ["CLAUDE_CONFIG_DIR"] = str(selected)
     return configured, environ
 
 
@@ -365,9 +375,9 @@ def refuse_cross_account_launch(worker_dir, *, account_env=None):
     """A launch acts as the resolved Worker account, so only that account is allowed."""
     if worker_dir is None:
         return
-    if not os.path.isabs(worker_dir) or (
-            os.path.normpath(worker_dir) != os.path.normpath(str(
-                (account_env or os.environ).get("CLAUDE_CONFIG_DIR") or config_dir()))):
+    effective_env = os.environ if account_env is None else account_env
+    selected = effective_env.get("CLAUDE_CONFIG_DIR") or _default_config_dir()
+    if not os.path.isabs(worker_dir) or os.path.realpath(worker_dir) != os.path.realpath(selected):
         raise DispatchError("CROSS_ACCOUNT_LAUNCH_REFUSED")
 
 

@@ -14,6 +14,7 @@ from contextlib import redirect_stdout
 from datetime import datetime, timedelta, timezone
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import test_developer_assignment_inbox as assignment_fixtures
@@ -35,7 +36,8 @@ FAKE_CLAUDE = r'''
 import json, os, sys, time
 from pathlib import Path
 home = Path(os.environ['FAKE_CLAUDE_DIR'])
-account = Path(os.environ['CLAUDE_CONFIG_DIR'])
+account = Path(os.environ.get('CLAUDE_CONFIG_DIR') or
+               os.environ['FAKE_DEFAULT_CLAUDE_CONFIG_DIR'])
 account_scenario = account / 'fake-scenario.json'
 scenario_path = account_scenario if account_scenario.exists() else home / 'scenario.json'
 scenario = json.loads(scenario_path.read_text())
@@ -159,10 +161,13 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.home = Path(temp.name)
         self.config = self.home / 'claude-config'
         self.config.mkdir()
+        self.default_config = self.home / '.claude'
+        self.default_config.mkdir()
         self.claude = self.home / 'claude'
         self.claude.write_text('#!' + sys.executable + ' -B\n' + FAKE_CLAUDE)
         self.claude.chmod(0o700)
         env = patch.dict(os.environ, {'FAKE_CLAUDE_DIR': str(self.home),
+                                      'FAKE_DEFAULT_CLAUDE_CONFIG_DIR': str(self.default_config),
                                       'CLAUDE_CONFIG_DIR': str(self.config)})
         env.start()
         self.addCleanup(env.stop)
@@ -305,6 +310,46 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         launch = self.launches()[0]
         self.assertEqual(launch['config_dir'], str(self.config))
         self.assertEqual(launch['model'], 'env-model')
+
+    def test_default_account_omits_config_dir_for_launch_and_agent_listing(self):
+        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)],
+                      before=[row(TARGET, status='idle', cwd=self.cwd)],
+                      after=[[row(TARGET, cwd=self.cwd)]],
+                      transcripts=[{'session': TARGET, 'new_action': True}])
+        with patch.object(dispatch_tool.pwd, 'getpwuid',
+                          return_value=SimpleNamespace(pw_dir=str(self.home))), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
+            code, _ = self.dispatch()
+        self.assertEqual(code, 0)
+        calls = self.calls()
+        self.assertTrue(any('--bg' in call['argv'] for call in calls))
+        self.assertTrue(any(call['argv'][:2] == ['agents', '--json'] for call in calls))
+        self.assertTrue(all(call['config_dir'] is None for call in calls))
+
+    def test_account_environment_resolves_default_and_preserves_other_override(self):
+        with patch.object(dispatch_tool.pwd, 'getpwuid',
+                          return_value=SimpleNamespace(pw_dir=str(self.home))), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.default_config)}):
+            _, default_env = dispatch_tool._account_environment('claude-developer')
+        self.assertNotIn('CLAUDE_CONFIG_DIR', default_env)
+
+        other = self.home / 'claude2'
+        other.mkdir()
+        with patch.object(dispatch_tool.pwd, 'getpwuid',
+                          return_value=SimpleNamespace(pw_dir=str(self.home))), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(other)}):
+            _, other_env = dispatch_tool._account_environment('claude-developer')
+        self.assertEqual(other_env['CLAUDE_CONFIG_DIR'], str(other))
+
+    def test_default_account_cross_account_guard_compares_resolved_paths(self):
+        alias = self.home / 'default-alias'
+        alias.symlink_to(self.default_config, target_is_directory=True)
+        with patch.object(dispatch_tool.pwd, 'getpwuid',
+                          return_value=SimpleNamespace(pw_dir=str(self.home))):
+            dispatch_tool.refuse_cross_account_launch(str(alias), account_env={})
+            with self.assertRaises(dispatch_tool.DispatchError) as raised:
+                dispatch_tool.refuse_cross_account_launch(str(self.config), account_env={})
+        self.assertEqual(raised.exception.code, 'CROSS_ACCOUNT_LAUNCH_REFUSED')
 
     def test_invalid_role_config_reports_role_error_without_launching(self):
         error = dispatch_tool.LLMToolError('invalid role config')
