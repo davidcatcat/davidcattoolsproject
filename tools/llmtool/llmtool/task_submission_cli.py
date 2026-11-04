@@ -1047,8 +1047,13 @@ def run_task_review_prompt(args, *, store=None):
             task['task_id'], task['run_id'], binding['contract_digest'], expected_head)
     except Exception:
         refuse('REVIEW_PROMPT_BINDING_MISSING')
-    reviewer_actor = ('Codex' if type(task.get('developer')) is dict and
-                      task['developer'].get('provider_profile') == 'claude' else 'Claude')
+    reviewer_identity = getattr(reviewer, 'trusted_agent_id', None)
+    reviewer_actor = {
+        'codex-reviewer': 'Codex',
+        'claude-reviewer': 'Claude',
+    }.get(reviewer_identity)
+    if reviewer_actor is None:
+        refuse('REVIEW_PROMPT_REVIEWER_IDENTITY_INVALID')
     verdict_line = task_completion._REVIEW_VERDICT_ACTIVITY_LINE.replace(
         'actor=Claude', 'actor=' + reviewer_actor)
     lines = [

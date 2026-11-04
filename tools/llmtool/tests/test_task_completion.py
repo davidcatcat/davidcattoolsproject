@@ -1073,8 +1073,10 @@ class TaskCompletionTests(unittest.TestCase):
                                'submitted_at': '2026-10-21T10:00:00Z',
                                'body': 'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n' +
                                        self._review_binding(head=result_sha)}]
-                    task = ({} if profile is None else
-                            {'developer': {'provider_profile': profile}})
+                    developer = {'provider_profile': profile}
+                    if profile == 'agy':
+                        developer['model'] = 'gemini-2.5-pro'
+                    task = ({} if profile is None else {'developer': developer})
                     api = self._github_response_sequence(result_sha, pr, review, checks)
                     with patch('llmtool.task_completion._github_get', side_effect=api):
                         evidence = task_completion.collect_github_evidence(
@@ -1119,7 +1121,10 @@ class TaskCompletionTests(unittest.TestCase):
                     task = {'task_id': '1' * 32, 'run_id': '2' * 32,
                             'task_binding': {'contract_digest': '3' * 64}}
                     if profile is not None:
-                        task['developer'] = {'provider_profile': profile}
+                        developer = {'provider_profile': profile}
+                        if profile == 'agy':
+                            developer['model'] = 'gemini-2.5-pro'
+                        task['developer'] = developer
                     if reviewer == 'codex-reviewer':
                         task['review_dispatch_claim'] = [{
                             'pr': 10, 'head_sha': result_sha,
@@ -1146,6 +1151,22 @@ class TaskCompletionTests(unittest.TestCase):
                     if not expected:
                         self.assertIn('REVIEW_DEVELOPER_FAMILY_UNSUPPORTED',
                                       evidence['missing_gates'])
+
+    def test_agy_review_family_uses_actual_model_and_unknown_fails_closed(self):
+        for model, compatible_reviewers in (
+                ('claude-sonnet-5-5-medium', ('codex-reviewer',)),
+                ('gemini-2.5-pro', ('claude-reviewer', 'codex-reviewer'))):
+            developer = {'provider_profile': 'agy', 'model': model}
+            with self.subTest(model=model):
+                for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                    self.assertEqual(task_completion._review_family_compatible(
+                        developer, reviewer), reviewer in compatible_reviewers)
+        for developer in ({'provider_profile': 'agy'},
+                          {'provider_profile': 'agy', 'model': 'other-model'}):
+            with self.subTest(developer=developer):
+                for reviewer in ('claude-reviewer', 'codex-reviewer'):
+                    self.assertFalse(task_completion._review_family_compatible(
+                        developer, reviewer))
 
     def test_review_binding_must_match_task_run_contract_and_result_head(self):
         result_sha, _ = self._make_result()

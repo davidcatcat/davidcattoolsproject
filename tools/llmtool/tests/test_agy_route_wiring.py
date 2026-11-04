@@ -161,7 +161,7 @@ class AgyRouteWiringTests(unittest.TestCase):
             'task_binding': {'contract_digest': 'c' * 64},
             'completion': {'executor_task_id': 'executor-d6',
                            'evidence': {'common_dir': '/repo/.git'}},
-            'developer': {'provider_profile': 'agy'},
+            'developer': {'provider_profile': 'agy', 'model': 'gemini-2.5-pro'},
         }
         executor = SimpleNamespace(root='/repo/worktree', common_dir='/repo/.git',
                                    branch='task-branch', result_sha='d' * 40)
