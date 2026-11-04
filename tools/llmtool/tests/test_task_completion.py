@@ -252,6 +252,22 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['result_head'], result_sha)
         self.assertEqual(result['changed_paths'], [self.source_path])
 
+    def test_result_collection_refuses_hidden_out_of_scope_write_with_replace_config(self):
+        result_sha = self._make_path_result('README.md', 'Executor changed docs.\n')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        replacement_tree = self._git('rev-parse', self.source_sha + '^{tree}')
+        replacement_sha = self._git('commit-tree', replacement_tree, '-p', self.source_sha,
+                                    '-m', 'replacement hiding README write')
+        self._git('config', 'core.useReplaceRefs', 'true')
+        self._git('replace', result_sha, replacement_sha)
+
+        with patch.dict(os.environ, {'GIT_NO_REPLACE_OBJECTS': '0'}):
+            with self.assertRaises(LLMToolError) as rejected:
+                self._collect_result(result_sha, artifact)
+        self.assertEqual(rejected.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
     def test_result_collection_ignores_replacement_commit_for_ancestry(self):
         result_sha, artifact = self._make_result()
         replacement_tree = self._git('rev-parse', self.source_sha + '^{tree}')
@@ -508,6 +524,29 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(result['source_sha'], self.source_sha)
         self.assertEqual(result['changed_paths'], [self.source_path])
         self.assertEqual(result['diff_sha256'], hashlib.sha256(artifact).hexdigest())
+
+    def test_uncommitted_worktree_result_refuses_legacy_grafts(self):
+        path = self.root / self.source_path
+        path.write_text(path.read_text() + '# uncommitted task result\n')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', '--no-ext-diff', '--no-textconv',
+             '--no-renames', self.source_sha, '--'], cwd=self.root)
+        grafts = Path(self.common) / 'info' / 'grafts'
+        grafts.parent.mkdir(parents=True, exist_ok=True)
+        grafts.write_text('')
+
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion.collect_executor_worktree_result(
+                task_id=self.task_id, expected_common_dir=self.common,
+                expected_root=str(self.root), expected_branch='feat/executor',
+                source_sha=self.source_sha,
+                task_binding={'task_id': '1' * 32, 'run_id': '2' * 32,
+                              'contract_digest': '3' * 64},
+                expected_agent='executor-agent', expected_session_ref='Executor D6 session',
+                expected_native_session_id='native-executor', write_paths=[self.source_path],
+                read_paths=[self.source_path], artifact=artifact.decode('utf-8'),
+                artifact_sha256=hashlib.sha256(artifact).hexdigest())
+        self.assertEqual(rejected.exception.completion_code, 'LEGACY_GRAFTS_UNSUPPORTED')
 
     def test_worktree_docs_only_gate_returns_explicit_non_test_record(self):
         docs = self.root / 'README.md'

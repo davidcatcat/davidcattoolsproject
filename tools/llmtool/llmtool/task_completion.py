@@ -827,7 +827,8 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
         'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat', 'PAGER': 'cat',
         'GIT_LITERAL_PATHSPECS': '1', 'TMPDIR': '/tmp',
     }
-    safe = ('-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+    safe = ('-c', 'core.useReplaceRefs=false', '-c', 'core.fsmonitor=false',
+            '-c', 'core.hooksPath=/dev/null',
             '-c', 'core.untrackedCache=false', '-c', 'core.attributesFile=/dev/null',
             '-c', 'core.pager=cat', '-c', 'color.ui=false', '-c',
             'protocol.allow=never')
@@ -1284,6 +1285,7 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
             any(type(task_binding.get(key)) is not str for key in
                 ('task_id', 'run_id', 'contract_digest'))):
         _stop('TASK_BINDING_MISSING')
+    _reject_legacy_grafts(registration.root, registration.common_dir)
     untracked_raw = _git(registration.root,
         ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
     try:
@@ -1308,6 +1310,7 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
                                  result_head), limit=4096)
     except LLMToolError:
         _stop('D6_TASK_BINDING_MISMATCH')
+    _reject_legacy_grafts(registration.root, registration.common_dir)
     if (type(artifact) is not str or type(artifact_sha256) is not str or
             hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha256 or
             artifact.encode('utf-8') != live['diff']):
@@ -1417,7 +1420,8 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
                     stream.write(content)
                 target.chmod(0o755 if mode == '100755' else 0o644)
             proc = subprocess.run(
-                ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', 'apply',
+                ['/usr/bin/git', '-c', 'core.useReplaceRefs=false',
+                 '-c', 'core.hooksPath=/dev/null', 'apply',
                  '--binary', '--whitespace=nowarn', '-'],
                 cwd=temp_root, input=artifact.encode('utf-8'),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
