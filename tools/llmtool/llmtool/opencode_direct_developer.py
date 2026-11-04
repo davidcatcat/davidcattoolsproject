@@ -185,7 +185,7 @@ def _has_output_truncation(raw, *, stderr=False):
             if (error.get('type') == 'output-limit' or
                     (error.get('type') == 'unknown' and
                      type(error.get('message')) is str and
-                     'Output limit exceeded' in error['message'])):
+                     'Response still truncated' in error['message'])):
                 return True
     except (ValueError, RecursionError):
         return False
@@ -208,10 +208,10 @@ def _classify_provider_error(raw, *, stderr=b''):
             event = json.loads(line)
             if type(event) is not dict or event.get('type') != 'error':
                 continue
-            error = event.get('error') if type(event) is dict else None
+            has_error = True
+            error = event.get('error')
             if type(error) is not dict:
                 continue
-            has_error = True
             error_type = error.get('type')
             if error_type in ('provider.free-limit', 'provider.quota'):
                 has_free_limit = True

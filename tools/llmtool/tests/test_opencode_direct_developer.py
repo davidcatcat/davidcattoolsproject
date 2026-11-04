@@ -292,6 +292,13 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertNotIn(marker, repr(error.args))
         self.assertNotIn(marker, repr(vars(error)))
 
+    def test_error_event_without_dict_payload_stays_provider_failed(self):
+        event = self.event('error', error='malformed provider payload')
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events((event + '\n').encode())
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_PROVIDER_FAILED')
+
     def test_structured_provider_limit_and_rate_codes(self):
         cases = (
             ({'type': 'provider.free-limit', 'message': 'PRIVATE FREE MESSAGE'},
@@ -355,15 +362,26 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                          'OPENCODE_OUTPUT_TRUNCATED')
         self.assertNotIn(marker, repr(vars(nonzero.exception)))
 
-    def test_unknown_output_limit_fallback_uses_fixed_marker_only(self):
+    def test_unknown_output_limit_fallback_uses_real_cli_message(self):
+        marker = 'Response still truncated after two output token limit continuations'
         event = self.event('error', error={
-            'type': 'unknown', 'message': 'Output limit exceeded: PRIVATE DETAILS',
+            'type': 'unknown', 'message': marker,
         })
         with self.assertRaises(DirectOpenCodeError) as caught:
             parse_json_events((event + '\n').encode())
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_OUTPUT_TRUNCATED')
-        self.assertNotIn('PRIVATE DETAILS', repr(vars(caught.exception)))
+        self.assertNotIn(marker, str(caught.exception))
+        self.assertNotIn(marker, repr(vars(caught.exception)))
+        cli = self.fake_cli(event + '\n', exit_code=7)
+        with self.assertRaises(DirectOpenCodeError) as nonzero:
+            self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                write_paths=['source.py'], prompt='bounded task prompt',
+                timeout_seconds=5, executable=cli)
+        self.assertEqual(nonzero.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn(marker, str(nonzero.exception))
+        self.assertNotIn(marker, repr(vars(nonzero.exception)))
 
     def test_limit_classification_precedence_is_consistent_across_events(self):
         output = self.event('error', error={
