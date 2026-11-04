@@ -33,6 +33,7 @@ from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
 from . import worker_dispatch
+from .run_budget import MAX_REPAIR_ATTEMPTS
 from .developer_output_normalize import _HUNK
 from . import role_config
 from . import trust
@@ -771,6 +772,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--egress-basis', required=True, help='task-specific non-sensitive data authorization basis')
     delegate.add_argument('--data-class', help='required data classification for gw-agent direct Tasks')
     delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY direct Tasks')
+    delegate.add_argument('--high-debug-ref',
+                          help='trusted GitHub comment URL authorizing a repair-cap override')
     delegate.add_argument('--context-stdin', action='store_true',
                           help='company-gw/codex only: read bounded, sensitive-screened context from stdin')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
@@ -3965,6 +3968,53 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
     return 1
 
 
+def _check_delegate_repair_cap(args, store):
+    """Fail closed before dispatch when this D6 has exhausted its repair rounds."""
+    executor_task = getattr(args, 'executor_task', None)
+    current_task_id = getattr(args, 'task_id', None)
+    try:
+        task_ids = store.task_ids()
+    except Exception:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
+    count = 0
+    for task_id in task_ids:
+        if task_id == current_task_id:
+            continue
+        try:
+            record = store.get(task_id)
+        except Exception:
+            raise LLMToolError(
+                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+        completion = record.get('completion')
+        if (type(completion) is dict and
+                completion.get('executor_task_id') == executor_task and
+                type(record.get('developer')) is dict):
+            count += 1
+    if count < 1 + MAX_REPAIR_ATTEMPTS:
+        return
+    ref = getattr(args, 'high_debug_ref', None)
+    try:
+        slug = trust.load_trust().repository['slug']
+    except Exception:
+        slug = None
+    valid = (type(ref) is str and type(slug) is str and
+             re.fullmatch(
+                 r'https://github\.com/' + re.escape(slug) +
+                 r'/issues/[1-9][0-9]*(?:/comments/[1-9][0-9]*|#issuecomment-[1-9][0-9]*)',
+                 ref) is not None)
+    if not valid:
+        code = ('DELEGATE_HIGH_DEBUG_REF_INVALID' if ref is not None else
+                'DELEGATE_REPAIR_LIMIT_REACHED')
+        raise LLMToolError(code)
+    try:
+        store.record_repair_cap_override(
+            current_task_id, ref=ref, rounds=max(3, count + 1))
+    except Exception:
+        raise LLMToolError(
+            f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
+
+
 def run_task_delegate(args, *, store=None):
     store = TaskStore() if store is None else store
     if getattr(args, 'background', False):
@@ -4021,6 +4071,7 @@ def run_task_delegate(args, *, store=None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
         if registration.task_id != getattr(args, 'executor_task', None):
             raise LLMToolError('D6_SOURCE_BINDING_MISMATCH')
+        _check_delegate_repair_cap(args, store)
         return _run_background_delegate(
             args, provider=provider, store=store,
             d6_binding=(registration, _snapshot))
@@ -4030,17 +4081,21 @@ def run_task_delegate(args, *, store=None):
         if getattr(args, 'owner_ref', None) is None:
             raise LLMToolError('--provider agy requires --owner-ref')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
+        _check_delegate_repair_cap(args, store)
         return run_task_agy_delegate(args, store=store)
     if args.provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
+        _check_delegate_repair_cap(args, store)
         return run_task_gw_agent_delegate(args, store=store)
     _validate_acceptance_scope(args.acceptance)
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
+        _check_delegate_repair_cap(args, store)
         return run_task_codex_delegate(args, store=store)
     if args.provider == 'opencode':
+        _check_delegate_repair_cap(args, store)
         return run_task_opencode_delegate(args, store=store)
     if args.provider not in ('company-gw', 'codex'):
         raise LLMToolError('unsupported Developer route')
@@ -4125,6 +4180,7 @@ def run_task_delegate(args, *, store=None):
     }
     # Persist the one-shot claim before network I/O. A crash or ambiguous result
     # remains pending; this task cannot silently trigger a duplicate provider call.
+    _check_delegate_repair_cap(args, store)
     try:
         store.compare_and_update(
             task['task_id'],

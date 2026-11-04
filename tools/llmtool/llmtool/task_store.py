@@ -88,7 +88,7 @@ FIELDS = _FIELDS_V2_ROUTE_COMPLETION | frozenset((
     'dispatch_audit', 'completion_events', 'completion_event_tombstones',
     'remote_test_receipts', 'remote_test_outcomes', 'review_dispatch_claim',
     'review_repair_claims', 'high_debug', 'abandonment', 'pm_session_adoptions',
-    'pm_provenance', 'merge_attempt', 'published_pr'))
+    'pm_provenance', 'merge_attempt', 'published_pr', 'repair_cap_override'))
 _REVIEW_DISPATCH_CLAIM_FIELDS = frozenset((
     'executor_task', 'pr', 'head_sha', 'version', 'state', 'reviewer_task',
     'native_session_id', 'account_mode', 'claimed_at', 'updated_at'))
@@ -119,6 +119,9 @@ _V2_REPAIR_SHAPES = tuple(shape | frozenset(('review_repair_claims',))
                           for shape in _V2_REPAIR_OPTIONAL_BASES)
 _HIGH_DEBUG_VALID_SHAPES = tuple(shape | frozenset(('high_debug',)) for shape in (
     *_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES))
+_REPAIR_CAP_OVERRIDE_VALID_SHAPES = tuple(
+    shape | frozenset(('repair_cap_override',)) for shape in (
+        *_V2_REPAIR_OPTIONAL_BASES, *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES))
 _HIGH_DEBUG_FIELDS = frozenset(('family', 'failed_corrections', 'early_reason', 'examined_sha',
     'd6', 'model_requested', 'model_observed', 'effort_observed', 'status',
     'report_sha256', 'report', 'usage', 'recorded_at'))
@@ -371,6 +374,25 @@ def _valid_utc_seconds(value):
         return False
     try:
         return datetime.strptime(value, _UTC_SECONDS).strftime(_UTC_SECONDS) == value
+    except ValueError:
+        return False
+
+
+def _valid_github_comment_url_shape(value):
+    if type(value) is not str or len(value) > 2048:
+        return False
+    try:
+        parsed = urlsplit(value)
+        return (parsed.scheme == 'https' and parsed.netloc == 'github.com' and
+                parsed.username is None and parsed.password is None and
+                parsed.port is None and not parsed.query and
+                (re.fullmatch(
+                    r'/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}/issues/[1-9][0-9]*/comments/[1-9][0-9]*',
+                    parsed.path) is not None and not parsed.fragment or
+                 re.fullmatch(
+                    r'/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}/issues/[1-9][0-9]*',
+                    parsed.path) is not None and
+                 re.fullmatch(r'issuecomment-[1-9][0-9]*', parsed.fragment) is not None))
     except ValueError:
         return False
 
@@ -828,7 +850,8 @@ def _validate(record):
                 for shape in (*_V2_SHAPES, *_V2_REMOTE_TEST_SHAPES,
                               *_V2_REMOTE_OUTCOME_SHAPES,
                               *_V2_REMOTE_RECEIPT_OUTCOME_SHAPES)),
-             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES)) or
+             *_V2_REPAIR_SHAPES, *_HIGH_DEBUG_VALID_SHAPES,
+             *_REPAIR_CAP_OVERRIDE_VALID_SHAPES)) or
             record.get('schema_version') not in (1, 2)):
         _fail()
     if merge_attempt is not None:
@@ -921,6 +944,14 @@ def _validate(record):
                 item.get('status') not in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED', 'REPORT_INVALID',
                                         'RUN_FAILED')):
                 _fail('HIGH_DEBUG_INVALID')
+    if 'repair_cap_override' in record:
+        item = record['repair_cap_override']
+        if (type(item) is not dict or set(item) !=
+                frozenset(('ref', 'rounds', 'recorded_at')) or
+                not _valid_github_comment_url_shape(item.get('ref')) or
+                type(item.get('rounds')) is not int or item['rounds'] < 3 or
+                not _valid_utc_seconds(item.get('recorded_at'))):
+            _fail('TASK_REPAIR_CAP_OVERRIDE_INVALID')
     if 'review_dispatch_claim' in record:
         claim = record['review_dispatch_claim']
         claims = [claim] if type(claim) is dict else claim
@@ -2347,6 +2378,22 @@ class TaskStore:
                 self._update(task_id, expected={'record_sha256': current['record_sha256']},
                              changes={'published_pr': published})
                 return published
+            except TaskStoreConflict:
+                continue
+        _fail('TASK_STORE_BUSY')
+
+    def record_repair_cap_override(self, task_id, *, ref, rounds, recorded_at=None):
+        """Persist the trusted PM reference that raises this Task's repair cap."""
+        item = {'ref': ref, 'rounds': rounds,
+                'recorded_at': (datetime.now(timezone.utc).replace(
+                    microsecond=0).strftime(_UTC_SECONDS)
+                    if recorded_at is None else recorded_at)}
+        for _ in range(4):
+            current = self.get(task_id)
+            try:
+                return self._update(
+                    task_id, expected={'record_sha256': current['record_sha256']},
+                    changes={'repair_cap_override': item})
             except TaskStoreConflict:
                 continue
         _fail('TASK_STORE_BUSY')
