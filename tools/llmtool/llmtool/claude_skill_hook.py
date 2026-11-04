@@ -375,7 +375,7 @@ def _protected_gates(command):
 
     def parse(segment):
         try:
-            return [word.lower() for word in shlex.split(segment, posix=True)]
+            return shlex.split(segment, posix=True)
         except ValueError:
             # An unmatched quote should not hide a recognizable leading
             # command (for example a shell comment containing an apostrophe).
@@ -416,7 +416,7 @@ def _protected_gates(command):
                 if wrapper == 'env':
                     words = strip_value_options(words, {'-u', '--unset', '-C', '--chdir'})
                     while words and (words[0].startswith('-') or
-                                     re.fullmatch(r'[a-z_][a-z0-9_]*=.*', words[0])):
+                                     re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[0])):
                         words.pop(0)
                 elif wrapper == 'sudo':
                     words = strip_value_options(words, {'-u', '--user', '-g', '--group',
@@ -428,7 +428,7 @@ def _protected_gates(command):
                     while words and words[0].startswith('-'):
                         words.pop(0)
                 else:
-                    while words and re.fullmatch(r'[a-z_][a-z0-9_]*=.*', words[0]):
+                    while words and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*=.*', words[0]):
                         words.pop(0)
             if not words or words[0] in ('echo', 'printf'):
                 continue
