@@ -12,7 +12,7 @@ import os
 import subprocess
 import unittest
 from argparse import Namespace
-from contextlib import redirect_stdout
+from contextlib import contextmanager, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -64,6 +64,16 @@ class ClaudePMCodexFlowTests(unittest.TestCase):
     _git = completion_fixture.TaskCompletionTests._git
     _write_registration = completion_fixture.TaskCompletionTests._write_registration
     _write_env2_marker = completion_fixture.TaskCompletionTests._write_env2_marker
+
+    @contextmanager
+    def _trusted_main_ref(self):
+        """Provide an authenticated fixture main pin for task completion."""
+        with patch('llmtool.task_submission_cli.task_completion._github_get',
+                   return_value={'ref': 'refs/heads/main', 'object': {
+                       'type': 'commit', 'sha': self.source_sha}}), \
+             patch('llmtool.task_submission_cli.task_completion._trusted_slug',
+                   return_value='davidcatcat/davidcattoolsproject'):
+            yield
 
     def _proposal(self):
         """Build the diff a Codex Developer would propose, leaving the tree clean."""
@@ -169,11 +179,7 @@ class ClaudePMCodexFlowTests(unittest.TestCase):
 
         # 4. Executor-result callback: real D6/Git/test evidence, no PM provider call.
         out = StringIO()
-        with patch('llmtool.task_submission_cli.task_completion._github_get',
-                   return_value={'ref': 'refs/heads/main', 'object': {
-                       'type': 'commit', 'sha': self.source_sha}}), \
-             patch('llmtool.task_submission_cli.task_completion._trusted_slug',
-                   return_value='davidcatcat/davidcattoolsproject'), \
+        with self._trusted_main_ref(), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    side_effect=forbidden), \
              patch('llmtool.task_submission_cli.create_client', side_effect=forbidden), \
