@@ -218,7 +218,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                           return_value={'generation': {'max_tokens': 49152}}), \
              patch.object(task_submission_cli, 'selected_provider', return_value={
                  'type': 'openai-compatible', 'model': 'authorized-model',
-                 'base_url': 'https://authorized.example/v1'}), \
+                 'base_url': 'https://authorized.example'}), \
              patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
                  'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
              patch.object(worker_dispatch, 'authorize_dispatch',
@@ -412,7 +412,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                           return_value={'generation': {'max_tokens': 49152}}), \
              patch.object(task_submission_cli, 'selected_provider', return_value={
                  'type': 'openai-compatible', 'model': 'authorized-model',
-                 'base_url': 'https://authorized.example/v1'}), \
+                 'base_url': 'https://authorized.example'}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
              patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
