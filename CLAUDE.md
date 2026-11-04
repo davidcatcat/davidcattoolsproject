@@ -1,9 +1,15 @@
 # Repository Guidance
 
-Before product work, review, QA or PR operations, read:
+<!-- Claude Code project instructions: @imports load content; ordinary Markdown links do not. -->
+@AGENTS.md
+
+> The imported AGENTS.md is the authoritative repository-wide policy. Do not treat a linked skill, a discovered skill name, or a previous handoff summary as proof that its full contents were read. This file is guidance, not a substitute for llmtool's independent enforcement gates (Issue #919).
+
+Before any governed product work, PM dispatch, review, QA or PR/Git operation, explicitly load the applicable workflow skill and verify the file content was actually returned to this session. If the required content cannot be read, stop the affected operation and report UNVERIFIED; do not claim compliance:
 
 - [ai-team-delivery](skills/ai-team-delivery/SKILL.md) and [AGENTS.md](AGENTS.md) for current roles and authority.
 - The requested specialist gate skill: [safe-git](skills/safe-git/SKILL.md), [debug-ci](skills/debug-ci/SKILL.md), [review-change](skills/review-change/SKILL.md), [bug-hunt](skills/bug-hunt/SKILL.md), [security-review](skills/security-review/SKILL.md), [qa-validation](skills/qa-validation/SKILL.md), [validate-runtime](skills/validate-runtime/SKILL.md) or [company-llm-delegation](skills/company-llm-delegation/SKILL.md). Read only the requested gate skill; gates are distinct.
+- Re-evaluate these reads for every separate subagent/reviewer session; a parent session's reads do not establish a child's reads. Never claim a High Debug task, completed review or test without its actual task/run evidence.
 - The [Roadmap](tools/llmtool/ROADMAP.md) for project status and [policy history](docs/history/llmtool-agent-policy-legacy-20261020.md) for provenance. Policy history is archived, not current instructions; see the [2026-10-20 Claude guidance snapshot](docs/history/claude-guidance-20261020.md).
 
 ## Claude PM
