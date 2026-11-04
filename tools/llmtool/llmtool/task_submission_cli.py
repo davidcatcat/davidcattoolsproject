@@ -39,7 +39,8 @@ from . import role_config
 from . import trust
 from .developer_routes import (AgyRoute, GwAgentRoute, RouteError, capture_snapshot,
                                for_platform, load_route_config, run_route)
-from .developer_routes.gw_agent import cleanup_audit_copies
+from .developer_routes.gw_agent import (_GATEWAY_DATA_CLASS, _normalize_gw_agent_usage,
+                                        cleanup_audit_copies)
 from .developer_routes.agy import MAX_PROMPT_BYTES as AGY_MAX_PROMPT_BYTES
 from .task_verification import (AcceptanceCriterion, CriterionKind, TaskContract)
 from .test_output_excerpts import _emitted_sensitive
@@ -3165,7 +3166,12 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     route_config = load_route_config()['routes'].get('gw-agent')
-    gateway_data_class = {'SYNTHETIC': 'synthetic'}.get(data_class)
+    data_class_map = (route_config.get('data_class_map')
+                      if type(route_config) is dict else None)
+    if data_class_map is None:
+        data_class_map = _GATEWAY_DATA_CLASS
+    gateway_data_class = (data_class_map.get(data_class)
+                          if data_class_map == _GATEWAY_DATA_CLASS else None)
     if (type(route_config) is not dict or gateway_data_class is None or
             gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')
@@ -3432,30 +3438,6 @@ def _normalize_agy_usage(value):
             any(type(count) is not int or count < 0 for count in value.values())):
         return None
     return dict(value)
-
-
-def _normalize_gw_agent_usage(value):
-    """Retain gateway UNKNOWN and partial counters without AGY's all-fields rule."""
-    allowed = {'status', 'calls', 'calls_without_usage', 'input_tokens',
-               'output_tokens', 'total_tokens'}
-    unknown = {'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
-               'input_tokens': None, 'output_tokens': None}
-    if type(value) is not dict:
-        return unknown
-    normalized = {}
-    for key, item in value.items():
-        if key not in allowed:
-            continue
-        if key == 'status':
-            if type(item) is str and len(item) <= 32:
-                normalized[key] = item
-        elif item is None and key in ('input_tokens', 'output_tokens', 'total_tokens'):
-            normalized[key] = None
-        elif type(item) is int and 0 <= item <= 50_000_000:
-            normalized[key] = item
-    if not normalized:
-        return unknown
-    return normalized
 
 
 def _codex_developer_report(result):

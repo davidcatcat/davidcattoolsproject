@@ -34,6 +34,30 @@ _STATUS_EXIT = {'DONE': 0, 'BLOCKED': 3, 'MODEL_ERROR': 4,
 _AUDIT_RETENTION_SECONDS = 30 * 24 * 60 * 60
 
 
+def _normalize_gw_agent_usage(value):
+    """Keep gateway UNKNOWN and partial counters without AGY's all-fields rule."""
+    allowed = {'status', 'calls', 'calls_without_usage', 'input_tokens',
+               'output_tokens', 'total_tokens'}
+    unknown = {'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
+               'input_tokens': None, 'output_tokens': None}
+    if type(value) is not dict:
+        return unknown
+    normalized = {}
+    for key, item in value.items():
+        if key not in allowed:
+            continue
+        if key == 'status':
+            if type(item) is str and len(item) <= 32:
+                normalized[key] = item
+        elif item is None and key in ('input_tokens', 'output_tokens', 'total_tokens'):
+            normalized[key] = None
+        elif type(item) is int and 0 <= item <= 50_000_000:
+            normalized[key] = item
+    if not normalized:
+        return unknown
+    return normalized
+
+
 def cleanup_audit_copies(*, now=None, temp_root=None):
     """Remove llmtool-owned audit copies older than the 30-day retention window."""
     now = datetime.now(timezone.utc).timestamp() if now is None else now
@@ -158,6 +182,13 @@ class GwAgentRoute(DeveloperRoute):
         self.authorization_ref = authorization_ref
         self.expected_served_model = expected
         self._default_model = default_model
+        data_class_map = config.get('data_class_map', _GATEWAY_DATA_CLASS)
+        if (type(data_class_map) is not dict or data_class_map != _GATEWAY_DATA_CLASS or
+                any(type(key) is not str or not key or type(value) is not str or not value
+                    for key, value in data_class_map.items()) or
+                len(set(data_class_map.values())) != len(data_class_map)):
+            raise RouteError('GW_AGENT_CONFIG_INVALID')
+        self.data_class_map = dict(data_class_map)
         self._validated_request = None
         self._credential_resolved = False
         self._credential = None
@@ -197,7 +228,7 @@ class GwAgentRoute(DeveloperRoute):
                     'budgets', 'findings'}
         if set(task) - required:
             raise RouteError('GW_AGENT_TASK_UNKNOWN_FIELDS')
-        for field in sorted(required - set(task)):
+        for field in sorted((required - {'findings'}) - set(task)):
             raise RouteError('GW_AGENT_TASK_' + field.upper() + '_MISSING')
         if type(task.get('schema_version')) is not int or task['schema_version'] != 1:
             raise RouteError('GW_AGENT_TASK_SCHEMA_VERSION_INVALID')
@@ -238,6 +269,8 @@ class GwAgentRoute(DeveloperRoute):
                 raise RouteError('GW_AGENT_TASK_BUDGET_' + field.upper() + '_INVALID')
         if set(budgets) != set(_GATEWAY_BUDGETS):
             raise RouteError('GW_AGENT_TASK_BUDGETS_INVALID')
+        if 'findings' not in task:
+            raise RouteError('GW_AGENT_TASK_FINDINGS_MISSING')
         return value
 
     def prepare_files(self, tmpdir, request):
@@ -256,14 +289,14 @@ class GwAgentRoute(DeveloperRoute):
                 private_tmp == root or root in private_tmp.parents):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         task = dict(request['task'])
-        gateway_data_class = _GATEWAY_DATA_CLASS.get(task.get('data_class'), task.get('data_class'))
+        gateway_data_class = self.data_class_map.get(task.get('data_class'), task.get('data_class'))
         if gateway_data_class not in self.allowed_data_classes:
             raise RouteError('GW_AGENT_TASK_DATA_CLASS_INVALID')
         task['data_class'] = gateway_data_class
         credential = self._load_credential()
         profile = dict(self.profile)
         profile['allowed_data_classes'] = [
-            _GATEWAY_DATA_CLASS.get(item, item) for item in profile['allowed_data_classes']]
+            self.data_class_map.get(item, item) for item in profile['allowed_data_classes']]
         profile['auth_env'] = 'GW_AGENT_API_KEY' if credential is not None else None
         try:
             serialized_task = _canonical(task)

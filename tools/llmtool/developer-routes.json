@@ -13,6 +13,7 @@
       "default_model": "gw-agent-default",
       "default_effort": "low",
       "profile_name": "llmtool-direct",
+      "data_class_map": {"SYNTHETIC": "synthetic"},
       "profile": {
         "adapter": "openai-chat-tools",
         "base_url": "https://api.openai.com/v1",
