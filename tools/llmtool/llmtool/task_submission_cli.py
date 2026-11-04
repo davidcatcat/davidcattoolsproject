@@ -3165,7 +3165,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     request = _screen_text(task['request'], REQUEST_LIMIT)
     _screen_text(task['response'], RESPONSE_LIMIT)
     route_config = load_route_config()['routes'].get('gw-agent')
-    if type(route_config) is not dict or data_class not in route_config['allowed_data_classes']:
+    gateway_data_class = {'SYNTHETIC': 'synthetic'}.get(data_class)
+    if (type(route_config) is not dict or gateway_data_class is None or
+            gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')
     model = route_config['default_model']
     effort = route_config['default_effort']
@@ -3174,7 +3176,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         'task_contract_digest': binding['contract_digest'], 'source_sha': snapshot.head,
         'goal': assignment['goal'], 'acceptance': acceptance,
         'read_paths': read_paths, 'write_paths': write_paths,
-        'egress_basis': egress_basis, 'data_class': data_class,
+        'egress_basis': egress_basis, 'data_class': gateway_data_class,
     }
     prompt = ('You are the Gw Agent Developer for this bounded llmtool Task. Work only in the '
               'registered D6 worktree. Read only read_paths and edit only write_paths. '
@@ -3185,11 +3187,16 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     if len(prompt.encode('utf-8')) > 48 * 1024:
         raise LLMToolError('gw-agent request exceeds the supported size')
     task_input = {
+        'schema_version': 1,
         'task_id': task['task_id'], 'source_sha': snapshot.head,
+        'goal': assignment['goal'], 'acceptance': acceptance,
         'read_paths': read_paths, 'write_paths': write_paths,
-        'budgets': {'wall_clock_seconds': 600, 'stdout_bytes': 1024 * 1024,
-                    'stderr_bytes': 65536},
-        'egress_basis': egress_basis, 'data_class': data_class,
+        'budgets': {'max_turns': 16, 'max_input_tokens': 32768,
+                    'max_output_tokens': 8192, 'max_wall_seconds': 600,
+                    'max_tool_result_bytes': 262144,
+                    'max_sent_bytes': 16 * 1024 * 1024},
+        'egress_basis': egress_basis, 'data_class': gateway_data_class,
+        'findings': [],
     }
     test_policy = _remote_receipt_test_policy(task, read_paths=read_paths)
     developer = {
@@ -3310,7 +3317,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         artifact = raw.decode('utf-8', 'strict')
         audit_sha = route._result['audit_sha256']
         served_model = result.model
-        usage = _normalize_agy_usage(result.usage)
+        usage = _normalize_gw_agent_usage(result.usage)
         if usage is not None:
             usage['served_model'] = served_model
         developer.update(state='DEVELOPER_RESPONDED', artifact=artifact,
@@ -3322,7 +3329,8 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
             execution={'status': 'DONE', 'native_session_id': result.session_id,
                 'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
                 'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
-                'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
+                'usage_source': ('CLI_REPORTED' if result.usage is not None and
+                                 usage.get('status') != 'UNKNOWN' else 'UNKNOWN'),
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None})
     except RouteError as exc:
@@ -3424,6 +3432,30 @@ def _normalize_agy_usage(value):
             any(type(count) is not int or count < 0 for count in value.values())):
         return None
     return dict(value)
+
+
+def _normalize_gw_agent_usage(value):
+    """Retain gateway UNKNOWN and partial counters without AGY's all-fields rule."""
+    allowed = {'status', 'calls', 'calls_without_usage', 'input_tokens',
+               'output_tokens', 'total_tokens'}
+    unknown = {'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
+               'input_tokens': None, 'output_tokens': None}
+    if type(value) is not dict:
+        return unknown
+    normalized = {}
+    for key, item in value.items():
+        if key not in allowed:
+            continue
+        if key == 'status':
+            if type(item) is str and len(item) <= 32:
+                normalized[key] = item
+        elif item is None and key in ('input_tokens', 'output_tokens', 'total_tokens'):
+            normalized[key] = None
+        elif type(item) is int and 0 <= item <= 50_000_000:
+            normalized[key] = item
+    if not normalized:
+        return unknown
+    return normalized
 
 
 def _codex_developer_report(result):

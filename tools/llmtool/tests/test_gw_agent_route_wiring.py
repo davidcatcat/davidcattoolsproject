@@ -4,6 +4,7 @@ import inspect
 import io
 import json
 import os
+import sys
 import tempfile
 import unittest
 from argparse import Namespace
@@ -51,7 +52,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
     def test_route_config_and_data_class_are_validated(self):
         config = load_route_config()['routes']['gw-agent']
         self.assertEqual(config['package_path'], '~/.local/lib/api-agent-gateway')
-        self.assertEqual(config['allowed_data_classes'], ['SYNTHETIC'])
+        self.assertEqual(config['allowed_data_classes'], ['synthetic'])
+        self.assertEqual(config['profile']['adapter'], 'openai-chat-tools')
+        self.assertIn('base_url', config['profile'])
+        self.assertEqual(config['profile']['allowed_data_classes'], ['synthetic'])
         self.assertEqual(config['authorization_ref'],
             'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-6594101520')
         with tempfile.TemporaryDirectory() as temp:
@@ -70,7 +74,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                 'max_input_tokens': 10000, 'max_output_tokens': 1000,
                 'max_wall_seconds': 60, 'max_tool_result_bytes': 4096,
                 'max_sent_bytes': 100000},
-            'egress_basis': 'Synthetic test content.', 'data_class': 'SYNTHETIC'}}
+            'egress_basis': 'Synthetic test content.', 'data_class': 'synthetic'}}
         route.validate_request(request)
         request['task']['data_class'] = 'RESTRICTED'
         with self.assertRaises(LLMToolError):
@@ -199,7 +203,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['SYNTHETIC'],
+                              'allowed_data_classes': ['synthetic'],
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
                  'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
@@ -382,7 +386,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['SYNTHETIC'],
+                              'allowed_data_classes': ['synthetic'],
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
@@ -537,14 +541,29 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             audit_copy_path='/tmp/gw-agent-audit',
             _result={'audit_sha256': 'e' * 64})
         result = SimpleNamespace(model='real-served-model', usage={
-            'prompt_tokens': 1, 'completion_tokens': 1, 'total_tokens': 2},
+            'input_tokens': 1, 'output_tokens': None, 'status': 'PARTIAL'},
             session_id='provider-session', exit_code=0, stdout_sha256='f' * 64,
             elapsed_ms=10, cleanup_status='CLEAN')
         decision = worker_dispatch.PolicyDecision('company-gw-agent', True,
                                                   'OWNER_POLICY_ALLOWED', 'f' * 64)
+        gateway_profile = load_route_config()['routes']['gw-agent']['profile']
 
-        def run_route(_route, _request, *, gate, **_kwargs):
+        seen = {}
+        def run_route(_route, request, *, gate, **_kwargs):
             self.assertIs(gate(), decision)
+            seen['task'] = copy.deepcopy(request['task'])
+            gateway_path = str(Path(__file__).resolve().parents[2] / 'api-agent-gateway')
+            sys.path.insert(0, gateway_path)
+            try:
+                from api_agent_gateway.contract import parse_profile, parse_task
+                serialized = json.dumps(seen['task'], sort_keys=True,
+                                        separators=(',', ':')).encode('utf-8')
+                seen['parsed_task'] = parse_task(seen['task'], serialized)
+                parse_profile({'schema_version': 1, 'profiles': {
+                    'llmtool-direct': dict(gateway_profile, auth_env=None)}},
+                    'llmtool-direct')
+            finally:
+                sys.path.remove(gateway_path)
             return result
 
         with patch.object(task_completion, 'validate_task_binding'), \
@@ -558,7 +577,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, '_direct_result_callback', return_value={}), \
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
-                              'allowed_data_classes': ['SYNTHETIC'],
+                              'allowed_data_classes': ['synthetic'],
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
@@ -580,6 +599,16 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['model'], 'gw-agent-default')
         self.assertEqual(developer['artifact'], 'diff')
         self.assertEqual(developer['usage']['served_model'], 'real-served-model')
+        self.assertEqual(seen['task']['schema_version'], 1)
+        self.assertEqual(seen['task']['goal'], 'goal')
+        self.assertEqual(seen['task']['acceptance'], ['record result'])
+        self.assertEqual(seen['task']['data_class'], 'synthetic')
+        self.assertEqual(set(seen['task']['budgets']), {
+            'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',
+            'max_tool_result_bytes', 'max_sent_bytes'})
+        self.assertNotIn('stdout_bytes', seen['task']['budgets'])
+        self.assertEqual(developer['usage']['input_tokens'], 1)
+        self.assertIsNone(developer['usage']['output_tokens'])
 
     def test_old_audit_copies_are_removed_and_recent_copies_retained(self):
         with tempfile.TemporaryDirectory() as temp:
