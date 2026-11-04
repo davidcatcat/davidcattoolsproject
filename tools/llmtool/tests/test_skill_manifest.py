@@ -23,6 +23,7 @@ from llmtool.skill_manifest import (
 
 FILES = {
     'AGENTS.md': b'governance\n',
+    'CLAUDE.md': b'claude governance\n',
     'skills/ai-team-delivery/SKILL.md': b'delivery\n',
     'skills/ai-team-delivery/pm-continuation.md': b'pm\n',
     'skills/ai-team-delivery/pm-continuation-reference.md': b'reference\n',
@@ -66,8 +67,10 @@ class SkillManifestTests(unittest.TestCase):
         self._git('commit', '-qm', 'fixture')
         return self._git('rev-parse', 'HEAD').stdout.decode('ascii').strip()
 
-    def _manifest(self, role='developer', gate='develop', runner=subprocess.run):
-        return build_manifest(self.repo, self.commit, role, gate, git_runner=runner)
+    def _manifest(self, role='developer', gate='develop', runner=subprocess.run,
+                  provider='codex'):
+        return build_manifest(self.repo, self.commit, role, gate,
+                              git_runner=runner, provider=provider)
 
     def _assert_code(self, code, *args, **kwargs):
         repo_root = kwargs.pop('repo_root', self.repo)
@@ -110,6 +113,17 @@ class SkillManifestTests(unittest.TestCase):
         self.assertNotEqual(developer['manifest_sha256'], pm['manifest_sha256'])
         self.assertNotEqual(developer['manifest_sha256'], review['manifest_sha256'])
         self.assertNotEqual(developer['manifest_sha256'], publish['manifest_sha256'])
+
+    def test_provider_selects_claude_entrypoint_and_preserves_default(self):
+        default = self._manifest()
+        claude = self._manifest(provider='claude')
+        default_paths = [entry['path'] for entry in default['entries']]
+        claude_paths = [entry['path'] for entry in claude['entries']]
+        self.assertIn('AGENTS.md', default_paths)
+        self.assertNotIn('CLAUDE.md', default_paths)
+        self.assertIn('CLAUDE.md', claude_paths)
+        self.assertNotIn('AGENTS.md', claude_paths)
+        self.assertNotEqual(default['manifest_sha256'], claude['manifest_sha256'])
 
     def test_injected_git_runner_is_used(self):
         calls = []
