@@ -180,13 +180,45 @@ def _has_output_truncation(raw, *, stderr=False):
             error = event.get('error')
             if type(error) is not dict:
                 continue
-            encoded_error = json.dumps(error, ensure_ascii=True)
-            if ('StepFailedError' in encoded_error or
-                    'Response still truncated' in encoded_error):
+            # Error messages are provider prose. Only typed fields may select
+            # a stable failure code.
+            if (error.get('name') == 'StepFailedError' or
+                    error.get('type') == 'StepFailedError' or
+                    error.get('code') == 'OUTPUT_LIMIT_EXCEEDED'):
                 return True
     except (ValueError, RecursionError):
         return False
     return False
+
+
+def _classify_provider_error(raw, *, stderr=b''):
+    """Classify structured OpenCode errors without retaining provider text."""
+    if _has_structured_tool_denial(raw):
+        return 'TOOL_DENIED'
+    if _has_provider_auth_error(raw):
+        return 'OPENCODE_AUTH_REQUIRED'
+    try:
+        for line in raw.decode('utf-8').splitlines():
+            if not line:
+                continue
+            event = json.loads(line)
+            error = event.get('error') if type(event) is dict else None
+            if type(error) is not dict:
+                continue
+            error_type = error.get('type')
+            if error_type in ('provider.free-limit', 'provider.quota'):
+                return 'OPENCODE_FREE_LIMIT'
+            status = error.get('status', error.get('statusCode',
+                                error.get('status_code')))
+            code = error.get('code')
+            if status == 429 or code == 429 or code == '429':
+                return 'OPENCODE_RATE_LIMITED'
+    except (UnicodeError, ValueError, RecursionError):
+        pass
+    if (_has_output_truncation(raw) or
+            _has_output_truncation(stderr, stderr=True)):
+        return 'OPENCODE_OUTPUT_TRUNCATED'
+    return 'OPENCODE_PROVIDER_FAILED'
 
 
 def _observed_native_session(raw):
@@ -462,12 +494,7 @@ def parse_json_events(raw, *, step_limit=DEFAULT_AGENT_STEPS):
         if _tool_denied(event):
             _reject('TOOL_DENIED')
         if event.get('type') == 'error':
-            error = event.get('error')
-            _reject('OPENCODE_AUTH_REQUIRED' if type(error) is dict and
-                    error.get('type') == 'provider.auth' else
-                    'OPENCODE_OUTPUT_TRUNCATED' if _has_output_truncation(
-                        json.dumps(event).encode('utf-8')) else
-                    'OPENCODE_PROVIDER_FAILED')
+            _reject(_classify_provider_error(json.dumps(event).encode('utf-8')))
         event_type = event.get('type')
         event_sid = event.get('sessionID')
         if (event_type not in ('step_start', 'step_finish', 'text', 'tool_use') or
@@ -660,7 +687,7 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                     os.set_blocking(process.stdin.fileno(), False)
                     selector.register(process.stdin, selectors.EVENT_WRITE, 'stdin')
                     offset = 0
-                    complete_stdout = 0
+                    denial_line_start = 0
                     while selector.get_map():
                         lifecycle.check()
                         remaining = work_deadline - time.monotonic()
@@ -685,15 +712,21 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                 continue
                             destination = stdout if key.data == 'stdout' else stderr
                             cap = MAX_OUTPUT_BYTES if key.data == 'stdout' else MAX_STDERR_BYTES
+                            chunk_start = len(stdout) if key.data == 'stdout' else 0
                             if len(destination) + len(chunk) > cap:
                                 _reject('OPENCODE_OUTPUT_TOO_LARGE' if key.data == 'stdout'
                                         else 'OPENCODE_STDERR_TOO_LARGE')
                             destination.extend(chunk)
                             if key.data == 'stdout':
-                                end = stdout.rfind(b'\n')
-                                if end >= complete_stdout:
-                                    complete = bytes(stdout[complete_stdout:end + 1])
-                                    complete_stdout = end + 1
+                                scan_from = 0
+                                while True:
+                                    end = chunk.find(b'\n', scan_from)
+                                    if end < 0:
+                                        break
+                                    line_end = chunk_start + end + 1
+                                    complete = bytes(stdout[denial_line_start:line_end])
+                                    denial_line_start = line_end
+                                    scan_from = end + 1
                                     if _has_structured_tool_denial(complete):
                                         _reject('TOOL_DENIED')
                     _await_exit_without_reap(process, deadline=work_deadline)
@@ -773,15 +806,8 @@ def run(*, root, read_paths, write_paths, prompt, prelaunch_validate,
                                   started_at=started_at, ended_at=ended_at,
                                   native_session_id=_observed_native_session(raw))
     if process.returncode != 0:
-        denied = _has_structured_tool_denial(raw)
-        auth_required = _has_provider_auth_error(raw)
-        output_truncated = (_has_output_truncation(raw) or
-                            _has_output_truncation(bytes(stderr), stderr=True))
         raise DirectOpenCodeError(
-                                  'TOOL_DENIED' if denied else
-                                  'OPENCODE_AUTH_REQUIRED' if auth_required else
-                                  'OPENCODE_OUTPUT_TRUNCATED' if output_truncated else
-                                  'OPENCODE_PROVIDER_FAILED', attempted=True,
+                                  _classify_provider_error(raw, stderr=bytes(stderr)), attempted=True,
                                   cleanup_status=cleanup, process_exit_code=process.returncode,
                                   stdout_sha256=(hashlib.sha256(raw).hexdigest() if raw else None),
                                   elapsed_ms=elapsed, source_bytes=source_bytes,

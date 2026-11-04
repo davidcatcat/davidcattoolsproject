@@ -192,11 +192,13 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
 
     def test_streaming_rejects_output_above_cap_and_cleans_up(self):
         cli = self.fake_cli('x' * 129)
-        with patch('llmtool.opencode_direct_developer.MAX_OUTPUT_BYTES', 128):
+        with patch('llmtool.opencode_direct_developer.MAX_OUTPUT_BYTES', 128), \
+                patch('llmtool.opencode_direct_developer.parse_json_events') as parser:
             with self.assertRaises(DirectOpenCodeError) as caught:
                 self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
                     write_paths=['source.py'], prompt='bounded task prompt',
                     timeout_seconds=5, executable=cli)
+        parser.assert_not_called()
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_OUTPUT_TOO_LARGE')
         self.assertEqual(caught.exception.cleanup_status, 'CONFIRMED')
@@ -290,15 +292,56 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         self.assertNotIn(marker, repr(error.args))
         self.assertNotIn(marker, repr(vars(error)))
 
+    def test_structured_provider_limit_and_rate_codes(self):
+        cases = (
+            ({'type': 'provider.free-limit', 'message': 'PRIVATE FREE MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.quota', 'message': 'PRIVATE QUOTA MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'statusCode': 429, 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
+            ({'type': 'provider.unavailable', 'message': 'PRIVATE UNKNOWN MESSAGE'},
+             'OPENCODE_PROVIDER_FAILED'),
+        )
+        for details, expected in cases:
+            with self.subTest(details=details):
+                event = self.event('error', error=details)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    parse_json_events((event + '\n').encode())
+                self.assertEqual(caught.exception.direct_opencode_code, expected)
+                self.assertNotIn('PRIVATE', repr(vars(caught.exception)))
+
+    def test_nonzero_structured_provider_limit_and_rate_codes(self):
+        cases = (
+            ({'type': 'provider.free-limit', 'message': 'PRIVATE FREE MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'type': 'provider.quota', 'message': 'PRIVATE QUOTA MESSAGE'},
+             'OPENCODE_FREE_LIMIT'),
+            ({'statusCode': 429, 'message': 'PRIVATE RATE MESSAGE'},
+             'OPENCODE_RATE_LIMITED'),
+            ({'type': 'provider.unavailable', 'message': 'PRIVATE UNKNOWN MESSAGE'},
+             'OPENCODE_PROVIDER_FAILED'),
+        )
+        for details, expected in cases:
+            with self.subTest(details=details):
+                cli = self.fake_cli(self.event('error', error=details) + '\n', exit_code=7)
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=cli)
+                self.assertEqual(caught.exception.direct_opencode_code, expected)
+                self.assertNotIn('PRIVATE', repr(vars(caught.exception)))
+
     def test_output_truncation_error_event_has_distinct_code(self):
         event = self.event('error', error={
             'name': 'StepFailedError',
-            'message': 'Response still truncated after two output token limit continuations',
+            'message': 'PRIVATE OUTPUT MESSAGE',
         })
         with self.assertRaises(DirectOpenCodeError) as caught:
             parse_json_events((event + '\n').encode())
         self.assertEqual(caught.exception.direct_opencode_code,
                          'OPENCODE_OUTPUT_TRUNCATED')
+        self.assertNotIn('PRIVATE', repr(vars(caught.exception)))
 
     def test_nonzero_structured_denial_has_bound_timing_and_no_secret_leak(self):
         task_id, run_id = 'a' * 32, 'b' * 32

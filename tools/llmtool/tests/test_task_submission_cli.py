@@ -1507,7 +1507,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                     cleanup_status='CONFIRMED', process_exit_code=None,
                                     stdout_sha256='a' * 64, elapsed_ms=1200,
                                     source_bytes=10, source_file_count=1,
-                                    source_manifest_sha256='b' * 64)
+                                    source_manifest_sha256='b' * 64,
+                                    native_session_id='ses_Abc123')
         args = self._opencode_delegate_args(task)
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.opencode_direct_developer.run',
@@ -1524,12 +1525,23 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(result['developer']['execution']['source_bytes'], 10)
         self.assertEqual(result['developer']['execution']['source_file_count'], 1)
         self.assertEqual(result['developer']['execution']['source_manifest_sha256'], 'b' * 64)
+        self.assertEqual(result['developer']['execution']['native_session_id'], 'ses_Abc123')
         with patch.dict(os.environ, {'HOME': str(self.home)}), \
                 patch('llmtool.task_submission_cli.opencode_direct_developer.run') as second, \
                 self.assertRaises(LLMToolError):
             run_task_delegate(args)
         second.assert_not_called()
         self.assertEqual(invoke.call_count, 1)
+
+    def test_opencode_prompt_includes_bounded_read_and_round_sizing_guidance(self):
+        task = self._pm_task_with_opencode_assignment()
+        prompt = submission_cli._opencode_developer_prompt(
+            task, source_sha='a' * 40, read_paths=['source.py'],
+            write_paths=['source.py'], acceptance=['Make the change'],
+            pm_goal='Make the change')
+        self.assertIn('symbol or line hints and targeted reads', prompt)
+        self.assertIn('read rounds + edit rounds + inspection rounds + 1 final round', prompt)
+        self.assertIn('at least 3 rounds after reading for a one-edit task', prompt)
 
     def test_opencode_interrupt_persists_unknown_then_preserves_exit(self):
         from llmtool.providers.cli_lifecycle import CLIHostTermination
