@@ -23,6 +23,7 @@ _SCRIPT = Path(__file__).resolve().parents[1] / 'scripts' / 'claude_bg_dispatch.
 _spec = importlib.util.spec_from_file_location('claude_bg_dispatch_under_test', _SCRIPT)
 dispatch_tool = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(dispatch_tool)
+REAL_RESOLVE_ROLE = dispatch_tool.role_config.resolve_role
 
 TARGET = '2b128608-8b94-4c12-96b9-e6cdf9a388c7'
 COPY = '95c9758e-1111-4222-8333-944455556666'
@@ -34,12 +35,17 @@ FAKE_CLAUDE = r'''
 import json, os, sys, time
 from pathlib import Path
 home = Path(os.environ['FAKE_CLAUDE_DIR'])
-scenario = json.loads((home / 'scenario.json').read_text())
+account = Path(os.environ['CLAUDE_CONFIG_DIR'])
+account_scenario = account / 'fake-scenario.json'
+scenario_path = account_scenario if account_scenario.exists() else home / 'scenario.json'
+scenario = json.loads(scenario_path.read_text())
 state_path = home / 'state.json'
 state = json.loads(state_path.read_text()) if state_path.exists() else {'polls': 0}
 argv = sys.argv[1:]
 with open(home / 'calls.jsonl', 'a') as log:
-    log.write(json.dumps({'argv': argv, 'cwd': os.getcwd()}) + '\n')
+    log.write(json.dumps({'argv': argv, 'cwd': os.getcwd(),
+                          'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'),
+                          'model': os.environ.get('ANTHROPIC_MODEL')}) + '\n')
 
 def fill(value):
     text = json.dumps(value)
@@ -165,11 +171,17 @@ class ClaudeBgDispatchTests(unittest.TestCase):
                                 'claude-developer', True, 'OWNER_POLICY_ALLOWED', 'a' * 64))
         gate.start()
         self.addCleanup(gate.stop)
+        role = patch.object(dispatch_tool.role_config, 'resolve_role', return_value={
+            'role': 'claude-developer', 'config_dir': None, 'model': None})
+        role.start()
+        self.addCleanup(role.stop)
         self.root = str(self.f.root)
         self.cwd = str(self.home)  # the session's recorded cwd must exist to launch there
 
-    def scenario(self, **value):
-        (self.home / 'scenario.json').write_text(json.dumps(value))
+    def scenario(self, *, account_dir=None, **value):
+        path = (Path(account_dir) / 'fake-scenario.json' if account_dir is not None
+                else self.home / 'scenario.json')
+        path.write_text(json.dumps(value))
 
     def calls(self):
         path = self.home / 'calls.jsonl'
@@ -268,6 +280,115 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(receipt['reason'], 'WORKER_UNKNOWN')
         gate.assert_not_called()
         self.assertEqual(self.calls(), [])
+
+    def test_role_config_dir_and_model_are_used_only_when_environment_is_unset(self):
+        role_dir = self.home / 'role-account'
+        role_dir.mkdir()
+        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)], before=[], after=[[]])
+        configured = {'role': 'claude-developer', 'config_dir': str(role_dir),
+                      'model': 'role-model'}
+        with patch.object(dispatch_tool.role_config, 'resolve_role', return_value=configured), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': '', 'ANTHROPIC_MODEL': ''}, clear=False):
+            os.environ.pop('CLAUDE_CONFIG_DIR', None)
+            os.environ.pop('ANTHROPIC_MODEL', None)
+            self.dispatch()
+        launch = self.launches()[0]
+        self.assertEqual(launch['config_dir'], str(role_dir))
+        self.assertEqual(launch['model'], 'role-model')
+
+        self.reset()
+        self.scenario(all=[row(TARGET, status='done', cwd=self.cwd)], before=[], after=[[]])
+        with patch.object(dispatch_tool.role_config, 'resolve_role', return_value=configured), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': str(self.config),
+                                        'ANTHROPIC_MODEL': 'env-model'}):
+            self.dispatch()
+        launch = self.launches()[0]
+        self.assertEqual(launch['config_dir'], str(self.config))
+        self.assertEqual(launch['model'], 'env-model')
+
+    def test_invalid_role_config_reports_role_error_without_launching(self):
+        error = dispatch_tool.LLMToolError('invalid role config')
+        error.role_config_code = 'ROLE_ACCOUNT_DIR_INVALID'
+        with patch.object(dispatch_tool.role_config, 'resolve_role', side_effect=error):
+            code, receipt = self.dispatch()
+        self.assertEqual((code, receipt['reason']), (2, 'ROLE_ACCOUNT_DIR_INVALID'))
+        self.assertEqual(self.calls(), [])
+
+    def test_reviewer_role_resolves_real_config_and_uses_it_for_every_cli_call(self):
+        from llmtool.config import user_config_path
+
+        reviewer_dir = self.home / 'reviewer-account'
+        reviewer_dir.mkdir()
+        user_home = self.home / 'user-home'
+        user_home.mkdir()
+        temp_dir = self.home / 'tmp'
+        temp_dir.mkdir()
+        config_path = user_config_path(str(user_home))
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text(
+            'accounts:\n  reviewer:\n    kind: claude\n    config_dir: %s\n'
+            'roles:\n  reviewer:\n    provider: claude\n    account: reviewer\n' % reviewer_dir)
+        self.scenario(account_dir=reviewer_dir,
+                      all=[row(TARGET, status='done', state='done', cwd=self.cwd)], before=[],
+                      after=[[row(TARGET, status='done', state='done', cwd=self.cwd)]])
+        with patch.object(dispatch_tool.role_config, 'resolve_role',
+                          side_effect=lambda role: REAL_RESOLVE_ROLE(role, home=str(user_home))), \
+                patch.dict(os.environ, {'HOME': str(user_home), 'TMPDIR': str(temp_dir),
+                                        'CLAUDE_CONFIG_DIR': '', 'ANTHROPIC_MODEL': ''}):
+            code, receipt = self.dispatch(name='claude-reviewer')
+        self.assertEqual(code, 1, receipt)
+        self.assertEqual(receipt['reason'], 'SESSION_DONE')
+        self.assertTrue(self.calls())
+        self.assertTrue(all(call['config_dir'] == str(reviewer_dir) for call in self.calls()))
+
+    def test_reviewer_without_account_refuses_before_cli(self):
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': '', 'HOME': str(self.home)}):
+            with patch.object(dispatch_tool.role_config, 'resolve_role',
+                              return_value={'provider': 'claude', 'config_dir': None}):
+                code, receipt = self.dispatch(name='claude-reviewer')
+        self.assertEqual((code, receipt['reason']), (2, 'REVIEWER_ACCOUNT_UNCONFIGURED'))
+        self.assertEqual(self.calls(), [])
+
+    def test_non_claude_role_provider_refuses_before_cli(self):
+        with patch.object(dispatch_tool.role_config, 'resolve_role', return_value={
+                'provider': 'codex', 'config_dir': str(self.config)}):
+            code, receipt = self.dispatch()
+        self.assertEqual((code, receipt['reason']), (2, 'ROLE_PROVIDER_UNSUPPORTED'))
+        self.assertEqual(self.calls(), [])
+
+    def test_codex_reviewer_is_refused_before_cli_with_or_without_account_config(self):
+        cases = (
+            ({'provider': 'codex', 'config_dir': str(self.config)},
+             {'CLAUDE_CONFIG_DIR': str(self.config)}),
+            ({'provider': 'claude', 'config_dir': None},
+             {'CLAUDE_CONFIG_DIR': ''}),
+        )
+        for configured, environment in cases:
+            with self.subTest(configured=configured, environment=environment):
+                self.reset()
+                with patch.object(dispatch_tool.role_config, 'resolve_role',
+                                  return_value=configured), \
+                        patch.dict(os.environ, environment):
+                    code, receipt = self.dispatch(name='codex-reviewer')
+                self.assertEqual((code, receipt['reason']),
+                                 (2, 'ROLE_PROVIDER_UNSUPPORTED'))
+                self.assertEqual(self.calls(), [])
+
+    def test_busy_resume_refuses_using_resolved_account(self):
+        role_dir = self.home / 'developer-account'
+        role_dir.mkdir()
+        self.scenario(account_dir=role_dir,
+                      all=[row(TARGET, status='busy', cwd=self.cwd)],
+                      before=[row(TARGET, status='busy', cwd=self.cwd)])
+        with patch.object(dispatch_tool.role_config, 'resolve_role', return_value={
+                'role': 'claude-developer', 'provider': 'claude',
+                'config_dir': str(role_dir), 'model': None}), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
+            code, receipt = self.dispatch()
+        self.assertEqual((code, receipt['reason']), (2, 'SESSION_BUSY'))
+        self.assertEqual(self.launches(), [])
+        self.assertEqual(len(self.calls()), 2)
+        self.assertTrue(all(call['config_dir'] == str(role_dir) for call in self.calls()))
 
     def test_busy_with_new_action_is_delivered_and_old_history_is_ignored(self):
         self.scenario(
@@ -488,17 +609,20 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.scenario(after=[[row(TARGET)]])
         (self.home / 'state.json').write_text(json.dumps({'polls': 0, 'launch_ms': 1}))
         report.write_text('PASS')
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1', '--since', self.recent())
         self.assertEqual((code, result['result']), (0, 'REPORT_PRESENT'))
         report.unlink()
         self.scenario(after=[[row(TARGET, status='waiting')]])
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1')
         self.assertEqual((code, result['reason']), (1, 'SESSION_WAITING'))
         self.assertEqual(self.stops(), [TARGET])
         self.scenario(after=[[]])
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1')
         self.assertEqual((code, result['reason']), (1, 'SESSION_GONE'))
 
@@ -507,15 +631,56 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         (self.home / 'state.json').write_text(json.dumps({'polls': 0, 'launch_ms': 1}))
         # Healthy for two polls, then gone before any report is written.
         self.scenario(after=[[row(TARGET)], [row(TARGET)], []])
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '5')
         self.assertEqual((code, result['result'], result['reason']),
                          (1, 'FAILED', 'SESSION_GONE'))
         self.assertEqual(result['status'], 'busy')  # last healthy state seen
         self.assertEqual(result['stop']['session'], TARGET)
         self.assertEqual(self.stops(), [TARGET])
+        self.assertTrue(all(call['config_dir'] == str(self.config) for call in self.calls()))
         polls = [call for call in self.calls() if call['argv'][:2] == ['agents', '--json']]
         self.assertEqual(len(polls), 3)
+
+    def test_watch_requires_explicit_worker_role(self):
+        with self.assertRaises(SystemExit) as caught:
+            dispatch_tool._main(['--claude', str(self.claude), 'watch',
+                                 '--session-id', TARGET, '--report-file',
+                                 str(self.home / 'report.md')])
+        self.assertEqual(caught.exception.code, 2)
+        self.assertEqual(self.calls(), [])
+
+    def test_watch_rejects_unknown_worker_role_before_cli_calls(self):
+        code, result = self.run_tool('watch', '--name', 'unknown-role',
+                                     '--session-id', TARGET, '--report-file',
+                                     str(self.home / 'report.md'), '--timeout', '1')
+        self.assertEqual((code, result['reason']), (2, 'WORKER_UNKNOWN'))
+        self.assertEqual(self.calls(), [])
+
+    def test_watch_uses_worker_account_and_stops_there_instead_of_pm_account(self):
+        worker_dir = self.home / 'worker-account'
+        worker_dir.mkdir()
+        # watch does not launch this session, so the fake CLI serves its
+        # current state from `before`; `after` is used only after a launch.
+        self.scenario(account_dir=worker_dir, before=[row(TARGET, status='waiting')])
+        def configured_role(role):
+            return {'role': role, 'provider': 'claude',
+                    'config_dir': str(worker_dir if role == 'claude-developer'
+                                     else self.config)}
+
+        with patch.object(dispatch_tool.role_config, 'resolve_role',
+                          side_effect=configured_role), \
+                patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': ''}):
+            _, pm_env = dispatch_tool._account_environment('pm')
+            self.assertEqual(pm_env['CLAUDE_CONFIG_DIR'], str(self.config))
+            code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                         '--session-id', TARGET, '--report-file',
+                                         str(self.home / 'worker-report.md'), '--timeout', '1')
+        self.assertEqual((code, result['reason']), (1, 'SESSION_WAITING'))
+        [stop] = [call for call in self.calls() if call['argv'][:1] == ['stop']]
+        self.assertEqual(stop['config_dir'], str(worker_dir))
+        self.assertTrue(all(call['config_dir'] == str(worker_dir) for call in self.calls()))
 
     def test_resumed_session_keeping_its_old_start_time_is_still_identified(self):
         # Not active before the launch, active after it: that is this launch.
@@ -623,17 +788,20 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.scenario(after=[[row(TARGET)]])
         for extra in ([], ['--since', self.recent()]):
             with self.subTest(extra=extra):
-                code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+                code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                             '--session-id', TARGET, '--report-file',
                                              str(report), '--timeout', '1', *extra)
                 self.assertEqual((code, result['reason']), (1, 'REPORT_TIMEOUT'))
         since = self.recent()
         stale = dispatch_tool._entry_ms({'timestamp': since}) / 1000 - 1
         os.utime(report, (stale, stale))  # one second before the dispatch
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1', '--since', since)
         self.assertEqual((code, result['reason']), (1, 'REPORT_TIMEOUT'))
         report.write_text('new round')  # mtime is now
-        code, result = self.run_tool('watch', '--session-id', TARGET, '--report-file',
+        code, result = self.run_tool('watch', '--name', 'claude-developer',
+                                     '--session-id', TARGET, '--report-file',
                                      str(report), '--timeout', '1', '--since', self.recent())
         self.assertEqual((code, result['result']), (0, 'REPORT_PRESENT'))
 
