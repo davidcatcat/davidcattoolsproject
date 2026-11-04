@@ -89,6 +89,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             with patch.dict(os.environ, {'HOME': str(home)}):
                 config = load_route_config()['routes']['gw-agent']
                 self.assertEqual(config['package_path'], '~/.local/lib/api-agent-gateway')
+                config['profile']['base_url'] = 'https://authorized.example/v1'
                 route = GwAgentRoute(config)
             self.assertEqual(route.package_path, str(package.resolve()))
 
@@ -524,7 +525,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                     store.compare_and_update(task_id,
                         expected={'developer': current['developer']}, developer=blocked)
 
-    def test_gw_agent_success_persists_when_served_model_differs(self):
+    def test_gw_agent_success_persists_with_verified_served_model(self):
         task = {'schema_version': 2, 'task_id': 'a' * 32, 'run_id': 'b' * 32,
             'state': 'PM_RESPONDED', 'response': 'PM response', 'request': 'bounded task',
             'task_binding': {'contract_digest': 'c' * 64},
@@ -578,7 +579,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             '    base_url: http://10.20.30.40:8080\n'
             '    model: authorized-model\n',
             encoding='utf-8')
-        result = SimpleNamespace(model='real-served-model', usage={
+        result = SimpleNamespace(model='authorized-model', usage={
             'input_tokens': 1, 'output_tokens': None, 'status': 'PARTIAL'},
             session_id='provider-session', exit_code=0, stdout_sha256='f' * 64,
             elapsed_ms=10, cleanup_status='CLEAN')
@@ -662,7 +663,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['profile']['max_output_tokens'], 8192)
         self.assertEqual(seen['profile']['http_allow_hosts'], ['10.20.30.40'])
         self.assertEqual(developer['artifact'], 'diff')
-        self.assertEqual(developer['usage']['served_model'], 'real-served-model')
+        self.assertEqual(developer['usage']['served_model'], 'authorized-model')
         self.assertEqual(seen['task']['schema_version'], 1)
         self.assertEqual(seen['task']['goal'], 'goal')
         self.assertEqual(seen['task']['acceptance'], ['record result'])
