@@ -1092,7 +1092,7 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             missing = completion.get('missing_gates', [])
             if 'CI' in ' '.join(missing) or any(str(item).startswith(('CI_', 'PR_', 'REQUIRED_CI')) for item in missing):
                 codes.extend(item for item in missing if str(item).startswith(('CI_', 'PR_', 'REQUIRED_CI')))
-                step = 'WAITING_CI'
+                step = 'CI_FAILED' if 'REQUIRED_CI_FAILED' in missing else 'WAITING_CI'
             elif missing:
                 codes.extend(missing)
                 step = 'WAITING_EXECUTOR'

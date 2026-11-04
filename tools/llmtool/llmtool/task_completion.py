@@ -1816,7 +1816,8 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
         candidates.append(run)
     if not candidates:
         return {'workflow_id': workflow_id, 'run_id': None, 'run_attempt': None,
-                'run_number': None, 'successful_checks': [], 'check_ids': {}}
+                'run_number': None, 'successful_checks': [], 'check_ids': {},
+                'check_outcomes': {check_name: 'MISSING'}}
     run = max(candidates, key=lambda item: (item['run_number'], item['run_attempt'], item['id']))
     run_id, attempt = run['id'], run['run_attempt']
     jobs = _github_get(f'actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100')
@@ -1843,7 +1844,8 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
         required_jobs[check_name] = (job, int(check_id_match.group(1)))
     if set(required_jobs) != {check_name}:
         return {'workflow_id': workflow_id, 'run_id': run_id, 'run_attempt': attempt,
-                'run_number': run['run_number'], 'successful_checks': [], 'check_ids': {}}
+                'run_number': run['run_number'], 'successful_checks': [], 'check_ids': {},
+                'check_outcomes': {check_name: 'MISSING'}}
     checks = _github_get(f'commits/{result_sha}/check-runs?per_page=100')
     if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
             type(checks.get('total_count')) is not int or
@@ -1857,7 +1859,7 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
         if check['id'] in by_id and by_id[check['id']] != check:
             _stop('CI_EVIDENCE_INVALID')
         by_id[check['id']] = check
-    successful, check_ids = set(), {}
+    successful, check_ids, check_outcomes = set(), {}, {}
     job, check_id = required_jobs[check_name]
     check = by_id.get(check_id)
     app = None if check is None else check.get('app')
@@ -1870,9 +1872,30 @@ def _collect_one_ci_workflow(*, pr_number, result_sha, workflow_path,
             run.get('status') == 'completed' and run.get('conclusion') == 'success'):
         successful.add(check_name)
         check_ids[check_name] = check['id']
+        check_outcomes[check_name] = 'SUCCESS'
+    elif (check is None or check.get('name') != check_name or
+          check.get('head_sha') != result_sha or type(app) is not dict or
+          app.get('id') != app_id or app.get('slug') != 'github-actions' or
+          app.get('name') != 'GitHub Actions'):
+        check_outcomes[check_name] = 'MISSING'
+    elif (run.get('status') != 'completed' or job.get('status') != 'completed' or
+          check.get('status') != 'completed'):
+        check_outcomes[check_name] = 'PENDING'
+    elif (run.get('conclusion') in ('success', 'failure', 'cancelled', 'timed_out',
+                                     'action_required', 'startup_failure', 'stale',
+                                     'neutral') and
+          job.get('conclusion') in ('success', 'failure', 'cancelled', 'timed_out',
+                                     'action_required', 'startup_failure', 'stale',
+                                     'neutral') and
+          check.get('conclusion') in ('success', 'failure', 'cancelled', 'timed_out',
+                                       'action_required', 'startup_failure', 'stale',
+                                       'neutral')):
+        check_outcomes[check_name] = 'FAILED'
+    else:
+        check_outcomes[check_name] = 'MISSING'
     return {'workflow_id': workflow_id, 'run_id': run_id, 'run_attempt': attempt,
             'run_number': run['run_number'], 'successful_checks': sorted(successful),
-            'check_ids': check_ids}
+            'check_ids': check_ids, 'check_outcomes': check_outcomes}
 
 
 def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
@@ -1896,14 +1919,16 @@ def _collect_ci_evidence(*, pr_number, result_sha, changed_paths=None,
         runner_names=workflow['runner_names'], runner_labels=workflow['runner_labels'],
         mode=ci_trust['mode'], app_id=ci_trust['github_actions_app_id'],
         pr_merged=pr_merged, pr_head_ref=pr_head_ref) for workflow in selected]
-    successful, check_ids = set(), {}
+    successful, check_ids, check_outcomes = set(), {}, {}
     for result in results:
         successful.update(result['successful_checks'])
         check_ids.update(result['check_ids'])
+        check_outcomes.update(result['check_outcomes'])
     primary, primary_workflow = results[0], selected[0]
     return {'workflow_id': primary['workflow_id'], 'run_id': primary['run_id'],
             'run_attempt': primary['run_attempt'], 'run_number': primary['run_number'],
             'successful_checks': sorted(successful), 'check_ids': check_ids,
+            'check_outcomes': check_outcomes,
             'linux_required': True, 'docs_only': docs_only,
             'required_checks': sorted(workflow[field] for workflow in selected),
             'workflow_path': primary_workflow['path'],
@@ -2202,6 +2227,10 @@ def collect_github_evidence(*, pr_number, result_sha, task_id, run_id,
     required_checks = set(ci['required_checks'])
     if not required_checks.issubset(successful):
         missing.append('REQUIRED_CI_MISSING')
+        if 'FAILED' in ci.get('check_outcomes', {}).values():
+            missing.append('REQUIRED_CI_FAILED')
+        elif 'PENDING' in ci.get('check_outcomes', {}).values():
+            missing.append('REQUIRED_CI_PENDING')
     return {'evidence': {'pr_number': pr_number, 'head_sha': result_sha,
             'pr_state': 'MERGED' if is_merged_pr else 'OPEN',
             'merge_commit_sha': pr.get('merge_commit_sha') if is_merged_pr else None,

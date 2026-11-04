@@ -14,7 +14,7 @@ _UNKNOWN = {
     'UNKNOWN', 'OUTCOME_UNKNOWN', 'REVIEW_OUTCOME_UNKNOWN',
     'REPAIR_OUTCOME_UNKNOWN', 'MERGE_OUTCOME_UNKNOWN',
 }
-_TERMINAL = {'CLOSED', 'MERGED', 'MERGE_REFUSED', 'REFUSED'}
+_TERMINAL = {'CLOSED', 'CI_FAILED', 'MERGED', 'MERGE_REFUSED', 'REFUSED'}
 
 
 def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
@@ -35,6 +35,7 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
     attempts = 0
     mac_ci_pending = False
     completion_mac_label_attempted = False
+    last_result = None
 
     # Polls consume the bounded call budget so a permanently pending Task
     # cannot spin forever, but they do not count as completed workflow steps.
@@ -56,23 +57,14 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             if type(merged.get('step')) is not str:
                 return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
                         'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
-            merged_result = merged.get('result')
-            waiting_for_mac = (
-                merged.get('step') == 'WAITING_CI' or
-                (merged.get('step') == 'MERGE_REFUSED' and any(
-                    code == 'MERGE_MACOS_CHECK_REQUIRED' or
-                    (code == 'MERGE_CHECKS_NOT_GREEN' and
-                     type(merged_result) is dict and
-                     merged_result.get('macos_check_pending') is True)
-                    for code in codes))
-            )
-            if waiting_for_mac:
-                if attempts >= max_steps and merged.get('step') == 'MERGE_REFUSED':
-                    return dict(merged, steps=completed)
+            last_result = merged
+            if merged.get('step') == 'WAITING_CI':
                 if attempts >= max_steps:
                     break
                 pause(poll_seconds)
                 continue
+            # MERGE_REFUSED is a terminal decision for this drive invocation,
+            # including when an exact-head Mac check is still pending.
             return dict(merged, steps=completed)
 
         advance_adapters = dict(adapters)
@@ -83,6 +75,7 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         if type(result) is not dict:
             return {'task_id': task_id, 'step': 'UNKNOWN', 'result': None,
                     'codes': ['ADVANCE_RESULT_INVALID'], 'steps': completed}
+        last_result = result
 
         step = result.get('step')
         codes = result.get('codes', [])
@@ -107,7 +100,6 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
         if (merge and step == 'WAITING_CI' and
                 'CI_WORKFLOW_JOBS_INVALID' in codes):
             if not completion_mac_label_attempted:
-                completion_mac_label_attempted = True
                 label_adapters = {key: adapters[key] for key in
                                   ('github_get', 'merge_gh_runner', 'cwd')
                                   if key in adapters}
@@ -157,6 +149,7 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
             # apply mac-ci. Keep polling that merge path so READY_FOR_INTEGRATION
             # from the non-merge path cannot immediately retry the merge.
             if merged.get('step') == 'WAITING_CI':
+                last_result = merged
                 mac_ci_pending = True
                 if attempts >= max_steps:
                     break
@@ -171,5 +164,8 @@ def drive(*, task_id, store=None, merge=False, max_steps=100, poll_seconds=5,
                     'REVIEW_NOT_POSTED', 'NEEDS_CWD', 'RUNTIME_NOT_ON_PATH'):
             return dict(result, steps=completed)
 
-    return {'task_id': task_id, 'step': 'MAX_STEPS', 'result': None,
-            'codes': [], 'steps': completed}
+    return {'task_id': task_id, 'step': 'MAX_STEPS',
+            'result': last_result.get('result') if type(last_result) is dict else None,
+            'codes': list(last_result.get('codes', []))
+                     if type(last_result) is dict and type(last_result.get('codes')) is list
+                     else [], 'steps': completed}
