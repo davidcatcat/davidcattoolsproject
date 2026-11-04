@@ -123,6 +123,8 @@ class SkillManifestTests(unittest.TestCase):
         self.assertNotIn('CLAUDE.md', default_paths)
         self.assertIn('CLAUDE.md', claude_paths)
         self.assertNotIn('AGENTS.md', claude_paths)
+        self.assertIn('skills/ai-team-delivery/pm-continuation.md', claude_paths)
+        self.assertIn('skills/ai-team-delivery/pm-continuation-reference.md', claude_paths)
         self.assertNotEqual(default['manifest_sha256'], claude['manifest_sha256'])
 
     def test_injected_git_runner_is_used(self):

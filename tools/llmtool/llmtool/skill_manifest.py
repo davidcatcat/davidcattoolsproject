@@ -209,9 +209,8 @@ def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run,
         _raise(SKILL_MANIFEST_COMMIT_INVALID)
     paths = resolve(role, gate)
     if provider == 'claude':
-        paths = tuple(sorted(
-            _CLAUDE_BASE_PATHS + paths[len(_BASE_PATHS):]
-        ))
+        task_paths = tuple(path for path in paths if path not in _BASE_PATHS)
+        paths = tuple(sorted(_CLAUDE_BASE_PATHS + task_paths))
 
     top = _run_git(
         git_runner, repo_root,
