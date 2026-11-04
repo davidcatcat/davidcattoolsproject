@@ -499,7 +499,7 @@ class GwAgentRoute(DeveloperRoute):
                 diagnostic = 'GW_AGENT_TASK_ID_MISMATCH'
                 if suffix is not None:
                     diagnostic += '_' + suffix
-                raise RouteError(diagnostic[:96], facts={
+                raise RouteError(diagnostic[:64], facts={
                     'gateway_code': suffix,
                     'gateway_status': status if type(status) is str and
                     re.fullmatch(r'[A-Z_]{1,32}', status) else None})
