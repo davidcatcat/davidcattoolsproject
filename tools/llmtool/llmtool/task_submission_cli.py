@@ -775,6 +775,8 @@ def add_task_submission_parsers(actions):
     delegate.add_argument('--owner-ref', help='required Owner assignment comment URL for AGY direct Tasks')
     delegate.add_argument('--high-debug-ref',
                           help='trusted GitHub comment URL authorizing a repair-cap override')
+    delegate.add_argument('--high-debug-task',
+                          help='32-character Task ID containing the confirmed High Debug diagnosis')
     delegate.add_argument('--context-stdin', action='store_true',
                           help='company-gw/codex only: read bounded, sensitive-screened context from stdin')
     complete = actions.add_parser('complete', help='Collect verified Executor evidence and return it to the original PM')
@@ -4051,12 +4053,17 @@ def _check_delegate_repair_cap(args, store):
         raise LLMToolError(
             f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {current_task_id}') from None
     count = 0
+    high_debug_task = getattr(args, 'high_debug_task', None)
+    unreadable_high_debug_task = False
     for task_id in task_ids:
         if task_id == current_task_id:
             continue
         try:
             record = store.get(task_id)
         except Exception:
+            if task_id == high_debug_task:
+                unreadable_high_debug_task = True
+                continue
             raise LLMToolError(
                 f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
         completion = record.get('completion')
@@ -4065,7 +4072,12 @@ def _check_delegate_repair_cap(args, store):
                 type(record.get('developer')) is dict):
             count += 1
     if count < 1 + MAX_REPAIR_ATTEMPTS:
+        if unreadable_high_debug_task:
+            raise LLMToolError(
+                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {high_debug_task}') from None
         return
+    if high_debug_task is None:
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
     ref = getattr(args, 'high_debug_ref', None)
     try:
         slug = trust.load_trust().repository['slug']
@@ -4080,6 +4092,37 @@ def _check_delegate_repair_cap(args, store):
         code = ('DELEGATE_HIGH_DEBUG_REF_INVALID' if ref is not None else
                 'DELEGATE_REPAIR_LIMIT_REACHED')
         raise LLMToolError(code)
+    if unreadable_high_debug_task:
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
+    if (type(high_debug_task) is not str or
+            re.fullmatch(r'[0-9a-f]{32}', high_debug_task) is None):
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
+    try:
+        diagnosis_task = store.get(high_debug_task)
+        entries = diagnosis_task.get('high_debug')
+        if (type(diagnosis_task) is not dict or
+                diagnosis_task.get('task_id') != high_debug_task or
+                type(entries) is not list or not entries):
+            raise ValueError
+        entry = entries[-1]
+        d6 = entry.get('d6')
+        examined_sha = entry.get('examined_sha')
+        # High Debug D6 names are derived from their executor D6, attempt
+        # number, and examined HEAD. Recompute the name to bind this entry to
+        # the executor D6 being repaired.
+        from .high_debug import _d6_name
+        match = (re.fullmatch(r'[a-z0-9][a-z0-9-]{0,95}', d6)
+                 if type(d6) is str else None)
+        attempt_match = (re.search(r'-hd([1-9][0-9]*)-[0-9a-f]{7}\Z', d6)
+                         if match else None)
+        if (entry.get('status') != 'RCA_CONFIRMED' or
+                type(examined_sha) is not str or
+                re.fullmatch(r'[0-9a-f]{40}', examined_sha) is None or
+                attempt_match is None or
+                d6 != _d6_name(executor_task, int(attempt_match.group(1)), examined_sha)):
+            raise ValueError
+    except Exception:
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
     try:
         store.record_repair_cap_override(
             current_task_id, ref=ref, rounds=max(3, count + 1))
