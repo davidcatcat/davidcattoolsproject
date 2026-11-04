@@ -10,6 +10,7 @@ import unittest
 from argparse import Namespace
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 from unittest.mock import patch
 
 from llmtool import review_dispatch, task_completion, task_submission_cli, worker_dispatch
@@ -663,7 +664,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(developer['model'], 'authorized-model')
         self.assertEqual(seen['route_model'], 'authorized-model')
         self.assertEqual(seen['profile']['model'], 'authorized-model')
-        self.assertEqual(seen['profile']['base_url'], 'http://10.20.30.40:8080')
+        self.assertEqual(seen['profile']['base_url'], 'http://10.20.30.40:8080/v1')
         self.assertEqual(seen['profile']['max_output_tokens'], 8192)
         self.assertEqual(seen['profile']['http_allow_hosts'], ['10.20.30.40'])
         self.assertEqual(developer['artifact'], 'diff')
@@ -673,6 +674,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(seen['task']['acceptance'], ['record result'])
         self.assertEqual(seen['task']['data_class'], 'synthetic')
         self.assertEqual(seen['prepared_task']['data_class'], 'synthetic')
+        self.assertEqual(seen['prepared_profile']['base_url'],
+                         'http://10.20.30.40:8080/v1')
+        post_path = urlsplit(seen['prepared_profile']['base_url']).path.rstrip('/') + '/chat/completions'
+        self.assertEqual(post_path, '/v1/chat/completions')
         self.assertEqual(seen['prepared_profile']['http_allow_hosts'], ['10.20.30.40'])
         self.assertEqual(set(seen['task']['budgets']), {
             'max_turns', 'max_input_tokens', 'max_output_tokens', 'max_wall_seconds',

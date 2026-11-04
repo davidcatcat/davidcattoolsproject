@@ -3202,6 +3202,14 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 type(route_output_cap) is not int or
                 type(profile) is not dict):
             raise ValueError
+        endpoint = urlsplit(base_url)
+        if (endpoint.scheme not in ('http', 'https') or not endpoint.hostname or
+                endpoint.username is not None or endpoint.password is not None or
+                endpoint.path not in ('', '/') or '?' in base_url or '#' in base_url):
+            raise ValueError
+        # llmtool stores an origin; the gateway OpenAI adapter appends
+        # /chat/completions, so preserve the provider API prefix here.
+        gateway_base_url = base_url.rstrip('/') + '/v1'
         # The provider's generation limit may exceed the gateway's context cap.
         # Keep the effective output budget below both route-owned limits.
         max_output_tokens = min(max_output_tokens, route_output_cap,
@@ -3209,7 +3217,7 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         route_config = copy.deepcopy(route_config)
         route_config['default_model'] = model
         route_config['expected_served_model'] = model
-        route_config['profile'].update(base_url=base_url, model=model,
+        route_config['profile'].update(base_url=gateway_base_url, model=model,
             max_output_tokens=max_output_tokens,
             context_cap_tokens=context_cap_tokens)
         route_config['profile'].pop('http_allow_hosts', None)
@@ -3389,7 +3397,9 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         if (not owner_gate_denied and type(gateway_code) is str and
                 re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code) and
                 exc.code.startswith('GW_AGENT_')):
-            code = (code + '_' + gateway_code)[:64]
+            if not code.endswith('_' + gateway_code):
+                code = (code + '_' + gateway_code)[:64]
+        code = code[:64]
         return persist_failure(code)
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',
