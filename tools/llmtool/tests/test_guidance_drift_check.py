@@ -47,6 +47,11 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(config), encoding="utf-8")
 
+    def write_raw_config(self, raw):
+        path = self.repo / "tools" / "llmtool" / "guidance-drift.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw, encoding="utf-8")
+
     def test_pass(self):
         self.assertEqual(check(self.repo), [])
 
@@ -75,6 +80,37 @@ class GuidanceDriftCheckTests(unittest.TestCase):
                 findings = check(self.repo)
                 self.assertTrue(any(f"MISSING_IN_CLAUDE {missing}" in item for item in findings))
 
+    def test_dispatch_values_are_matched_as_whole_words_in_full_source(self):
+        self.agents = "Worker is PAUSED now, **ALLOWED** only, dispatch=OWNER_ASSIGNMENT_ONLY.\n"
+        self.claude = "PAUSED and **ALLOWED**, dispatch=OWNER_ASSIGNMENT_ONLY.\n"
+        self.write_guidance()
+        self.write_config()
+        self.assertEqual(check(self.repo), [])
+
+        self.claude = "PAUSEDly and ALLOWED_ONLY\n"
+        self.write_guidance()
+        self.write_config()
+        findings = check(self.repo)
+        self.assertTrue(any("MISSING_IN_CLAUDE ALLOWED" in item for item in findings))
+        self.assertTrue(any("MISSING_IN_CLAUDE OWNER_ASSIGNMENT_ONLY" in item for item in findings))
+
+    def test_url_and_model_extraction_handles_case_wrappers_and_families(self):
+        self.agents = (
+            "**HTTPS://x.invalid/a** and https://x.invalid/a_(b).\n"
+            "Model `gpt-7-x high`; option --model gpt-8-y.\n"
+            "Models qwen3-coder and kimi-k2.\n"
+        )
+        self.claude = "https://x.invalid/a https://x.invalid/a_(b).\n"
+        self.write_guidance()
+        self.write_config()
+        findings = check(self.repo)
+        for missing in ("gpt-7-x", "gpt-8-y", "qwen3-coder", "kimi-k2"):
+            self.assertTrue(any(f"MISSING_IN_CLAUDE {missing}" in item for item in findings), missing)
+        self.claude += "gpt-7-x and gpt-8-y qwen3-coder kimi-k2\n"
+        self.write_guidance()
+        self.write_config()
+        self.assertEqual(check(self.repo), [])
+
     def test_stale_exception(self):
         self.write_config(codex_only=[{"value": "https://stale.invalid/value", "reason": "No longer in AGENTS.md."}])
         self.assertTrue(any("STALE_EXCEPTION https://stale.invalid/value" in item for item in check(self.repo)))
@@ -98,6 +134,39 @@ class GuidanceDriftCheckTests(unittest.TestCase):
     def test_wrong_schema_fails_closed(self):
         self.write_config(schema_version=2)
         self.assertTrue(any("CONFIG_SCHEMA" in item for item in check(self.repo)))
+
+    def test_deeply_nested_duplicate_and_unknown_config_are_invalid(self):
+        self.write_raw_config("{" + '"nested":' * 2000 + "0" + "}" * 2000)
+        self.assertTrue(any("CONFIG_INVALID" in item for item in check(self.repo)))
+        self.write_raw_config('{"schema_version":1,"schema_version":1,"hashes":{},"codex_only":[]}')
+        self.assertTrue(any("CONFIG_INVALID" in item for item in check(self.repo)))
+        self.write_config()
+        path = self.repo / "tools" / "llmtool" / "guidance-drift.json"
+        config = json.loads(path.read_text(encoding="utf-8"))
+        config["unexpected"] = True
+        path.write_text(json.dumps(config), encoding="utf-8")
+        self.assertTrue(any("CONFIG_INVALID" in item for item in check(self.repo)))
+
+    def test_invalid_codex_only_entries_fail_closed(self):
+        for entries in (["https://example.invalid"], [{"value": "x", "reason": "ok", "extra": 1}],
+                        [{"value": "x", "reason": ""}], [{"value": "x", "reason": "ok\nnext"}]):
+            with self.subTest(entries=entries):
+                self.write_config(codex_only=entries)
+                self.assertTrue(any("CONFIG_INVALID" in item for item in check(self.repo)))
+
+    def test_guidance_file_missing_and_invalid_are_reported(self):
+        agents = self.repo / "AGENTS.md"
+        agents.unlink()
+        findings = check(self.repo)
+        self.assertTrue(any("AGENTS.md: FILE_MISSING" in item for item in findings))
+
+        agents.write_bytes(b"\xff")
+        findings = check(self.repo)
+        self.assertTrue(any("AGENTS.md: FILE_INVALID" in item for item in findings))
+
+    def test_real_repository_guidance_is_current(self):
+        repository = Path(__file__).resolve().parents[3]
+        self.assertEqual(check(repository), [])
 
 
 if __name__ == "__main__":

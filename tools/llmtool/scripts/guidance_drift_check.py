@@ -12,22 +12,29 @@ from typing import Any
 
 REPO = Path(__file__).resolve().parents[3]
 CONFIG_PATH = Path("tools/llmtool/guidance-drift.json")
-URL = re.compile(r"https://[^\s`<>\])}]+")
+URL = re.compile(r"https://[^\s`<>\[\]{}]+", re.IGNORECASE)
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 MODEL_NAME = re.compile(
-    r"^(?:gpt-[\w.-]+|claude-[\w.-]+|opencode/[\w.-]+|deepseek-[\w.-]+|"
-    r"gemini-[\w.-]+|grok-[\w.-]+|llama-[\w.-]+|mistral-[\w.-]+)$",
+    r"(?<![\w./-])(?:opencode/)?(?:gpt|claude|deepseek|gemini|grok|llama|mistral|"
+    r"qwen\d*|kimi)(?:-[\w.]+)+(?![\w.-])",
     re.IGNORECASE,
 )
 CHECK_NAME = re.compile(r"^check\s+\([^)]+\)$")
 DISPATCH_VALUES = {"PAUSED", "OWNER_ASSIGNMENT_ONLY", "ALLOWED"}
 
 
+def _clean_url(value: str) -> str:
+    value = value.rstrip(".,;:!?*_")
+    while value.endswith(")") and value.count(")") > value.count("("):
+        value = value[:-1]
+    return value
+
+
 def _hard_values(source: str) -> set[str]:
-    values = {match.rstrip(".,;:") for match in URL.findall(source)}
+    values = {_clean_url(match) for match in URL.findall(source)}
     inline_values = set(INLINE_CODE.findall(source))
-    values.update(inline_values & DISPATCH_VALUES)
-    values.update(value for value in inline_values if MODEL_NAME.fullmatch(value))
+    values.update(value for value in DISPATCH_VALUES if re.search(rf"\b{value}\b", source))
+    values.update(match.group(0) for match in MODEL_NAME.finditer(source))
     values.update(value for value in inline_values if CHECK_NAME.fullmatch(value))
     return values
 
@@ -45,12 +52,22 @@ def _load_config(path: Path) -> tuple[dict[str, Any] | None, list[str]]:
     except (OSError, UnicodeError) as exc:
         return None, [_finding(label, "CONFIG_INVALID", type(exc).__name__)]
 
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate JSON key")
+            result[key] = value
+        return result
+
     try:
-        config = json.loads(raw)
-    except (json.JSONDecodeError, UnicodeError) as exc:
+        config = json.loads(raw, object_pairs_hook=unique_object)
+    except (json.JSONDecodeError, UnicodeError, ValueError, RecursionError) as exc:
         return None, [_finding(label, "CONFIG_INVALID", type(exc).__name__)]
     if not isinstance(config, dict):
         return None, [_finding(label, "CONFIG_INVALID", "top-level value must be an object")]
+    if set(config) != {"schema_version", "hashes", "codex_only"}:
+        return None, [_finding(label, "CONFIG_INVALID", "unknown or missing top-level keys")]
     if type(config.get("schema_version")) is not int or config["schema_version"] != 1:
         return None, [_finding(label, "CONFIG_SCHEMA", str(config.get("schema_version")))]
 
