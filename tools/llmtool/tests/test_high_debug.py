@@ -48,6 +48,17 @@ class HighDebugTests(unittest.TestCase):
         report = self._report('**RCA_CONFIRMED**\nBLOCKED')
         self.assertEqual(high_debug._outcome_status(report), 'REPORT_INVALID')
 
+    def test_outcome_status_with_another_status_in_trailing_text_is_report_invalid(self):
+        lines = (
+            'RCA_CONFIRMED — RCA_UNCONFIRMED',
+            'BLOCKED: RCA_CONFIRMED',
+            'RCA_CONFIRMED - not BLOCKED',
+        )
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(high_debug._outcome_status(self._report(line)),
+                                 'REPORT_INVALID')
+
     def test_outcome_status_missing_section_is_report_invalid(self):
         report = '## Root Cause\nRCA_CONFIRMED\n'
         self.assertEqual(high_debug._outcome_status(report), 'REPORT_INVALID')

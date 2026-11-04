@@ -238,10 +238,11 @@ def _has_report_section(report, heading):
 
 
 _STATUS_WORDS = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED')
+_STATUS_TOKEN = re.compile(r'(?<!\w)(?:' + '|'.join(_STATUS_WORDS) + r')(?!\w)')
 _STATUS_LINE = re.compile(
     r'^(?:\*\*(?P<bold>' + '|'.join(_STATUS_WORDS) + r')\*\*'
     r'|(?P<plain>' + '|'.join(_STATUS_WORDS) + r'))'
-    r'(?:(?:\s+—|\s+-|\s*:)\s+\S.*)?$'
+    r'(?P<trailing>(?:(?:\s+—|\s+-|\s*:)\s+\S.*)?)$'
 )
 
 
@@ -260,6 +261,8 @@ def _outcome_status(report):
         if in_outcome:
             match = _STATUS_LINE.fullmatch(stripped)
             if match:
+                if _STATUS_TOKEN.search(match.group('trailing') or ''):
+                    return 'REPORT_INVALID'
                 found.append(match.group('bold') or match.group('plain'))
     return found[0] if len(found) == 1 else 'REPORT_INVALID'
 
