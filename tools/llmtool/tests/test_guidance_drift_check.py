@@ -146,6 +146,28 @@ class GuidanceDriftCheckTests(unittest.TestCase):
             },
         )
 
+    def test_model_extraction_rejects_file_extensions(self):
+        source = (
+            "llama-3.md gpt-6-luna.md claude-opus-5-5.py "
+            "gpt-5.5 gpt-5.5.2 gpt-6.1-sol claude-opus-5-5 "
+            "anthropic/claude-opus-5-5 o4-mini\n"
+        )
+        models = {
+            value for value in guidance_drift_check._hard_values(source)
+            if guidance_drift_check.MODEL_NAME.fullmatch(value)
+        }
+        self.assertEqual(
+            models,
+            {
+                "gpt-5.5",
+                "gpt-5.5.2",
+                "gpt-6.1-sol",
+                "claude-opus-5-5",
+                "anthropic/claude-opus-5-5",
+                "o4-mini",
+            },
+        )
+
     def test_url_extraction_strips_closing_parens_and_quotes(self):
         source = '(see https://x.invalid/a.) and "https://x.invalid/a"\n'
         urls = {value for value in guidance_drift_check._hard_values(source) if value.startswith("https://")}

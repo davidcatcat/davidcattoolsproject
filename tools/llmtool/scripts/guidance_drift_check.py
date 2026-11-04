@@ -20,7 +20,7 @@ MODEL_NAME = re.compile(
     r"claude-(?:opus|sonnet|haiku)-[\w.-]*\w|"
     r"(?:deepseek|gemini|grok|llama|mistral|qwen\d*|kimi)-[\w.-]*\w|"
     r"o\d+-[\w.-]*\w|glm-\d+(?:-[\w.-]*\w)?|minimax-m\d+(?:-[\w.-]*\w)?)"
-    r"(?![\w-]|\.\w|/)",
+    r"(?![\w-]|\.\w|/)(?<!\.md)(?<!\.py)(?<!\.json)(?<!\.yml)(?<!\.yaml)(?<!\.txt)(?<!\.sh)(?<!\.toml)",
     re.IGNORECASE,
 )
 CHECK_NAME = re.compile(r"^check\s+\([^)]+\)$")
