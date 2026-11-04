@@ -12,6 +12,30 @@ from llmtool.errors import LLMToolError
 
 
 class HighDebugTests(unittest.TestCase):
+    @staticmethod
+    def _report(outcome_lines, prose=''):
+        parts = []
+        for section in high_debug.REPORT_SECTIONS[:-1]:
+            parts.append('## ' + section + '\n' + (prose if section == 'Root Cause' else 'text') + '\n')
+        parts.append('## Outcome/cost\n' + outcome_lines + '\n')
+        return '\n'.join(parts)
+
+    def test_outcome_status_ignores_words_outside_outcome_section(self):
+        report = self._report('RCA_CONFIRMED\nCost: low', prose='This was BLOCKED earlier.\nBLOCKED')
+        self.assertEqual(high_debug._outcome_status(report), 'RCA_CONFIRMED')
+
+    def test_outcome_status_accepts_bold_form_on_its_own_line(self):
+        report = self._report('**RCA_CONFIRMED**\n\nModel: gpt-6.1-sol; usage UNKNOWN')
+        self.assertEqual(high_debug._outcome_status(report), 'RCA_CONFIRMED')
+
+    def test_outcome_status_two_words_is_report_invalid(self):
+        report = self._report('**RCA_CONFIRMED**\nBLOCKED')
+        self.assertEqual(high_debug._outcome_status(report), 'REPORT_INVALID')
+
+    def test_outcome_status_missing_section_is_report_invalid(self):
+        report = '## Root Cause\nRCA_CONFIRMED\n'
+        self.assertEqual(high_debug._outcome_status(report), 'REPORT_INVALID')
+
     def test_codex_invocation_enables_search_and_keeps_read_only_sandbox(self):
         with tempfile.TemporaryDirectory() as directory:
             output_path = str(Path(directory) / 'report.md')
@@ -229,6 +253,29 @@ class HighDebugTests(unittest.TestCase):
     def test_report_section_only_in_prose_is_invalid(self):
         report = ''.join('## ' + heading + '\nDetails.\n' for heading in high_debug.REPORT_SECTIONS if heading != 'Root Cause')
         report += 'The Root Cause is described in prose.\nRCA_UNCONFIRMED'
+        (result, _invoke, store) = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
+
+    def _sections(self, outcome_body):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS[:-1])
+        return report + '## Outcome/cost\n' + outcome_body
+
+    def test_blocked_in_prose_does_not_count(self):
+        report = self._sections('RCA_CONFIRMED\n').replace(
+            'Details.', 'This was BLOCKED earlier.', 1)
+        (result, _invoke, store) = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
+
+    def test_two_status_words_in_outcome_are_invalid(self):
+        (result, _invoke, store) = self._run_case(
+            self._sections('RCA_CONFIRMED\nBLOCKED\n'))
+        self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
+
+    def test_missing_outcome_section_is_invalid(self):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS[:-1])
+        report += 'RCA_CONFIRMED\n'
         (result, _invoke, store) = self._run_case(report)
         self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
 

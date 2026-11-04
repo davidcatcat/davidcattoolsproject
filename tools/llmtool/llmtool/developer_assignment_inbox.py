@@ -8,7 +8,7 @@ lists its live assignments with ``task assignments --worker <name>``
 one-shot ASSIGNED -> CLAIMED write the claim re-runs the dispatch gate
 (recorded in the assignment audit), re-reads the D6 (still ACTIVE at
 ``source_sha``), checks the worker, D6 and expiry, and requires this
-session's Claude Code transcript under the claimer's own ``CLAUDE_CONFIG_DIR``
+session's Claude Code transcript under the claimer's resolved Claude account
 for ``cwd`` equal to the D6 root (plain owned files, no symlinks). A late claim
 moves the assignment to EXPIRED. The PM sees UNCLAIMED or CLAIMED (with the
 receipt) in ``task inbox``.
@@ -46,7 +46,8 @@ class AssignmentRefused(LLMToolError):
 
 def refusal_code(exc):
     """The stable refusal code carried by an assignment/claim error, if any."""
-    for name in ('assignment_code', 'dispatch_code', 'task_store_error_code'):
+    for name in ('assignment_code', 'dispatch_code', 'task_store_error_code',
+                 'role_config_code'):
         code = getattr(exc, name, None)
         if code:
             return code
@@ -65,18 +66,31 @@ def _parse(stamp):
     return datetime.strptime(stamp, _UTC_SECONDS).replace(tzinfo=timezone.utc)
 
 
+def _account_dir(environ=None):
+    env = os.environ if environ is None else environ
+    base = env.get('CLAUDE_CONFIG_DIR')
+    if not base and env.get('HOME'):
+        from .role_config import resolve_role
+        base = resolve_role('claude-developer', environ=env,
+                            home=env['HOME'])['config_dir']
+    if not base and env.get('HOME'):
+        base = os.path.join(env['HOME'], '.claude')
+    if base is None or not os.path.isabs(base):
+        raise AssignmentRefused('ASSIGNMENT_ACCOUNT_DIR_UNAVAILABLE')
+    return os.path.normpath(base)
+
+
 def account_dir_label(environ=None):
     """Digest labelling the claimer's Claude account (its configuration directory).
 
     Only a domain-separated digest of the directory path is stored; nothing
     inside the directory is read.
     """
-    env = os.environ if environ is None else environ
-    base = env.get('CLAUDE_CONFIG_DIR') or (
-        os.path.join(env['HOME'], '.claude') if env.get('HOME') else None)
-    if base is None or not os.path.isabs(base):
-        raise AssignmentRefused('ASSIGNMENT_ACCOUNT_DIR_UNAVAILABLE')
-    path = os.path.normpath(base).encode('utf-8', 'surrogateescape')
+    return _account_dir_label(_account_dir(environ))
+
+
+def _account_dir_label(base):
+    path = base.encode('utf-8', 'surrogateescape')
     return hashlib.sha256(_ACCOUNT_DOMAIN + path).hexdigest()[:16]
 
 
@@ -141,7 +155,8 @@ def claim(store, assignment_id, *, worker, d6_task_id, session_id, environ=None,
     """One-shot claim after re-running the dispatch, D6 and transcript checks."""
     if type(session_id) is not str or PM_NATIVE_SESSION_ID.fullmatch(session_id) is None:
         raise AssignmentRefused('ASSIGNMENT_SESSION_INVALID')
-    label = account_dir_label(environ)
+    account_dir = _account_dir(environ)
+    label = _account_dir_label(account_dir)
 
     def gate(item):
         entry, denied = _decision(item['worker'], item['owner_assignment_ref'],
@@ -156,9 +171,13 @@ def claim(store, assignment_id, *, worker, d6_task_id, session_id, environ=None,
                 registration.root != item['d6_root']):
             return entry, AssignmentRefused('ASSIGNMENT_SOURCE_STALE')
         from . import active_pm_inbox
+        session_env = dict(os.environ if environ is None else environ)
+        session_env['CLAUDE_CONFIG_DIR'] = account_dir
         try:
-            active_pm_inbox.observe_claude_session(session_id, item['d6_root'], environ)
-        except LLMToolError:
+            active_pm_inbox.observe_claude_session(session_id, item['d6_root'], session_env)
+        except LLMToolError as error:
+            if getattr(error, 'role_config_code', None):
+                raise
             return entry, AssignmentRefused('ASSIGNMENT_SESSION_NOT_FOUND')
         return entry, None
 

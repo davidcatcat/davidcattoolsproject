@@ -177,6 +177,34 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
         self.assertEqual(view['status'], 'OK')
         self.assertEqual(self.store.task_ids(), [])
 
+    def test_claim_without_config_env_uses_worker_account_not_pm_account(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        home = str(self.base / 'home')
+        worker_dir = str(Path(home) / '.claude')
+        environ = {'HOME': home}
+
+        def configured_role(role, *, environ, home):
+            return {'role': role, 'config_dir': self.account_a if role == 'pm' else None}
+
+        self.transcript(session, worker_dir)
+        with patch('llmtool.role_config.resolve_role', side_effect=configured_role):
+            claimed = inbox.claim(self.store, assigned['assignment_id'], worker=WORKER,
+                                  d6_task_id=D6, session_id=session, environ=environ)
+        self.assertEqual(claimed['state'], 'CLAIMED')
+        self.assertEqual(claimed['claim']['account_dir_label'],
+                         inbox.account_dir_label(environ))
+
+        self.register(D6, head='2' * 40)
+        assigned = self.assign()
+        pm_only_session = str(uuid.uuid4())
+        self.transcript(pm_only_session, self.account_a)
+        with patch('llmtool.role_config.resolve_role', side_effect=configured_role):
+            self.assert_refused(
+                'ASSIGNMENT_SESSION_NOT_FOUND', inbox.claim, self.store,
+                assigned['assignment_id'], worker=WORKER, d6_task_id=D6,
+                session_id=pm_only_session, environ=environ)
+
     # -- matrix 2 ---------------------------------------------------------
 
     def test_2_same_session_reclaim_returns_receipt_other_session_refused(self):
@@ -522,6 +550,22 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
                                   store=TaskStore(self.base / 'home' / '.local' / 'state' /
                                                   'llmtool' / 'tasks'), stdout=out)
         self.assertEqual(code, 0)
+
+    def test_claim_cli_preserves_specific_role_config_refusal_from_claim_gate(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        self.transcript(session, self.account_b)
+        error = LLMToolError('role configuration is invalid')
+        error.role_config_code = 'ROLE_ACCOUNT_DIR_INVALID'
+        out = StringIO()
+        with patch.dict(os.environ, {'CLAUDE_CONFIG_DIR': self.account_b}), \
+                patch.object(active_pm_inbox, 'observe_claude_session', side_effect=error):
+            code = run_task_claim(Namespace(assignment_id=assigned['assignment_id'],
+                                            worker=WORKER, d6=D6, session=session),
+                                  store=self.store, stdout=out)
+        self.assertEqual(code, 1)
+        self.assertEqual(json.loads(out.getvalue()), {'code': 'ROLE_ACCOUNT_DIR_INVALID'})
+        self.assertEqual(self.stored(assigned['assignment_id'])['state'], 'ASSIGNED')
 
 
 if __name__ == '__main__':

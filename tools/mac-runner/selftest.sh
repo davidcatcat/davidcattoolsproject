@@ -34,7 +34,11 @@ hook() {  # hook <event> <actor> [VAR=value...]
 }
 event '{"pull_request":{"head":{"repo":{"full_name":"davidcatcat/davidcattoolsproject"}},"user":{"login":"davidcatcat"}}}'
 check "same-repo PR by the Owner admitted" 0 hook pull_request davidcatcat
+event '{"pull_request":{"head":{"repo":{"full_name":"davidcatcat/davidcattoolsproject"}},"user":{"login":"ddavidccatssun"}}}'
+check "same-repo PR by ddavidccatssun admitted" 0 hook pull_request ddavidccatssun
 check "PR by another actor refused" 1 hook pull_request someone-else
+check "PR by prefix lookalike refused" 1 hook pull_request xddavidccatssun
+check "PR by suffix lookalike refused" 1 hook pull_request ddavidccatssunx
 check "empty actor refused" 1 hook pull_request ""
 check "other triggering actor refused" 1 hook pull_request davidcatcat GITHUB_TRIGGERING_ACTOR=x
 event '{"pull_request":{"head":{"repo":{"full_name":"x/fork"}},"user":{"login":"davidcatcat"}}}'

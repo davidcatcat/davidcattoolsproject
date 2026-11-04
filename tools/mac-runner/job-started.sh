@@ -8,11 +8,10 @@ fail() { echo "::error::runner admission refused: $1"; exit 1; }
 here=$(cd "$(dirname "$0")" && pwd -P) || fail "cannot find the hook directory"
 "$here/probe.sh" || exit 1
 
-# Only this repository, only workflows written for this runner, only code the
-# Owner's account pushed (the Agents work through that account). Forks and
-# other events never run here.
+# Only this repository, only workflows written for this runner, and only code
+# pushed by a trusted account. Forks and other events never run here.
 repo=davidcatcat/davidcattoolsproject
-trusted_actors=" davidcatcat "
+trusted_actors=" davidcatcat ddavidccatssun "
 workflows=" llmtool-mac-ci.yml mac-runner-smoke.yml "
 
 event() { plutil -extract "$1" raw -o - "$GITHUB_EVENT_PATH" 2>/dev/null; }
