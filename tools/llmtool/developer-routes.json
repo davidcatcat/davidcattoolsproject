@@ -15,7 +15,6 @@
       "profile_name": "llmtool-direct",
       "profile": {
         "adapter": "openai-chat-tools",
-        "base_url": "https://api.openai.com/v1",
         "auth_env": "GW_AGENT_API_KEY",
         "model": "gw-agent-default",
         "context_cap_tokens": 32768,

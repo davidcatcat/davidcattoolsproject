@@ -3189,24 +3189,35 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
         generation = company_config.get('generation')
         model = company_provider.get('model')
         base_url = company_provider.get('base_url')
-        max_output_tokens = generation.get('max_tokens') if type(generation) is dict else None
         profile = route_config.get('profile')
-        context_cap_tokens = (generation.get('context_cap_tokens')
-                              if type(generation) is dict else None)
-        if context_cap_tokens is None and type(profile) is dict:
-            context_cap_tokens = profile.get('context_cap_tokens')
+        max_output_tokens = generation.get('max_tokens') if type(generation) is dict else None
+        context_cap_tokens = (profile.get('context_cap_tokens')
+                              if type(profile) is dict else None)
+        route_output_cap = (profile.get('max_output_tokens')
+                            if type(profile) is dict else None)
         if (company_provider.get('type') != 'openai-compatible' or
                 type(model) is not str or not model or type(base_url) is not str or
                 not base_url or type(max_output_tokens) is not int or
                 type(context_cap_tokens) is not int or
+                type(route_output_cap) is not int or
                 type(profile) is not dict):
             raise ValueError
+        # The provider's generation limit may exceed the gateway's context cap.
+        # Keep the effective output budget below both route-owned limits.
+        max_output_tokens = min(max_output_tokens, route_output_cap,
+                                context_cap_tokens - 1)
         route_config = copy.deepcopy(route_config)
         route_config['default_model'] = model
         route_config['expected_served_model'] = model
         route_config['profile'].update(base_url=base_url, model=model,
             max_output_tokens=max_output_tokens,
             context_cap_tokens=context_cap_tokens)
+        route_config['profile'].pop('http_allow_hosts', None)
+        if urlsplit(base_url).scheme == 'http':
+            host = urlsplit(base_url).hostname
+            if not host:
+                raise ValueError
+            route_config['profile']['http_allow_hosts'] = [host]
     except Exception:
         raise LLMToolError('authorized company-gw profile is unavailable or invalid') from None
     effort = route_config['default_effort']
