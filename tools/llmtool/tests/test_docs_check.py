@@ -1,4 +1,6 @@
+import hashlib
 import importlib.util
+import json
 import subprocess
 import tempfile
 import unittest
@@ -17,6 +19,15 @@ class DocsCheckTests(unittest.TestCase):
         self.repo = Path(self.temp.name)
         self.original = docs_check.REPO
         docs_check.REPO = self.repo
+        (self.repo / "AGENTS.md").write_text("guidance\n", encoding="utf-8")
+        (self.repo / "CLAUDE.md").write_text("guidance\n", encoding="utf-8")
+        hashes = {
+            name: hashlib.sha256((self.repo / name).read_bytes()).hexdigest()
+            for name in ("AGENTS.md", "CLAUDE.md")
+        }
+        config = self.repo / "tools" / "llmtool" / "guidance-drift.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"schema_version": 1, "hashes": hashes, "codex_only": []}), encoding="utf-8")
         subprocess.run(["git", "init", "-q"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=self.repo, check=True)
         subprocess.run(["git", "config", "user.name", "Test"], cwd=self.repo, check=True)
@@ -64,6 +75,14 @@ class DocsCheckTests(unittest.TestCase):
     def test_clean_docs_pass(self):
         (self.repo / "other.md").write_text("# Good\n", encoding="utf-8")
         self.assertFalse(self.findings("[good](other.md#good)\n"))
+
+    def test_guidance_drift_fails_docs_check(self):
+        original = docs_check.guidance_drift_check.check
+        docs_check.guidance_drift_check.check = lambda _repo: ["AGENTS.md: HASH_STALE stale"]
+        try:
+            self.assertTrue(any("HASH_STALE" in item for item in self.findings("# Good\n")))
+        finally:
+            docs_check.guidance_drift_check.check = original
 
     def test_link_inside_fenced_code_is_ignored(self):
         self.assertFalse(self.findings("```md\n[example](missing.md)\n```\n"))

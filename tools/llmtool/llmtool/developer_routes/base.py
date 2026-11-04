@@ -617,7 +617,12 @@ def run_route(route: DeveloperRoute, request: Mapping[str, Any], *, gate,
                          facts={'changed_files': changed},
                          progress=quota_progress if quota else None)
     if quota:
-        raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'), progress=quota_progress)
+        facts = {}
+        gateway_code = getattr(route, '_gateway_code', None)
+        if type(gateway_code) is str and re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code):
+            facts['gateway_code'] = gateway_code
+        raise RouteError(_route_code(route, 'QUOTA_EXHAUSTED'),
+                         progress=quota_progress, facts=facts)
     try:
         route.validate_status(parsed)
     except RouteError:

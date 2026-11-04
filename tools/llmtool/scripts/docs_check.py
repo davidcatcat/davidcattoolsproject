@@ -4,11 +4,18 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import re
 import subprocess
 import sys
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
+
+_GUIDANCE_SPEC = importlib.util.spec_from_file_location(
+    "guidance_drift_check", Path(__file__).resolve().with_name("guidance_drift_check.py")
+)
+guidance_drift_check = importlib.util.module_from_spec(_GUIDANCE_SPEC)
+_GUIDANCE_SPEC.loader.exec_module(guidance_drift_check)
 
 
 REPO = Path(__file__).resolve().parents[3]
@@ -144,8 +151,8 @@ def check_frontmatter(repo_path: str, source: str) -> list[str]:
 
 
 def check(base: str, head: str) -> list[str]:
+    findings: list[str] = guidance_drift_check.check(REPO)
     files, added = changed_files(base, head)
-    findings: list[str] = []
     for name, line in added:
         if name and emitted_sensitive(line):
             findings.append(f"{name}: added line contains sensitive-content indicators")
