@@ -33,6 +33,9 @@ class GwAgentRouteTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        home = mock.patch.dict(os.environ, {'HOME': self.temp.name})
+        home.start()
+        self.addCleanup(home.stop)
         self.root = Path(self.temp.name) / 'repo'
         self.root.mkdir()
         subprocess.run(['/usr/bin/git', 'init', str(self.root)], check=True,
@@ -83,6 +86,60 @@ class GwAgentRouteTests(unittest.TestCase):
             gw_agent.llm_config, 'api_' + 'key', return_value=self.credential)
         with credential_loader, value_loader:
             return run_route(*args, **kwargs)
+
+    def test_missing_optional_key_writes_unauthenticated_profile_and_environment(self):
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
+                                  return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            self.route.prepare_files(tmpdir, self.request())
+            env = self.route.build_env(tmpdir)
+        profile_file = json.loads((Path(tmpdir) / 'profiles.json').read_text())
+        profile = profile_file['profiles']['fake']
+        self.assertIsNone(profile['auth_env'])
+        self.assertNotIn('GW_AGENT_API_KEY', env)
+
+    def test_configured_key_remains_bound_to_gateway_environment(self):
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
+                                  return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key',
+                                  return_value=self.credential):
+            self.route.prepare_files(tmpdir, self.request())
+            env = self.route.build_env(tmpdir)
+        profile_file = json.loads((Path(tmpdir) / 'profiles.json').read_text())
+        profile = profile_file['profiles']['fake']
+        self.assertEqual(profile['auth_env'], 'GW_AGENT_API_KEY')
+        self.assertEqual(env['GW_AGENT_API_KEY'], self.credential)
+        self.assertNotIn(self.credential, json.dumps(profile_file))
+
+    def test_invalid_or_unresolvable_credentials_fail_closed_without_disclosure(self):
+        cases = (
+            ('missing-env', None, RuntimeError('missing configured key')),
+            ('empty-env', None, RuntimeError('empty configured key')),
+            ('invalid', 'bad\nsecret', None),
+            ('overlong', 'x' * 8193, None),
+            ('config-error', None, RuntimeError('private configuration detail')),
+        )
+        for label, credential, resolve_error in cases:
+            self.route._credential_resolved = False
+            self.route._credential = None
+            with tempfile.TemporaryDirectory() as tmpdir, self.subTest(case=label):
+                resolver = (mock.patch.object(
+                    gw_agent.llm_config, 'resolve_profile_config', side_effect=resolve_error)
+                    if label == 'config-error' else mock.patch.object(
+                        gw_agent.llm_config, 'resolve_profile_config', return_value={}))
+                key_loader = (mock.patch.object(gw_agent.llm_config, 'api_key',
+                                                side_effect=resolve_error)
+                              if label in ('missing-env', 'empty-env') else
+                              mock.patch.object(gw_agent.llm_config, 'api_key',
+                                                return_value=credential))
+                with resolver, key_loader:
+                    with self.assertRaises(RouteError) as caught:
+                        self.route.prepare_files(tmpdir, self.request())
+                self.assertEqual(caught.exception.code, 'GW_AGENT_CREDENTIAL_MISSING')
+                self.assertNotIn('private configuration detail', str(caught.exception))
+                self.assertEqual(list(Path(tmpdir).iterdir()), [])
 
     def test_invalid_package_paths_raise_route_error(self):
         package_file = Path(self.temp.name) / 'package-file'
@@ -354,9 +411,11 @@ class GwAgentRouteTests(unittest.TestCase):
                               reply(tool_call('finish', summary='done'), model='fake-model')))
         request = self.request()
         request['task']['goal'] = 'Change source.py from original to changed.'
-        result = self.run_route_with_credential(
-            self.route, request, gate=lambda: True,
-            boundary=DirectBoundary(), snapshot=capture_snapshot)
+        with mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
+                               return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
+            result = run_route(self.route, request, gate=lambda: True,
+                               boundary=DirectBoundary(), snapshot=capture_snapshot)
         self.assertEqual(result.status, 'DONE')
         self.assertEqual(result.changed_files, ('source.py',))
         self.assertEqual((self.root / 'source.py').read_text(), 'changed\n')
