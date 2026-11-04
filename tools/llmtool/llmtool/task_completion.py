@@ -823,10 +823,12 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
         'TMPDIR': os.environ.get('TMPDIR') or '/tmp',
         'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_ATTR_NOSYSTEM': '1',
         'GIT_OPTIONAL_LOCKS': '0', 'GIT_NO_LAZY_FETCH': '1',
+        'GIT_NO_REPLACE_OBJECTS': '1',
         'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat', 'PAGER': 'cat',
         'GIT_LITERAL_PATHSPECS': '1', 'TMPDIR': '/tmp',
     }
-    safe = ('-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
+    safe = ('-c', 'core.useReplaceRefs=false', '-c', 'core.fsmonitor=false',
+            '-c', 'core.hooksPath=/dev/null',
             '-c', 'core.untrackedCache=false', '-c', 'core.attributesFile=/dev/null',
             '-c', 'core.pager=cat', '-c', 'color.ui=false', '-c',
             'protocol.allow=never')
@@ -956,13 +958,40 @@ def collect_git_snapshot(root):
     actual_root = _git(root, ('rev-parse', '--show-toplevel'), limit=4096).decode().strip()
     common = _git(root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
                   limit=4096).decode().strip()
+    _reject_legacy_grafts(root, common)
     branch = _git(root, ('branch', '--show-current'), limit=4096).decode().strip()
     head = _git(root, ('rev-parse', '--verify', 'HEAD'), limit=4096).decode().strip()
     status = _git(root, ('status', '--porcelain=v1', '-z', '--untracked-files=all'), limit=1024*1024)
     if (actual_root != root or not branch or _HEX40.fullmatch(head) is None or
             os.path.realpath(common) != common):
         _stop('GIT_BINDING_INVALID')
+    _reject_legacy_grafts(root, common)
     return GitSnapshot(root, common, branch, head, status == b'')
+
+
+def _reject_legacy_grafts(root, common_dir=None):
+    """Refuse repositories whose legacy graft files can rewrite ancestry."""
+    try:
+        common_dir = common_dir or _git(
+            root, ('rev-parse', '--path-format=absolute', '--git-common-dir'),
+            limit=4096).decode('utf-8', 'strict').strip()
+        git_dir = _git(root, ('rev-parse', '--path-format=absolute', '--git-dir'),
+                       limit=4096).decode('utf-8', 'strict').strip()
+        for info_dir in {Path(common_dir) / 'info', Path(git_dir) / 'info'}:
+            grafts = info_dir / 'grafts'
+            try:
+                grafts.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                _stop('LEGACY_GRAFTS_UNSUPPORTED')
+            # Any entry is unsupported: this includes symlinks, unreadable files,
+            # directories, and other unexpected file types.
+            _stop('LEGACY_GRAFTS_UNSUPPORTED')
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('LEGACY_GRAFTS_UNSUPPORTED')
 
 
 def bind_executor_task(task_id, *, expected_common_dir, root=None):
@@ -1057,6 +1086,7 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
             any(type(task_binding.get(key)) is not str for key in
                 ('task_id', 'run_id', 'contract_digest'))):
         _stop('TASK_BINDING_MISSING')
+    _reject_legacy_grafts(registration.root, registration.common_dir)
     snapshot = collect_git_snapshot(registration.root)
     if (snapshot.common_dir != registration.common_dir or snapshot.branch != registration.branch or
             snapshot.head != registration.result_sha or not snapshot.clean):
@@ -1070,13 +1100,10 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
         _stop('D6_TASK_BINDING_MISMATCH')
     if source_sha == snapshot.head:
         _stop('RESULT_DIFF_EMPTY')
-    ancestor = subprocess.run(['/usr/bin/git', '-C', registration.root, 'merge-base',
-        '--is-ancestor', source_sha, snapshot.head], stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=_TIMEOUT,
-        env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
-             'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_OPTIONAL_LOCKS': '0',
-             'GIT_NO_LAZY_FETCH': '1'}, shell=False, check=False)
-    if ancestor.returncode != 0:
+    _, ancestor_status = _git(registration.root,
+        ('merge-base', '--is-ancestor', source_sha, snapshot.head),
+        limit=4096, allow_exit_1=True, return_exit_code=True)
+    if ancestor_status != 0:
         _stop('SOURCE_NOT_ANCESTOR')
     changed = _git(registration.root, ('diff', '--name-only', '-z', '--no-ext-diff',
                   '--no-textconv', '--no-renames', source_sha, snapshot.head, '--'),
@@ -1125,6 +1152,7 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
             except LLMToolError:
                 _stop('DEVELOPER_ARTIFACT_CHAIN_INVALID')
             previous_end = end_sha
+    _reject_legacy_grafts(registration.root, registration.common_dir)
     return {
         'task_id': task_binding.get('task_id'), 'run_id': task_binding.get('run_id'),
         'executor_task_id': registration.task_id,
@@ -1257,6 +1285,7 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
             any(type(task_binding.get(key)) is not str for key in
                 ('task_id', 'run_id', 'contract_digest'))):
         _stop('TASK_BINDING_MISSING')
+    _reject_legacy_grafts(registration.root, registration.common_dir)
     untracked_raw = _git(registration.root,
         ('ls-files', '--others', '--exclude-standard', '-z'), limit=64 * 1024)
     try:
@@ -1281,6 +1310,7 @@ def collect_executor_worktree_result(*, task_id, expected_common_dir, expected_r
                                  result_head), limit=4096)
     except LLMToolError:
         _stop('D6_TASK_BINDING_MISMATCH')
+    _reject_legacy_grafts(registration.root, registration.common_dir)
     if (type(artifact) is not str or type(artifact_sha256) is not str or
             hashlib.sha256(artifact.encode('utf-8')).hexdigest() != artifact_sha256 or
             artifact.encode('utf-8') != live['diff']):
@@ -1374,7 +1404,8 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
     env = {'PATH': '/usr/bin:/bin', 'LC_ALL': 'C',
            'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null',
            'GIT_ATTR_NOSYSTEM': '1', 'GIT_OPTIONAL_LOCKS': '0',
-           'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_LAZY_FETCH': '1'}
+           'GIT_TERMINAL_PROMPT': '0', 'GIT_NO_LAZY_FETCH': '1',
+           'GIT_NO_REPLACE_OBJECTS': '1'}
     try:
         with tempfile.TemporaryDirectory(prefix='llmtool-proposal-tree-') as temporary:
             temp_root = Path(temporary)
@@ -1389,7 +1420,8 @@ def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_
                     stream.write(content)
                 target.chmod(0o755 if mode == '100755' else 0o644)
             proc = subprocess.run(
-                ['/usr/bin/git', '-c', 'core.hooksPath=/dev/null', 'apply',
+                ['/usr/bin/git', '-c', 'core.useReplaceRefs=false',
+                 '-c', 'core.hooksPath=/dev/null', 'apply',
                  '--binary', '--whitespace=nowarn', '-'],
                 cwd=temp_root, input=artifact.encode('utf-8'),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
