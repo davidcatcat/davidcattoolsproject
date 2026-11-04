@@ -102,7 +102,8 @@ class GwAgentRoute(DeveloperRoute):
                  (type(expected) is not str or _MODEL.fullmatch(expected) is None)) or
                 type(default_model) is not str or _MODEL.fullmatch(default_model) is None):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
-        if (profile.get('auth_env') != 'GW_AGENT_API_KEY' or
+        if ('auth_env' not in profile or
+                profile['auth_env'] not in (None, 'GW_AGENT_API_KEY') or
                 type(profile.get('model')) is not str or
                 _MODEL.fullmatch(profile['model']) is None or
                 (expected is not None and profile['model'] != expected)):
@@ -132,6 +133,8 @@ class GwAgentRoute(DeveloperRoute):
         self.expected_served_model = expected
         self._default_model = default_model
         self._validated_request = None
+        self._credential_resolved = False
+        self._credential = None
         classes = config.get('allowed_data_classes')
         if (type(classes) is not list or not classes or
                 any(type(item) is not str or not item for item in classes) or
@@ -177,6 +180,14 @@ class GwAgentRoute(DeveloperRoute):
         return value
 
     def prepare_files(self, tmpdir, request):
+        try:
+            self._prepare_files(tmpdir, request)
+        except BaseException:
+            self._credential = None
+            self._credential_resolved = False
+            raise
+
+    def _prepare_files(self, tmpdir, request):
         root = Path(request['root']).resolve(strict=True)
         private_tmp = Path(tmpdir).resolve(strict=True)
         package_path = Path(self.package_path)
@@ -184,10 +195,13 @@ class GwAgentRoute(DeveloperRoute):
                 private_tmp == root or root in private_tmp.parents):
             raise RouteError('GW_AGENT_CONFIG_INVALID')
         task = dict(request['task'])
+        credential = self._load_credential()
+        profile = dict(self.profile)
+        profile['auth_env'] = 'GW_AGENT_API_KEY' if credential is not None else None
         try:
             serialized_task = _canonical(task)
             serialized_profile = _canonical({'schema_version': 1,
-                                              'profiles': {self.profile_name: self.profile}})
+                                              'profiles': {self.profile_name: profile}})
         except (TypeError, ValueError):
             raise RouteError('GW_AGENT_REQUEST_INVALID') from None
         auth = {
@@ -225,21 +239,41 @@ class GwAgentRoute(DeveloperRoute):
                 '--profiles-file', str(Path(tmp) / 'profiles.json'),
                 '--state-dir', str(Path(tmp) / 'state')]
 
-    def build_env(self, tmpdir):
+    def _load_credential(self):
+        if self._credential_resolved:
+            return self._credential
         try:
             config_value = llm_config.resolve_profile_config('company-gw')
-            credential = llm_config.api_key(config_value)
+            try:
+                credential = llm_config.api_key(config_value)
+            except Exception as exc:
+                diagnostic = getattr(exc, 'diagnostic', None)
+                diagnostic_code = getattr(diagnostic, 'code', None)
+                diagnostic_code = getattr(diagnostic_code, 'value', diagnostic_code)
+                if diagnostic_code != 'AUTH_CREDENTIAL_MISSING':
+                    raise
+                credential = None
         except Exception:
             raise RouteError('GW_AGENT_CREDENTIAL_MISSING') from None
-        if (type(credential) is not str or not credential or '\x00' in credential or
-                len(credential) > 8192):
+        if (credential is not None and
+                (type(credential) is not str or not credential or '\x00' in credential or
+                 len(credential) > 8192)):
             raise RouteError('GW_AGENT_CREDENTIAL_MISSING')
+        self._credential = credential
+        self._credential_resolved = True
+        return credential
+
+    def build_env(self, tmpdir):
+        credential = self._load_credential()
         env = {key: os.environ[key] for key in
                ('PATH', 'HOME', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'LC_CTYPE')
                if key in os.environ}
         env['TMPDIR'] = tmpdir
         env['PYTHONPATH'] = self.package_path
-        env['GW_AGENT_API_KEY'] = credential
+        if credential is not None:
+            env['GW_AGENT_API_KEY'] = credential
+        self._credential = None
+        self._credential_resolved = False
         return env
 
     def parse_output(self, stdout, stderr, log_text):

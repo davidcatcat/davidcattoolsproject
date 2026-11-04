@@ -80,7 +80,7 @@
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
       "decided_at": "2026-10-31",
-      "reason": "PM-selected AGY Developer route uses gemini-4-argon-medium and formal Codex review; validate auth, quota, session, D6 and scoped safety; no automatic retry or fallback",
+      "reason": "PM-selected AGY Developer route uses gemini-4-argon-medium and a formal Reviewer from a different model family than the actual author; validate auth, quota, session, D6 and scoped safety; no automatic retry or fallback",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "company-gw": {
@@ -101,7 +101,7 @@
       "dispatch": "ALLOWED",
       "decided_by": "Owner",
       "decided_at": "2026-10-31",
-      "reason": "fixed formal Reviewer using the configured default Claude CLI account claude; use a separate read-only context",
+      "reason": "fixed formal Reviewer using the role-configured Claude account (claude2); use a separate read-only context",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6530593665"
     },
     "codex-reviewer": {
