@@ -340,7 +340,8 @@ jobs:
         if: matrix.shard == 1
         env:
           PYTHONDONTWRITEBYTECODE: '1'
-        run: "$JOB_PYTHON" -B -m unittest discover -s tools/safe-git -p test_preflight.py
+        run: |
+          "$JOB_PYTHON" -B -m unittest discover -s tools/safe-git -p test_preflight.py
       - name: Working tree is clean
         shell: bash
         run: |
