@@ -227,7 +227,7 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result_sha
 
-    def _collect_registered_result(self, result_sha, write_paths):
+    def _collect_registered_result(self, result_sha, write_paths, trusted_base_sha=None):
         registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
         record = json.loads(registry_path.read_text())
         record['head_sha'] = result_sha
@@ -247,7 +247,8 @@ class TaskCompletionTests(unittest.TestCase):
             expected_agent='executor-agent', expected_session_ref='Executor D6 session',
             expected_native_session_id='native-executor', write_paths=write_paths,
             artifact=artifact,
-            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+            trusted_base_sha=trusted_base_sha)
 
     def test_main_merge_changes_are_excluded_from_developer_scope(self):
         self._git('branch', 'main', self.source_sha)
@@ -255,6 +256,7 @@ class TaskCompletionTests(unittest.TestCase):
         (self.root / 'README.md').write_text('Updated by main.\n')
         self._git('add', 'README.md')
         self._git('commit', '-m', 'main documentation update')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
         self._git('checkout', 'feat/executor')
         target = self.root / self.source_path
         target.write_text(target.read_text() + '\n# developer change\n')
@@ -267,8 +269,57 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('commit', '-m', 'later developer change')
 
         result = self._collect_registered_result(self._git('rev-parse', 'HEAD'),
-                                                 [self.source_path])
+                                                 [self.source_path], trusted_base_sha)
         self.assertEqual(result['changed_paths'], [self.source_path])
+        self.assertEqual(result['developer_changed_paths'], [self.source_path])
+
+    def test_fake_main_ref_cannot_hide_out_of_scope_merge(self):
+        outside = self.root / 'out.txt'
+        outside.write_text('Developer content.\n')
+        self._git('add', 'out.txt')
+        self._git('commit', '-m', 'out of scope commit')
+        evil = self._git('rev-parse', 'HEAD')
+        self._git('update-ref', 'refs/heads/master', evil)
+        self._git('merge', '--no-ff', evil, '-m', 'merge fake main')
+
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_registered_result(self._git('rev-parse', 'HEAD'),
+                                            [self.source_path])
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+
+    def test_repair_chain_segment_uses_developer_path_classification(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('Main update.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main update')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge main')
+        segment_start = self._git('rev-parse', 'HEAD')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# repair segment\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'repair segment')
+        segment_end = self._git('rev-parse', 'HEAD')
+
+        paths = task_completion._developer_changed_paths(
+            str(self.root), segment_start, segment_end, trusted_base_sha)
+        self.assertEqual(paths, (self.source_path,))
+
+    def test_old_ancestor_second_parent_does_not_hide_changes(self):
+        old_parent = self.source_sha
+        (self.root / 'out.txt').write_text('Developer content.\n')
+        self._git('add', 'out.txt')
+        self._git('commit', '-m', 'out of scope before merge')
+        first_parent = self._git('rev-parse', 'HEAD')
+        tree = self._git('rev-parse', first_parent + '^{tree}')
+        result_sha = self._git('commit-tree', tree, '-p', first_parent,
+                               '-p', old_parent, '-m', 'merge old ancestor')
+
+        paths = task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, result_sha, old_parent)
+        self.assertIn('out.txt', paths)
 
     def test_out_of_scope_developer_file_is_refused(self):
         result_sha = self._make_path_result('README.md', 'Developer edit.\n')
@@ -285,6 +336,7 @@ class TaskCompletionTests(unittest.TestCase):
         (self.root / 'README.md').write_text('Main version.\n')
         self._git('add', self.source_path, 'README.md')
         self._git('commit', '-m', 'main edits')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
         self._git('checkout', 'feat/executor')
         fixture.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
                            '    def test_developer(self): self.assertTrue(True)\n')
@@ -302,7 +354,7 @@ class TaskCompletionTests(unittest.TestCase):
 
         with self.assertRaises(LLMToolError) as raised:
             self._collect_registered_result(self._git('rev-parse', 'HEAD'),
-                                            [self.source_path])
+                                            [self.source_path], trusted_base_sha)
         self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
 
     def test_advanced_registered_base_completes_from_dispatch_source(self):
