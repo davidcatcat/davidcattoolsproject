@@ -668,7 +668,8 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(list(stage.iterdir()), [])
         self.assertTrue(saved.is_dir())
         self.complete(self.start(self.store(max_runs=1)))
-        self.assertEqual(stage.stat().st_ino, inode)
+        self.assertFalse(stage.exists())
+        self.assertTrue(saved.is_dir())
 
     def test_postpublication_fsync_failure_preserves_valid_run_until_grace(self):
         from llmtool import diagnostics_store as module

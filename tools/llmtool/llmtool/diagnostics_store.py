@@ -1,7 +1,8 @@
 """Opt-in POSIX metadata store. No provider access or implicit CLI persistence.
 
 Failures return None/False and retain one safe warning. Callers own rendering;
-they must preserve the primary task result. Unknown store data is never removed.
+they must preserve the primary task result. Unknown store data is never removed;
+guarded cleanup may remove empty, private initialization stages.
 """
 
 import errno
