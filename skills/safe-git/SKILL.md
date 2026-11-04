@@ -18,7 +18,6 @@ Before creating a worktree:
 
 Do not create or retire a D6 tree based only on this summary; follow the complete acceptance, inventory, ignored-file and process-release gates in the linked lifecycle reference. Preserve active, dirty, evidence-bearing or uncertain work. D6 worktree operations must not alter or retire the canonical checkout; its Integrator remains the sole writer.
 
-<a id="owner-approved-two-agent-developer-worktree-exception-not-activated"></a>
 The old G1–G7 fixed-root pilot is historical and archived in [policy history](../../docs/history/llmtool-agent-policy-legacy-20261020.md); D6 is current. See the linked [Owner decision](../../docs/decisions/llmtool_dynamic_worktree_20261019.md) and [D6 worktree reference](worktree-lifecycle.md) for policy attribution and registry details.
 
 ## Task binding and evidence
@@ -29,7 +28,6 @@ For runtime-bound tasks, preserve exact interpreter/import provenance, effective
 
 ## Before any Git mutation
 
-<a id="required-daily-executable-preflight-b-min"></a>
 For source/Git mutations in a claimed Mac workspace, run the required [read-only executable preflight](preflight-reference.md) with explicit, independently established expectations. Any nonzero result means preserve the state and stop; it does not authorize the workspace or replace D6 registration. GitHub API documentation edits follow their pinned-base procedure below and do not require a local Mac CLI preflight.
 
 At the actual task root, record:
@@ -48,7 +46,7 @@ Inspect the full diff and preserve unrelated work. Verify the published PR head 
 
 ## Fetch and synchronize
 
-Fetch only when remote state is required and the root/branch is verified. Developers and Reviewers must not perform unclaimed Git fetches in the canonical Integrator checkout. Compare local/remote refs; never infer remote state from stale tracking refs. Fast-forward only from a clean tree that is strictly behind. If histories diverge or a conflict appears, stop and report the exact state unless the user explicitly asked to resolve it; preserve both sides. Follow the [D6 hard Git limits](worktree-lifecycle.md#hard-git-safety-limits); never stash unrelated work.
+Fetch only when remote state is required and the root/branch is verified. Developers and Reviewers must not perform unclaimed Git fetches in the canonical Integrator checkout. Compare local/remote refs; never infer remote state from stale tracking refs. Fast-forward only from a clean tree that is strictly behind. If histories diverge or a conflict appears, stop and report the exact state unless the user explicitly asked to resolve it; preserve both sides. Follow the [D6 hard Git limits](worktree-lifecycle.md#hard-git-safety-limits). Never use `git stash` in a D6 because every worktree shares the same stash list.
 
 ## Commit and publish
 
@@ -66,5 +64,4 @@ The authorized Git operation is complete, its resulting repository state is veri
 
 ## Cloud and evidence
 
-<a id="d-007-codex-cloud--github-branch-separation-owner-decision-2026-10-17"></a>
 Cloud uses only its task-configured checkout. Verify it is `davidcatcat/davidcattoolsproject` and record branch, HEAD and remote before mutation; if identity/root cannot be established, STOP. Never assume `/workspace`. Do not claim Cloud publication proves Mac execution. Record exact source SHA and results; distinguish PR/issue publication from live Session delivery.

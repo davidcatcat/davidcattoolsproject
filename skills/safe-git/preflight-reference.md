@@ -5,7 +5,7 @@ This reference preserves the required Mac workspace preflight. Before any source
 ### Required daily executable preflight (B-min)
 
 Before source/Git mutation in a claimed workspace, run the same
-[read-only gate](preflight.py) used by the regression tests. This does not authorize a workspace, replace task registration, or turn PID attribution into an automated ownership check. First establish the permitted
+[read-only gate](../../tools/safe-git/preflight.py) used by the regression tests. This does not authorize a workspace, replace task registration, or turn PID attribution into an automated ownership check. First establish the permitted
 task/root and sole writer cooperatively; existing idle PIDs alone are not conflicts.
 
 Use explicit, independently established expected values, not values freshly
@@ -21,7 +21,7 @@ arguments exit **2**. Any nonzero result means preserve state and stop mutation.
 Run from the authorized workspace with its already trusted Python:
 
 ```sh
-python3 -B -I /absolute/reviewed/source/skills/safe-git/preflight.py \
+python3 -B -I /absolute/reviewed/source/tools/safe-git/preflight.py \
   --root /absolute/authorized/root --branch explicit-owned-branch \
   --common-dir /absolute/expected/common-dir \
   --origin git@github.com:davidcatcat/davidcattoolsproject.git \
@@ -53,7 +53,7 @@ For an initially known-safe, claimed checkout, create a candidate with this
 actual CLI (the same explicit identity/mode arguments as above):
 
 ```sh
-python3 -B -I /absolute/reviewed/source/skills/safe-git/preflight.py \
+python3 -B -I /absolute/reviewed/source/tools/safe-git/preflight.py \
   --root /absolute/authorized/root --branch explicit-owned-branch \
   --common-dir /absolute/expected/common-dir \
   --origin git@github.com:davidcatcat/davidcattoolsproject.git \
@@ -115,7 +115,7 @@ PID-only takeover. No G6/G7 authority is conferred.
 Targeted validation (no provider/lifecycle suite):
 
 ```sh
-python3 -B -I -m unittest discover -s skills/safe-git -p test_preflight.py -v
+python3 -B -I -m unittest discover -s tools/safe-git -p test_preflight.py -v
 ```
 
 These tests initialize their own disposable synthetic Git repositories and
