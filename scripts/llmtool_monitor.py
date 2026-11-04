@@ -3677,7 +3677,7 @@ def _claude_state(entry: dict, who: str, task: str, detail: str, age: float | No
         # Stopped at a prompt or menu only a person or its driving agent can answer.
         state = ATTENTION
         word = ("等人確認權限" if entry.get("waitingFor") == "permission prompt" else "等人回覆"
-                if status == "waiting" else "等人操作")
+                if status == "waiting" and job != "blocked" else "等人操作")
         detail = f"{word}，要{who}回{suffix}"
     elif status == "busy" or job == "working":
         state = WORKING
