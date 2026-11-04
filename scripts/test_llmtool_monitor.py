@@ -2745,14 +2745,15 @@ class OfficeViewTests(unittest.TestCase):
             {"type": "ai-title", "aiTitle": "handoff"}], age=300)
         (self.claude.parent / "sessions").mkdir()
         listed = {sid: {"sessionId": sid, "status": "waiting", "listed": True,
-                        "cwd": self.canonical}}
+                        "cwd": self.canonical, "name": "claude-pm"}}
         kwargs = {"codex_root": str(self.codex), "claude_root": str(self.claude),
                   "canonical": self.canonical, "agents": listed}
 
         with patch.object(mon, "_pm_runtime_bindings", return_value={}):
             exited = mon.office_rows([], self.NOW, **kwargs)
-        self.assertEqual([(row.name, row.state, row.detail) for row in exited],
-                         [("claude pm", mon.CLOSED, "推測 Claude CLI 已關閉（handoff）")])
+        self.assertEqual([(row.name, row.state, row.detail) for row in exited if row.kind != "worker"],
+                         [("claude pm（互動）", mon.CLOSED,
+                           "推測 Claude CLI 已關閉（等人回覆，要你回｜claude-pm）")])
 
         live_cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
         (self.claude.parent / "sessions" / "41.json").write_text(
@@ -2760,7 +2761,7 @@ class OfficeViewTests(unittest.TestCase):
                         "name": "claude-pm"}), encoding="utf-8")
         with patch.object(mon, "_pm_runtime_bindings", return_value={}):
             live = mon.office_rows([live_cli], self.NOW, **kwargs)
-        self.assertEqual([(row.name, row.state) for row in live],
+        self.assertEqual([(row.name, row.state) for row in live if row.kind != "worker"],
                          [("claude pm（互動）", mon.ATTENTION)])
 
     def test_launcher_named_claude_session_shows_its_role(self):
