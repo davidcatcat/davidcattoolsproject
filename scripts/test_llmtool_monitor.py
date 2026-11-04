@@ -2737,6 +2737,30 @@ class OfficeViewTests(unittest.TestCase):
         rows = {row.detail: row.state for row in self.rows([cli, *helpers])}
         self.assertEqual(rows["推測 Claude CLI 已關閉（title recent）"], mon.CLOSED)
 
+    def test_exited_claude_pm_session_ignores_stale_waiting_listing_but_live_one_waits(self):
+        sid = "pm-session"
+        self._write(self.claude / "proj" / f"{sid}.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "agent-name", "agentName": "claude-pm"},
+            {"type": "ai-title", "aiTitle": "handoff"}], age=300)
+        (self.claude.parent / "sessions").mkdir()
+        listed = {sid: {"sessionId": sid, "status": "waiting", "listed": True,
+                        "cwd": self.canonical}}
+        kwargs = {"codex_root": str(self.codex), "claude_root": str(self.claude),
+                  "canonical": self.canonical, "agents": listed}
+
+        exited = mon.office_rows([], self.NOW, **kwargs)
+        self.assertEqual([(row.name, row.state, row.detail) for row in exited],
+                         [("claude pm", mon.CLOSED, "推測 Claude CLI 已關閉（handoff）")])
+
+        live_cli = mon.Process(41, 1, 41, "05:00", "S+", "Claude Code CLI", "claude", "")
+        (self.claude.parent / "sessions" / "41.json").write_text(
+            json.dumps({"pid": 41, "sessionId": sid, "status": "waiting",
+                        "name": "claude-pm"}), encoding="utf-8")
+        live = mon.office_rows([live_cli], self.NOW, **kwargs)
+        self.assertEqual([(row.name, row.state) for row in live],
+                         [("claude pm（互動）", mon.ATTENTION)])
+
     def test_launcher_named_claude_session_shows_its_role(self):
         for sid, name in (("r", "claude-reviewer"), ("p", "claude-pm"),
                           ("d", "claude-developer-ui"), ("x", "claude-reviewers"),

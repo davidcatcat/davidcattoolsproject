@@ -5189,12 +5189,7 @@ def _closed_codex_cli(rows: list[OfficeRow], clis: int) -> list[OfficeRow]:
             gone.add(row.key)
         else:
             found = TURN_LABEL.search(row.detail)
-            # An idle TUI transcript says it is waiting for the next prompt,
-            # but the CLI may already have exited. Keep that distinct from a
-            # live waiting session so the office view does not imply it can
-            # accept input.
-            state = STOPPED if row.state == IDLE else CLOSED
-            out.append(replace(row, state=state,
+            out.append(replace(row, state=CLOSED,
                                detail="推測 Codex CLI 已關閉" + (found.group(0) if found else "")))
     return [row for row in out if row.group not in gone]
 
@@ -5462,12 +5457,15 @@ def _closed_claude_cli(rows: list[OfficeRow], sessions,
     record behind. Each running CLI names its session in the registry; a CLI
     without a readable entry keeps the most recently active unnamed session.
     Any other CLI session shows as closed for a while, then leaves with its
-    subagents. keep: keys of sessions `claude agents` still lists."""
+    subagents. A stale `claude agents` listing cannot keep a CLI transcript
+    open after its process exits. keep: keys of sessions `claude agents`
+    still lists, except CLI sessions whose process is gone."""
     found = _claude_live_sessions(sessions, processes)
     if found is None:
         return rows
     live, unnamed = found
-    keys = {f"claude:{sid}.jsonl" for sid in live} | set(keep)
+    cli_keys = {row.key for row in rows if row.cli}
+    keys = {f"claude:{sid}.jsonl" for sid in live} | (set(keep) - cli_keys)
     rest = sorted((row for row in rows if row.cli and row.key not in keys),
                   key=lambda row: row.age if row.age is not None else 1e12)
     keys |= {row.key for row in rest[:unnamed]}
