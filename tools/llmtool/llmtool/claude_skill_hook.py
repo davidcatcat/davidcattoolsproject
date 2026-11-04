@@ -1,25 +1,13 @@
-"""Claude Code hook for required skill delivery and protected Bash checks.
+"""Claude Code hook for required-skill indexes and protected Bash checks.
 
-The hook cannot block a script file that invokes a protected command, shell
-variable indirection, quote splitting, Claude's disableAllHooks setting, or
-Claude's --safe-mode option. An agent's own Bash can also run this module with
-synthetic stdin, so same-user forgery remains possible. These measured
-bypasses remain out of reach. Delivery markers use a short freshness window
-because separate hook processes have no shared delivery-run identifier. An
-attempt key hashes the stable hook input (event, source, session, agent, role,
-repository, manifest content and part count); the first arriving part allocates
-a random attempt id under the ledger lock and siblings join it. A repeated part
-starts a new attempt and revokes the prior attempt's markers and receipt. Thus
-same-source attempts are distinguished when they overlap by repeating a part;
-identical same-source attempts with disjoint part sets cannot be distinguished
-from one out-of-order attempt because Claude supplies no invocation id. A
-failed output is not recorded; a later redelivery is recognized as a repeated
-part only if that part was previously recorded. One session satisfies one gate family. A gate mismatch reports
-WRONG_HEAD. Receipts bind a content digest, not the delivered Git commit.
-Partial-part markers use OBSERVED_READ because the ledger has no partial
-delivery evidence level; only a complete set creates HOOK_DELIVERED. N4 and
-N5 remain deferred; enforce mode continues to block protected commands without
-a VERIFIED receipt.
+The hook verifies that each required file was observed through a Read tool in
+the same session and agent and still has the same content hash. This is
+evidence that the text reached that context, not that it was understood. The
+N3 protected-word matcher is deliberately lexical and cannot block commands
+hidden in scripts, shell indirection, disabled hooks, or Claude safe mode.
+Same-user processes can forge hook input or ledger data. N4/N5 are deferred;
+enforce mode blocks protected commands when required Read evidence is absent,
+stale, or invalidated by compaction. Observe mode remains the default.
 """
 
 import hashlib
@@ -27,372 +15,261 @@ import json
 import os
 import re
 import secrets
+import stat
 import subprocess
 import sys
 import fcntl
 from datetime import datetime, timedelta, timezone
 
 from . import skill_ledger
-from .skill_manifest import build_manifest, read_manifest_files
+from .skill_manifest import build_manifest, resolve
 
 MAX_CONTEXT_CHARS = 9000
-_CHUNK_RESERVE = 200
 _AGENT_ROLES = {
-    'pm': 'pm',
-    'developer': 'developer',
-    'reviewer': 'reviewer',
+    'pm': 'pm', 'developer': 'developer', 'reviewer': 'reviewer',
     'high-debug': 'high-debug',
 }
-_PENDING_DELIVERY = None
-_PART_FRESH_SECONDS = 30
-_DELIVERY_GENERATIONS = ('startup', 'resume', 'compact', 'subagent-start', 'delivery')
 
 
 def _mode():
     return 'enforce' if os.environ.get('LLMTOOL_HOOK_MODE') == 'enforce' else 'observe'
 
 
-def _emit(value):
-    try:
-        sys.stdout.write(json.dumps(value, separators=(',', ':')) + '\n')
-        sys.stdout.flush()
-        return True
-    except (OSError, ValueError):
-        _log('HOOK_OUTPUT_FAILED')
-        return False
-
-
-def _deny(event_name, reason):
-    if event_name != 'PreToolUse':
-        return {'hookSpecificOutput': {
-            'hookEventName': event_name,
-            'error': str(reason),
-        }}
-    return {
-        'hookSpecificOutput': {
-            'hookEventName': event_name,
-            'permissionDecision': 'deny',
-            'permissionDecisionReason': str(reason),
-        }
-    }
-
-
 def _log(code):
     print('claude_skill_hook: ' + code, file=sys.stderr)
 
 
+def _deny(event_name, reason):
+    if event_name != 'PreToolUse':
+        return {'hookSpecificOutput': {'hookEventName': event_name, 'error': str(reason)}}
+    return {'hookSpecificOutput': {
+        'hookEventName': event_name, 'permissionDecision': 'deny',
+        'permissionDecisionReason': str(reason),
+    }}
+
+
 def _role(payload, event_name):
-    if event_name == 'SubagentStart' or (payload.get('agent_id') and
-                                          payload.get('agent_type')):
+    if event_name == 'SubagentStart' or (payload.get('agent_id') and payload.get('agent_type')):
         agent_type = payload.get('agent_type')
-        if type(agent_type) is str:
-            return _AGENT_ROLES.get(agent_type.strip().lower(), 'UNVERIFIED')
-        return 'UNVERIFIED'
+        return _AGENT_ROLES.get(agent_type.strip().lower(), 'UNVERIFIED') if type(agent_type) is str else 'UNVERIFIED'
     value = os.environ.get('LLMTOOL_ROLE', 'pm')
-    return value if value in ('pm', 'developer', 'reviewer', 'high-debug') else 'UNVERIFIED'
+    return value if value in _AGENT_ROLES else 'UNVERIFIED'
+
+
+def _repo_root(repo):
+    result = subprocess.run(
+        ['git', 'rev-parse', '--show-toplevel'], cwd=repo, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=10,
+    )
+    if result.returncode:
+        raise ValueError('REPOSITORY_UNAVAILABLE')
+    return os.path.realpath(result.stdout.decode('utf-8').strip())
 
 
 def _commit(repo):
     result = subprocess.run(
         ['git', 'rev-parse', 'HEAD'], cwd=repo, stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False,
-        timeout=10,
+        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False, timeout=10,
     )
-    if result.returncode != 0:
+    head = result.stdout.decode('ascii', 'ignore').strip()
+    if result.returncode or re.fullmatch(r'[0-9a-f]{40}', head) is None:
         raise ValueError('REPOSITORY_UNAVAILABLE')
-    head = result.stdout.decode('ascii').strip()
-    if re.fullmatch(r'[0-9a-fA-F]{40}', head) is None:
-        raise ValueError('REPOSITORY_UNAVAILABLE')
-    return head.lower()
-
-
-def _repo_root(repo):
-    result = subprocess.run(
-        ['git', 'rev-parse', '--show-toplevel'], cwd=repo,
-        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL, check=False, timeout=10,
-    )
-    if result.returncode != 0:
-        raise ValueError('REPOSITORY_UNAVAILABLE')
-    return os.path.realpath(result.stdout.decode('utf-8').strip())
+    return head
 
 
 def _manifest_context(repo, head, role, gate):
     manifest = build_manifest(repo, head, role, gate, provider='claude')
-    files = read_manifest_files(repo, manifest)
-    full_text = ''.join(
-        '\n--- ' + path + ' ---\n' + content
-        for path, content in files
-    )
-    digest = manifest['manifest_sha256']
-    size = MAX_CONTEXT_CHARS - _CHUNK_RESERVE
-
-    def split_utf16(value, maximum):
-        chunks, current, units = [], [], 0
-        for character in value:
-            character_units = 2 if ord(character) > 0xffff else 1
-            if current and units + character_units > maximum:
-                chunks.append(''.join(current))
-                current, units = [], 0
-            current.append(character)
-            units += character_units
-        if current or not chunks:
-            chunks.append(''.join(current))
-        return chunks
-
-    chunks = split_utf16(full_text, size)
-    count = len(chunks)
-    contexts = []
-    for number, chunk in enumerate(chunks, 1):
-        label = ('Required skill text: part {0} of {1}; '
-                 'manifest_sha256={2}\n').format(number, count, digest)
-        context = label + chunk
-        if len(context.encode('utf-16-le')) // 2 > MAX_CONTEXT_CHARS:
-            raise ValueError('CONTEXT_TOO_LARGE')
-        contexts.append(context)
-    return manifest, contexts
+    paths = resolve(role, gate)
+    by_path = {entry['path']: entry['sha256'] for entry in manifest['entries']}
+    lines = [
+        'Required skills index',
+        'role: ' + role,
+        'gate: ' + gate,
+        'manifest_sha256: ' + manifest['manifest_sha256'],
+        'Read every listed file.',
+    ]
+    lines.extend(path + ' sha256=' + by_path[path] for path in paths)
+    context = '\n'.join(lines)
+    if len(context) > MAX_CONTEXT_CHARS:
+        raise ValueError('CONTEXT_TOO_LARGE')
+    return manifest, context
 
 
-def _binding(payload, role, repo, content_digest):
-    agent_id = payload.get('agent_id')
-    if not agent_id:
-        agent_id = 'main'
-    model = payload.get('model') or os.environ.get('LLMTOOL_MODEL')
+def _binding(payload, role, repo):
+    model = payload.get('model') or os.environ.get('LLMTOOL_MODEL') or ''
     return {
-        'task_id': os.environ.get('LLMTOOL_TASK_ID'),
-        'run_id': os.environ.get('LLMTOOL_RUN_ID'),
-        'session_id': payload.get('session_id'),
-        'agent_id': agent_id,
-        'role': role,
-        'provider': 'claude',
-        'model': model,
-        'repo': repo,
-        # Private content binding: these fields carry the canonical digest of
-        # manifest entries (path, blob SHA-256, size), not Git HEAD or the
-        # full manifest SHA-256. Delivery and checks use the same encoding.
-        'head': content_digest,
-        'manifest_sha256': content_digest,
+        'task_id': os.environ.get('LLMTOOL_TASK_ID', ''),
+        'run_id': os.environ.get('LLMTOOL_RUN_ID', ''),
+        'session_id': payload.get('session_id') or '',
+        'agent_id': payload.get('agent_id') or 'main',
+        'role': role, 'provider': 'claude', 'model': model, 'repo': repo,
+        'head': '', 'manifest_sha256': '',
     }
 
 
-def _content_digest(manifest):
-    entries = manifest.get('entries')
-    if type(entries) is not list:
-        raise ValueError('MANIFEST_UNAVAILABLE')
-    selected = []
-    for entry in entries:
-        if (type(entry) is not dict or type(entry.get('path')) is not str or
-                type(entry.get('sha256')) is not str or
-                type(entry.get('size')) is not int):
-            raise ValueError('MANIFEST_UNAVAILABLE')
-        selected.append({key: entry[key] for key in ('path', 'sha256', 'size')})
-    canonical = json.dumps(selected, sort_keys=True, separators=(',', ':'),
-                           ensure_ascii=True).encode('utf-8')
-    return hashlib.sha256(canonical).hexdigest()
-
-
-def _part_binding(base, part, count, generation):
-    values = dict(base)
-    suffix = ':generation:{}:part:{}:{}'.format(generation, part, count)
-    values['head'] = base['head'] + suffix
-    values['manifest_sha256'] = base['manifest_sha256'] + suffix
-    return values
-
-
-def _attempt_key(base, event_name, source, count):
-    value = {key: base[key] for key in skill_ledger._BINDING_FIELDS}
-    value.update(event_name=event_name, source=source, part_count=count)
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(',', ':'))
-                          .encode('utf-8')).hexdigest()
-
-
-def _binding_key(base):
-    return hashlib.sha256(json.dumps(
-        {key: base[key] for key in skill_ledger._BINDING_FIELDS},
-        sort_keys=True, separators=(',', ':')).encode('utf-8')).hexdigest()
-
-
-def _revoke_attempt(path, records, revoked, attempt_id):
-    for target in list(records):
-        if (target.get('delivery_attempt_id') != attempt_id or
-                target.get('entry_type') == 'REVOCATION' or
-                target.get('receipt_id') in revoked):
-            continue
-        event = dict(target)
-        event.update(entry_type='REVOCATION',
-                     revokes_receipt_id=target['receipt_id'],
-                     revocation_reason='DELIVERY_RESTARTED', status='REVOKED',
-                     receipt_id=secrets.token_hex(16),
-                     created_at=skill_ledger._now_text())
-        skill_ledger._append_locked(path, records, event)
-        records.append(event)
-        revoked.add(target['receipt_id'])
-
-
-def _finalize_delivery():
-    global _PENDING_DELIVERY
-    pending = _PENDING_DELIVERY
-    _PENDING_DELIVERY = None
-    if pending is None:
-        return
-    _record_delivery_part(pending)
-
-
-def _record_delivery_part(pending):
-    """Select/join an attempt, append its marker, and finalize under one lock."""
+def _append_event(binding, event_type, **fields):
     ledger = skill_ledger
     path = ledger._path()
-    try:
-        lock_fd = ledger._locked(path)
-    except Exception:
-        _log('LEDGER_UNREADABLE')
-        return
+    fd = ledger._locked(path)
     try:
         records = ledger._read(path, recover_torn=True)
         if not ledger._chain(records) or not ledger._recover_anchor(path, records):
-            _log('LEDGER_UNREADABLE')
-            return
+            raise ValueError('LEDGER_UNREADABLE')
         now = datetime.now(timezone.utc)
-        cutoff = now.timestamp() - _PART_FRESH_SECONDS
-        revoked = {item.get('revokes_receipt_id') for item in records
-                   if item.get('entry_type') == 'REVOCATION'}
-        attempt_key = pending['attempt_key']
-        binding_key = _binding_key(pending['base'])
-        active = {}
-        for item in records:
-            if (item.get('evidence_level') != 'OBSERVED_READ' or
-                    item.get('entry_type') == 'REVOCATION' or
-                    item.get('receipt_id') in revoked):
-                continue
-            created = skill_ledger._stamp(item.get('created_at'))
-            if created is None or created.timestamp() < cutoff:
-                if item.get('delivery_attempt_key') == attempt_key:
-                    _revoke_attempt(path, records, revoked,
-                                    item.get('delivery_attempt_id'))
-                continue
-            if item.get('delivery_attempt_key') == attempt_key:
-                active.setdefault(item.get('delivery_attempt_id'), {})[
-                    item.get('delivery_part')] = item
-        attempt_id = next(iter(active), None)
-        if attempt_id is None or pending['part'] in active[attempt_id]:
-            if attempt_id is not None:
-                _revoke_attempt(path, records, revoked, attempt_id)
-            # A new source/attempt invalidates earlier receipts for this exact
-            # session, role, agent, repository and manifest binding.
-            prior_ids = {item.get('delivery_attempt_id') for item in records
-                         if item.get('delivery_binding_key') == binding_key and
-                         item.get('receipt_id') not in revoked}
-            for prior_id in prior_ids:
-                if prior_id:
-                    _revoke_attempt(path, records, revoked, prior_id)
-            for target in list(records):
-                if (target.get('entry_type') == 'REVOCATION' or
-                        target.get('evidence_level') != 'HOOK_DELIVERED' or
-                        target.get('receipt_id') in revoked):
-                    continue
-                if all(target.get(key) == pending['base'][key]
-                       for key in ledger._BINDING_FIELDS):
-                    event = dict(target)
-                    event.update(entry_type='REVOCATION',
-                                 revokes_receipt_id=target['receipt_id'],
-                                 revocation_reason='DELIVERY_RESTARTED',
-                                 status='REVOKED', receipt_id=secrets.token_hex(16),
-                                 created_at=ledger._now_text())
-                    ledger._append_locked(path, records, event)
-                    records.append(event)
-                    revoked.add(target['receipt_id'])
-            attempt_id = secrets.token_hex(16)
-            active[attempt_id] = {}
-        part_values = _part_binding(
-            pending['base'], pending['part'], pending['count'], attempt_id,
-        )
-        part_values.update(
-            schema_version=ledger.SCHEMA_VERSION,
-            receipt_id=secrets.token_hex(16), evidence_level='OBSERVED_READ',
-            status='ACTIVE',
-            created_at=now.isoformat(timespec='seconds').replace('+00:00', 'Z'),
-            delivery_attempt_id=attempt_id,
-            delivery_attempt_key=attempt_key, delivery_binding_key=binding_key,
-            delivery_part=pending['part'],
-            delivery_part_count=pending['count'],
-        )
-        ledger._append_locked(path, records, part_values)
-        records.append(dict(part_values))
-        markers = active[attempt_id]
-        markers[pending['part']] = records[-1]
-        if len(markers) != pending['count']:
-            return
-        value = {key: pending['base'][key] for key in ledger._BINDING_FIELDS}
-        value.update({
-            'schema_version': skill_ledger.SCHEMA_VERSION,
+        entry = dict(binding)
+        entry.update({
+            'schema_version': ledger.SCHEMA_VERSION,
             'receipt_id': secrets.token_hex(16),
-            'evidence_level': 'HOOK_DELIVERED', 'status': 'ACTIVE',
-            'delivery_attempt_id': attempt_id,
-            'delivery_attempt_key': attempt_key,
-            'delivery_binding_key': binding_key,
-            'created_at': now.isoformat(timespec='seconds').replace('+00:00', 'Z'),
-            'expires_at': (now + timedelta(seconds=86400))
-                          .isoformat(timespec='seconds').replace('+00:00', 'Z'),
+            'evidence_level': 'OBSERVED_READ', 'status': 'ACTIVE',
+            'created_at': now.isoformat(timespec='microseconds').replace('+00:00', 'Z'),
+            'expires_at': (now + timedelta(days=1)).isoformat(timespec='microseconds').replace('+00:00', 'Z'),
+            'event_type': event_type,
         })
-        ledger._append_locked(path, records, value)
-    except Exception:
-        _log('LEDGER_UNREADABLE')
+        entry.update(fields)
+        ledger._append_locked(path, records, entry)
     finally:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        os.close(lock_fd)
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
-def _delivery(payload, event_name, part):
-    role = _role(payload, event_name)
-    mode = _mode()
-    if role == 'UNVERIFIED':
-        _log('UNVERIFIED_ROLE')
-        return _deny(event_name, 'UNVERIFIED_ROLE') if mode == 'enforce' else {}
-    repo = payload.get('cwd') or os.getcwd()
+def _safe_repo_file(repo, supplied):
+    if type(supplied) is not str or not supplied:
+        return None
+    target = supplied if os.path.isabs(supplied) else os.path.join(repo, supplied)
+    target = os.path.abspath(target)
     try:
-        repo = _repo_root(os.path.realpath(repo))
-        head = _commit(repo)
-        gate = os.environ.get('LLMTOOL_GATE', 'develop')
-        manifest, contexts = _manifest_context(repo, head, role, gate)
-        content_digest = _content_digest(manifest)
-    except Exception as exc:
-        reason = getattr(exc, 'code', None) or 'MANIFEST_UNAVAILABLE'
-        _log(reason)
-        return _deny(event_name, reason) if mode == 'enforce' else {}
-    if part < 1 or part > len(contexts):
-        _log('PART_OUT_OF_RANGE')
-        return _deny(event_name, 'PART_OUT_OF_RANGE')
-    if event_name == 'SubagentStart' and not payload.get('agent_id'):
-        _log('DELIVERY_BINDING_MISSING')
-        return {'hookSpecificOutput': {
-            'hookEventName': event_name,
-            'additionalContext': contexts[part - 1],
-        }}
-    base = _binding(payload, role, repo, content_digest)
-    generation = (payload.get('source') if event_name == 'SessionStart'
-                  else 'subagent-start')
-    if generation not in _DELIVERY_GENERATIONS:
-        generation = 'delivery'
-    global _PENDING_DELIVERY
-    _PENDING_DELIVERY = {
-        'base': base, 'part': part, 'count': len(contexts),
-        'payload': payload, 'role': role, 'repo': repo,
-        'content_digest': content_digest, 'manifest': manifest,
-        'generation': generation,
-        'attempt_key': _attempt_key(
-            base, event_name, generation, len(contexts),
-        ),
-        'event_name': event_name,
-    }
-    return {'hookSpecificOutput': {
-        'hookEventName': event_name,
-        'additionalContext': contexts[part - 1],
-    }}
+        if os.path.commonpath((repo, target)) != repo:
+            return None
+        relative = os.path.relpath(target, repo)
+        cursor = repo
+        for component in relative.split(os.sep):
+            if component in ('', '.'):
+                continue
+            cursor = os.path.join(cursor, component)
+            info = os.lstat(cursor)
+            if stat.S_ISLNK(info.st_mode):
+                return None
+        fd = os.open(target, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                return None
+            digest = hashlib.sha256()
+            line_count = 0
+            last_byte = b''
+            while True:
+                chunk = os.read(fd, 65536)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                line_count += chunk.count(b'\n')
+                last_byte = chunk[-1:]
+            if info.st_size and last_byte != b'\n':
+                line_count += 1
+            return relative.replace(os.sep, '/'), digest.hexdigest(), line_count
+        finally:
+            os.close(fd)
+    except (OSError, ValueError):
+        return None
+
+
+def _identity(record, binding, gate):
+    return (all(record.get(key) == binding.get(key) for key in
+                ('session_id', 'agent_id', 'role', 'provider', 'model', 'repo')) and
+            record.get('gate') == gate)
+
+
+def _record_read(payload, role):
+    repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
+    gate = os.environ.get('LLMTOOL_GATE', 'develop')
+    build_manifest(repo, _commit(repo), role, gate, provider='claude')
+    required = set(resolve(role, gate))
+    tool_input = payload.get('tool_input')
+    requested = tool_input.get('file_path') if type(tool_input) is dict else None
+    resolved = _safe_repo_file(repo, requested)
+    if resolved is None:
+        return
+    path, digest, line_count = resolved
+    if path not in required:
+        return
+    tool_input = payload.get('tool_input') or {}
+    offset = tool_input.get('offset', 1)
+    limit = tool_input.get('limit')
+    if (type(offset) is not int or offset != 1 or
+            (limit is not None and (type(limit) is not int or limit < line_count))):
+        return
+    binding = _binding(payload, role, repo)
+    if not binding['session_id'] or not binding['model']:
+        return
+    _append_event(binding, 'OBSERVED_READ', gate=gate,
+                  path=path, blob_sha256=digest)
+
+
+def _record_compaction(payload, role):
+    repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
+    gate = os.environ.get('LLMTOOL_GATE', 'develop')
+    binding = _binding(payload, role, repo)
+    if not binding['session_id'] or not binding['model']:
+        return
+    _append_event(binding, 'COMPACTION', gate=gate,
+                  source=payload.get('source'))
+
+
+def _check(payload, gate):
+    role = _role(payload, 'PreToolUse')
+    if role == 'UNVERIFIED':
+        return {'status': 'UNVERIFIED', 'reason': 'UNVERIFIED_ROLE'}
+    repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
+    manifest, _ = _manifest_context(repo, _commit(repo), role, gate)
+    binding = _binding(payload, role, repo)
+    if not binding['session_id'] or not binding['model']:
+        return {'status': 'UNVERIFIED', 'reason': 'NOT_READ'}
+    ledger = skill_ledger
+    fd = ledger._locked(ledger._path())
+    try:
+        records = ledger._read(ledger._path(), recover_torn=True)
+        if not ledger._chain(records) or not ledger._recover_anchor(ledger._path(), records):
+            return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    relevant = [r for r in records if r.get('event_type') in ('OBSERVED_READ', 'COMPACTION')
+                and _identity(r, binding, gate)]
+    boundaries = [r for r in relevant if r.get('event_type') == 'COMPACTION']
+    latest_boundary = max((skill_ledger._stamp(r.get('created_at')) for r in boundaries),
+                          default=None)
+    latest_boundary = latest_boundary or datetime.min.replace(tzinfo=timezone.utc)
+    required = {path: (_safe_repo_file(repo, path) or (None, None, None))[1]
+                for path in resolve(role, gate)}
+    saw_stale = False
+    saw_compacted = False
+    for path, current_hash in required.items():
+        rows = [r for r in relevant if r.get('event_type') == 'OBSERVED_READ' and r.get('path') == path]
+        fresh = [r for r in rows if (skill_ledger._stamp(r.get('created_at')) or
+                                     datetime.min.replace(tzinfo=timezone.utc)) > latest_boundary]
+        if not fresh:
+            if rows and boundaries:
+                saw_compacted = True
+            continue
+        if not any(r.get('blob_sha256') == current_hash for r in fresh):
+            saw_stale = True
+    if saw_compacted:
+        reason = 'COMPACTED'
+    elif saw_stale:
+        reason = 'STALE_BLOB'
+    elif any(not any(r.get('event_type') == 'OBSERVED_READ' and r.get('path') == path and
+                      (skill_ledger._stamp(r.get('created_at')) or
+                       datetime.min.replace(tzinfo=timezone.utc)) > latest_boundary and
+                      r.get('blob_sha256') == digest for r in relevant)
+             for path, digest in required.items()):
+        reason = 'NOT_READ'
+    else:
+        return {'status': 'VERIFIED', 'reason': None}
+    return {'status': 'UNVERIFIED', 'reason': reason}
 
 
 def _protected_gates(command):
-    # This is intentionally a conservative lexical search, not a shell parser.
-    # It catches commands nested in wrappers, quotes, substitutions and -c args.
+    # Conservative lexical matcher retained as the N3 protected-word boundary.
     gates = []
     for segment in re.split(r'[\n;&|(){}]+', command):
         tokens = re.findall(r'[A-Za-z0-9_.-]+', segment.lower())
@@ -409,136 +286,85 @@ def _protected_gates(command):
                 gates.append('review')
             if 'issue' in tokens and 'comment' in tokens:
                 gates.append('review')
-        if ('task' in tokens and 'delegate' in tokens and
-                ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens))):
+        if 'task' in tokens and 'delegate' in tokens and ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens)):
             gates.append('dispatch')
-        if ('task' in tokens and ('complete' in tokens or 'advance' in tokens) and
-                ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens))):
+        if 'task' in tokens and ('complete' in tokens or 'advance' in tokens) and ('llmtool' in tokens or ('-m' in tokens and 'llmtool' in tokens)):
             gates.append('complete')
-    # Preserve order while avoiding redundant checks from nested shell forms.
     return list(dict.fromkeys(gates))
 
 
-def _protected(command):
-    return bool(_protected_gates(command))
-
-
-def _check(payload, gate):
-    role = _role(payload, 'PreToolUse')
-    if role == 'UNVERIFIED':
-        return {'status': 'UNVERIFIED', 'reason': 'UNVERIFIED_ROLE'}
-    repo = os.path.realpath(payload.get('cwd') or os.getcwd())
-    try:
-        repo = _repo_root(repo)
-        head = _commit(repo)
-        manifest, _ = _manifest_context(
-            repo, head, role, gate,
-        )
-        content_digest = _content_digest(manifest)
-    except Exception as exc:
-        return {'status': 'UNVERIFIED',
-                'reason': getattr(exc, 'code', None) or 'MANIFEST_UNAVAILABLE'}
-    agent_id = payload.get('agent_id') or 'main'
-    model = payload.get('model') or os.environ.get('LLMTOOL_MODEL')
-    values = [os.environ.get('LLMTOOL_TASK_ID'), os.environ.get('LLMTOOL_RUN_ID'),
-              payload.get('session_id'), agent_id, role, 'claude', model, repo,
-              content_digest, content_digest]
-    if any(type(value) is not str or not value for value in values):
-        return {'status': 'UNVERIFIED', 'reason': 'BINDING_MISSING'}
-    try:
-        return skill_ledger.check(*values, now=datetime.now(timezone.utc))
-    except Exception:
-        return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
-
-
-def handle(payload, part=1):
-    """Return a Claude Code hook response for one decoded JSON payload."""
+def handle(payload):
     if type(payload) is not dict:
         return _deny('PreToolUse', 'INPUT_INVALID') if _mode() == 'enforce' else {}
-    event_name = payload.get('hook_event_name') or payload.get('hookEventName')
-    if event_name in ('SessionStart', 'SubagentStart'):
+    event = payload.get('hook_event_name') or payload.get('hookEventName')
+    if event in ('SessionStart', 'SubagentStart'):
         source = payload.get('source')
-        if event_name != 'SessionStart' or source in ('startup', 'resume', 'compact'):
-            if type(part) is not int or part < 1:
-                return _deny(event_name, 'PART_OUT_OF_RANGE')
-            return _delivery(payload, event_name, part)
-        _log('INPUT_INVALID')
-        return _deny(event_name, 'INPUT_INVALID') if _mode() == 'enforce' else {}
-    if event_name == 'PreToolUse' and payload.get('tool_name') == 'Bash':
+        if event == 'SessionStart' and source not in ('startup', 'resume', 'compact'):
+            _log('INPUT_INVALID')
+            return _deny(event, 'INPUT_INVALID') if _mode() == 'enforce' else {}
+        role = _role(payload, event)
+        if role == 'UNVERIFIED':
+            _log('UNVERIFIED_ROLE')
+            return _deny(event, 'UNVERIFIED_ROLE') if _mode() == 'enforce' else {}
+        try:
+            repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
+            manifest, context = _manifest_context(
+                repo, _commit(repo), role, os.environ.get('LLMTOOL_GATE', 'develop'))
+            if event == 'SessionStart' and source in ('compact', 'resume'):
+                _record_compaction(payload, role)
+        except Exception as exc:
+            reason = getattr(exc, 'code', None) or str(exc) or 'MANIFEST_UNAVAILABLE'
+            _log(reason)
+            return _deny(event, reason) if _mode() == 'enforce' else {}
+        return {'hookSpecificOutput': {'hookEventName': event, 'additionalContext': context}}
+    if event == 'PostToolUse' and payload.get('tool_name') == 'Read':
+        role = _role(payload, event)
+        if role == 'UNVERIFIED':
+            _log('UNVERIFIED_ROLE')
+            return {}
+        try:
+            _record_read(payload, role)
+        except Exception:
+            _log('LEDGER_UNREADABLE')
+        return {}
+    if event == 'PreToolUse' and payload.get('tool_name') == 'Bash':
         tool_input = payload.get('tool_input')
         command = tool_input.get('command') if type(tool_input) is dict else None
         if type(command) is not str:
-            reason = 'BASH_INPUT_INVALID'
-            if _mode() == 'enforce':
-                return _deny(event_name, reason)
-            _log(reason)
-            return {}
-        gates = _protected_gates(command)
-        for gate in gates:
-            if gate == 'COMMAND_UNPARSEABLE':
-                reason = 'COMMAND_UNPARSEABLE'
-                if _mode() == 'enforce':
-                    return _deny(event_name, reason)
-                _log(reason)
-                return {}
-            result = _check(payload, gate)
+            _log('BASH_INPUT_INVALID')
+            return _deny(event, 'BASH_INPUT_INVALID') if _mode() == 'enforce' else {}
+        for gate in _protected_gates(command):
+            try:
+                result = _check(payload, gate)
+            except Exception:
+                result = {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
             if result.get('status') != 'VERIFIED':
-                reason = result.get('reason') or 'UNVERIFIED'
-                if _mode() == 'enforce':
-                    return _deny(event_name, reason)
+                reason = result.get('reason') or 'NOT_READ'
                 _log(reason)
+                if _mode() == 'enforce':
+                    return _deny(event, reason)
         return {}
-    if (event_name == 'PreToolUse' and
-            type(payload.get('tool_name')) is not str):
-        reason = 'BASH_INPUT_INVALID'
-        if _mode() == 'enforce':
-            return _deny(event_name, reason)
-        _log(reason)
-        return {}
-    if event_name == 'PreToolUse':
-        return {}
-    _log('INPUT_INVALID')
-    return _deny('PreToolUse', 'INPUT_INVALID') if _mode() == 'enforce' else {}
+    return {}
 
 
 def main(argv=None):
-    global _PENDING_DELIVERY
-    _PENDING_DELIVERY = None
-    part = 1
+    # Extra arguments are intentionally ignored; multipart delivery is gone.
+    del argv
     try:
-        raw = sys.stdin.read()
-        payload = json.loads(raw)
-        arguments = list(sys.argv[1:] if argv is None else argv)
-        if len(arguments) > 2 or (arguments and arguments[0] != '--part'):
-            raise ValueError('PART_OUT_OF_RANGE')
-        if arguments:
-            if len(arguments) != 2 or not arguments[1].isdigit():
-                raise ValueError('PART_OUT_OF_RANGE')
-            part = int(arguments[1])
-        response = handle(payload, part)
-    except ValueError as exc:
-        reason = str(exc) if str(exc) == 'PART_OUT_OF_RANGE' else 'INPUT_INVALID'
-        _log(reason)
-        event_name = None
-        if type(locals().get('payload')) is dict:
-            event_name = payload.get('hook_event_name') or payload.get('hookEventName')
-        if event_name not in ('SessionStart', 'SubagentStart', 'PreToolUse'):
-            event_name = 'PreToolUse'
-        response = _deny(
-            event_name, reason,
-        ) if (_mode() == 'enforce' or reason == 'PART_OUT_OF_RANGE') else {}
+        payload = json.load(sys.stdin)
+    except (ValueError, OSError):
+        payload = None
+    try:
+        response = handle(payload)
     except Exception:
-        _log('INPUT_INVALID')
-        event_name = None
-        if type(locals().get('payload')) is dict:
-            event_name = payload.get('hook_event_name') or payload.get('hookEventName')
-        if event_name not in ('SessionStart', 'SubagentStart', 'PreToolUse'):
-            event_name = 'PreToolUse'
-        response = _deny(event_name, 'INPUT_INVALID') if _mode() == 'enforce' else {}
-    if _emit(response):
-        _finalize_delivery()
-    return 0
+        _log('HOOK_FAILURE')
+        response = _deny('PreToolUse', 'HOOK_FAILURE') if _mode() == 'enforce' else {}
+    try:
+        sys.stdout.write(json.dumps(response, separators=(',', ':')) + '\n')
+        sys.stdout.flush()
+    except (OSError, ValueError):
+        _log('HOOK_OUTPUT_FAILED')
 
 
 if __name__ == '__main__':
-    raise SystemExit(main())
+    main()
