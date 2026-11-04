@@ -237,6 +237,26 @@ def _has_report_section(report, heading):
     return False
 
 
+_STATUS_WORDS = ('RCA_CONFIRMED', 'RCA_UNCONFIRMED', 'BLOCKED')
+
+
+def _outcome_status(report):
+    """The status word on its own line in the Outcome/cost section, else REPORT_INVALID."""
+    in_outcome = False
+    found = []
+    for line in report.splitlines():
+        stripped = line.strip()
+        if _has_report_section(stripped, 'Outcome/cost'):
+            in_outcome = True
+            continue
+        if in_outcome and (stripped.startswith('## ') or
+                           any(_has_report_section(stripped, h) for h in REPORT_SECTIONS)):
+            in_outcome = False
+        if in_outcome and stripped in _STATUS_WORDS:
+            found.append(stripped)
+    return found[0] if len(found) == 1 else 'REPORT_INVALID'
+
+
 def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                    failed_corrections=None, early_reason=None, evidence=None,
                    runner=None, create_d6=None, repo_root=None,
@@ -354,8 +374,7 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     if failure is not None: failed(failure, observed, effort, usage)
     if len(report.encode('utf-8')) > 16384 or _emitted_sensitive(report):
         failed('HIGH_DEBUG_REPORT_INVALID', observed, effort, usage)
-    tokens=[x for x in ('RCA_CONFIRMED','RCA_UNCONFIRMED','BLOCKED') if x in report]
-    status=tokens[0] if len(tokens)==1 else 'REPORT_INVALID'
+    status=_outcome_status(report)
     if any(not _has_report_section(report, h) for h in REPORT_SECTIONS): status='REPORT_INVALID'
     entry={'family':family, 'failed_corrections':failed_corrections, 'early_reason':early_reason,
        'examined_sha':head,'d6':d6,'model_requested':'gpt-6.1-sol','model_observed':observed,

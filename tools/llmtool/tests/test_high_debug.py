@@ -232,6 +232,29 @@ class HighDebugTests(unittest.TestCase):
         (result, _invoke, store) = self._run_case(report)
         self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
 
+    def _sections(self, outcome_body):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS[:-1])
+        return report + '## Outcome/cost\n' + outcome_body
+
+    def test_blocked_in_prose_does_not_count(self):
+        report = self._sections('RCA_CONFIRMED\n').replace(
+            'Details.', 'This was BLOCKED earlier.', 1)
+        (result, _invoke, store) = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'RCA_CONFIRMED')
+
+    def test_two_status_words_in_outcome_are_invalid(self):
+        (result, _invoke, store) = self._run_case(
+            self._sections('RCA_CONFIRMED\nBLOCKED\n'))
+        self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
+
+    def test_missing_outcome_section_is_invalid(self):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS[:-1])
+        report += 'RCA_CONFIRMED\n'
+        (result, _invoke, store) = self._run_case(report)
+        self.assertEqual(store.entries[0]['status'], 'REPORT_INVALID')
+
     def test_dirty_diagnosis_worktree_is_refused(self):
         with self.assertRaises(LLMToolError) as caught:
             self._run_case('RCA_UNCONFIRMED', dirty=True)
