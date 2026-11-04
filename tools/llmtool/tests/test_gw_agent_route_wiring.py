@@ -597,6 +597,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             return seen['route']
 
         def run_route(_route, request, *, gate, **_kwargs):
+            seen['runner_calls'] = seen.get('runner_calls', 0) + 1
             self.assertIs(gate(), decision)
             _route.audit_copy_path = '/tmp/gw-agent-audit'
             _route._result = {'audit_sha256': 'e' * 64}
@@ -642,6 +643,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.dict(os.environ, {'HOME': str(config_home)}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
+             patch.object(task_submission_cli, 'GwAgentRoute', side_effect=make_route) as constructor, \
              patch.object(task_submission_cli, 'for_platform', return_value=object()), \
              patch.object(task_submission_cli, 'capture_snapshot'), \
              patch.object(task_submission_cli, 'cleanup_audit_copies'), \
@@ -653,6 +655,8 @@ class GwAgentRouteWiringTests(unittest.TestCase):
             status = task_submission_cli.run_task_gw_agent_delegate(
                 args, store=store, route_runner=run_route)
 
+        constructor.assert_called_once()
+        self.assertEqual(seen['runner_calls'], 1)
         self.assertEqual(status, 0)
         developer = store.value['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')

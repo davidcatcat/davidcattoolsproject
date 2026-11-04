@@ -578,6 +578,29 @@ class GwAgentRouteTests(unittest.TestCase):
                             and record.get('ok') is True
                             for record in audit_records))
 
+    def test_pinned_served_model_mismatch_is_refused_by_run_route(self):
+        gateway_tests = Path(self.route.package_path) / 'tests'
+        sys.path.insert(0, str(gateway_tests))
+        try:
+            from helpers import FakeServer, reply, tool_call
+        finally:
+            sys.path.remove(str(gateway_tests))
+        server = FakeServer()
+        self.addCleanup(server.close)
+        self.route.profile['base_url'] = f'http://127.0.0.1:{server.port}/v1'
+        self.route.expected_served_model = 'fake-model'
+        server.script.append(reply(tool_call('finish', summary='done'),
+                                   model='other-model'))
+
+        with self.assertRaises(RouteError) as caught:
+            self.run_route_with_credential(
+                self.route, self.request(), gate=lambda: True,
+                boundary=DirectBoundary(), snapshot=capture_snapshot)
+
+        self.assertEqual(caught.exception.code, 'GW_AGENT_MODEL_MISMATCH')
+        self.assertEqual((self.root / 'source.py').read_text(), 'original\n')
+        self.assertEqual(len(server.requests), 1)
+
 
 if __name__ == '__main__':
     unittest.main()
