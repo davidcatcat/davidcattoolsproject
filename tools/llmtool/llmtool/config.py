@@ -156,20 +156,17 @@ class RepositoryConfigError(LLMToolError):
 
 
 def legacy_repository_config(home=None):
-    """Return pre-trust repository defaults for trust verify-legacy only."""
+    """Return pre-trust defaults for trust init and verify-legacy only."""
     defaults = {
         "slug": "davidcatcat/davidcattoolsproject",
         "dispatch_issue": 289,
         "dispatch_evidence_pr": 283,
     }
     path = user_config_path(home)
-    try:
-        user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
-        if "repository" not in user:
-            return dict(defaults)
-        return _validate_repository(user["repository"], defaults)
-    except LLMToolError:
-        raise
+    user = _read_yaml(path, "user config") if os.path.lexists(path) else {}
+    if "repository" not in user:
+        return dict(defaults)
+    return _validate_repository(user["repository"], defaults)
 
 
 def repository_config(home=None):

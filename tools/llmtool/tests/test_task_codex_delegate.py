@@ -21,6 +21,16 @@ from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import (
     run_task_codex_delegate, run_task_direct_result_event,
 )
+from review_trust_fixture import start_module as _start_trust_fixture
+from review_trust_fixture import stop_module as _stop_trust_fixture
+
+
+def setUpModule():
+    _start_trust_fixture()
+
+
+def tearDownModule():
+    _stop_trust_fixture()
 
 
 class CodexDelegateTests(unittest.TestCase):

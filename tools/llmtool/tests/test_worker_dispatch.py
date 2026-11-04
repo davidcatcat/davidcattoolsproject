@@ -19,10 +19,13 @@ from llmtool import worker_dispatch
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record
+from review_trust_fixture import start_module as _start_trust_fixture
+from review_trust_fixture import stop_module as _stop_trust_fixture
 _IMPORT_HOME_PATCH.stop()
 
 
 def setUpModule():
+    _start_trust_fixture()
     global _MODULE_HOME_PATCH
     _MODULE_HOME_PATCH = patch.dict(os.environ, {'HOME': _MODULE_HOME.name})
     _MODULE_HOME_PATCH.start()
@@ -33,6 +36,7 @@ def setUpModule():
 
 def tearDownModule():
     _MODULE_HOME_PATCH.stop()
+    _stop_trust_fixture()
     _MODULE_HOME.cleanup()
 
 
