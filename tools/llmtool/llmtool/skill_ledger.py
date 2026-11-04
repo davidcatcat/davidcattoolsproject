@@ -3,7 +3,11 @@
 The hash chain detects edited, removed, or reordered lines. Same-user tampering
 can be detected only up to rewriting the whole chain: removing entries and
 rewriting the separate .head anchor is undetected, and deleting both files
-reads as an empty ledger.
+reads as an empty ledger. A pending append intent plus one removed committed
+line reads as not appended and goes undetected. check() may write .head while
+recovering an interrupted append. record() can raise after its line persists,
+so callers must treat that result as outcome unknown. The ledger is limited to
+16 MiB and uses an untimed exclusive flock.
 """
 
 import fcntl
@@ -101,6 +105,12 @@ def _locked(path):
             os.close(fd)
             _fail('LEDGER_UNREADABLE')
         fcntl.flock(fd, fcntl.LOCK_EX)
+        # Remove only stale temporary anchors, while holding the ledger lock.
+        for temp in path.parent.glob(path.name + '.head.*.tmp'):
+            try:
+                temp.unlink()
+            except FileNotFoundError:
+                pass
         return fd
     except SkillLedgerError:
         raise
@@ -108,7 +118,7 @@ def _locked(path):
         _fail('LEDGER_UNREADABLE')
 
 
-def _read(path):
+def _read(path, *, recover_torn=False):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
@@ -124,8 +134,45 @@ def _read(path):
         with os.fdopen(fd, 'rb') as stream:
             fd = None
             raw = stream.read(_MAX_BYTES + 1)
-        if len(raw) > _MAX_BYTES or (raw and not raw.endswith(b'\n')):
+        if len(raw) > _MAX_BYTES:
             _fail('LEDGER_UNREADABLE')
+        if raw and not raw.endswith(b'\n'):
+            if not recover_torn:
+                _fail('LEDGER_UNREADABLE')
+            complete_bytes = raw.rfind(b'\n') + 1
+            complete = raw[:complete_bytes]
+            try:
+                records = [json.loads(line.decode('utf-8'))
+                           for line in complete.splitlines()]
+                anchor = _read_anchor(path)
+                intent = anchor.get('intent') if type(anchor) is dict else None
+                actual_hash = records[-1]['entry_sha256'] if records else _GENESIS
+                if (not _chain(records) or type(intent) is not dict or
+                        anchor.get('count') != len(records) or
+                        anchor.get('last_sha256') != actual_hash or
+                        set(intent) != {'count', 'last_sha256'} or
+                        type(intent.get('count')) is not int or
+                        type(intent.get('last_sha256')) is not str):
+                    _fail('LEDGER_UNREADABLE')
+                repair_fd = os.open(path, os.O_WRONLY | os.O_NOFOLLOW)
+                try:
+                    repair_info = os.fstat(repair_fd)
+                    if (not stat.S_ISREG(repair_info.st_mode) or
+                            repair_info.st_dev != info.st_dev or
+                            repair_info.st_ino != info.st_ino or
+                            repair_info.st_uid != os.getuid() or
+                            stat.S_IMODE(repair_info.st_mode) != 0o600 or
+                            repair_info.st_nlink != 1):
+                        _fail('LEDGER_UNREADABLE')
+                    os.ftruncate(repair_fd, complete_bytes)
+                    os.fsync(repair_fd)
+                finally:
+                    os.close(repair_fd)
+            except SkillLedgerError:
+                raise
+            except Exception:
+                _fail('LEDGER_UNREADABLE')
+            raw = complete
         if not raw:
             return []
         records = [json.loads(line.decode('utf-8')) for line in raw.splitlines()]
@@ -361,7 +408,7 @@ def record(entry, *, ttl_seconds=86400):
     path = _path()
     lock_fd = _locked(path)
     try:
-        records = _read(path)
+        records = _read(path, recover_torn=True)
         if not _chain(records) or not _recover_anchor(path, records):
             _fail('CHAIN_BROKEN')
         return _append_locked(path, records, value)
@@ -387,7 +434,7 @@ def check(task_id, run_id, session_id, agent_id, role, provider, model, repo,
         return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
     try:
         try:
-            records = _read(path)
+            records = _read(path, recover_torn=True)
         except SkillLedgerError:
             return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
         if not _chain(records):
@@ -451,10 +498,14 @@ def revoke(receipt_id, reason):
     """Append a revocation event for an existing receipt."""
     if type(receipt_id) is not str or not receipt_id or type(reason) is not str or not reason:
         _fail('INVALID_ENTRY')
+    try:
+        _canonical({'reason': reason})
+    except (TypeError, ValueError, UnicodeError, OverflowError):
+        _fail('INVALID_ENTRY')
     path = _path()
     lock_fd = _locked(path)
     try:
-        records = _read(path)
+        records = _read(path, recover_torn=True)
         if not _chain(records) or not _recover_anchor(path, records):
             _fail('CHAIN_BROKEN')
         target = next((item for item in records if item.get('receipt_id') == receipt_id

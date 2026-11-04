@@ -222,6 +222,35 @@ class SkillLedgerTests(unittest.TestCase):
             self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
             self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
 
+    def test_middle_swap_and_schema_mismatch_break_chain(self):
+        for index in range(3):
+            self.record(run_id='run-' + str(index))
+        rows = self.path.read_text().splitlines()
+        self.path.write_text('\n'.join((rows[0], rows[2], rows[1])) + '\n')
+        self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
+        self.path.write_text(rows[0] + '\n' + rows[1] + '\n' + rows[2] + '\n')
+        value = json.loads(rows[0])
+        value['schema_version'] = ledger.SCHEMA_VERSION + 1
+        self.path.write_text(json.dumps(value, separators=(',', ':')) + '\n' +
+                             '\n'.join(rows[1:]) + '\n')
+        self.path.chmod(0o600)
+        self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
+
+    def test_missing_anchor_with_live_ledger_breaks_chain(self):
+        self.record()
+        Path(str(self.path) + '.head').unlink()
+        self.assertEqual(ledger.verify_chain(), (False, 'CHAIN_BROKEN'))
+
+    def test_record_and_revoke_refuse_a_broken_chain(self):
+        receipt = self.record()
+        self.path.write_text(self.path.read_text().replace('head-a', 'head-x'))
+        self.path.chmod(0o600)
+        for operation in (lambda: self.record(run_id='run-b'),
+                          lambda: ledger.revoke(receipt, 'withdrawn')):
+            with self.assertRaises(ledger.SkillLedgerError) as caught:
+                operation()
+            self.assertEqual(caught.exception.skill_ledger_code, 'CHAIN_BROKEN')
+
     def test_symlink_ledger_is_refused(self):
         target = self.path.parent / 'target'
         target.write_text('')
@@ -294,11 +323,28 @@ class SkillLedgerTests(unittest.TestCase):
         lock.chmod(0o644)
         self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
 
+    def test_lock_removes_stale_anchor_temporary_files(self):
+        stale = Path(str(self.path) + '.head.stale.tmp')
+        stale.write_text('incomplete')
+        self.record()
+        self.assertFalse(stale.exists())
+
     def test_lock_symlink_is_refused(self):
         target = self.path.parent / 'lock-target'
         target.write_text('')
         target.chmod(0o600)
         Path(str(self.path) + '.lock').symlink_to(target)
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+    def test_hard_linked_and_fifo_lock_files_are_refused(self):
+        lock = Path(str(self.path) + '.lock')
+        lock.write_text('')
+        lock.chmod(0o600)
+        os.link(lock, self.path.parent / 'lock-link')
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+        lock.unlink()
+        (self.path.parent / 'lock-link').unlink()
+        os.mkfifo(lock, 0o600)
         self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
 
     def test_parent_directory_mode_is_private(self):
@@ -396,6 +442,99 @@ class SkillLedgerTests(unittest.TestCase):
                 'LEDGER_UNREADABLE')):
             self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
 
+    def test_invalid_pending_intents_and_base_mismatches_break_chain(self):
+        for kind in ('malformed', 'intent_hash', 'two_lines', 'base_hash', 'base_count'):
+            with self.subTest(kind=kind):
+                for suffix in ('', '.head', '.lock'):
+                    candidate = Path(str(self.path) + suffix)
+                    if candidate.exists() or candidate.is_symlink():
+                        candidate.unlink()
+                self.record()
+                records = ledger._read(self.path)
+                anchor = Path(str(self.path) + '.head')
+                if kind == 'malformed':
+                    value = {'count': 1, 'last_sha256': records[-1]['entry_sha256'],
+                             'intent': {'count': 'bad', 'last_sha256': 'f' * 64}}
+                    anchor.write_text(json.dumps(value))
+                elif kind == 'two_lines':
+                    self.record(run_id='run-b')
+                    records = ledger._read(self.path)
+                    ledger._write_anchor(self.path, [],
+                                         {'count': 1, 'last_sha256': 'f' * 64})
+                else:
+                    base = records[-1]['entry_sha256']
+                    base_count = len(records)
+                    intent_hash = 'f' * 64
+                    if kind == 'intent_hash':
+                        self.record(run_id='run-b')
+                        records = ledger._read(self.path)
+                        base = records[-2]['entry_sha256']
+                        base_count = len(records) - 1
+                    if kind == 'base_hash':
+                        base = 'e' * 64
+                    elif kind == 'base_count':
+                        base_count += 1
+                    ledger._write_anchor(
+                        self.path, records,
+                        {'count': len(records) + 1, 'last_sha256': intent_hash})
+                    if kind in ('intent_hash', 'base_hash', 'base_count'):
+                        anchor.write_text(json.dumps({
+                            'count': base_count, 'last_sha256': base,
+                            'intent': {'count': len(records) if kind == 'intent_hash'
+                                       else len(records) + 1,
+                                       'last_sha256': intent_hash}}))
+                anchor.chmod(0o600)
+                self.assertEqual(self.check()['reason'], 'CHAIN_BROKEN')
+
+    def test_short_append_then_enospc_recovers_older_receipts(self):
+        self.record(run_id='older')
+        original_write = os.write
+        ledger_inode = self.path.stat().st_ino
+        partial_written = False
+
+        def short_ledger_write(fd, data):
+            nonlocal partial_written
+            if os.fstat(fd).st_ino == ledger_inode:
+                if not partial_written:
+                    partial_written = True
+                    return original_write(fd, data[:max(1, len(data) // 2)])
+                raise OSError(errno.ENOSPC, 'full')
+            return original_write(fd, data)
+
+        with mock.patch.object(ledger.os, 'write', side_effect=short_ledger_write):
+            with self.assertRaises(ledger.SkillLedgerError):
+                self.record(run_id='interrupted')
+        self.assertTrue(partial_written)
+        self.assertEqual(self.check(run_id='older')['status'], 'VERIFIED')
+        self.record(run_id='after-recovery')
+        self.assertEqual(self.check(run_id='after-recovery')['status'], 'VERIFIED')
+
+    def test_revoke_validates_reason_encoding_and_missing_or_duplicate_receipts(self):
+        for receipt_id, reason in ((None, 'withdrawn'), ('', 'withdrawn'),
+                                   ('missing', None), ('missing', ''),
+                                   ('missing', '\ud800')):
+            with self.subTest(receipt_id=receipt_id, reason=reason):
+                with self.assertRaises(ledger.SkillLedgerError) as caught:
+                    ledger.revoke(receipt_id, reason)
+                self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
+        with self.assertRaises(ledger.SkillLedgerError) as caught:
+            ledger.revoke('missing', 'withdrawn')
+        self.assertEqual(caught.exception.skill_ledger_code, 'NOT_FOUND')
+        receipt = self.record()
+        ledger.revoke(receipt, 'withdrawn')
+        with self.assertRaises(ledger.SkillLedgerError) as caught:
+            ledger.revoke(receipt, 'again')
+        self.assertEqual(caught.exception.skill_ledger_code, 'REVOKED')
+
+    def test_revoke_rejects_broken_chain(self):
+        receipt = self.record()
+        rows = self.path.read_text().splitlines()
+        self.path.write_text(rows[0].replace('head-a', 'head-x') + '\n')
+        self.path.chmod(0o600)
+        with self.assertRaises(ledger.SkillLedgerError) as caught:
+            ledger.revoke(receipt, 'withdrawn')
+        self.assertEqual(caught.exception.skill_ledger_code, 'CHAIN_BROKEN')
+
     def test_check_recovers_anchor_while_holding_exclusive_lock(self):
         self.record()
         original_recover = ledger._recover_anchor
@@ -487,6 +626,20 @@ class SkillLedgerTests(unittest.TestCase):
         self.record()
         self.assertEqual(self.check(now='999999-01-01T00:00:00+00:00')['reason'],
                          'INVALID_NOW')
+        self.assertEqual(self.check(now='0001-01-01T00:00:00+14:00')['reason'],
+                         'INVALID_NOW')
+        self.assertEqual(self.check(now=datetime.now())['reason'], 'INVALID_NOW')
+
+    def test_expiry_boundary_and_invalid_stored_expiry(self):
+        self.record()
+        row = json.loads(self.path.read_text())
+        self.assertEqual(self.check(now=row['expires_at'])['reason'], 'EXPIRED')
+        row['expires_at'] = 'invalid'
+        row['entry_sha256'] = ledger._entry_hash(row)
+        self.path.write_text(json.dumps(row, separators=(',', ':')) + '\n')
+        self.path.chmod(0o600)
+        ledger._write_anchor(self.path, [row])
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
 
     def test_verify_chain_parent_refusal_returns_ledger_code(self):
         self.path.parent.chmod(0o755)
