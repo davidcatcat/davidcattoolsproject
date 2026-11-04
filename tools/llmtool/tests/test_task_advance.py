@@ -1537,6 +1537,10 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
         self.assertEqual(calls, [])
 
+        result, calls = run_case(current=labeled, checks=linux_only_checks)
+        self.assertEqual(result['codes'], ['MERGE_REQUIRED_CHECK_MISSING'])
+        self.assertEqual(calls, [])
+
         result, calls = run_case(verdict='FIX')
         self.assertEqual(result['codes'], ['MERGE_REVIEW_NOT_PASS'])
         self.assertEqual(calls, [])

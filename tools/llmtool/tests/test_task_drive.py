@@ -129,6 +129,169 @@ class TaskDriveTests(unittest.TestCase):
         self.assertEqual(result['steps'], 2)
         self.assertEqual([call['merge'] for call in calls], [False, True])
 
+    def test_merge_labels_once_then_waits_for_green_mac_ci_before_retry(self):
+        pauses = []
+        calls = []
+        state = {'mac_ci_labels': 0, 'merge_polls': 0}
+
+        def advance(**kwargs):
+            calls.append(kwargs)
+            if not kwargs['merge']:
+                # This is the real non-merge result even after Mac CI completes.
+                return {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []}
+            state['merge_polls'] += 1
+            if state['merge_polls'] == 1:
+                state['mac_ci_labels'] += 1
+                return {'task_id': 't', 'step': 'WAITING_CI', 'codes': []}
+            if state['merge_polls'] == 2:
+                return {'task_id': 't', 'step': 'MERGE_REFUSED',
+                        'codes': ['MERGE_CHECKS_NOT_GREEN'],
+                        'result': {'macos_check_pending': True}}
+            if state['merge_polls'] == 3:
+                return {'task_id': 't', 'step': 'MERGE_REFUSED',
+                        'codes': ['MERGE_MACOS_CHECK_REQUIRED']}
+            return {'task_id': 't', 'step': 'MERGED', 'codes': []}
+
+        result = task_drive.drive(task_id='t', merge=True, max_steps=5,
+                                  poll_seconds=0.25, advance_call=advance,
+                                  sleep=pauses.append)
+
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual([call['merge'] for call in calls],
+                         [False, True, True, True, True])
+        self.assertEqual(state['mac_ci_labels'], 1)
+        self.assertEqual(pauses, [0.25, 0.25, 0.25])
+
+    def test_merge_uses_existing_path_for_skipped_mac_completion_evidence(self):
+        calls = []
+        label_calls = []
+        results = [
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGE_REFUSED',
+             'codes': ['MERGE_MACOS_CHECK_REQUIRED']},
+        ]
+
+        def advance(**kwargs):
+            calls.append(kwargs)
+            return results.pop(0)
+
+        def label_mac_ci(**kwargs):
+            label_calls.append(kwargs)
+            return {'step': 'WAITING_CI', 'codes': []}
+
+        result = task_drive.drive(task_id='t', merge=True, max_steps=4,
+                                  advance_call=advance, label_mac_ci_call=label_mac_ci,
+                                  sleep=lambda _seconds: None)
+
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
+        self.assertEqual([call['merge'] for call in calls], [False, False, False, True])
+        self.assertEqual(len(label_calls), 1)
+
+    def test_invalid_completion_evidence_without_skipped_mac_does_not_label(self):
+        calls = []
+        label_calls = []
+        results = [
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGED', 'codes': []},
+        ]
+
+        def advance(**kwargs):
+            calls.append(kwargs)
+            return results.pop(0)
+
+        def label_mac_ci(**kwargs):
+            label_calls.append(kwargs)
+            return None
+
+        result = task_drive.drive(task_id='t', merge=True, max_steps=3,
+                                  advance_call=advance, label_mac_ci_call=label_mac_ci,
+                                  sleep=lambda _seconds: None)
+
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual([call['merge'] for call in calls], [False, False, True])
+        self.assertEqual(len(label_calls), 1)
+
+    def test_labelled_mac_run_does_not_merge_while_completion_is_not_ready(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+            {'task_id': 't', 'step': 'WAITING_CI',
+             'codes': ['CI_WORKFLOW_JOBS_INVALID']},
+        ])
+        label_calls = []
+
+        def label_mac_ci(**kwargs):
+            label_calls.append(kwargs)
+            return {'step': 'WAITING_CI', 'codes': []}
+
+        result = task_drive.drive(task_id='t', merge=True, max_steps=2,
+                                  advance_call=advance, label_mac_ci_call=label_mac_ci,
+                                  sleep=lambda _seconds: None)
+
+        self.assertEqual(result['step'], 'MAX_STEPS')
+        self.assertEqual([call['merge'] for call in calls], [False, False])
+        self.assertEqual(len(label_calls), 1)
+
+    def test_mac_wait_budget_returns_last_refusal_and_completed_failure_stops(self):
+        pending_advance, pending_calls = self.adapter([
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': []},
+            {'task_id': 't', 'step': 'MERGE_REFUSED',
+             'codes': ['MERGE_MACOS_CHECK_REQUIRED']},
+            {'task_id': 't', 'step': 'MERGE_REFUSED',
+             'codes': ['MERGE_MACOS_CHECK_REQUIRED']},
+        ])
+        result = task_drive.drive(task_id='t', merge=True, max_steps=4,
+                                  advance_call=pending_advance,
+                                  sleep=lambda _seconds: None)
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
+        self.assertEqual(len(pending_calls), 4)
+
+        failed_advance, failed_calls = self.adapter([
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': []},
+            {'task_id': 't', 'step': 'MERGE_REFUSED',
+             'codes': ['MERGE_CHECKS_NOT_GREEN']},
+        ])
+        result = task_drive.drive(task_id='t', merge=True, max_steps=8,
+                                  advance_call=failed_advance,
+                                  sleep=lambda _seconds: None)
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_CHECKS_NOT_GREEN'])
+        self.assertEqual(len(failed_calls), 3)
+
+    def test_merge_refusal_is_returned_without_polling(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'READY_FOR_INTEGRATION', 'codes': []},
+            {'task_id': 't', 'step': 'MERGE_REFUSED',
+             'codes': ['MERGE_MACOS_CHECK_REQUIRED']},
+        ])
+
+        result = task_drive.drive(task_id='t', merge=True, advance_call=advance)
+
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
+        self.assertEqual([call['merge'] for call in calls], [False, True])
+
+    def test_waiting_ci_without_merge_does_not_attempt_merge(self):
+        advance, calls = self.adapter([
+            {'task_id': 't', 'step': 'WAITING_CI', 'codes': ['WAITING_CI']},
+        ])
+
+        result = task_drive.drive(task_id='t', merge=False, max_steps=1,
+                                  advance_call=advance)
+
+        self.assertEqual(result['step'], 'MAX_STEPS')
+        self.assertEqual([call['merge'] for call in calls], [False])
+
     def test_repeated_review_not_ready_stops_at_bounded_poll_attempts(self):
         pauses = []
         advance, calls = self.adapter([

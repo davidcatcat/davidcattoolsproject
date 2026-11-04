@@ -232,6 +232,29 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     code = _merge_checks(record, number, head, pr, github_get,
                          allow_missing_macos=True)
     if code and code not in ('MERGE_MACOS_CHECK_MISSING', 'MERGE_MACOS_CHECK_SKIPPED'):
+        if code == 'MERGE_CHECKS_NOT_GREEN':
+            # Preserve the merge refusal while telling the foreground driver
+            # whether the exact-head Mac check is still running. Completed
+            # failures remain ordinary refusals and are never polled as waits.
+            try:
+                checks = github_get(f'commits/{head}/check-runs?per_page=100')
+            except Exception:
+                checks = None
+            check_runs = checks.get('check_runs') if type(checks) is dict else None
+            mac_pending = (type(check_runs) is list and any(
+                type(item) is dict and item.get('head_sha') == head and
+                item.get('name') == 'check (macOS 3.13)' and
+                item.get('status') != 'completed' for item in check_runs))
+            all_other_checks_green = (type(check_runs) is list and all(
+                type(item) is dict and item.get('head_sha') == head and
+                ((item.get('name') == 'check (macOS 3.13)' and
+                  item.get('status') != 'completed') or
+                 (item.get('status') == 'completed' and
+                  item.get('conclusion') in ('success', 'skipped')))
+                for item in check_runs))
+            if mac_pending and all_other_checks_green:
+                return {'step': 'MERGE_REFUSED', 'codes': [code],
+                        'result': {'macos_check_pending': True}}
         return _merge_refusal(code)
     try:
         current_pr = github_get(f'pulls/{number}')
@@ -309,6 +332,68 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     except Exception:
         warning_codes.append('MERGE_PROVENANCE_COMMENT_FAILED')
     return {'step': 'MERGED', 'codes': warning_codes, 'result': {'pr': number, 'head': head}}
+
+
+def label_mac_ci_for_skipped_check(*, task_id, store=None, pr_number=None,
+                                   github_get=None, merge_gh_runner=None, cwd=None):
+    """Label an exact-head skipped macOS check without entering the merge path.
+
+    Return None when the available evidence is not specifically a skipped
+    macOS check. A successful or already-present label returns WAITING_CI.
+    """
+    store = TaskStore() if store is None else store
+    try:
+        record = store.get(task_id)
+    except Exception:
+        return None
+    if type(record) is not dict:
+        return None
+    executor_task = (record.get('completion') or {}).get('executor_task_id')
+    d6 = _d6_snapshot(record, executor_task) if type(executor_task) is str else None
+    if (type(d6) is not dict or type(d6.get('result_head')) is not str or
+            d6.get('recorded_result_head') != d6.get('result_head') or
+            d6.get('dirty') is True or d6.get('state') == 'DIRTY'):
+        return None
+    number = _pr_number(record, pr_number)
+    if number is None:
+        return None
+    get = task_completion._github_get if github_get is None else github_get
+    head = d6['result_head']
+    try:
+        pr = _pr_snapshot(number, get)
+    except Exception:
+        return None
+    if (type(pr) is not dict or pr.get('number', number) != number or
+            type(pr.get('head')) is not dict or pr['head'].get('sha') != head or
+            pr.get('state') not in (None, 'open') or pr.get('merged') is True or
+            pr.get('mergeable') is not True):
+        return None
+    code = _merge_checks(record, number, head, pr, get, allow_missing_macos=True)
+    if code != 'MERGE_MACOS_CHECK_SKIPPED':
+        return None
+    try:
+        current_pr = get(f'pulls/{number}')
+    except Exception:
+        return None
+    if (type(current_pr) is not dict or current_pr.get('number', number) != number or
+            type(current_pr.get('head')) is not dict or
+            current_pr['head'].get('sha') != head or
+            current_pr.get('state') not in (None, 'open') or
+            current_pr.get('merged') is True or current_pr.get('mergeable') is not True):
+        return None
+    has_mac_ci = _has_pr_label(current_pr, 'mac-ci')
+    if has_mac_ci is None:
+        return None
+    if not has_mac_ci:
+        runner = _publish_run_gh if merge_gh_runner is None else merge_gh_runner
+        try:
+            labeled = runner(d6.get('root') or cwd or os.getcwd(),
+                             ['pr', 'edit', str(number), '--add-label', 'mac-ci'])
+        except Exception:
+            labeled = None
+        if labeled is None or getattr(labeled, 'returncode', 1) != 0:
+            return _merge_refusal('MERGE_MAC_CI_LABEL_FAILED')
+    return {'step': 'WAITING_CI', 'codes': [], 'result': {'pr': number, 'head': head}}
 
 
 def _record_d6_result(*, task_id, canonical_root, root):
