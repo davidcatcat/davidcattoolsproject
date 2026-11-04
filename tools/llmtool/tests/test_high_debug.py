@@ -28,6 +28,22 @@ class HighDebugTests(unittest.TestCase):
         report = self._report('**RCA_CONFIRMED**\n\nModel: gpt-6.1-sol; usage UNKNOWN')
         self.assertEqual(high_debug._outcome_status(report), 'RCA_CONFIRMED')
 
+    def test_outcome_status_accepts_status_with_supported_trailing_text(self):
+        cases = (
+            ('RCA_CONFIRMED', 'RCA_CONFIRMED'),
+            ('**RCA_CONFIRMED**', 'RCA_CONFIRMED'),
+            ('**RCA_CONFIRMED** — reason', 'RCA_CONFIRMED'),  # PR #939 regression
+            ('RCA_UNCONFIRMED - reason', 'RCA_UNCONFIRMED'),
+            ('BLOCKED: reason', 'BLOCKED'),
+        )
+        for line, expected in cases:
+            with self.subTest(line=line):
+                self.assertEqual(high_debug._outcome_status(self._report(line)), expected)
+
+    def test_outcome_status_inside_prose_is_report_invalid(self):
+        report = self._report('Reason: RCA_CONFIRMED')
+        self.assertEqual(high_debug._outcome_status(report), 'REPORT_INVALID')
+
     def test_outcome_status_two_words_is_report_invalid(self):
         report = self._report('**RCA_CONFIRMED**\nBLOCKED')
         self.assertEqual(high_debug._outcome_status(report), 'REPORT_INVALID')
@@ -195,7 +211,7 @@ class HighDebugTests(unittest.TestCase):
         observed, _created = self._failing_case(store, self._repo(), returncode=1)
         self.assertEqual(observed, 'HIGH_DEBUG_RUN_FAILED')
 
-    def _run_case(self, report, *, dirty=False, snapshot_head=None):
+    def _run_case(self, report, *, dirty=False, snapshot_head=None, prompt_capture=None):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -204,6 +220,8 @@ class HighDebugTests(unittest.TestCase):
         registration = SimpleNamespace(result_sha='a' * 40, root=str(root),
                                        common_dir=str(root / '.git'))
         def runner(*, prompt, cwd, output_path):
+            if prompt_capture is not None:
+                prompt_capture.append(prompt)
             Path(output_path).write_text(report, encoding='utf-8')
             if dirty:
                 (Path(cwd) / 'unexpected.txt').write_text('changed', encoding='utf-8')
@@ -233,6 +251,18 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(len(store.events), 1)
         self.assertEqual(invoke(), None)
         self.assertEqual(len(store.events), 1)
+
+    def test_prompt_requires_outcome_status_at_section_start(self):
+        prompts = []
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED'
+        self._run_case(report, prompt_capture=prompts)
+        self.assertEqual(len(prompts), 1)
+        self.assertIn(
+            'The Outcome/cost section must start with exactly one status word alone on its own line:',
+            prompts[0])
+        self.assertIn('RCA_CONFIRMED, RCA_UNCONFIRMED or BLOCKED.', prompts[0])
 
     def test_missing_report_section_is_stored_as_invalid(self):
         (result, _invoke, store) = self._run_case('RCA_UNCONFIRMED')
