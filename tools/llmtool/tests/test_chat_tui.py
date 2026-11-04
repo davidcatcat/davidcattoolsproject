@@ -279,7 +279,8 @@ class WidgetTests(Base):
 
     @staticmethod
     async def until(ui, condition, what='condition'):
-        for _ in range(300):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
             if condition(ui):
                 return
             await asyncio.sleep(0.01)
@@ -2617,6 +2618,7 @@ class TaskEventsPaneTests(Base):
 
     drive = WidgetTests.drive
     idle = staticmethod(WidgetTests.idle)
+    until = staticmethod(WidgetTests.until)
     listed = TaskListTests.listed
     esc_settled = staticmethod(TaskListTests.esc_settled)
     def setUp(self):
@@ -2646,35 +2648,81 @@ class TaskEventsPaneTests(Base):
             self.assertTrue(ui.show_events)
             self.assertIn('new conversation output', ui.events.text)
 
-        def shown(ui):
+        async def shown(ui):
+            await self.until(ui, lambda ui: ui.show_events
+                             and ui.app.layout.has_focus(ui.events)
+                             and 'Recent events across 1 Tasks (0 unreadable' in ui.events.text
+                             and '[TASK] Task recorded (PM state now PM_RESPONDED)' in ui.events.text
+                             and ui.last_task_id[:8] in ui.events.text, 'events pane shown')
             self.assertTrue(ui.show_events)
             self.assertTrue(ui.app.layout.has_focus(ui.events))
             self.assertIn('Recent events across 1 Tasks (0 unreadable', ui.events.text)
             self.assertIn('[TASK] Task recorded (PM state now PM_RESPONDED)', ui.events.text)
             self.assertIn(ui.last_task_id[:8], ui.events.text)
 
+        async def refreshed(ui):
+            await self.until(ui, lambda ui: len(reads) == 2, 'events refreshed')
+            self.assertEqual(len(reads), 2)
+
+        async def hidden(ui):
+            await self.until(ui, lambda ui: not ui.events_visible(), 'events pane hidden')
+            self.assertFalse(ui.events_visible())
+
+        async def visible(ui):
+            await self.until(ui, lambda ui: ui.events_visible(), 'events pane visible')
+            self.assertTrue(ui.events_visible())
+
+        async def focused(ui):
+            await self.until(ui, lambda ui: ui.app.layout.has_focus(ui.events),
+                             'events pane focused')
+            self.assertTrue(ui.app.layout.has_focus(ui.events))
+
+        async def closed(ui):
+            await self.until(ui, lambda ui: not ui.show_events
+                             and ui.app.layout.has_focus(ui.input), 'events pane closed')
+            self.assertFalse(ui.show_events)
+            self.assertTrue(ui.app.layout.has_focus(ui.input))
+
+        async def detail_loaded(ui):
+            await self.until(ui, lambda ui: 'Events (newest first' in ui.detail.text,
+                             'event detail loaded')
+            self.assertIn('Events (newest first', ui.detail.text)
+
+        async def timeline_loaded(ui):
+            await self.until(ui, lambda ui: '[TASK] Task recorded' in ui.detail.text,
+                             'event timeline loaded')
+            self.assertIn('[TASK] Task recorded', ui.detail.text)
+
+        async def one_read(ui):
+            await self.until(ui, lambda ui: len(reads) == 1, 'initial events read')
+            self.assertEqual(len(reads), 1)
+
+        async def events_open(ui):
+            await self.until(ui, lambda ui: ui.show_events, 'events pane open')
+            self.assertTrue(ui.show_events)
+
+        async def events_closed(ui):
+            await self.until(ui, lambda ui: not ui.show_events, 'events pane closed')
+            self.assertFalse(ui.show_events)
+
         with patch('llmtool.active_pm_inbox.read_inbox', side_effect=boom), \
                 patch('llmtool.active_pm_inbox.record_ready_event', side_effect=boom), \
                 patch('llmtool.active_pm_inbox.ack', side_effect=boom), \
                 patch('llmtool.chat_tui_status.load_records', side_effect=counting):
             ui, _ = self.drive(['/task mode profile first\r', 'event task\r', self.idle,
-                                lambda ui: self.assertIn('Events (newest first', ui.detail.text),
-                                lambda ui: self.assertIn('[TASK] Task recorded', ui.detail.text),
+                                detail_loaded, timeline_loaded,
                                 '/task events\r', self.listed, shown, unseen,
-                                lambda ui: self.assertEqual(len(reads), 1),
-                                'r', self.listed, lambda ui: self.assertEqual(len(reads), 2),
+                                one_read,
+                                'r', self.listed, refreshed,
                                 # Help hides the pane: no interval read while it is hidden.
-                                '\x1bOP', lambda ui: self.assertFalse(ui.events_visible()),
+                                '\x1bOP', hidden,
                                 stale_wait, lambda ui: self.assertEqual(len(reads), 2),
-                                '\x1bOP', lambda ui: self.assertTrue(ui.events_visible()),
-                                lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.events)),
+                                '\x1bOP', visible, focused,
                                 self.listed,
-                                '\x1b', self.esc_settled,
-                                lambda ui: self.assertFalse(ui.show_events),
-                                lambda ui: self.assertTrue(ui.app.layout.has_focus(ui.input)),
+                                '\x1b', self.esc_settled, closed,
                                 '\x1bOS', self.listed,
-                                lambda ui: self.assertTrue(ui.show_events),
-                                '\x1bOS', lambda ui: self.assertFalse(ui.show_events)])
+                                events_open,
+                                '\x1bOS', events_closed])
         self.assertEqual(self.pm.complete.call_count, 1)
         self.factory.assert_not_called()
 
@@ -2685,6 +2733,30 @@ BG_WATCH = 'PM（背景通知） Claude Code 自行開始一輪（背景工作�
 BG_SUB = 'PM（背景通知） Claude Code 先處理一則背景通知；這則訊息等它結束後才開始'
 
 PM_SESSION = '0123abcd-89ab-cdef-0123-456789abcdef'
+
+
+class _FakeClaudeGate:
+    """Test-controlled release handle for every playback turn currently holding."""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._events = set()
+
+    def new_turn(self):
+        event = threading.Event()
+        with self._lock:
+            self._events.add(event)
+        return event
+
+    def finish_turn(self, event):
+        with self._lock:
+            self._events.discard(event)
+
+    def set(self):
+        with self._lock:
+            events = tuple(self._events)
+        for event in events:
+            event.set()
 
 
 class FakeClaude:
@@ -2698,7 +2770,8 @@ class FakeClaude:
         import json as _json
         self._json = _json
         self.turns = list(turns)        # one list of (stream object | 'HOLD') per user message
-        self.gate = threading.Event()
+        self.gate = _FakeClaudeGate()
+        self._user_gate = None
         self.written = []
         self.threads = []               # playback threads, joined by the test cleanup
         read, self._write = os.pipe()
@@ -2719,12 +2792,16 @@ class FakeClaude:
             raise BrokenPipeError()
         if line.get('type') == 'user' and self.turns:
             self._lifecycle(line, 'queued')
-            thread = threading.Thread(target=self._play_user, args=(line, self.turns.pop(0)),
+            gate = self.gate.new_turn()
+            self._user_gate = gate
+            thread = threading.Thread(target=self._play_user,
+                                      args=(line, self.turns.pop(0), gate),
                                       name='fake-claude-play', daemon=True)
             self.threads.append(thread)
             thread.start()
         elif line.get('type') == 'control_request':
-            self.gate.set()
+            if self._user_gate is not None:
+                self._user_gate.set()
         return len(data)
 
     def flush(self):
@@ -2746,17 +2823,19 @@ class FakeClaude:
             self._emit({'type': 'command_lifecycle', 'command_uuid': line['uuid'],
                         'state': self.rewrite.get(state, state), 'uuid': 'frame'})
 
-    def _play_user(self, line, script):
-        with self.turn_lock:
-            self.gate.clear()   # each turn holds until its own interrupt or release
-            self._lifecycle(line, 'started')
-            self._play(script)
-            self._lifecycle(line, 'completed')
+    def _play_user(self, line, script, gate):
+        try:
+            with self.turn_lock:
+                self._lifecycle(line, 'started')
+                self._play(script, gate)
+                self._lifecycle(line, 'completed')
+        finally:
+            self.gate.finish_turn(gate)
 
-    def _play(self, script):
+    def _play(self, script, gate):
         for item in script:
             if item == 'HOLD':
-                self.gate.wait(5)
+                gate.wait(5)
             elif item == 'EXIT':
                 self._end()
                 return
@@ -2791,13 +2870,53 @@ class FakeClaude:
 
     def unsolicited(self, script, delay=0.0):
         """Play a turn Claude Code starts by itself (a background task notification)."""
+        gate = self.gate.new_turn()
         def play():
-            time.sleep(delay)
-            with self.turn_lock:
-                self._play(script)
+            try:
+                time.sleep(delay)
+                with self.turn_lock:
+                    self._play(script, gate)
+            finally:
+                self.gate.finish_turn(gate)
         thread = threading.Thread(target=play, name='fake-claude-play', daemon=True)
         self.threads.append(thread)
         thread.start()
+
+
+class FakeClaudeGateTests(unittest.TestCase):
+    def test_release_before_turn_playback_does_not_leak_to_next_turn(self):
+        fake = FakeClaude([['HOLD'], ['HOLD']])
+        first = {'type': 'user', 'uuid': 'first'}
+        second = {'type': 'user', 'uuid': 'second'}
+
+        fake.turn_lock.acquire()
+        try:
+            fake.write((fake._json.dumps(first) + '\n').encode('utf-8'))
+            first_thread = fake.threads[0]
+            fake.write((fake._json.dumps({'type': 'control_request'}) + '\n').encode('utf-8'))
+        finally:
+            fake.turn_lock.release()
+
+        started = time.monotonic()
+        first_thread.join(0.5)
+        first_released_promptly = not first_thread.is_alive() and time.monotonic() - started < 1
+        if first_thread.is_alive():
+            fake.gate.set()
+            first_thread.join(1)
+
+        fake.write((fake._json.dumps(second) + '\n').encode('utf-8'))
+        second_thread = fake.threads[1]
+        second_thread.join(0.1)
+        next_turn_still_holds = second_thread.is_alive()
+        fake.gate.set()
+        second_thread.join(1)
+        fake._end()
+        fake.stdout.close()
+
+        self.assertTrue(first_released_promptly, 'release before gate.clear was lost')
+        self.assertTrue(next_turn_still_holds, 'an earlier interrupt released the next turn')
+        self.assertFalse(first_thread.is_alive())
+        self.assertFalse(second_thread.is_alive())
 
 
 def _delta(text, index=0):
@@ -3405,7 +3524,8 @@ class PMConversationTests(BoundedPMTest):
 
     @staticmethod
     async def until(ui, condition, what='condition'):
-        for _ in range(300):
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
             if condition(ui):
                 return
             await asyncio.sleep(0.01)
@@ -5219,7 +5339,12 @@ class PMConversationTests(BoundedPMTest):
             ui.interrupt_pm = lambda *a: (interrupts.append(1), original(*a))
 
         def layer(panel=None, detail=None, searching=None, count=0):
-            def step(ui):
+            async def step(ui):
+                await self.until(ui, lambda ui: (panel is None or ui.show_background == panel)
+                                 and (detail is None or ui.show_task_view == detail)
+                                 and (searching is None or ui.searching == searching)
+                                 and len(interrupts) == count
+                                 and (count or ui.pm_turn_active), 'modal layer')
                 if panel is not None:
                     self.assertEqual(ui.show_background, panel)
                 if detail is not None:
