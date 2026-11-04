@@ -180,6 +180,14 @@ class GwAgentRoute(DeveloperRoute):
         return value
 
     def prepare_files(self, tmpdir, request):
+        try:
+            self._prepare_files(tmpdir, request)
+        except BaseException:
+            self._credential = None
+            self._credential_resolved = False
+            raise
+
+    def _prepare_files(self, tmpdir, request):
         root = Path(request['root']).resolve(strict=True)
         private_tmp = Path(tmpdir).resolve(strict=True)
         package_path = Path(self.package_path)

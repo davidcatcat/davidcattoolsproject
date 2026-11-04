@@ -164,6 +164,20 @@ class GwAgentRouteTests(unittest.TestCase):
                 self.assertNotIn('private configuration detail', str(caught.exception))
                 self.assertEqual(list(Path(tmpdir).iterdir()), [])
 
+    def test_prepare_files_failure_clears_cached_credential(self):
+        request = self.request()
+        request['task']['non_serializable'] = object()
+        with tempfile.TemporaryDirectory() as tmpdir, \
+                mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
+                                  return_value={}), \
+                mock.patch.object(gw_agent.llm_config, 'api_key',
+                                  return_value=self.credential):
+            with self.assertRaises(RouteError) as caught:
+                self.route.prepare_files(tmpdir, request)
+            self.assertEqual(caught.exception.code, 'GW_AGENT_REQUEST_INVALID')
+            self.assertIsNone(self.route._credential)
+            self.assertFalse(self.route._credential_resolved)
+
     def test_route_config_accepts_only_supported_auth_env_values(self):
         route_config = {
             'schema_version': 1,
@@ -492,7 +506,10 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(result.changed_files, ('source.py',))
         self.assertEqual((self.root / 'source.py').read_text(), 'changed\n')
         self.assertEqual(len(server.requests), 2)
-        self.assertNotIn('authorization', repr(server.requests).lower())
+        self.assertEqual(len(server.headers), 2)
+        self.assertTrue(all(
+            not any(name.lower() == 'authorization' for name in headers)
+            for headers in server.headers))
         audit_records = [json.loads(line) for line in Path(self.route.audit_copy_path).read_text().splitlines()]
         self.assertTrue(any(record.get('type') == 'tool'
                             and record.get('tool') == 'apply_edit'
