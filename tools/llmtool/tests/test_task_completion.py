@@ -103,6 +103,15 @@ class TaskCompletionTests(unittest.TestCase):
         kwargs.update(overrides)
         return kwargs
 
+    def _trusted_main_ref(self):
+        def github_get(path):
+            if path != 'git/ref/heads/main':
+                raise AssertionError(f'unexpected GitHub path: {path}')
+            return {'ref': 'refs/heads/main',
+                    'object': {'type': 'commit', 'sha': '9' * 40}}
+
+        return patch.object(task_completion, '_github_get', side_effect=github_get)
+
     def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
                                   workflow=None, runs=None, jobs=None, comments=()):
         workflow = workflow or {'id': 42, 'path': '.github/workflows/llmtool-mac-ci.yml',
@@ -1951,6 +1960,7 @@ class TaskCompletionTests(unittest.TestCase):
                         'formal_review_state': 'UNVERIFIED', 'required_checks': [],
                         'successful_checks': [], 'ci_head_sha': '4' * 40},
                         'missing_gates': ['REVIEWER_D6_SESSION_NOT_INDEPENDENT']}), \
+             self._trusted_main_ref(), \
              patch('llmtool.task_submission_cli.resolve_profile_config') as resolve, \
              redirect_stdout(out):
             self.assertEqual(run_task_complete(args, store=store), 1)
@@ -1983,6 +1993,7 @@ class TaskCompletionTests(unittest.TestCase):
              patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
                    return_value=tests), \
              patch('llmtool.task_submission_cli.task_completion.collect_github_evidence') as github, \
+             self._trusted_main_ref(), \
              patch('llmtool.task_submission_cli.resolve_profile_config', return_value=pm_config('original-pm')) as resolve, \
              patch('llmtool.task_submission_cli.api_key', return_value='key-not-recorded'), \
              patch('llmtool.task_submission_cli.selected_provider', return_value={
@@ -2140,6 +2151,7 @@ class TaskCompletionTests(unittest.TestCase):
                        return_value=tests), \
                  patch('llmtool.task_submission_cli.task_completion.collect_github_evidence',
                        return_value=gh), \
+                 self._trusted_main_ref(), \
                  patch('llmtool.task_submission_cli.resolve_profile_config',
                        side_effect=forbidden), \
                  patch('llmtool.task_submission_cli.api_key', side_effect=forbidden), \
@@ -2190,6 +2202,7 @@ class TaskCompletionTests(unittest.TestCase):
                    return_value=git), \
              patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
                    return_value=failing), \
+             self._trusted_main_ref(), \
              patch('llmtool.task_submission_cli.resolve_profile_config',
                    side_effect=AssertionError('no PM call')), \
              redirect_stdout(out):
@@ -3199,7 +3212,7 @@ class TaskCompletionTests(unittest.TestCase):
         failure.completion_code = 'RESULT_HEAD_MISMATCH'
         first_output = StringIO()
         with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
-                   side_effect=failure), redirect_stdout(first_output):
+                   side_effect=failure), self._trusted_main_ref(), redirect_stdout(first_output):
             self.assertEqual(run_task_complete(args, store=store), 1)
         waiting = store.get(task['task_id'])['completion']
         admitted = waiting['evidence']
@@ -3224,6 +3237,7 @@ class TaskCompletionTests(unittest.TestCase):
                                   'exit_code': 0, 'output_sha256': '6' * 64}]), \
              patch('llmtool.task_submission_cli.task_completion.collect_github_evidence',
                    return_value={'evidence': {}, 'missing_gates': ['FORMAL_REVIEW_MISSING']}), \
+             self._trusted_main_ref(), \
              patch('llmtool.task_submission_cli.resolve_profile_config') as resolve, \
              redirect_stdout(second_output):
             self.assertEqual(run_task_complete(args, store=store), 1)
@@ -3254,6 +3268,7 @@ class TaskCompletionTests(unittest.TestCase):
                    return_value=[{'path': self.source_path, 'source_sha': '4' * 40,
                                   'exit_code': 0, 'output_sha256': '6' * 64}]), \
              patch('llmtool.task_submission_cli.task_completion.collect_github_evidence') as github, \
+             self._trusted_main_ref(), \
              patch('llmtool.task_submission_cli.resolve_profile_config') as resolve, \
              redirect_stdout(out):
             self.assertEqual(run_task_complete(args, store=store), 1)
@@ -3330,6 +3345,7 @@ class TaskCompletionTests(unittest.TestCase):
                    return_value=tests), \
              patch('llmtool.task_submission_cli.task_completion.collect_github_evidence',
                    return_value=gh), \
+             self._trusted_main_ref(), \
              patch('llmtool.task_submission_cli.resolve_profile_config', side_effect=resolver) as resolve, \
              patch('llmtool.task_submission_cli.api_key', return_value=rotated_key), \
              patch('llmtool.task_submission_cli.selected_provider', return_value=(provider or {
