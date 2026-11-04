@@ -1269,11 +1269,13 @@ class _GateMixin:
         # Never compare against some other installed llmtool.
         if not os.path.realpath(worker_dispatch.__file__).startswith(os.path.realpath(root) + os.sep):
             raise AssertionError(f"llmtool gate loaded from {worker_dispatch.__file__}")
-        if worker_dispatch._REPOSITORY_CONFIG_ERROR is not None:
-            raise AssertionError(f"llmtool gate config could not load; these tests must run with tools/llmtool/.venv/bin/python: {worker_dispatch._REPOSITORY_CONFIG_ERROR}")
-        cls.gate = staticmethod(worker_dispatch._parse_policy)
+        patterns = worker_dispatch._build_reference_patterns({
+            'slug': 'davidcatcat/davidcattoolsproject',
+            'dispatch_issue': 289, 'dispatch_evidence_pr': 283,
+        })
+        cls.gate = staticmethod(lambda raw: worker_dispatch._parse_policy(raw, patterns))
         cls.gate_file = staticmethod(lambda path: worker_dispatch._parse_policy(
-            worker_dispatch._read_policy_file(Path(path))))
+            worker_dispatch._read_policy_file(Path(path)), patterns))
 
 
 class DispatchGateAgreementTests(_GateMixin, unittest.TestCase):
