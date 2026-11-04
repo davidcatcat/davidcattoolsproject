@@ -1378,10 +1378,14 @@ def _validate(record):
                     type(developer['created_at']) is not str):
                 _fail()
             if 'owner_assignment_ref' in developer:
-                from .worker_dispatch import _OWNER_COMMENT_REF
+                from .worker_dispatch import owner_comment_ref
                 ref = developer['owner_assignment_ref']
-                if (developer['provider_profile'] not in ('claude', 'agy') or
-                        type(ref) is not str or _OWNER_COMMENT_REF.fullmatch(ref) is None):
+                try:
+                    valid_owner_ref = (type(ref) is str and
+                                       owner_comment_ref().fullmatch(ref) is not None)
+                except LLMToolError:
+                    _fail('TASK_STORE_REPOSITORY_CONFIG_INVALID')
+                if developer['provider_profile'] not in ('claude', 'agy') or not valid_owner_ref:
                     _fail()
             if developer['provider_profile'] == 'agy' and 'owner_assignment_ref' not in developer:
                 _fail()

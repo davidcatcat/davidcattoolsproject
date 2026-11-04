@@ -25,7 +25,8 @@ CONTRACT_TOKENS = (
     "role.owner", "role.pm", "role.system", "tool.summary", "tool.error", "meta.usage",
     "rule", "status.bar", "status.key",
 )
-UI_TOKENS = ("ui.menu", "ui.menu.current", "ui.menu.header", "ui.help", "ui.selected", "ui.link")
+UI_TOKENS = ("ui.menu", "ui.menu.current", "ui.menu.header", "ui.help", "ui.selected", "ui.link",
+             "ui.pr.url")
 
 
 class StyleTokenTests(unittest.TestCase):

@@ -292,7 +292,7 @@ class TrustCliTest(unittest.TestCase):
         output = __import__("io").StringIO()
         with mock.patch.object(trust_cli, "load_trust", return_value=trust), \
              mock.patch.object(trust_cli, "_owner_home", return_value=self.home), \
-             mock.patch.object(config, "repository_config", return_value={
+             mock.patch.object(config, "legacy_repository_config", return_value={
                  "slug": trust.repository["slug"], "dispatch_issue": 410,
                  "dispatch_evidence_pr": 411}), \
              mock.patch.object(task_completion, "_DOCS_CHECK", "changed legacy docs check"), \

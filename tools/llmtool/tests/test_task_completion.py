@@ -52,6 +52,7 @@ def pm_config(profile, require_configured=True):
 
 class TaskCompletionTests(unittest.TestCase):
     def setUp(self):
+        review_trust_fixture.install_for_case(self)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.base = Path(self.temp.name).resolve()
@@ -1406,21 +1407,48 @@ class TaskCompletionTests(unittest.TestCase):
     def test_ci_rejects_wrong_runner_and_legacy_linux_check(self):
         result_sha = 'a' * 40
         pr_number = 10
+        def keyed_responses(api):
+            return {
+                'actions/workflows/llmtool-mac-ci.yml': api[3],
+                f"actions/workflows/42/runs?head_sha={result_sha}&event=pull_request&per_page=100": api[4],
+                'actions/runs/100/attempts/1/jobs?per_page=100': api[5],
+                'commits/' + result_sha + '/check-runs?per_page=100': api[10],
+                'actions/workflows/llmtool-linux-ci.yml': api[7],
+                f"actions/workflows/43/runs?head_sha={result_sha}&event=pull_request&per_page=100": api[8],
+                'actions/runs/200/attempts/1/jobs?per_page=100': api[9],
+            }
+
         checks = {'total_count': 1, 'check_runs': [
             {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': result_sha,
              'status': 'completed', 'conclusion': 'success'}]}
-        api = self._github_response_sequence(result_sha, {}, [], checks)
-        api[5]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
-        with patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
-            with self.assertRaises(LLMToolError) as rejected:
-                task_completion._collect_ci_evidence(
-                    pr_number=pr_number, result_sha=result_sha)
-        self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
+        for linux_case in ('unavailable', 'malformed', 'successful', 'pending'):
+            api = self._github_response_sequence(result_sha, {}, [], checks)
+            api[5]['jobs'][0]['runner_name'] = 'GitHub Actions 1000003657'
+            responses = keyed_responses(api)
+            if linux_case == 'malformed':
+                responses['actions/workflows/llmtool-linux-ci.yml']['path'] = (
+                    '.github/workflows/wrong.yml')
+            elif linux_case == 'pending':
+                api[8]['workflow_runs'][0].update(status='in_progress', conclusion=None)
+                api[9]['jobs'][0].update(status='in_progress', conclusion=None)
+                api[10]['check_runs'][0].update(status='in_progress', conclusion=None)
+            def get_response(path):
+                if (linux_case == 'unavailable' and
+                        path == 'actions/workflows/llmtool-linux-ci.yml'):
+                    task_completion._stop('GITHUB_EVIDENCE_UNAVAILABLE')
+                return responses[path]
+            with self.subTest(linux_evidence=linux_case), \
+                    patch('llmtool.task_completion._github_get', side_effect=get_response):
+                with self.assertRaises(LLMToolError) as rejected:
+                    task_completion._collect_ci_evidence(
+                        pr_number=pr_number, result_sha=result_sha)
+            self.assertEqual(rejected.exception.completion_code, 'CI_WORKFLOW_JOBS_INVALID')
         for name in ('davidproject-self-action-3', 'davidproject-self-action-2 ', ''):
             api = self._github_response_sequence(result_sha, {}, [], checks)
             api[5]['jobs'][0]['runner_name'] = name
             with self.subTest(runner=name), \
-                    patch('llmtool.task_completion._github_get', side_effect=api[3:6]):
+                    patch('llmtool.task_completion._github_get',
+                          side_effect=keyed_responses(api).__getitem__):
                 with self.assertRaises(LLMToolError):
                     task_completion._collect_ci_evidence(pr_number=pr_number, result_sha=result_sha)
         api = self._github_response_sequence(result_sha, {}, [], checks)

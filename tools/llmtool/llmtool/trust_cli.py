@@ -29,7 +29,7 @@ def _legacy_sources():
     try:
         lifecycle = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(lifecycle)
-        repo = config.repository_config(home=str(_owner_home()))
+        repo = config.legacy_repository_config(home=str(_owner_home()))
         retain_match = re.search(r"\(\?:([0-9|]+)\)", lifecycle.OWNER_APPROVAL_RE.pattern)
         retain_issues = tuple(int(value) for value in retain_match.group(1).split("|")) if retain_match else ()
         if len(retain_issues) != 2:

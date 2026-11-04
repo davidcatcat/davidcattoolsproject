@@ -17,10 +17,24 @@ from unittest.mock import patch
 
 from llmtool import task_completion
 from llmtool import task_submission_cli
+from llmtool import trust as _trust_module
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import (
     run_task_codex_delegate, run_task_direct_result_event,
 )
+from review_trust_fixture import start_module as _start_trust_fixture
+from review_trust_fixture import stop_module as _stop_trust_fixture
+
+# Capture the real loader before the module fixture replaces it.
+_GENUINE_LOAD_TRUST = _trust_module.load_trust
+
+
+def setUpModule():
+    _start_trust_fixture()
+
+
+def tearDownModule():
+    _stop_trust_fixture()
 
 
 class CodexDelegateTests(unittest.TestCase):
@@ -179,7 +193,8 @@ class CodexDelegateTests(unittest.TestCase):
                   overwrite_ignored=None, malformed_diff=None, callback_handler=None,
                   registration=None, bound_registration=None, codex_error=None,
                   codex_result=None, codex_timeout=600, run_observer=None,
-                  empty_diff=False, large_diff=False, background=False):
+                  empty_diff=False, large_diff=False, background=False,
+                  dispatch_observer=None):
         self._fake_codex(ignored=ignored, bytecode=bytecode,
                          overwrite_ignored=overwrite_ignored,
                          empty_diff=empty_diff, large_diff=large_diff)
@@ -226,7 +241,7 @@ class CodexDelegateTests(unittest.TestCase):
                     patch('llmtool.task_submission_cli.codex_direct_timeout',
                           return_value=codex_timeout), \
                     patch('llmtool.task_submission_cli._bootstrap_registered_d6',
-                          side_effect=bootstrap_error), \
+                          side_effect=bootstrap_error) as bootstrap_mock, \
                     (patch.object(task_completion, 'bind_executor_task',
                           return_value=(registration, snapshot)) if registration else
                      patch.object(task_completion, 'bind_executor_task',
@@ -249,6 +264,8 @@ class CodexDelegateTests(unittest.TestCase):
                     run_patch as codex_run, \
                     patch('llmtool.task_submission_cli.run_task_direct_result_event',
                           side_effect=callback_handler, return_value=0) as callback:
+                if dispatch_observer is not None:
+                    dispatch_observer(bootstrap_mock, codex_run, callback)
                 result = (task_submission_cli.run_task_delegate(args, store=self.store)
                           if background else
                           run_task_codex_delegate(args, store=self.store))
@@ -1193,19 +1210,32 @@ class CodexDelegateTests(unittest.TestCase):
             return home, None
         # Plain sibling import: CI runs from tests/ without a `tests` package.
         from test_trust import _document
-        raw = json.dumps(_document(*roots)).encode('utf-8')
+        document = _document(*roots)
+        document['repository']['slug'] = 'davidcatcat/davidcattoolsproject'
+        document['repository']['allowed_origins'] = [
+            'git@github.com:davidcatcat/davidcattoolsproject.git',
+            'https://github.com/davidcatcat/davidcattoolsproject.git',
+        ]
+        raw = json.dumps(document).encode('utf-8')
         trust_path = trust_dir / 'trust.json'
         trust_path.write_bytes(raw)
         trust_path.chmod(0o600)
         return home, hashlib.sha256(raw).hexdigest()
 
-    def _dispatch_real_bootstrap(self, task, trust_home):
+    def _dispatch_real_bootstrap(self, task, trust_home, *, dispatch_observer=None):
         """Run the real bootstrap with a pinned fake helper and a temp trust home."""
-        from llmtool import trust as trust_module
         real_bootstrap = task_submission_cli._bootstrap_registered_d6
-        original_load_trust = trust_module.load_trust
         real_run = subprocess.run
         helper_calls = []
+        bootstrap_calls = []
+
+        def load_test_trust(home=None):
+            # Pin every loader call to the private test home.
+            return _GENUINE_LOAD_TRUST(home=str(trust_home))
+
+        def observed_bootstrap(registration):
+            bootstrap_calls.append(registration)
+            return real_bootstrap(registration)
 
         def capture_helper(argv, *args, **kwargs):
             if (isinstance(argv, list) and len(argv) > 4 and
@@ -1217,7 +1247,7 @@ class CodexDelegateTests(unittest.TestCase):
         with patch('llmtool.task_submission_cli._trusted_d6_helper_source',
                    return_value=(self.root, b'raise SystemExit(0)')), \
                 patch.object(task_submission_cli.trust, 'load_trust',
-                             side_effect=lambda: original_load_trust(home=str(trust_home))), \
+                             side_effect=load_test_trust), \
                 patch.object(task_submission_cli.subprocess, 'run',
                              side_effect=capture_helper), \
                 patch.dict(os.environ, {'HOME': str(trust_home)}):
@@ -1225,15 +1255,19 @@ class CodexDelegateTests(unittest.TestCase):
             # runner's real home even if a code path bypasses the loader seam.
             # Any Codex launch raises, so reaching Codex cannot look like a pass.
             result, saved, callback = self._dispatch(
-                task, bootstrap_error=real_bootstrap,
-                codex_error=AssertionError('Codex must not run'))
-        return result, saved, callback, helper_calls
+                task, bootstrap_error=observed_bootstrap,
+                codex_error=AssertionError('Codex must not run'),
+                dispatch_observer=(lambda bootstrap, codex, callback: (
+                    dispatch_observer(bootstrap, codex, callback, bootstrap_calls,
+                                      helper_calls)
+                    if dispatch_observer is not None else None)))
+        return result, saved, callback, helper_calls, bootstrap_calls
 
     def test_bootstrap_passes_trust_digest_to_env_helper(self):
         task = self._task()
         trust_home, digest = self._bootstrap_trust_home()
-        result, saved, callback, helper_calls = self._dispatch_real_bootstrap(
-            task, trust_home)
+        result, saved, callback, helper_calls, _bootstrap_calls = \
+            self._dispatch_real_bootstrap(task, trust_home)
         self.assertEqual(len(helper_calls), 1)
         argv = helper_calls[0]
         self.assertEqual(argv[5:], ['--task-id', 'executor-task-1',
@@ -1247,13 +1281,46 @@ class CodexDelegateTests(unittest.TestCase):
     def test_missing_trust_refuses_bootstrap_before_helper_and_codex(self):
         task = self._task()
         trust_home, _digest = self._bootstrap_trust_home(write=False)
-        result, saved, callback, helper_calls = self._dispatch_real_bootstrap(
-            task, trust_home)
-        self.assertEqual(result, 1)
-        self.assertEqual(saved['developer']['state'], 'DEVELOPER_UNAVAILABLE')
-        self.assertEqual(saved['developer']['error_code'], 'ENV_BOOTSTRAP_TRUST_UNAVAILABLE')
-        self.assertEqual(helper_calls, [])
-        callback.assert_not_called()
+        observers = {}
+
+        def capture_observers(bootstrap, codex, callback, bootstrap_calls,
+                              helper_calls):
+            observers.update(bootstrap=bootstrap, codex=codex, callback=callback,
+                             bootstrap_calls=bootstrap_calls, helper_calls=helper_calls)
+
+        with self.assertRaises(task_submission_cli.LLMToolError) as caught:
+            self._dispatch_real_bootstrap(task, trust_home,
+                                          dispatch_observer=capture_observers)
+        self.assertIn('WORKER_REPOSITORY_CONFIG_INVALID', str(caught.exception))
+        saved = self.store.get(task['task_id'])
+        self.assertIsNone(saved['developer'])
+        self.assertIsNone(saved['completion'])
+        self.assertEqual(saved['dispatch_audit'][-1]['reason_code'],
+                         'WORKER_REPOSITORY_CONFIG_INVALID')
+        self.assertEqual(observers['bootstrap_calls'], [])
+        self.assertEqual(observers['helper_calls'], [])
+        observers['bootstrap'].assert_not_called()
+        observers['codex'].assert_not_called()
+        observers['callback'].assert_not_called()
+
+    def test_registered_d6_bootstrap_refuses_missing_trust_before_launch(self):
+        from llmtool.opencode_direct_developer import DirectOpenCodeError
+
+        trust_home, _digest = self._bootstrap_trust_home(write=False)
+
+        def load_test_trust(home=None):
+            return _GENUINE_LOAD_TRUST(home=str(trust_home))
+
+        registration = SimpleNamespace(root=self.root, task_id='executor-task-1')
+        with patch.object(task_submission_cli.trust, 'load_trust',
+                          side_effect=load_test_trust), \
+                patch('llmtool.task_submission_cli._trusted_d6_helper_source',
+                      return_value=(self.root, b'raise SystemExit(0)')), \
+                patch.object(task_submission_cli.subprocess, 'run') as launch:
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                task_submission_cli._bootstrap_registered_d6(registration)
+        self.assertEqual(caught.exception.direct_opencode_code, 'ENV_BOOTSTRAP_TRUST_UNAVAILABLE')
+        launch.assert_not_called()
 
     def _rebootstrap(self, **registry_changes):
         """Act like ENV-2: write a fresh report and rewrite the registry PASS marker."""

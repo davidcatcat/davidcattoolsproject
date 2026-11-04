@@ -1533,8 +1533,23 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         self.assertEqual(result['step'], 'MERGED')
         self.assertFalse(any('--add-label' in call for call in calls))
 
+        pending_macos = {'total_count': 2, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'},
+            {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'in_progress',
+             'conclusion': None}]}
+        result, calls = run_case(checks=pending_macos)
+        self.assertEqual(result['step'], 'MERGE_REFUSED')
+        self.assertEqual(result['codes'], ['MERGE_CHECKS_NOT_GREEN'])
+        self.assertEqual(result['result'], {'macos_check_pending': True})
+        self.assertEqual(calls, [])
+
         result, calls = run_case(current=labeled, checks=skipped_macos_checks)
         self.assertEqual(result['codes'], ['MERGE_MACOS_CHECK_REQUIRED'])
+        self.assertEqual(calls, [])
+
+        result, calls = run_case(current=labeled, checks=linux_only_checks)
+        self.assertEqual(result['codes'], ['MERGE_REQUIRED_CHECK_MISSING'])
         self.assertEqual(calls, [])
 
         result, calls = run_case(verdict='FIX')
@@ -1554,6 +1569,128 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         result, calls = run_case(gh_code=1)
         self.assertEqual(result['codes'], ['MERGE_MAC_CI_LABEL_FAILED'])
         self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+
+    def test_skipped_mac_label_helper_requires_exact_head_green_linux_and_open_mergeable_pr(self):
+        class Store:
+            def get(self, _task_id):
+                return base_record()
+
+        def run_case(*, head=HEAD, mergeable=True, labels=None, files=None,
+                     checks=None):
+            pr = {'number': 17, 'head': {'sha': head}, 'state': 'open',
+                  'merged': False, 'mergeable': mergeable,
+                  'labels': [] if labels is None else labels}
+            check_runs = checks or [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)',
+                 'status': 'completed', 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)',
+                 'status': 'completed', 'conclusion': 'skipped'},
+            ]
+            calls = []
+
+            def github_get(path):
+                if path.startswith('commits/'):
+                    return {'total_count': len(check_runs), 'check_runs': check_runs}
+                if path.endswith('/files?per_page=100'):
+                    return [{'filename': f} for f in (files or ['src/module.py'])]
+                if path.startswith('pulls/'):
+                    return pr
+                return []
+
+            def runner(_root, args):
+                calls.append(args)
+                return type('R', (), {'returncode': 0})()
+
+            with patch.object(task_advance, '_d6_snapshot', return_value=d6()):
+                result = task_advance.label_mac_ci_for_skipped_check(
+                    task_id=base_record()['task_id'], store=Store(), pr_number=17,
+                    github_get=github_get, merge_gh_runner=runner, cwd='/repo')
+            self.assertFalse(any(len(call) > 1 and call[1] == 'merge'
+                                 for call in calls))
+            return result, calls
+
+        result, calls = run_case()
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [['pr', 'edit', '17', '--add-label', 'mac-ci']])
+
+        result, calls = run_case(labels=[{'name': 'mac-ci'}])
+        self.assertEqual(result['step'], 'WAITING_CI')
+        self.assertEqual(calls, [])
+
+        variants = [
+            ('pending Linux', [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)',
+                 'status': 'in_progress', 'conclusion': None},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)',
+                 'status': 'completed', 'conclusion': 'skipped'}]),
+            ('failed Linux', [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)',
+                 'status': 'completed', 'conclusion': 'failure'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)',
+                 'status': 'completed', 'conclusion': 'skipped'}]),
+            ('pending Mac', [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)',
+                 'status': 'completed', 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)',
+                 'status': 'in_progress', 'conclusion': None}]),
+            ('failed Mac', [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)',
+                 'status': 'completed', 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)',
+                 'status': 'completed', 'conclusion': 'failure'}]),
+            ('successful Mac', [
+                {'head_sha': HEAD, 'name': 'check (Linux 3.14)',
+                 'status': 'completed', 'conclusion': 'success'},
+                {'head_sha': HEAD, 'name': 'check (macOS 3.13)',
+                 'status': 'completed', 'conclusion': 'success'}]),
+        ]
+        for label, check_runs in variants:
+            with self.subTest(label=label):
+                result, calls = run_case(checks=check_runs)
+                self.assertIsNone(result)
+                self.assertEqual(calls, [])
+
+        for kwargs in (
+                {'head': 'b' * 40},
+                {'mergeable': None},
+                {'files': ['tools/llmtool/llmtool/chat_tui.py']}):
+            with self.subTest(kwargs=kwargs):
+                result, calls = run_case(**kwargs)
+                self.assertIsNone(result)
+                self.assertEqual(calls, [])
+
+    def test_advance_preserves_terminal_ci_failure_separately_from_pending(self):
+        claim = {'pr': 17, 'head_sha': HEAD, 'version': 1,
+                 'state': 'COMPLETED', 'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+
+        for missing, expected_step, expected_codes in (
+                (['REQUIRED_CI_MISSING', 'REQUIRED_CI_FAILED'], 'CI_FAILED',
+                 ['REQUIRED_CI_MISSING', 'REQUIRED_CI_FAILED']),
+                (['REQUIRED_CI_MISSING', 'REQUIRED_CI_PENDING'], 'WAITING_CI',
+                 ['REQUIRED_CI_MISSING', 'REQUIRED_CI_PENDING'])):
+            class Store:
+                def __init__(self):
+                    self.record = base_record(review_dispatch_claim=[claim],
+                        completion_events=[event])
+                def get(self, _task_id):
+                    return self.record
+
+            store = Store()
+
+            def completion(_args, *, store):
+                store.record['completion']['missing_gates'] = missing
+                return 1
+
+            with self.subTest(missing=missing), \
+                 patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+                 patch.object(task_advance, '_pr_snapshot', return_value=PR), \
+                 patch.object(task_advance, '_review_outcomes', return_value=[]):
+                result = task_advance.advance(task_id=store.record['task_id'],
+                    store=store, pr_number=17, run_task_complete_call=completion)
+            self.assertEqual(result['step'], expected_step)
+            self.assertEqual(result['codes'], expected_codes)
 
     def test_merge_refuses_unqualified_reviews_checks_heads_and_owner_acceptance(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',

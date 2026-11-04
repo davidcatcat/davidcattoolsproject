@@ -458,6 +458,22 @@ class TaskStoreTests(unittest.TestCase):
                 task['task_id'], expected={'developer': None}, developer=developer)
         return task
 
+    def test_claude_assignment_rejects_invalid_repository_config(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        developer = self._developer_assignment(provider='claude')
+        developer['owner_assignment_ref'] = (
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+            '#issuecomment-1')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None), \
+                patch.object(worker_dispatch, 'owner_comment_ref',
+                             side_effect=LLMToolError('repository config is invalid')):
+            with self.assertRaises(LLMToolError) as caught:
+                self.store.compare_and_update(
+                    task['task_id'], expected={'developer': None}, developer=developer)
+        self.assertEqual(caught.exception.task_store_error_code,
+                         'TASK_STORE_REPOSITORY_CONFIG_INVALID')
+
     def test_claude_result_is_pm_bound_single_pending_transition(self):
         task = self._claude_result_task()
         pm_session = task['pm_session_id']

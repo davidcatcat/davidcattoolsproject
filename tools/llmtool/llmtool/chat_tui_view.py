@@ -38,6 +38,7 @@ without a terminal.
 import bisect
 import collections
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -115,6 +116,7 @@ THEME_DARK = {
     "ui.help": "italic",
     "ui.selected": "reverse",
     "ui.link": "underline",
+    "ui.pr.url": "fg:ansiblue",
 }
 # Light terminals: the ANSI yellow and bright black most palettes ship are unreadable on a
 # white background, so this table names darker RGB values (prompt_toolkit maps them to the
@@ -159,6 +161,7 @@ THEME_LIGHT = {
     "ui.help": "italic",
     "ui.selected": "reverse",
     "ui.link": "underline",
+    "ui.pr.url": "fg:#0645ad",
 }
 THEME_MONO = {
     "text": "",
@@ -200,6 +203,7 @@ THEME_MONO = {
     "ui.help": "",
     "ui.selected": "reverse",
     "ui.link": "",
+    "ui.pr.url": "",
 }
 # Theme name -> its table; a theme swaps the whole table (W56a contract).
 STYLE_TOKENS = {"dark": THEME_DARK, "light": THEME_LIGHT, "mono": THEME_MONO}
@@ -225,6 +229,32 @@ def token_style(token, colour=True, theme="dark"):
     table = STYLE_TOKENS.get(theme if colour else "mono") or THEME_DARK
     style = table.get(token)
     return table["text"] if style is None else style
+
+
+def add_pr_url_styles(view, trusted_prefix):
+    """Style full PR URLs from the trusted repository prefix without changing text."""
+    if not isinstance(trusted_prefix, str) or not trusted_prefix:
+        return
+    text = view.text
+    pattern = re.compile(re.escape(trusted_prefix) + r"\d{1,9}(?![\w/])")
+    matches = [(match.start(), match.end()) for match in pattern.finditer(text)]
+    if not matches:
+        return
+
+    spans = []
+    for token, low, high in view.styled(0, len(text)):
+        cuts = {low, high}
+        for match_low, match_high in matches:
+            if match_low < high and match_high > low:
+                cuts.update((max(low, match_low), min(high, match_high)))
+        cuts = sorted(cuts)
+        for start, end in zip(cuts, cuts[1:]):
+            styled_token = ("ui.pr.url" if any(match_low <= start and end <= match_high
+                                               for match_low, match_high in matches)
+                            else token)
+            if styled_token != "text":
+                spans.append((start, end, styled_token))
+    view.spans = spans
 
 
 def render_markdown(text, width):

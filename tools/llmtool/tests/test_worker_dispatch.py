@@ -19,10 +19,13 @@ from llmtool import worker_dispatch
 from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore, new_id
 from llmtool.task_submission_cli import _record
+from review_trust_fixture import start_module as _start_trust_fixture
+from review_trust_fixture import stop_module as _stop_trust_fixture
 _IMPORT_HOME_PATCH.stop()
 
 
 def setUpModule():
+    _start_trust_fixture()
     global _MODULE_HOME_PATCH
     _MODULE_HOME_PATCH = patch.dict(os.environ, {'HOME': _MODULE_HOME.name})
     _MODULE_HOME_PATCH.start()
@@ -33,6 +36,7 @@ def setUpModule():
 
 def tearDownModule():
     _MODULE_HOME_PATCH.stop()
+    _stop_trust_fixture()
     _MODULE_HOME.cleanup()
 
 
@@ -47,6 +51,11 @@ class WorkerDispatchTests(unittest.TestCase):
         self.policy_patch = patch.object(worker_dispatch, '_POLICY_PATH', self.policy_path)
         self.policy_patch.start()
         self.addCleanup(self.policy_patch.stop)
+        self.repository_patch = patch.object(worker_dispatch, 'repository_config',
+            return_value={'slug': 'davidcatcat/davidcattoolsproject',
+                          'dispatch_issue': 289, 'dispatch_evidence_pr': 283})
+        self.repository_patch.start()
+        self.addCleanup(self.repository_patch.stop)
         self.store = TaskStore(self.root / 'tasks')
         self.task = self._task()
         self.store.create(self.task)
@@ -425,42 +434,24 @@ class WorkerDispatchTests(unittest.TestCase):
             os.chdir(previous)
 
     def test_invalid_user_repository_config_has_a_distinct_dispatch_denial(self):
-        project_root = Path(__file__).resolve().parents[1]
-        home = Path(self.temp.name) / 'invalid-home'
-        user_config = home / '.config' / 'llmtool' / 'config.yaml'
-        user_config.parent.mkdir(parents=True)
-        user_config.write_text('[invalid yaml', encoding='utf-8')
-        script = (
-            "from llmtool.worker_dispatch import evaluate, WORKERS; "
-            "assert all(evaluate(worker).reason_code == "
-            "'WORKER_REPOSITORY_CONFIG_INVALID' for worker in WORKERS)"
-        )
-        result = subprocess.run(
-            [sys.executable, '-B', '-c', script], cwd=project_root,
-            env={**os.environ, 'HOME': str(home)}, check=False,
-            capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
+        with patch.object(worker_dispatch, 'repository_config',
+                          side_effect=LLMToolError('TRUST_PATH_INVALID')):
+            self.assertTrue(all(worker_dispatch.evaluate(worker).reason_code ==
+                                'WORKER_REPOSITORY_CONFIG_INVALID'
+                                for worker in worker_dispatch.WORKERS))
 
-    def test_valid_user_repository_config_is_loaded_in_an_isolated_subprocess(self):
-        project_root = Path(__file__).resolve().parents[1]
-        home = Path(self.temp.name) / 'custom-home'
-        user_config = home / '.config' / 'llmtool' / 'config.yaml'
-        user_config.parent.mkdir(parents=True)
-        user_config.write_text(
-            'repository:\n  slug: example-org/custom-repo\n'
-            '  dispatch_issue: 12\n  dispatch_evidence_pr: 34\n', encoding='utf-8')
-        script = (
-            "from llmtool import worker_dispatch as w; "
-            "assert w._OWNER_COMMENT_REF.fullmatch("
-            "'https://github.com/example-org/custom-repo/issues/12#issuecomment-7'); "
-            "assert w._OWNER_COMMENT_REF.fullmatch("
-            "'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7') is None"
-        )
-        result = subprocess.run(
-            [sys.executable, '-B', '-c', script], cwd=project_root,
-            env={**os.environ, 'HOME': str(home)}, check=False,
-            capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
+    def test_trusted_repository_builds_both_patterns_without_owner_slug_fallback(self):
+        repository = {'slug': 'example-org/custom-repo', 'dispatch_issue': 12,
+                      'dispatch_evidence_pr': 34}
+        owner_pattern, evidence_pattern = worker_dispatch._build_reference_patterns(repository)
+        self.assertIsNotNone(owner_pattern.fullmatch(
+            'https://github.com/example-org/custom-repo/issues/12#issuecomment-7'))
+        self.assertIsNone(owner_pattern.fullmatch(
+            'https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-7'))
+        self.assertIsNotNone(evidence_pattern.fullmatch(
+            'https://github.com/example-org/custom-repo/pull/34'))
+        self.assertIsNone(evidence_pattern.fullmatch(
+            'https://github.com/davidcatcat/davidcattoolsproject/pull/283'))
 
     def test_policy_is_reloaded_after_each_change(self):
         self._set_state('opencode-developer', 'PAUSED')

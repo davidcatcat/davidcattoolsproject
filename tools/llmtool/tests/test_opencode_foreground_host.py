@@ -13,6 +13,7 @@ from llmtool.run_budget import RunBudget, UsageLedger
 HERE = Path(__file__).resolve().parent
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))
+import review_trust_fixture
 import test_opencode_worker as fixtures
 
 
@@ -29,6 +30,7 @@ class CompositionTests(unittest.TestCase):
         return job, policy, a, snap
 
     def _task_store_for_worker_job(self, job, *, with_developer=False):
+        review_trust_fixture.install_for_case(self)
         import hashlib
         from llmtool.action_contract import TaskBinding
         from llmtool.task_store import TaskStore

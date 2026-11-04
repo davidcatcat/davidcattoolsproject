@@ -61,6 +61,14 @@ class ThemeChoiceTests(unittest.TestCase):
                 self.assertNotIn("ansiyellow", style)
                 self.assertNotIn("ansibrightblack", style)
 
+    def test_trusted_pr_url_style_is_blue_and_disabled_without_colour(self):
+        self.assertEqual(chat_tui_view.token_style("ui.pr.url", True, "dark"),
+                         chat_tui_view.THEME_DARK["ui.pr.url"])
+        self.assertEqual(chat_tui_view.token_style("ui.pr.url", True, "light"),
+                         chat_tui_view.THEME_LIGHT["ui.pr.url"])
+        self.assertEqual(chat_tui_view.token_style("ui.pr.url", False, "dark"),
+                         chat_tui_view.THEME_MONO["ui.pr.url"])
+
 
 class SettingsFileTests(unittest.TestCase):
     def setUp(self):
@@ -280,6 +288,44 @@ class PaneLinkTests(unittest.TestCase):
         view.set_text("llmtool/a.py:12 #7")
         rows = self.pane_rows(view, None)
         self.assertFalse(any("[ZeroWidthEscape]" in style for row in rows for style, _t in row))
+
+    def test_trusted_pr_url_style_preserves_text_and_copy_without_links(self):
+        from prompt_toolkit.utils import get_cwidth
+        trusted = "https://github.com/o/r/pull/"
+        text = ("PR: " + trusted + "123\n"
+                "Other repo: https://github.com/x/y/pull/9\n"
+                "Issue: https://github.com/o/r/issues/123")
+        for theme in ("dark", "light"):
+            with self.subTest(theme=theme):
+                view = chat_tui_view.ConversationView(get_cwidth)
+                view.set_text(text)
+                chat_tui_view.add_pr_url_styles(view, trusted)
+                pane = chat_tui_view.make_pane(
+                    view, colour=True,
+                    styler=lambda token: chat_tui_view.token_style(token, True, theme),
+                    linker=lambda: None)  # /links off; styling remains visible
+                content = pane.control.create_content(100, 10)
+                pieces = [piece for row_index in range(content.line_count)
+                          for piece in content.get_line(row_index)]
+                pr_spans = [(text[low:high], token)
+                            for token, low, high in view.styled(0, len(text))
+                            if token == "ui.pr.url"]
+                self.assertEqual(pr_spans, [(trusted + "123", "ui.pr.url")])
+                rendered = [(style, value) for style, value in pieces]
+                pr_style = chat_tui_view.token_style("ui.pr.url", True, theme)
+                self.assertTrue(any(value == trusted + "123" and style == pr_style
+                                    for style, value in rendered))
+                rendered_text = "\n".join("".join(value for _style, value in content.get_line(index))
+                                           for index in range(content.line_count))
+                self.assertEqual(rendered_text, text)
+                self.assertFalse(any("[ZeroWidthEscape]" in style for style, _value in rendered))
+                self.assertEqual(view.text.encode(), text.encode())
+                self.assertEqual(view.copy_text(0, len(view.text)).encode(), text.encode())
+
+        plain = chat_tui_view.ConversationView(get_cwidth)
+        plain.set_text(text)
+        self.assertEqual(plain.copy_text(0, len(plain.text)).encode(), text.encode())
+        self.assertEqual(plain.text.encode(), text.encode())
 
 
 class BackgroundItemTests(unittest.TestCase):
