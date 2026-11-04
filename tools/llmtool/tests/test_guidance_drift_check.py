@@ -122,6 +122,34 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         }
         self.assertEqual(models, {"gpt-8-y", "kimi-k2", "gpt-5.5", "gpt-5.5.2", "gpt-8-y.2"})
 
+    def test_model_extraction_handles_provider_ids_and_avoids_paths_and_prose(self):
+        source = (
+            "anthropic/claude-opus-5-5 openrouter/qwen3-coder o4-mini glm-5 "
+            "minimax-m2 gpt5 gpt-5.5.2.\n"
+            "File tools/llmtool/scripts/gpt-5.py; claude-reviewer and Claude-authored.\n"
+        )
+        models = {
+            value for value in guidance_drift_check._hard_values(source)
+            if guidance_drift_check.MODEL_NAME.fullmatch(value)
+        }
+        self.assertEqual(
+            models,
+            {
+                "anthropic/claude-opus-5-5",
+                "openrouter/qwen3-coder",
+                "o4-mini",
+                "glm-5",
+                "minimax-m2",
+                "gpt5",
+                "gpt-5.5.2",
+            },
+        )
+
+    def test_url_extraction_strips_closing_parens_and_quotes(self):
+        source = '(see https://x.invalid/a.) and "https://x.invalid/a"\n'
+        urls = {value for value in guidance_drift_check._hard_values(source) if value.startswith("https://")}
+        self.assertEqual(urls, {"https://x.invalid/a"})
+
     def test_stale_exception(self):
         self.write_config(codex_only=[{"value": "https://stale.invalid/value", "reason": "No longer in AGENTS.md."}])
         self.assertTrue(any("STALE_EXCEPTION https://stale.invalid/value" in item for item in check(self.repo)))
@@ -147,8 +175,11 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         self.assertTrue(any("CONFIG_SCHEMA" in item for item in check(self.repo)))
 
     def test_deeply_nested_duplicate_and_unknown_config_are_invalid(self):
-        self.write_raw_config("{" + '"nested":' * 2000 + "0" + "}" * 2000)
-        self.assertTrue(any("CONFIG_INVALID" in item for item in check(self.repo)))
+        depth = sys.getrecursionlimit() + 100
+        nested_json = "[" * depth + "0" + "]" * depth
+        self.write_raw_config(nested_json)
+        findings = check(self.repo)
+        self.assertTrue(any("CONFIG_INVALID RecursionError" in item for item in findings))
         self.write_raw_config('{"schema_version":1,"schema_version":1,"hashes":{},"codex_only":[]}')
         self.assertTrue(any("CONFIG_INVALID" in item for item in check(self.repo)))
         self.write_config()
