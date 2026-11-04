@@ -22,7 +22,7 @@ import fcntl
 from datetime import datetime, timedelta, timezone
 
 from . import skill_ledger
-from .skill_manifest import build_manifest, resolve
+from .skill_manifest import build_manifest
 
 MAX_CONTEXT_CHARS = 9000
 _AGENT_ROLES = {
@@ -79,7 +79,7 @@ def _commit(repo):
 
 def _manifest_context(repo, head, role, gate):
     manifest = build_manifest(repo, head, role, gate, provider='claude')
-    paths = resolve(role, gate)
+    paths = tuple(entry['path'] for entry in manifest['entries'])
     by_path = {entry['path']: entry['sha256'] for entry in manifest['entries']}
     lines = [
         'Required skills index',
@@ -182,8 +182,8 @@ def _identity(record, binding, gate):
 def _record_read(payload, role):
     repo = _repo_root(os.path.realpath(payload.get('cwd') or os.getcwd()))
     gate = os.environ.get('LLMTOOL_GATE', 'develop')
-    build_manifest(repo, _commit(repo), role, gate, provider='claude')
-    required = set(resolve(role, gate))
+    manifest = build_manifest(repo, _commit(repo), role, gate, provider='claude')
+    required = {entry['path'] for entry in manifest['entries']}
     tool_input = payload.get('tool_input')
     requested = tool_input.get('file_path') if type(tool_input) is dict else None
     resolved = _safe_repo_file(repo, requested)
@@ -228,6 +228,10 @@ def _check(payload, gate):
     fd = ledger._locked(ledger._path())
     try:
         records = ledger._read(ledger._path(), recover_torn=True)
+        # A missing ledger or a genuinely empty ledger without an anchor is
+        # the normal initial state: there are simply no Read observations yet.
+        if not records and not os.path.lexists(str(ledger._anchor_path(ledger._path()))):
+            return {'status': 'UNVERIFIED', 'reason': 'NOT_READ'}
         if not ledger._chain(records) or not ledger._recover_anchor(ledger._path(), records):
             return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
     finally:
@@ -239,8 +243,8 @@ def _check(payload, gate):
     latest_boundary = max((skill_ledger._stamp(r.get('created_at')) for r in boundaries),
                           default=None)
     latest_boundary = latest_boundary or datetime.min.replace(tzinfo=timezone.utc)
-    required = {path: (_safe_repo_file(repo, path) or (None, None, None))[1]
-                for path in resolve(role, gate)}
+    required = {entry['path']: (_safe_repo_file(repo, entry['path']) or (None, None, None))[1]
+                for entry in manifest['entries']}
     saw_stale = False
     saw_compacted = False
     for path, current_hash in required.items():

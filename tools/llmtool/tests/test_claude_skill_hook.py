@@ -27,6 +27,7 @@ class ClaudeSkillHookTests(unittest.TestCase):
         paths = {path for role in ('pm', 'developer', 'reviewer', 'high-debug')
                  for gate in ('dispatch', 'develop', 'review', 'complete', 'publish', 'merge')
                  for path in resolve(role, gate)}
+        paths.add('CLAUDE.md')
         for relative in paths:
             target = self.repo / relative
             target.parent.mkdir(parents=True, exist_ok=True)
