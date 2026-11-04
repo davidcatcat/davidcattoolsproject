@@ -39,6 +39,7 @@ These checks prevent refusals that cost a dispatch round (2026-11-02):
 - **Sync the canonical checkout before dispatch.** Run `git merge --ff-only origin/main` in the canonical root first; a stale install refuses with `LLMTOOL_SOURCE_STALE`.
 - **A branch update needs a new review.** After `gh pr update-branch`, or any merge of main into a PR, the verdict no longer covers the head. Request a merge-delta re-review of the new head before merging, unless the new head equals the reviewed head.
 - **Never wrap dispatch or repair in `timeout`.** It can kill Codex with signal 9. Run `llmtool task delegate` and any helper that runs it in the background, then poll. Set `ANTHROPIC_MODEL` explicitly for a background Claude dispatch until central role config (D1) lands.
+- Stopping a waiting shell also kills background work that shell started; account for that before stopping it.
 
 ### Sub-agent PMs (Owner D8 2026-11-02)
 
@@ -60,9 +61,7 @@ Only the main PM merges, adopts Tasks, edits the #763 inventory or asks the Owne
 
    Before parking a difficult unresolved Task, record a Debug escalation disposition in its existing Issue/Task record: the qualified model/Worker route considered and, if selected, its result; or the concrete gate/refusal reason (dispatch, availability, data permission or budget) and recovery condition. This record is required for continuation, but it does not require a high-model call for every `BLOCKED` Task.
 
-   For substantial technical uncertainty, proactively select a suitable high-capability Debug Developer when an authorized Worker route and the existing budget permit. Follow the [High Debug procedure and report requirements](pm-continuation-reference.md#high-debug); diagnosis does not grant implementation or acceptance authority.
-
-   **Mandatory High Debug after two failed corrections (Owner 2026-10-27):** After two corrections fail in the same confirmed root-cause/finding family, stop ordinary repeated repairs and assign a separate bounded Codex CLI `gpt-6.1-sol` Debug Developer Task when all existing gates permit. This uses `codex-developer`, does not change the normal Codex model or grant another repair. Severe uncertainty may justify earlier use with recorded evidence. See the [High Debug procedure](pm-continuation-reference.md#high-debug).
+   For substantial technical uncertainty, or after two failed corrections in the same confirmed root-cause/finding family, follow the [High Debug report](high-debug-report.md). High Debug does not grant implementation, acceptance or additional repair authority.
 
    If the preferred route is unavailable or not authorized, choose another safe option if one exists. Do not increase spending, use a paid fallback, expand data permission or weaken D8. If the next useful action requires reserved authority, new spending/data permission, or no safe route remains, record the exact gate evidence and recovery condition and follow the Owner escalation rule below. Otherwise isolate only the affected Task and keep independent work moving.
    - **Retry or reassign:** reread and validate `worker-dispatch.json` before each action, record the gate decision and confirm fresh availability and all task, privacy, budget and review gates. Retry only transient failures within budget; never replay UNKNOWN or non-replayable operations. Reassign only after the prior writer releases the D6. Follow the [dispatch and handoff checklist](pm-continuation-reference.md#retry-and-reassignment); paid fallback is prohibited unless already authorized.

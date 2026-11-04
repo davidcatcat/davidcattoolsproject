@@ -11,6 +11,7 @@ Validate structured examples, paths, identifiers, and evidence labels against au
 
 1. **Read complete parser and constant definitions from source:**
    - Do not infer wire/JSON schemas from dataclass fields, partial line slices, or `<CONTEXT_SUMMARY>`.
+   - Read `task_verification.py` when verifying Task Contract acceptance evidence and its result statuses.
    - Read the complete parser function (for example, `_decode_host` in `tools/llmtool/llmtool/review_authority.py` or `parse_task_contract` in `tools/llmtool/llmtool/task_contract.py`) and grep authoritative constants (such as `REVIEWER_ROLES` in `tools/llmtool/llmtool/task_review.py`).
 2. **Separate `TEMPLATE_ONLY` blocks from `SYNTHETIC_PARSER_VERIFIED` fixtures:**
    - Label any example containing `<...>` placeholders or unprovisioned paths as `TEMPLATE_ONLY` and state that running it literally fails closed.
@@ -20,7 +21,8 @@ Validate structured examples, paths, identifiers, and evidence labels against au
      ```
    - Record the concrete fixture SHA256, exact command, exit code, output, and parser-only boundary limits (static structural validation does not open SQLite ledgers, check `auth_home`, execute binaries, or grant live authority).
 3. **Validate filesystem paths against actual path and inode rules:**
-   - Verify candidate paths against the real validator (`action_contract._path` permits only `[A-Za-z0-9._-]` per path component and rejects `@` in npm `@scope` paths; `O_NOFOLLOW` and `stat.S_ISREG` reject symlinks).
+   - Verify candidate paths against the real validator. For relative Task paths, `action_contract._path` requires NFC text with slash-separated components; it rejects empty, `.` and `..` components, leading hyphens, denied names, `.env.*`, sensitive key/certificate extensions, `.github/workflows`, and `.config` credential directories. Remaining characters must be alphanumeric or `.`, `_` or `-`; alphanumeric includes Unicode letters and digits. The validator's `absolute=True` mode additionally permits a leading `/`.
+   - When checking filesystem entries, account for the applicable file validator's `O_NOFOLLOW` and `stat.S_ISREG` checks against symlinks and non-regular files.
    - State operational and upgrade caveats when documenting conditional provisioning options (such as hardlink or file-copy drift after package upgrades).
 4. **Preserve pinned evidence and verify unrecorded external IDs:**
    - Reuse existing timestamped, SHA-pinned verification evidence without re-running unchanged tests or queries.
