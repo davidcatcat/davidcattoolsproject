@@ -236,12 +236,15 @@ class GwAgentRoute(DeveloperRoute):
             return self._credential
         try:
             config_value = llm_config.resolve_profile_config('company-gw')
-            provider = llm_config.selected_provider(config_value)
-            key_env = provider.get('api_key_env')
-            if key_env and not os.environ.get(key_env):
-                credential = None
-            else:
+            try:
                 credential = llm_config.api_key(config_value)
+            except Exception as exc:
+                diagnostic = getattr(exc, 'diagnostic', None)
+                diagnostic_code = getattr(diagnostic, 'code', None)
+                diagnostic_code = getattr(diagnostic_code, 'value', diagnostic_code)
+                if diagnostic_code != 'AUTH_CREDENTIAL_MISSING':
+                    raise
+                credential = None
         except Exception:
             raise RouteError('GW_AGENT_CREDENTIAL_MISSING') from None
         if (credential is not None and

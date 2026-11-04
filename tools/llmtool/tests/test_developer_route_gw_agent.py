@@ -101,14 +101,15 @@ class GwAgentRouteTests(unittest.TestCase):
 
     def test_missing_or_empty_configured_key_writes_unauthenticated_profile(self):
         for configured_value in (None, ''):
+            missing_key = gw_agent.llm_config.coded_error(
+                'configured API key environment variable is missing or empty',
+                'AUTH_CREDENTIAL_MISSING', 'config.auth', user_action_required=True)
             with self.subTest(configured_value='missing' if configured_value is None else 'empty'), \
                     tempfile.TemporaryDirectory() as tmpdir, \
                     mock.patch.object(gw_agent.llm_config, 'resolve_profile_config',
                                       return_value={}), \
-                    mock.patch.object(gw_agent.llm_config, 'selected_provider',
-                                      return_value={'api_key_env': 'GW_AGENT_API_KEY'}), \
                     mock.patch.object(gw_agent.llm_config, 'api_key',
-                                      side_effect=RuntimeError('missing key')):
+                                      side_effect=missing_key):
                 if configured_value is None:
                     with mock.patch.dict(os.environ, {}, clear=False):
                         os.environ.pop('GW_AGENT_API_KEY', None)
@@ -141,6 +142,7 @@ class GwAgentRouteTests(unittest.TestCase):
             ('nul', 'bad\x00secret', None),
             ('overlong', 'x' * 8193, None),
             ('config-error', None, RuntimeError('private configuration detail')),
+            ('key-error', None, RuntimeError('private credential detail')),
         )
         for label, credential, resolve_error in cases:
             self.route._credential_resolved = False
@@ -152,7 +154,7 @@ class GwAgentRouteTests(unittest.TestCase):
                         gw_agent.llm_config, 'resolve_profile_config', return_value={}))
                 key_loader = (mock.patch.object(gw_agent.llm_config, 'api_key',
                                                 side_effect=resolve_error)
-                              if label in ('missing-env', 'empty-env') else
+                              if label == 'key-error' else
                               mock.patch.object(gw_agent.llm_config, 'api_key',
                                                 return_value=credential))
                 with resolver, key_loader:
