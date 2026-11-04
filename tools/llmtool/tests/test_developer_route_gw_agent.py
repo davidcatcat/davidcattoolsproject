@@ -420,6 +420,21 @@ class GwAgentRouteTests(unittest.TestCase):
         self.assertEqual(caught.exception.code,
                          'GW_AGENT_TASK_ID_MISMATCH_TASK_INVALID')
 
+    def test_long_gateway_code_keeps_bounded_task_identity_diagnostic(self):
+        gateway_code = 'GATEWAY_' + 'X' * 40
+        with tempfile.TemporaryDirectory() as temp:
+            result_path = Path(temp) / 'result.json'
+            result_path.write_text(json.dumps({
+                'schema_version': 1, 'status': 'POLICY_REFUSED', 'code': gateway_code,
+                'task_id': None}))
+            result_path.chmod(0o600)
+            with self.assertRaises(RouteError) as caught:
+                self.route.collect(temp, {'root': str(self.root),
+                                          'task': {'task_id': 'task-001'}})
+        self.assertTrue(caught.exception.code.startswith('GW_AGENT_TASK_ID_MISMATCH'))
+        self.assertLessEqual(len(caught.exception.code), 64)
+        self.assertEqual(caught.exception.facts['gateway_code'], gateway_code)
+
     def test_gateway_usage_keeps_unknown_and_partial_values(self):
         self.assertEqual(gw_agent._normalize_gw_agent_usage(None), {
             'status': 'UNKNOWN', 'calls': 0, 'calls_without_usage': 0,
