@@ -1,6 +1,7 @@
 """Focused tests for the local skill evidence ledger."""
 
 import errno
+import fcntl
 import json
 import multiprocessing
 import os
@@ -36,7 +37,7 @@ class SkillLedgerTests(unittest.TestCase):
         self.path = Path(self.tmp.name) / 'ledger.jsonl'
         self.path.parent.chmod(0o700)
         self.path_patch = mock.patch.object(ledger, '_path', return_value=self.path)
-        self.path_patch.start()
+        self.path_mock = self.path_patch.start()
         self.addCleanup(self.path_patch.stop)
         self.entry = {
             'task_id': 'task-a', 'run_id': 'run-a', 'session_id': 'session-a',
@@ -254,6 +255,17 @@ class SkillLedgerTests(unittest.TestCase):
     def test_hard_linked_ledger_is_refused(self):
         self.record()
         os.link(self.path, self.path.parent / 'ledger-link')
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+        self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
+        with self.assertRaises(ledger.SkillLedgerError) as caught:
+            self.record(run_id='other')
+        self.assertEqual(caught.exception.skill_ledger_code, 'LEDGER_UNREADABLE')
+
+    def test_existing_non_private_ledger_is_refused_by_public_operations(self):
+        self.record()
+        self.path.chmod(0o644)
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+        self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
         with self.assertRaises(ledger.SkillLedgerError) as caught:
             self.record(run_id='other')
         self.assertEqual(caught.exception.skill_ledger_code, 'LEDGER_UNREADABLE')
@@ -268,6 +280,13 @@ class SkillLedgerTests(unittest.TestCase):
             stream.write(b'{"torn":')
         self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
 
+    def test_valid_final_json_without_newline_is_refused(self):
+        self.record()
+        raw = self.path.read_bytes()
+        self.assertTrue(raw.endswith(b'\n'))
+        self.path.write_bytes(raw[:-1])
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
     def test_lock_file_mode_is_private(self):
         self.record()
         lock = Path(str(self.path) + '.lock')
@@ -278,6 +297,7 @@ class SkillLedgerTests(unittest.TestCase):
     def test_lock_symlink_is_refused(self):
         target = self.path.parent / 'lock-target'
         target.write_text('')
+        target.chmod(0o600)
         Path(str(self.path) + '.lock').symlink_to(target)
         self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
 
@@ -291,7 +311,7 @@ class SkillLedgerTests(unittest.TestCase):
         link_parent = self.path.parent / 'link-parent'
         link_parent.symlink_to(real_parent, target_is_directory=True)
         self.path = link_parent / 'ledger.jsonl'
-        self.path_patch.return_value = self.path
+        self.path_mock.return_value = self.path
         self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
 
     def test_missing_binding_fields_are_refused(self):
@@ -305,7 +325,7 @@ class SkillLedgerTests(unittest.TestCase):
                 self.assertEqual(caught.exception.skill_ledger_code, 'INVALID_ENTRY')
 
     def test_invalid_and_oversized_ttl_are_refused(self):
-        for ttl in (0, -1, 1.5, 10**100):
+        for ttl in (0, -1, 1.5, 10**100, False, True):
             with self.subTest(ttl=ttl):
                 with self.assertRaises(ledger.SkillLedgerError) as caught:
                     ledger.record(dict(self.entry), ttl_seconds=ttl)
@@ -331,9 +351,11 @@ class SkillLedgerTests(unittest.TestCase):
                 self.record()
                 anchor = Path(str(self.path) + '.head')
                 if kind == 'symlink':
+                    anchor_contents = anchor.read_bytes()
                     anchor.unlink()
                     target = self.path.parent / 'anchor-target'
-                    target.write_text('{}')
+                    target.write_bytes(anchor_contents)
+                    target.chmod(0o600)
                     anchor.symlink_to(target)
                 elif kind == 'hardlink':
                     os.link(anchor, self.path.parent / 'anchor-link')
@@ -351,6 +373,47 @@ class SkillLedgerTests(unittest.TestCase):
                         candidate.unlink()
                 self.path.unlink(missing_ok=True)
 
+    def test_non_regular_anchor_is_rejected_before_anchor_json_parsing(self):
+        self.record()
+        anchor = Path(str(self.path) + '.head')
+        anchor.unlink()
+        os.mkfifo(anchor, 0o600)
+        with mock.patch.object(ledger.json, 'loads', wraps=json.loads) as loads:
+            self.assertFalse(ledger._read_anchor(self.path))
+        loads.assert_not_called()
+
+    def test_recovery_io_failures_are_reported_as_unreadable(self):
+        self.record()
+        records = ledger._read(self.path)
+        pending = {'count': len(records) + 1, 'last_sha256': 'f' * 64}
+        ledger._write_anchor(self.path, records, pending)
+        with mock.patch.object(ledger, '_write_anchor', side_effect=ledger.SkillLedgerError(
+                'LEDGER_UNREADABLE')):
+            self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+
+        ledger._write_anchor(self.path, records, pending)
+        with mock.patch.object(ledger, '_write_anchor', side_effect=ledger.SkillLedgerError(
+                'LEDGER_UNREADABLE')):
+            self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
+
+    def test_check_recovers_anchor_while_holding_exclusive_lock(self):
+        self.record()
+        original_recover = ledger._recover_anchor
+        lock = Path(str(self.path) + '.lock')
+
+        def assert_locked(path, records):
+            probe_fd = os.open(lock, os.O_RDWR)
+            try:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(probe_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                os.close(probe_fd)
+            return original_recover(path, records)
+
+        with mock.patch.object(ledger, '_recover_anchor', side_effect=assert_locked) as recover:
+            self.assertEqual(self.check()['status'], 'VERIFIED')
+        recover.assert_called_once()
+
     def test_interrupted_anchor_replace_recovers_committed_receipt(self):
         self.record()
         original_replace = os.replace
@@ -366,26 +429,41 @@ class SkillLedgerTests(unittest.TestCase):
         with mock.patch.object(ledger.os, 'replace', side_effect=fail_final_replace):
             with self.assertRaises(ledger.SkillLedgerError):
                 self.record(run_id='run-b')
-        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.assertEqual(self.check(run_id='run-a')['status'], 'VERIFIED')
+        self.assertEqual(self.check(run_id='run-b')['status'], 'VERIFIED')
         self.record(run_id='after-recovery')
         self.assertTrue(ledger.verify_chain()[0])
 
     def test_interrupted_anchor_fsync_recovers_committed_receipt(self):
         self.record()
         original_fsync = os.fsync
-        calls = 0
+        original_write_anchor = ledger._write_anchor
+        in_final_anchor_phase = False
+        final_anchor_fsync_reached = False
+
+        def track_anchor_phase(path, records, intent=None):
+            nonlocal in_final_anchor_phase
+            previous_phase = in_final_anchor_phase
+            in_final_anchor_phase = intent is None
+            try:
+                return original_write_anchor(path, records, intent)
+            finally:
+                in_final_anchor_phase = previous_phase
 
         def fail_final_anchor_fsync(fd):
-            nonlocal calls
-            calls += 1
-            if calls == 3:
+            nonlocal final_anchor_fsync_reached
+            if in_final_anchor_phase and not final_anchor_fsync_reached:
+                final_anchor_fsync_reached = True
                 raise OSError(errno.ENOSPC, 'full')
             return original_fsync(fd)
 
-        with mock.patch.object(ledger.os, 'fsync', side_effect=fail_final_anchor_fsync):
+        with mock.patch.object(ledger, '_write_anchor', side_effect=track_anchor_phase), \
+                mock.patch.object(ledger.os, 'fsync', side_effect=fail_final_anchor_fsync):
             with self.assertRaises(ledger.SkillLedgerError):
                 self.record(run_id='run-b')
-        self.assertEqual(self.check()['status'], 'VERIFIED')
+        self.assertTrue(final_anchor_fsync_reached)
+        self.assertEqual(self.check(run_id='run-a')['status'], 'VERIFIED')
+        self.assertEqual(self.check(run_id='run-b')['status'], 'VERIFIED')
         self.record(run_id='after-recovery')
         self.assertTrue(ledger.verify_chain()[0])
 

@@ -287,8 +287,13 @@ def verify_chain():
             records = _read(path)
         except SkillLedgerError:
             return False, 'LEDGER_UNREADABLE'
-        return ((True, None) if _chain(records) and _recover_anchor(path, records)
-                else (False, 'CHAIN_BROKEN'))
+        if not _chain(records):
+            return False, 'CHAIN_BROKEN'
+        try:
+            recovered = _recover_anchor(path, records)
+        except SkillLedgerError:
+            return False, 'LEDGER_UNREADABLE'
+        return (True, None) if recovered else (False, 'CHAIN_BROKEN')
     finally:
         fcntl.flock(lock_fd, fcntl.LOCK_UN)
         os.close(lock_fd)
@@ -385,7 +390,13 @@ def check(task_id, run_id, session_id, agent_id, role, provider, model, repo,
             records = _read(path)
         except SkillLedgerError:
             return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
-        if not _chain(records) or not _anchor_matches(path, records):
+        if not _chain(records):
+            return {'status': 'UNVERIFIED', 'reason': 'CHAIN_BROKEN'}
+        try:
+            recovered = _recover_anchor(path, records)
+        except SkillLedgerError:
+            return {'status': 'UNVERIFIED', 'reason': 'LEDGER_UNREADABLE'}
+        if not recovered:
             return {'status': 'UNVERIFIED', 'reason': 'CHAIN_BROKEN'}
         by_id = [item for item in records if item.get('receipt_id') and
                  item.get('entry_type') != 'REVOCATION']
