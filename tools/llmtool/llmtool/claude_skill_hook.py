@@ -7,7 +7,11 @@ Read whose working-tree hash differs from the manifest hash records no row, so
 the gate reports NOT_READ; a file changed after a valid Read reports
 STALE_BLOB. The
 N3 protected-word matcher is deliberately lexical and cannot block commands
-hidden in scripts, shell indirection, disabled hooks, or Claude safe mode.
+hidden in scripts, shell indirection, disabled hooks, or Claude safe mode. If
+both a compaction ledger append and its failure-marker write fail, an already
+readable ledger may retain older evidence; that rare gap cannot be recorded.
+After a failed compaction marker, re-reads remain COMPACTED; start a new
+session to recover.
 Same-user processes can forge hook input or ledger data. A Read event is
 evidence the hook saw the unchanged file contents at hook time, not that the
 text was understood; a file change between hashing and later use remains a
@@ -363,40 +367,115 @@ def _check(payload, gate):
 
 
 def _protected_gates(command):
-    # N3 recognizes command forms, so quoted arguments and option values do
-    # not combine unrelated protected words into a match.
+    # Keep shell syntax handling lexical: split command boundaries, then
+    # inspect each command without combining quoted arguments from neighbors.
     gates = []
-    for segment in re.split(r'[\n;&|(){}]+', command):
+    wrappers = {'command', 'exec', 'env', 'sudo', 'time', 'nohup', '!',
+                'if', 'then', 'while', 'do'}
+
+    def parse(segment):
         try:
-            tokens = [token.lower() for token in shlex.split(segment, posix=True)]
+            return [token.lower() for token in shlex.split(segment, posix=True)]
         except ValueError:
-            continue
-        while tokens and re.fullmatch(r'[a-z_][a-z0-9_]*=.*', tokens[0]):
-            tokens.pop(0)
-        if not tokens or tokens[0] in ('echo', 'printf'):
-            continue
-        executable = os.path.basename(tokens[0])
-        args = tokens[1:]
-        if executable == 'git' and args and args[0] == 'push':
-            gates.append('publish')
-        if executable == 'gh' and len(args) >= 2:
-            if args[:2] == ['pr', 'merge']:
-                gates.append('merge')
-            if args[0] == 'pr' and args[1] in ('comment', 'review'):
-                gates.append('review')
-            if args[:2] == ['issue', 'comment']:
-                gates.append('review')
-        tool_args = None
-        if executable in ('llmtool', 'llmtool.exe'):
-            tool_args = args
-        elif (executable in ('python', 'python3', 'python.exe', 'python3.exe') and
-              len(args) >= 3 and args[:2] == ['-m', 'llmtool.cli']):
-            tool_args = args[2:]
-        if tool_args and len(tool_args) >= 2 and tool_args[0] == 'task':
-            if tool_args[1] == 'delegate':
-                gates.append('dispatch')
-            if tool_args[1] in ('complete', 'advance'):
-                gates.append('complete')
+            # An unmatched quote should not hide a recognizable leading
+            # command (for example a shell comment containing an apostrophe).
+            # This fallback deliberately applies the same token rules after
+            # removing quote characters; it does not infer commands in prose.
+            return re.sub(r'["\']', '', segment).split()
+
+    def strip_value_options(tokens, value_options):
+        result = []
+        index = 0
+        while index < len(tokens):
+            token = tokens[index]
+            if token in value_options:
+                index += 2
+                continue
+            if any(token.startswith(option + '=') for option in value_options):
+                index += 1
+                continue
+            result.append(token)
+            index += 1
+        return result
+
+    def scan(segment, depth=0):
+        if depth > 8:
+            return
+        for part in re.split(r'[\n;&|(){}]+', segment):
+            tokens = parse(part)
+            if not tokens:
+                continue
+            # Shell control words and command wrappers may precede the real
+            # executable. env/sudo accept option arguments before it.
+            while tokens:
+                while tokens and tokens[0] in ('if', 'then', 'while', 'do', '!'):
+                    tokens.pop(0)
+                if not tokens or tokens[0] not in wrappers:
+                    break
+                wrapper = tokens.pop(0)
+                if wrapper == 'env':
+                    tokens = strip_value_options(tokens, {'-u', '--unset', '-C', '--chdir'})
+                    while tokens and (tokens[0].startswith('-') or
+                                      re.fullmatch(r'[a-z_][a-z0-9_]*=.*', tokens[0])):
+                        tokens.pop(0)
+                elif wrapper == 'sudo':
+                    tokens = strip_value_options(tokens, {'-u', '--user', '-g', '--group',
+                                                          '-h', '--host', '-p', '--prompt',
+                                                          '-C', '--close-from', '-T', '--command-timeout'})
+                    while tokens and tokens[0].startswith('-'):
+                        tokens.pop(0)
+                elif wrapper == 'time':
+                    while tokens and tokens[0].startswith('-'):
+                        tokens.pop(0)
+                else:
+                    while tokens and re.fullmatch(r'[a-z_][a-z0-9_]*=.*', tokens[0]):
+                        tokens.pop(0)
+            if not tokens or tokens[0] in ('echo', 'printf'):
+                continue
+            executable = os.path.basename(tokens[0])
+            args = tokens[1:]
+            if executable in ('bash', 'sh', 'zsh'):
+                try:
+                    c_index = args.index('-c')
+                except ValueError:
+                    c_index = -1
+                if c_index >= 0 and c_index + 1 < len(args):
+                    scan(args[c_index + 1], depth + 1)
+                continue
+            if executable == 'git':
+                args = strip_value_options(args, {'-c', '-C', '--git-dir', '--work-tree',
+                                                  '--namespace', '--exec-path'})
+                if args and args[0] == 'push':
+                    gates.append('publish')
+            elif executable == 'gh':
+                args = strip_value_options(args, {'-R', '--repo'})
+                if args[:2] == ['pr', 'merge']:
+                    gates.append('merge')
+                if len(args) >= 2 and args[0] == 'pr' and args[1] in ('comment', 'review'):
+                    gates.append('review')
+                if args[:2] == ['issue', 'comment']:
+                    gates.append('review')
+            tool_args = None
+            if executable in ('llmtool', 'llmtool.exe'):
+                tool_args = [arg for arg in args if arg != '--json']
+            elif re.fullmatch(r'python(?:3(?:\.\d+)?)?(?:\.exe)?', executable):
+                python_args = list(args)
+                while python_args and python_args[0] in ('-B', '-I'):
+                    python_args.pop(0)
+                while python_args and python_args[0] == '-X':
+                    python_args = python_args[2:]
+                while python_args and python_args[0].startswith('-X'):
+                    python_args.pop(0)
+                if len(python_args) >= 2 and python_args[0] == '-m' and python_args[1] in (
+                        'llmtool', 'llmtool.cli'):
+                    tool_args = python_args[2:]
+            if tool_args and len(tool_args) >= 2 and tool_args[0] == 'task':
+                if tool_args[1] == 'delegate':
+                    gates.append('dispatch')
+                if tool_args[1] in ('complete', 'advance'):
+                    gates.append('complete')
+
+    scan(command)
     return list(dict.fromkeys(gates))
 
 
