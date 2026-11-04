@@ -2091,7 +2091,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
         args = Namespace(task_id=task['task_id'], executor_task='executor-task-1',
                          reviewer_task='reviewer-task-1', pr=10)
         with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
-                   return_value=git_evidence), \
+                   return_value=git_evidence) as collect, \
+                patch('llmtool.task_submission_cli.task_completion._github_get',
+                      return_value={'ref': 'refs/heads/main', 'object': {
+                          'type': 'commit', 'sha': '9' * 40}}) as github_ref, \
+                patch('llmtool.task_submission_cli.task_completion._trusted_slug',
+                      return_value='davidcatcat/davidcattoolsproject'), \
                 patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
                       return_value=[{'path': target, 'source_sha': result_sha,
                                      'exit_code': 0, 'output_sha256': '6' * 64}]), \
@@ -2101,6 +2106,49 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(run_task_complete(args, store=store), 1)
 
         self.assertEqual(github.call_args.kwargs['changed_paths'], changed_paths)
+        self.assertEqual(github_ref.call_args.args[0], 'git/ref/heads/main')
+        self.assertEqual(collect.call_args.kwargs['trusted_base_sha'], '9' * 40)
+        saved = store.get(task['task_id'])
+        pin = saved['completion']['evidence']['trusted_main_pin']
+        self.assertEqual(pin['sha'], '9' * 40)
+        self.assertEqual(pin['ref'], 'refs/heads/main')
+        self.assertEqual(pin['provenance'], 'AUTHENTICATED_TRUSTED_SLUG_GITHUB_REF')
+        self.assertEqual(pin['repository'], 'davidcatcat/davidcattoolsproject')
+        self.assertEqual(pin['task_id'], task['task_id'])
+        self.assertEqual(pin['run_id'], task['run_id'])
+        self.assertEqual(pin['contract_digest'], task['task_binding']['contract_digest'])
+        self.assertEqual(pin['source_sha'], self.executor_head)
+        self.assertEqual(pin['verified_result_heads'], [result_sha])
+
+    def test_trusted_main_pin_requires_authenticated_commit_ref_and_binding(self):
+        task = {'task_id': 'a' * 32, 'run_id': 'b' * 32,
+                'task_binding': {'contract_digest': 'c' * 64}}
+        source_sha = 'd' * 40
+        with patch.object(submission_cli.task_completion, '_github_get',
+                          return_value={'ref': 'refs/heads/master', 'object': {
+                              'type': 'commit', 'sha': '9' * 40}}):
+            with self.assertRaises(LLMToolError) as raised:
+                submission_cli._capture_trusted_main_pin(task, source_sha)
+        self.assertEqual(raised.exception.completion_code, 'MAIN_REF_PIN_INVALID')
+
+        with patch.object(submission_cli.task_completion, '_github_get',
+                          side_effect=LLMToolError('unavailable')):
+            with self.assertRaises(LLMToolError):
+                submission_cli._capture_trusted_main_pin(task, source_sha)
+
+        response = {'ref': 'refs/heads/main', 'object': {
+            'type': 'commit', 'sha': '9' * 40}}
+        with patch.object(submission_cli.task_completion, '_github_get',
+                          return_value=response), \
+                patch.object(submission_cli.task_completion, '_trusted_slug',
+                             return_value='davidcatcat/davidcattoolsproject'):
+            pin = submission_cli._capture_trusted_main_pin(task, source_sha)
+        wrong_task = dict(task, task_id='e' * 32)
+        with patch.object(submission_cli.task_completion, '_trusted_slug',
+                          return_value='davidcatcat/davidcattoolsproject'), \
+                self.assertRaises(LLMToolError) as raised:
+            submission_cli._validate_trusted_main_pin(pin, wrong_task, source_sha)
+        self.assertEqual(raised.exception.completion_code, 'MAIN_REF_PIN_INVALID')
 
     def _remote_test_task(self):
         path = 'tools/llmtool/tests/test_task_submission_cli.py'

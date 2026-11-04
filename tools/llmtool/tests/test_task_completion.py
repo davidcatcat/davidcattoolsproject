@@ -268,24 +268,47 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('add', self.source_path)
         self._git('commit', '-m', 'later developer change')
 
+        objects_before = self._git('count-objects', '-v')
         result = self._collect_registered_result(self._git('rev-parse', 'HEAD'),
                                                  [self.source_path], trusted_base_sha)
-        self.assertEqual(result['changed_paths'], [self.source_path])
+        self.assertEqual(self._git('count-objects', '-v'), objects_before)
+        self.assertEqual(result['changed_paths'], ['README.md', self.source_path])
         self.assertEqual(result['developer_changed_paths'], [self.source_path])
 
-    def test_fake_main_ref_cannot_hide_out_of_scope_merge(self):
+    def test_fake_main_aliases_cannot_hide_malicious_merge(self):
+        self._git('branch', 'legitimate-pin', self.source_sha)
+        self._git('checkout', 'legitimate-pin')
+        (self.root / 'README.md').write_text('Legitimate pinned main.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'legitimate pinned main')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\nDeveloper change.\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'scoped developer change')
+        self._git('branch', 'scoped-developer-change', 'HEAD')
         outside = self.root / 'out.txt'
-        outside.write_text('Developer content.\n')
+        outside.write_text('Malicious imported content.\n')
         self._git('add', 'out.txt')
-        self._git('commit', '-m', 'out of scope commit')
+        self._git('commit', '-m', 'malicious out of scope change')
         evil = self._git('rev-parse', 'HEAD')
-        self._git('update-ref', 'refs/heads/master', evil)
-        self._git('merge', '--no-ff', evil, '-m', 'merge fake main')
+        self._git('branch', 'malicious-import', evil)
 
-        with self.assertRaises(LLMToolError) as raised:
-            self._collect_registered_result(self._git('rev-parse', 'HEAD'),
-                                            [self.source_path])
-        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+        aliases = ('refs/heads/main', 'refs/heads/master', 'refs/remotes/origin/main')
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                for candidate in aliases:
+                    self._git('update-ref', '-d', candidate)
+                self._git('update-ref', alias, evil)
+                self._git('reset', '--hard', 'scoped-developer-change')
+                self._git('merge', '--no-ff', 'malicious-import', '-m',
+                          'merge malicious branch')
+                with self.assertRaises(LLMToolError) as raised:
+                    self._collect_registered_result(self._git('rev-parse', 'HEAD'),
+                                                    [self.source_path], trusted_base_sha)
+                self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
+                self._git('reset', '--hard', 'scoped-developer-change')
 
     def test_repair_chain_segment_uses_developer_path_classification(self):
         self._git('branch', 'main', self.source_sha)
@@ -295,8 +318,8 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('commit', '-m', 'main update')
         trusted_base_sha = self._git('rev-parse', 'HEAD')
         self._git('checkout', 'feat/executor')
+        segment_start = self.source_sha
         self._git('merge', '--no-ff', 'main', '-m', 'merge main')
-        segment_start = self._git('rev-parse', 'HEAD')
         target = self.root / self.source_path
         target.write_text(target.read_text() + '\n# repair segment\n')
         self._git('add', self.source_path)
@@ -320,6 +343,52 @@ class TaskCompletionTests(unittest.TestCase):
         paths = task_completion._developer_changed_paths(
             str(self.root), self.source_sha, result_sha, old_parent)
         self.assertIn('out.txt', paths)
+
+    def test_invalid_trusted_main_pin_is_rejected(self):
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion._developer_changed_paths(
+                str(self.root), self.source_sha, self.source_sha, 'not-a-commit')
+        self.assertEqual(raised.exception.completion_code, 'GIT_INSPECTION_FAILED')
+
+    def test_nul_path_output_preserves_quoted_unicode_names(self):
+        path = 'folder/name with spaces é.py'
+        result_sha = self._make_path_result(path, 'value = 1\n')
+        paths = task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, result_sha, self.source_sha)
+        self.assertEqual(paths, (path,))
+
+    def test_deletions_and_mode_changes_are_attributed(self):
+        deleted = 'delete me.txt'
+        executable = 'run me.sh'
+        for path in (deleted, executable):
+            (self.root / path).write_text('content\n')
+        self._git('add', deleted, executable)
+        self._git('commit', '-m', 'add mode fixtures')
+        base = self._git('rev-parse', 'HEAD')
+        (self.root / deleted).unlink()
+        (self.root / executable).chmod(0o755)
+        self._git('add', '-A')
+        self._git('commit', '-m', 'delete and change mode')
+        result = self._git('rev-parse', 'HEAD')
+        self.assertEqual(task_completion._developer_changed_paths(
+            str(self.root), base, result, base), (deleted, executable))
+
+    def test_overlapping_main_and_developer_edits_remain_attributed(self):
+        self._git('branch', 'main-overlap', self.source_sha)
+        self._git('checkout', 'main-overlap')
+        readme = self.root / 'README.md'
+        readme.write_text('Repository fixture.\nMain line.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main overlapping file edit')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        readme.write_text('Developer line.\nRepository fixture.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'developer overlapping file edit')
+        self._git('merge', '--no-ff', 'main-overlap', '-m', 'merge overlapping main')
+        paths = task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, self._git('rev-parse', 'HEAD'), trusted_base_sha)
+        self.assertIn('README.md', paths)
 
     def test_out_of_scope_developer_file_is_refused(self):
         result_sha = self._make_path_result('README.md', 'Developer edit.\n')

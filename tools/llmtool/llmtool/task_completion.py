@@ -816,7 +816,7 @@ def validate_env2_pass_marker(registration, *, expected_root, current_head):
 
 
 def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
-         return_exit_code=False):
+         return_exit_code=False, env_overrides=None):
     """Run one fixed Git read with bounded output and no inherited Git config."""
     env = {
         'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
@@ -826,6 +826,12 @@ def _git(root, args, *, limit=_GIT_LIMIT, allow_exit_1=False,
         'GIT_TERMINAL_PROMPT': '0', 'GIT_PAGER': 'cat', 'PAGER': 'cat',
         'GIT_LITERAL_PATHSPECS': '1', 'TMPDIR': '/tmp',
     }
+    if env_overrides is not None:
+        if (type(env_overrides) is not dict or
+                any(type(key) is not str or type(value) is not str
+                    for key, value in env_overrides.items())):
+            _stop('GIT_INSPECTION_FAILED')
+        env.update(env_overrides)
     safe = ('-c', 'core.fsmonitor=false', '-c', 'core.hooksPath=/dev/null',
             '-c', 'core.untrackedCache=false', '-c', 'core.attributesFile=/dev/null',
             '-c', 'core.pager=cat', '-c', 'color.ui=false', '-c',
@@ -1078,13 +1084,15 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if not _is_ancestor(root, second_parent, trusted_base_sha):
             continue
         merge_parents[commit] = second_parent
-        history = _git(root, ('rev-list', second_parent, '^' + source_sha),
-                        limit=1024 * 1024)
-        inherited.update(history.decode('ascii').splitlines())
-        # --remerge-diff may create objects in the shared Git common directory.
-        # Any such inspection failure remains fail-closed as GIT_INSPECTION_FAILED.
-        resolution_raw = _git(root, ('show', '--remerge-diff', '--format=',
-                                     '--name-only', '-z', commit), limit=1024 * 1024)
+        history = _git(root, ('rev-list', '--max-count=4097', second_parent,
+                              '^' + source_sha), limit=1024 * 1024)
+        inherited_commits = history.decode('ascii').splitlines()
+        if len(inherited_commits) > 4096:
+            _stop('RESULT_DIFF_INVALID')
+        inherited.update(inherited_commits)
+        # --remerge-diff can write synthetic merge objects. Give Git a private
+        # object directory with the repository object store as read-only input.
+        resolution_raw = _remerge_diff_paths_raw(root, commit)
         try:
             merge_resolution_paths[commit] = set(
                 path for path in resolution_raw.decode('utf-8', 'strict').split('\x00')
@@ -1122,6 +1130,31 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
         if len(developer_paths) > 128:
             _stop('RESULT_DIFF_INVALID')
     return tuple(sorted(developer_paths))
+
+
+def _remerge_diff_paths_raw(root, commit):
+    """Read resolution paths while containing synthetic merge object writes."""
+    try:
+        objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
+                       limit=4096).decode('utf-8', 'strict').strip()
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
+    if not objects or not os.path.isabs(objects):
+        _stop('GIT_INSPECTION_FAILED')
+    try:
+        with tempfile.TemporaryDirectory(prefix='llmtool-remerge-objects-') as temporary:
+            object_dir = Path(temporary) / 'objects'
+            object_dir.mkdir(mode=0o700)
+            return _git(root, ('show', '--remerge-diff', '--format=',
+                               '--name-only', '-z', commit), limit=1024 * 1024,
+                        env_overrides={
+                            'GIT_OBJECT_DIRECTORY': str(object_dir),
+                            'GIT_ALTERNATE_OBJECT_DIRECTORIES': objects,
+                        })
+    except LLMToolError:
+        raise
+    except Exception:
+        _stop('GIT_INSPECTION_FAILED')
 
 
 def _is_ancestor(root, ancestor, descendant):
@@ -1178,7 +1211,11 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
     changed = _git(registration.root, ('diff', '--name-only', '-z', '--no-ext-diff',
                   '--no-textconv', '--no-renames', source_sha, snapshot.head, '--'),
                    limit=1024*1024)
-    paths = tuple(sorted(set(path for path in changed.decode('utf-8', 'strict').split('\x00') if path)))
+    try:
+        paths = tuple(sorted(set(path for path in
+            changed.decode('utf-8', 'strict').split('\x00') if path)))
+    except UnicodeError:
+        _stop('GIT_INSPECTION_FAILED')
     if not paths or len(paths) > 128:
         _stop('RESULT_DIFF_INVALID')
     developer_paths = _developer_changed_paths(
@@ -1220,8 +1257,11 @@ def collect_executor_result(*, task_id, expected_common_dir, expected_root,
             changed_segment = _git(registration.root,
                 ('diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
                  '--no-renames', start_sha, end_sha, '--'), limit=1024*1024)
-            segment_paths = tuple(sorted(set(
-                path for path in changed_segment.decode('utf-8', 'strict').split('\x00') if path)))
+            try:
+                segment_paths = tuple(sorted(set(path for path in
+                    changed_segment.decode('utf-8', 'strict').split('\x00') if path)))
+            except UnicodeError:
+                _stop('GIT_INSPECTION_FAILED')
             segment_developer_paths = _developer_changed_paths(
                 registration.root, start_sha, end_sha, trusted_base_sha)
             if (not segment_paths or not segment_developer_paths or
