@@ -4057,16 +4057,12 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
     count = 0
     newest_assignment = None
     high_debug_task = getattr(args, 'high_debug_task', None)
-    unreadable_high_debug_task = False
     for task_id in task_ids:
         if task_id == current_task_id:
             continue
         try:
             record = store.get(task_id)
         except Exception:
-            if task_id == high_debug_task:
-                unreadable_high_debug_task = True
-                continue
             raise LLMToolError(
                 f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
         completion = record.get('completion')
@@ -4101,8 +4097,6 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         raise LLMToolError(code)
     if high_debug_task is None:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_REQUIRED')
-    if unreadable_high_debug_task:
-        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
     if (type(high_debug_task) is not str or
             re.fullmatch(r'[0-9a-f]{32}', high_debug_task) is None):
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
@@ -4133,11 +4127,6 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             raise ValueError from None
         if newest_assignment is None or recorded_stamp <= newest_assignment:
             raise ValueError
-        if d6_binding is None:
-            d6_binding = _delegate_d6_binding(args)
-        _registration, snapshot = d6_binding
-        if examined_sha != getattr(snapshot, 'head', None):
-            raise ValueError
         # High Debug D6 names are derived from their executor D6, attempt
         # number, and examined HEAD. Recompute the name to bind this entry to
         # the executor D6 being repaired.
@@ -4154,6 +4143,14 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             raise ValueError
     except Exception:
         raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID') from None
+    if d6_binding is None:
+        try:
+            d6_binding = _delegate_d6_binding(args)
+        except Exception:
+            raise LLMToolError('D6_SOURCE_BINDING_MISMATCH') from None
+    _registration, snapshot = d6_binding
+    if examined_sha != getattr(snapshot, 'head', None):
+        raise LLMToolError('DELEGATE_HIGH_DEBUG_TASK_INVALID')
     try:
         store.record_repair_cap_override(
             current_task_id, ref=ref, rounds=max(3, count + 1))

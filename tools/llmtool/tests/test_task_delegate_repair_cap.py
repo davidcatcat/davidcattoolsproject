@@ -110,9 +110,24 @@ class DelegateRepairCapTests(unittest.TestCase):
 
         self.assertEqual(store.recorded, [])
 
-    def test_below_cap_ignores_unreadable_diagnosis(self):
+    def test_below_cap_rejects_unreadable_record(self):
         store = _Store(count=MAX_REPAIR_ATTEMPTS, unreadable=True)
-        task_submission_cli._check_delegate_repair_cap(_args(), store)
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_unreadable_diagnosis_that_may_be_counted_fails_closed(self):
+        store = _Store(count=MAX_REPAIR_ATTEMPTS, unreadable=True)
+        store.records.pop(_HIGH_DEBUG_TASK, None)
+        store.records[_HIGH_DEBUG_TASK] = {
+            'completion': {'executor_task_id': _EXECUTOR_TASK},
+            'developer': {'created_at': '2026-11-04T00:00:00Z'},
+        }
+
+        with self.assertRaisesRegex(
+                LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
 
     def test_missing_high_debug_task_is_refused(self):
@@ -203,6 +218,15 @@ class DelegateRepairCapTests(unittest.TestCase):
         store.records['00000000000000000000000000000000']['developer']['created_at'] = 'bad'
         with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_COUNT_UNAVAILABLE'):
             task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_d6_binding_failure_has_distinct_error(self):
+        store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+        with patch.object(task_submission_cli, '_delegate_d6_binding',
+                          side_effect=OSError('unavailable')):
+            with self.assertRaisesRegex(
+                    LLMToolError, 'D6_SOURCE_BINDING_MISMATCH'):
+                task_submission_cli._check_delegate_repair_cap(_args(), store)
         self.assertEqual(store.recorded, [])
 
 
