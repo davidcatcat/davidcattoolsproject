@@ -654,7 +654,9 @@ class ClaudeBgDispatchTests(unittest.TestCase):
     def test_watch_uses_worker_account_and_stops_there_instead_of_pm_account(self):
         worker_dir = self.home / 'worker-account'
         worker_dir.mkdir()
-        self.scenario(account_dir=worker_dir, after=[[row(TARGET, status='waiting')]])
+        # watch does not launch this session, so the fake CLI serves its
+        # current state from `before`; `after` is used only after a launch.
+        self.scenario(account_dir=worker_dir, before=[row(TARGET, status='waiting')])
         def configured_role(role):
             return {'role': role, 'provider': 'claude',
                     'config_dir': str(worker_dir if role == 'claude-developer'
