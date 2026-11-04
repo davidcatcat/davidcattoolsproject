@@ -159,48 +159,48 @@ def _unwrap(command):
     current = command
     for _ in range(8):
         try:
-            tokens = shlex.split(current, posix=True)
+            words = shlex.split(current, posix=True)
         except ValueError:
             return []
-        if not tokens:
+        if not words:
             return []
-        executable = os.path.basename(tokens[0])
+        executable = os.path.basename(words[0])
         if executable == 'env':
             index = 1
-            while index < len(tokens):
-                token = tokens[index]
-                if token == '--':
+            while index < len(words):
+                word = words[index]
+                if word == '--':
                     index += 1
                     break
-                if token.startswith('-'):
-                    index += 2 if token in ('-u', '--unset', '-C', '--chdir') else 1
+                if word.startswith('-'):
+                    index += 2 if word in ('-u', '--unset', '-C', '--chdir') else 1
                     continue
-                if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', token):
+                if re.match(r'^[A-Za-z_][A-Za-z0-9_]*=', word):
                     index += 1
                     continue
                 break
-            if index >= len(tokens):
+            if index >= len(words):
                 return []
-            current = shlex.join(tokens[index:])
+            current = shlex.join(words[index:])
             continue
         if executable in ('bash', 'sh'):
             try:
-                index = tokens.index('-c')
+                index = words.index('-c')
             except ValueError:
-                return tokens
-            if index + 1 >= len(tokens):
+                return words
+            if index + 1 >= len(words):
                 return []
-            current = tokens[index + 1]
+            current = words[index + 1]
             continue
-        return tokens
+        return words
     return []
 
 
 def _protected(command):
-    tokens = _unwrap(command)
-    if not tokens:
+    words = _unwrap(command)
+    if not words:
         return False
-    names = [os.path.basename(token) for token in tokens]
+    names = [os.path.basename(word) for word in words]
     for index, name in enumerate(names):
         rest = names[index:]
         if name == 'git' and 'push' in rest[1:]:
