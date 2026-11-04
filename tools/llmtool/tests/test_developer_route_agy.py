@@ -129,6 +129,7 @@ class AgyRouteTests(unittest.TestCase):
 
     def test_config_loader_rejects_unknown_and_personal_values(self):
         config = load_route_config()
+        self.assertEqual(config['routes']['agy']['default_model'], 'claude-sonnet-5-5-medium')
         self.assertEqual(config['routes']['agy']['default_effort'], 'medium')
         for entry in ({'unexpected': True}, {'executable': '/Users/name/agy'}):
             path = self.root / 'bad.json'
