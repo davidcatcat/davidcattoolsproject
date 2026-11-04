@@ -287,25 +287,58 @@ class SkillLedgerTests(unittest.TestCase):
             self.assertEqual(self.path.read_bytes(), damaged)
             self.assertEqual(anchor.read_bytes(), pending_anchor)
 
-    def test_torn_tail_refusal_does_not_truncate_for_record_or_revoke(self):
-        receipt = self.record()
+    def test_record_recovers_torn_tail_with_pending_intent(self):
+        self.record()
+        records = ledger._read(self.path)
+        ledger._write_anchor(self.path, records, {
+            'count': len(records) + 1, 'last_sha256': 'f' * 64})
         with self.path.open('ab') as stream:
             stream.write(b'{"torn":')
-        damaged = self.path.read_bytes()
-        for operation in (lambda: self.record(run_id='torn'),
-                          lambda: ledger.revoke(receipt, 'withdrawn')):
-            with self.assertRaises(ledger.SkillLedgerError) as caught:
-                operation()
-            self.assertEqual(caught.exception.skill_ledger_code, 'LEDGER_UNREADABLE')
-            self.assertEqual(self.path.read_bytes(), damaged)
+        receipt = self.record(run_id='recovered-record')
+        self.assertTrue(receipt)
+        self.assertTrue(ledger.verify_chain()[0])
+
+    def test_revoke_recovers_torn_tail_with_pending_intent(self):
+        receipt = self.record()
+        records = ledger._read(self.path)
+        ledger._write_anchor(self.path, records, {
+            'count': len(records) + 1, 'last_sha256': 'f' * 64})
+        with self.path.open('ab') as stream:
+            stream.write(b'{"torn":')
+        ledger.revoke(receipt, 'withdrawn')
+        self.assertEqual(self.check()['reason'], 'REVOKED')
 
     def test_verify_chain_refuses_torn_tail_without_repair(self):
         self.record()
+        records = ledger._read(self.path)
+        ledger._write_anchor(self.path, records, {
+            'count': len(records) + 1, 'last_sha256': 'f' * 64})
         with self.path.open('ab') as stream:
             stream.write(b'{"torn":')
         damaged = self.path.read_bytes()
+        anchor = Path(str(self.path) + '.head')
+        pending_anchor = anchor.read_bytes()
         self.assertEqual(ledger.verify_chain(), (False, 'LEDGER_UNREADABLE'))
         self.assertEqual(self.path.read_bytes(), damaged)
+        self.assertEqual(anchor.read_bytes(), pending_anchor)
+
+    def test_torn_tail_with_edited_row_is_unreadable_without_truncating(self):
+        self.record()
+        records = ledger._read(self.path)
+        ledger._write_anchor(self.path, records, {
+            'count': len(records) + 1, 'last_sha256': 'f' * 64})
+        raw = self.path.read_bytes()
+        edited = raw.replace(b'head-a', b'head-x', 1)
+        self.assertNotEqual(edited, raw)
+        with self.path.open('wb') as stream:
+            stream.write(edited)
+            stream.write(b'{"torn":')
+        damaged = self.path.read_bytes()
+        anchor = Path(str(self.path) + '.head')
+        pending_anchor = anchor.read_bytes()
+        self.assertEqual(self.check()['reason'], 'LEDGER_UNREADABLE')
+        self.assertEqual(self.path.read_bytes(), damaged)
+        self.assertEqual(anchor.read_bytes(), pending_anchor)
 
     def test_symlink_ledger_is_refused(self):
         self.record()

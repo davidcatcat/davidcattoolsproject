@@ -4,8 +4,9 @@ The hash chain detects edited, removed, or reordered lines. Same-user tampering
 can be detected only up to rewriting the whole chain: removing entries and
 rewriting the separate .head anchor is undetected, and deleting both files
 reads as an empty ledger. A pending append intent plus one removed committed
-line reads as not appended and goes undetected. check() may write .head while
-recovering an interrupted append. record() can raise after its line persists,
+line reads as not appended and goes undetected. check(), record(), and revoke()
+may truncate the ledger while recovering an interrupted append; check() may
+also write .head. record() can raise after its line persists,
 so callers must treat that result as outcome unknown. The ledger is limited to
 16 MiB and uses an untimed exclusive flock.
 """
