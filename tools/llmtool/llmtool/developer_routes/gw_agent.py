@@ -229,8 +229,9 @@ class GwAgentRoute(DeveloperRoute):
                     'budgets', 'findings'}
         if set(task) - required:
             raise RouteError('GW_AGENT_TASK_UNKNOWN_FIELDS')
-        for field in sorted((required - {'findings'}) - set(task)):
+        for field in sorted(required - {'findings'} - set(task)):
             raise RouteError('GW_AGENT_TASK_' + field.upper() + '_MISSING')
+        task.setdefault('findings', [])
         if type(task.get('schema_version')) is not int or task['schema_version'] != 1:
             raise RouteError('GW_AGENT_TASK_SCHEMA_VERSION_INVALID')
         if (type(task.get('task_id')) is not str or
@@ -273,8 +274,6 @@ class GwAgentRoute(DeveloperRoute):
                 raise RouteError('GW_AGENT_TASK_BUDGET_' + field.upper() + '_INVALID')
         if set(budgets) != set(_GATEWAY_BUDGETS):
             raise RouteError('GW_AGENT_TASK_BUDGETS_INVALID')
-        if 'findings' not in task:
-            raise RouteError('GW_AGENT_TASK_FINDINGS_MISSING')
         return value
 
     def prepare_files(self, tmpdir, request):
@@ -411,7 +410,7 @@ class GwAgentRoute(DeveloperRoute):
                 type(result.get('audit_sha256')) is not str or
                 re.fullmatch(r'[0-9a-f]{64}', result['audit_sha256']) is None):
             raise RouteError('GW_AGENT_OUTPUT_INVALID')
-        if result['served_model'] == 'UNKNOWN':
+        if result['served_model'] == 'UNKNOWN' and result['status'] == 'DONE':
             raise RouteError('GW_AGENT_MODEL_UNVERIFIED', facts={
                 'gateway_code': self._gateway_code, 'gateway_status': result['status']})
         if ((result['status'] == 'DONE' and result['code'] is not None) or

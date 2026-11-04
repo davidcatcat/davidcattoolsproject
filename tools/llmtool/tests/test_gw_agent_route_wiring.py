@@ -204,7 +204,19 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['synthetic'],
+                              'profile': {'adapter': 'openai-chat-tools',
+                                  'base_url': 'https://api.openai.com/v1',
+                                  'model': 'gw-agent-default',
+                                  'context_cap_tokens': 32768,
+                                  'max_output_tokens': 8192,
+                                  'allowed_data_classes': ['synthetic']},
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+             patch.object(task_submission_cli, 'resolve_profile_config',
+                          return_value={'generation': {'max_tokens': 8192,
+                                                       'context_cap_tokens': 32768}}), \
+             patch.object(task_submission_cli, 'selected_provider', return_value={
+                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'base_url': 'https://authorized.example/v1'}), \
              patch.object(worker_dispatch, 'evaluate', return_value=worker_dispatch.PolicyDecision(
                  'company-gw-agent', True, 'OWNER_POLICY_ALLOWED', 'f' * 64)), \
              patch.object(worker_dispatch, 'authorize_dispatch',
@@ -550,6 +562,11 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         gateway_profile.pop('data_class_map', None)
 
         seen = {}
+        def make_route(config):
+            seen['profile'] = copy.deepcopy(config['profile'])
+            seen['route_model'] = config['default_model']
+            return route
+
         def run_route(_route, request, *, gate, **_kwargs):
             self.assertIs(gate(), decision)
             seen['task'] = copy.deepcopy(request['task'])
@@ -561,7 +578,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
                                         separators=(',', ':')).encode('utf-8')
                 seen['parsed_task'] = parse_task(seen['task'], serialized)
                 parse_profile({'schema_version': 1, 'profiles': {
-                    'llmtool-direct': dict(gateway_profile, auth_env=None)}},
+                    'llmtool-direct': dict(seen['profile'], auth_env=None)}},
                     'llmtool-direct')
             finally:
                 sys.path.remove(gateway_path)
@@ -579,10 +596,17 @@ class GwAgentRouteWiringTests(unittest.TestCase):
              patch.object(task_submission_cli, 'load_route_config',
                           return_value={'routes': {'gw-agent': {
                               'allowed_data_classes': ['synthetic'],
+                              'profile': gateway_profile,
                               'default_model': 'gw-agent-default', 'default_effort': 'low'}}}), \
+             patch.object(task_submission_cli, 'resolve_profile_config',
+                          return_value={'generation': {'max_tokens': 8192,
+                                                       'context_cap_tokens': 32768}}), \
+             patch.object(task_submission_cli, 'selected_provider', return_value={
+                 'type': 'openai-compatible', 'model': 'authorized-model',
+                 'base_url': 'https://authorized.example/v1'}), \
              patch.object(worker_dispatch, 'authorize_dispatch'), \
              patch.object(worker_dispatch, 'evaluate', return_value=decision), \
-             patch.object(task_submission_cli, 'GwAgentRoute', return_value=route), \
+             patch.object(task_submission_cli, 'GwAgentRoute', side_effect=make_route), \
              patch.object(task_submission_cli, 'for_platform', return_value=object()), \
              patch.object(task_submission_cli, 'capture_snapshot'), \
              patch.object(task_submission_cli, 'cleanup_audit_copies'), \
@@ -597,7 +621,10 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         self.assertEqual(status, 0)
         developer = store.value['developer']
         self.assertEqual(developer['state'], 'DEVELOPER_RESPONDED')
-        self.assertEqual(developer['model'], 'gw-agent-default')
+        self.assertEqual(developer['model'], 'authorized-model')
+        self.assertEqual(seen['route_model'], 'authorized-model')
+        self.assertEqual(seen['profile']['model'], 'authorized-model')
+        self.assertEqual(seen['profile']['base_url'], 'https://authorized.example/v1')
         self.assertEqual(developer['artifact'], 'diff')
         self.assertEqual(developer['usage']['served_model'], 'real-served-model')
         self.assertEqual(seen['task']['schema_version'], 1)

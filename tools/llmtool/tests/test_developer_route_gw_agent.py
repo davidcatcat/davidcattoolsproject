@@ -380,13 +380,19 @@ class GwAgentRouteTests(unittest.TestCase):
                                   return_value={}), \
                 mock.patch.object(gw_agent.llm_config, 'api_key', return_value=None):
             self.route._prepare_files(tmpdir, request)
-        task = json.loads((Path(tmpdir) / 'task.json').read_text())
-        authorization = json.loads((Path(tmpdir) / 'authorization.json').read_text())
-        profile = json.loads((Path(tmpdir) / 'profiles.json').read_text())['profiles']['fake']
-        self.assertEqual(task['data_class'], 'synthetic')
-        self.assertEqual(authorization['data_class'], 'synthetic')
-        self.assertEqual(profile['allowed_data_classes'], ['synthetic'])
-        self.assertEqual(authorization['scope_digest'], _scope_digest(task))
+            task = json.loads((Path(tmpdir) / 'task.json').read_text())
+            authorization = json.loads((Path(tmpdir) / 'authorization.json').read_text())
+            profile = json.loads((Path(tmpdir) / 'profiles.json').read_text())['profiles']['fake']
+            self.assertEqual(task['data_class'], 'synthetic')
+            self.assertEqual(authorization['data_class'], 'synthetic')
+            self.assertEqual(profile['allowed_data_classes'], ['synthetic'])
+            self.assertEqual(authorization['scope_digest'], _scope_digest(task))
+
+    def test_omitted_findings_defaults_to_empty(self):
+        request = self.request()
+        request['task'].pop('findings')
+        validated = self.route.validate_request(request)
+        self.assertEqual(validated['task']['findings'], [])
 
     def test_complete_gateway_task_contract_names_the_failing_field(self):
         cases = (('schema_version', 2, 'GW_AGENT_TASK_SCHEMA_VERSION_INVALID'),

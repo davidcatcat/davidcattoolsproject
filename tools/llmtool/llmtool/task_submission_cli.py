@@ -3178,7 +3178,32 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
     if (type(route_config) is not dict or gateway_data_class is None or
             gateway_data_class not in route_config.get('allowed_data_classes', [])):
         raise LLMToolError('gw-agent data class is not allowed by its profile')
-    model = route_config['default_model']
+    try:
+        company_config = resolve_profile_config('company-gw', require_configured=True)
+        company_provider = selected_provider(company_config)
+        generation = company_config.get('generation')
+        model = company_provider.get('model')
+        base_url = company_provider.get('base_url')
+        max_output_tokens = generation.get('max_tokens') if type(generation) is dict else None
+        profile = route_config.get('profile')
+        context_cap_tokens = (generation.get('context_cap_tokens')
+                              if type(generation) is dict else None)
+        if context_cap_tokens is None and type(profile) is dict:
+            context_cap_tokens = profile.get('context_cap_tokens')
+        if (company_provider.get('type') != 'openai-compatible' or
+                type(model) is not str or not model or type(base_url) is not str or
+                not base_url or type(max_output_tokens) is not int or
+                type(context_cap_tokens) is not int or
+                type(profile) is not dict):
+            raise ValueError
+        route_config = copy.deepcopy(route_config)
+        route_config['default_model'] = model
+        route_config['expected_served_model'] = model
+        route_config['profile'].update(base_url=base_url, model=model,
+            max_output_tokens=max_output_tokens,
+            context_cap_tokens=context_cap_tokens)
+    except Exception:
+        raise LLMToolError('authorized company-gw profile is unavailable or invalid') from None
     effort = route_config['default_effort']
     prompt_packet = {
         'task_id': task['task_id'], 'run_id': task['run_id'],
@@ -3344,6 +3369,11 @@ def run_task_gw_agent_delegate(args, *, store, route_runner=None):
                 'source_manifest_sha256': None})
     except RouteError as exc:
         code = 'DEVELOPER_' + (exc.code if not owner_gate_denied else 'DISPATCH_DENIED')
+        gateway_code = exc.facts.get('gateway_code') if type(exc.facts) is dict else None
+        if (not owner_gate_denied and type(gateway_code) is str and
+                re.fullmatch(r'[A-Z0-9_]{1,48}', gateway_code) and
+                exc.code.startswith('GW_AGENT_')):
+            code = (code + '_' + gateway_code)[:64]
         return persist_failure(code)
     except Exception:
         return persist_failure('DEVELOPER_RESULT_UNKNOWN',
