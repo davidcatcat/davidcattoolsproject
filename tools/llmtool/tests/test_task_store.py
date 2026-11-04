@@ -86,6 +86,44 @@ class TaskStoreTests(unittest.TestCase):
             self.store.update(task['task_id'], high_debug=[changed])
         self.assertEqual(self.store.get(task['task_id'])['high_debug'], [entry])
 
+    def test_repair_cap_override_validates_and_records_optional_shape(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        saved = self.store.record_repair_cap_override(
+            task['task_id'],
+            ref='https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
+            rounds=3, recorded_at='2026-11-04T00:00:00Z')
+        self.assertEqual(saved['repair_cap_override'], {
+            'ref': 'https://github.com/davidcatcat/davidcattoolsproject/issues/120#issuecomment-123',
+            'rounds': 3, 'recorded_at': '2026-11-04T00:00:00Z'})
+
+    def test_repair_cap_override_rejects_bad_shapes(self):
+        cases = (
+            {'ref': 'http://github.com/owner/repo/issues/1/comments/2',
+             'rounds': 3, 'recorded_at': '2026-11-04T00:00:00Z'},
+            {'ref': 'https://github.com/owner/repo/issues/1',
+             'rounds': 3, 'recorded_at': '2026-11-04T00:00:00Z'},
+            {'ref': 'https://github.com/owner/repo/issues/1/comments/2',
+             'rounds': 2, 'recorded_at': '2026-11-04T00:00:00Z'},
+            {'ref': 'https://github.com/owner/repo/issues/1/comments/2',
+             'rounds': 3, 'recorded_at': 'invalid'},
+            {'ref': 'https://github.com/owner/repo/issues/1/comments/2',
+             'rounds': True, 'recorded_at': '2026-11-04T00:00:00Z'},
+        )
+        for override in cases:
+            with self.subTest(override=override):
+                task = self._codex_dispatch_task()
+                self.store.create(task)
+                with self.assertRaises(LLMToolError) as caught:
+                    self.store.update(task['task_id'], repair_cap_override=override)
+                self.assertEqual(caught.exception.task_store_error_code,
+                                 'TASK_REPAIR_CAP_OVERRIDE_INVALID')
+
+    def test_repair_cap_override_is_optional_for_existing_records(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        self.assertNotIn('repair_cap_override', self.store.get(task['task_id']))
+
     def test_run_failed_high_debug_entries_from_high_debug_are_valid(self):
         from llmtool import high_debug
         task = self._codex_dispatch_task()
