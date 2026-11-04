@@ -651,6 +651,13 @@ class ClaudeBgDispatchTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, 2)
         self.assertEqual(self.calls(), [])
 
+    def test_watch_rejects_unknown_worker_role_before_cli_calls(self):
+        code, result = self.run_tool('watch', '--name', 'unknown-role',
+                                     '--session-id', TARGET, '--report-file',
+                                     str(self.home / 'report.md'), '--timeout', '1')
+        self.assertEqual((code, result['reason']), (2, 'WORKER_UNKNOWN'))
+        self.assertEqual(self.calls(), [])
+
     def test_watch_uses_worker_account_and_stops_there_instead_of_pm_account(self):
         worker_dir = self.home / 'worker-account'
         worker_dir.mkdir()

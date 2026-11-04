@@ -177,6 +177,34 @@ class DeveloperAssignmentInboxTests(unittest.TestCase):
         self.assertEqual(view['status'], 'OK')
         self.assertEqual(self.store.task_ids(), [])
 
+    def test_claim_without_config_env_uses_worker_account_not_pm_account(self):
+        assigned = self.assign()
+        session = str(uuid.uuid4())
+        home = str(self.base / 'home')
+        worker_dir = str(Path(home) / '.claude')
+        environ = {'HOME': home}
+
+        def configured_role(role, *, environ, home):
+            return {'role': role, 'config_dir': self.account_a if role == 'pm' else None}
+
+        self.transcript(session, worker_dir)
+        with patch('llmtool.role_config.resolve_role', side_effect=configured_role):
+            claimed = inbox.claim(self.store, assigned['assignment_id'], worker=WORKER,
+                                  d6_task_id=D6, session_id=session, environ=environ)
+        self.assertEqual(claimed['state'], 'CLAIMED')
+        self.assertEqual(claimed['claim']['account_dir_label'],
+                         inbox.account_dir_label(environ))
+
+        self.register(D6, head='2' * 40)
+        assigned = self.assign()
+        pm_only_session = str(uuid.uuid4())
+        self.transcript(pm_only_session, self.account_a)
+        with patch('llmtool.role_config.resolve_role', side_effect=configured_role):
+            self.assert_refused(
+                'ASSIGNMENT_SESSION_NOT_FOUND', inbox.claim, self.store,
+                assigned['assignment_id'], worker=WORKER, d6_task_id=D6,
+                session_id=pm_only_session, environ=environ)
+
     # -- matrix 2 ---------------------------------------------------------
 
     def test_2_same_session_reclaim_returns_receipt_other_session_refused(self):

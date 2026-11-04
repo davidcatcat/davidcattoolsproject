@@ -140,6 +140,15 @@ def _account_environment(role):
     return configured, environ
 
 
+def _worker_key(role):
+    """Return the dispatch-gated Worker key for a supported Claude role."""
+    if role == "claude-reviewer":
+        return "claude-reviewer"
+    if type(role) is str and CLAUDE_DEVELOPER_ROLE_RE.fullmatch(role):
+        return "claude-developer"
+    raise DispatchError("WORKER_UNKNOWN")
+
+
 def _run(argv, *, cwd=None, timeout=CLI_TIMEOUT, env=None):
     try:
         proc = subprocess.run(argv, cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True,
@@ -353,7 +362,7 @@ def worker_config_dir(value):
 
 
 def refuse_cross_account_launch(worker_dir, *, account_env=None):
-    """A launch acts as the account it runs under, so only the caller's own is allowed."""
+    """A launch acts as the resolved Worker account, so only that account is allowed."""
     if worker_dir is None:
         return
     if not os.path.isabs(worker_dir) or (
@@ -373,14 +382,7 @@ def dispatch(*, claude, target, role, task_id, prompt, repo_root, timeout, poll_
     except LLMToolError as exc:
         raise DispatchError(getattr(exc, "role_config_code", "ROLE_CONFIG_INVALID")) from None
     refuse_cross_account_launch(worker_dir, account_env=account_env)
-    if role_settings.get("provider") not in (None, "claude"):
-        raise DispatchError("ROLE_PROVIDER_UNSUPPORTED")
-    worker_key = {"claude-reviewer": "claude-reviewer",
-                  "codex-reviewer": "codex-reviewer"}.get(role)
-    if worker_key is None and is_claude_developer_role:
-        worker_key = "claude-developer"
-    if worker_key is None:
-        raise DispatchError("WORKER_UNKNOWN")
+    worker_key = _worker_key(role)
     decision = worker_dispatch.evaluate(worker_key, owner_assignment_ref, task_id)
     if not decision.allowed:
         raise DispatchError(decision.reason_code)
@@ -520,6 +522,7 @@ def watch(*, claude, session_id, report_file, timeout, poll_interval, role, sinc
         _, account_env = _account_environment(role)
     except LLMToolError as exc:
         raise DispatchError(getattr(exc, "role_config_code", "ROLE_CONFIG_INVALID")) from None
+    _worker_key(role)
     result = {"schema_version": 1, "result": "WAITING", "reason": None,
               "session_id": session_id, "report_file": str(report_file),
               "status": None, "state": None, "stop": {"attempted": False}}
@@ -676,7 +679,7 @@ def _main(argv=None):
     start.add_argument("--repo-root", default=str(Path(__file__).resolve().parents[3]))
     start.add_argument("--timeout", type=float, default=120.0)
     start.add_argument("--worker-config-dir",
-                       help="must be the caller's own CLAUDE_CONFIG_DIR; another "
+                       help="must match the resolved Worker account; another "
                             "account is refused (use task assign + receipt)")
     proof = sub.add_parser("receipt", help="cross-account delivery evidence; never launches")
     proof.add_argument("--assignment-id", required=True, help="id printed by task assign")
