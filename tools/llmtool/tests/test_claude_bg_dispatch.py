@@ -101,7 +101,10 @@ elif '--bg' in argv:
     now = stamp(int(time.time() * 1000) + 50)
     for item in scenario.get('transcripts', []):
         sid = fill(item['session'])
-        folder = Path(os.environ['CLAUDE_CONFIG_DIR']) / 'projects' / item.get('project', 'p')
+        # The default account intentionally has no CLAUDE_CONFIG_DIR in the
+        # child environment. Keep the fake's transcript store rooted at the
+        # same effective account in that case.
+        folder = account / 'projects' / item.get('project', 'p')
         folder.mkdir(parents=True, exist_ok=True)
         with open(folder / (sid + '.jsonl'), 'a') as out:
             out.write(json.dumps({'type': 'user', 'cwd': '/old/cwd',
