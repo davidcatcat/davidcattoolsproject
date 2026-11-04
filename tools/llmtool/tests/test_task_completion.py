@@ -79,6 +79,9 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('add', self.source_path, 'tools/llmtool/.gitignore', 'README.md')
         self._git('commit', '-m', 'source')
         self.source_sha = self._git('rev-parse', 'HEAD')
+        trusted_ref = self._trusted_main_ref()
+        trusted_ref.start()
+        self.addCleanup(trusted_ref.stop)
         self.common = str(self.root / '.git')
         (Path(self.common) / 'llmtool-worktrees').mkdir(mode=0o700)
         self.task_id = 'executor-task'
@@ -102,6 +105,15 @@ class TaskCompletionTests(unittest.TestCase):
                   'task_record': {'developer': {'provider_profile': 'codex'}}}
         kwargs.update(overrides)
         return kwargs
+
+    def _trusted_main_ref(self):
+        def github_get(path):
+            if path != 'git/ref/heads/main':
+                raise AssertionError(f'unexpected GitHub path: {path}')
+            return {'ref': 'refs/heads/main',
+                    'object': {'type': 'commit', 'sha': self.source_sha}}
+
+        return patch.object(task_completion, '_github_get', side_effect=github_get)
 
     def _github_response_sequence(self, result_sha, pr, reviews, checks, *,
                                   workflow=None, runs=None, jobs=None, comments=()):
@@ -227,7 +239,7 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result_sha
 
-    def _collect_result(self, result_sha, artifact):
+    def _collect_result(self, result_sha, artifact, *, trusted_base_sha=None):
         return task_completion.collect_executor_result(
             task_id=self.task_id, expected_common_dir=self.common,
             expected_root=str(self.root), expected_branch='feat/executor',
@@ -237,7 +249,51 @@ class TaskCompletionTests(unittest.TestCase):
             expected_agent='executor-agent', expected_session_ref='Executor D6 session',
             expected_native_session_id='native-executor', write_paths=[self.source_path],
             artifact=artifact,
-            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest())
+            artifact_sha256=hashlib.sha256(artifact.encode()).hexdigest(),
+            **({'trusted_base_sha': trusted_base_sha}
+               if trusted_base_sha is not None else {}))
+
+    def test_main_merge_changes_are_excluded_from_developer_scope(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('Updated by main.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main documentation update')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer change')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge main')
+        target.write_text(target.read_text() + '# later developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'later developer change')
+
+        result_sha = self._git('rev-parse', 'HEAD')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result_sha
+        self._write_env2_marker(record, self.root, submitted_head=result_sha,
+                                current_head=result_sha)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+
+        result = self._collect_result(result_sha, artifact, trusted_base_sha=main_sha)
+        self.assertEqual(result['changed_paths'], ['README.md', self.source_path])
+        self.assertEqual(result['developer_changed_paths'], [self.source_path])
+
+    def test_out_of_scope_developer_file_is_refused(self):
+        result_sha = self._make_path_result('README.md', 'Developer edit.\n')
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_result(result_sha, artifact)
+        self.assertEqual(raised.exception.completion_code, 'RESULT_SCOPE_MISMATCH')
 
     def test_result_collection_ignores_replacement_commit_and_environment_override(self):
         result_sha, artifact = self._make_result()

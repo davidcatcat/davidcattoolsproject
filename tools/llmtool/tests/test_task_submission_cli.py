@@ -2103,7 +2103,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
         args = Namespace(task_id=task['task_id'], executor_task='executor-task-1',
                          reviewer_task='reviewer-task-1', pr=10)
         with patch('llmtool.task_submission_cli.task_completion.collect_executor_result',
-                   return_value=git_evidence), \
+                   return_value=git_evidence) as collect, \
+                patch('llmtool.task_submission_cli.task_completion._github_get',
+                      return_value={'ref': 'refs/heads/main', 'object': {
+                          'type': 'commit', 'sha': '9' * 40}}) as github_ref, \
+                patch('llmtool.task_submission_cli.task_completion._trusted_slug',
+                      return_value='davidcatcat/davidcattoolsproject'), \
                 patch('llmtool.task_submission_cli.task_completion.run_bounded_tests',
                       return_value=[{'path': target, 'source_sha': result_sha,
                                      'exit_code': 0, 'output_sha256': '6' * 64}]), \
@@ -2113,6 +2118,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
             self.assertEqual(run_task_complete(args, store=store), 1)
 
         self.assertEqual(github.call_args.kwargs['changed_paths'], changed_paths)
+        self.assertEqual(github_ref.call_args.args[0], 'git/ref/heads/main')
+        self.assertEqual(collect.call_args.kwargs['trusted_base_sha'], '9' * 40)
+        pin = store.get(task['task_id'])['completion']['evidence']['trusted_main_pin']
+        self.assertEqual(pin['sha'], '9' * 40)
+        self.assertEqual(pin['verified_result_heads'], [result_sha])
 
     def _remote_test_task(self):
         path = 'tools/llmtool/tests/test_task_submission_cli.py'

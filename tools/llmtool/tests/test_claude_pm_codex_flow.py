@@ -169,7 +169,12 @@ class ClaudePMCodexFlowTests(unittest.TestCase):
 
         # 4. Executor-result callback: real D6/Git/test evidence, no PM provider call.
         out = StringIO()
-        with patch('llmtool.task_submission_cli.resolve_profile_config',
+        with patch('llmtool.task_submission_cli.task_completion._github_get',
+                   return_value={'ref': 'refs/heads/main', 'object': {
+                       'type': 'commit', 'sha': self.source_sha}}), \
+             patch('llmtool.task_submission_cli.task_completion._trusted_slug',
+                   return_value='davidcatcat/davidcattoolsproject'), \
+             patch('llmtool.task_submission_cli.resolve_profile_config',
                    side_effect=forbidden), \
              patch('llmtool.task_submission_cli.create_client', side_effect=forbidden), \
              redirect_stdout(out):
