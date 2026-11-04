@@ -4,6 +4,7 @@ import os
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 from llmtool.skill_manifest import (
     MAX_SKILL_FILE_SIZE,
@@ -65,8 +66,9 @@ class SkillManifestTests(unittest.TestCase):
         return build_manifest(self.repo, self.commit, role, gate, git_runner=runner)
 
     def _assert_code(self, code, *args, **kwargs):
+        repo_root = kwargs.pop('repo_root', self.repo)
         with self.assertRaises(SkillManifestError) as caught:
-            build_manifest(self.repo, *args, **kwargs)
+            build_manifest(repo_root, *args, **kwargs)
         self.assertEqual(caught.exception.code, code)
         self.assertEqual(caught.exception.args, (code,))
         self.assertEqual(str(caught.exception), code)
@@ -123,6 +125,73 @@ class SkillManifestTests(unittest.TestCase):
             '0' * 40, 'developer', 'develop',
         )
 
+    def test_annotated_tag_object_id_is_not_a_commit(self):
+        tag = self._git('tag', '-a', 'manifest-tag', '-m', 'tag')
+        tag_oid = self._git('rev-parse', 'refs/tags/manifest-tag').stdout.decode('ascii').strip()
+        self._assert_code(
+            SKILL_MANIFEST_COMMIT_INVALID, tag_oid, 'developer', 'develop',
+        )
+
+    def test_replace_refs_do_not_change_commit_or_blob_contents(self):
+        expected = self._manifest()
+
+        # Replacing a required blob must not alter the bytes attributed to the
+        # original commit.
+        blob = self._git('rev-parse', self.commit + ':AGENTS.md').stdout.decode('ascii').strip()
+        replacement_blob = subprocess.run(
+            ['git', 'hash-object', '-w', '--stdin'], cwd=self.repo,
+            input=b'replaced governance\n', stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, check=True,
+        )
+        self._git('replace', blob, replacement_blob.stdout.decode('ascii').strip())
+        self.assertEqual(self._manifest(), expected)
+        self._git('replace', '-d', blob)
+
+        # Replacing the commit itself must not redirect the manifest either.
+        self._write_files({'AGENTS.md': b'replacement commit\n'})
+        replacement_commit = self._commit()
+        self._git('replace', self.commit, replacement_commit)
+        self.assertEqual(self._manifest(), expected)
+
+    def test_inherited_git_dir_does_not_redirect_repository_reads(self):
+        expected = self._manifest()
+        other = tempfile.TemporaryDirectory()
+        try:
+            subprocess.run(['git', 'init', '-q', other.name], check=True)
+            previous = os.environ.get('GIT_DIR')
+            os.environ['GIT_DIR'] = os.path.join(other.name, '.git')
+            try:
+                self.assertEqual(self._manifest(), expected)
+            finally:
+                if previous is None:
+                    os.environ.pop('GIT_DIR', None)
+                else:
+                    os.environ['GIT_DIR'] = previous
+        finally:
+            other.cleanup()
+
+    def test_subdirectory_repository_root_is_refused(self):
+        subdir = os.path.join(self.repo, 'skills')
+        os.makedirs(subdir, exist_ok=True)
+        self._assert_code(
+            SKILL_MANIFEST_COMMIT_INVALID, self.commit, 'developer', 'develop',
+            repo_root=subdir,
+        )
+
+    def test_malformed_tree_object_id_is_a_code_only_failure(self):
+        def malformed_runner(args, **kwargs):
+            if 'ls-tree' in args:
+                return SimpleNamespace(
+                    returncode=0,
+                    stdout=b'100644 blob not-an-object-id\tAGENTS.md\0',
+                )
+            return subprocess.run(args, **kwargs)
+
+        self._assert_code(
+            SKILL_MANIFEST_PATH_MISSING, self.commit, 'developer', 'develop',
+            git_runner=malformed_runner,
+        )
+
     def test_unknown_role_and_gate_are_refused(self):
         self._assert_code(SKILL_MANIFEST_ROLE_INVALID, self.commit, 'unknown', 'develop')
         self._assert_code(SKILL_MANIFEST_GATE_INVALID, self.commit, 'developer', 'unknown')
@@ -157,7 +226,18 @@ class SkillManifestTests(unittest.TestCase):
     def test_oversized_file_is_refused(self):
         self._write_files({'AGENTS.md': b'x' * (MAX_SKILL_FILE_SIZE + 1)})
         self.commit = self._commit()
-        self._assert_code(SKILL_MANIFEST_TOO_LARGE, self.commit, 'developer', 'develop')
+        content_reads = []
+
+        def tracking_runner(args, **kwargs):
+            if 'cat-file' in args and 'blob' in args:
+                content_reads.append(tuple(args))
+            return subprocess.run(args, **kwargs)
+
+        self._assert_code(
+            SKILL_MANIFEST_TOO_LARGE, self.commit, 'developer', 'develop',
+            git_runner=tracking_runner,
+        )
+        self.assertEqual(content_reads, [])
 
 
 if __name__ == '__main__':

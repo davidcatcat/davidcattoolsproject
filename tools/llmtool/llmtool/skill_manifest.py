@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import re
 import subprocess
 
@@ -91,9 +92,16 @@ def resolve(role, gate):
 def _run_git(git_runner, repo_root, args):
     """Run one bounded Git read, suppressing stderr from safe errors."""
     try:
+        # Environment variables such as GIT_DIR and GIT_WORK_TREE can redirect
+        # this read away from repo_root. Do not inherit any Git-specific state.
+        env = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith('GIT_')
+        }
         result = git_runner(
-            ['git'] + list(args),
+            ['git', '--no-replace-objects'] + list(args),
             cwd=repo_root,
+            env=env,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             check=False,
@@ -104,18 +112,28 @@ def _run_git(git_runner, repo_root, args):
 
 
 def _stdout(result):
-    value = getattr(result, 'stdout', None)
-    if type(value) is bytes:
-        return value
-    if type(value) is str:
-        return value.encode('utf-8')
+    try:
+        value = getattr(result, 'stdout', None)
+        if type(value) is bytes:
+            return value
+        if type(value) is str:
+            return value.encode('utf-8')
+    except Exception:
+        pass
     return b''
+
+
+def _valid_object_id(value):
+    return (
+        type(value) is bytes
+        and re.fullmatch(rb'[0-9a-fA-F]{40}', value) is not None
+    )
 
 
 def _read_blob(git_runner, repo_root, commit, path):
     tree = _run_git(
         git_runner, repo_root,
-        ['ls-tree', '-z', commit, '--', path],
+        ['ls-tree', '--full-tree', '-z', commit, '--', path],
     )
     if tree is None or getattr(tree, 'returncode', 1) != 0:
         _raise(SKILL_MANIFEST_PATH_MISSING)
@@ -136,6 +154,8 @@ def _read_blob(git_runner, repo_root, commit, path):
     mode, object_type, object_id = selected
     if mode == b'120000' or object_type != b'blob':
         _raise(SKILL_MANIFEST_NOT_FILE)
+    if not _valid_object_id(object_id):
+        _raise(SKILL_MANIFEST_PATH_MISSING)
 
     size_result = _run_git(
         git_runner, repo_root,
@@ -178,11 +198,28 @@ def build_manifest(repo_root, commit, role, gate, git_runner=subprocess.run):
         _raise(SKILL_MANIFEST_COMMIT_INVALID)
     paths = resolve(role, gate)
 
+    top = _run_git(
+        git_runner, repo_root,
+        ['rev-parse', '--show-toplevel'],
+    )
+    if top is None or getattr(top, 'returncode', 1) != 0:
+        _raise(SKILL_MANIFEST_COMMIT_INVALID)
+    try:
+        top_path = os.path.realpath(_stdout(top).decode('utf-8').strip())
+        requested_root = os.path.realpath(repo_root)
+    except (UnicodeDecodeError, TypeError, ValueError, OSError):
+        _raise(SKILL_MANIFEST_COMMIT_INVALID)
+    if not top_path or top_path != requested_root:
+        _raise(SKILL_MANIFEST_COMMIT_INVALID)
+
     checked_commit = _run_git(
         git_runner, repo_root,
-        ['cat-file', '-e', commit + '^{commit}'],
+        ['rev-parse', '--verify', commit + '^{commit}'],
     )
-    if checked_commit is None or getattr(checked_commit, 'returncode', 1) != 0:
+    if (checked_commit is None
+            or getattr(checked_commit, 'returncode', 1) != 0
+            or _stdout(checked_commit).strip().lower()
+            != commit.lower().encode('ascii')):
         _raise(SKILL_MANIFEST_COMMIT_INVALID)
 
     entries = []
