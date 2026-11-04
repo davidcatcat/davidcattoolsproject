@@ -16,7 +16,7 @@ URL = re.compile(r"https://[^\s`<>\[\]{}]+", re.IGNORECASE)
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 MODEL_NAME = re.compile(
     r"(?<![\w./-])(?:opencode/)?(?:gpt|claude|deepseek|gemini|grok|llama|mistral|"
-    r"qwen\d*|kimi)(?:-[\w.]*\w)+(?![\w.-])",
+    r"qwen\d*|kimi)(?:-[\w.]*\w)+(?![\w-]|\.\w)",
     re.IGNORECASE,
 )
 CHECK_NAME = re.compile(r"^check\s+\([^)]+\)$")

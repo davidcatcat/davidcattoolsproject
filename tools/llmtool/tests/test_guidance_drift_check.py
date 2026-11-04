@@ -111,6 +111,17 @@ class GuidanceDriftCheckTests(unittest.TestCase):
         self.write_config()
         self.assertEqual(check(self.repo), [])
 
+    def test_model_extraction_handles_sentence_periods_versions_and_partial_names(self):
+        source = (
+            "gpt-8-y. kimi-k2. gpt-5.5. gpt-5.5.2. "
+            "prefixgpt-8-y gpt-8-y.2 xkimi-k2\n"
+        )
+        models = {
+            value for value in guidance_drift_check._hard_values(source)
+            if guidance_drift_check.MODEL_NAME.fullmatch(value)
+        }
+        self.assertEqual(models, {"gpt-8-y", "kimi-k2", "gpt-5.5", "gpt-5.5.2"})
+
     def test_stale_exception(self):
         self.write_config(codex_only=[{"value": "https://stale.invalid/value", "reason": "No longer in AGENTS.md."}])
         self.assertTrue(any("STALE_EXCEPTION https://stale.invalid/value" in item for item in check(self.repo)))
