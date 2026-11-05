@@ -231,18 +231,22 @@ class HighDebugTests(unittest.TestCase):
         self.assertNotIn('�', stored_head)
 
     def test_sensitive_report_within_limit_stores_fixed_lines_only(self):
+        # synthetic-fixture: screen-tool test
         report = 'safe\nBear' + 'er ' + 'a' * 40
         entry = self._failed_report(report)
         self.assertEqual(entry['report'],
                          'HIGH_DEBUG_REPORT_INVALID\ncheck: SENSITIVE\nbytes: ' +
-                         str(len(report.encode('utf-8'))) + '\nlimit: 16384')
+                         str(len(report.encode('utf-8'))) +
+                         '\nlimit: 16384\nhit: auth_scheme line=2')
 
     def test_oversized_report_sensitive_beyond_kept_head_stores_fixed_lines(self):
+        # synthetic-fixture: screen-tool test
         report = 'safe head' + 'x' * 17000 + '\nBear' + 'er ' + 'b' * 40
         entry = self._failed_report(report)
         self.assertEqual(entry['report'],
                          'HIGH_DEBUG_REPORT_INVALID\ncheck: SIZE,SENSITIVE\nbytes: ' +
-                         str(len(report.encode('utf-8'))) + '\nlimit: 16384')
+                         str(len(report.encode('utf-8'))) +
+                         '\nlimit: 16384\nhit: auth_scheme line=2')
 
     def test_cut_that_creates_sensitive_match_falls_back_to_fixed_lines(self):
         report = 'x' * 17000
