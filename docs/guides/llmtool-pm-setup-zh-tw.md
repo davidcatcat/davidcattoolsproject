@@ -2,7 +2,7 @@
 
 # 設定與切換 llmtool PM
 
-本指南說明如何在 llmtool TUI 建立及使用 Claude 或 Codex PM。帳戶驗證會檢查 CLI 設定資料夾中繼資料，不會開啟認證檔案；重新連線 Codex PM 時，llmtool 會開啟工作階段記錄。
+本指南說明如何在 llmtool TUI 建立及使用 Claude 或 Codex PM。帳戶設定驗證會檢查 CLI 設定資料夾中繼資料。
 
 相關文件：[Codex PM 離線驗收資料包](llmtool-codex-pm-offline-acceptance-zh-tw.md)；[llmtool README](../../tools/llmtool/README.md)。
 
@@ -25,9 +25,9 @@ roles:
     account: claude-example
 ```
 
-`roles.pm` 可選擇 PM 使用的帳戶。舊設定 `pm_runtime.claude_config_dir` 仍受支援；如果它和 `roles.pm` 都選了資料夾，兩邊必須一致。不一致或無效設定會導致 `PM_CONFIG_INVALID`。Claude 帳戶資料夾會作為 `CLAUDE_CONFIG_DIR` 傳給 Claude CLI；Codex 帳戶資料夾會作為 `CODEX_HOME` 傳給 Codex CLI。兩者皆由使用者設定中的帳戶解析。帳戶驗證只檢查資料夾中繼資料，不會開啟認證檔案；重新連線 Codex PM 時，llmtool 會開啟工作階段記錄。
+`roles.pm` 可選擇 PM 使用的帳戶。舊設定 `pm_runtime.claude_config_dir` 仍受支援；如果它和 `roles.pm` 都選了資料夾，兩邊必須一致。不一致或無效設定會導致 `PM_CONFIG_INVALID`。Claude 帳戶資料夾會作為 `CLAUDE_CONFIG_DIR` 傳給 Claude CLI；Codex 帳戶資料夾會作為 `CODEX_HOME` 傳給 Codex CLI。兩者皆由使用者設定中的帳戶解析。帳戶設定驗證只檢查資料夾中繼資料。
 
-`/pm accounts` 會列出帳戶名稱、種類及資料夾狀態，不會顯示路徑。`/pm accounts --check` 會列出 `NAME: logged in yes` 或 `NAME: logged in no`。若尚未設定帳戶，TUI 會顯示如何新增帳戶。
+`/pm accounts` 會列出帳戶名稱、種類及資料夾狀態，不會顯示路徑。`/pm accounts --check` 會以各帳戶的資料夾執行 `claude auth status` 或 `codex login status`，並丟棄命令輸出；llmtool 不會自行開啟認證檔案，這些提供者 CLI 會使用其登入狀態。指令會列出 `NAME: logged in yes` 或 `NAME: logged in no`。若尚未設定帳戶，TUI 會顯示如何新增帳戶。
 
 ## TUI 指令
 
@@ -47,7 +47,7 @@ roles:
 
 Claude 是預設 runtime。建立 Codex PM 時使用 `/pm new --runtime codex --account NAME`；該帳戶必須是 `kind: codex`，否則指令會被拒絕。`/pm use` 只選取工作階段，不會連線；選取後還要執行 `/pm connect` 才會連線。`/pm list` 顯示最新的 10 筆，最新在前；`/pm list --all` 顯示所有工作階段，包括最新的 10 筆。
 
-工作目錄（`CWD`）是該 PM 工作階段所在的目錄。建立工作階段時可指定它；連線時提供的目錄必須符合已建立工作階段的目錄。已綁定具名帳戶的工作階段一律使用該帳戶，忽略之後 `roles.pm` 的變更；要切換帳戶，請用 `/pm new --account NAME` 建立新工作階段。`PM_ACCOUNT_MISMATCH` 只會在工作階段儲存時未綁定帳戶、而目前設定後來選出帳戶時回報。Codex PM 也會以該工作階段目錄作為執行目錄。
+工作目錄（`CWD`）是該 PM 工作階段所在的目錄。建立工作階段時可指定它；連線時提供的目錄必須符合已建立工作階段的目錄。已綁定具名帳戶的工作階段會忽略之後 `roles.pm.account` 的變更；其他 `roles.pm` 欄位（例如 `model`）仍會套用。無效的 `roles.pm` 設定會回報 `PM_CONFIG_INVALID`。要切換帳戶，請用 `/pm new --account NAME` 建立新工作階段。`PM_ACCOUNT_MISMATCH` 只會在工作階段儲存時未綁定帳戶、而目前設定後來選出帳戶時回報。Codex PM 也會以該工作階段目錄作為執行目錄。
 
 ## 權限與使用界線
 
