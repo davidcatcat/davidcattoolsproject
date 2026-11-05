@@ -238,23 +238,37 @@ class OwnerApprovalCliTests(unittest.TestCase):
                                 'OWNER_APPROVAL_REPOSITORY_MISMATCH')):
             with self.subTest(code=code), patch.object(owner, '_read_pr', return_value=(metadata, pull_files())), \
                     patch.object(owner, '_repository_slug', return_value=REPOSITORY), \
-                    patch.object(owner, 'confirm_on_tty') as challenge, patch('sys.stderr') as stderr:
+                    patch.object(owner, 'confirm_on_tty') as challenge, \
+                    patch.object(owner, 'grant') as grant, \
+                    patch.object(owner, '_ledger_for_grant') as ledger_for_grant, \
+                    patch.object(owner, '_ledger_open') as ledger_open, \
+                    patch('sys.stderr') as stderr:
                 self.assertEqual(owner.run_owner_approval(SimpleNamespace(pr=7, head=SHA)), 1)
                 challenge.assert_not_called()
-                self.assertIn(code, stderr.write.call_args.args[0])
+                self.assertEqual(''.join(call.args[0] for call in stderr.write.call_args_list),
+                                 'llmtool: ' + code + '\n')
+                grant.assert_not_called()
+                ledger_for_grant.assert_not_called()
+                ledger_open.assert_not_called()
 
     def test_unicode_line_separators_fillers_and_whitespace_are_sanitized(self):
         value = 'a\u2028\u3164   b\u2029\u115f\u1160\uffa0\n c'
-        self.assertEqual(owner.safe_terminal_text(value, 100), 'a? ? b???? c')
+        self.assertEqual(owner.safe_terminal_text(value, 100), 'a?? b????? c')
 
     def test_duplicate_live_grant_refuses_before_challenge(self):
         with patch.object(owner, '_read_pr', return_value=(pull(), pull_files())), \
                 patch.object(owner, '_repository_slug', return_value=REPOSITORY), \
                 patch.object(owner, 'is_approved', return_value=True), \
-                patch.object(owner, 'confirm_on_tty') as challenge, patch('sys.stderr') as stderr:
+                patch.object(owner, 'confirm_on_tty') as challenge, \
+                patch.object(owner, 'grant') as grant, \
+                patch.object(owner, '_ledger_for_grant') as ledger_for_grant, \
+                patch('sys.stderr') as stderr:
             self.assertEqual(owner.run_owner_approval(SimpleNamespace(pr=7, head=SHA)), 1)
             challenge.assert_not_called()
-            self.assertIn('OWNER_APPROVAL_ALREADY_LIVE', stderr.write.call_args.args[0])
+            self.assertEqual(''.join(call.args[0] for call in stderr.write.call_args_list),
+                             'llmtool: OWNER_APPROVAL_ALREADY_LIVE\n')
+            grant.assert_not_called()
+            ledger_for_grant.assert_not_called()
 
     def test_non_tty_pipe_is_refused_without_creating_ledger(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {'HOME': directory}):
