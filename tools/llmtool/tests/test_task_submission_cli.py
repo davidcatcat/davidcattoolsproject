@@ -993,11 +993,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
         policy['workers']['codex-reviewer']['reason'] = 'test fixture allows isolated route checks'
         self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
         denied_stdout = io.StringIO()
-        self.assertEqual(submission_cli.run_task_remote_test(Namespace(
+        submission_cli.run_task_remote_test(Namespace(
             task_id=task['task_id'], executor_task=d6_task_id,
             sha=result_head, ref='refs/heads/feat/test-executor',
             module=['test_task_store'], pr=None), store=store,
-            stdout=denied_stdout), 0)
+            stdout=denied_stdout)
         denied_result = json.loads(denied_stdout.getvalue())
         self.assertEqual(denied_result['result'], 'ADMISSION_DENIED')
         self.assertEqual(denied_result['code'], 'MODULE_NOT_ADMITTED')
@@ -1018,11 +1018,11 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 patch.object(remote_test, '_config', return_value={
                     'host': 'ec2.example', 'user': 'tester',
                     'repo_path': '/srv/repo', 'python': '/usr/bin/python3'}):
-            self.assertEqual(submission_cli.run_task_remote_test(Namespace(
+            submission_cli.run_task_remote_test(Namespace(
                 task_id=task['task_id'], executor_task=d6_task_id,
                 sha=result_head, ref='refs/heads/feat/test-executor',
                 module=['test_task_submission_cli'], pr=None), store=store,
-                stdout=remote_stdout), 0)
+                stdout=remote_stdout)
         remote_result = json.loads(remote_stdout.getvalue())
         self.assertEqual(remote_result['result'], 'UNAVAILABLE')
         self.assertEqual(remote_result['code'], 'SSH_FAILED')
