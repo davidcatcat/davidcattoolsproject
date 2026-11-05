@@ -182,6 +182,58 @@ class PMRuntimeAPI:
         from .pm_runtime import read_history
         return read_history(session_id, after=0, limit=200, state_root=self.state_root)
 
+    def read_all_turns(self, session_id):
+        from .pm_runtime import read_history
+        turns = []
+        after = 0
+        while True:
+            page = read_history(session_id, after=after, limit=200, state_root=self.state_root)
+            page_turns = page['turns']
+            if not page_turns:
+                return turns
+            turns.extend(page_turns)
+            after = page['next_after']
+
+
+_USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
+               'cache_creation_input_tokens')
+
+
+def usage_totals(turns):
+    """Return recorded token totals and the number of recorded and missing turns."""
+    totals = {key: 0 for key in _USAGE_KEYS}
+    counted = missing = 0
+    for turn in turns:
+        usage = turn.get('usage') if type(turn) is dict else None
+        recorded = False
+        if type(usage) is dict:
+            for key in _USAGE_KEYS:
+                value = usage.get(key)
+                if type(value) is int and value >= 0:
+                    totals[key] += value
+                    recorded = True
+        if recorded:
+            counted += 1
+        else:
+            missing += 1
+    return totals, counted, missing
+
+
+def usage_status_line(turns, formatter):
+    """Format PM turn usage, preserving UNKNOWN when no turns recorded usage."""
+    if not turns:
+        return '用量（本 session）：尚無回合'
+    totals, counted, missing = usage_totals(turns)
+    if not counted:
+        return '用量（本 session）：UNKNOWN（%d 回合沒有用量紀錄）' % missing
+    line = ('用量（本 session）：輸入 %s · 輸出 %s · 快取讀取 %s · 快取建立 %s tokens（%d 回合'
+            % (formatter(totals['input_tokens']), formatter(totals['output_tokens']),
+               formatter(totals['cache_read_input_tokens']),
+               formatter(totals['cache_creation_input_tokens']), counted))
+    if missing:
+        line += '，%d 回合沒有紀錄' % missing
+    return line + '）'
+
 
 def binding_text(binding):
     """Dedicated-binding status from pm_runtime.current_binding (a dict or None)."""

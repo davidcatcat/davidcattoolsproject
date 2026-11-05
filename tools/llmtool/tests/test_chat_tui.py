@@ -1837,6 +1837,7 @@ class W57ChatTests(Base):
         self.assertIn('狀態：待命', status)
         self.assertNotIn('not probed', status)
         self.assertNotIn('connectivity', status)
+        self.assertNotIn('用量（本 session）', status)
 
     def test_chat_status_shows_the_served_model_of_the_last_reply(self):
         self.client.complete.return_value = Reply('reply', {'served_model': 'qwen3-coder-480b'})
@@ -5425,8 +5426,27 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('佇列（本機設定）：沒有', status)
         self.assertRegex(status, '背景：(讀取中|UNKNOWN（TaskStore：.*）|[0-9]+ 件進行中)')
         self.assertIn('主題（本機設定）：', status)
+        ordered = ['狀態（PM 模式）', 'PM session：', 'Claude 帳號目錄：',
+                   '權限模式（本機設定）：', 'PM 狀態：', '背景：', '佇列（本機設定）：',
+                   '主題（本機設定）：', '用量（本 session）：', 'Context 與額度：']
+        positions = [status.index(line) for line in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(status.rstrip().splitlines()[-2:], [
+            '  用量（本 session）：尚無回合',
+            '  Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）'])
         self.assertNotIn('供應商', status)
         self.assertNotIn('provider:', status)
+
+    def test_status_pm_history_read_failure_shows_unknown_and_returns(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_all_turns',
+                                               Mock(side_effect=OSError('history unavailable'))),
+                            '/status\r',
+                            lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
+                                                  ui.conversation.text)])
+        status = ui.conversation.text.split('> /status', 1)[1]
+        self.assertIn('用量（本 session）：UNKNOWN（PM 歷史無法讀取）', status)
+        self.assertIn('Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）', status)
 
     def test_status_background_read_failure_shows_unknown_source_and_reason(self):
         reason = 'TaskStore read denied'
