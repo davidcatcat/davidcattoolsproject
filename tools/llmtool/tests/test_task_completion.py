@@ -264,7 +264,8 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         if artifact is None:
             artifact = subprocess.check_output(
-                ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+                ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha,
+                 '--', self.source_path],
                 cwd=self.root, text=True)
         return self._collect_result(result_sha, artifact,
                                     trusted_base_sha=trusted_base_sha)
