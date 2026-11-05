@@ -78,6 +78,16 @@ class ThemePTYTests(unittest.TestCase):
         terminal.wait_text("full-screen", "TUI startup")
         return terminal
 
+    def test_default_on_resume_from_background_items(self):
+        terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
+                                      items=_items())
+        terminal.connect_pm()
+        notice = "（自動）重新連線：請接續進行中的工作並回報狀態"
+        terminal.wait_text(notice, "auto-resume system notice", 20)
+        terminal.wait_for(lambda _rows: terminal.claude_messages() == [notice],
+                          "exactly one auto-resume message", 20)
+        self.assertEqual(terminal.claude_messages(), [notice])
+
     def dump(self, terminal, name):
         rows = terminal.wait_stable(name)
         if self.evidence:
@@ -139,6 +149,7 @@ class ThemePTYTests(unittest.TestCase):
         """[Mac PTY (fake provider)] dark theme, no OSC 8 on Terminal.app, ↓ background panel"""
         terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "Apple_Terminal"},
                                       git_remote="git@github.com:o/r.git")
+        terminal.submit("/settings auto-resume off")
         self.ask(terminal)
         self.dump(terminal, "dark-chat")
         self.assertTrue(terminal.cell(23, 0).reverse)            # dark status bar: reverse
@@ -149,6 +160,7 @@ class ThemePTYTests(unittest.TestCase):
         """[Mac PTY (fake provider)] light theme, OSC 8 links on iTerm2, copy returns the source"""
         terminal = self.open_terminal({"COLORFGBG": "0;15", "TERM_PROGRAM": "iTerm.app"},
                                       git_remote="git@github.com:o/r.git")
+        terminal.submit("/settings auto-resume off")
         self.ask(terminal)
         rows = self.dump(terminal, "light-chat")
         status = terminal.cell(23, 0)
@@ -178,7 +190,8 @@ class ThemePTYTests(unittest.TestCase):
         terminal.wait_text("Theme: dark (drawn dark)", "/theme dark")
         terminal.wait_for(lambda _rows: terminal.cell(23, 0).reverse, "dark status bar")
         settings = terminal.root / ".local" / "state" / "llmtool" / "tui-settings.json"
-        self.assertEqual(json.loads(settings.read_text()), {"links": "on", "theme": "dark"})
+        self.assertEqual(json.loads(settings.read_text()),
+                         {"auto_resume": "off", "links": "on", "theme": "dark"})
         self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
         self.dump(terminal, "light-then-dark-pm")
 
@@ -201,6 +214,7 @@ class ThemePTYTests(unittest.TestCase):
         terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
                                       git_remote="git@github.com:o/r.git", items=items,
                                       details=details, rows=16)
+        terminal.submit("/settings auto-resume off")
         terminal.connect_pm()
         terminal.wait_text("背景 2 · ↓ 查看", "status line background count")
         terminal.submit("第零則 " + "長訊息內容，" * 40)
@@ -255,6 +269,7 @@ class ThemePTYTests(unittest.TestCase):
                   "updated_at": (now - timedelta(minutes=3)).isoformat()}]
         terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
                                       items=items, details={}, rows=16, refresh=1)
+        terminal.submit("/settings auto-resume off")
         listing = terminal.root / "background.json"
         terminal.connect_pm()
         terminal.wait_text("背景 2 · ↓ 查看", "status line background count")
@@ -327,6 +342,7 @@ class ThemePTYTests(unittest.TestCase):
             with self.subTest(columns=columns):
                 terminal = self.open_terminal({"COLORFGBG": "15;0"}, items=items,
                                               details=details, rows=60, columns=columns)
+                terminal.submit("/settings auto-resume off")
                 terminal.connect_pm()
                 terminal.wait_text("背景 2", "status line background count")
                 terminal.send("\x1b[B")
@@ -400,6 +416,7 @@ class ThemePTYTests(unittest.TestCase):
         terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "iTerm.app"},
                                       git_remote="git@github.com:o/r.git", items=items,
                                       details=details, rows=60)
+        terminal.submit("/settings auto-resume off")
         terminal.connect_pm()
         terminal.wait_text("背景 1", "status line background count")
         before = len(terminal.raw_text())
@@ -438,6 +455,7 @@ class ThemePTYTests(unittest.TestCase):
                                   for n in range(10)]}}
         terminal = self.open_terminal({"COLORFGBG": "15;0", "TERM_PROGRAM": "Apple_Terminal"},
                                       items=items, details=details, rows=24)
+        terminal.submit("/settings auto-resume off")
         terminal.connect_pm()
         terminal.wait_text("背景 1", "status line background count")
         terminal.send("草稿")
