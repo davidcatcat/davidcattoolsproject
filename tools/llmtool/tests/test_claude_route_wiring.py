@@ -11,6 +11,17 @@ from llmtool.developer_routes import RouteError
 from llmtool.errors import LLMToolError
 
 
+import review_trust_fixture
+
+
+def setUpModule():
+    review_trust_fixture.start_module()
+
+
+def tearDownModule():
+    review_trust_fixture.stop_module()
+
+
 class ClaudeRouteWiringTests(unittest.TestCase):
     def _setup(self, *, trusted_agent='claude-developer', runner_error=None,
                changed_paths=('src.py',), boundary_digest='f' * 64):
