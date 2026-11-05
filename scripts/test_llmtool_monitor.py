@@ -1581,7 +1581,7 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual(mon.owner_count_line(source)[0], "等你決定：0 件（只看最近 12 小時留言）")
 
         marked = comment(10, NOW - 30,
-                         "<!-- activity: type=repair_gate actor=PM target=Owner status=WAITING -->\nNeed a decision")
+                         "<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\nNeed a decision")
         pages = [page(1, 100) for _ in range(mon.GITHUB_PAGES)]
         pages[0][0] = marked
         waiting = FakeRun(*([(0, batch) for batch in pages]), (0, page(900, 1)), (0, []))
@@ -2761,7 +2761,7 @@ class OfficeViewTests(unittest.TestCase):
         verdicts = {"123": [(self.NOW - 30, "REVIEW_PASS", ["abcdef0"])]}
         reviewer_line = task_line(reviewer, prs, verdicts)
         self.assertIn("已結束", reviewer_line)
-        self.assertIn("已結束", task_line("inspect-hd1-abcdef0", prs))
+        self.assertIn("未確認", task_line("inspect-hd1-abcdef0", prs))
         self.assertIn("DONE session 完成", task_line("done-row", {}, rows=[done]))
 
     def test_d6_running_phase_uses_live_main_subagent_and_codex_family(self):
