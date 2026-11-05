@@ -575,6 +575,11 @@ def _safe_identifier(value, pattern):
     return type(value) is str and pattern.fullmatch(value) is not None
 
 
+def _safe_native_session_id(value):
+    return (type(value) is str and 1 <= len(value) <= 256 and
+            all(ord(char) >= 0x20 and ord(char) != 0x7f for char in value))
+
+
 def _completion_timestamp(value):
     if type(value) is not str:
         _fail('COMPLETION_EVENT_INVALID')
@@ -1493,22 +1498,25 @@ def _validate(record):
                 _fail()
             if 'claude_result' in developer:
                 result = developer['claude_result']
+                legacy_result = (type(result) is dict and set(result) == {
+                    'executor_task_id', 'head_sha', 'recorded_at'})
                 if (developer['provider_profile'] != 'claude' or
                         type(result) is not dict or
-                        set(result) != {'executor_task_id', 'head_sha', 'recorded_at',
-                                        'author_session_ids', 'claim_id'} or
+                        (not legacy_result and set(result) != {
+                            'executor_task_id', 'head_sha', 'recorded_at',
+                            'author_session_ids', 'claim_id'}) or
                         not _safe_identifier(result['executor_task_id'], D6_TASK_ID) or
                         type(result['head_sha']) is not str or
                         re.fullmatch(r'[0-9a-f]{40}', result['head_sha']) is None or
-                        type(result['author_session_ids']) is not list or
+                        (not legacy_result and (type(result['author_session_ids']) is not list or
                         not result['author_session_ids'] or
-                        any(type(session) is not str or not re.fullmatch(
-                            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
-                            session) for session in result['author_session_ids']) or
-                        len(result['author_session_ids']) != len(set(result['author_session_ids'])) or
+                        any(not _safe_native_session_id(session)
+                            for session in result['author_session_ids']) or
+                        len(result['author_session_ids']) != len(set(result['author_session_ids'])))) or
+                        (not legacy_result and
                         (result['claim_id'] is not None and
                          (type(result['claim_id']) is not str or
-                          re.fullmatch(r'[0-9a-f]{32}', result['claim_id']) is None)) or
+                          re.fullmatch(r'[0-9a-f]{32}', result['claim_id']) is None))) or
                         type(result['recorded_at']) is not str or
                         re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',
                                      result['recorded_at']) is None):
@@ -2701,9 +2709,7 @@ class TaskStore:
         if (not _safe_identifier(pm_session_id, SESSION_ID) or
                 not _safe_identifier(executor_task_id, D6_TASK_ID) or
                 type(head_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', head_sha) is None or
-                type(session_id) is not str or re.fullmatch(
-                    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
-                    session_id) is None):
+                not _safe_native_session_id(session_id)):
             _fail('CLAUDE_RESULT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
@@ -2724,15 +2730,27 @@ class TaskStore:
             else:
                 eligible = [claim for claim in claims if claim.get('executor_task') == executor_task_id]
                 claim = eligible[-1] if eligible else None
+                author_sessions = previous.get('author_session_ids')
+                if not author_sessions:
+                    completion = current.get('completion')
+                    evidence = (completion.get('evidence')
+                                if type(completion) is dict else None)
+                    registered = (evidence.get('executor_native_session_id')
+                                  if type(evidence) is dict else None)
+                    author_sessions = ([registered] if _safe_native_session_id(registered)
+                                        else [])
                 if (claim_id is None or type(claim) is not dict or
                         claim.get('repair_task_id') != claim_id or
                         claim.get('state') != 'DISPATCHED' or
+                        claim.get('head_sha') != previous.get('head_sha') or
                         previous.get('claim_id') == claim_id or
                         claim.get('head_sha') == head_sha or
                         previous.get('head_sha') == head_sha or
-                        session_id in previous.get('author_session_ids', [])):
+                        session_id in author_sessions):
                     _fail('CLAUDE_RESULT_STATE_INVALID')
-                sessions = list(previous['author_session_ids']) + [session_id]
+                if not author_sessions:
+                    _fail('CLAUDE_RESULT_STATE_INVALID')
+                sessions = list(author_sessions) + [session_id]
             responded = dict(developer)
             responded.update(state='DEVELOPER_RESPONDED', claude_result={
                 'executor_task_id': executor_task_id, 'head_sha': head_sha,

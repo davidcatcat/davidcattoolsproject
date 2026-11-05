@@ -303,6 +303,10 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
             type(acceptance) is not list or
             not all(type(item) is str for item in acceptance)):
         _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+    # The continuation adds exactly one bounded acceptance item. Refuse before
+    # writing a claim if it would exceed the record schema's fixed limit.
+    if len(acceptance) + 1 > 16:
+        _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
     if remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
                                        pr_number=pr_number, github_get=github_get)
@@ -361,10 +365,12 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if existing is not None and existing is not retry_claim:
         task_id_for_repair = existing.get('repair_task_id')
         dispatched = existing.get('state') == 'DISPATCHED'
+        next_action = ('claude-result' if profile == 'claude' and dispatched else
+                       f"review-dispatch --version {packet_version + 1}" if dispatched else
+                       f"task delegate {task_id_for_repair}")
         return {'claim': existing, 'repair_task_id': task_id_for_repair,
                 'replayed': dispatched,
-                'next_action': (f"review-dispatch --version {packet_version + 1}"
-                                if dispatched else f"task delegate {task_id_for_repair}")}
+                'next_action': next_action}
     attempt = len(attempts) + 1
     if attempt > MAX_REPAIR_ATTEMPTS:
         # Stop after two failed corrections; continue through High Debug or reassignment.

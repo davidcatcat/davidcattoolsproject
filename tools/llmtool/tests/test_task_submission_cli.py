@@ -955,7 +955,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         registered_d6 = dict(self.executor_registry)
         registered_d6.update(task_id=d6_task_id, head_sha=result_head,
                               trusted_agent_id='claude-developer',
-                              native_session_id='claude-native-session')
+                              native_session_id='12345678-1234-1234-1234-123456789abc')
         registration_path = (Path(self.executor_common_dir) / 'llmtool-worktrees' /
                              (d6_task_id + '.json'))
         registered_d6['trusted_agent_id'] = 'codex-developer'
@@ -983,7 +983,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 task_id=task['task_id'], executor_task=d6_task_id,
                 owner_ref=owner_ref, common_dir=self.executor_common_dir,
                 read_path=[declared_test_path], write_path=[declared_test_path]), store=store)
-        registered_d6['native_session_id'] = 'claude-native-session'
+        registered_d6['native_session_id'] = '12345678-1234-1234-1234-123456789abc'
         registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
         registration_path.chmod(0o600)
         scope_mismatch_task = run_task_record_pm(
@@ -1059,7 +1059,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(bound['completion']['evidence']['executor_native_session'],
                          'VERIFIED')
         self.assertEqual(bound['completion']['evidence']['executor_native_session_id'],
-                         'claude-native-session')
+                         '12345678-1234-1234-1234-123456789abc')
         self.assertEqual(_select_reviewer(bound), 'codex-reviewer')
         second_task = run_task_record_pm(
             Namespace(stdin_json=True), store=store,
@@ -1082,9 +1082,13 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 task_id=task['task_id'], executor_task='a' * 32,
                 head=result_head, pm_session=task['pm_session_id']), store=store)
         with redirect_stdout(io.StringIO()):
-            submission_cli.run_task_claude_result(Namespace(
-                task_id=task['task_id'], executor_task=d6_task_id,
-                head=result_head, pm_session=task['pm_session_id']), store=store)
+            with patch.object(submission_cli.role_config, 'resolve_role',
+                               return_value={'config_dir': '/tmp/claude'}), \
+                    patch.object(submission_cli.active_pm_inbox,
+                                 'observe_claude_session', return_value=str(self.executor_root)):
+                submission_cli.run_task_claude_result(Namespace(
+                    task_id=task['task_id'], executor_task=d6_task_id,
+                    head=result_head, pm_session=task['pm_session_id']), store=store)
         completed = store.get(task['task_id'])
         self.assertEqual(completed['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(completed['developer']['claude_result']['executor_task_id'],

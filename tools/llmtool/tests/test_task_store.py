@@ -511,6 +511,41 @@ class TaskStoreTests(unittest.TestCase):
                 executor_task_id='executor-1', head_sha='a' * 40,
                 session_id='12345678-1234-1234-1234-123456789abc')
 
+    def test_old_claude_result_shape_remains_readable_and_seeds_repair_authors(self):
+        task = self._claude_result_task()
+        native = '12345678-1234-1234-1234-123456789abc'
+        claim_id = 'f' * 32
+        current = self.store.get(task['task_id'])
+        developer = dict(current['developer'], state='DEVELOPER_RESPONDED',
+            claude_result={'executor_task_id': 'executor-1', 'head_sha': 'a' * 40,
+                           'recorded_at': '2026-11-04T00:00:00Z'})
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': 'executor-1',
+            'reviewer_task_id': None,
+            'evidence': {'common_dir': '/tmp/common', 'root': '/tmp/root',
+                         'branch': 'task', 'source_sha': 'a' * 40,
+                         'executor_native_session_id': native},
+            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        claim = {'executor_task': 'executor-1', 'pr': 42, 'head_sha': 'a' * 40,
+            'version': 1, 'attempt': 1, 'family': 'pr-42', 'state': 'DISPATCHED',
+            'repair_task_id': claim_id, 'comment_id': 9, 'packet_sha256': 'e' * 64,
+            'claimed_at': '2026-11-04T00:00:00Z'}
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            saved = self.store.compare_and_update(task['task_id'],
+                expected={'record_sha256': current['record_sha256']},
+                developer=developer, completion=completion, review_repair_claims=[claim])
+            self.assertEqual(self.store.get(task['task_id'])['developer']['claude_result'],
+                             developer['claude_result'])
+            repaired = self.store.record_claude_result(task['task_id'],
+                pm_session_id=task['pm_session_id'], executor_task_id='executor-1',
+                head_sha='b' * 40, session_id='22345678-1234-1234-1234-123456789abc',
+                claim_id=claim_id)
+        self.assertEqual(repaired['developer']['claude_result']['author_session_ids'],
+                         [native, '22345678-1234-1234-1234-123456789abc'])
+        self.assertEqual(repaired['developer']['claude_result']['claim_id'], claim_id)
+
     def test_claude_result_cli_requires_invoking_pm_session(self):
         task = self._claude_result_task()
         args = SimpleNamespace(task_id=task['task_id'], executor_task='executor-1',
@@ -532,6 +567,42 @@ class TaskStoreTests(unittest.TestCase):
                 args, store=self.store, stdout=io.StringIO())
         self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
                          'DEVELOPER_PENDING')
+
+        native = '12345678-1234-1234-1234-123456789abc'
+        current = self.store.get(task['task_id'])
+        completion = {
+            'state': 'WAITING_EXECUTOR', 'executor_task_id': 'executor-1',
+            'reviewer_task_id': None,
+            'evidence': {'common_dir': '/tmp/common', 'root': '/tmp/root',
+                         'branch': 'task', 'source_sha': 'a' * 40,
+                         'executor_native_session_id': native},
+            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+        }
+        self.store.compare_and_update(task['task_id'],
+            expected={'record_sha256': current['record_sha256']}, completion=completion)
+        registration = SimpleNamespace(root='/tmp/root', common_dir='/tmp/common',
+            branch='task', result_sha='a' * 40, native_session_id=native)
+        snapshot = SimpleNamespace(head='a' * 40, clean=True, root='/tmp/root',
+            common_dir='/tmp/common', branch='task')
+        current = self.store.get(task['task_id'])
+        with patch.object(task_submission_cli_module.task_completion,
+                          'read_d6_registration', return_value=registration), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'collect_git_snapshot', return_value=snapshot), \
+                patch.object(task_submission_cli_module.task_completion, '_git',
+                             return_value=b''), \
+                patch.object(task_submission_cli_module.task_completion,
+                             '_developer_changed_paths', return_value=('src.py',)), \
+                patch.object(task_submission_cli_module.role_config, 'resolve_role',
+                             return_value={'config_dir': '/tmp/claude'}), \
+                patch.object(task_submission_cli_module.active_pm_inbox,
+                             'observe_claude_session', return_value='/tmp/root'), \
+                patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.assertEqual(task_submission_cli_module.run_task_claude_result(
+                args, store=self.store, stdout=io.StringIO()), 0)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                         'DEVELOPER_RESPONDED')
 
         native_pm_session_id = str(uuid.uuid4())
         uuid_task = self._claude_result_task(pm_session_id='pm-' + native_pm_session_id)
