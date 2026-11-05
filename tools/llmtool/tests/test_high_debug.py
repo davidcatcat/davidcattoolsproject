@@ -3,11 +3,15 @@ import tempfile
 import unittest
 import subprocess
 import json
+import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from contextlib import redirect_stderr
+from io import StringIO
 
 from llmtool import high_debug
+from llmtool import cli
 from llmtool.errors import LLMToolError
 
 
@@ -172,7 +176,6 @@ class HighDebugTests(unittest.TestCase):
             ({'returncode': 1}, 'HIGH_DEBUG_RUN_FAILED'),
             ({'runner_error': subprocess.TimeoutExpired('codex', 1800)},
              'HIGH_DEBUG_RUN_FAILED'),
-            ({'report': 'x' * 16385}, 'HIGH_DEBUG_REPORT_INVALID'),
             ({'dirty': True}, 'HIGH_DEBUG_WROTE_FILES'),
         )
         for attempt, (kwargs, code) in enumerate(cases, 1):
@@ -186,6 +189,117 @@ class HighDebugTests(unittest.TestCase):
                 (root / 'unexpected.txt').unlink(missing_ok=True)
         self.assertEqual(len(store.entries), len(cases))
         self.assertEqual(store.events, [])
+
+    def _failed_report(self, report):
+        store = _Store()
+        caught, created = self._failing_case(store, self._repo(), report=report)
+        self.assertEqual(caught, 'HIGH_DEBUG_REPORT_INVALID')
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len(store.entries), 1)
+        self.assertEqual(store.events, [])
+        entry = store.entries[0]
+        self.assertEqual(entry['status'], 'RUN_FAILED')
+        self.assertEqual(entry['report_sha256'],
+                         hashlib.sha256(entry['report'].encode('utf-8')).hexdigest())
+        self.assertFalse(high_debug._emitted_sensitive(entry['report']))
+        return entry
+
+    def test_oversized_clean_report_is_truncated_at_utf8_boundary(self):
+        report = 'head' + '🙂' * 6000
+        entry = self._failed_report(report)
+        self.assertIn('report truncated', entry['report'])
+        self.assertLessEqual(len(entry['report'].encode('utf-8')), high_debug._REPORT_LIMIT)
+        stored_head = entry['report'].split('report truncated\n', 1)[1]
+        self.assertTrue(report.startswith(stored_head))
+        self.assertNotIn('�', stored_head)
+
+    def test_sensitive_report_within_limit_stores_fixed_lines_only(self):
+        report = 'safe\nBear' + 'er ' + 'a' * 40
+        entry = self._failed_report(report)
+        self.assertEqual(entry['report'],
+                         'HIGH_DEBUG_REPORT_INVALID\ncheck: SENSITIVE\nbytes: ' +
+                         str(len(report.encode('utf-8'))) + '\nlimit: 16384')
+
+    def test_oversized_report_sensitive_beyond_kept_head_stores_fixed_lines(self):
+        report = 'safe head' + 'x' * 17000 + '\nBear' + 'er ' + 'b' * 40
+        entry = self._failed_report(report)
+        self.assertEqual(entry['report'],
+                         'HIGH_DEBUG_REPORT_INVALID\ncheck: SIZE,SENSITIVE\nbytes: ' +
+                         str(len(report.encode('utf-8'))) + '\nlimit: 16384')
+
+    def test_cut_that_creates_sensitive_match_falls_back_to_fixed_lines(self):
+        report = 'x' * 17000
+        store = _Store()
+        with patch.object(high_debug, '_emitted_sensitive', side_effect=(False, True)) as scan:
+            self._failing_case(store, self._repo(), report=report)
+        stored = store.entries[0]['report']
+        self.assertEqual(stored,
+                         'HIGH_DEBUG_REPORT_INVALID\ncheck: SIZE\nbytes: 17000\nlimit: 16384')
+        self.assertEqual(scan.call_count, 2)
+        self.assertFalse(high_debug._emitted_sensitive(stored))
+
+    def test_kept_truncated_report_with_sections_and_outcome_stays_run_failed(self):
+        complete = ''.join('## ' + heading + '\nDetails.\n'
+                           for heading in high_debug.REPORT_SECTIONS)
+        complete += 'RCA_CONFIRMED\n'
+        report = complete + ('x' * (high_debug._REPORT_LIMIT + 1000))
+        entry = self._failed_report(report)
+        self.assertEqual(entry['status'], 'RUN_FAILED')
+        self.assertIn('RCA_CONFIRMED', entry['report'])
+        self.assertIn('report truncated', entry['report'])
+
+    def test_oversized_report_refusal_carries_safe_detail(self):
+        report = 'x' * 20000
+        entry = self._failed_report(report)
+        self.assertEqual(entry['report'].split('\nreport truncated\n', 1)[0],
+                         'HIGH_DEBUG_REPORT_INVALID\ncheck: SIZE\nbytes: 20000\nlimit: 16384')
+        self.assertTrue(entry['report'].endswith('x' * 100))
+        with self.assertRaises(LLMToolError) as caught:
+            self._failing_case(_Store(), self._repo(), report=report)
+        self.assertEqual(caught.exception.high_debug_detail,
+                         'check=SIZE bytes=20000 limit=16384')
+
+    def test_oversized_evidence_refusal_has_size_detail(self):
+        store = _Store()
+        with tempfile.TemporaryDirectory() as directory:
+            evidence = Path(directory) / 'evidence.txt'
+            evidence.write_bytes(b'x' * 8193)
+            with patch.object(high_debug.worker_dispatch, 'evaluate',
+                              return_value=SimpleNamespace(allowed=True)):
+                with self.assertRaises(LLMToolError) as caught:
+                    high_debug.run_high_debug(store=store, task_id='a' * 32,
+                        executor_task='executor', pr_number=17, family='family',
+                        failed_corrections=2, evidence=str(evidence))
+        self.assertEqual(caught.exception.high_debug_code, 'HIGH_DEBUG_EVIDENCE_INVALID')
+        self.assertEqual(caught.exception.high_debug_detail, 'bytes=8193 limit=8192')
+
+    def _cli_refusal_line(self, action, detail):
+        error = LLMToolError('safe refusal')
+        error.high_debug_code = 'HIGH_DEBUG_REPORT_INVALID'
+        error.review_repair_code = 'REVIEW_REPAIR_REFUSED'
+        if detail is not None:
+            error.high_debug_detail = detail
+        args = SimpleNamespace(command='task', action=action)
+        output = StringIO()
+        with patch.object(cli, 'parser_for_cli',
+                          return_value=SimpleNamespace(parse_args=lambda _argv: args)), \
+             patch('llmtool.source_freshness.require_fresh_source'), \
+             patch.object(cli.task_submission_cli, 'run_task_high_debug', side_effect=error), \
+             patch.object(cli.task_submission_cli, 'run_task_repair', side_effect=error), \
+             redirect_stderr(output):
+            self.assertEqual(cli.main([]), 1)
+        return output.getvalue()
+
+    def test_cli_prints_allowlisted_high_debug_detail(self):
+        self.assertEqual(self._cli_refusal_line('high-debug', 'check=SIZE bytes=20000 limit=16384'),
+                         'llmtool: high-debug refused: HIGH_DEBUG_REPORT_INVALID '
+                         '(check=SIZE bytes=20000 limit=16384)\n')
+
+    def test_cli_omits_high_debug_detail_that_fails_allowlist(self):
+        self.assertEqual(self._cli_refusal_line('high-debug', 'check=SIZE\nunsafe'),
+                         'llmtool: high-debug refused: HIGH_DEBUG_REPORT_INVALID\n')
+        self.assertEqual(self._cli_refusal_line('repair', 'check=SIZE bytes=20000'),
+                         'llmtool: repair refused: REVIEW_REPAIR_REFUSED\n')
 
     def test_failed_create_costs_no_entry_and_retry_skips_a_leftover_d6(self):
         store = _Store()

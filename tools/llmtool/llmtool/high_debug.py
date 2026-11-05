@@ -18,6 +18,8 @@ REPORT_SECTIONS = ('Identity and source', 'Symptom and reproduction', 'Root Caus
                    'Outcome/cost')
 _HEX40 = re.compile(r'[0-9a-f]{40}\Z')
 _SESSION_READ_LIMIT = 2 * 1024 * 1024
+_REPORT_LIMIT = 16384
+_EVIDENCE_LIMIT = 8192
 
 
 def _thread_id_from_events(events_raw):
@@ -136,9 +138,11 @@ class _AttemptFailed(Exception):
         self.code = code
 
 
-def _refuse(code):
+def _refuse(code, detail=None):
     error = LLMToolError('High-debug diagnosis refused; details omitted')
     error.high_debug_code = code
+    if detail is not None:
+        error.high_debug_detail = detail
     raise error from None
 
 
@@ -209,14 +213,34 @@ _D6_NAME_PROBES = 16
 
 
 def _failed_entry(*, family, failed_corrections, early_reason, head, d6, code,
+                  report=None,
                   observed, effort, usage, recorded_at):
     """The high_debug entry recording one Codex attempt that did not finish."""
+    stored_report = code if report is None else report
     return {'family': family, 'failed_corrections': failed_corrections,
             'early_reason': early_reason, 'examined_sha': head, 'd6': d6,
             'model_requested': 'gpt-6.1-sol', 'model_observed': observed,
             'effort_observed': effort, 'status': 'RUN_FAILED',
-            'report_sha256': hashlib.sha256(code.encode()).hexdigest(),
-            'report': code, 'usage': usage, 'recorded_at': recorded_at}
+            'report_sha256': hashlib.sha256(stored_report.encode('utf-8')).hexdigest(),
+            'report': stored_report, 'usage': usage, 'recorded_at': recorded_at}
+
+
+def _report_rejection(code, checks, byte_count, report):
+    """Return a bounded diagnostic report, or fixed lines if its head is unsafe."""
+    fixed_lines = (code, 'check: ' + checks, 'bytes: ' + str(byte_count),
+                   'limit: ' + str(_REPORT_LIMIT))
+    fixed = '\n'.join(fixed_lines)
+    if 'SENSITIVE' in checks:
+        return fixed
+    marker = '\nreport truncated\n'
+    available = _REPORT_LIMIT - len((fixed + marker).encode('utf-8'))
+    if available < 0:
+        return fixed
+    head = report.encode('utf-8')[:available].decode('utf-8', 'ignore')
+    stored = fixed + marker + head
+    if _emitted_sensitive(stored):
+        return fixed
+    return stored
 
 
 def _d6_name(executor_task, attempt, head):
@@ -296,8 +320,14 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:
-                raw = evidence_stream.read(8193)
-            if len(raw) > 8192: _refuse('HIGH_DEBUG_EVIDENCE_INVALID')
+                evidence_bytes = os.fstat(evidence_stream.fileno()).st_size
+                if evidence_bytes > _EVIDENCE_LIMIT:
+                    _refuse('HIGH_DEBUG_EVIDENCE_INVALID',
+                            f'bytes={evidence_bytes} limit={_EVIDENCE_LIMIT}')
+                raw = evidence_stream.read(_EVIDENCE_LIMIT + 1)
+            if len(raw) > _EVIDENCE_LIMIT:
+                _refuse('HIGH_DEBUG_EVIDENCE_INVALID',
+                        f'bytes={evidence_bytes} limit={_EVIDENCE_LIMIT}')
             evidence_text = raw.decode('utf-8')
             if _emitted_sensitive(evidence_text): _refuse('HIGH_DEBUG_EVIDENCE_SENSITIVE')
         except LLMToolError: raise
@@ -333,19 +363,20 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
     else:
         _refuse('HIGH_DEBUG_D6_CREATE_FAILED')
 
-    def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN'):
+    def failed(code, observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN', report=None,
+               detail=None):
         # A Codex attempt that started but did not finish is recorded: it
         # counts toward the entry limit and keeps its D6 traceable. Recording
         # is best effort: the original refusal code is what the caller sees.
         try:
             store.append_high_debug(task_id, _failed_entry(
                 family=family, failed_corrections=failed_corrections,
-                early_reason=early_reason, head=head, d6=d6, code=code,
+                early_reason=early_reason, head=head, d6=d6, code=code, report=report,
                 observed=observed, effort=effort, usage=usage,
                 recorded_at=store._completion_now()))
         except Exception:
             pass
-        _refuse(code)
+        _refuse(code, detail)
 
     create = create_d6 or _create_d6
     try: diagnosis_root = create(task_id=d6, base_sha=head, repo_root=repo_root, executor_task=executor_task)
@@ -384,8 +415,17 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         try: os.unlink(output_path)
         except Exception: pass
     if failure is not None: failed(failure, observed, effort, usage)
-    if len(report.encode('utf-8')) > 16384 or _emitted_sensitive(report):
-        failed('HIGH_DEBUG_REPORT_INVALID', observed, effort, usage)
+    report_bytes = report.encode('utf-8')
+    oversized = len(report_bytes) > _REPORT_LIMIT
+    sensitive = _emitted_sensitive(report)
+    if oversized or sensitive:
+        checks = ','.join(check for check, matched in
+                          (('SIZE', oversized), ('SENSITIVE', sensitive)) if matched)
+        stored_report = _report_rejection('HIGH_DEBUG_REPORT_INVALID', checks,
+                                          len(report_bytes), report)
+        detail = f'check={checks} bytes={len(report_bytes)} limit={_REPORT_LIMIT}'
+        failed('HIGH_DEBUG_REPORT_INVALID', observed, effort, usage,
+               report=stored_report, detail=detail)
     status=_outcome_status(report)
     if any(not _has_report_section(report, h) for h in REPORT_SECTIONS): status='REPORT_INVALID'
     entry={'family':family, 'failed_corrections':failed_corrections, 'early_reason':early_reason,
