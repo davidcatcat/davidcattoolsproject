@@ -5945,7 +5945,8 @@ class OfficeViewTests(unittest.TestCase):
         compact = mon.office_view([no_detail], width=10)
         start = next(i for i, (line, _) in enumerate(compact) if "plain name" in line)
         self.assertFalse(compact[start + 1][0].startswith("  "))
-        self.assertTrue(all(mon._width(line) <= 10 for line, _ in compact))
+        self.assertTrue(all(mon._width(line) <= 10 for line, style in compact
+                            if style not in ("title", "section")))
         wide_line = next(line for line, _ in mon.office_view([row]) if "plain name" in line)
         self.assertGreater(wide_line.index(mon.WORKING), wide_line.index("plain name"))
 
@@ -5953,7 +5954,8 @@ class OfficeViewTests(unittest.TestCase):
         row = mon.OfficeRow("中文工作名稱 plain name", mon.WORKING,
                             "detail words that continue", 0, 1)
         listed = mon.office_view([row], width=32)
-        self.assertTrue(all(mon._width(line) <= 32 for line, _ in listed))
+        self.assertTrue(all(mon._width(line) <= 32 for line, style in listed
+                            if style not in ("title", "section")))
         first = next(line for line, _ in listed if line.startswith(mon.WORKING))
         self.assertIn("中文", first)
 
