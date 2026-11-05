@@ -7331,8 +7331,13 @@ def install_lines(github, pin_file=None) -> list[tuple[str, str]]:
 
     if pin_file is None:
         pin_file = os.path.join(os.path.expanduser("~"), ".local/state/llmtool/approved-install.json")
+    fd = None
     try:
-        with open(pin_file, "rb") as pin:
+        fd = os.open(pin_file, os.O_RDONLY | os.O_NONBLOCK | getattr(os, "O_NOFOLLOW", 0))
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("pin is not a regular file")
+        with os.fdopen(fd, "rb") as pin:
+            fd = None
             raw = pin.read(4097)
         if len(raw) > 4096:
             raise ValueError("pin too large")
@@ -7346,6 +7351,12 @@ def install_lines(github, pin_file=None) -> list[tuple[str, str]]:
     except (OSError, ValueError, UnicodeError, RecursionError):
         out.append(("安裝釘選檔無法讀取", "!"))
         return out
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
     main_health = github.main_health
     if main_health is not None and approved_sha[:7] != main_health.sha:
@@ -7548,7 +7559,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  top=office_top(github, mon.quota, time.time(),
                                                 stuck=stuck_lines(mon, time.time()),
                                                 progress=pm_progress(mon, time.time()),
-                                                install=install_lines(github))))
+                                                install=install_lines(github)))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office)))))

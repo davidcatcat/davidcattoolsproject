@@ -2391,6 +2391,20 @@ class InstallLinesTests(unittest.TestCase):
                 path.write_bytes(raw)
                 self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
 
+    def test_fifo_pin_is_unreadable_without_blocking(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "pin"
+            os.mkfifo(path)
+            self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
+
+    def test_symlink_pin_is_unreadable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "target"
+            target.write_text(json.dumps({"approved_sha": "a" * 40}), encoding="utf-8")
+            path = Path(directory) / "pin"
+            path.symlink_to(target)
+            self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
+
     def test_counts_only_waiting_owner_approval_summaries(self):
         pending = [mon.OwnerPending(1, "#1", "open", "Need owner-approval grant", "waiting_owner"),
                    mon.OwnerPending(2, "#2", "open", "Other owner request", "waiting_owner"),
