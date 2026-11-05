@@ -1590,10 +1590,10 @@ class OfficeViewTests(unittest.TestCase):
         items += [{"type": "event_msg", "payload": {"type": kind}} for kind in events]
         return self._write(self.codex / day / f"rollout-{name}.jsonl", items, age)
 
-    def rows(self, processes=()):
+    def rows(self, processes=(), **kwargs):
         return mon.office_rows(list(processes), self.NOW, codex_root=str(self.codex),
                                claude_root=str(self.claude),
-                               canonical=self.canonical)
+                               canonical=self.canonical, **kwargs)
 
     def by_name(self, rows):
         return {row.name: row for row in rows}
@@ -2884,8 +2884,10 @@ class OfficeViewTests(unittest.TestCase):
         listed = agents.sessions(mon.claude_config_dirs(str(self.claude)))
         self.assertEqual(asked, [str(self.claude.parent)])
         self.assertEqual(sorted(listed), ["aaaaaaaa-0001", "bbbbbbbb-0002", "ffffffff-0006"])
+        running = self._registry(61, sessionId="aaaaaaaa-0001", kind="bg", status="busy",
+                                 name="claude-developer", cwd=str(self.task))
         rows = [row for row in mon.office_rows(
-            [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+            [running], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
             canonical=self.canonical, agents=listed) if row.kind != "worker"]
         got = {row.sid: (row.name, row.state, row.detail) for row in rows}
         self.assertEqual(got, {
@@ -2898,7 +2900,7 @@ class OfficeViewTests(unittest.TestCase):
             self.assertNotIn(secret, text)
         for entry in listed.values():
             self.assertLessEqual(set(entry), {"sessionId", "kind", "listed", "status",
-                                              "jobState", "cwd", "name"})
+                                              "jobState", "listedPid", "cwd", "name"})
         # Asked again only after the cadence, never on every office rebuild.
         agents.sessions(mon.claude_config_dirs(str(self.claude)))
         self.assertEqual(len(asked), 1)
@@ -2907,17 +2909,92 @@ class OfficeViewTests(unittest.TestCase):
         self._write(self.claude / "proj" / "aaaaaaaa-0001.jsonl", [
             {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
             {"type": "ai-title", "aiTitle": "title a"}], age=600)
-        (self.claude.parent / "sessions").mkdir(exist_ok=True)   # registry readable, no CLI in it
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)   # registry readable; the CLI below is registered
         listed = mon.parse_claude_agents(json.dumps(
             [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "status": "waiting",
-              "cwd": self.canonical}]))
+              "pid": 61, "cwd": self.canonical}]))
         self.assertEqual((listed["aaaaaaaa-0001"]["status"],
                           listed["aaaaaaaa-0001"]["jobState"]), ("waiting", "blocked"))
+        running = self._registry(61, sessionId="aaaaaaaa-0001", kind="bg", status="busy",
+                                 cwd=self.canonical)
         rows = [row for row in mon.office_rows(
-            [], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
+            [running], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
             canonical=self.canonical, agents=listed) if row.kind != "worker"]
         self.assertEqual([(row.sid, row.state, row.detail) for row in rows],
                          [("aaaaaaaa", mon.ATTENTION, "等人操作，要你回")])
+
+    def test_claude_agents_parses_only_positive_exact_int_pid(self):
+        entries = [{"sessionId": f"s{i}-123456", "state": "blocked", "pid": pid}
+                   for i, pid in enumerate((41, 0, -1, True, 1.5, "42"))]
+        parsed = mon.parse_claude_agents(json.dumps(entries))
+        self.assertEqual(parsed["s0-123456"]["listedPid"], 41)
+        for sid in ("s1-123456", "s2-123456", "s3-123456", "s4-123456", "s5-123456"):
+            self.assertNotIn("listedPid", parsed[sid])
+
+    def test_claude_agents_blocked_without_process_or_transcript_has_no_row(self):
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        listed = mon.parse_claude_agents(json.dumps(
+            [{"sessionId": "aaaaaaaa-0001", "state": "blocked"}]))
+        rows = self.rows([], agents=listed)
+        self.assertFalse(any(row.sid == "aaaaaaaa" for row in rows))
+
+    def test_claude_agents_blocked_without_process_transcript_is_closed(self):
+        self._write(self.claude / "proj" / "aaaaaaaa-0001.jsonl", [
+            {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
+            {"type": "ai-title", "aiTitle": "title a"}], age=600)
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
+                                     "jobState": "blocked"}}
+        rows = [row for row in self.rows([], agents=listed) if row.kind != "worker"]
+        self.assertEqual([(row.sid, row.state) for row in rows], [("aaaaaaaa", mon.CLOSED)])
+
+    def test_claude_agents_blocked_listed_pid_must_name_a_claude_process(self):
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
+                                     "jobState": "blocked", "listedPid": 61,
+                                     "listed": True, "cwd": self.canonical}}
+        self.assertFalse(any(row.sid == "aaaaaaaa" for row in self.rows([], agents=listed)))
+        non_claude = mon.Process(61, 1, 61, "05:00", "S", "Codex daemon", "codex", "")
+        self.assertFalse(any(row.sid == "aaaaaaaa" for row in
+                             self.rows([non_claude], agents=listed)))
+
+    def test_claude_agents_blocked_listed_pid_accepts_running_background_session(self):
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
+                                     "jobState": "blocked", "listedPid": 61,
+                                     "listed": True, "cwd": self.canonical}}
+        background = mon.Process(61, 7, 7, "05:00", "S", "Claude Code background session",
+                                 "claude", "Claude Code daemon 7")
+        rows = [row for row in self.rows([background], agents=listed) if row.kind != "worker"]
+        self.assertEqual([(row.sid, row.state) for row in rows], [("aaaaaaaa", mon.ATTENTION)])
+
+    def test_claude_agents_blocked_without_readable_registry_keeps_attention(self):
+        listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
+                                     "jobState": "blocked", "listed": True,
+                                     "cwd": self.canonical}}
+        sessions = mon.claude_sessions(str(self.claude))
+        self.assertTrue(all(not os.path.exists(directory) for directory in sessions))
+        self.assertIsNone(mon._claude_registered(sessions, []))
+        rows = [row for row in self.rows([], agents=listed) if row.kind != "worker"]
+        self.assertEqual([(row.sid, row.state) for row in rows], [("aaaaaaaa", mon.ATTENTION)])
+
+    def test_claude_agents_blocked_registry_cli_keeps_attention_and_pid(self):
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)
+        proc = mon.Process(61, 1, 61, "05:00", "S+", "Claude Code CLI", "claude", "")
+        (self.claude.parent / "sessions" / "61.json").write_text(json.dumps(
+            {"pid": 61, "sessionId": "aaaaaaaa-0001", "status": "busy"}), encoding="utf-8")
+        listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
+                                     "jobState": "blocked", "listed": True,
+                                     "cwd": self.canonical}}
+        captured = {}
+        original = mon.claude_rows
+        def capture(now, root=None, canonical=None, live=None):
+            captured.update(live or {})
+            return original(now, root, canonical, live)
+        with patch.object(mon, "claude_rows", side_effect=capture):
+            rows = [row for row in self.rows([proc], agents=listed) if row.kind != "worker"]
+        self.assertEqual([(row.sid, row.state) for row in rows], [("aaaaaaaa", mon.ATTENTION)])
+        self.assertEqual(captured["aaaaaaaa-0001"][0]["pid"], 61)
 
     def test_claude_agents_failure_or_timeout_degrades_to_no_rows(self):
         (self.claude.parent / "sessions").mkdir(exist_ok=True)
