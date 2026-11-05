@@ -633,6 +633,17 @@ class MonitorTaskBaselineTests(unittest.TestCase):
             self.poll([])
             self.assertEqual(rows.call_count, 2)
 
+    def test_stuck_record_refresh_failure_preserves_previous_value(self):
+        previous = ([mon.StuckRecord("a" * 8, "wp-1", True, 0.0)], "")
+        self.monitor.stuck_records = previous
+        with patch.object(mon, "llmtool_task_records", return_value=[]), \
+                patch.object(mon, "llmtool_route_outcomes", return_value={"opencode": None}), \
+                patch.object(mon, "quota_warnings", return_value=[]), \
+                patch.object(mon, "office_rows", return_value=[]), \
+                patch.object(mon, "stuck_records", side_effect=OSError("offline")):
+            self.poll([])
+        self.assertIs(self.monitor.stuck_records, previous)
+
     def task_kinds(self, new):
         return [kind for _, kind, _ in new if kind in self.TASK_KINDS]
 
@@ -7863,3 +7874,177 @@ class PrBoardTests(unittest.TestCase):
         self.assertIn("審查 通過", " ".join(rows))
         self.assertIn("macOS 成功", " ".join(rows))
         self.assertTrue(all(mon._width(line) <= 40 for line in lines))
+
+
+class StuckAlertTests(unittest.TestCase):
+    NOW = 1_800_000_000.0
+    TASK = "a" * 32
+
+    def stamp(self, age):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.NOW - age))
+
+    def test_stuck_entry_accepts_only_bound_fields_and_newest_busy_event(self):
+        base = {"task_id": self.TASK, "request": "Repair round: fix",
+                "developer": {"state": "DEVELOPER_RESPONDED", "executor_task_id": "wp-1"}}
+        self.assertEqual(mon._stuck_entry(base), mon.StuckRecord("a" * 8, "wp-1", True, 0.0))
+        for request, state, expected in (("Repair round: fix", "DEVELOPER_UNAVAILABLE", False),
+                                         ("words Repair round: fix", "DEVELOPER_RESPONDED", False),
+                                         ("Repair round: fix", None, False)):
+            case = {**base, "request": request,
+                    "developer": {"state": state, "executor_task_id": "wp-1"}}
+            self.assertEqual(mon._stuck_entry(case).repair, expected)
+        case = {"task_id": self.TASK, "remote_test_outcomes": [
+            {"code": "REMOTE_BUSY", "at": self.stamp(30)}]}
+        self.assertEqual(mon._stuck_entry(case).busy_at, mon._remote_test_time(self.stamp(30)))
+        for later in ({"remote_test_receipts": [{"ended_at": self.stamp(20)}]},
+                      {"remote_test_outcomes": [{"code": "OTHER", "at": self.stamp(20)}]}):
+            value = {"task_id": self.TASK, **case, **later}
+            self.assertEqual(mon._stuck_entry(value).busy_at, 0.0)
+        self.assertIsNone(mon._stuck_entry({"task_id": "A" * 32, "developer": {"executor_task_id": "wp"}}))
+        self.assertIsNone(mon._stuck_entry({"task_id": self.TASK, "request": "Repair round",
+                                            "developer": {"state": "DEVELOPER_RESPONDED"}}))
+        self.assertEqual(tuple(field.name for field in __import__("dataclasses").fields(mon.StuckRecord)),
+                         ("task", "d6", "repair", "busy_at"))
+
+    def test_stuck_records_use_the_bounded_task_cache(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / f"{self.TASK}.json"
+            payload = {"task_id": self.TASK, "request": "Repair round: fix",
+                       "developer": {"state": "DEVELOPER_RESPONDED", "executor_task_id": "wp-1"}}
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+            opened = []
+            with patch.object(mon, "_remote_test_open", wraps=mon._remote_test_open) as read:
+                first, problem = mon.stuck_records(root)
+                second, same_problem = mon.stuck_records(root)
+                opened = [call.args[0] for call in read.call_args_list]
+            self.assertEqual(first, [mon.StuckRecord("a" * 8, "wp-1", True, 0.0)])
+            self.assertEqual(second, first)
+            self.assertEqual((problem, same_problem), ("", ""))
+            self.assertEqual(opened, [str(path)])
+            self.assertEqual(path.stat().st_nlink, 1)
+
+    def test_stuck_reviews_and_open_d6_use_live_rows_and_open_branches(self):
+        task = "task pr5-claude-rv1-abcdef0"
+        details = {task: ("ACTIVE", "agent", self.NOW - 100, self.NOW, "feature")}
+        row = mon.OfficeRow("Reviewer", mon.WORKING, "", 0, 0, task="task " + task)
+        self.assertEqual(mon.stuck_reviews([row], details), [("5", "abcdef0", self.NOW - 100)])
+        for state in ("DONE", "IDLE"):
+            self.assertEqual(mon.stuck_reviews([replace(row, state=state)], details), [])
+        self.assertEqual(mon.stuck_reviews([replace(row, task="task other")], details), [])
+        self.assertEqual(mon.stuck_reviews([row], {}), [])
+        self.assertEqual(mon.stuck_open_d6(details, {"feature": (5, "OPEN")}), {task})
+        for branch, state in (("feature", "MERGED"), ("feature", "CLOSED"), ("missing", "OPEN"), ("", "OPEN")):
+            value = {task: ("ACTIVE", "agent", self.NOW, self.NOW, branch)}
+            self.assertEqual(mon.stuck_open_d6(value, {branch: (5, state)}), set())
+
+    def test_stuck_alert_thresholds_grouping_order_and_caps(self):
+        review = [("5", "abcdef0", self.NOW - mon.STUCK_REVIEW - 1)]
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [("5", "abcdef0", self.NOW - 3599)], None, set()), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [("5", "abcdef0", self.NOW - 3600)], None, set()), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [("5", "abcdef0", 0)], None, set()), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, review, None, set()),
+                         ["審查超過 1 小時：PR #5 @abcdef0（已 60 分鐘）"])
+        for age in (2699, 2700):
+            self.assertEqual(mon.stuck_alerts(self.NOW, [("queued", "llmtool Mac CI", self.NOW - age,
+                                                          None, 1)], [], None, set()), [])
+        mac_ci = [("queued", "llmtool Mac CI job", self.NOW - 2701, None, 7),
+                  ("in_progress", "llmtool Mac CI job 2", self.NOW - 2800, "runner", 7),
+                  ("queued", "llmtool Mac CI queued", self.NOW - 2701, None, 8),
+                  ("in_progress", "llmtool Linux CI", self.NOW - 5000, None, 9),
+                  ("queued", "bad", None, None, 10), ("queued", "bad", "1", None, 11),
+                  ("queued", "bad", self.NOW - 5000, None), None]
+        alerts = mon.stuck_alerts(self.NOW, mac_ci, [], None, set())
+        self.assertEqual(alerts, ["macOS 超過 45 分鐘：llmtool Mac CI job 2（執行中，已 46 分鐘）",
+                                  "macOS 超過 45 分鐘：llmtool Mac CI queued（排隊，已 45 分鐘）"])
+        per_entry = mon.stuck_alerts(self.NOW, [
+            ("queued", "llmtool Mac CI odd one", self.NOW - 2800, None, "one"),
+            ("queued", "llmtool Mac CI odd two", self.NOW - 2701, None, "two")], [], None, set())
+        self.assertEqual(len(per_entry), 2)
+        busy = [mon.StuckRecord(f"{i:08x}", "", False, self.NOW - age)
+                for i, age in enumerate((1800, 60, 30, 20, 1801, -1), 1)]
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], [busy[0]], set()),
+                         ["EC2 忙碌：task 00000001（REMOTE_BUSY，30 分鐘前）"])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], [busy[4], busy[5]], set()), [])
+        repair = [mon.StuckRecord(f"{i:08x}{j:024x}", f"wp-{i}", True, 0)
+                  for i in range(1, 7) for j in range(2)]
+        ordered = mon.stuck_alerts(self.NOW, None, review, busy + repair,
+                                   {f"wp-{i}" for i in range(1, 7)})
+        self.assertEqual(ordered[0], "審查超過 1 小時：PR #5 @abcdef0（已 60 分鐘）")
+        self.assertTrue(ordered[1].startswith("EC2 忙碌：task 00000002"))
+        self.assertEqual(sum(line.startswith("EC2 忙碌：") for line in ordered), 3)
+        self.assertTrue(any(line.startswith("修復已到上限：D6 wp-1") for line in ordered))
+        self.assertEqual(sum(line.startswith("修復已到上限：") for line in ordered), 5)
+        self.assertIn("另有 1 件到達修復上限", ordered)
+        self.assertFalse(mon.stuck_alerts(self.NOW, None, [], [
+            mon.StuckRecord("a" * 8, "wp-1", True, 0)], {"wp-1"}))
+        self.assertFalse(mon.stuck_alerts(self.NOW, None, [], repair[:2], set()))
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], repair[:2], {"wp-1"}),
+                         ["修復已到上限：D6 wp-1（2 輪）"])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], [repair[0]], {"wp-1"}), [])
+        self.assertEqual(mon.stuck_alerts(self.NOW, None, [], None, set()), [])
+
+    def test_stuck_top_and_missing_github(self):
+        top = mon.office_top(None, [], self.NOW, stuck=["macOS 超過 45 分鐘", "修復已到上限"])
+        self.assertEqual(top[-2:], [("macOS 超過 45 分鐘", "!"), ("修復已到上限", "!")])
+        self.assertEqual(mon.office_top(None, [], self.NOW), [("等你決定：未讀 GitHub", "")])
+
+    def test_stuck_lines_without_github_keep_local_review_and_busy_only(self):
+        task_id = "task pr5-claude-rv1-abcdef0"
+        office = [mon.OfficeRow("Reviewer", mon.WORKING, "", 0, 0, task=task_id)]
+        details = {task_id[5:]: ("ACTIVE", "agent", self.NOW - 3700, self.NOW, "feature")}
+        monitor = type("MonitorFixture", (), {"github": None, "office": office,
+                    "stuck_records": ([mon.StuckRecord("a" * 8, "", False,
+                                                        self.NOW - 60)], "")})()
+        with patch.object(mon, "canonical_root", return_value="root"), \
+                patch.object(mon, "registry_details", return_value=details):
+            lines = mon.stuck_lines(monitor, self.NOW)
+        self.assertEqual(lines, ["審查超過 1 小時：PR #5 @abcdef0（已 61 分鐘）",
+                                 "EC2 忙碌：task aaaaaaaa（REMOTE_BUSY，1 分鐘前）"])
+
+    def test_once_and_office_paint_render_stuck_lines(self):
+        github = mon.GitHubSource("o/r", runner=FakeRun(), clock=lambda: self.NOW)
+        github.ci_runs = [("queued", "llmtool Mac CI", self.NOW - 2701, None, 7)]
+        github.branch_prs = {"feature": (5, "OPEN")}
+        github.verdicts, github.pending, github.scope = {}, [], ""
+        github.board_pulls, github.ci_heads = [], {}
+        github.successful_read, github.read_failed = True, False
+        github.board_page_count, github.board_oldest_updated = 0, None
+        github.want_ci, github.main_error, github.main_health = False, "", None
+        github.ci_view, github.events = None, []
+        github.refresh = lambda: None
+
+        class FakeMonitor:
+            def __init__(self):
+                self.version, self.processes, self.lingering = "test", [], []
+                self.disk_usage, self.error, self.office, self.office_error = None, None, [], None
+                self.quota, self.pm_board, self.ec2_heads = [], mon.PmBoard("ok", 0, [], [], []), None
+                self.records, self.opencode_route, self.opencode_route_failed = [], None, False
+                self.tasks, self.d6, self.stuck_records = [], [], ([
+                    mon.StuckRecord("a" * 8, "wp-1", True, 0),
+                    mon.StuckRecord("b" * 8, "wp-1", True, 0)], "")
+                self.github, self.polls = github, 0
+            def poll(self): pass
+
+        class Screen:
+            def getmaxyx(self): return (40, 120)
+            def erase(self): pass
+
+        details = {"wp-1": ("ACTIVE", "agent", self.NOW, self.NOW, "feature")}
+        with patch.object(mon, "Monitor", FakeMonitor), \
+                patch.object(mon, "ClaudeAgents"), \
+                patch.object(mon, "canonical_root", return_value="root"), \
+                patch.object(mon, "registry_details", return_value=details), \
+                patch.object(mon.time, "time", return_value=self.NOW), \
+                patch("sys.stdout", __import__("io").StringIO()) as output:
+            self.assertEqual(mon.run_once(github), 0)
+            rendered = output.getvalue()
+        self.assertIn("macOS 超過 45 分鐘", rendered)
+        self.assertIn("修復已到上限：D6 wp-1（2 輪）", rendered)
+        drawn = {}
+        monitor = FakeMonitor()
+        mon._paint_screen(Screen(), monitor, "office", 0, False, {},
+                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
+        self.assertTrue(any("修復已到上限：D6 wp-1（2 輪）" in line for line in drawn.values()))
