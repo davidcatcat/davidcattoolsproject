@@ -5675,16 +5675,16 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual(sum(line.startswith('  卡住｜') for line in report.splitlines()), 20)
         self.assertIn('  另有 5 項未顯示', report)
         self.assertTrue(report.endswith('  需要你決定：無法提供（Core 尚未記錄）'))
+        ui.app.output.get_size = lambda: Size(rows=24, columns=140)
+        self.assertIn('注意 25', ui.status_text())
+        ui.app.output.get_size = lambda: Size(rows=24, columns=70)
+        self.assertNotIn('注意 25', ui.status_text())
         ui.attention = None
         with patch.object(ui, 'attention_lines',
                           return_value=['row %d' % index for index in range(25)]):
             report = ui.attention_report()
         self.assertEqual(sum(line.startswith('  row ') for line in report.splitlines()), 20)
         self.assertIn('  另有 5 項未顯示', report)
-        ui.app.output.get_size = lambda: Size(rows=24, columns=140)
-        self.assertIn('注意 25', ui.status_text())
-        ui.app.output.get_size = lambda: Size(rows=24, columns=70)
-        self.assertNotIn('注意 25', ui.status_text())
 
     def test_attention_lines_are_session_scoped_and_ignore_empty_owner_escape(self):
         ui, _ = self.drive([self.connect(), self.connected])
