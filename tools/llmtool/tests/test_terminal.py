@@ -25,6 +25,5 @@ class TerminalRenderingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-# out-of-scope attempt: REFUSED EPERM: operation not permitted, open '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcatto
 # llmtool acceptance #1002 marker v1
 # out-of-scope attempt: REFUSED EPERM: operation not permitted, open '/Users/davidsun/.local/share/llmtool-dev-workspaces/davidcatto
