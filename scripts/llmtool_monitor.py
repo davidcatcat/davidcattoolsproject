@@ -866,9 +866,12 @@ class Monitor:
         self.office_state: dict = {}
         self.office_error: str | None = None   # why the office view could not be built
         self.office_due = 0.0   # monotonic time of the next office rebuild
+        self.pm_board = PmBoard("missing", None, [], [], [])
+        self.pm_board_due = 0.0
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
         self.records: list = []   # llmtool task-record lines, refreshed with the office view
         self.opencode_route = None
+        self.opencode_route_failed = False
         self.quota: list[str] = []
         self.quota_due = 0.0
         self.d6: list = []   # D6 task lines, refreshed with the office view
@@ -914,6 +917,12 @@ class Monitor:
         self.polls += 1
         self.refresh_disk_usage()
         now = time.monotonic()
+        if now >= self.pm_board_due:
+            self.pm_board_due = now + 30.0
+            try:
+                self.pm_board = read_pm_board(time.time())
+            except Exception:
+                pass
         stamp = datetime.now().strftime("%H:%M:%S")
         try:
             result = collect(self.remembered)
@@ -987,8 +996,9 @@ class Monitor:
                 pass
             try:
                 self.opencode_route = llmtool_route_outcomes(time.time()).get("opencode")
+                self.opencode_route_failed = False
             except Exception:  # preserve the last successful route summary
-                pass
+                self.opencode_route_failed = True
             if time.monotonic() >= self.quota_due:
                 self.quota_due = time.monotonic() + 60.0
                 try:
@@ -1310,12 +1320,15 @@ def edit_failures(stage: Stage) -> tuple[int, int]:
     return sum(tool.status == "error" for tool in edits), len(edits)
 
 
-def task_lines(tasks: list[Task], limit: int = 6, route=None) -> list[str]:
+def task_lines(tasks: list[Task], limit: int = 6, route=None,
+               route_failed: bool = False) -> list[str]:
     if not tasks:
         if route:
             age, total, succeeded, words = route
             return [f"/private/tmp 沒有 OpenCode 階段細節；llmtool Task 紀錄近 7 天 {total} 次，成功 {succeeded} 次，"
                     f"最近一次 {_short_ago(age)}：{words}"]
+        if route_failed:
+            return ["OpenCode Task 紀錄讀取失敗，狀態未確認"]
         return ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"]
     lines = []
     for task in tasks[:limit]:
@@ -1823,6 +1836,9 @@ class GitHubSource:
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.verdicts: dict | None = None   # review_verdicts(); None until GitHub was read
+        self.board_pulls: list[BoardPull] | None = None  # same pulls page as branch_prs
+        self.board_page_count: int | None = None
+        self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
@@ -1971,6 +1987,21 @@ class GitHubSource:
                 more = not (type(probe) is list and not probe)
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=100")
+            if type(pulls) is not list:
+                raise ValueError("pulls page")
+            board_page_count = len(pulls)
+            updated_times = []
+            for pull in pulls:
+                updated = pull.get("updated_at") if type(pull) is dict else None
+                try:
+                    if type(updated) is not str:
+                        raise ValueError("invalid updated_at")
+                    updated_times.append(datetime.strptime(updated, "%Y-%m-%dT%H:%M:%SZ")
+                                         .replace(tzinfo=timezone.utc).timestamp())
+                except (ValueError, OverflowError):
+                    updated_times.append(math.nan)
+            board_oldest_updated = (min(updated_times) if updated_times
+                                    and all(math.isfinite(value) for value in updated_times) else None)
             # A comment posted between page reads shifts the pages: list it once.
             seen, unique = set(), []
             for item in comments:
@@ -1981,10 +2012,14 @@ class GitHubSource:
             events = github_events(unique, pulls, since)
             pending = owner_pending(unique, pulls, self.pending)
             prs = branch_prs(pulls, self.repo)
+            work_pulls = board_pulls(pulls, self.repo)
             scope = (f"等你決定：看最近 {int(self.window // 3600)} 小時的 GitHub 留言"
                      + (f"（只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則）" if more else "")
                      + "；監控開著時，更早還沒回覆的也會留著")
             self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
+            self.board_pulls = work_pulls
+            self.board_page_count = board_page_count
+            self.board_oldest_updated = board_oldest_updated
             self.verdicts = review_verdicts(unique)
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
@@ -2018,7 +2053,8 @@ class GitHubSource:
             if type(commits) is not list or not commits:
                 raise ValueError("main commits")
             commit = commits[0]
-            if type(commit) is not dict or type(commit.get("sha")) is not str or not commit["sha"]:
+            if (type(commit) is not dict or type(commit.get("sha")) is not str
+                    or not re.fullmatch(r"[0-9a-fA-F]{7,64}", commit["sha"])):
                 raise ValueError("main commit")
             sha = commit["sha"]
             commit_obj = commit.get("commit")
@@ -2040,7 +2076,8 @@ class GitHubSource:
                 if (type(run) is not dict or type(run.get("name")) is not str
                         or type(run.get("status")) is not str
                         or (run.get("conclusion") is not None and type(run.get("conclusion")) is not str)
-                        or type(run.get("head_sha")) is not str or not run["head_sha"]
+                        or type(run.get("head_sha")) is not str
+                        or not re.fullmatch(r"[0-9a-fA-F]{7,64}", run["head_sha"])
                         or type(run.get("created_at")) is not str):
                     raise ValueError("main workflow run")
                 if not _github_time(run["created_at"]):
@@ -3623,6 +3660,297 @@ def review_verdicts(comments) -> dict:
             ids = frozenset(token[:7].lower() for token in COMMIT_ID.findall(body))
             found.setdefault(number, []).append((when, verdict.group(1), ids))
     return found
+
+
+PM_BOARD = os.path.expanduser("~/.local/state/llmtool/pm-board.json")
+PM_BOARD_STALE = 1800
+PM_BOARD_LIMIT = 64 * 1024
+PM_BOARD_REF = re.compile(r"(?:PR )?#[0-9]{1,7}")
+
+
+@dataclass(frozen=True)
+class PmBoardItem:
+    ref: str
+    what: str
+    next: str
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class PmBoard:
+    status: str
+    age: float | None
+    running: list
+    queue: list
+    blocked: list
+    skipped: int = 0
+
+
+@dataclass(frozen=True)
+class BoardPull:
+    number: int
+    title: str
+    state: str
+    merged_at: float
+    updated_at: float
+    head: str
+    draft: bool
+
+
+@dataclass(frozen=True)
+class WorkBoard:
+    owner: list
+    running: list
+    queue: list
+    blocked: list
+    done: list
+    github_known: bool
+    board_known: bool
+    github_status: str
+    board_status: str
+    board_age: float | None
+    skipped: int
+    note: str = ""
+    window_hours: int = 12
+
+
+# File format: a JSON object with schema_version 1, UTC updated_at, string
+# updated_by, and required running/queue/blocked lists of {ref, what, next, reason?}.
+def read_pm_board(now, path=None) -> PmBoard:
+    """Read schema_version 1 from ~/.local/state/llmtool/pm-board.json.
+
+    The JSON object has updated_at (UTC), updated_by and lists running, queue
+    and blocked. Items have ref (#965 or PR #976), what, next and optional
+    reason; extra keys such as note are ignored.
+    """
+    path = PM_BOARD if path is None else path
+    fd = None
+    try:
+        nofollow = getattr(os, "O_NOFOLLOW", None)
+        nonblock = getattr(os, "O_NONBLOCK", None)
+        if nofollow is None or nonblock is None:
+            return PmBoard("unreadable", None, [], [], [])
+        flags = os.O_RDONLY | nofollow | nonblock
+        fd = os.open(path, flags)
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return PmBoard("unreadable", None, [], [], [])
+        raw = os.read(fd, PM_BOARD_LIMIT + 1)
+        if len(raw) > PM_BOARD_LIMIT:
+            return PmBoard("malformed", None, [], [], [])
+    except FileNotFoundError:
+        return PmBoard("missing", None, [], [], [])
+    except (OSError, ValueError, TypeError):
+        return PmBoard("unreadable", None, [], [], [])
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+    try:
+        value = json.loads(raw)
+    except (ValueError, RecursionError, UnicodeDecodeError):
+        return PmBoard("malformed", None, [], [], [])
+    if (type(value) is not dict or type(value.get("schema_version")) is not int
+            or value["schema_version"] != 1 or type(value.get("updated_by")) is not str):
+        return PmBoard("malformed", None, [], [], [])
+    for name in ("running", "queue", "blocked"):
+        if type(value.get(name)) is not list:
+            return PmBoard("malformed", None, [], [], [])
+    stamp = value.get("updated_at")
+    try:
+        if type(stamp) is not str or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", stamp):
+            raise ValueError("invalid timestamp")
+        parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        age = float(now) - parsed.timestamp()
+        if age < 0:
+            return PmBoard("undated", None, [], [], [])
+    except (TypeError, ValueError, OverflowError):
+        return PmBoard("undated", None, [], [], [])
+    lists = {}
+    skipped = 0
+    for name in ("running", "queue", "blocked"):
+        entries = value[name]
+        valid = []
+        for item in entries[:50]:
+            if type(item) is not dict or type(item.get("ref")) is not str or not PM_BOARD_REF.fullmatch(item["ref"]):
+                skipped += 1
+                continue
+            if type(item.get("what")) is not str or type(item.get("next")) is not str:
+                skipped += 1
+                continue
+            reason = item.get("reason", "")
+            if type(reason) is not str:
+                skipped += 1
+                continue
+            valid.append(PmBoardItem(item["ref"], _label(item["what"], 60),
+                                     _label(item["next"], 16) or "未確認",
+                                     _label(reason, 60)))
+        skipped += max(0, len(entries) - 50)
+        lists[name] = valid
+    return PmBoard("stale" if age > PM_BOARD_STALE else "ok", age,
+                   lists["running"], lists["queue"], lists["blocked"], skipped)
+
+
+def board_pulls(pulls, repo: str) -> list[BoardPull]:
+    """Convert one already-read pulls page to safe, display-only PR records."""
+    out = []
+    entries = pulls if type(pulls) is list else []
+    for pull in entries:
+        if type(pull) is not dict or type(pull.get("number")) is not int or pull["number"] < 1:
+            continue
+        head_data = pull.get("head")
+        source = head_data.get("repo") if type(head_data) is dict else None
+        if (type(source) is not dict or type(source.get("full_name")) is not str
+                or source["full_name"].casefold() != repo.casefold()):
+            continue
+        title = pull.get("title")
+        state = "MERGED" if pull.get("merged_at") else (
+            "OPEN" if pull.get("state") == "open" else "CLOSED" if pull.get("state") == "closed" else "")
+        if type(title) is not str or not state:
+            continue
+        sha = head_data.get("sha")
+        head = sha[:7].lower() if type(sha) is str and re.fullmatch(r"[0-9a-fA-F]+", sha) else ""
+        title = re.sub(r"#(?=[0-9])", "", title)
+        out.append(BoardPull(pull["number"], _label(title, 60), state,
+                             _github_time(pull.get("merged_at")), _github_time(pull.get("updated_at")),
+                             head, pull.get("draft") is True))
+    return out
+
+
+def _board_ref_number(ref):
+    match = re.fullmatch(r"(?:PR )?#([0-9]{1,7})", ref or "")
+    return int(match.group(1)) if match else None
+
+
+def work_board(github, board: PmBoard, now) -> WorkBoard:
+    pulls = github.board_pulls if github is not None else None
+    github_known = bool(github is not None and github.successful_read)
+    board_known = board.status in ("ok", "stale")
+    owner = list(github.pending if github is not None else [])
+    running = list(board.running) if board_known else []
+    queue = list(board.queue) if board_known else []
+    blocked = list(board.blocked) if board_known else []
+    file_items = running + queue + blocked
+    refs = {_board_ref_number(item.ref) for item in file_items}
+    # Queue and blocked assignments take an open PR out of the running column.
+    queued_blocked = {_board_ref_number(item.ref) for item in queue + blocked}
+    if github_known:
+        for pull in pulls or []:
+            if pull.state != "OPEN" or pull.number in refs or pull.number in queued_blocked:
+                continue
+            verdicts = (github.verdicts or {}).get(str(pull.number), [])
+            matching = [entry for entry in verdicts if pull.head and pull.head in entry[2]]
+            matching.sort(key=lambda entry: entry[0], reverse=True)
+            what = pull.title + (" 草稿" if pull.draft else "")
+            if matching and matching[0][1] == "FAIL":
+                next_step = "Developer"
+            elif matching and matching[0][1] == "PASS":
+                next_step = "PM"
+            elif matching:
+                next_step = "未確認"
+                what += "「已見審查結論，下一步未確認」"
+            else:
+                next_step = "未確認"
+                what += "「未見審查結論」"
+            running.append(PmBoardItem(f"PR #{pull.number}", what, next_step))
+    running.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
+    queue.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
+    blocked.sort(key=lambda item: (_board_ref_number(item.ref) or 0, item.ref))
+    # A local reason is part of the row text for queued or blocked work.
+    queue = [replace(item, what=item.what + (f"：{item.reason}" if item.reason else "")) for item in queue]
+    blocked = [replace(item, what=item.what + (f"：{item.reason}" if item.reason else "")) for item in blocked]
+    local = datetime.fromtimestamp(float(now))
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+    done = sorted((pull for pull in (pulls or []) if pull.state == "MERGED" and pull.merged_at >= midnight),
+                  key=lambda pull: pull.merged_at, reverse=True)
+    page_count = getattr(github, "board_page_count", None) if github is not None else None
+    oldest = getattr(github, "board_oldest_updated", None) if github is not None else None
+    # Test doubles and older snapshots may not carry raw-page metadata.
+    if page_count is None and github_known:
+        page_count = len(pulls or [])
+    notes = []
+    if github_known and page_count is not None and page_count >= 100:
+        notes.append("進行中的 GitHub 來源只看最近更新的 100 筆 PR，可能不完整")
+        if oldest is None or oldest >= midnight:
+            notes.append("今天完成可能不完整（只讀最近 100 筆 PR）")
+    note = "；".join(notes)
+    github_status = ("未讀 GitHub" if github is None else
+                     "GitHub 讀取失敗，以下可能過時" if github.read_failed else
+                     "GitHub 尚未讀取" if not github_known else "")
+    return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
+                     github_status, board.status, board.age, board.skipped, note,
+                     int(github.window // 3600) if github is not None else 12)
+
+
+def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
+    def append_header(text, style=""):
+        lines = _wrap(text, width) if width is not None else [text]
+        out.extend((line, style) for line in lines)
+
+    today = len(work.done) if work.github_known else "?"
+    known_running = len(work.running)
+    waiting_owner = sum(item.kind == "waiting_owner" for item in work.owner)
+    other_owner = len(work.owner) - waiting_owner
+    owner_count = (f"{len(work.owner)}（等你決定 {waiting_owner}，其他 Owner 請求 {other_owner}）"
+                   if work.github_known else "?")
+    counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
+              f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
+              f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
+              f"卡住 {len(work.blocked) if work.board_known else '?'}")
+    out = []
+    append_header("工作白板", "title")
+    append_header(counts)
+    if work.github_status:
+        append_header(work.github_status, "!")
+    board_warnings = {
+        "missing": "PM 白板檔不存在，排隊和卡住未知",
+        "unreadable": "PM 白板檔無法讀取，排隊和卡住未知",
+        "malformed": "PM 白板檔格式錯誤，排隊和卡住未知",
+        "undated": "PM 白板檔沒有有效更新時間，排隊和卡住未知",
+    }
+    if work.board_status == "stale":
+        minutes = int((work.board_age or 0) // 60)
+        append_header(f"PM 白板檔已 {minutes} 分鐘沒更新，排隊和卡住可能過時", "!")
+    elif work.board_status in board_warnings:
+        append_header(board_warnings[work.board_status], "!")
+    if work.skipped:
+        append_header(f"白板檔有 {work.skipped} 筆略過", "!")
+    if work.note:
+        append_header(work.note, "!")
+    sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known),
+                ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
+                (f"今天完成（累計 {today}）", work.done, work.github_known))
+    for title, items, known in sections:
+        append_header(f"── {title} ──", "section")
+        if not items:
+            empty = (f"無（只看最近 {work.window_hours} 小時留言）"
+                     if known and title == "等你" else "無" if known else "未知")
+            append_header(empty, "dim")
+            continue
+        for item in items:
+            if isinstance(item, BoardPull):
+                ref = f"PR #{item.number}"
+                rest = f"{item.title}  → {datetime.fromtimestamp(item.merged_at).astimezone():%H:%M}"
+            elif isinstance(item, OwnerPending):
+                ref = item.reference
+                rest = f"{item.summary or item.status}  → 你"
+            else:
+                ref = item.ref
+                rest = f"{item.what}  → {item.next}"
+            if width:
+                first_width = max(1, width - _width(ref) - 2)
+                if first_width < 12:
+                    wrapped = _wrap(rest, max(1, width - 2))
+                    pieces = [ref, *["  " + line for line in wrapped]]
+                else:
+                    wrapped = _wrap(rest, first_width)
+                    pieces = [ref + "  " + wrapped[0]]
+                    pieces.extend(" " * (_width(ref) + 2) + line for line in wrapped[1:])
+            else:
+                pieces = [f"{ref}  {rest}"]
+            out.extend((piece, "") for piece in pieces)
+    return out
 
 
 def _review_label(pr: str, sha: str) -> str:
@@ -6180,9 +6508,14 @@ def owner_count_line(github) -> tuple[str, str]:
         return text, "!" if github.read_failed else ""
     count = sum(item.kind == "waiting_owner" for item in github.pending)
     text = f"等你決定：{count} 件"
+    others = sum(item.kind != "waiting_owner" for item in github.pending)
+    if others:
+        text += f"（另有 {others} 筆其他 Owner 請求）"
+    elif count == 0:
+        text += f"（只看最近 {int(github.window // 3600)} 小時留言）"
     if github.read_failed:
         text += "（GitHub 讀取失敗，可能過時）"
-    return text, "!" if count else ""
+    return text, "!" if count or others else ""
 
 
 def office_top(github, quota, now) -> list[tuple[str, str]]:
@@ -6342,10 +6675,13 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  pending=github.pending if github is not None else None,
                                  scope=github.scope if github is not None else "",
                                  top=office_top(github, mon.quota, time.time()))))
+    print("\n".join(line for line, _ in board_view(
+        work_board(github, mon.pm_board, time.time()))))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
-                     *task_lines(mon.tasks, 3, mon.opencode_route)]))
+                     *task_lines(mon.tasks, 3, mon.opencode_route,
+                                 mon.opencode_route_failed)]))
     print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
     print(f"說明：{FOOTNOTE}。")
@@ -6418,10 +6754,10 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             continue
         if key in (ord("q"), ord("Q"), 27):
             return
-        views = ("log", "tasks", "table", "activity", "office")
-        if key == 9:  # Tab cycles log -> tasks -> processes -> Activity -> office
+        views = ("log", "tasks", "table", "activity", "office", "board")
+        if key == 9:  # Tab cycles through log, tasks, processes, Activity, office and board
             view, offset = views[(views.index(view) + 1) % len(views)], 0
-        elif key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5")):
+        elif key in (ord("1"), ord("2"), ord("3"), ord("4"), ord("5"), ord("6")):
             view, offset = views[key - ord("1")], 0
         elif key in (ord("a"), ord("A")) and view == "office":
             expanded = not expanded
@@ -6476,11 +6812,13 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         end = len(entries) - offset
         for row, (stamp, kind, text) in enumerate(entries[max(0, end - body):end]):
             put(3 + row, f"{stamp} {MARK.get(kind, ' ')} {text}", colors.get(kind, 0))
-        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+        hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "tasks":
-        lines = d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""] + task_lines(mon.tasks, route=mon.opencode_route)
+        lines = (d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""]
+                 + task_lines(mon.tasks, route=mon.opencode_route,
+                             route_failed=mon.opencode_route_failed))
         offset = max(0, min(offset, len(lines) - body))
         for row, line in enumerate(lines[offset:offset + body]):
             attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
@@ -6489,7 +6827,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
             elif "UNKNOWN" in line or "TIMEOUT" in line or "BLOCKED" in line or " error" in line:
                 attr |= colors.get("!", 0)
             put(3 + row, line, attr)
-        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
+        hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  q: quit"
     elif view == "activity":
         all_lines = activity_lines(mon.tasks, github=mon.github, background=True)
         header = _activity_screen_lines(all_lines[:1], w - 1)
@@ -6508,7 +6846,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         for row, line in enumerate(lines[max(0, end - available):end]):
             attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
             put(start + row, line, attr)
-        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+        hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "office":
@@ -6521,14 +6859,23 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
         for row, (line, style) in enumerate(lines[offset:offset + body]):
             put(3 + row, line, styles.get(style, 0))
-        hint = ("Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  "
+        hint = ("Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
                 f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
+    elif view == "board":
+        lines = board_view(work_board(mon.github, mon.pm_board, time.time()), w - 1)
+        offset = max(0, min(offset, len(lines) - body))
+        styles = {"title": colors.get("title", 0) | curses.A_BOLD,
+                  "!": colors.get("!", 0) | curses.A_BOLD,
+                  "section": curses.A_BOLD, "dim": curses.A_DIM}
+        for row, (line, style) in enumerate(lines[offset:offset + body]):
+            put(3 + row, line, styles.get(style, 0))
+        hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  q: quit"
     else:
         lines = table_lines(mon.processes) if not mon.error else ["(process table unavailable)"]
         offset = max(0, min(offset, len(lines) - body))
         for row, line in enumerate(lines[offset:offset + body]):
             put(3 + row, line, curses.A_BOLD if offset + row == 0 else 0)
-        hint = "Tab/1-5: log·tasks·processes·Activity·辦公室  ↑↓ PgUp/PgDn: scroll  q: quit"
+        hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  q: quit"
     put(h - 1, f"{hint}  ·  {FOOTNOTE}", curses.A_DIM)
     # Park the (hidden) cursor at the top-left. macOS Terminal draws an input
     # method's composing text (e.g. Zhuyin) at the cursor; left on the last
