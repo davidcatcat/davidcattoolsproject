@@ -728,6 +728,159 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(record_store.updates, [])
         validate_record_binding.assert_not_called()
 
+    def test_claude_cli_run_session_requires_completed_execution(self):
+        valid = {'provider_profile': 'claude',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'state': 'DEVELOPER_RESPONDED',
+            'execution': {'status': 'DONE', 'process_exit_code': 0,
+                          'native_session_id': 'claude-run-1'}}
+        self.assertEqual(task_submission_cli._claude_cli_run_session(valid), 'claude-run-1')
+        variants = [
+            dict(valid, provider_profile='codex'),
+            dict(valid, backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED'),
+            dict(valid, state='BLOCKED'),
+            dict(valid, execution=None),
+            dict(valid, execution={'status': 'UNKNOWN', 'process_exit_code': 0,
+                                   'native_session_id': 'claude-run-1'}),
+            dict(valid, execution={'status': 'DONE', 'process_exit_code': 1,
+                                   'native_session_id': 'claude-run-1'}),
+            dict(valid, execution={'status': 'DONE', 'process_exit_code': False,
+                                   'native_session_id': 'claude-run-1'}),
+            dict(valid, execution={'status': 'DONE', 'process_exit_code': 0,
+                                   'native_session_id': None}),
+            dict(valid, execution={'status': 'DONE', 'process_exit_code': 0,
+                                   'native_session_id': 'UNKNOWN'}),
+        ]
+        for developer in variants:
+            with self.subTest(developer=developer):
+                self.assertIsNone(task_submission_cli._claude_cli_run_session(developer))
+
+    def test_task_complete_claude_session_gate_uses_reviewer_d6_and_bound_claim(self):
+        task_id, run_id, reviewer_task = 'a' * 32, 'b' * 32, 'reviewer-d6'
+        head, digest, executor_session, reviewer_session = 'c' * 40, 'd' * 64, 'run-1', 'run-2'
+
+        def matching_claim(**overrides):
+            claim = {'pr': 17, 'head_sha': head, 'reviewer_task': reviewer_task,
+                'state': 'COMPLETED', 'native_session_id': reviewer_session,
+                'review_result': {'task_id': task_id, 'run_id': run_id,
+                    'contract_digest': digest, 'head': head}}
+            claim.update(overrides)
+            return claim
+
+        def complete(developer_overrides=None, *, reviewer_native=reviewer_session,
+                     claims=None):
+            developer = {'provider_profile': 'claude',
+                'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+                'state': 'DEVELOPER_RESPONDED', 'model': 'claude-test',
+                'session_id': 'developer-session', 'usage': {},
+                'source_sha': 'e' * 40, 'read_paths': ['src.py'],
+                'write_paths': ['src.py'], 'executor_task_id': 'executor-d6',
+                'claude_result': {'executor_task_id': 'executor-d6'},
+                'execution': {'status': 'DONE', 'process_exit_code': 0,
+                              'native_session_id': executor_session}}
+            if developer_overrides:
+                developer.update(developer_overrides)
+            initial = {'task_id': task_id, 'run_id': run_id,
+                'contract_digest': digest, 'source_sha': 'e' * 40,
+                'root': '/worktree', 'common_dir': '/common', 'branch': 'task',
+                'executor_identity': 'claude-developer', 'executor_session_ref': 'ref',
+                'executor_native_session_id': None, 'execution_mode': 'DIRECT_D6',
+                'trusted_main_pin': {'sha': 'f' * 40, 'verified_result_heads': []}}
+            task = {'schema_version': 2, 'state': 'PM_RESPONDED', 'task_id': task_id,
+                'run_id': run_id, 'task_binding': {'contract_digest': digest},
+                'pm_route_binding': {'type': 'openai-compatible'},
+                'pm_assignment': {'goal': 'goal'}, 'developer': developer,
+                'completion': {'executor_task_id': 'executor-d6',
+                    'pm_dispatch': 'NOT_STARTED', 'evidence': initial}}
+            if claims is not None:
+                task['review_dispatch_claim'] = claims
+
+            class Store:
+                def get(self, _task_id):
+                    return task
+
+                def compare_and_update(self, _task_id, *, expected, **updates):
+                    task.update(updates)
+                    return task
+
+            github = {'evidence': {'formal_review_state': 'PASS'},
+                      'missing_gates': ['CI_NOT_READY']}
+            d6 = SimpleNamespace(native_session_id=reviewer_native)
+            with patch.object(task_submission_cli.task_completion, 'validate_task_binding'), \
+                 patch.object(task_submission_cli, '_validate_trusted_main_pin'), \
+                 patch.object(task_submission_cli, '_completion_repair_artifact_segments',
+                              return_value=None), \
+                 patch.object(task_submission_cli.task_completion, 'collect_claude_result',
+                    return_value={'result_head': head, 'source_sha': 'e' * 40,
+                        'root': '/worktree', 'common_dir': '/common',
+                        'executor_identity': 'claude-developer', 'changed_paths': ['src.py']}), \
+                 patch.object(task_submission_cli, '_remote_task_test_paths', return_value=[]), \
+                 patch.object(task_submission_cli, '_matching_remote_test_receipt',
+                              return_value=(None, None)), \
+                 patch.object(task_submission_cli.task_completion, 'collect_github_evidence',
+                              return_value=github) as collect_github, \
+                 patch.object(task_submission_cli.task_completion, 'read_d6_registration',
+                              return_value=d6), \
+                 patch.object(task_submission_cli, '_task_view', return_value={}), \
+                 patch.object(task_submission_cli, '_print'):
+                result = task_submission_cli.run_task_complete(
+                    Namespace(task_id=task_id, executor_task='executor-d6',
+                              reviewer_task=reviewer_task, pr=17), store=Store())
+            self.assertEqual(result, 1)
+            self.assertEqual(collect_github.call_args.kwargs['executor_native_session_id'],
+                             task_submission_cli._claude_cli_run_session(developer))
+            return task['completion']['missing_gates'], task['completion']['evidence']
+
+        valid = matching_claim()
+        missing, evidence = complete(claims=[valid])
+        self.assertEqual(missing, ['CI_NOT_READY'])
+        self.assertEqual(evidence['review_pr_ci']['formal_review_state'], 'PASS')
+
+        refused = [
+            ('same reviewer and executor session', {}, executor_session, [valid]),
+            ('missing executor session', {'execution': {'status': 'DONE',
+                'process_exit_code': 0, 'native_session_id': None}}, reviewer_session,
+                [matching_claim(native_session_id=None)]),
+            ('unknown executor session', {'execution': {'status': 'DONE',
+                'process_exit_code': 0, 'native_session_id': 'UNKNOWN'}}, reviewer_session,
+                [matching_claim(native_session_id=None)]),
+            ('execution not done', {'execution': {'status': 'UNKNOWN',
+                'process_exit_code': 0, 'native_session_id': executor_session}},
+                reviewer_session, [valid]),
+            ('nonzero process exit', {'execution': {'status': 'DONE',
+                'process_exit_code': 1, 'native_session_id': executor_session}},
+                reviewer_session, [valid]),
+            ('reviewer D6 has no session', {}, None, [matching_claim(native_session_id=None)]),
+            ('unknown claim session', {}, reviewer_session,
+                [matching_claim(state='UNKNOWN')]),
+            ('claim session differs', {}, reviewer_session,
+                [matching_claim(native_session_id='different')]),
+            ('claim another head', {}, reviewer_session,
+                [matching_claim(head_sha='9' * 40)]),
+            ('claim another PR', {}, reviewer_session, [matching_claim(pr=18)]),
+            ('claim another reviewer task', {}, reviewer_session,
+                [matching_claim(reviewer_task='other-reviewer')]),
+            ('claim another task', {}, reviewer_session,
+                [matching_claim(review_result={'task_id': '9' * 32, 'run_id': run_id,
+                    'contract_digest': digest, 'head': head})]),
+            ('claim another run', {}, reviewer_session,
+                [matching_claim(review_result={'task_id': task_id, 'run_id': '9' * 32,
+                    'contract_digest': digest, 'head': head})]),
+            ('claim another contract', {}, reviewer_session,
+                [matching_claim(review_result={'task_id': task_id, 'run_id': run_id,
+                    'contract_digest': '9' * 64, 'head': head})]),
+            ('two matching claims', {}, reviewer_session, [valid, dict(valid)]),
+        ]
+        for label, developer, reviewer, claims in refused:
+            with self.subTest(label=label):
+                missing, evidence = complete(developer, reviewer_native=reviewer,
+                                             claims=claims)
+                self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', missing)
+                self.assertEqual(evidence['review_pr_ci']['formal_review_state'], 'UNVERIFIED')
+
+        missing, evidence = complete({}, reviewer_native=reviewer_session, claims=None)
+        self.assertIn('REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT', missing)
+
     def test_codex_and_agy_delegates_refuse_claude_reserved_d6(self):
         registration = SimpleNamespace(task_id='d6-owner-task',
             trusted_agent_id='claude-developer')
