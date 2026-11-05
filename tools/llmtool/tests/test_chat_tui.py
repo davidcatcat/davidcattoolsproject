@@ -3169,6 +3169,68 @@ class StreamScreeningTests(unittest.TestCase):
         self.assertEqual(self.pm.safe_name('tool ' + _fake_key()), '[withheld]')
 
 
+@unittest.skipUnless(HAVE_TOOLKIT, 'prompt-toolkit optional extra not installed')
+class AutoResumeWidgetTests(Base):
+    """Auto-resume decisions use a fake PM client and never start a provider stream."""
+
+    def make_ui(self):
+        self.pipe = create_pipe_input()
+        self.pipe.__enter__()
+        self.addCleanup(self.pipe.__exit__, None, None, None)
+        return chat_tui.ChatTUI(self.session, input=self.pipe, output=DummyOutput())
+
+    def prepare(self, ui):
+        ui.pm_runtime = Mock(turn_active=Mock(return_value=False))
+        ui.pm_mode, ui.pm_state = True, 'idle'
+        ui._pm_start_turn = Mock()
+
+    def test_no_work_does_not_send(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = False
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+
+    def test_busy_pm_defers_resume_until_idle(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui.pm_runtime.turn_active.return_value = True
+        ui._auto_resume_pending = True
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+        self.assertTrue(ui._auto_resume_pending)
+        ui.pm_runtime.turn_active.return_value = False
+        ui._pm_background_waiting.append({'runtime': ui.pm_runtime})
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+        ui._pm_background_waiting.clear()
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_called_once()
+
+    def test_resume_sends_once_per_connect_and_shows_system_line(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = True
+        ui._maybe_auto_resume()
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_called_once_with(
+            '（自動）重新連線：請接續進行中的工作並回報狀態', 'owner → PM（自動恢復）:\n')
+        self.assertIn('（自動）重新連線：請接續進行中的工作並回報狀態',
+                      ui.conversation.text)
+        self.assertFalse(ui._auto_resume_pending)
+        self.assertTrue(ui._auto_resume_sent)
+
+    def test_settings_switch_persists_off_and_prevents_resume(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        self.assertEqual(ui.settings['auto_resume'], 'on')
+        ui._auto_resume_pending = True
+        ui.run_display_command('/settings auto-resume off')
+        ui._maybe_auto_resume()
+        ui._pm_start_turn.assert_not_called()
+        self.assertEqual(chat_tui_theme.load_settings()['auto_resume'], 'off')
+
+
 def _crafted_turn(**fields):
     turn = {'turn_id': 'a' * 32, 'seq': 1, 'started_at': '2026-10-28T00:00:00+00:00',
             'ended_at': None, 'owner_text': 'hi', 'status': 'COMPLETED', 'result_text': 'ok',
@@ -3701,6 +3763,22 @@ class PMConversationTests(BoundedPMTest):
 
     def connect(self):
         return '/pm connect\r'   # uses the saved dedicated binding
+
+    def test_connect_auto_resumes_once_when_taskstore_has_in_flight_work(self):
+        self.turns = [_full_turn()]
+        with patch.object(chat_tui_status, 'read_background', return_value=[
+                {'role': 'Developer', 'task': 'task-1', 'state': 'DEVELOPER_PENDING'}]):
+            ui, _ = self.drive([self.connect(), lambda ui: self.until(
+                ui, lambda ui: ui.pm_runtime is not None and ui.pm_mode), self.turn_done])
+        self.assertEqual(self.fakes[0].users(), ['（自動）重新連線：請接續進行中的工作並回報狀態'])
+        self.assertEqual(ui.conversation.text.count(
+            '（自動）重新連線：請接續進行中的工作並回報狀態'), 2)  # system line and sent turn
+
+    def test_connect_does_not_auto_resume_when_taskstore_is_empty(self):
+        with patch.object(chat_tui_status, 'read_background', return_value=[]):
+            ui, _ = self.drive([self.connect(), self.connected])
+        self.assertEqual(self.fakes[0].users(), [])
+        self.assertNotIn('（自動）重新連線', ui.conversation.text)
 
     def test_connect_stream_tools_and_turn_end(self):
         self.turns = [_full_turn(hold=True)]

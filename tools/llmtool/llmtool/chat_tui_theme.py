@@ -29,7 +29,7 @@ from urllib.parse import quote
 
 THEMES = ("dark", "light")
 THEME_CHOICES = THEMES + ("auto",)
-DEFAULT_SETTINGS = {"theme": "auto", "links": "on"}
+DEFAULT_SETTINGS = {"theme": "auto", "links": "on", "auto_resume": "on"}
 SETTINGS_NAME = "tui-settings.json"
 SETTINGS_MAX_BYTES = 4096
 # TERM_PROGRAM values (and TERM) of terminals with OSC 8 hyperlinks.
@@ -104,6 +104,8 @@ def load_settings(path=None):
             settings["theme"] = data["theme"]
         if data.get("links") in ("on", "off"):
             settings["links"] = data["links"]
+        if data.get("auto_resume") in ("on", "off"):
+            settings["auto_resume"] = data["auto_resume"]
     return settings
 
 

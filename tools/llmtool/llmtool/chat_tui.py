@@ -124,6 +124,7 @@ Display
   /links [on|off]       Clickable path/file.py:123 (file://) and #123 (GitHub issue/PR of the
                         git remote) links; only on terminals with OSC 8 links (iTerm2, WezTerm,
                         Warp, kitty). Copy still gives the text as shown
+  /settings [auto-resume on|off]  Automatic PM resume after reconnect (saved locally)
 In PM mode the status bar starts with ▸▸ PM 模式 · the PM permission mode · 背景 N (Tasks of
 this PM session with a Developer or Reviewer at work, read from TaskStore every %d s) ·
 ↓ 查看 · 佇列 N. With an empty input, Down opens the background list (role, Task/PR, state,
@@ -213,6 +214,7 @@ SLASH_COMMANDS = (
     ("/task events", "/task events", "Recent Task events from TaskStore"),
     ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
     ("/links", "/links ", "Clickable file and #PR links: on or off (saved)"),
+    ("/settings", "/settings ", "Automatic PM resume after reconnect"),
     ("/pm list", "/pm list", "List dedicated PM sessions"),
     ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
     ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
@@ -880,6 +882,8 @@ class ChatTUI:
         # it (the reason text) until /pm queue send, or Enter on an empty draft sends one.
         self.pm_outbox = collections.deque()
         self.pm_outbox_paused = None
+        self._auto_resume_pending = False
+        self._auto_resume_sent = False
         self.pm_turn_status = None   # TURN_END status of the current turn
         self.pm_turn_error = None    # RUNTIME_ERROR code of the current turn
         self.pm_turn_refused = False # a tool was refused (PERMISSION_DENIED) in this turn
@@ -1566,6 +1570,7 @@ class ChatTUI:
             "  /history                Show recent chat turns",
             "  /clear                  Clear the chat",
             "  /theme [dark|light|auto] Set the display theme",
+            "  /settings auto-resume on|off  Set automatic PM resume",
             "  /links [on|off]         Set clickable links",
             "  /exit, /quit            Leave chat",
             "Type / to choose a command. Enter runs a command you typed. F1 shows key help.",
@@ -1627,8 +1632,19 @@ class ChatTUI:
         return "\n  ".join(lines)
 
     def run_display_command(self, text):
-        """/theme [dark|light|auto] and /links [on|off]: change, save and report."""
+        """/theme, /links and /settings: change local display and resume settings."""
         parts = text.split()
+        if parts[0] == "/settings":
+            if len(parts) == 1:
+                self.append("Settings: auto-resume %s. /settings auto-resume on|off"
+                            % self.settings.get("auto_resume", "on"))
+                return
+            if len(parts) != 3 or parts[1] != "auto-resume" or parts[2] not in ("on", "off"):
+                self.append("usage: /settings [auto-resume on|off]")
+                return
+            self.settings["auto_resume"] = parts[2]
+            self.append("Settings: auto-resume " + parts[2] + self._save_settings())
+            return
         if parts[0] == "/theme":
             if len(parts) == 1:
                 self.append("Theme: %s (drawn %s%s). /theme dark|light|auto"
@@ -2539,7 +2555,7 @@ class ChatTUI:
         if text.strip() == "/status":
             self.append(self.status_report())
             return
-        if text.strip().split(maxsplit=1)[0] in ("/theme", "/links"):
+        if text.strip().split(maxsplit=1)[0] in ("/theme", "/links", "/settings"):
             self.run_display_command(text.strip())
             return
         try:
@@ -3411,6 +3427,8 @@ class ChatTUI:
                                 + "; /pm disconnect first")
                 return
             self.pm_state = "connecting"
+            self._auto_resume_pending = False
+            self._auto_resume_sent = False
             self._pm_worker(self._pm_connect, session_id, parts[3] if len(parts) == 4 else None)
             return
         if parts[1:2] == ["new"]:
@@ -3633,6 +3651,11 @@ class ChatTUI:
             except LLMToolError:
                 outcome["binding"] = None
             outcome["history"], outcome["history_error"] = self._pm_read_history(session_id, runtime)
+            try:
+                outcome["background"] = chat_tui_status.read_background(session_id)
+            except Exception:
+                # Unknown TaskStore state is never treated as evidence of in-flight work.
+                outcome["background"] = None
         except LLMToolError as exc:
             outcome["error"] = chat_tui_pm.error_code(exc)
         except Exception:
@@ -3669,6 +3692,11 @@ class ChatTUI:
             return
         self.pm_runtime = outcome["runtime"]
         self.pm_binding = outcome.get("binding")
+        background = outcome.get("background")
+        if isinstance(background, list):
+            self.background, self.background_error = background, None
+            self.background_key = outcome["session"]
+            self.background_loaded = time.monotonic()
         if callable(getattr(self.pm_runtime, "background_turn", None)):
             threading.Thread(target=self._pm_watch, args=(self.pm_runtime, self._loop),
                              name="llmtool-chat-pm-watch", daemon=True).start()
@@ -3685,6 +3713,35 @@ class ChatTUI:
             "open elsewhere. Esc interrupts a turn; /pm disconnect ends the "
             "connection. Chat replies are never the PM.")
         self._append_history(outcome["history"], outcome["history_error"])
+        self._auto_resume_pending = (
+            self.settings.get("auto_resume", "on") == "on"
+            and ((isinstance(background, list) and bool(background))
+                 or bool(self._pm_background_waiting)))
+        self._maybe_auto_resume()
+
+    def _maybe_auto_resume(self):
+        """Send one resume turn for this connection, only after work is confirmed and idle."""
+        if (not self._auto_resume_pending or self._auto_resume_sent
+                or self.settings.get("auto_resume", "on") != "on"):
+            return
+        if (self.pm_runtime is None or not self.pm_mode or self.pm_pending
+                or self.pm_turn_active or self._pm_background_waiting
+                or self.pm_state in ("closing", "working", "thinking", "interrupting")):
+            return
+        busy = getattr(self.pm_runtime, "turn_active", None)
+        if callable(busy):
+            try:
+                if busy():
+                    return
+            except Exception:
+                return
+        elif busy:
+            return
+        self._auto_resume_pending = False  # claim before starting; at most once per connect
+        self._auto_resume_sent = True
+        line = "（自動）重新連線：請接續進行中的工作並回報狀態"
+        self.append(line, segments=[(line, "role.system")])
+        self._pm_start_turn(line, "owner → PM（自動恢復）:\n")
 
     @staticmethod
     def _close_runtime(runtime):
@@ -4241,6 +4298,7 @@ class ChatTUI:
                 self._pm_background_show(turn)
             else:
                 turn["seq"] = -1
+        self._maybe_auto_resume()
         self.app.invalidate()
 
     def interrupt_pm(self, by="esc"):
