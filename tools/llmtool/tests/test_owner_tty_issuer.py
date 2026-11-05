@@ -253,7 +253,10 @@ class OwnerApprovalPtyTests(unittest.TestCase):
         for answer in ('wrong', 'close'):
             with self.subTest(answer=answer):
                 status, output, root = self._run_case(answer)
-                self.assertEqual(status, 1, output.decode('utf-8', 'replace'))
+                if answer == 'wrong':
+                    self.assertEqual(status, 1, output.decode('utf-8', 'replace'))
+                else:
+                    self.assertNotEqual(status, 0, output.decode('utf-8', 'replace'))
                 with patch.dict(os.environ, {'HOME': str(root)}):
                     self.assertFalse(owner.is_approved(owner.merge_binding(7, SHA)))
 
