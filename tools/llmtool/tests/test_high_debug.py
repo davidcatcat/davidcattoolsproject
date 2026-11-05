@@ -8,7 +8,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from io import StringIO
 
 from llmtool import high_debug
@@ -305,6 +305,7 @@ class HighDebugTests(unittest.TestCase):
             ({'runner_error': subprocess.TimeoutExpired('codex', 1800)},
              'HIGH_DEBUG_RUN_FAILED'),
             ({'dirty': True}, 'HIGH_DEBUG_WROTE_FILES'),
+            # synthetic-fixture: screen-tool test
             ({'report': 'private report ' + 'x' * 20000},
              'HIGH_DEBUG_REPORT_INVALID'),
             ({'report': 'safe head ' + 'x' * 17000 + '\nBear' + 'er ' + 'c' * 40},
@@ -701,6 +702,98 @@ class HighDebugTests(unittest.TestCase):
             'HIGH_DEBUG_EVIDENCE_SENSITIVE', 'EVIDENCE', [('unclassified', 1)], 4)
         high_debug.record_screen_disposition('a' * 32, 'family', [('unclassified', 1)],
             'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+
+    def test_screen_sensitive_line_checks_scan_escaped_unicode_form(self):
+        with patch.object(high_debug, '_SENSITIVE', re.compile(r'never-match')), \
+             patch.object(high_debug, '_sensitive_jwt',
+                          side_effect=lambda value: r'\xe9' in value), \
+             patch.object(high_debug, '_sensitive_url',
+                          side_effect=lambda value: r'\xe9' in value):
+            self.assertEqual(high_debug._screen_hits('é'),
+                             [('jwt', 1), ('url_userinfo', 1)])
+
+    def test_screen_rule_requires_pattern_to_begin_at_match_text(self):
+        table = (('later', re.compile('beta')),
+                 ('starts_here', re.compile('alpha|beta')))
+        with patch.object(high_debug, '_SCREEN_RULES', table):
+            self.assertEqual(high_debug._screen_rule('alpha beta'), 'starts_here')
+
+    def test_screen_record_counts_omitted_hits_and_disposition_uses_kept_set(self):
+        task_id, family = 'a' * 32, 'family'
+        hits = [(f'rule{number:02}', number) for number in range(35)]
+        with patch.object(high_debug, '_screen_hits', return_value=hits):
+            located = high_debug._screen_hits('benign')
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', located, 35)
+        record = json.loads(high_debug._screen_path(task_id, family).read_text())
+        self.assertEqual(record['omitted'], 3)
+        self.assertEqual(record['hits'], [list(hit) for hit in hits[:32]])
+        self.assertIn('more=3', high_debug._screen_detail(hits[:32], omitted=record['omitted']))
+        record_path = high_debug._screen_path(task_id, family)
+        for invalid_omitted in ('3', -1):
+            invalid_record = dict(record, omitted=invalid_omitted)
+            record_path.write_text(json.dumps(invalid_record), encoding='utf-8')
+            with self.assertRaises(LLMToolError) as caught:
+                high_debug.record_screen_disposition(task_id, family, hits[:32],
+                    'FALSE_POSITIVE', 'https://github.com/org/repo/issues/1#issuecomment-2')
+            self.assertEqual(caught.exception.high_debug_code,
+                             'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+        record_path.write_text(json.dumps(record), encoding='utf-8')
+        high_debug.record_screen_disposition(task_id, family, hits[:32], 'FALSE_POSITIVE',
+            'https://github.com/org/repo/issues/1#issuecomment-2')
+
+    def test_pending_screen_record_blocks_before_missing_evidence_read(self):
+        task_id, family = 'a' * 32, 'family'
+        high_debug._write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
+                                        'EVIDENCE', [('unclassified', 1)], 4)
+        store = _Store()
+        create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+        with self.assertRaises(LLMToolError) as caught:
+            high_debug.run_high_debug(store=store, task_id=task_id,
+                executor_task='executor', pr_number=17, family=family,
+                failed_corrections=2, evidence=str(Path(self.unposted_root.name) / 'missing'),
+                runner=runner, create_d6=create)
+        self.assertEqual(caught.exception.high_debug_code,
+                         'HIGH_DEBUG_SCREEN_DISPOSITION_REQUIRED')
+        create.assert_not_called()
+        runner.assert_not_called()
+
+    def test_invalid_screen_record_directory_refuses_before_d6_or_runner(self):
+        for kind in ('file', 'dangling_symlink', 'symlink_directory', 'lstat_error'):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                task_id, family = 'a' * 32, 'family'
+                store_root = Path(directory) / 'tasks'
+                screen_dir = store_root.parent / 'high-debug-screen'
+                record_path = screen_dir / (task_id + '-' + family + '.json')
+                screen_dir.mkdir(parents=True)
+                lstat_patch = None
+                if kind == 'file':
+                    screen_dir.rmdir()
+                    screen_dir.write_text('directory replaced by file', encoding='utf-8')
+                elif kind == 'dangling_symlink':
+                    screen_dir.rmdir()
+                    screen_dir.symlink_to(Path(directory) / 'missing-target')
+                elif kind == 'symlink_directory':
+                    target = Path(directory) / 'empty-target'
+                    target.mkdir()
+                    screen_dir.rmdir()
+                    screen_dir.symlink_to(target, target_is_directory=True)
+                elif kind == 'lstat_error':
+                    lstat_patch = patch.object(Path, 'lstat', side_effect=PermissionError())
+                create, runner = unittest.mock.Mock(), unittest.mock.Mock()
+                with ExitStack() as stack:
+                    stack.enter_context(patch.object(high_debug.task_store, 'default_root',
+                                                     return_value=store_root))
+                    if lstat_patch is not None:
+                        stack.enter_context(lstat_patch)
+                    with self.assertRaises(LLMToolError) as caught:
+                        high_debug.run_high_debug(store=_Store(), task_id=task_id,
+                            executor_task='executor', pr_number=17, family=family,
+                            failed_corrections=2, runner=runner, create_d6=create)
+                self.assertEqual(caught.exception.high_debug_code,
+                                 'HIGH_DEBUG_SCREEN_RECORD_INVALID')
+                create.assert_not_called()
+                runner.assert_not_called()
 
     def test_screen_record_contains_no_refused_text_and_disposition_is_exact(self):
         task_id, family = 'a' * 32, 'family'

@@ -281,7 +281,7 @@ def _refuse(code, detail=None):
 
 def _screen_rule(match_text):
     for name, pattern in _SCREEN_RULES:
-        if pattern.search(match_text):
+        if pattern.match(match_text):
             return name
     return 'unclassified'
 
@@ -294,12 +294,13 @@ def _screen_hits(text):
         for match in _SENSITIVE.finditer(value):
             line = value.count('\n', 0, match.start()) + 1
             located.add((_screen_rule(match.group(0)), line))
-    for line, value in enumerate(text.split('\n'), 1):
-        if _sensitive_jwt(value):
-            located.add(('jwt', line))
-        if _sensitive_url(value):
-            located.add(('url_userinfo', line))
-    return sorted(located)[:_SCREEN_HIT_LIMIT]
+    for value in (text, ascii_text):
+        for line, content in enumerate(value.split('\n'), 1):
+            if _sensitive_jwt(content):
+                located.add(('jwt', line))
+            if _sensitive_url(content):
+                located.add(('url_userinfo', line))
+    return sorted(located)
 
 
 def _screen_path(task_id, family):
@@ -323,7 +324,11 @@ def _write_screen_record(task_id, family, code, source, hits, byte_count):
     if not stat.S_ISDIR(directory_info.st_mode) or directory.is_symlink():
         raise OSError('invalid screen record directory')
     os.chmod(directory, 0o700)
-    record = {'code': code, 'source': source, 'hits': [list(hit) for hit in hits],
+    kept_hits = sorted(set(hits))
+    omitted = max(0, len(kept_hits) - _SCREEN_HIT_LIMIT)
+    record = {'code': code, 'source': source,
+              'hits': [list(hit) for hit in kept_hits[:_SCREEN_HIT_LIMIT]],
+              'omitted': omitted,
               'bytes': byte_count, 'recorded_at': datetime.now(timezone.utc).isoformat(),
               'disposition': None}
     fd, temporary = tempfile.mkstemp(prefix='.screen-', dir=str(directory))
@@ -347,10 +352,10 @@ def _read_screen_record(task_id, family):
     path = _screen_path(task_id, family)
     try:
         parent_info = path.parent.lstat()
-        if path.parent.is_symlink() or not stat.S_ISDIR(parent_info.st_mode):
+        if not stat.S_ISDIR(parent_info.st_mode):
             _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
         info = path.lstat()
-        if path.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_size > _SCREEN_RECORD_LIMIT:
+        if not stat.S_ISREG(info.st_mode) or info.st_size > _SCREEN_RECORD_LIMIT:
             _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
         fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
         try:
@@ -364,10 +369,11 @@ def _read_screen_record(task_id, family):
             _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
         record = json.loads(raw.decode('utf-8'))
         if (type(record) is not dict or set(record) !=
-                {'code', 'source', 'hits', 'bytes', 'recorded_at', 'disposition'} or
+                {'code', 'source', 'hits', 'omitted', 'bytes', 'recorded_at', 'disposition'} or
                 record.get('source') not in ('EVIDENCE', 'REPORT') or
                 type(record.get('hits')) is not list or not record['hits'] or
                 len(record['hits']) > _SCREEN_HIT_LIMIT or
+                type(record.get('omitted')) is not int or record['omitted'] < 0 or
                 type(record.get('bytes')) is not int or record['bytes'] < 0 or
                 not _valid_screen_timestamp(record.get('recorded_at'))):
             _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
@@ -398,21 +404,47 @@ def _read_screen_record(task_id, family):
         _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
 
 
-def _screen_detail(hits, prefix=''):
+def _screen_detail(hits, prefix='', omitted=0):
     pairs = list(hits)
     while True:
-        omitted = len(hits) - len(pairs)
+        more = omitted + len(hits) - len(pairs)
         suffix = (' rules=' + ','.join(hit[0] for hit in pairs) +
                   ' lines=' + ','.join(str(hit[1]) for hit in pairs))
-        if omitted:
-            suffix += ' more=' + str(omitted)
+        if more:
+            suffix += ' more=' + str(more)
         detail = prefix + suffix
         if len(detail) <= 128:
             return detail
         if pairs:
             pairs.pop()
             continue
-        return (prefix + ' more=' + str(len(hits)))[:128]
+        return (prefix + ' more=' + str(omitted + len(hits)))[:128]
+
+
+def _screen_record_exists(path):
+    """Validate the record directory and return whether a regular record exists."""
+    try:
+        parent_info = path.parent.lstat()
+    except FileNotFoundError as error:
+        if error.errno == 2:
+            parent_info = None
+        else:
+            _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+    except OSError:
+        _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+    if parent_info is not None and not stat.S_ISDIR(parent_info.st_mode):
+        _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+    try:
+        info = path.lstat()
+    except FileNotFoundError as error:
+        if error.errno == 2:
+            return False
+        _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+    except OSError:
+        _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+    if not stat.S_ISREG(info.st_mode):
+        _refuse('HIGH_DEBUG_SCREEN_RECORD_INVALID')
+    return True
 
 
 def record_screen_disposition(task_id, family, hits, classification, ref):
@@ -420,7 +452,7 @@ def record_screen_disposition(task_id, family, hits, classification, ref):
             type(family) is not str or _SCREEN_FAMILY.fullmatch(family) is None):
         _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_INVALID')
     path = _screen_path(task_id, family)
-    if not path.exists() and not path.is_symlink():
+    if not _screen_record_exists(path):
         _refuse('HIGH_DEBUG_SCREEN_NO_REFUSAL')
     record = _read_screen_record(task_id, family)
     if record['disposition'] is not None:
@@ -636,11 +668,12 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         if len(family_claims) < failed_corrections:
             _refuse('HIGH_DEBUG_ARGUMENT_INVALID')
     screen_path = _screen_path(task_id, family)
-    if screen_path.exists() or screen_path.is_symlink():
+    if _screen_record_exists(screen_path):
         screen_record = _read_screen_record(task_id, family)
         if screen_record['disposition'] is None:
             _refuse('HIGH_DEBUG_SCREEN_DISPOSITION_REQUIRED',
-                    _screen_detail([tuple(hit) for hit in screen_record['hits']]))
+                    _screen_detail([tuple(hit) for hit in screen_record['hits']],
+                                   omitted=screen_record['omitted']))
     if evidence is not None:
         try:
             with open(evidence, 'rb') as evidence_stream:
@@ -658,9 +691,11 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
                 try:
                     _write_screen_record(task_id, family, 'HIGH_DEBUG_EVIDENCE_SENSITIVE',
                                          'EVIDENCE', hits, len(raw))
-                    detail = _screen_detail(hits)
+                    detail = _screen_detail(hits, omitted=max(0, len(hits) - _SCREEN_HIT_LIMIT))
                 except Exception:
-                    detail = _screen_detail(hits, 'screen_record=UNRECORDED')
+                    detail = _screen_detail(
+                        hits, 'screen_record=UNRECORDED',
+                        omitted=max(0, len(hits) - _SCREEN_HIT_LIMIT))
                 _refuse('HIGH_DEBUG_EVIDENCE_SENSITIVE', detail)
         except LLMToolError: raise
         except Exception: _refuse('HIGH_DEBUG_EVIDENCE_INVALID')
@@ -717,7 +752,9 @@ def run_high_debug(*, store, task_id, executor_task, pr_number, family,
         if not posted:
             detail = (detail + ' ' if detail else '') + 'github_record=UNPOSTED'
         if screen_hits is not None:
-            detail = _screen_detail(screen_hits, detail or '')
+            detail = _screen_detail(
+                screen_hits, detail or '',
+                omitted=max(0, len(screen_hits) - _SCREEN_HIT_LIMIT))
         _refuse(code, detail)
 
     create = create_d6 or _create_d6
