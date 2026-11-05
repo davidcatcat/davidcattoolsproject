@@ -3255,6 +3255,50 @@ class AutoResumeWidgetTests(Base):
                 ui._maybe_auto_resume()
                 ui._pm_start_turn.assert_not_called()
 
+    def test_one_queued_draft_cancels_resume_before_background_turn_drains(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = True
+        ui.pm_turn_active = True
+        ui.submit_pm('draft one')
+
+        ui.pm_turn_status = 'COMPLETED'
+        ui.finish_pm_turn()
+
+        ui._pm_start_turn.assert_called_once_with(
+            'draft one', 'owner → PM（自佇列送出，剩 0 則）:\n')
+        self.assertFalse(ui._auto_resume_pending)
+
+    def test_two_queued_drafts_cancel_resume_before_each_background_drain(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = True
+        ui.pm_turn_active = True
+        ui.submit_pm('draft one')
+        ui.submit_pm('draft two')
+
+        ui.pm_turn_status = 'COMPLETED'
+        ui.finish_pm_turn()
+        ui.pm_turn_active = True
+        ui.pm_turn_status = 'COMPLETED'
+        ui.finish_pm_turn()
+
+        self.assertEqual([call.args[0] for call in ui._pm_start_turn.call_args_list],
+                         ['draft one', 'draft two'])
+        self.assertFalse(ui._auto_resume_pending)
+
+    def test_immediate_draft_cancels_resume_without_changing_sent_latch(self):
+        ui = self.make_ui()
+        self.prepare(ui)
+        ui._auto_resume_pending = True
+        ui._auto_resume_sent = True
+
+        ui.submit_pm('immediate draft')
+
+        ui._pm_start_turn.assert_called_once_with('immediate draft', 'owner → PM:\n')
+        self.assertFalse(ui._auto_resume_pending)
+        self.assertTrue(ui._auto_resume_sent)
+
     def test_settings_off_cancels_candidate_permanently(self):
         ui = self.make_ui()
         self.prepare(ui)

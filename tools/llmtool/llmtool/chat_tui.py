@@ -3844,6 +3844,7 @@ class ChatTUI:
         if self.pm_runtime is None or self.pm_pending:
             self.append("llmtool: the PM is not connected; /pm connect")
             return
+        self._auto_resume_pending = False
         self.input.buffer.reset(append_to_history=True)
         if self.pm_turn_active or self.pm_outbox:
             # W52 F2: a turn is running (or a paused queue waits): queue it, in order.
@@ -4278,6 +4279,8 @@ class ChatTUI:
     def finish_pm_turn(self, seq=None):
         if self._pm_stale(seq):
             return
+        if self.pm_outbox:
+            self._auto_resume_pending = False
         status, error = self.pm_turn_status, self.pm_turn_error
         if (self.pm_interrupt_by in ("esc", "ctrl-c") or error is not None
                 or self.pm_turn_refused or status not in ("COMPLETED", "ABSORBED")):
