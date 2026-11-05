@@ -78,10 +78,12 @@ class SettingsFileTests(unittest.TestCase):
         self.path = Path(temp.name) / "state" / "llmtool" / "tui-settings.json"
 
     def test_defaults_when_missing_and_round_trip_with_mode_0600(self):
-        self.assertEqual(chat_tui_theme.load_settings(self.path), {"theme": "auto", "links": "on"})
+        self.assertEqual(chat_tui_theme.load_settings(self.path),
+                         {"theme": "auto", "links": "on", "auto_resume": "on"})
         chat_tui_theme.save_settings({"theme": "light", "links": "off", "other": 1}, self.path)
         self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
-        self.assertEqual(chat_tui_theme.load_settings(self.path), {"theme": "light", "links": "off"})
+        self.assertEqual(chat_tui_theme.load_settings(self.path),
+                         {"theme": "light", "links": "off", "auto_resume": "on"})
         self.assertEqual(self.path.read_text(), '{"links": "off", "theme": "light"}')
         self.assertEqual([p.name for p in self.path.parent.iterdir()], ["tui-settings.json"])
 
@@ -92,7 +94,7 @@ class SettingsFileTests(unittest.TestCase):
             with self.subTest(content=content[:20]):
                 self.path.write_text(content)
                 self.assertEqual(chat_tui_theme.load_settings(self.path),
-                                 {"theme": "auto", "links": "on"})
+                                 {"theme": "auto", "links": "on", "auto_resume": "on"})
         target = self.path.parent / "elsewhere.json"
         target.write_text('{"theme": "light"}')
         self.path.unlink()
