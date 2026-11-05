@@ -8,7 +8,7 @@
 
 ## 帳戶設定
 
-帳戶只能放在使用者設定檔 `~/.config/llmtool/config.yaml`，不可放在專案的 `.llmtool.yaml`。每個帳戶必須且只能有 `kind` 和 `config_dir` 兩個欄位。`kind` 是 `claude` 或 `codex`；`config_dir` 必須是絕對路徑，指向已存在、由目前使用者擁有的真實資料夾，而且群組及其他使用者都不能寫入。資料夾若可由群組或其他使用者寫入，狀態會顯示為「資料夾不私密」，且設定會被拒絕。
+帳戶只能放在使用者設定檔 `~/.config/llmtool/config.yaml`，不可放在專案的 `.llmtool.yaml`。每個帳戶必須且只能有 `kind` 和 `config_dir` 兩個欄位。`kind` 是 `claude` 或 `codex`；`config_dir` 必須是絕對路徑，指向已存在、由目前使用者擁有的真實資料夾，而且群組及其他使用者都不能寫入。資料夾若可由群組或其他使用者寫入，`folder not private`（資料夾不符合私密性要求）會作為 `/pm accounts` 的狀態顯示，且設定會被拒絕。
 
 以下名稱和路徑都是示意佔位值，請換成自己的值：
 

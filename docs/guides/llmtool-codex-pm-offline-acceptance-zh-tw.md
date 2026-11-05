@@ -11,7 +11,7 @@
 | 測試模組 | 涵蓋內容 |
 | --- | --- |
 | `test_pm_runtime_codex` | Codex PM runtime 的工作階段綁定、CLI 呼叫與續接、事件及用量、錯誤、停止處理，以及不符合條件的工作階段拒絕。 |
-| `test_pm_runtime` | 涵蓋範圍：未驗證（本次允許讀取的來源未確認此模組的測試涵蓋內容）。 |
+| `test_pm_runtime` | Claude PM runtime 的設定與帳戶解析、事件和歷史、工作階段綁定與生命週期、輸入及輸出篩檢、工具描述，以及訊息交付狀態。 |
 | `test_chat_tui_pm_management` | 只涵蓋帳戶列出、登入檢查，以及建立／列出／選取 PM 工作階段。 |
 
 從 `tools/llmtool` 目錄執行以下命令：
@@ -20,7 +20,9 @@
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests .venv/bin/python -B -m unittest test_pm_runtime_codex test_pm_runtime test_chat_tui_pm_management
 ```
 
-這些測試使用假的 `codex` 程式：不會啟動真正的 Codex CLI、不會呼叫 provider，也不會消耗 quota；而且它們絕不會在 D6 worktree 內執行。
+依專案規則，這些測試不在 D6 worktree 內執行；測試本身不會強制此限制。`test_pm_runtime_codex` 使用假的 `codex` 程式。`test_pm_runtime` 主要以程式內的假程序測試 Claude runtime，並在 Codex adapter／binding 案例使用假的 `codex` 程式。這兩個 runtime 模組不呼叫真實 provider。`test_chat_tui_pm_management` 使用的 provider 程式未驗證。
+
+PM 觀察（2026-11-05，base main `47707e5b`）：這三個模組在一份獨立複本中、使用空的臨時 `HOME`，共執行 100 項測試，結果為 `OK`。`HOME` 必須是正規化路徑；若 `HOME` 含有 `..`，`test_tool_descriptions_display_paths_by_location` 會失敗。這是 PM 本機執行的觀察記錄，不是 CI 結果。
 
 已提交的 `tests/tui_pty_driver.py` 和 `tests/test_chat_tui_pty.py` 沒有 Codex PM 情境。因此，下方所記錄的 PTY 檢查是 PM 使用臨時建立的假 `codex` 程式執行，沒有可重複執行它們的已提交腳本。
 
@@ -34,14 +36,14 @@ PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=$PWD:$PWD/tests .venv/bin/python -B -m unit
 
 ## 3. 證據與狀態清單
 
-證據等級分開記錄假離線測試、假程式 PTY 與真實 Mac PTY。狀態表示目前記錄的情況。
+證據等級分開記錄假離線測試、假程式 PTY、Owner 實機使用與真實 Codex PM。狀態表示目前記錄的情況。
 
 | 項目 | 證據等級 | 狀態 |
 | --- | --- | --- |
-| 離線測試模組（使用假 `codex`） | 假離線測試 | 可由上列測試命令執行；這不是本文件所聲稱的新測試結果 |
+| 離線測試模組 | 假離線測試 | PM 本機執行：100 項測試 `OK`（獨立複本、空的臨時 `HOME`；非 CI） |
 | W64 的 Mac PTY 檢查 | 假程式 PTY | 歷史記錄：18 項 PASS |
 | W65 的 PTY 檢查 | 假程式 PTY | 歷史記錄：6 項中 6 項 PASS |
-| Owner 對 W64 和 W65 的真實使用 OK | 真實 Mac PTY | 歷史記錄：涵蓋 `/pm` 指令，不代表真實 Codex PM |
+| Owner 對 W64 和 W65 的真實使用 OK | Owner 實機使用 | 歷史記錄：涵蓋 `/pm` 指令，不代表真實 Codex PM；使用的 provider 未驗證 |
 | 使用真實帳戶執行真實 Codex PM | 真實 Codex PM | 未執行 |
 
 **驗收規則：假程式或假資料執行永遠不能證明真實 Codex 行為。**
