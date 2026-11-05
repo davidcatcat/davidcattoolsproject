@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+import stat
 from unittest.mock import patch
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -28,6 +29,10 @@ SECRETS = ("PROMPT-SECRET", "REASONING-SECRET", "TOOL-OUTPUT-SECRET", "MODEL-OUT
 
 
 _ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_ISOLATED = tempfile.TemporaryDirectory()
+_RULE_ALERT_PATCH = patch.object(
+    mon, "RULE_ALERT_FILE",
+    os.path.join(_RULE_ALERT_ISOLATED.name, "rule-file-alerts.json"))
 
 
 def setUpModule():
@@ -35,9 +40,12 @@ def setUpModule():
     # changing state mid-test would add office events to unrelated assertions.
     for name in ("CODEX_SESSIONS", "CODEX_HISTORY", "CODEX_STATE", "CLAUDE_PROJECTS", "CLAUDE_OTHER_PROJECTS", "OPENCODE_DB", "KILO_DB", "LLMTOOL_TASKS"):
         setattr(mon, name, os.path.join(_ISOLATED.name, name))
+    _RULE_ALERT_PATCH.start()
 
 
 def tearDownModule():
+    _RULE_ALERT_PATCH.stop()
+    _RULE_ALERT_ISOLATED.cleanup()
     _ISOLATED.cleanup()
 
 
@@ -1411,6 +1419,15 @@ def comment(number, seconds, body, kind="issues", association="OWNER"):
 
 
 class GitHubActivityTests(unittest.TestCase):
+    def test_refresh_does_not_create_default_rule_alert_path_under_home(self):
+        with tempfile.TemporaryDirectory() as home, patch.dict(os.environ, {"HOME": home}):
+            default_path = os.path.join(os.path.expanduser("~"),
+                                        ".local/state/llmtool/rule-file-alerts.json")
+            source = mon.GitHubSource("o/r", clock=lambda: NOW)
+            source._get = lambda path: []
+            source.refresh(force=True)
+            self.assertFalse(os.path.exists(default_path))
+
     def test_progress_summary_shows_only_valid_d6_and_family_labels(self):
         marker = "<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->\n"
         task = "Task: " + "a" * 32
@@ -2352,6 +2369,159 @@ class DispatchFileAgreementTests(_GateMixin, unittest.TestCase):
 
     def test_roster_workers_are_gate_workers(self):
         self.assertLessEqual({key for _, key, _ in mon.WORKER_ROSTER}, mon.DISPATCH_WORKERS)
+
+
+class RuleAlertTests(unittest.TestCase):
+    NOW = 1_800_000_000
+    MATCHED = "tools/llmtool/worker-dispatch.json"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.path = os.path.join(self.tmp.name, "state", "rule-file-alerts.json")
+        rule_alert_file = patch.object(mon, "RULE_ALERT_FILE", self.path)
+        rule_alert_file.start()
+        self.addCleanup(rule_alert_file.stop)
+        self.source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _pull(self, number, *, merged=None, base="main", title=None):
+        stamp = datetime.fromtimestamp(merged if merged is not None else self.NOW,
+                                       timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return {"number": number, "title": title or f"PR {number}",
+                "merged_at": stamp if merged is not None else None,
+                "base": {"ref": base}}
+
+    def _record(self, baseline=None, checked=None, alerts=None):
+        mon._save_rule_alerts(self.path, {"schema_version": 1,
+                                          "baseline": self.NOW if baseline is None else baseline,
+                                          "checked": checked or [], "alerts": alerts or []})
+
+    def _read(self):
+        return mon._load_rule_alerts(self.path)
+
+    def test_first_run_sets_baseline_and_ignores_old_merge(self):
+        calls = []
+        self.source._get = lambda path: calls.append(path)
+        self.source.refresh_rule_alerts([self._pull(1, merged=self.NOW - 10)])
+        self.assertEqual(self._read(), {"schema_version": 1, "baseline": self.NOW,
+                                        "checked": [], "alerts": []})
+        self.assertEqual(calls, [])
+
+    def test_sensitive_merge_and_rename_are_alerted_and_ordinary_is_checked(self):
+        self._record()
+        files = {
+            2: [{"filename": self.MATCHED}],
+            3: [{"filename": "README.md", "previous_filename": self.MATCHED}],
+            4: [{"filename": "README.md"}],
+        }
+        self.source._get = lambda path: files[int(path.split("/pulls/")[1].split("/")[0])]
+        self.source.refresh_rule_alerts([self._pull(n, merged=self.NOW + n) for n in (2, 3, 4)])
+        state = self._read()
+        self.assertEqual(state["checked"], [2, 3, 4])
+        self.assertEqual([alert["pr"] for alert in state["alerts"]], [2, 3])
+        self.assertEqual(state["alerts"][0]["paths"], [self.MATCHED])
+        self.assertEqual(state["alerts"][1]["paths"], [self.MATCHED])
+        self.source.refresh_rule_alerts([self._pull(n, merged=self.NOW + n) for n in (2, 3, 4)])
+        self.assertEqual([alert["pr"] for alert in self._read()["alerts"]], [2, 3])
+
+    def test_other_base_and_closed_unmerged_are_ignored(self):
+        self._record()
+        calls = []
+        self.source._get = lambda path: calls.append(path) or []
+        self.source.refresh_rule_alerts([self._pull(5, merged=self.NOW + 1, base="release"),
+                                         self._pull(6)])
+        self.assertEqual(calls, [])
+        self.assertEqual(self._read()["checked"], [])
+
+    def test_reads_at_most_five_then_continues_next_refresh(self):
+        self._record()
+        calls = []
+        self.source._get = lambda path: calls.append(path) or []
+        pulls = [self._pull(n, merged=self.NOW + n) for n in range(1, 8)]
+        self.source.refresh_rule_alerts(pulls)
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(self._read()["checked"], [1, 2, 3, 4, 5])
+        self.source.refresh_rule_alerts(pulls)
+        self.assertEqual(len(calls), 7)
+        self.assertEqual(self._read()["checked"], list(range(1, 8)))
+
+    def test_failed_read_retries_and_does_not_change_refresh_health(self):
+        self._record()
+        self.source.successful_read, self.source.read_failed = True, True
+        self.source._get = lambda path: (_ for _ in ()).throw(RuntimeError("offline"))
+        self.source.refresh_rule_alerts([self._pull(8, merged=self.NOW + 1)])
+        self.assertEqual(self._read()["checked"], [])
+        self.assertEqual(self._read()["alerts"], [])
+        self.assertTrue(self.source.successful_read)
+        self.assertTrue(self.source.read_failed)
+
+    def test_too_many_files_and_unloadable_matcher_fail_closed(self):
+        self._record()
+        pulls = [self._pull(9, merged=self.NOW + 1), self._pull(10, merged=self.NOW + 2)]
+        self.source._get = lambda path: ([{}] * 100 if "/9/" in path else [])
+        self.source.refresh_rule_alerts(pulls[:1])
+        self.assertEqual(self._read()["alerts"][0]["paths"], ["<too-many-files>"])
+        self._record()
+        with patch.object(mon.importlib.util, "spec_from_file_location", return_value=None):
+            self.source._get = lambda path: [{"filename": "README.md"}]
+            self.source.refresh_rule_alerts(pulls[1:])
+        self.assertEqual(self._read()["alerts"][0]["paths"], ["<sensitive-list-unreadable>"])
+
+    def test_lines_limits_order_and_malformed_record(self):
+        self.assertEqual(mon.rule_alert_lines(), [])
+        alerts = [{"pr": n, "title": f"private title {n}", "paths": ["x"]}
+                  for n in range(1, 8)]
+        self._record(alerts=alerts)
+        lines = mon.rule_alert_lines()
+        self.assertEqual([line for line, _ in lines[:5]], [
+            f"規則檔已變更：PR #{n}，1 個檔（看過後請 PM 清除）" for n in (7, 6, 5, 4, 3)])
+        self.assertEqual(lines[-1], ("另有 2 件規則檔告警", "!"))
+        self.assertTrue(all("private title" not in line for line, _ in lines))
+        Path(self.path).write_text("{", encoding="utf-8")
+        self.assertEqual(mon.rule_alert_lines(), [("規則檔告警紀錄無法讀取", "!")])
+
+    def test_clear_removes_alert_and_preserves_checked_without_github_or_subprocess(self):
+        alert = {"pr": 12, "title": "title", "paths": [self.MATCHED]}
+        self._record(checked=[12], alerts=[alert])
+        with patch("subprocess.run", side_effect=AssertionError("subprocess")), \
+                patch("subprocess.Popen", side_effect=AssertionError("subprocess")), \
+                patch("builtins.print") as output:
+            self.assertEqual(mon.main(["--clear-rule-alert", "12"]), 0)
+        self.assertEqual(self._read()["checked"], [12])
+        self.assertEqual(self._read()["alerts"], [])
+        self.assertEqual(output.call_args.args, ("RULE_ALERT_CLEARED pr=12",))
+        self.assertEqual(mon.rule_alert_lines(), [])
+        with patch("builtins.print") as output:
+            self.assertEqual(mon.main(["--clear-rule-alert", "13"]), 1)
+        self.assertEqual(output.call_args.args, ("RULE_ALERT_NOT_FOUND pr=13",))
+
+    def test_clear_malformed_record_is_unchanged_and_save_uses_private_modes(self):
+        os.makedirs(os.path.dirname(self.path), exist_ok=True)
+        Path(self.path).write_bytes(b"{bad")
+        original = Path(self.path).read_bytes()
+        with patch("builtins.print") as output:
+            self.assertEqual(mon.main(["--clear-rule-alert", "12"]), 1)
+        self.assertEqual(Path(self.path).read_bytes(), original)
+        self.assertEqual(output.call_args.args, ("RULE_ALERT_RECORD_BAD",))
+        self._record()
+        self.assertEqual(stat.S_IMODE(os.stat(self.path).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(os.path.dirname(self.path)).st_mode), 0o700)
+
+    def test_office_places_rule_alerts_after_owner_count(self):
+        from types import SimpleNamespace
+        github = SimpleNamespace(successful_read=True, read_failed=False, pending=[], window=43200,
+                                 comments_cut=False, main_health=None, main_error="")
+        self._record(alerts=[{"pr": 21, "title": "hidden", "paths": ["x"]}])
+        top = mon.office_top(github, [], 0, install=mon.rule_alert_lines() + [])
+        self.assertEqual(top[1], ("規則檔已變更：PR #21，1 個檔（看過後請 PM 清除）", "!"))
+
+    def test_persistence_and_presentation_run_no_subprocess(self):
+        self._record(alerts=[{"pr": 22, "title": "hidden", "paths": ["x"]}])
+        with patch("subprocess.run", side_effect=AssertionError("subprocess")), \
+                patch("subprocess.Popen", side_effect=AssertionError("subprocess")):
+            self.assertEqual(mon.rule_alert_lines()[0][1], "!")
 
 
 class InstallLinesTests(unittest.TestCase):
