@@ -886,6 +886,34 @@ class ActivityViewTests(unittest.TestCase):
                 lines = mon.activity_lines([], github=None, tasks_root=tasks)
             self.assertEqual(lines[0], "⚠ PM 上次派工：未確認（本機 Task 紀錄讀取失敗）")
 
+    def test_successful_github_read_with_local_dispatch_problem_is_unconfirmed(self):
+        class Source:
+            window = 12 * 3600
+            status = "GitHub：讀取完成"
+            successful_read = True
+            events = [mon.ActivityEvent(NOW, "developer_dispatch", "", "",
+                                        "ASSIGNED", "#965", actor="PM", target="AGY")]
+            clock = staticmethod(lambda: NOW)
+            def refresh(self): pass
+
+        with patch.object(mon, "pm_last_dispatch", return_value=(None, "problem")):
+            lines = mon.activity_lines([], github=Source(), tasks_root="unused")
+        self.assertEqual(lines[0], "⚠ PM 上次派工：未確認（problem）")
+
+    def test_bounded_task_entries_returns_fit_entry_and_over_budget_problem(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            older = Path(tasks) / "wp-1.json"
+            newer = Path(tasks) / "wp-2.json"
+            older.write_text(json.dumps({"name": "first"}), encoding="utf-8")
+            newer.write_text(json.dumps({"name": "second"}), encoding="utf-8")
+            os.utime(older, (NOW - 20, NOW - 20))
+            os.utime(newer, (NOW - 10, NOW - 10))
+            budget = newer.stat().st_size
+            entries, problem = mon._bounded_task_entries(
+                tasks, {}, budget, lambda record: record.get("name"))
+        self.assertEqual(entries, ["second"])
+        self.assertEqual(problem, mon.REMOTE_TEST_OVER_BUDGET)
+
     def test_pm_dispatch_entry_rejects_wrong_types(self):
         self.assertIsNone(mon._dispatch_entry(None))
         self.assertIsNone(mon._dispatch_entry({"task_id": "x" * 32, "developer": {}}))
@@ -938,6 +966,55 @@ class ActivityViewTests(unittest.TestCase):
                               lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("監控程式已更新", drawn[2])
         self.assertIn("PM 上次派工", drawn[3])
+
+    def test_activity_paint_passes_noise_state_and_updates_hint(self):
+        monitor = mon.Monitor()
+        class Screen:
+            def getmaxyx(self): return (20, 120)
+            def erase(self): pass
+            def refresh(self): pass
+            def move(self, *args): pass
+            def clearok(self, *args): pass
+        calls = []
+        drawn = {}
+        def activity_lines(*args, **kwargs):
+            calls.append(kwargs.get("show_noise"))
+            return ["header", "event"]
+        with patch.object(mon, "activity_lines", side_effect=activity_lines):
+            mon._paint_screen(Screen(), monitor, "activity", 0, True, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+            self.assertTrue(any("a: 顯示雜訊" in text for text in drawn.values()))
+            drawn.clear()
+            mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text),
+                              noise=True)
+        self.assertEqual(calls, [False, True])
+        self.assertTrue(any("a: 隱藏雜訊" in text for text in drawn.values()))
+
+    def test_activity_lines_shows_hidden_comment_without_patching(self):
+        class Source:
+            status = "GitHub：讀取完成"
+            clock = staticmethod(lambda: NOW)
+            events = [mon.ActivityEvent(NOW, "github_comment", "", "", "POSTED",
+                                        "#70", summary="subpm-lease repair")]
+            def refresh(self): pass
+
+        lines = mon.activity_lines([], github=Source(), tasks_root=str(_ISOLATED.name),
+                                   show_noise=True)
+        self.assertTrue(any("subpm-lease repair" in line for line in lines))
+
+    def test_activity_hint_starts_with_noise_action(self):
+        monitor = mon.Monitor()
+        class Screen:
+            def getmaxyx(self): return (20, 80)
+            def erase(self): pass
+            def refresh(self): pass
+            def move(self, y, x): pass
+        drawn = {}
+        with patch.object(mon, "activity_lines", return_value=["header", "event"]):
+            mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+        self.assertTrue(drawn[19].startswith("a: 顯示雜訊"))
 
     def test_curses_activity_events_do_not_overwrite_hint_on_short_terminal(self):
         class Source:
@@ -1079,6 +1156,88 @@ def comment(number, seconds, body, kind="issues", association="OWNER"):
 
 
 class GitHubActivityTests(unittest.TestCase):
+    def test_progress_summary_shows_only_valid_d6_and_family_labels(self):
+        marker = "<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->\n"
+        task = "Task: " + "a" * 32
+        cases = (
+            (task + "\nD6: wp-1\nFamily: fixture-family", "Family fixture-family（D6 wp-1）"),
+            (task + "\nD6: wp-1", "D6 wp-1"),
+            (task + "\nFamily: fixture_family", "Family fixture family"),
+            (task, "Task: [已遮蔽]"),
+            ("Ordinary progress headline\nD6: wp-1\nFamily: fixture-family",
+             "Ordinary progress headline"),
+            (task + "\nD6: bad name\nFamily: fixture-family", "Family fixture-family"),
+            (task + "\nD6: wp-1\nFamily: bad name", "D6 wp-1"),
+            (task + "\nD6: wp-1\nsee Family: other", "D6 wp-1"),
+        )
+        for body, expected in cases:
+            with self.subTest(expected=expected):
+                events = mon.github_events([comment(51, NOW - 9, marker + body)], [], NOW - 99)
+                self.assertEqual(len(events), 1)
+                self.assertEqual(events[0].event_type, "developer_progress")
+                self.assertEqual(events[0].summary, expected)
+                self.assertNotIn("a" * 32, events[0].summary)
+        long_hex = "b" * 32
+        invalid_values = (f"x_{long_hex}", f"{long_hex}_x", f"task{long_hex}",
+                          f"{long_hex}g", "c" * 40)
+        for value in invalid_values:
+            with self.subTest(bad_d6=value):
+                events = mon.github_events([comment(
+                    53, NOW - 9, marker + task + f"\nD6: {value}\nFamily: fixture_family")],
+                    [], NOW - 99)
+                self.assertEqual(events[0].summary, "Family fixture family")
+                self.assertNotIn(value, events[0].summary)
+            with self.subTest(bad_family=value):
+                events = mon.github_events([comment(
+                    54, NOW - 9, marker + task + f"\nD6: wp-1\nFamily: {value}")],
+                    [], NOW - 99)
+                self.assertEqual(events[0].summary, "D6 wp-1")
+                self.assertNotIn(value, events[0].summary)
+        partial = mon.github_events([comment(
+            55, NOW - 9, marker + task + "\nsee D6: wp-1")], [], NOW - 99)
+        self.assertEqual(partial[0].summary, "Task: [已遮蔽]")
+        self.assertNotIn("wp-1", partial[0].summary)
+        other = marker.replace("developer_progress", "test_result").replace(
+            "target=PM", "target=Tests").replace("status=WAITING", "status=PASS")
+        other += task + "\nD6: wp-1\nFamily: fixture-family"
+        event = mon.github_events([comment(52, NOW - 9, other)], [], NOW - 99)[0]
+        self.assertEqual(event.event_type, "test_result")
+        self.assertEqual(event.summary, "Task: [已遮蔽]")
+
+    def test_lease_and_correction_noise_is_hidden_counted_and_revealed(self):
+        comments = [comment(61, NOW - 6, "subpm-lease started"),
+                    comment(62, NOW - 5, "Correction updated details"),
+                    comment(63, NOW - 4, "ordinary text mentions subpm-lease"),
+                    comment(64, NOW - 3,
+                            "<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->\n"
+                            "Correction progress"),
+                    comment(65, NOW - 2, "final visible comment")]
+        events = mon.github_events(comments, [], NOW - 99)
+        hidden = mon.render_activity(events, limit=1)
+        self.assertIn("已隱藏 2 筆 lease／更正留言", hidden)
+        visible_events = [line for line in hidden if "GitHub #65" in line or "Codex → PM" in line]
+        self.assertEqual(len(visible_events), 1)
+        self.assertIn("final visible comment", visible_events[0])
+        shown = mon.render_activity(events, show_noise=True)
+        self.assertFalse(any("已隱藏" in line for line in shown))
+        self.assertTrue(any("subpm-lease started" in line for line in shown))
+        self.assertTrue(any("Correction updated details" in line for line in shown))
+        self.assertTrue(any("subpm-lease" in line for line in shown))
+        self.assertTrue(any("Correction progress" in line for line in shown))
+        leases = mon.github_events([comment(67, NOW - 1, "subpm-leases are still visible")], [], NOW - 99)
+        self.assertTrue(any("subpm-leases are still visible" in line for line in mon.render_activity(leases)))
+        corrections = mon.github_events([comment(66, NOW - 1, "corrections are still visible")],
+                                        [], NOW - 99)
+        self.assertTrue(any("corrections are still visible" in line
+                            for line in mon.render_activity(corrections)))
+        self.assertFalse(any("已隱藏" in line for line in
+                             mon.render_activity(events, limit=10, show_noise=True)))
+        self.assertFalse(any("已隱藏" in line for line in
+                             mon.render_activity([events[2]], limit=10)))
+        typed_default = mon.render_activity([events[3]], limit=10)
+        self.assertTrue(any("Correction progress" in line for line in typed_default))
+        self.assertFalse(any("已隱藏" in line for line in typed_default))
+
     def test_marked_comment_becomes_typed_undelivered_reply(self):
         body = ("<!-- activity: type=undelivered_reply actor=Claude target=PM status=NOT_DELIVERED -->\n"
                 "**Claude Reviewer → PM**: verdicts below")
@@ -7090,9 +7249,9 @@ class WorkBoardTests(unittest.TestCase):
         screen.keys = []
         painted = []
         original = mon._paint_screen
-        def record(*args):
+        def record(*args, **kwargs):
             painted.append((args[2], args[3]))
-            return original(*args)
+            return original(*args, **kwargs)
         with patch.object(screen, "keys", [ord("6"), ord("q")]), \
              patch.object(mon, "_paint_screen", side_effect=record), \
              patch.object(monitor, "poll"), patch.object(mon.GitHubSource, "refresh_in_background"), \
@@ -7108,6 +7267,39 @@ class WorkBoardTests(unittest.TestCase):
         self.assertEqual([view for view, _ in painted],
                          ["office", "board", "log", "tasks", "table", "activity", "office"])
         self.assertTrue(all(offset == 0 for _, offset in painted))
+
+    def test_curses_a_toggles_only_the_current_view_state(self):
+        monitor = mon.Monitor()
+        class Screen:
+            def __init__(self, keys): self.keys = list(keys)
+            def getmaxyx(self): return (30, 100)
+            def timeout(self, value): pass
+            def keypad(self, value): pass
+            def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
+            def addnstr(self, y, x, text, n, attr): pass
+            def getch(self): return self.keys.pop(0)
+            def clearok(self, value): pass
+
+        def run(keys):
+            painted = []
+            screen = Screen([*(ord(key) for key in keys), ord("q")])
+            original = mon._paint_screen
+            def record(*args, **kwargs):
+                painted.append((args[2], args[4], kwargs.get("noise", False)))
+                return original(*args, **kwargs)
+            with patch.object(mon, "_paint_screen", side_effect=record), \
+                 patch.object(monitor, "poll"), \
+                 patch.object(mon.GitHubSource, "refresh_in_background"), \
+                 patch("curses.curs_set"):
+                mon.run_curses(screen, 60, False, monitor)
+            return painted
+
+        self.assertEqual(run("4a5")[-1], ("office", False, True))
+        self.assertEqual(run("5a4")[-1], ("activity", True, False))
+        self.assertEqual(run("4a")[-1], ("activity", False, True))
+        self.assertEqual(run("1a")[-1], ("log", False, False))
 
     def test_unknown_counts_sections_and_narrow_rows_preserve_refs(self):
         unknown = mon.work_board(self._github(None, successful_read=False),

@@ -1532,6 +1532,7 @@ SECRETISH = re.compile(
 # they remain the poster's own claim, so typed lines are labelled 自述.
 TRUSTED_ASSOCIATION = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 URL = re.compile(r"https?://\S+")
+FEED_NOISE = re.compile(r"(?i)^(?:subpm-lease\b|correction\b)")
 MD_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
 GITHUB_TIMEOUT = 20
 DEFAULT_GITHUB_REPO = "davidcatcat/davidcattoolsproject"
@@ -1582,6 +1583,33 @@ def _headline(text) -> str:
     return ""
 
 
+def _progress_summary(body: str) -> str:
+    """Show safe D6/family labels when a progress comment starts with a Task id."""
+    headline = _headline(body)
+    if not re.fullmatch(r"Task:? \[已遮蔽\]", headline):
+        return headline
+    d6 = family = ""
+    for line in body.splitlines() if type(body) is str else []:
+        match = re.fullmatch(r"D6:\s*(.+)", line)
+        if (match and not re.search(r"[0-9A-Fa-f]{32,}", match.group(1))
+                and AGENT_ID.fullmatch(match.group(1))):
+            d6 = match.group(1)
+            continue
+        match = re.fullmatch(r"Family:\s*(.+)", line)
+        if (match and not re.search(r"[0-9A-Fa-f]{32,}", match.group(1))
+                and AGENT_ID.fullmatch(match.group(1))):
+            family = match.group(1)
+    if family and d6:
+        summary = f"Family {family}（D6 {d6}）"
+    elif family:
+        summary = f"Family {family}"
+    elif d6:
+        summary = f"D6 {d6}"
+    else:
+        return headline
+    return _headline(summary)
+
+
 def _issue_number(url) -> str:
     found = re.search(r"/(?:issues|pull)/(\d{1,7})$", url) if type(url) is str else None
     return found.group(1) if found else ""
@@ -1627,8 +1655,9 @@ def _marker_events(body: str, when: float, number: str) -> list[ActivityEvent]:
             return []
         if actor == target:
             return []
+        summary = _progress_summary(body) if kind == "developer_progress" else _headline(body)
         events.append(ActivityEvent(when, kind, "", "", status, f"#{number}",
-                                    actor=actor, target=target, summary=_headline(body)))
+                                    actor=actor, target=target, summary=summary))
     return events
 
 
@@ -2241,15 +2270,28 @@ def _activity_line(event: ActivityEvent) -> str:
 
 
 def render_activity(events: list[ActivityEvent], limit: int = 60,
-                    github: "GitHubSource | None" = None) -> list[str]:
+                    github: "GitHubSource | None" = None,
+                    show_noise: bool = False) -> list[str]:
     events = [event for event in events if type(event) is ActivityEvent]
     if github is not None:
         events += [event for event in github.events if type(event) is ActivityEvent]
+    hidden = 0
+    if not show_noise:
+        visible = []
+        for event in events:
+            if (event.event_type == "github_comment" and type(event.summary) is str
+                    and FEED_NOISE.match(event.summary)):
+                hidden += 1
+            else:
+                visible.append(event)
+        events = visible
     ordered = sorted(events, key=lambda event: (event.occurred_at, event.reference,
                                                  event.event_type, event.stage, event.status))
     lines = [line for line in (_activity_line(event) for event in ordered[-max(0, limit):]) if line]
     if not lines:
         lines.append("目前沒有可顯示的動態。")
+    if hidden:
+        lines.append(f"已隱藏 {hidden} 筆 lease／更正留言")
     if github is None:
         lines.append("GitHub 動態已關閉（--no-github），跨工作階段的標記沒有顯示。")
     else:
@@ -2259,10 +2301,10 @@ def render_activity(events: list[ActivityEvent], limit: int = 60,
 
 def activity_lines(tasks: list[Task], limit: int = 60,
                    github: "GitHubSource | None" = None, background: bool = False,
-                   tasks_root: str | None = None) -> list[str]:
+                   tasks_root: str | None = None, show_noise: bool = False) -> list[str]:
     if github is not None:
         github.refresh_in_background() if background else github.refresh()
-    lines = render_activity(activity_events(tasks), limit, github)
+    lines = render_activity(activity_events(tasks), limit, github, show_noise=show_noise)
     now = github.clock() if github is not None else time.time()
     try:
         entry, problem = pm_last_dispatch(now, tasks_root)
@@ -7005,6 +7047,7 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             colors[key] = curses.color_pair(n)
     view, offset, next_poll = "office", 0, 0.0
     expanded = False   # office view: gray rows folded (default) or listed (key a)
+    noise = False      # Activity view: feed noise hidden (default) or shown (key a)
     next_draw, dirty = 0.0, True
 
     def put(y: int, text: str, attr: int = 0) -> None:
@@ -7026,7 +7069,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
         # the clock; getch() still wakes every 100 ms so keys answer at once.
         if dirty or time.monotonic() >= next_draw:
             dirty, next_draw = False, time.monotonic() + DRAW_EVERY
-            offset = _paint_screen(stdscr, mon, view, offset, expanded, colors, put)
+            offset = _paint_screen(stdscr, mon, view, offset, expanded, colors, put,
+                                   noise=noise)
         key = stdscr.getch()
         if key == -1:
             continue
@@ -7047,6 +7091,8 @@ def run_curses(stdscr, interval: float, use_color: bool, mon: "Monitor") -> None
             view, offset = views[key - ord("1")], 0
         elif key in (ord("a"), ord("A")) and view == "office":
             expanded = not expanded
+        elif key in (ord("a"), ord("A")) and view == "activity":
+            noise = not noise
         elif key == curses.KEY_UP:
             offset += 1 if view in FOLLOW_VIEWS else -1
         elif key == curses.KEY_DOWN:
@@ -7067,7 +7113,7 @@ def body_lines(stdscr) -> int:
     return max(1, stdscr.getmaxyx()[0] - 4)
 
 
-def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
+def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=False) -> int:
     """One repaint of the current view (the loop above decides when);
     returns the scroll offset clamped to the view."""
     import curses
@@ -7115,7 +7161,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
             put(3 + row, line, attr)
         hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  q: quit"
     elif view == "activity":
-        all_lines = activity_lines(mon.tasks, github=mon.github, background=True)
+        all_lines = activity_lines(mon.tasks, github=mon.github, background=True,
+                                   show_noise=noise)
         header = _activity_screen_lines(all_lines[:1], w - 1)
         # Keep the header on the first Activity body row, but never on the
         # navigation hint row on very short terminals.
@@ -7132,7 +7179,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         for row, line in enumerate(lines[max(0, end - available):end]):
             attr = colors.get("!", 0) if "未知" in line or "UNKNOWN" in line or "沒送到" in line else 0
             put(start + row, line, attr)
-        hint = "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  End: follow  q: quit"
+        hint = (f"a: {'隱藏雜訊' if noise else '顯示雜訊'}  "
+                "Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
+                "End: follow  q: quit")
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "office":
