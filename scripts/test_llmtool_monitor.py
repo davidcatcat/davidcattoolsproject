@@ -7581,7 +7581,7 @@ class PrBoardTests(unittest.TestCase):
             ("", False, "通過", "成功", "結果不明", "未確認 CI", "PM"),
             ("", False, "通過", "執行中", "?", "未確認 CI", "PM"),
             ("", False, "通過", "成功", "執行中", "等 macOS", "CI"),
-            ("", False, "通過", "略過", "成功", "加 mac-ci", "PM"),
+            ("", False, "通過", "成功", "略過", "加 mac-ci", "PM"),
             ("", False, "未審", "", "派審查", "PM"),
             ("", False, "未確認", "", "未確認", "PM"),
         ]
@@ -7787,7 +7787,10 @@ class PrBoardTests(unittest.TestCase):
             os.utime(path, (NOW + 32, NOW + 32))
             results, problem = mon.ec2_head_results(tasks)
             self.assertEqual((results, problem), ({"abcdef0": "PASS"}, expected))
-            absent = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            known = mon.pr_board_rows([self._pull(1)], {}, {}, (results, problem), set(), [])[0]
+            self.assertEqual(known.ec2, "PASS")
+            absent = mon.pr_board_rows([self._pull(1, head="fedcba9")], {}, {},
+                                       (results, problem), set(), [])[0]
             self.assertEqual(absent.ec2, "?")
             results_again, problem_again = mon.ec2_head_results(tasks)
             self.assertEqual((results_again, problem_again), (results, problem))
