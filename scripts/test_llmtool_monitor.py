@@ -741,47 +741,133 @@ class MonitorTaskBaselineTests(unittest.TestCase):
 
 
 class ActivityViewTests(unittest.TestCase):
+    def _dispatch_record(self, root, task, state="DEVELOPER_DISPATCHING",
+                         provider="agy-cli", created=None, request="Repair round: #763 work"):
+        path = Path(root) / f"{task}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        record = {"task_id": task, "developer": {"state": state,
+                   "provider_type": provider,
+                   "created_at": mon.time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                       mon.time.gmtime(NOW - 12 * 60 if created is None else created))},
+                  "request": request}
+        path.write_text(json.dumps(record), encoding="utf-8")
+        os.chmod(path, 0o600)
+        return path
+
     def test_pm_last_dispatch_header_recent_stale_absent_and_wrapped(self):
         now = NOW
+        with tempfile.TemporaryDirectory() as tasks:
+            self._dispatch_record(tasks, "a" * 32)
 
-        class Source:
-            window = 12 * 3600
-            status = "GitHub：讀取完成"
-            successful_read = True
-            clock = staticmethod(lambda: now)
-            def __init__(self, events):
-                self.events = events
-            def refresh(self):
-                pass
+            class Source:
+                window = 12 * 3600
+                status = "GitHub：讀取完成"
+                successful_read = True
+                clock = staticmethod(lambda: now)
+                def __init__(self, events): self.events = events
+                def refresh(self): pass
 
-        recent = mon.ActivityEvent(now - 12 * 60, "developer_dispatch", "", "",
-                                   "ASSIGNED", "#763", actor="PM", target="AGY")
-        lines = mon.activity_lines([], github=Source([recent]))
-        self.assertEqual(lines[0], "PM 上次派工：12 分鐘前（→ AGY，#763）")
+            marker = mon.ActivityEvent(now - 12 * 60, "developer_dispatch", "", "",
+                                       "ASSIGNED", "#763", actor="PM", target="AGY")
+            lines = mon.activity_lines([], github=Source([marker]), tasks_root=tasks)
+            self.assertEqual(lines[0], "PM 上次派工：12 分鐘前（→ AGY，#763）")
 
-        stale = replace(recent, occurred_at=now - 31 * 60)
-        lines = mon.activity_lines([], github=Source([stale]))
-        self.assertEqual(lines[0], "⚠ PM 上次派工：31 分鐘前；超過 30 分鐘沒有派工（→ AGY，#763）")
+            stale_tasks = Path(tasks) / "stale"
+            self._dispatch_record(stale_tasks, "b" * 32, created=now - 31 * 60)
+            lines = mon.activity_lines([], github=Source([]), tasks_root=str(stale_tasks))
+            self.assertEqual(lines[0], "⚠ PM 上次派工：31 分鐘前；超過 30 分鐘沒有派工（→ AGY，#763）")
 
-        lines = mon.activity_lines([], github=Source([]))
-        self.assertEqual(lines[0], "⚠ PM 上次派工：最近 12 小時沒有")
+            lines = mon.activity_lines([], github=Source([]), tasks_root=str(Path(tasks) / "empty"))
+            self.assertEqual(lines[0], "⚠ PM 上次派工：本機紀錄沒有派工")
 
         wrapped = mon._activity_screen_lines([lines[0]], 18)
         self.assertGreater(len(wrapped), 1)
         self.assertTrue(all(mon._width(piece) <= 18 for piece in wrapped))
 
-    def test_pm_last_dispatch_is_unknown_until_github_read_succeeds(self):
-        self.assertIn("未知", mon.activity_lines([], github=None)[0])
+    def test_pm_last_dispatch_does_not_count_github_marker_and_works_without_github(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            marker = mon.ActivityEvent(NOW, "developer_dispatch", "", "", "ASSIGNED",
+                                       "#763", actor="PM", target="AGY")
+            self.assertEqual(mon.activity_lines([], github=None, tasks_root=tasks)[0],
+                             "⚠ PM 上次派工：本機紀錄沒有派工")
+            class Source:
+                window = 12 * 3600
+                status = "GitHub：尚未讀取"
+                successful_read = False
+                events = [marker]
+                clock = staticmethod(lambda: NOW)
+                def refresh(self): pass
+            self.assertEqual(mon.activity_lines([], github=Source(), tasks_root=tasks)[0],
+                             "⚠ PM 上次派工：本機紀錄沒有派工")
 
-        class Source:
-            window = 12 * 3600
-            status = "GitHub：尚未讀取"
-            successful_read = False
-            events = []
-            clock = staticmethod(lambda: NOW)
-            def refresh(self): pass
+    def test_pm_dispatch_accepted_states_refused_states_newest_and_future(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            accepted = tuple(mon.DISPATCH_ACCEPTED)
+            for index, state in enumerate(accepted):
+                record = {"task_id": f"{index + 1:032x}", "developer": {
+                    "state": state, "created_at": mon.time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                        mon.time.gmtime(NOW - 100 - index))}}
+                self.assertIsInstance(mon._dispatch_entry(record), mon.DispatchRecord)
+                self._dispatch_record(tasks, f"{index + 1:032x}", state=state,
+                                      created=NOW - 100 - index)
+            entry, problem = mon.pm_last_dispatch(NOW, tasks)
+            self.assertEqual(problem, "")
+            self.assertEqual(entry.created, NOW - 100)
+            self._dispatch_record(tasks, "9" * 32, state="DEVELOPER_UNAVAILABLE", created=NOW - 1)
+            self._dispatch_record(tasks, "a" * 32, state="DEVELOPER_PENDING", created=NOW - 2)
+            self._dispatch_record(tasks, "b" * 32, state="BLOCKED", created=NOW - 3)
+            refused = Path(tasks) / f"{'e' * 32}.json"
+            refused.write_text(json.dumps({"task_id": "e" * 32, "request": "#763"}),
+                               encoding="utf-8")
+            os.chmod(refused, 0o600)
+            self._dispatch_record(tasks, "c" * 32, created=NOW + mon.REMOTE_TEST_SKEW + 100)
+            entry, problem = mon.pm_last_dispatch(NOW, tasks)
+            self.assertEqual(problem, "")
+            self.assertEqual(entry.created, NOW - 100)
 
-        self.assertIn("未知", mon.activity_lines([], github=Source())[0])
+    def test_pm_dispatch_provider_words_issue_and_line_forms(self):
+        provider_words = (("codex-cli", "Codex"), ("opencode-cli", "OpenCode"),
+                          ("agy-cli", "AGY"), ("openai-compatible", "公司 gw"),
+                          ("gw-agent-cli", "gw agent"), ("unknown", "Developer"))
+        for provider, label in provider_words:
+            entry = mon.DispatchRecord(NOW - 60, provider, "965")
+            self.assertEqual(mon.pm_dispatch_line(entry, "", NOW),
+                             f"PM 上次派工：1 分鐘前（→ {label}，#965）")
+        self.assertEqual(mon.pm_dispatch_line(mon.DispatchRecord(NOW, "", ""), "", NOW),
+                         "PM 上次派工：剛剛（→ Developer）")
+        self.assertEqual(mon.pm_dispatch_line(None, "", NOW),
+                         "⚠ PM 上次派工：本機紀錄沒有派工")
+        self.assertEqual(mon.pm_dispatch_line(None, "problem", NOW),
+                         "⚠ PM 上次派工：未確認（problem）")
+        self.assertEqual(mon.pm_dispatch_line(mon.DispatchRecord(NOW - 60, "codex-cli", ""),
+                                              "problem", NOW),
+                         "⚠ PM 上次派工：未確認（problem）；已讀到的最近一次：1 分鐘前")
+        self.assertEqual(mon.pm_dispatch_line(mon.DispatchRecord(NOW - 31 * 60, "codex-cli", "965"),
+                                              "", NOW),
+                         "⚠ PM 上次派工：31 分鐘前；超過 30 分鐘沒有派工（→ Codex，#965）")
+
+    def test_pm_dispatch_over_budget_and_github_none(self):
+        with tempfile.TemporaryDirectory() as tasks:
+            self._dispatch_record(tasks, "d" * 32)
+            with patch.object(mon, "DISPATCH_BUDGET", 0):
+                lines = mon.activity_lines([], github=None, tasks_root=tasks)
+            self.assertIn("未確認", lines[0])
+            with patch.object(mon, "pm_last_dispatch", side_effect=RuntimeError("read failed")):
+                lines = mon.activity_lines([], github=None, tasks_root=tasks)
+            self.assertEqual(lines[0], "⚠ PM 上次派工：未確認（本機 Task 紀錄讀取失敗）")
+
+    def test_pm_dispatch_entry_rejects_wrong_types(self):
+        self.assertIsNone(mon._dispatch_entry(None))
+        self.assertIsNone(mon._dispatch_entry({"task_id": "x" * 32, "developer": {}}))
+        self.assertIsNone(mon._dispatch_entry({"task_id": "a" * 32, "developer": {
+            "state": "DEVELOPER_DISPATCHING", "created_at": []}}))
+        self.assertIsNone(mon._dispatch_entry({"task_id": "a" * 32, "developer": {
+            "state": [], "created_at": "2026-01-01T00:00:00Z"}}))
+        no_issue = mon._dispatch_entry({"task_id": "a" * 32, "developer": {
+            "state": "DEVELOPER_DISPATCHING", "created_at": "2026-01-01T00:00:00Z",
+            "provider_type": 7}, "request": "ordinary task"})
+        self.assertEqual(no_issue, mon.DispatchRecord(mon._remote_test_time("2026-01-01T00:00:00Z"),
+                                                       "", ""))
 
     def test_curses_activity_header_stays_visible_above_bottom_anchored_events(self):
         class Source:
@@ -807,17 +893,19 @@ class ActivityViewTests(unittest.TestCase):
             def refresh(self): pass
             def move(self, *args): pass
             def clearok(self, *args): pass
-        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
-                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        with patch.object(mon, "LLMTOOL_TASKS", str(Path(_ISOLATED.name) / "paint-empty")):
+            mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
         header_text = "".join(drawn[row] for row in sorted(drawn) if row >= 2)
         self.assertIn("PM 上次派工", drawn[3])
-        self.assertIn("最近 12 小時沒有", header_text)
+        self.assertIn("本機紀錄沒有派工", header_text)
         self.assertNotIn("目前沒有可顯示", header_text)
 
         monitor.stale = True
         drawn.clear()
-        mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
-                          lambda row, text, attr=0: drawn.__setitem__(row, text))
+        with patch.object(mon, "LLMTOOL_TASKS", str(Path(_ISOLATED.name) / "paint-empty")):
+            mon._paint_screen(Screen(), monitor, "activity", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("監控程式已更新", drawn[2])
         self.assertIn("PM 上次派工", drawn[3])
 
@@ -847,8 +935,9 @@ class ActivityViewTests(unittest.TestCase):
             def clearok(self, *args): pass
         for height in (5, 4):
             drawn.clear()
-            mon._paint_screen(Screen(height), monitor, "activity", 0, False, {},
-                              lambda row, text, attr=0: drawn.__setitem__(row, text))
+            with patch.object(mon, "LLMTOOL_TASKS", str(Path(_ISOLATED.name) / "paint-empty")):
+                mon._paint_screen(Screen(height), monitor, "activity", 0, False, {},
+                                  lambda row, text, attr=0: drawn.__setitem__(row, text))
             self.assertTrue(any("Tab/1-6" in text and "白板" in text for text in drawn.values()))
             self.assertNotIn("PM 上次派工", drawn[height - 1])
             self.assertFalse(any("GitHub #" in text for row, text in drawn.items()
@@ -2014,6 +2103,26 @@ class OfficeViewTests(unittest.TestCase):
             first = opened.call_count
             mon.codex_work_records(str(tasks))
         self.assertEqual(opened.call_count, first)
+
+    def test_codex_work_exact_match_is_found_when_second(self):
+        unrelated = mon.CodexWork("1" * 32, "wp-1", "other-session", "DEVELOPER_RUNNING",
+                                  self.NOW - 10, "", "")
+        exact = mon.CodexWork("2" * 32, "wp-1", "wanted-session", "DEVELOPER_RUNNING",
+                              self.NOW - 10, "", "")
+        self.assertEqual(mon._codex_work_match([unrelated, exact], "wp-1", "wanted-session",
+                                               0, False), (exact, True))
+
+    def test_codex_work_cached_file_is_dropped_after_becoming_hard_link(self):
+        tasks = Path(self.tmp.name) / "cached-hard-link-tasks"
+        original = self._work_record(tasks, "b" * 32)
+        entries, problem = mon.codex_work_records(str(tasks))
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(problem, "")
+        linked = tasks / f"{'c' * 32}.json"
+        os.link(original, linked)
+        entries, problem = mon.codex_work_records(str(tasks))
+        self.assertEqual(entries, [])
+        self.assertEqual(problem, "")
 
     def test_bound_work_keeps_detail_alert_and_event_identity_unchanged(self):
         self._register("wp-1", str(self.task), trusted_agent_id="codex-developer")
