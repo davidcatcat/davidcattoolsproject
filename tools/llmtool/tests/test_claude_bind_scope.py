@@ -11,6 +11,7 @@ from llmtool.errors import LLMToolError
 from llmtool.task_store import TaskStore
 from llmtool.task_submission_cli import run_task_record_pm
 from llmtool import task_submission_cli
+from llmtool import worker_dispatch
 
 
 def setUpModule():
@@ -23,28 +24,36 @@ def tearDownModule():
 
 class ClaudeBindScopeTests(unittest.TestCase):
     owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
-                 'issues/289#issuecomment-6641326482')
-    d6_task_id = '14ffbf93461373873bb32fbdb83924a0'
+                 'issues/289#issuecomment-123456789')
+    d6_task_id = 'c' * 32
     native_session_id = '12345678-1234-1234-1234-123456789abc'
 
     def setUp(self):
         self.fx = completion_fixture.TaskCompletionTests(methodName='runTest')
         self.addCleanup(self.fx.doCleanups)
         self.fx.setUp()
-        self.store = TaskStore(self.fx.base / 'claude-tasks')
+        self.store = TaskStore((self.fx.base / 'claude-tasks').resolve())
+        self.assertEqual(worker_dispatch._POLICY_PATH.resolve(),
+                         self.fx.policy_path.resolve())
         policy = json.loads(self.fx.policy_path.read_text(encoding='utf-8'))
+        policy['workers']['claude-developer']['dispatch'] = 'OWNER_ASSIGNMENT_ONLY'
         policy['workers']['claude-developer']['owner_assignments'] = [{
             'task_id': self.d6_task_id,
             'owner_assignment_ref': self.owner_ref,
         }]
         self.fx.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        decision = worker_dispatch.evaluate(
+            'claude-developer', owner_assignment_ref=self.owner_ref,
+            task_id=self.d6_task_id)
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.reason_code, 'OWNER_ASSIGNMENT_MATCHED')
 
-    def _task(self):
+    def _task(self, risk='LOW'):
         response = json.dumps({
             'schema_version': 1,
             'summary': 'Bind and verify a synthetic Claude D6 result.',
             'developer_assignment': {
-                'route': 'claude', 'risk': 'LOW',
+                'route': 'claude', 'risk': risk,
                 'goal': 'Record the bounded committed result.',
                 'acceptance': ['The synthetic result is scoped and recorded.'],
             },
@@ -115,13 +124,14 @@ class ClaudeBindScopeTests(unittest.TestCase):
         return patch.object(completion_fixture.task_completion, '_github_get',
                             side_effect=github_get)
 
-    def _bind(self, task, *, head=None, risk='LOW'):
+    def _bind(self, task, *, head=None, store=None):
         args = Namespace(
             task_id=task['task_id'], executor_task=self.d6_task_id,
             owner_ref=self.owner_ref, common_dir=self.fx.common,
             read_path=[self.fx.source_path], write_path=[self.fx.source_path])
         return task_submission_cli.run_task_claude_bind(
-            args, store=self.store, stdout=io.StringIO())
+            args, store=self.store if store is None else store,
+            stdout=io.StringIO())
 
     def _result(self, task, head):
         return task_submission_cli.run_task_claude_result(Namespace(
@@ -141,7 +151,8 @@ class ClaudeBindScopeTests(unittest.TestCase):
 
     def test_main_merge_changes_are_excluded_from_developer_scope(self):
         task, main_sha, head = self._bound_result_history()
-        self._result(task, head)
+        with self._github_main_pin(main_sha):
+            self._result(task, head)
         completed = self.store.get(task['task_id'])
         self.assertEqual(completed['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(completed['developer']['claude_result']['head_sha'], head)
@@ -211,8 +222,6 @@ class ClaudeBindScopeTests(unittest.TestCase):
 
     def test_commit_after_merge_is_out_of_scope_at_result(self):
         task, main_sha, head = self._bound_result_history()
-        with self._github_main_pin(main_sha):
-            self._bind(task)
         before = self.store.get(task['task_id'])
         self._commit_path('outside.txt', 'late out of scope\n', 'late edit')
         late_head = self.fx._git('rev-parse', 'HEAD')
@@ -222,6 +231,8 @@ class ClaudeBindScopeTests(unittest.TestCase):
         after = self.store.get(task['task_id'])
         self.assertEqual(after['record_sha256'], before['record_sha256'])
         self.assertEqual(after['developer']['state'], 'DEVELOPER_PENDING')
+        self.assertEqual(after['completion']['state'], 'WAITING_EXECUTOR')
+        self.assertNotIn('claude_result', after['developer'])
 
     def test_invalid_main_pin_is_refused_at_bind_and_result(self):
         task = self._task()
@@ -269,20 +280,104 @@ class ClaudeBindScopeTests(unittest.TestCase):
         self.assertIsNone(unchanged['developer'])
         self.assertIsNone(unchanged['completion'])
 
-    def test_other_risk_task_is_refused_without_binding(self):
-        task = self._task()
-        current = self.store.get(task['task_id'])
-        assignment = dict(current['pm_assignment'], risk='OTHER')
-        self.store.compare_and_update(
-            task['task_id'], expected={'record_sha256': current['record_sha256']},
-            pm_assignment=assignment)
-        self._developer_edit()
+    def test_other_risk_pm_response_is_refused_without_task(self):
+        task_ids_before = self.store.task_ids()
+        with self.assertRaisesRegex(
+                LLMToolError,
+                'PM response must recommend one low-risk supported Developer assignment'):
+            self._task(risk='OTHER')
+        self.assertEqual(self.store.task_ids(), task_ids_before)
+
+    def test_other_risk_stored_assignment_is_refused_at_bind(self):
+        task = self._task(risk='LOW')
+        stored = self.store.get(task['task_id'])
+        self.assertEqual(stored['pm_assignment']['risk'], 'LOW')
+        self.assertIsNone(stored['developer'])
+        self.assertIsNone(stored['completion'])
+
+        class ReadOnlyRiskStore:
+            def get(self, task_id):
+                if task_id != task['task_id']:
+                    raise AssertionError('unexpected task ID')
+                result = dict(stored)
+                result['pm_assignment'] = dict(
+                    stored['pm_assignment'], risk='OTHER')
+                return result
+
+            def __getattr__(self, name):
+                raise AssertionError(f'unexpected store access: {name}')
+
         with self.assertRaisesRegex(
                 LLMToolError, 'Claude binding requires a low-risk active-PM Claude Task'):
+            self._bind(task, store=ReadOnlyRiskStore())
+
+    def test_dirty_d6_is_refused_at_result(self):
+        task, main_sha, head = self._bound_result_history()
+        before = self.store.get(task['task_id'])
+        (self.fx.root / self.fx.source_path).write_text(
+            'uncommitted edit\n', encoding='utf-8')
+        with self._github_main_pin(main_sha):
+            with self.assertRaisesRegex(LLMToolError, 'CLAUDE_RESULT_STATE_INVALID'):
+                self._result(task, head)
+        after = self.store.get(task['task_id'])
+        self.assertEqual(after['record_sha256'], before['record_sha256'])
+        self.assertEqual(after['developer']['state'], 'DEVELOPER_PENDING')
+        self.assertEqual(after['completion']['state'], 'WAITING_EXECUTOR')
+        self.assertNotIn('claude_result', after['developer'])
+
+    def test_foreign_merge_is_out_of_scope_at_result(self):
+        task, main_sha, _ = self._bound_result_history()
+        self.fx._git('branch', 'foreign', self.fx.source_sha)
+        self.fx._git('checkout', 'foreign')
+        self._commit_path('outside.txt', 'foreign content\n', 'foreign edit')
+        self.fx._git('checkout', 'feat/executor')
+        head = self._merge('foreign', 'merge foreign branch')
+        before = self.store.get(task['task_id'])
+        with self._github_main_pin(main_sha):
+            with self.assertRaisesRegex(LLMToolError, 'RESULT_SCOPE_MISMATCH'):
+                self._result(task, head)
+        after = self.store.get(task['task_id'])
+        self.assertEqual(after['record_sha256'], before['record_sha256'])
+        self.assertEqual(after['developer']['state'], 'DEVELOPER_PENDING')
+        self.assertEqual(after['completion']['state'], 'WAITING_EXECUTOR')
+        self.assertNotIn('claude_result', after['developer'])
+
+    def test_out_of_scope_merge_resolution_is_refused_at_result(self):
+        task = self._task()
+        main_sha = self._main_commit(
+            fixture_content='import unittest\nclass Fixture(unittest.TestCase):\n'
+                            '    def test_main(self): self.assertTrue(True)\n')
+        self._developer_edit(
+            'import unittest\nclass Fixture(unittest.TestCase):\n'
+            '    def test_developer(self): self.assertTrue(True)\n')
+        with self._github_main_pin(main_sha):
             self._bind(task)
-        unchanged = self.store.get(task['task_id'])
-        self.assertIsNone(unchanged['developer'])
-        self.assertIsNone(unchanged['completion'])
+
+        merged = subprocess.run(
+            ['/usr/bin/git', 'merge', '--no-ff', 'main', '-m', 'merge main'],
+            cwd=self.fx.root, text=True, capture_output=True)
+        self.assertNotEqual(merged.returncode, 0)
+        unmerged = self.fx._git('diff', '--name-only', '--diff-filter=U').splitlines()
+        self.assertEqual(unmerged, [self.fx.source_path])
+        (self.fx.root / self.fx.source_path).write_text(
+            'import unittest\nclass Fixture(unittest.TestCase):\n'
+            '    def test_resolved(self): self.assertTrue(True)\n', encoding='utf-8')
+        (self.fx.root / 'README.md').write_text(
+            'Developer resolution edit.\n', encoding='utf-8')
+        self.fx._git('add', self.fx.source_path, 'README.md')
+        self.fx._git('commit', '-m', 'resolve merge out of scope')
+        head = self.fx._git('rev-parse', 'HEAD')
+        self._register(head)
+
+        before = self.store.get(task['task_id'])
+        with self._github_main_pin(main_sha):
+            with self.assertRaisesRegex(LLMToolError, 'RESULT_SCOPE_MISMATCH'):
+                self._result(task, head)
+        after = self.store.get(task['task_id'])
+        self.assertEqual(after['record_sha256'], before['record_sha256'])
+        self.assertEqual(after['developer']['state'], 'DEVELOPER_PENDING')
+        self.assertEqual(after['completion']['state'], 'WAITING_EXECUTOR')
+        self.assertNotIn('claude_result', after['developer'])
 
 
 if __name__ == '__main__':
