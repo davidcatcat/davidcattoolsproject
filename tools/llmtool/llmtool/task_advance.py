@@ -382,9 +382,12 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
         return _merge_refusal(code)
     prior = record.get('merge_attempt')
     if prior is not None:
-        if prior.get('pr') != number or prior.get('head_sha') != head:
+        if type(prior) is not dict or prior.get('pr') != number or prior.get('head_sha') != head:
             return _merge_refusal('MERGE_CONFLICTING_PR')
-        return _merge_refusal('MERGE_ALREADY_CLAIMED')
+        if prior.get('state') != 'UNKNOWN':
+            return _merge_refusal('MERGE_ALREADY_CLAIMED')
+        if current_pr.get('state') != 'open' or current_pr.get('merged') is not False:
+            return _merge_refusal('MERGE_PR_NOT_OPEN')
     claim = {'pr': number, 'head_sha': head, 'state': 'CLAIMED',
              'claimed_at': TaskStore._completion_now()}
     try:
@@ -398,13 +401,23 @@ def _merge_once(*, store, record, number, head, pr, events, github_get,
     except Exception:
         result = None
     if result is None or getattr(result, 'returncode', 1) != 0:
-        claim['state'] = 'UNKNOWN'
         try:
-            store.compare_and_update(record['task_id'], expected={'merge_attempt':
-                dict(claim, state='CLAIMED')}, merge_attempt=claim)
+            outcome_pr = github_get(f'pulls/{number}')
         except Exception:
-            pass
-        return _merge_refusal('MERGE_OUTCOME_UNKNOWN')
+            outcome_pr = None
+        outcome_head = outcome_pr.get('head') if type(outcome_pr) is dict else None
+        if (type(outcome_pr) is dict and outcome_pr.get('number', number) == number and
+                type(outcome_head) is dict and outcome_head.get('sha') == head and
+                outcome_pr.get('merged') is True):
+            result = type('MergeResult', (), {'returncode': 0})()
+        else:
+            claim['state'] = 'UNKNOWN'
+            try:
+                store.compare_and_update(record['task_id'], expected={'merge_attempt':
+                    dict(claim, state='CLAIMED')}, merge_attempt=claim)
+            except Exception:
+                pass
+            return _merge_refusal('MERGE_OUTCOME_UNKNOWN')
     claim['state'] = 'MERGED'
     warning_codes = []
     try:

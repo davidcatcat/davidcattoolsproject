@@ -2095,12 +2095,18 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
         class Store:
             def __init__(self):
                 self.attempt = None
+                self.record_hashes = []
             def compare_and_update(self, _task_id, *, expected, merge_attempt):
-                if self.attempt != expected.get('merge_attempt'):
+                if 'record_sha256' in expected:
+                    if self.attempt is not None and self.attempt.get('state') != 'UNKNOWN':
+                        raise RuntimeError('claim race')
+                    self.record_hashes.append(expected['record_sha256'])
+                elif self.attempt != expected.get('merge_attempt'):
                     raise RuntimeError('claim race')
                 self.attempt = dict(merge_attempt)
         store, calls = Store(), []
-        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'merged': False,
+              'mergeable': True,
               'labels': [{'name': 'mac-ci'}]}
         def github_get(path):
             if path.startswith('commits/'):
@@ -2133,12 +2139,108 @@ class RetiredD6MergeClosureTests(unittest.TestCase):
             gh_runner=ambiguous, root='/repo')
         self.assertEqual(result['codes'], ['MERGE_OUTCOME_UNKNOWN'])
         self.assertEqual(store.attempt['state'], 'UNKNOWN')
-        retry_record = dict(record, merge_attempt=store.attempt)
+        retry_record = dict(record, record_sha256='s' * 64, merge_attempt=store.attempt)
         result = task_advance._merge_once(store=store, record=retry_record, number=17,
             head=HEAD, pr=pr, events=[event], github_get=github_get_green,
-            gh_runner=ambiguous, root='/repo')
-        self.assertEqual(result['codes'], ['MERGE_ALREADY_CLAIMED'])
-        self.assertEqual(len(calls), 1)
+            gh_runner=lambda _root, args: calls.append(args) or
+                type('R', (), {'returncode': 0})(), root='/repo')
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(store.attempt['state'], 'MERGED')
+        self.assertEqual(sum(args[1] == 'merge' for args in calls), 2)
+        self.assertEqual(store.record_hashes, ['r' * 64, 's' * 64])
+
+    def test_merge_failed_command_records_merged_after_fresh_read(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                  'review_dispatch_claim': [review]}
+
+        class Store:
+            def __init__(self):
+                self.attempt = None
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                if 'record_sha256' in expected:
+                    self.attempt = dict(merge_attempt)
+                elif self.attempt == expected.get('merge_attempt'):
+                    self.attempt = dict(merge_attempt)
+                else:
+                    raise RuntimeError('claim race')
+
+        store, calls = Store(), []
+        merged_after_failure = [False]
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+              'merged': False, 'mergeable': True, 'labels': [{'name': 'mac-ci'}]}
+        checks = {'total_count': 2, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'},
+            {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+             'conclusion': 'success'}]}
+        def github_get(path):
+            if path.startswith('commits/'):
+                return checks
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            if path.startswith('pulls/'):
+                return (dict(pr, state='closed', merged=True) if merged_after_failure[0]
+                        else pr)
+            return []
+        def failed_merge(_root, args):
+            calls.append(args)
+            merged_after_failure[0] = True
+            raise OSError('connection lost after remote merge')
+        result = task_advance._merge_once(store=store, record=record, number=17,
+            head=HEAD, pr=pr, events=[event], github_get=github_get,
+            gh_runner=failed_merge, root='/repo')
+        self.assertEqual(result['step'], 'MERGED')
+        self.assertEqual(store.attempt['state'], 'MERGED')
+        self.assertEqual([args[1] for args in calls], ['merge', 'comment'])
+
+    def test_merge_refuses_nonretryable_claims_and_moved_head(self):
+        review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
+                  'review_result': {'verdict': 'PASS'}}
+        event = {'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,
+                 'outcome': 'REVIEW_PASS'}
+        record = {'task_id': '1' * 32, 'record_sha256': 'r' * 64,
+                  'review_dispatch_claim': [review]}
+
+        class Store:
+            def __init__(self, attempt):
+                self.attempt = attempt
+                self.updates = []
+            def compare_and_update(self, _task_id, *, expected, merge_attempt):
+                self.updates.append((expected, merge_attempt))
+
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'mergeable': True,
+              'labels': [{'name': 'mac-ci'}]}
+        checks = {'total_count': 2, 'check_runs': [
+            {'head_sha': HEAD, 'name': 'check (Linux 3.14)', 'status': 'completed',
+             'conclusion': 'success'},
+            {'head_sha': HEAD, 'name': 'check (macOS 3.13)', 'status': 'completed',
+             'conclusion': 'success'}]}
+        def github_get(path):
+            if path.startswith('commits/'):
+                return checks
+            if path.endswith('/files?per_page=100'):
+                return [{'filename': 'src/module.py'}]
+            return pr
+        runner_calls = []
+        runner = lambda _root, args: runner_calls.append(args) or type(
+            'R', (), {'returncode': 0})()
+        for state, attempt_head, current_pr, expected_code in (
+                ('CLAIMED', HEAD, pr, 'MERGE_ALREADY_CLAIMED'),
+                ('MERGED', HEAD, pr, 'MERGE_ALREADY_CLAIMED'),
+                ('UNKNOWN', 'f' * 40, pr, 'MERGE_CONFLICTING_PR'),
+                ('UNKNOWN', HEAD, dict(pr, head={'sha': 'f' * 40}), 'MERGE_STALE_HEAD')):
+            attempt = {'pr': 17, 'head_sha': attempt_head, 'state': state}
+            store = Store(attempt)
+            result = task_advance._merge_once(store=store,
+                record=dict(record, merge_attempt=attempt), number=17,
+                head=HEAD, pr=current_pr, events=[event], github_get=github_get,
+                gh_runner=runner, root='/repo')
+            self.assertEqual(result['codes'], [expected_code])
+        self.assertEqual(runner_calls, [])
 
     def test_successful_merge_keeps_merged_state_when_record_or_comment_warns(self):
         review = {'pr': 17, 'head_sha': HEAD, 'version': 1, 'state': 'COMPLETED',
