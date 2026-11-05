@@ -269,6 +269,12 @@ def _post_remote_test_comment(gh_runner, root, number, task_id, d6, head, summar
         raise _PublishRefusal('REMOTE_TEST_COMMENT_FAILED')
 
 
+def _post_review_verdict_comment(gh_runner, root, number, review_text):
+    response = gh_runner(root, ['pr', 'comment', str(number), '--body', review_text])
+    if getattr(response, 'returncode', 1) != 0:
+        raise _PublishRefusal('REVIEW_VERDICT_COMMENT_FAILED')
+
+
 def _merge_pass_claim(record, number, head, events):
     candidates = []
     for claim in _claims(record):
@@ -1124,6 +1130,19 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                             pr_number=number, version=version)
         except Exception as exc:
             codes.append(_refusal(exc, 'review_dispatch_code'))
+        if type(result) is dict:
+            review_text = result.get('review_text')
+            if (result.get('state') == 'COMPLETED' and
+                    type(review_text) is str and review_text):
+                try:
+                    _post_review_verdict_comment(
+                        _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                        d6.get('root') or cwd or os.getcwd(), number, review_text)
+                except Exception:
+                    codes.append('REVIEW_VERDICT_COMMENT_FAILED')
+            if 'review_text' in result:
+                result = dict(result)
+                result.pop('review_text', None)
     elif step == 'RECORD_REVIEW_RESULT':
         claim = next(c for c in reversed(_claims(record)) if type(c) is dict and
                      c.get('pr') == number and c.get('head_sha') == d6['result_head'])
