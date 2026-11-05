@@ -4060,9 +4060,11 @@ class TaskCompletionTests(unittest.TestCase):
             rc, _ = call(['task', 'claude-bind', task_id, '--executor-task',
                           d6_task, '--owner-ref', owner_ref, '--common-dir', self.common])
             self.assertEqual(rc, 0)
-            rc, _ = call(['task', 'claude-result', task_id, '--executor-task',
-                          d6_task, '--head', head, '--pm-session', task['pm_session_id']])
-            self.assertEqual(rc, 0)
+            if not old_sha_receipt:
+                rc, _ = call(['task', 'claude-result', task_id, '--executor-task',
+                              d6_task, '--head', head,
+                              '--pm-session', task['pm_session_id']])
+                self.assertEqual(rc, 0)
 
             real_remote_test = remote_test.run_remote_test
 
@@ -4073,17 +4075,20 @@ class TaskCompletionTests(unittest.TestCase):
                 return real_remote_test(*args, transport=ssh, **kwargs)
 
             if not skip_remote_test:
-                remote_sha = base if old_sha_receipt else head
-                if old_sha_receipt:
-                    receipt['source_sha'] = base
-                    receipt['tree'] = self._git('rev-parse', base + '^{tree}')
-                    receipt['fetch_head'] = base
                 with patch.object(remote_test, 'run_remote_test', side_effect=run_with_ssh):
                     rc, remote = call(['task', 'remote-test', task_id,
-                        '--executor-task', d6_task, '--sha', remote_sha,
+                        '--executor-task', d6_task, '--sha', head,
                         '--ref', 'refs/heads/feat/executor', '--module', 'test_fixture'])
                 self.assertIsNone(rc)
                 self.assertEqual(remote['result'], 'PASS')
+
+            if old_sha_receipt:
+                head, _ = self._make_result(
+                    code='    def test_ok(self): self.assertEqual(2, 2)\n')
+                rc, _ = call(['task', 'claude-result', task_id, '--executor-task',
+                              d6_task, '--head', head,
+                              '--pm-session', task['pm_session_id']])
+                self.assertEqual(rc, 0)
 
             pr = {'number': 10, 'state': 'open', 'merged': False,
                   'head': {'sha': head}, 'base': {'sha': base, 'repo': {
@@ -4121,20 +4126,24 @@ class TaskCompletionTests(unittest.TestCase):
                 self.assertEqual(path, 'pulls/10')
                 return pr
 
-            with patch.object(review_dispatch, '_resolve_github_login',
-                              return_value='reviewer-user'), \
-                    patch.object(review_dispatch, '_create_d6', side_effect=create_d6), \
-                    patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
-                    patch.object(review_dispatch, '_dispatch_codex', side_effect=codex), \
-                    patch('llmtool.task_completion._github_get',
-                          side_effect=dispatch_github):
-                rc, dispatched = call(['task', 'review-dispatch', task_id,
-                    '--executor-task', d6_task, '--pr', '10',
-                    '--reviewer', 'codex-reviewer'])
-            self.assertIsNone(rc)
-            reviewer_task = dispatched['reviewer_task']
             if skip_completed_claim:
-                store.update(task_id, review_dispatch_claim=[])
+                reviewer_task = 'reviewer-without-claim'
+                create_d6(task_id=reviewer_task, reviewer_key='codex-reviewer',
+                          base_sha=head, github_login='reviewer-user')
+                bind_d6(reviewer_task, 'codex-reviewer-session', None)
+            else:
+                with patch.object(review_dispatch, '_resolve_github_login',
+                                  return_value='reviewer-user'), \
+                        patch.object(review_dispatch, '_create_d6', side_effect=create_d6), \
+                        patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
+                        patch.object(review_dispatch, '_dispatch_codex', side_effect=codex), \
+                        patch('llmtool.task_completion._github_get',
+                              side_effect=dispatch_github):
+                    rc, dispatched = call(['task', 'review-dispatch', task_id,
+                        '--executor-task', d6_task, '--pr', '10',
+                        '--reviewer', 'codex-reviewer'])
+                self.assertIsNone(rc)
+                reviewer_task = dispatched['reviewer_task']
 
             checks = {'total_count': 2, 'check_runs': [
                 {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': head,
@@ -4191,12 +4200,12 @@ class TaskCompletionTests(unittest.TestCase):
                          (10, context['head'], context['reviewer_task']))
         self.assertEqual(claim['review_result']['review_text'], context['body'])
 
-    def _assert_cli_completion_waits(self, context, expected_gate):
+    def _assert_cli_completion_waits(self, context, expected_gate, expected_state):
         rc, result = self._complete_claude_bound_context(context)
         self.assertEqual(rc, 1)
         completion = result['completion']
         self.assertEqual(completion['missing_gates'], [expected_gate])
-        self.assertIn(completion['state'], ('WAITING_REVIEW', 'WAITING_GATES'))
+        self.assertEqual(completion['state'], expected_state)
         self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
 
     def test_claude_bound_complete_rejects_wrong_claude_result_head(self):
@@ -4207,7 +4216,8 @@ class TaskCompletionTests(unittest.TestCase):
         claude_result['head_sha'] = context['base']
         developer['claude_result'] = claude_result
         context['store'].update(context['task_id'], developer=developer)
-        self._assert_cli_completion_waits(context, 'CLAUDE_RESULT_BINDING_INVALID')
+        self._assert_cli_completion_waits(
+            context, 'CLAUDE_RESULT_BINDING_INVALID', 'WAITING_EXECUTOR')
 
     def test_claude_bound_complete_rejects_stale_env2_marker(self):
         context = self._claude_bound_task_context()
@@ -4216,19 +4226,23 @@ class TaskCompletionTests(unittest.TestCase):
         value['env2_pass_marker']['current_head_sha'] = context['base']
         registry.write_text(json.dumps(value), encoding='utf-8')
         registry.chmod(0o600)
-        self._assert_cli_completion_waits(context, 'D6_ENV2_PASS_MARKER_MISMATCH')
+        self._assert_cli_completion_waits(
+            context, 'D6_ENV2_PASS_MARKER_MISMATCH', 'WAITING_EXECUTOR')
 
     def test_claude_bound_complete_requires_remote_test_receipt(self):
         context = self._claude_bound_task_context(skip_remote_test=True)
-        self._assert_cli_completion_waits(context, 'REMOTE_TEST_RECEIPT_MISSING')
+        self._assert_cli_completion_waits(
+            context, 'REMOTE_TEST_RECEIPT_MISSING', 'WAITING_EXECUTOR')
 
     def test_claude_bound_complete_rejects_old_sha_remote_receipt(self):
         context = self._claude_bound_task_context(old_sha_receipt=True)
-        self._assert_cli_completion_waits(context, 'REMOTE_TEST_RECEIPT_MISSING')
+        self._assert_cli_completion_waits(
+            context, 'REMOTE_TEST_RECEIPT_MISSING', 'WAITING_EXECUTOR')
 
     def test_claude_bound_complete_requires_completed_review_dispatch_claim(self):
         context = self._claude_bound_task_context(skip_completed_claim=True)
-        self._assert_cli_completion_waits(context, 'FORMAL_REVIEW_MISSING')
+        self._assert_cli_completion_waits(
+            context, 'FORMAL_REVIEW_MISSING', 'WAITING_REVIEW')
 
     def test_non_claude_executor_requires_bound_artifact(self):
         result_sha, _ = self._make_result()
