@@ -420,16 +420,29 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         cli_store = Store(cli_task)
         sentinel = LLMToolError('AFTER_CLAUDE_BINDING')
         with patch.object(task_submission_cli.task_completion, 'validate_task_binding',
-                          side_effect=sentinel):
-            with self.assertRaisesRegex(LLMToolError, 'AFTER_CLAUDE_BINDING'):
-                task_submission_cli.run_task_complete(args, store=cli_store)
-        self.assertEqual(cli_store.updates[-1]['completion']['state'], 'WAITING_EXECUTOR')
+                          side_effect=sentinel) as validate_binding, \
+             patch.object(task_submission_cli, '_task_view', return_value={}), \
+             patch.object(task_submission_cli, '_print'):
+            self.assertEqual(task_submission_cli.run_task_complete(args, store=cli_store), 1)
+        self.assertEqual(validate_binding.call_count, 1)
+        completion_updates = [update['completion'] for update in cli_store.updates
+                              if 'completion' in update]
+        self.assertEqual(len(completion_updates), 1)
+        self.assertEqual(completion_updates[0]['state'], 'WAITING_EXECUTOR')
+        self.assertEqual(completion_updates[0]['missing_gates'],
+                         ['TASK_RUN_CONTRACT_MISMATCH'])
+        self.assertEqual(completion_updates[0]['pm_dispatch'], 'NOT_STARTED')
 
         record_only = dict(cli_developer,
             backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED')
         record_task = dict(common, developer=record_only)
-        with self.assertRaisesRegex(LLMToolError, 'CLAUDE_RESULT_BINDING_INVALID'):
-            task_submission_cli.run_task_complete(args, store=Store(record_task))
+        record_store = Store(record_task)
+        with patch.object(task_submission_cli.task_completion,
+                          'validate_task_binding') as validate_record_binding:
+            with self.assertRaisesRegex(LLMToolError, 'CLAUDE_RESULT_BINDING_INVALID'):
+                task_submission_cli.run_task_complete(args, store=record_store)
+        self.assertEqual(record_store.updates, [])
+        validate_record_binding.assert_not_called()
 
     def test_codex_and_agy_delegates_refuse_claude_reserved_d6(self):
         registration = SimpleNamespace(task_id='d6-owner-task',
