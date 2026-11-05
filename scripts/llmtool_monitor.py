@@ -2652,7 +2652,6 @@ D6_STATES = {   # D6 record state -> plain words
 }
 D6_WINDOW = 24 * 3600
 D6_OPEN_STATES = frozenset({"ACTIVE", "REPAIR", "REVIEW_PENDING"})
-D6_RUNNING_STATES = frozenset({WORKING, STALLED, ATTENTION})
 D6_STALE_HEAD = "⚠ 另有 "
 PR_DONE_WORDS = {"MERGED": "已合併", "CLOSED": "已關閉"}
 AGENT_ID = re.compile(r"[A-Za-z0-9._-]{1,96}")
@@ -2690,9 +2689,7 @@ def d6_task_lines(canonical: str, office: list, now: float,
     for row in office:
         if row.task.startswith("task ") and row.state != CLOSED:
             live.setdefault(row.task[5:], []).append(f"{row.name} {row.state}")
-    running = {row.task[5:] for row in office
-               if row.task.startswith("task ") and row.state in D6_RUNNING_STATES
-               and row.state != CLOSED}
+    running = _d6_running_tasks(office)
     # A recorded time in the future would pin a task on top: use the write time.
     stamped = ((task_id, state, agent, verified if verified <= now + 300 else written, branch)
                for task_id, (state, agent, verified, written, branch) in details.items())
@@ -2733,6 +2730,21 @@ def d6_task_lines(canonical: str, office: list, now: float,
         lines.append(D6_STALE_HEAD + f"{len(older)} 筆較舊的 D6 登記還是進行中，但 PR 已合併或關閉："
                      + "、".join(older[:6]) + ("…" if len(older) > 6 else ""))
     return lines
+
+
+def _d6_running_tasks(office: list) -> set[str]:
+    """Return D6 tasks with live work, based on row family and state."""
+    running = {row.task[5:] for row in office
+               if row.task.startswith("task ")
+               and (row.state in (WORKING, STALLED)
+                    or row.state == ATTENTION and not row.key.startswith("codex:"))}
+    # Claude subagent rows carry no task; their parent session supplies it.
+    running_keys = {row.group for row in office
+                    if row.kind == "subagent" and row.group
+                    and row.state in (WORKING, STALLED)}
+    running.update(row.task[5:] for row in office
+                   if row.task.startswith("task ") and row.key in running_keys)
+    return running
 
 
 def _review_task(task_id: str) -> tuple[str, str] | None:
@@ -6372,7 +6384,7 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
     """Show a live agent CLI in its registered D6 task even without a transcript."""
     now = time.time() if now is None else now
     covered = {row.task[5:] for row in rows
-               if row.task.startswith("task ") and row.state != CLOSED}
+               if row.task.startswith("task ") and row.state not in (CLOSED, DONE)}
     seen = set(covered)
     out = []
     for proc in sorted(processes, key=lambda item: item.pid):
