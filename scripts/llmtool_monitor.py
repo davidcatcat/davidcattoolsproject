@@ -868,6 +868,9 @@ class Monitor:
         self.office_due = 0.0   # monotonic time of the next office rebuild
         self.one_shot: dict = {}   # pid -> [started, last_seen, gone] for Codex-started claude runs
         self.records: list = []   # llmtool task-record lines, refreshed with the office view
+        self.opencode_route = None
+        self.quota: list[str] = []
+        self.quota_due = 0.0
         self.d6: list = []   # D6 task lines, refreshed with the office view
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
@@ -983,6 +986,16 @@ class Monitor:
             except Exception:  # optional, like task evidence
                 pass
             try:
+                self.opencode_route = llmtool_route_outcomes(time.time()).get("opencode")
+            except Exception:  # preserve the last successful route summary
+                pass
+            if time.monotonic() >= self.quota_due:
+                self.quota_due = time.monotonic() + 60.0
+                try:
+                    self.quota = quota_warnings(time.time())
+                except Exception:  # local optional evidence; preserve last good value
+                    pass
+            try:
                 office = office_rows(result.processes, finished_runs=finished,
                                      verdicts=self.github.verdicts if self.github else None,
                                      ci=self.github.ci_runs if self.github else None,
@@ -1008,7 +1021,8 @@ class Monitor:
                     new.append((stamp, "!", f"監控程式已更新，這個畫面還是舊版（{self.version}），請按 q 後重開"))
                 try:
                     self.d6 = d6_task_lines(canonical_root(), office, time.time(),
-                                            self.github.branch_prs if self.github else None)
+                                            self.github.branch_prs if self.github else None,
+                                            self.github.verdicts if self.github else None)
                 except Exception:  # optional, like task evidence; never show a stale list
                     self.d6 = []
         if self.short_lived and now - self.last_summary >= self.summary_every:
@@ -1296,9 +1310,13 @@ def edit_failures(stage: Stage) -> tuple[int, int]:
     return sum(tool.status == "error" for tool in edits), len(edits)
 
 
-def task_lines(tasks: list[Task], limit: int = 6) -> list[str]:
+def task_lines(tasks: list[Task], limit: int = 6, route=None) -> list[str]:
     if not tasks:
-        return ["近 12 小時沒有 OpenCode 執行紀錄（/private/tmp/llmtool-*）。"]
+        if route:
+            age, total, succeeded, words = route
+            return [f"/private/tmp 沒有 OpenCode 階段細節；llmtool Task 紀錄近 7 天 {total} 次，成功 {succeeded} 次，"
+                    f"最近一次 {_short_ago(age)}：{words}"]
+        return ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"]
     lines = []
     for task in tasks[:limit]:
         lines.append(f"任務 {task.task_id}   分支 {task.branch or '-'}")
@@ -1653,6 +1671,7 @@ class OwnerPending:
     reference: str   # "#310"
     status: str
     summary: str
+    kind: str = ""
 
 
 _MARKER_ROLES = {name.casefold(): name for name in ("PM", "Integrator", "Owner")}
@@ -1711,7 +1730,8 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
         if settles:
             open_requests.pop(number, None)
         elif fields.get("target") == "owner" and when:
-            open_requests[number] = OwnerPending(when, f"#{number}", status, _headline(body))
+            open_requests[number] = OwnerPending(when, f"#{number}", status, _headline(body),
+                                                fields.get("type", "").casefold())
     return sorted((item for number, item in open_requests.items()
                    if closed.get(number, 0.0) <= item.when), key=lambda item: item.when)
 
@@ -1764,6 +1784,15 @@ class _UseGh(Exception):
     """The direct API read is not usable for this call: ask gh instead."""
 
 
+@dataclass(frozen=True)
+class MainHealth:
+    sha: str
+    title: str
+    committed_at: float
+    linux: tuple | None = None   # (status, conclusion, sha)
+    mac: tuple | None = None     # (status, conclusion, created_at, sha)
+
+
 class GitHubSource:
     """Rate-limited, read-only GitHub activity. Failures become a status line."""
 
@@ -1789,12 +1818,17 @@ class GitHubSource:
         self.connect = lambda: http.client.HTTPSConnection(GITHUB_API_HOST, timeout=GITHUB_TIMEOUT)
         self.events: list[ActivityEvent] = []
         self.successful_read = False
+        self.read_failed = False
         self.pending: list[OwnerPending] = []
         self.scope = ""   # what the ★ list could see, said next to it
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.verdicts: dict | None = None   # review_verdicts(); None until GitHub was read
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.want_ci = False   # set while a self-hosted runner is on this Mac
+        self.want_main = False
+        self.main_health: MainHealth | None = None
+        self.main_error = ""
+        self.main_read_at = None
         self.ci_view: CiView | None = None   # self-hosted runners; None until GitHub was read
         self._finished: dict = {}   # run id -> ci_finished_jobs(); a finished run never changes
         self._jobs: dict = {}   # run id -> (updated_at, read at, jobs payload) of unfinished runs
@@ -1956,16 +1990,80 @@ class GitHubSource:
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
                            + (f"；留言太多，只讀了最新 {GITHUB_PAGE * GITHUB_PAGES} 則" if more else ""))
             self.successful_read = True
+            self.read_failed = False
             failed = False
         except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
             # Keep the previous events; say plainly that they may be stale.
             detail = str(exc)[:40] if isinstance(exc, RuntimeError) else type(exc).__name__
             self.status = f"GitHub：讀取失敗（{detail}），以下 GitHub 項目可能過時"
+            self.read_failed = True
         self.refresh_ci()
+        if self.want_main:
+            self.refresh_main()
         # A failing gh (offline, rate limited, hung) is retried later each
         # time, so the Mac is not forking it every 30 seconds for nothing.
         self.wait = min(self.wait * 2, GITHUB_BACKOFF) if failed else GITHUB_REFRESH
         self.settled = time.monotonic()
+
+    def refresh_main(self) -> None:
+        """Read a small, bounded snapshot of main and its two required CI runs."""
+        now = time.monotonic()
+        if self.main_read_at is not None and now - self.main_read_at < 300:
+            return
+        self.main_read_at = now
+        try:
+            commits = self._get(f"repos/{self.repo}/commits?sha=main&per_page=1")
+            linux_payload = self._get(f"repos/{self.repo}/actions/runs?branch=main&event=push&per_page=30")
+            mac_payload = self._get(f"repos/{self.repo}/actions/workflows/llmtool-mac-ci.yml/runs?branch=main&event=workflow_dispatch&per_page=1")
+            if type(commits) is not list or not commits:
+                raise ValueError("main commits")
+            commit = commits[0]
+            if type(commit) is not dict or type(commit.get("sha")) is not str or not commit["sha"]:
+                raise ValueError("main commit")
+            sha = commit["sha"]
+            commit_obj = commit.get("commit")
+            if type(commit_obj) is not dict or type(commit_obj.get("message")) is not str:
+                raise ValueError("main commit message")
+            author = commit_obj.get("committer")
+            if type(author) is not dict or type(author.get("date")) is not str:
+                raise ValueError("main commit time")
+            committed_at = _github_time(author["date"])
+            if not committed_at:
+                raise ValueError("main commit time")
+            linux_runs = linux_payload.get("workflow_runs") if type(linux_payload) is dict else None
+            mac_runs = mac_payload.get("workflow_runs") if type(mac_payload) is dict else None
+            if type(linux_runs) is not list or type(mac_runs) is not list:
+                raise ValueError("main workflow runs")
+            if any(type(run) is not dict for run in linux_runs + mac_runs):
+                raise ValueError("main workflow run")
+            def valid_run(run):
+                if (type(run) is not dict or type(run.get("name")) is not str
+                        or type(run.get("status")) is not str
+                        or (run.get("conclusion") is not None and type(run.get("conclusion")) is not str)
+                        or type(run.get("head_sha")) is not str or not run["head_sha"]
+                        or type(run.get("created_at")) is not str):
+                    raise ValueError("main workflow run")
+                if not _github_time(run["created_at"]):
+                    raise ValueError("main workflow time")
+                return run
+            linux_candidates = [valid_run(run) for run in linux_runs
+                                if run.get("name") == "llmtool Linux CI"]
+            linux_run = max(linux_candidates, key=lambda run: _github_time(run.get("created_at")),
+                            default=None)
+            mac_candidates = [valid_run(run) for run in mac_runs]
+            mac_run = max(mac_candidates, key=lambda run: _github_time(run.get("created_at")),
+                          default=None)
+            linux = ((linux_run["status"], linux_run.get("conclusion"), linux_run["head_sha"])
+                     if linux_run else None)
+            mac_time = _github_time(mac_run.get("created_at")) if mac_run else 0.0
+            mac = ((mac_run["status"], mac_run.get("conclusion"), mac_time, mac_run["head_sha"])
+                   if mac_run else None)
+            self.main_health = MainHealth(sha[:7], _label(commit_obj["message"], 50),
+                                          committed_at, linux, mac)
+            self.main_error = ""
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            self.main_error = (str(exc)[:40] if isinstance(exc, RuntimeError)
+                               else type(exc).__name__)
 
     def refresh_ci(self) -> None:
         """Runners and CI, read on their own: a failure only marks them 未確認."""
@@ -2465,8 +2563,23 @@ PR_DONE_WORDS = {"MERGED": "已合併", "CLOSED": "已關閉"}
 AGENT_ID = re.compile(r"[A-Za-z0-9._-]{1,96}")
 
 
+def d6_phase(state: str, sessions: bool, pr: str, reviewer_done: bool) -> str:
+    if sessions:
+        return "執行中"
+    if reviewer_done:
+        return "審查已結束，待收尾"
+    if pr in PR_DONE_WORDS:
+        return "已完成，待收尾"
+    if pr == "OPEN":
+        return "等審查或 CI"
+    if state in ("RETIRE_READY", "RETAIN_BLOCKED", "REPAIR", "REVIEW_PENDING"):
+        return D6_STATES.get(state, state)
+    return "閒置（查不到 PR）"
+
+
 def d6_task_lines(canonical: str, office: list, now: float,
-                  prs: dict[str, tuple[int, str]] | None = None) -> list[str]:
+                  prs: dict[str, tuple[int, str]] | None = None,
+                  verdicts: dict | None = None) -> list[str]:
     """Locked D6 tasks whose record changed in the last 24 hours, newest first,
     each with the live session working in its root, if any. Only the task id,
     state, bound agent id, branch and time are read; free-text dispositions are
@@ -2489,12 +2602,37 @@ def d6_task_lines(canonical: str, office: list, now: float,
                     key=lambda item: -item[3])
     width = max((len(item[0]) for item in recent), default=0)
     lines = []
+    pr_numbers = {number: state for number, state in prs.values()}
     for task_id, state, agent, when, branch in recent:
         who = "、".join(live.get(task_id, [])) or "沒有 session 在跑"
         done = stale(state, branch)
+        pr_state = prs.get(branch, (None, ""))[1] if branch and prs else ""
+        reviewer_done = False
+        match = re.fullmatch(
+            r"pr(\d+)-(?:claude-rv|codex-rv)[A-Za-z0-9._-]*?-([0-9a-fA-F]{7})",
+            task_id)
+        if match is None:
+            match = re.search(r"pr(\d+).*?-crv[A-Za-z0-9._-]*?-([0-9a-fA-F]{7})", task_id)
+        if match and not live.get(task_id):
+            reviewer_done = any(match.group(2).lower() in ids
+                                for _, _, ids in (verdicts or {}).get(match.group(1), []))
+        if not live.get(task_id) and not prs:
+            phase = D6_STATES.get(state, state)
+        elif match and not live.get(task_id):
+            reviewer_pr = pr_numbers.get(int(match.group(1)), "")
+            if reviewer_done:
+                phase = "審查已結束，待收尾"
+            elif reviewer_pr in PR_DONE_WORDS:
+                phase = "已完成，待收尾"
+            else:
+                phase = "審查沒在跑，查不到結論"
+        elif not live.get(task_id) and CODEX_HIGH_DEBUG_TASK.search(task_id):
+            phase = "診斷沒在跑，待收尾"
+        else:
+            phase = d6_phase(state, bool(live.get(task_id)), pr_state, reviewer_done)
         note = f"  ⚠ PR #{done[0]} {PR_DONE_WORDS[done[1]]}，登記還是{D6_STATES.get(state, state)}" if done else ""
         lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
-                     f"{D6_STATES.get(state, state)}  →  {who}  （{agent or '未綁定 agent'}）{note}")
+                     f"{phase}  →  {who}  （{agent or '未綁定 agent'}）{note}")
     older = sorted(task_id for task_id, (state, _, _, written, branch) in details.items()
                    if stale(state, branch) and task_id not in {item[0] for item in recent})
     if older:
@@ -3402,6 +3540,36 @@ CI_CONCLUSIONS = {"success": "成功", "failure": "失敗", "cancelled": "取消
                   "timed_out": "逾時", "skipped": "略過"}
 
 
+def main_health_line(health, error, now) -> tuple[str, str]:
+    if health is None:
+        text = "main：尚未讀取"
+        if error:
+            text += f"（未確認：{error}）"
+        return text, "!" if error else ""
+    def result(status, conclusion):
+        if status != "completed":
+            return "執行中"
+        return CI_CONCLUSIONS.get(conclusion, "未確認")
+    linux = "未確認"
+    failed = bool(error)
+    if health.linux:
+        status, conclusion, sha = health.linux
+        linux = result(status, conclusion)
+        if sha[:7].lower() != health.sha[:7].lower():
+            linux += f" @{sha[:7]}"
+        failed |= status == "completed" and conclusion not in ("success", "skipped")
+    mac = "未確認"
+    if health.mac:
+        status, conclusion, created, _ = health.mac
+        mac = f"全套 {result(status, conclusion)}（{_short_ago(max(0.0, now - created))}）"
+        failed |= status == "completed" and conclusion not in ("success", "skipped")
+    text = (f"main {health.sha} {health.title}（{_short_ago(max(0.0, now - health.committed_at))}）"
+            f"· Linux {linux} · Mac {mac}")
+    if error:
+        text += f"（未確認：{error}）"
+    return text, "!" if failed else ""
+
+
 def ci_runners(payload) -> list:
     """Registered self-hosted runners as (name, os, status, busy, labels);
     names or labels that do not look like GitHub's are dropped."""
@@ -3868,6 +4036,112 @@ def _session_files(top: str) -> list[str]:
             _remember(_listing_cache, folder.path, cached)
         found += [os.path.join(folder.path, name) for name in cached[1]]
     return found
+
+
+QUOTA_WARN_PERCENT = 80
+
+
+def _quota_timestamp(value):
+    if type(value) in (int, float):
+        return float(value)
+    if type(value) is str:
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            return parsed.timestamp() if parsed.tzinfo else None
+        except (ValueError, OverflowError):
+            return None
+    return None
+
+
+def quota_warnings(now, codex_root=None, claude_root=None) -> list[str]:
+    """Quota notices from bounded local Codex and Claude session tails only."""
+    out = []
+    root = CODEX_SESSIONS if codex_root is None else codex_root
+    paths = []
+    for day in range(CODEX_DAYS):
+        folder = time.strftime("%Y/%m/%d", time.localtime(now - day * 86400))
+        paths.extend(glob.glob(os.path.join(root, folder, "rollout-*.jsonl")))
+    recent = []
+    for path in paths:
+        try:
+            modified = os.path.getmtime(path)
+        except OSError:
+            continue
+        if now - modified <= OFFICE_WINDOW:
+            recent.append((modified, path))
+    latest_rate = None
+    for modified, path in sorted(recent)[-8:]:
+        for item in _jsonl_tail(path):
+            payload = item.get("payload") if item.get("type") == "event_msg" else None
+            limits = payload.get("rate_limits") if type(payload) is dict else None
+            if type(limits) is dict:
+                latest_rate = (limits, modified)
+    if latest_rate is not None:
+        latest_rate, rate_modified = latest_rate
+        reached = latest_rate.get("rate_limit_reached_type")
+        if type(reached) is str:
+            has_active_window = any(
+                type(data) is dict
+                and (reset := _quota_timestamp(data.get("resets_at"))) is not None
+                and reset > now
+                for data in (latest_rate.get("primary"), latest_rate.get("secondary"))
+            )
+            if has_active_window:
+                out.append("Codex 已到用量上限")
+        else:
+            for data in (latest_rate.get("primary"), latest_rate.get("secondary")):
+                if type(data) is not dict:
+                    continue
+                used = data.get("used_percent")
+                window = data.get("window_minutes")
+                reset = _quota_timestamp(data.get("resets_at"))
+                if (type(used) not in (int, float) or type(used) is bool
+                        or type(window) not in (int, float) or type(window) is bool
+                        or reset is None or reset <= now or used < QUOTA_WARN_PERCENT):
+                    continue
+                window_text = ("5 小時額度" if window == 300 else
+                               "7 天額度" if window == 10080 else f"{window:g} 分鐘額度")
+                age = max(0, int((now - rate_modified) // 60))
+                reset_local = datetime.fromtimestamp(reset)
+                reset_format = "%H:%M" if reset_local.date() == datetime.fromtimestamp(now).date() else "%m-%d %H:%M"
+                line = (f"Codex {window_text}已用 {used:g}%，{reset_local:{reset_format}} 重置"
+                        f"（紀錄 {age} 分鐘前）")
+                if line not in out:
+                    out.append(line)
+
+    for top in claude_roots(claude_root):
+        candidates = []
+        for path in _session_files(top):
+            try:
+                modified = os.path.getmtime(path)
+            except OSError:
+                continue
+            if now - modified <= OFFICE_WINDOW:
+                candidates.append((modified, path))
+        activity = []
+        for _, path in sorted(candidates, reverse=True)[:8]:
+            for item in _jsonl_tail(path):
+                stamp = _quota_timestamp(item.get("timestamp"))
+                if stamp is None:
+                    continue
+                if item.get("error") == "rate_limit" or item.get("type") == "assistant":
+                    activity.append((stamp, item))
+        hits = [(stamp, item) for stamp, item in activity if item.get("error") == "rate_limit"]
+        latest = max(hits, default=None, key=lambda entry: entry[0])
+        later_assistant = max((stamp for stamp, item in activity
+                               if item.get("type") == "assistant" and not item.get("error")),
+                              default=0.0)
+        if (latest is None or later_assistant > latest[0]
+                or now - latest[0] > 5 * 3600):
+            continue
+        message = latest[1].get("message")
+        content = message.get("content") if type(message) is dict else None
+        first = content[0].get("text") if type(content) is list and content and type(content[0]) is dict else ""
+        reset = re.search(r"resets ([0-9:]{1,5}(?:am|pm))", first, re.I) if type(first) is str else None
+        config_name = os.path.basename(os.path.dirname(top))
+        suffix = f"，resets {reset.group(1)}" if reset else ""
+        out.append(f"Claude（{config_name}）已到用量上限{suffix}")
+    return out
 
 
 def claude_rows(now: float, root=None,
@@ -5896,10 +6170,34 @@ def _line_style(row: OfficeRow, rows: list[OfficeRow]) -> str:
     return min(about, key=BANDS.index, default="dim")
 
 
+def owner_count_line(github) -> tuple[str, str]:
+    if github is None:
+        return "等你決定：未讀 GitHub", ""
+    if not github.successful_read:
+        text = "等你決定：尚未讀取"
+        if github.read_failed:
+            text += "（GitHub 讀取失敗，可能過時）"
+        return text, "!" if github.read_failed else ""
+    count = sum(item.kind == "waiting_owner" for item in github.pending)
+    text = f"等你決定：{count} 件"
+    if github.read_failed:
+        text += "（GitHub 讀取失敗，可能過時）"
+    return text, "!" if count else ""
+
+
+def office_top(github, quota, now) -> list[tuple[str, str]]:
+    out = [owner_count_line(github)]
+    if github is not None:
+        out.append(main_health_line(github.main_health, github.main_error, now))
+    out.extend((line, "!") for line in (quota or []))
+    return out
+
+
 def office_view(rows: list[OfficeRow], error: str | None = None,
                 width: int | None = None, expand: bool = False,
                 pending: list[OwnerPending] | None = None,
-                now: float | None = None, scope: str = "") -> list[tuple[str, str]]:
+                now: float | None = None, scope: str = "", *,
+                top: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     With a screen width, each detail is cut so the time column stays visible.
     Rows are ordered red, green, yellow, gray in each section; without expand
@@ -5909,6 +6207,9 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     members = sum(row.kind != "shared" for row in rows)   # a shared line is not a member
     out = [(f"辦公室 · {working} 位工作中 · 共 {members} 位", "title")]
     now = time.time() if now is None else now
+    for text, style in top or []:
+        out += [(('  ' if i else '') + piece, style) for i, piece in
+                enumerate(_wrap(text, max(10, width - 2)) if width else [text])]
     pending = list(pending or [])
     texts = [f"★ 等你決定：GitHub {item.reference}（{_short_ago(max(0.0, now - item.when))}）"
              + (f" — {item.summary}" if item.summary else "")
@@ -5990,8 +6291,10 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
 
 def office_lines(rows: list[OfficeRow], error: str | None = None,
                  width: int | None = None, expand: bool = False,
-                 pending: list[OwnerPending] | None = None, scope: str = "") -> list[str]:
-    return [line for line, _ in office_view(rows, error, width, expand, pending, scope=scope)]
+                 pending: list[OwnerPending] | None = None, scope: str = "", *,
+                 top: list[tuple[str, str]] | None = None) -> list[str]:
+    return [line for line, _ in office_view(rows, error, width, expand, pending,
+                                             scope=scope, top=top)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -6037,11 +6340,12 @@ def run_once(github: "GitHubSource | None" = None) -> int:
         return 1
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True,
                                  pending=github.pending if github is not None else None,
-                                 scope=github.scope if github is not None else "")))
+                                 scope=github.scope if github is not None else "",
+                                 top=office_top(github, mon.quota, time.time()))))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
-                     *task_lines(mon.tasks, 3)]))
+                     *task_lines(mon.tasks, 3, mon.opencode_route)]))
     print("\n最近動態")
     print("\n".join(activity_lines(mon.tasks, github=github)))
     print(f"說明：{FOOTNOTE}。")
@@ -6176,7 +6480,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
         if offset:
             hint = f"[scrolled back {offset}]  " + hint
     elif view == "tasks":
-        lines = d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""] + task_lines(mon.tasks)
+        lines = d6_lines(mon.d6) + [""] + record_lines(mon.records) + [""] + task_lines(mon.tasks, route=mon.opencode_route)
         offset = max(0, min(offset, len(lines) - body))
         for row, line in enumerate(lines[offset:offset + body]):
             attr = curses.A_BOLD if line.startswith(("任務 ", "llmtool 任務紀錄", "D6 任務")) else 0
@@ -6210,7 +6514,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put) -> int:
     elif view == "office":
         lines = office_view(mon.office, mon.office_error, w - 1, expanded,
                             pending=mon.github.pending if mon.github is not None else None,
-                            scope=mon.github.scope if mon.github is not None else "")
+                            scope=mon.github.scope if mon.github is not None else "",
+                            top=office_top(mon.github, mon.quota, time.time()))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
@@ -6260,6 +6565,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--interval must be between 0.5 and 60 seconds")
     github = None if args.no_github else GitHubSource(DEFAULT_GITHUB_REPO,
                                                        direct=not (args.once or args.gh_cli))
+    if github is not None:
+        github.want_main = True
     if args.once:
         return run_once(github)
     mon = Monitor(min_age=max(0.0, args.min_age), show_all=args.all)
