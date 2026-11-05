@@ -60,7 +60,7 @@ _LOG_ERROR = re.compile(r'ERROR:[\w.-]+:')
 _PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
 _JWT_START = re.compile(r'(?<![A-Za-z0-9_])eyJ', re.IGNORECASE)
-_JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}(?<=[A-Za-z0-9_])(?![A-Za-z0-9_])', re.IGNORECASE)
+_JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}(?:\b|(?<=[A-Za-z0-9_])(?![A-Za-z0-9_]))', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 _URL_AUTHORITY = re.compile(r'[^\s/]+')
 
