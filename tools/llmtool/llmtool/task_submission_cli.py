@@ -819,15 +819,6 @@ def add_task_submission_parsers(actions):
                        help='merged integration PR containing the reviewed head')
     drive.add_argument('--reviewer-session-done', action='store_true',
                        help='record REVIEW_BLOCKED when the dispatched Reviewer has ended without a verdict')
-    claude_bind = actions.add_parser(
-        'claude-bind', help='Bind an existing Owner-assigned Claude Developer D6')
-    claude_bind.add_argument('task_id', help='existing durable Task ID')
-    claude_bind.add_argument('--executor-task', required=True,
-                             help='registered D6 Executor task id')
-    claude_bind.add_argument('--owner-ref', required=True,
-                             help='Owner assignment reference for this Claude Developer')
-    claude_bind.add_argument('--common-dir',
-                             help='registered repository common Git directory')
     claude_result = actions.add_parser(
         'claude-result', help='Record the original PM-bound Claude Developer result')
     claude_result.add_argument('task_id', help='existing durable Task ID')

@@ -1111,11 +1111,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
             input_stream=io.StringIO(envelope), return_record=True)
         barrier = threading.Barrier(2)
         outcomes = []
+        worker_errors = []
         outcome_lock = threading.Lock()
 
         def bind_candidate(candidate):
-            barrier.wait(timeout=5)
             try:
+                barrier.wait(timeout=5)
                 result = submission_cli.run_task_claude_bind(Namespace(
                     task_id=candidate['task_id'], executor_task=d6_task_id,
                     owner_ref=owner_ref, common_dir=self.executor_common_dir),
@@ -1123,6 +1124,14 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 outcome = result
             except LLMToolError as exc:
                 outcome = getattr(exc, 'task_store_error_code', None)
+            except BaseException as exc:
+                with outcome_lock:
+                    worker_errors.append(exc)
+                try:
+                    barrier.abort()
+                except threading.BrokenBarrierError:
+                    pass
+                return
             with outcome_lock:
                 outcomes.append(outcome)
 
@@ -1133,6 +1142,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         for thread in threads:
             thread.join(timeout=10)
         self.assertTrue(all(not thread.is_alive() for thread in threads))
+        self.assertEqual(worker_errors, [])
         self.assertCountEqual(outcomes, [0, 'TASK_D6_ALREADY_BOUND'])
 
     def test_claude_binding_refuses_wrong_d6_missing_ref_and_paused_worker(self):

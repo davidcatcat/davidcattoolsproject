@@ -290,7 +290,9 @@ class TaskCompletionTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             task_completion.collect_claude_result(**wrong_head)
 
-        stale_sha, _ = self._make_result(refresh_env2_marker=False)
+        stale_sha, _ = self._make_result(
+            code='    def test_ok(self): self.assertEqual(2, 2)\n',
+            refresh_env2_marker=False)
         stale = dict(kwargs, claude_result={
             'executor_task_id': self.task_id, 'head_sha': stale_sha})
         with self.assertRaises(LLMToolError):
@@ -3961,6 +3963,207 @@ class TaskCompletionTests(unittest.TestCase):
             task_completion.validate_review_repair_intent(bad_digest, handoff, review_return)
         self.assertEqual(caught.exception.completion_code, 'REVIEW_REPAIR_DIGEST_MISMATCH')
 
+
+    def test_claude_bound_task_cli_end_to_end(self):
+        from llmtool import remote_test, review_dispatch
+        from llmtool.cli import main
+
+        d6_task = '4' * 32
+        owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                     'issues/289#issuecomment-6641326482')
+        root = self.base / 'claude-bound-executor'
+        root.mkdir(mode=0o700)
+        self.root = root
+        self.common = str(root / '.git')
+        self.task_id = d6_task
+        self._git('init', '-b', 'feat/executor')
+        self._git('config', 'user.name', 'Executor')
+        self._git('config', 'user.email', 'executor@example.invalid')
+        self.source_path = 'tools/llmtool/tests/test_fixture.py'
+        source = root / self.source_path
+        source.parent.mkdir(parents=True, exist_ok=True)
+        (root / 'tools' / 'llmtool' / '.gitignore').write_text(
+            '/.d6-bootstrap-report.json\n')
+        source.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_ok(self): self.assertEqual(1, 1)\n')
+        (root / 'README.md').write_text('Repository fixture.\n')
+        self._git('add', self.source_path, 'tools/llmtool/.gitignore', 'README.md')
+        self._git('commit', '-m', 'source')
+        self.source_sha = self._git('rev-parse', 'HEAD')
+        base = self.source_sha
+        self._git('branch', 'main', base)
+        self._write_registration(d6_task, 'claude-developer', 'claude-session',
+            root, 'feat/executor', base, base, native_session_id='claude-native')
+        head, _ = self._make_result()
+
+        policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
+        policy['workers']['claude-developer']['dispatch'] = 'OWNER_ASSIGNMENT_ONLY'
+        policy['workers']['claude-developer']['owner_assignments'] = [{
+            'task_id': d6_task, 'owner_assignment_ref': owner_ref}]
+        policy['workers']['codex-reviewer']['dispatch'] = 'ALLOWED'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+
+        home = self.base / 'home'
+        home.mkdir(mode=0o700)
+        remote_config = home / '.config' / 'llmtool' / 'remote-test.json'
+        remote_config.parent.mkdir(parents=True, mode=0o700)
+        remote_config.write_text(json.dumps({
+            'host': 'ec2.example.org', 'user': 'runner',
+            'repo_path': '/srv/repo', 'python': '/usr/bin/python3'}))
+        remote_config.chmod(0o600)
+        tree = self._git('rev-parse', head + '^{tree}')
+        receipt = {
+            'result': 'PASS', 'exit_code': 0, 'source_sha': head,
+            'tree': tree, 'fetch_head': head, 'modules': ['test_fixture'],
+            'identity': {'uid': 65534}, 'started_at': '2026-11-05T00:00:00Z',
+            'ended_at': '2026-11-05T00:00:01Z', 'elapsed_s': 1.0,
+            'ran_total': 1, 'final': ['OK'], 'failures': [], 'log_bytes': 0,
+            'log_sha256': 'd' * 64,
+            'remote_log_path': '/tmp/llmtool-remote-log.Abc123/remote-test.log',
+        }
+
+        def call(argv, stdin=''):
+            output = StringIO()
+            with patch('sys.stdin', StringIO(stdin)), redirect_stdout(output), \
+                    patch('llmtool.source_freshness.require_fresh_source',
+                          return_value='OK'):
+                rc = main(argv)
+            rendered = output.getvalue()
+            return rc, json.loads(rendered) if rendered.strip() else None
+
+        envelope = json.dumps({
+            'request': 'Verify the bounded change.',
+            'response': json.dumps({'schema_version': 1, 'summary': 'Bind Claude.',
+                'developer_assignment': {'route': 'claude', 'risk': 'LOW',
+                    'goal': 'Record the result.',
+                    'acceptance': ['The result is verified.']}}),
+        })
+        with patch.dict(os.environ, {
+                'HOME': str(home), 'PATH': '/usr/bin:/bin',
+                'GIT_CONFIG_NOSYSTEM': '1', 'GIT_CONFIG_GLOBAL': '/dev/null'},
+                clear=True):
+            store = TaskStore()
+            self.assertEqual(store.root, home / '.local' / 'state' /
+                             'llmtool' / 'tasks')
+            rc, recorded = call(['task', 'record-pm', '--stdin-json'], envelope)
+            self.assertEqual(rc, 0)
+            task = store.get(recorded['task_id'])
+            task_id, run_id = task['task_id'], task['run_id']
+            contract_digest = task['task_binding']['contract_digest']
+
+            rc, _ = call(['task', 'claude-bind', task_id, '--executor-task',
+                          d6_task, '--owner-ref', owner_ref, '--common-dir', self.common])
+            self.assertEqual(rc, 0)
+            rc, _ = call(['task', 'claude-result', task_id, '--executor-task',
+                          d6_task, '--head', head, '--pm-session', task['pm_session_id']])
+            self.assertEqual(rc, 0)
+
+            real_remote_test = remote_test.run_remote_test
+
+            def run_with_ssh(*args, **kwargs):
+                def ssh(argv, script, timeout):
+                    return subprocess.CompletedProcess(
+                        argv, 0, json.dumps(receipt).encode(), b'')
+                return real_remote_test(*args, transport=ssh, **kwargs)
+
+            with patch.object(remote_test, 'run_remote_test', side_effect=run_with_ssh):
+                rc, remote = call(['task', 'remote-test', task_id,
+                    '--executor-task', d6_task, '--sha', head,
+                    '--ref', 'refs/heads/feat/executor', '--module', 'test_fixture'])
+            self.assertIsNone(rc)
+            self.assertEqual(remote['result'], 'PASS')
+
+            pr = {'number': 10, 'state': 'open', 'merged': False,
+                  'head': {'sha': head}, 'base': {'sha': base, 'repo': {
+                      'full_name': 'davidcatcat/davidcattoolsproject'}},
+                  'user': {'login': 'author-user'}}
+            body = (
+                '<!-- activity: type=review_verdict actor=Codex target=PM status=PASS -->\n'
+                f'Verdict: PASS | Version: v1 | HEAD: {head}\n'
+                'FORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+                f'LLMTOOL-REVIEW-BINDING v1 task={task_id} run={run_id} '
+                f'contract={contract_digest} head={head}')
+
+            def create_d6(**kw):
+                reviewer_root = self.base / kw['task_id']
+                self._git('worktree', 'add', '-b',
+                    'llmtool/reviewer-' + kw['task_id'], str(reviewer_root), kw['base_sha'])
+                self._write_registration(kw['task_id'], kw['reviewer_key'],
+                    'pending-' + kw['task_id'], reviewer_root,
+                    'llmtool/reviewer-' + kw['task_id'], kw['base_sha'], kw['base_sha'],
+                    github_login=kw['github_login'], state='REVIEW_PENDING')
+
+            def bind_d6(task_id, session_id, repo_root):
+                registry = Path(self.common) / 'llmtool-worktrees' / (task_id + '.json')
+                value = json.loads(registry.read_text(encoding='utf-8'))
+                value['session_ref'] = session_id
+                value['native_session_id'] = session_id
+                registry.write_text(json.dumps(value), encoding='utf-8')
+                registry.chmod(0o600)
+
+            def codex(**kwargs):
+                return {'thread_id': '0123456789abcdef', 'verdict': 'PASS',
+                        'review_text': body}
+
+            def dispatch_github(path):
+                self.assertEqual(path, 'pulls/10')
+                return pr
+
+            with patch.object(review_dispatch, '_resolve_github_login',
+                              return_value='reviewer-user'), \
+                    patch.object(review_dispatch, '_create_d6', side_effect=create_d6), \
+                    patch.object(review_dispatch, '_bind_d6', side_effect=bind_d6), \
+                    patch.object(review_dispatch, '_dispatch_codex', side_effect=codex), \
+                    patch('llmtool.review_dispatch._github_get',
+                          side_effect=dispatch_github):
+                rc, dispatched = call(['task', 'review-dispatch', task_id,
+                    '--executor-task', d6_task, '--pr', '10',
+                    '--reviewer', 'codex-reviewer'])
+            self.assertIsNone(rc)
+            reviewer_task = dispatched['reviewer_task']
+
+            checks = {'total_count': 2, 'check_runs': [
+                {'id': 1, 'name': 'check (macOS 3.13)', 'head_sha': head,
+                 'status': 'completed', 'conclusion': 'success'},
+                {'id': 2, 'name': 'check (Linux 3.14)', 'head_sha': head,
+                 'status': 'completed', 'conclusion': 'success'},
+            ]}
+            comment = {'id': 44, 'user': {'login': 'reviewer-user'}, 'body': body,
+                'created_at': '2026-11-05T00:00:00Z',
+                'updated_at': '2026-11-05T00:00:00Z'}
+            github_responses = [
+                {'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': base}},
+                *self._github_response_sequence(head, pr, [], checks,
+                                                comments=[comment]),
+            ]
+            with patch('llmtool.task_completion._github_get',
+                       side_effect=github_responses):
+                rc, completed = call(['task', 'complete', task_id,
+                    '--executor-task', d6_task, '--reviewer-task', reviewer_task,
+                    '--pr', '10'])
+            self.assertEqual(rc, 0)
+            completion = completed['completion']
+            self.assertEqual(completion['state'], 'PM_EVIDENCE_READY')
+            self.assertEqual(completion['missing_gates'], [])
+            self.assertEqual(completion['evidence']['result']['result_head'], head)
+            review_ci = completion['evidence']['review_pr_ci']
+            self.assertEqual(review_ci['formal_review_state'], 'ACCEPTED')
+            self.assertEqual(review_ci['ci_head'], head)
+            self.assertEqual(review_ci['ci_checks'], {
+                'check (macOS 3.13)': 'SUCCESS',
+                'check (Linux 3.14)': 'SUCCESS'})
+            self.assertEqual(completion['pm_dispatch'], 'NOT_STARTED')
+            self.assertIsNone(completed['developer']['artifact'])
+            saved = store.get(task_id)
+            self.assertEqual(saved['remote_test_receipts'][-1]['result'], 'PASS')
+            self.assertEqual(saved['remote_test_receipts'][-1]['source_sha'], head)
+            claims = [claim for claim in saved['review_dispatch_claim']
+                      if claim['state'] == 'COMPLETED']
+            self.assertEqual(len(claims), 1)
+            claim = claims[0]
+            self.assertEqual((claim['pr'], claim['head_sha'], claim['reviewer_task']),
+                             (10, head, reviewer_task))
+            self.assertEqual(claim['review_result']['review_text'], body)
 
 if __name__ == '__main__':
     unittest.main()

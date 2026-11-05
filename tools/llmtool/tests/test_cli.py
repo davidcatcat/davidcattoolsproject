@@ -137,7 +137,8 @@ class CLITests(unittest.TestCase):
         from llmtool.cli import main
         from unittest.mock import patch
         called = []
-        with patch('llmtool.source_freshness.require_fresh_source'), \
+        with patch('llmtool.source_freshness.require_fresh_source',
+                   return_value='OK') as freshness, \
                 patch.object(task_submission_cli, 'run_task_claude_bind',
                              side_effect=lambda args: called.append(args) or 0):
             rc = main(['task', 'claude-bind', 'a' * 32, '--executor-task', 'd6-task',
@@ -145,6 +146,11 @@ class CLITests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(len(called), 1)
         self.assertEqual(called[0].action, 'claude-bind')
+        freshness.assert_called_once()
+        parsed = called[0]
+        self.assertEqual(parsed.task_id, 'a' * 32)
+        self.assertEqual(parsed.executor_task, 'd6-task')
+        self.assertEqual(parsed.owner_ref, 'https://github.com/example/repo/issues/1')
 
     def test_review_bundle_is_local_early_dispatch_and_sanitized_json(self):
         result = self.run_cli('task','review-bundle','--help')
