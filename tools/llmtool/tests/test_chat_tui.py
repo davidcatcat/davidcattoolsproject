@@ -2342,8 +2342,9 @@ class TaskListTests(Base):
     def test_w60_f3_list_longer_than_the_screen_scrolls_and_shift_c_copies_every_row(self):
         """Owner 3rd acceptance: C copied only the first page; the list must scroll."""
         ids = [('%02d' % n) * 16 for n in range(40)]          # distinct first 8 characters
+        now = datetime.now(timezone.utc).replace(second=0, microsecond=0)
         records = [_record(task_id=task, request='W60 第%02d列' % n,
-                           updated_at='2026-11-02T%02d:%02d:00Z' % (n // 60, n % 60))
+                           updated_at=(now - timedelta(minutes=40 - n)).strftime('%Y-%m-%dT%H:%M:%SZ'))
                    for n, task in enumerate(ids)]
         size = [Size(rows=24, columns=80)]
         seen = {}
