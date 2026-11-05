@@ -481,76 +481,33 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id='pm-' + new_id(),
-                executor_task_id='executor-1', head_sha='a' * 40,
-                session_id='12345678-1234-1234-1234-123456789abc')
+                executor_task_id='executor-1', head_sha='a' * 40)
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='executor-1', head_sha='bad',
-                session_id='12345678-1234-1234-1234-123456789abc')
+                executor_task_id='executor-1', head_sha='bad')
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='different-executor', head_sha='a' * 40,
-                session_id='12345678-1234-1234-1234-123456789abc')
+                executor_task_id='different-executor', head_sha='a' * 40)
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             saved = self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='executor-1', head_sha='a' * 40,
-                session_id='12345678-1234-1234-1234-123456789abc')
+                executor_task_id='executor-1', head_sha='a' * 40)
         result = saved['developer']['claude_result']
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(result['executor_task_id'], 'executor-1')
         self.assertEqual(result['head_sha'], 'a' * 40)
-        self.assertEqual(result['author_session_ids'],
-                         ['12345678-1234-1234-1234-123456789abc'])
         self.assertRegex(result['recorded_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='executor-1', head_sha='a' * 40,
-                session_id='12345678-1234-1234-1234-123456789abc')
-
-    def test_old_claude_result_shape_remains_readable_and_seeds_repair_authors(self):
-        task = self._claude_result_task()
-        native = '12345678-1234-1234-1234-123456789abc'
-        claim_id = 'f' * 32
-        current = self.store.get(task['task_id'])
-        developer = dict(current['developer'], state='DEVELOPER_RESPONDED',
-            claude_result={'executor_task_id': 'executor-1', 'head_sha': 'a' * 40,
-                           'recorded_at': '2026-11-04T00:00:00Z'})
-        completion = {
-            'state': 'WAITING_EXECUTOR', 'executor_task_id': 'executor-1',
-            'reviewer_task_id': None,
-            'evidence': {'common_dir': '/tmp/common', 'root': '/tmp/root',
-                         'branch': 'task', 'source_sha': 'a' * 40,
-                         'executor_native_session_id': native},
-            'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
-            'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
-        }
-        claim = {'executor_task': 'executor-1', 'pr': 42, 'head_sha': 'a' * 40,
-            'version': 1, 'attempt': 1, 'family': 'pr-42', 'state': 'DISPATCHED',
-            'repair_task_id': claim_id, 'comment_id': 9, 'packet_sha256': 'e' * 64,
-            'claimed_at': '2026-11-04T00:00:00Z'}
-        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
-            saved = self.store.compare_and_update(task['task_id'],
-                expected={'record_sha256': current['record_sha256']},
-                developer=developer, completion=completion, review_repair_claims=[claim])
-            self.assertEqual(self.store.get(task['task_id'])['developer']['claude_result'],
-                             developer['claude_result'])
-            repaired = self.store.record_claude_result(task['task_id'],
-                pm_session_id=task['pm_session_id'], executor_task_id='executor-1',
-                head_sha='b' * 40, session_id='22345678-1234-1234-1234-123456789abc',
-                claim_id=claim_id)
-        self.assertEqual(repaired['developer']['claude_result']['author_session_ids'],
-                         [native, '22345678-1234-1234-1234-123456789abc'])
-        self.assertEqual(repaired['developer']['claude_result']['claim_id'], claim_id)
+                executor_task_id='executor-1', head_sha='a' * 40)
 
     def test_claude_result_cli_requires_invoking_pm_session(self):
         task = self._claude_result_task()
         args = SimpleNamespace(task_id=task['task_id'], executor_task='executor-1',
-                               head='a' * 40,
-                               session='12345678-1234-1234-1234-123456789abc')
+                               head='a' * 40)
         with self.assertRaises(LLMToolError):
             task_submission_cli_module.run_task_claude_result(args, store=self.store)
         args.pm_session = 'pm-not-the-original'
@@ -562,42 +519,28 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
                          'DEVELOPER_PENDING')
         args.pm_session = task['pm_session_id']
-        with self.assertRaises(LLMToolError):
-            task_submission_cli_module.run_task_claude_result(
-                args, store=self.store, stdout=io.StringIO())
-        self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
-                         'DEVELOPER_PENDING')
-
-        native = '12345678-1234-1234-1234-123456789abc'
-        current = self.store.get(task['task_id'])
         completion = {
             'state': 'WAITING_EXECUTOR', 'executor_task_id': 'executor-1',
             'reviewer_task_id': None,
             'evidence': {'common_dir': '/tmp/common', 'root': '/tmp/root',
-                         'branch': 'task', 'source_sha': 'a' * 40,
-                         'executor_native_session_id': native},
+                         'branch': 'task', 'source_sha': task['developer']['source_sha']},
             'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
             'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
         }
+        current = self.store.get(task['task_id'])
         self.store.compare_and_update(task['task_id'],
             expected={'record_sha256': current['record_sha256']}, completion=completion)
         registration = SimpleNamespace(root='/tmp/root', common_dir='/tmp/common',
-            branch='task', result_sha='a' * 40, native_session_id=native)
+            branch='task', result_sha='a' * 40)
         snapshot = SimpleNamespace(head='a' * 40, clean=True, root='/tmp/root',
             common_dir='/tmp/common', branch='task')
-        current = self.store.get(task['task_id'])
         with patch.object(task_submission_cli_module.task_completion,
                           'read_d6_registration', return_value=registration), \
                 patch.object(task_submission_cli_module.task_completion,
                              'collect_git_snapshot', return_value=snapshot), \
-                patch.object(task_submission_cli_module.task_completion, '_git',
-                             return_value=b''), \
+                patch.object(task_submission_cli_module.task_completion, '_git', return_value=b''), \
                 patch.object(task_submission_cli_module.task_completion,
                              '_developer_changed_paths', return_value=('src.py',)), \
-                patch.object(task_submission_cli_module.role_config, 'resolve_role',
-                             return_value={'config_dir': '/tmp/claude'}), \
-                patch.object(task_submission_cli_module.active_pm_inbox,
-                             'observe_claude_session', return_value='/tmp/root'), \
                 patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             self.assertEqual(task_submission_cli_module.run_task_claude_result(
                 args, store=self.store, stdout=io.StringIO()), 0)
@@ -608,11 +551,22 @@ class TaskStoreTests(unittest.TestCase):
         uuid_task = self._claude_result_task(pm_session_id='pm-' + native_pm_session_id)
         args.task_id = uuid_task['task_id']
         args.pm_session = native_pm_session_id
-        with self.assertRaises(LLMToolError):
-            task_submission_cli_module.run_task_claude_result(
-                args, store=self.store, stdout=io.StringIO())
+        completion = dict(completion, evidence=dict(completion['evidence']))
+        current = self.store.get(uuid_task['task_id'])
+        self.store.compare_and_update(uuid_task['task_id'],
+            expected={'record_sha256': current['record_sha256']}, completion=completion)
+        with patch.object(task_submission_cli_module.task_completion,
+                          'read_d6_registration', return_value=registration), \
+                patch.object(task_submission_cli_module.task_completion,
+                             'collect_git_snapshot', return_value=snapshot), \
+                patch.object(task_submission_cli_module.task_completion, '_git', return_value=b''), \
+                patch.object(task_submission_cli_module.task_completion,
+                             '_developer_changed_paths', return_value=('src.py',)), \
+                patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.assertEqual(task_submission_cli_module.run_task_claude_result(
+                args, store=self.store, stdout=io.StringIO()), 0)
         self.assertEqual(self.store.get(uuid_task['task_id'])['developer']['state'],
-                         'DEVELOPER_PENDING')
+                         'DEVELOPER_RESPONDED')
 
     def test_claude_result_rejects_wrong_state(self):
         task = self._codex_dispatch_task()
@@ -620,8 +574,7 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=task['pm_session_id'],
-                executor_task_id='executor-1', head_sha='a' * 40,
-                session_id='12345678-1234-1234-1234-123456789abc')
+                executor_task_id='executor-1', head_sha='a' * 40)
 
     def _allow_codex_dispatch(self):
         policy_path = Path(worker_dispatch._POLICY_PATH)

@@ -329,54 +329,6 @@ class ReviewRepairTests(unittest.TestCase):
                          self.store.get(TASK)['review_repair_claims'][0]['repair_task_id'])
         self.assertEqual(len(self.calls), 1)
 
-    def _claude_task(self, *, acceptance_count=1):
-        record = _record()
-        record['developer'].update(provider_profile='claude',
-            executor_task_id=EXECUTOR,
-            owner_assignment_ref='https://github.com/example/repo/issues/1#issuecomment-2',
-            acceptance=[f'criterion {index}' for index in range(acceptance_count)])
-        record['pm_assignment'].update(route='claude',
-            acceptance=list(record['developer']['acceptance']))
-        return record
-
-    def _claude_receipt(self):
-        receipt = {'task_id': TASK, 'run_id': RUN, 'executor_task': EXECUTOR,
-            'source_sha': HEAD, 'result': 'FAIL', 'modules': ['test_round'],
-            'failure_excerpt': 'Failure excerpt'}
-        receipt['receipt_digest'] = hashlib.sha256(json.dumps(
-            receipt, ensure_ascii=True, sort_keys=True,
-            separators=(',', ':')).encode('utf-8')).hexdigest()
-        return receipt
-
-    def test_claude_repair_is_record_only_and_replay_returns_result_action(self):
-        self.store = TempTaskStore(self.temp.name, self._claude_task())
-        with patch.object(review_repair, '_registered_d6', return_value=(
-                type('Registration', (), {'root': '/registered/d6'})(), object())):
-            result = self.dispatch(remote_test_receipt=self._claude_receipt())
-        saved = self.store.get(TASK)
-        self.assertEqual(result['next_action'], 'claude-result')
-        self.assertEqual(len(saved['review_repair_claims']), 1)
-        self.assertEqual(saved['review_repair_claims'][0]['state'], 'DISPATCHED')
-        self.assertEqual(self.calls, [])
-        with patch.object(review_repair, '_registered_d6', return_value=(
-                type('Registration', (), {'root': '/registered/d6'})(), object())):
-            replay = self.dispatch(remote_test_receipt=self._claude_receipt())
-        self.assertTrue(replay['replayed'])
-        self.assertEqual(replay['next_action'], 'claude-result')
-        self.assertEqual(len(self.store.get(TASK)['review_repair_claims']), 1)
-
-    def test_claude_acceptance_limit_refuses_before_claim(self):
-        self.store = TempTaskStore(self.temp.name, self._claude_task(acceptance_count=16))
-        before = self.store.get(TASK)['review_repair_claims']
-        with patch.object(review_repair, '_registered_d6', return_value=(
-                type('Registration', (), {'root': '/registered/d6'})(), object())):
-            with self.assertRaisesRegex(Exception, 'refused') as raised:
-                self.dispatch(remote_test_receipt=self._claude_receipt())
-        self.assertEqual(raised.exception.review_repair_code,
-                         'REPAIR_DEVELOPER_BINDING_INVALID')
-        self.assertEqual(self.store.get(TASK).get('review_repair_claims', []), before)
-        self.assertEqual(self.calls, [])
-
     def test_failed_claim_starts_a_new_repair_attempt(self):
         self.dispatch()
         record = self.store.get(TASK)

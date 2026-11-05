@@ -832,10 +832,6 @@ def add_task_submission_parsers(actions):
                                help='40-character result HEAD SHA')
     claude_result.add_argument('--pm-session', required=True,
                                help='original Claude Code PM session ID or stored pm- session ID')
-    claude_result.add_argument('--session',
-                               help='actual resumed Claude Developer session UUID')
-    claude_result.add_argument('--claim-id',
-                               help='DISPATCHED repair claim id for a subsequent result')
     review_prompt = actions.add_parser(
         'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
     review_prompt.add_argument('task_id', help='existing durable Task ID')
@@ -1161,7 +1157,7 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
 
 
 def run_task_claude_result(args, *, store=None, stdout=None):
-    """Persist a Claude Developer result against its original PM and author sessions."""
+    """Persist a Claude Developer result against its original PM session."""
     store = TaskStore() if store is None else store
     pm_session_id = getattr(args, 'pm_session', None)
     if type(pm_session_id) is not str or not pm_session_id:
@@ -1188,39 +1184,6 @@ def run_task_claude_result(args, *, store=None, stdout=None):
             snapshot.head != registration.result_sha or snapshot.root != registration.root or
             snapshot.common_dir != registration.common_dir or snapshot.branch != registration.branch):
         raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
-    previous_result = developer.get('claude_result')
-    claim_id = getattr(args, 'claim_id', None)
-    session_id = getattr(args, 'session', None)
-    if previous_result is not None:
-        claims = task.get('review_repair_claims', [])
-        eligible = [claim for claim in claims if claim.get('executor_task') == args.executor_task]
-        latest = eligible[-1] if eligible else None
-        if (type(latest) is not dict or latest.get('state') != 'DISPATCHED' or
-                latest.get('repair_task_id') != claim_id or
-                latest.get('head_sha') != previous_result.get('head_sha') or
-                args.head == previous_result.get('head_sha')):
-            raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
-        try:
-            task_completion._git(registration.root, (
-                'merge-base', '--is-ancestor', latest['head_sha'], args.head), limit=4096)
-        except Exception:
-            raise LLMToolError('CLAUDE_RESULT_STATE_INVALID') from None
-        author_sessions = previous_result.get('author_session_ids')
-        if not author_sessions:
-            completion_evidence = completion.get('evidence')
-            native = (completion_evidence.get('executor_native_session_id')
-                      if type(completion_evidence) is dict else None)
-            author_sessions = [native] if type(native) is str else []
-        if session_id is None or session_id in author_sessions:
-            raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
-    elif claim_id is not None:
-        raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
-    else:
-        session_id = registration.native_session_id
-        if (type(session_id) is not str or not session_id or session_id == 'UNKNOWN' or
-                len(session_id) > 256 or
-                any(ord(char) < 0x20 or ord(char) == 0x7f for char in session_id)):
-            raise LLMToolError('CLAUDE_RESULT_SESSION_INVALID')
     try:
         merges = task_completion._git(registration.root, (
             'rev-list', '--merges', developer['source_sha'] + '..' + args.head, '--'),
@@ -1237,25 +1200,9 @@ def run_task_claude_result(args, *, store=None, stdout=None):
     if (not changed or len(changed) > 32 or
             not set(changed).issubset(set(developer.get('write_paths', [])))):
         raise LLMToolError('RESULT_SCOPE_MISMATCH')
-    if previous_result is None:
-        initial_session = registration.native_session_id
-        if (getattr(args, 'session', None) is not None and
-                args.session != initial_session):
-            raise LLMToolError('registered Claude session does not match --session')
-    else:
-        try:
-            role = role_config.resolve_role('claude-developer')
-            if type(role.get('config_dir')) is not str:
-                raise LLMToolError('Claude Developer role account is unavailable')
-            active_pm_inbox.observe_claude_session(
-                session_id, registration.root,
-                {'CLAUDE_CONFIG_DIR': role['config_dir']})
-        except Exception:
-            raise LLMToolError('CLAUDE_RESULT_SESSION_INVALID') from None
     result = store.record_claude_result(
         args.task_id, pm_session_id=pm_session_id,
-        executor_task_id=args.executor_task, head_sha=args.head,
-        session_id=session_id, claim_id=getattr(args, 'claim_id', None))
+        executor_task_id=args.executor_task, head_sha=args.head)
     _print(_task_view(result), stdout=stdout)
     return 0
 
@@ -5250,26 +5197,6 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                     # The primary collector already records unavailable D6
                     # registration as a fail-closed reviewer gate.
                     pass
-            if claude_route and type(claude_result) is dict:
-                author_sessions = claude_result.get('author_session_ids')
-                if not author_sessions:
-                    initial_native = initial.get('executor_native_session_id')
-                    author_sessions = [initial_native] if type(initial_native) is str else []
-                try:
-                    reviewer_registration = task_completion.read_d6_registration(
-                        args.reviewer_task, git_evidence['common_dir'])
-                    reviewer_native = reviewer_registration.native_session_id
-                    if (not reviewer_native or reviewer_native == 'UNKNOWN' or
-                            reviewer_native in author_sessions):
-                        github['missing_gates'] = sorted(set(
-                            github['missing_gates'] +
-                            ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
-                        github['evidence']['formal_review_state'] = 'UNVERIFIED'
-                except Exception:
-                    github['missing_gates'] = sorted(set(
-                        github['missing_gates'] +
-                        ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
-                    github['evidence']['formal_review_state'] = 'UNVERIFIED'
             evidence['review_pr_ci'] = github['evidence']
             missing.extend(github['missing_gates'])
     except LLMToolError as exc:

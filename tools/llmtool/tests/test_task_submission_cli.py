@@ -999,17 +999,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         no_test_task = run_task_record_pm(
             Namespace(stdin_json=True), store=store,
             input_stream=io.StringIO(envelope), return_record=True)
-        original_git = submission_cli.task_completion._git
-
-        def no_test_diff(root, git_args, **kwargs):
-            if (root == str(self.executor_root) and len(git_args) > 0 and
-                    git_args[0] == 'diff' and '--name-only' in git_args):
-                return b'README.md\x00'
-            return original_git(root, git_args, **kwargs)
-
         with self.assertRaises(LLMToolError) as no_test_error:
-            with patch.object(submission_cli.task_completion, '_git',
-                              side_effect=no_test_diff):
+            with patch.object(submission_cli.task_completion,
+                              '_developer_changed_paths', return_value=('README.md',)):
                 submission_cli.run_task_claude_bind(Namespace(
                     task_id=no_test_task['task_id'], executor_task=d6_task_id,
                     owner_ref=owner_ref, common_dir=self.executor_common_dir,
@@ -1081,14 +1073,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
             submission_cli.run_task_claude_result(Namespace(
                 task_id=task['task_id'], executor_task='a' * 32,
                 head=result_head, pm_session=task['pm_session_id']), store=store)
-        with redirect_stdout(io.StringIO()):
-            with patch.object(submission_cli.role_config, 'resolve_role',
-                               return_value={'config_dir': '/tmp/claude'}), \
-                    patch.object(submission_cli.active_pm_inbox,
-                                 'observe_claude_session', return_value=str(self.executor_root)):
-                submission_cli.run_task_claude_result(Namespace(
-                    task_id=task['task_id'], executor_task=d6_task_id,
-                    head=result_head, pm_session=task['pm_session_id']), store=store)
+        with redirect_stdout(io.StringIO()), \
+                patch.object(submission_cli.task_completion,
+                             '_developer_changed_paths', return_value=(declared_test_path,)):
+            submission_cli.run_task_claude_result(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                head=result_head, pm_session=task['pm_session_id']), store=store)
         completed = store.get(task['task_id'])
         self.assertEqual(completed['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(completed['developer']['claude_result']['executor_task_id'],
@@ -1267,20 +1257,10 @@ class TaskSubmissionCLITests(unittest.TestCase):
             updated_policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
             updated_policy['workers']['claude-developer']['dispatch'] = worker_state
             self.policy_path.write_text(json.dumps(updated_policy), encoding='utf-8')
-            original_git = submission_cli.task_completion._git
-            committed_diff_args = (
-                'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
-                '--no-renames', registration.source_sha, registration.result_sha, '--')
-
-            def git_side_effect(root, args, **kwargs):
-                if root == registration.root and args == committed_diff_args:
-                    return b'sample.py\x00'
-                return original_git(root, args, **kwargs)
-
             with patch.object(submission_cli.task_completion, 'read_d6_registration',
                               return_value=registration), \
-                    patch.object(submission_cli.task_completion, '_git',
-                                 side_effect=git_side_effect):
+                    patch.object(submission_cli.task_completion,
+                                 '_developer_changed_paths', return_value=('sample.py',)):
                 return submission_cli.run_task_claude_bind(Namespace(
                     task_id=task['task_id'], executor_task=d6_id, owner_ref=ref,
                     common_dir=self.executor_common_dir,
