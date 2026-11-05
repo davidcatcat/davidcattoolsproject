@@ -124,6 +124,7 @@ class MonitorTrustTests(unittest.TestCase):
     def test_task_route_summary_and_existing_task_output(self):
         route = (90.0, 3, 2, "已回覆")
         self.assertIn("Task 紀錄近 7 天 3 次，成功 2 次", mon.task_lines([], route=route)[0])
+        self.assertIn("最近一次", mon.task_lines([], route=route)[0])
         self.assertEqual(mon.task_lines([]), ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"])
         self.assertNotIn("12 小時", mon.task_lines([])[0])
         task = mon.Task("/tmp/llmtool-x", "t1", "branch", ())
@@ -140,7 +141,7 @@ class MonitorTrustTests(unittest.TestCase):
         self.assertIn("main 74f78a4 題目（2 小時前）· Linux 成功", text)
         self.assertIn("Mac 全套 成功（7 小時前）", text)
         self.assertEqual(style, "")
-        self.assertEqual(mon.main_health_line(replace(health, linux=("in_progress", None, "oldsha1")), "", self.NOW)[0].split("· Linux ")[1].split(" ·")[0], "執行中 @oldsha")
+        self.assertEqual(mon.main_health_line(replace(health, linux=("in_progress", None, "oldsha1")), "", self.NOW)[0].split("· Linux ")[1].split(" ·")[0], "執行中 @oldsha1")
         self.assertIn("Mac 未確認", mon.main_health_line(replace(health, mac=None), "", self.NOW)[0])
         self.assertEqual(mon.main_health_line(replace(health, linux=("completed", "failure", "74f78a4")), "", self.NOW)[1], "!")
 
@@ -149,16 +150,13 @@ class MonitorTrustTests(unittest.TestCase):
         base = f"repos/o/r/"
         paths = {
             base + "commits?sha=main&per_page=1": [{"sha": "74f78a4deadbeef", "commit": {
-                "message": "Health title", "committer": {"date": datetime.fromtimestamp(
-                    self.NOW - 60, timezone.utc).isoformat()}}}],
+                "message": "Health title", "committer": {"date": iso(self.NOW - 60)}}}],
             base + "actions/runs?branch=main&event=push&per_page=30": {"workflow_runs": [{
                 "name": "llmtool Linux CI", "status": "completed", "conclusion": "success",
-                "head_sha": "74f78a4deadbeef", "created_at": datetime.fromtimestamp(
-                    self.NOW - 30, timezone.utc).isoformat()}]},
+                "head_sha": "74f78a4deadbeef", "created_at": iso(self.NOW - 30)}]},
             base + "actions/workflows/llmtool-mac-ci.yml/runs?branch=main&event=workflow_dispatch&per_page=1": {
                 "workflow_runs": [{"name": "llmtool Mac CI", "status": "in_progress",
-                    "conclusion": None, "head_sha": "74f78a4deadbeef", "created_at": datetime.fromtimestamp(
-                        self.NOW - 20, timezone.utc).isoformat()}]},
+                    "conclusion": None, "head_sha": "74f78a4deadbeef", "created_at": iso(self.NOW - 20)}]},
         }
         calls = []
         source._get = lambda path: calls.append(path) or paths[path]
@@ -182,6 +180,15 @@ class MonitorTrustTests(unittest.TestCase):
         quiet._get = lambda path: seen.append(path) or ([] if "comments?" in path else [])
         quiet.refresh_ci = lambda: None
         quiet.refresh(force=True)
+        self.assertFalse(any("commits?sha=main" in path for path in seen))
+
+    def test_github_refresh_does_not_read_main_without_opt_in(self):
+        source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
+        seen = []
+        source._get = lambda path: seen.append(path) or []
+        source.refresh_ci = lambda: None
+        source.refresh(force=True)
+        self.assertFalse(source.want_main)
         self.assertFalse(any("commits?sha=main" in path for path in seen))
 
     def test_office_top_is_rendered_before_error_and_wraps(self):
@@ -219,22 +226,33 @@ class QuotaWarningTests(unittest.TestCase):
             self._write(path, [entry("90", self.NOW + 3600)])
             self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
 
+    def test_codex_rate_limit_reached_is_suppressed_after_all_windows_reset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
+            path = folder / "rollout-a.jsonl"
+            rate = {"type": "event_msg", "payload": {"rate_limits": {
+                "rate_limit_reached_type": "primary",
+                "primary": {"resets_at": self.NOW - 1},
+                "secondary": {"resets_at": self.NOW}}}}
+            self._write(path, [rate])
+            self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
+
     def test_claude_quota_hit_cleared_expired_and_reset_text_only(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp) / ".claude-account" / "projects"
             path = root / "project" / "session.jsonl"
-            rate = {"type": "assistant", "timestamp": datetime.fromtimestamp(self.NOW - 60, timezone.utc).isoformat(),
-                    "error": "rate_limit", "content": [{"text": "resets 8:30am private text"}]}
+            rate = {"type": "assistant", "timestamp": iso(self.NOW - 60),
+                    "error": "rate_limit", "message": {"content": [{"text": "resets 8:30am private text"}]}}
             self._write(path, [rate])
             lines = mon.quota_warnings(self.NOW, codex_root=temp + "/missing",
                                        claude_root=str(root))
             self.assertEqual(lines, ["Claude（.claude-account）已到用量上限，resets 8:30am"])
-            cleared = dict(rate, timestamp=datetime.fromtimestamp(self.NOW - 30, timezone.utc).isoformat())
-            assistant = {"type": "assistant", "timestamp": datetime.fromtimestamp(self.NOW - 10, timezone.utc).isoformat(),
-                         "content": [{"text": "ordinary reply"}]}
+            cleared = dict(rate, timestamp=iso(self.NOW - 30))
+            assistant = {"type": "assistant", "timestamp": iso(self.NOW - 10),
+                         "message": {"content": [{"text": "ordinary reply"}]}}
             self._write(path, [cleared, assistant])
             self.assertEqual(mon.quota_warnings(self.NOW, temp + "/missing", str(root)), [])
-            old = dict(rate, timestamp=datetime.fromtimestamp(self.NOW - 6 * 3600, timezone.utc).isoformat())
+            old = dict(rate, timestamp=iso(self.NOW - 6 * 3600))
             self._write(path, [old])
             self.assertEqual(mon.quota_warnings(self.NOW, temp + "/missing", str(root)), [])
 
@@ -520,6 +538,18 @@ class MonitorTaskBaselineTests(unittest.TestCase):
         with patch.object(mon, "office_rows", return_value=[]):
             self.poll([])
         self.assertIsNone(self.monitor.office_error)
+
+    def test_route_outcome_failure_preserves_previous_opencode_route(self):
+        previous = (30.0, 4, 3, "已回覆")
+        self.monitor.opencode_route = previous
+        with patch.object(mon, "collect", return_value=self.snapshot), \
+             patch.object(mon, "scan_tasks", return_value=[]), \
+             patch.object(mon, "llmtool_task_records", return_value=[]), \
+             patch.object(mon, "llmtool_route_outcomes", side_effect=OSError("offline")), \
+             patch.object(mon, "quota_warnings", return_value=[]), \
+             patch.object(mon, "office_rows", return_value=[]):
+            self.monitor.poll()
+        self.assertEqual(self.monitor.opencode_route, previous)
 
     def test_office_is_rebuilt_at_most_every_office_every_seconds(self):
         with patch.object(mon, "office_rows", return_value=[]) as rows:
@@ -1284,7 +1314,7 @@ class GitHubActivityTests(unittest.TestCase):
              patch.object(mon.time, "time", return_value=NOW), \
              patch("sys.stdout", __import__("io").StringIO()) as out:
             self.assertEqual(mon.main(["--once", "--github"]), 0)
-        self.assertEqual(len(run.calls), 3)
+        self.assertEqual(len(run.calls), 4)
         self.assertTrue(all(argv[1:4] == ["api", "-X", "GET"] for argv, _ in run.calls))
         self.assertTrue(all(mon.DEFAULT_GITHUB_REPO in argv[4] for argv, _ in run.calls))
         self.assertIn("GitHub #4：新留言 — hello", out.getvalue())

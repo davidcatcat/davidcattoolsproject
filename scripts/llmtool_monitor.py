@@ -1315,7 +1315,7 @@ def task_lines(tasks: list[Task], limit: int = 6, route=None) -> list[str]:
         if route:
             age, total, succeeded, words = route
             return [f"/private/tmp 沒有 OpenCode 階段細節；llmtool Task 紀錄近 7 天 {total} 次，成功 {succeeded} 次，"
-                    f"最近一回 {_short_ago(age)}：{words}"]
+                    f"最近一次 {_short_ago(age)}：{words}"]
         return ["近 7 天 llmtool Task 紀錄沒有 OpenCode 執行"]
     lines = []
     for task in tasks[:limit]:
@@ -4065,7 +4065,14 @@ def quota_warnings(now, codex_root=None, claude_root=None) -> list[str]:
         latest_rate, rate_modified = latest_rate
         reached = latest_rate.get("rate_limit_reached_type")
         if type(reached) is str:
-            out.append("Codex 已到用量上限")
+            has_active_window = any(
+                type(data) is dict
+                and (reset := _quota_timestamp(data.get("resets_at"))) is not None
+                and reset > now
+                for data in (latest_rate.get("primary"), latest_rate.get("secondary"))
+            )
+            if has_active_window:
+                out.append("Codex 已到用量上限")
         else:
             for data in (latest_rate.get("primary"), latest_rate.get("secondary")):
                 if type(data) is not dict:
@@ -4110,7 +4117,8 @@ def quota_warnings(now, codex_root=None, claude_root=None) -> list[str]:
         if (latest is None or later_assistant > latest[0]
                 or now - latest[0] > 5 * 3600):
             continue
-        content = latest[1].get("content")
+        message = latest[1].get("message")
+        content = message.get("content") if type(message) is dict else None
         first = content[0].get("text") if type(content) is list and content and type(content[0]) is dict else ""
         reset = re.search(r"resets ([0-9:]{1,5}(?:am|pm))", first, re.I) if type(first) is str else None
         config_name = os.path.basename(os.path.dirname(top))
@@ -6300,7 +6308,6 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     mon = Monitor()
     mon.agents = ClaudeAgents(background=False)   # a single poll: ask before it, not after
     if github is not None:
-        github.want_main = True
         github.refresh()   # before the poll, so the D6 list can see PR states
         mon.github = github
     mon.poll()
