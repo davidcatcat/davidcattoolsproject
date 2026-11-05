@@ -378,6 +378,32 @@ class WidgetTests(Base):
         self.assertEqual(seen['argument_draft'], '/pm new --runtime')
         self.assertEqual(ui.input.text, '/pm new --runtime')
 
+    def test_settings_ghost_hints_render_without_editing_input(self):
+        seen = {}
+
+        def capture(ui, key):
+            screen = ui.app.renderer.last_rendered_screen
+            size = ui.app.output.get_size()
+            seen[key] = "".join(screen.data_buffer[y][x].char
+                                for y in range(size.rows) for x in range(size.columns))
+            seen[key + "_draft"] = ui.input.text
+
+        ui, _ = self.drive(['/settings', lambda ui: capture(ui, 'command'),
+                            ' ', lambda ui: capture(ui, 'command_space'),
+                            'auto-resume', lambda ui: capture(ui, 'setting'),
+                            ' ', lambda ui: capture(ui, 'setting_space'),
+                            'on', lambda ui: capture(ui, 'value')])
+        self.assertIn('auto-resume on|off', seen['command'])
+        self.assertIn('auto-resume on|off', seen['command_space'])
+        self.assertIn('on|off', seen['setting'])
+        self.assertIn('on|off', seen['setting_space'])
+        self.assertNotIn('on|off', seen['value'])
+        self.assertEqual(seen['command_draft'], '/settings')
+        self.assertEqual(seen['command_space_draft'], '/settings ')
+        self.assertEqual(seen['setting_draft'], '/settings auto-resume')
+        self.assertEqual(seen['setting_space_draft'], '/settings auto-resume ')
+        self.assertEqual(seen['value_draft'], '/settings auto-resume on')
+
     def test_saved_history_is_identified_in_opening_text(self):
         history_path = self.temp_root / '.local/state/llmtool/chat/history.json'
         self.session = ChatSession(self.session.config, history_path=history_path)
@@ -718,7 +744,8 @@ class WidgetTests(Base):
 
     def test_picker_completes_draft_without_executing(self):
         def open_menu(ui):
-            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill', '/settings'])
+            self.assertEqual([c[0] for c in ui.menu_items],
+                             ['/status', '/skill', '/settings'])
         ui, _ = self.drive(['/s', open_menu, '\x1b[B', '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/skill '),
                             lambda ui: self.assertEqual(ui.menu_items, []),
@@ -738,6 +765,28 @@ class WidgetTests(Base):
                             '\x15', '/provider', '\t',
                             lambda ui: self.assertEqual(ui.input.text, '/provider ')])
         self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
+    def test_settings_exact_command_still_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_settings_with_trailing_space_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings ', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_tab_keeps_settings_command_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/settings', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+
+    def test_tab_keeps_settings_prefix_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/sett', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
         self.factory.assert_not_called()
 
     def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
@@ -799,7 +848,8 @@ class WidgetTests(Base):
 
     def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
         def open_menu(ui):
-            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill', '/settings'])
+            self.assertEqual([c[0] for c in ui.menu_items],
+                             ['/status', '/skill', '/settings'])
             # The short lone-Esc timeout applies only while the picker is open.
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
         ui, _ = self.drive(['/s', open_menu, '\x1b\r',

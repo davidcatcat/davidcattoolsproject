@@ -216,7 +216,7 @@ SLASH_COMMANDS = (
     ("/task events", "/task events", "Recent Task events from TaskStore"),
     ("/theme", "/theme ", "Colour theme: dark, light or auto (saved)"),
     ("/links", "/links ", "Clickable file and #PR links: on or off (saved)"),
-    ("/settings", "/settings ", "Automatic PM resume after reconnect"),
+    ("/settings", "/settings ", "PM 重連後自動接續：/settings auto-resume on|off"),
     ("/pm list", "/pm list", "List dedicated PM sessions"),
     ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
     ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
@@ -3262,7 +3262,7 @@ class ChatTUI:
 
     @staticmethod
     def pm_ghost_hint(text, width=None, get_cwidth=None):
-        """Display-only completion for the PM command prefixes accepted by the TUI."""
+        """Display-only completion for the /pm and /settings commands accepted by the TUI."""
         hints = {
             "/pm ": "new | list [--all] | use N|SESSION | accounts [--check] | "
                     "connect [SESSION [CWD]] | disconnect | history | queue",
@@ -3270,6 +3270,10 @@ class ChatTUI:
             "/pm accounts ": "[--check]",
             "/pm use ": "N|SESSION",
             "/pm connect ": "[SESSION [CWD]]",
+            "/settings": " auto-resume on|off",
+            "/settings ": "auto-resume on|off",
+            "/settings auto-resume": " on|off",
+            "/settings auto-resume ": "on|off",
         }
         hint = hints.get(text, "")
         if width is not None and get_cwidth is not None:
