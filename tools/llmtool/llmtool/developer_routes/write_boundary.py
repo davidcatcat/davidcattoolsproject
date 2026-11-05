@@ -284,14 +284,19 @@ class SandboxExecBoundary(WriteBoundary):
                            str(Path(parent) / '.llmtool-other.tmp.123.0123456789ab'),
                            str(Path(root).resolve() / '.llmtool-other.tmp.123.0123456789ab'))
                 for path in invalid:
-                    code = ('from pathlib import Path\n'
+                    code = ('import sys\nfrom pathlib import Path\n'
                             'p=Path(' + repr(path) + ')\n'
-                            'p.write_bytes(b"probe")\np.unlink()\n')
+                            'try:\n p.write_bytes(b"probe")\n'
+                            'except PermissionError:\n sys.exit(3)\n'
+                            'except Exception:\n sys.exit(4)\n'
+                            'try:\n p.unlink(missing_ok=True)\n'
+                            'except Exception:\n sys.exit(4)\n'
+                            'sys.exit(0)\n')
                     try:
                         rc, out, err = runner([self.executable, '-p', profile, python, '-c', code],
                                               str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
                                                           'PYTHONDONTWRITEBYTECODE': '1'}, 10)
-                        passed = type(rc) is int and rc != 0
+                        passed = type(rc) is int and rc == 3
                     except Exception:
                         passed = False
                     probes.append({'expected_write': False, 'operation': 'claude_tmp_name',
@@ -299,19 +304,24 @@ class SandboxExecBoundary(WriteBoundary):
                 source = None
                 hardlink_tmp = target + '.tmp.123.0123456789ab'
                 try:
-                    fd, source = tempfile.mkstemp(prefix='llmtool-claude-hardlink-')
+                    fd, source = tempfile.mkstemp(
+                        prefix='llmtool-claude-hardlink-',
+                        dir=str(Path(root).resolve().parent))
                     os.write(fd, b'probe-source')
                     os.close(fd)
                     program = ('import os,sys\nfrom pathlib import Path\n'
                                's=Path(' + repr(source) + ')\n'
                                'p=Path(' + repr(hardlink_tmp) + ')\n'
                                'try:\n os.link(s,p)\n'
-                               'except OSError:\n sys.exit(0)\n'
-                               'else:\n p.unlink()\n sys.exit(7)\n')
+                               'except PermissionError:\n sys.exit(3)\n'
+                               'except OSError:\n sys.exit(4)\n'
+                               'try:\n p.unlink()\n'
+                               'except OSError:\n sys.exit(4)\n'
+                               'sys.exit(7)\n')
                     rc, out, err = runner([self.executable, '-p', profile, python, '-c', program],
                                           str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
                                                       'PYTHONDONTWRITEBYTECODE': '1'}, 10)
-                    passed = type(rc) is int and rc == 0
+                    passed = type(rc) is int and rc == 3
                 except Exception:
                     passed = False
                 finally:

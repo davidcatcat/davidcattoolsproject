@@ -185,9 +185,9 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
             self.assertEqual(opted_out, expected)
             self.assertNotEqual(opted_in, opted_out)
             prepared_opt_in = SandboxExecBoundary(
-                executable='/bin/true', allow_claude_tmp=True).prepare(
+                executable=sys.executable, allow_claude_tmp=True).prepare(
                     str(root), ['source.py'])[0][2]
-            prepared_default = SandboxExecBoundary(executable='/bin/true').prepare(
+            prepared_default = SandboxExecBoundary(executable=sys.executable).prepare(
                 str(root), ['source.py'])[0][2]
             self.assertIn('(allow file-write* (regex #', prepared_opt_in)
             self.assertNotIn('(allow file-write* (regex #', prepared_default)
@@ -211,8 +211,12 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
             def runner(argv, *_args):
                 code = argv[-1]
                 programs.append(code)
-                if "0123456789ab" in code:
+                if 'os.replace' in code:
                     return 1, b'', b''
+                if 'sys.exit(3)' in code:
+                    return 3, b'', b''
+                if 'llmtool-claude-hardlink-' in code and 'os.link' in code:
+                    return 3, b'', b''
                 if 'os.link' in code:
                     return 0, b'', b''
                 if 'Path("/dev/null").write_bytes' in code:
@@ -226,6 +230,41 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
                 compile(code, 'probe', 'exec')
             self.assertTrue(any(probe.get('operation') == 'claude_tmp_rename' and
                                 not probe['passed'] for probe in proof['probes']))
+
+    def test_claude_denial_probes_require_permission_error(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / 'repo'
+            (root / 'src').mkdir(parents=True)
+            subprocess.run(['/usr/bin/git', 'init', str(root)], check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            boundary = SandboxExecBoundary(executable='/bin/true', tmpdir=temp,
+                                           allow_claude_tmp=True)
+            policy_root, paths, states = boundary._policy(root, ['src/file.py'], [])
+            profile = boundary._profile(paths, states, (), paths)
+            boundary._prepared = (str(policy_root), ('src/file.py',), (), paths, states,
+                                  profile, hashlib.sha256(profile.encode()).hexdigest())
+
+            for operation in ('claude_tmp_name', 'claude_tmp_hardlink'):
+                for wrong_rc in (1, 0, 4):
+                    with self.subTest(operation=operation, rc=wrong_rc):
+                        def runner(argv, *_args):
+                            code = argv[-1]
+                            if 'os.replace' in code:
+                                return 0, b'', b''
+                            if 'llmtool-claude-hardlink-' in code and 'os.link' in code:
+                                return (wrong_rc if operation == 'claude_tmp_hardlink' else 3), b'', b''
+                            if 'sys.exit(3)' in code:
+                                return (wrong_rc if operation == 'claude_tmp_name' else 3), b'', b''
+                            if 'os.link' in code:
+                                return 0, b'', b''
+                            if 'Path("/dev/null").write_bytes' in code:
+                                return 0, b'', b''
+                            return (0 if 'llmtool' not in code else 1), b'', b''
+
+                        proof = boundary.verify(root, ['src/file.py'], (), runner=runner)
+                        self.assertFalse(proof['verified'])
+                        self.assertTrue(any(probe.get('operation') == operation and
+                                            not probe['passed'] for probe in proof['probes']))
 
     def test_non_darwin_platform_is_unsupported(self):
         self.assertIsInstance(for_platform('linux'), UnsupportedBoundary)
@@ -294,13 +333,29 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
             self.assertTrue(proof['verified'], proof['probes'])
             self.assertEqual(target.read_bytes(), b'original')
             self.assertEqual(target.stat().st_mode & 0o777, 0o640)
+            source = Path(root).parent / 'claude-hardlink-control-source'
+            control_link = target.with_name(target.name + '.tmp.123.0123456789ab')
+            source.write_bytes(b'control')
+            os.link(source, control_link)
+            self.assertEqual(control_link.read_bytes(), b'control')
+            control_link.unlink()
+            source.unlink()
             unwrapped_probe = target.with_name(target.name + '.tmp.x.0123456789ab')
             unwrapped_probe.write_bytes(b'probe')
             self.assertEqual(unwrapped_probe.read_bytes(), b'probe')
             unwrapped_probe.unlink()
             claude_probes = [probe for probe in proof['probes']
                              if probe.get('operation', '').startswith('claude_tmp')]
-            self.assertEqual(len(claude_probes), 8)
+            self.assertEqual(len(claude_probes), 7)
+            self.assertEqual({probe['operation'] for probe in claude_probes},
+                             {'claude_tmp_rename', 'claude_tmp_name',
+                              'claude_tmp_hardlink'})
+            self.assertEqual([probe['operation'] for probe in claude_probes].count(
+                'claude_tmp_rename'), 1)
+            self.assertEqual([probe['operation'] for probe in claude_probes].count(
+                'claude_tmp_name'), 5)
+            self.assertEqual([probe['operation'] for probe in claude_probes].count(
+                'claude_tmp_hardlink'), 1)
             self.assertTrue(all(probe['passed'] for probe in claude_probes))
 
 
