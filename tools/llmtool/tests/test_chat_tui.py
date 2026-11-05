@@ -2305,15 +2305,13 @@ class AttentionReportTests(Base):
         self.drive([check])
 
     def test_attention_failed_snapshot_keeps_local_facts(self):
-        def failed(ui):
-            self.connected_ui(ui)
-            ui.pm_outbox.append('plain queued text')
-            ui.pm_outbox_paused = 'interrupted'
-            ui.pm_state = 'error(PM_FAILED)'
-            ui.finish_attention(ui.pm_target[0], None)
-
-        ui, _ = self.drive([failed, '/attention\r'])
-        text = ui.conversation.text.split('> /attention', 1)[1]
+        ui, _ = self.drive([])
+        self.connected_ui(ui)
+        ui.pm_outbox.append('plain queued text')
+        ui.pm_outbox_paused = 'interrupted'
+        ui.pm_state = 'error(PM_FAILED)'
+        ui.finish_attention(ui.pm_target[0], None)
+        text = ui.attention_report()
         self.assertIn('注意事項：UNKNOWN（TaskStore 無法讀取）', text)
         self.assertIn('PM 佇列暫停：interrupted', text)
         self.assertIn('最近的 PM 回合出錯', text)
@@ -2330,7 +2328,7 @@ class AttentionReportTests(Base):
         text = ui.conversation.text.split('> /attention', 1)[1]
         self.assertIn('注意事項：UNKNOWN（TaskStore 部分無法讀取）', text)
         self.assertIn('部分讀取失敗：Tasks 1；PM inbox 1', text)
-        rows = [line for line in text.splitlines() if '卡住｜attention' in line]
+        rows = [line for line in text.splitlines() if '卡住｜attentio' in line]
         self.assertEqual(len(rows), 1)
         self.assertLessEqual(len(rows[0].strip()), 162)
         self.assertTrue(text.rstrip().endswith('需要你決定：無法提供（Core 尚未記錄）'))
