@@ -101,6 +101,8 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         and pause the queue: nothing more is sent. Enter on an empty draft
                         sends the next queued message, /pm queue send resumes them all.
                         Ctrl-C interrupts and pauses the queue; a second Ctrl-C exits
+PM setup
+  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md
 A PM turn and a chat request never run together: in chat mode, Enter during a PM turn
 keeps the draft and sends nothing until the turn ends.
 A CWD with spaces: /pm new "/path/with space" or /pm new /path/with\\ space.
@@ -1565,6 +1567,8 @@ class ChatTUI:
             "  /pm history             Show recent PM turns",
             "  /pm queue               List, clear, or resume queued messages",
             "  /pm disconnect         Leave the PM session",
+            "PM setup",
+            "  設定 PM（帳號、Codex、工作目錄、預設）：docs/guides/llmtool-pm-setup-zh-tw.md",
             "Chat",
             "  /status                 Show the current chat or PM status",
             "  /provider [PROFILE]     List or switch chat profiles",
