@@ -97,6 +97,7 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         notice during a streaming reply is shown below it, never inside it
   /pm queue             List the queued messages; /pm queue clear drops them,
                         /pm queue send resumes a paused queue (sends them all)
+  /attention            Show what needs attention after /status
   Esc (during a turn)   Interrupt the PM turn (focus in the input or the conversation pane)
                         and pause the queue: nothing more is sent. Enter on an empty draft
                         sends the next queued message, /pm queue send resumes them all.
@@ -218,6 +219,7 @@ SLASH_COMMANDS = (
     ("/pm list", "/pm list", "List dedicated PM sessions"),
     ("/pm use", "/pm use ", "Select a dedicated PM session without connecting"),
     ("/pm accounts", "/pm accounts", "List configured PM accounts and folder status"),
+    ("/attention", "/attention", "需要注意的事：卡住、失敗、未讀"),
 )
 MENU_LIMIT = 5  # Most picker rows shown at once; more matches scroll.
 BACKGROUND_LIMIT = 6  # Most rows of the ↓ background panel shown below its header.
@@ -229,7 +231,7 @@ STATUS_FIELDS = ("mode", "session", "provider", "model", "state", "queue", "usag
 STATUS_DROP_ORDER = ("help", "keys", "usage", "model", "provider", "scroll", "session", "mouse")
 # PM mode (W56d): the longer ▸▸ lead stays; the scroll position and session go before the
 # keys that act now (Esc 中斷, F7 工具).
-PM_STATUS_DROP_ORDER = ("help", "scroll", "session", "mouse", "identity", "keys")
+PM_STATUS_DROP_ORDER = ("attention", "help", "scroll", "session", "mouse", "identity", "keys")
 STATUS_KEY_FIELDS = ("keys", "mouse", "help")   # drawn as status.key
 STATUS_SEPARATOR = " | "
 ESC_SEQUENCE_TIMEOUT = 0.4  # Seconds a lone Esc waits for a following Enter (Esc Enter = newline).
@@ -857,6 +859,9 @@ class ChatTUI:
         self.background_error = None
         self.background_loaded = None    # monotonic time of the last finished read
         self.background_reader = None
+        self.attention = None
+        self.attention_key = None
+        self.attention_read_at = None
         self.show_background = False
         # W59: the selected panel row is an identity, (role, task), changed only by the
         # Owner's navigation (opening the panel, Up/Down) and never by a draw or a refresh;
@@ -1409,12 +1414,13 @@ class ChatTUI:
         if self.pm_mode:
             # Chat provider/model/usage are not the PM's; in PM mode only PM fields show.
             fields.update(self.pm_status_fields(compact))
-            shown = ["mode", "identity", "session", "state", "keys", "scroll", "mouse", "help"]
+            shown = ["mode", "attention", "identity", "session", "state", "keys", "scroll",
+                     "mouse", "help"]
         shown = [key for key in shown if fields.get(key)]
         if self.busy or self.pm_turn_active or self.task_view_visible():
             # Keep identity ahead of optional context while busy or in the Task detail;
             # Task detail key hints remain last so the copy/return actions stay visible.
-            pm_drop_order = ("help", "identity", "scroll", "session", "mouse", "keys")
+            pm_drop_order = ("attention", "help", "identity", "scroll", "session", "mouse", "keys")
         else:
             # At idle, preserve the PM runtime/account identity at narrow widths.
             pm_drop_order = PM_STATUS_DROP_ORDER
@@ -1567,6 +1573,7 @@ class ChatTUI:
             "  /pm disconnect         Leave the PM session",
             "Chat",
             "  /status                 Show the current chat or PM status",
+            "  /attention              Show what needs attention after /status",
             "  /provider [PROFILE]     List or switch chat profiles",
             "  /skill [NAME]           List, choose, or clear a skill",
             "  /history                Show recent chat turns",
@@ -1631,6 +1638,50 @@ class ChatTUI:
                            else _tokens(session.last_usage) + " tokens（供應商回報）"),
                  "連線：未檢查",
                  theme]
+        return "\n  ".join(lines)
+
+    def attention_lines(self):
+        """One safe display line per known attention fact for the current PM."""
+        lines = []
+        key = self.pm_target[0] if self.pm_target else None
+        snapshot = self.attention if key is not None and self.attention_key == key else None
+        if type(snapshot) is dict:
+            items = snapshot.get("items", [])
+            for item in items if type(items) is list else []:
+                if type(item) is not dict:
+                    continue
+                label = terminal_safe_text(str(item.get("label", "")))
+                task = terminal_safe_text(str(item.get("task", "")))[:8]
+                line = label + "｜" + task
+                reason = item.get("reason")
+                if reason:
+                    line += "｜" + terminal_safe_text(str(reason))
+                lines.append(line)
+            unread = snapshot.get("unread", 0)
+            if type(unread) is int and unread > 0:
+                lines.append("PM 有 %d 則未讀事件" % unread)
+        if self.pm_outbox and self.pm_outbox_paused:
+            lines.append("PM 佇列暫停：" + terminal_safe_text(str(self.pm_outbox_paused)))
+        if self.pm_state and self.pm_state.startswith("error("):
+            lines.append("最近的 PM 回合出錯")
+        return lines
+
+    def attention_report(self):
+        """Read-only attention summary for the connected PM session."""
+        if not self.pm_mode or not self.pm_target:
+            return "注意事項：尚未連線 PM。先 /pm connect。"
+        if self.attention_key != self.pm_target[0] or self.attention_read_at is None:
+            return "注意事項：讀取中，稍後再試。"
+        if self.attention is None:
+            lines = ["注意事項：UNKNOWN（TaskStore 無法讀取）"]
+            lines.extend(self.attention_lines())
+            lines.append("需要你決定：無法提供（Core 尚未記錄）")
+            return "\n  ".join(lines)
+        attention_lines = self.attention_lines()
+        lines = ["注意事項（%d 項）" % len(attention_lines),
+                 "來源：TaskStore（本機）｜讀取於 " + self.attention_read_at]
+        lines.extend(attention_lines or ["目前沒有"])
+        lines.append("需要你決定：無法提供（Core 尚未記錄）")
         return "\n  ".join(lines)
 
     def run_display_command(self, text):
@@ -2559,6 +2610,9 @@ class ChatTUI:
         if text.strip() == "/status":
             self.append(self.status_report())
             return
+        if text.strip() == "/attention":
+            self.append(self.attention_report())
+            return
         if text.strip().split(maxsplit=1)[0] in ("/theme", "/links", "/settings"):
             self.run_display_command(text.strip())
             return
@@ -2883,7 +2937,9 @@ class ChatTUI:
                 lead.append("↓ 查看")
         if self.pm_outbox:
             lead.append("佇列 %d" % len(self.pm_outbox) + (" 暫停" if self.pm_outbox_paused else ""))
+        attention_count = len(self.attention_lines())
         return {"mode": " · ".join(lead),
+                "attention": "注意 %d" % attention_count if attention_count > 0 else "",
                 "identity": compact(chat_tui_pm.safe_text(runtime) + "/"
                                      + chat_tui_pm.safe_text(account), 20),
                 "session": compact(session_id, 8),
@@ -2925,9 +2981,20 @@ class ChatTUI:
         except Exception:
             outcome = ([], "TaskStore read failed; details omitted")
         try:
+            attention = chat_tui_status.read_attention(key)
+        except Exception:
+            attention = None
+        try:
+            loop.call_soon_threadsafe(self.finish_attention, key, attention)
             loop.call_soon_threadsafe(self.finish_background, key, outcome)
         except RuntimeError:
             pass
+
+    def finish_attention(self, key, value):
+        self.attention = value
+        self.attention_key = key
+        self.attention_read_at = datetime.now().strftime("%H:%M:%S")
+        self.app.invalidate()
 
     def finish_background(self, key, outcome):
         self.background_reader = None

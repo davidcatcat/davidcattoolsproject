@@ -170,6 +170,8 @@ class Base(unittest.TestCase):
         self.background_read_patch = patch.object(chat_tui_status, 'read_background',
                                                   return_value=[])
         self.background_read_patch.start()
+        patch.object(chat_tui_status, 'read_attention',
+                     return_value={'items': [], 'unread': 0}).start()
         # W57: Task mode is behind the developer flag; these tests exercise it, and
         # NonDevTaskTests checks the default without the flag.
         patch.dict(os.environ, {chat_tui.DEV_ENV: '1'}).start()
@@ -702,9 +704,10 @@ class WidgetTests(Base):
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links', '/settings', '/pm list', '/pm use',
-                                  '/pm accounts'])
+                                  '/pm accounts', '/attention'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:3],
                          ['/status', '/skill', '/settings'])
+        self.assertEqual([c[0] for c in chat_tui.slash_matches('/a')], ['/attention'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
                          ['/pm connect', '/pm new', '/pm'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/ory')][:2],
@@ -850,6 +853,12 @@ class WidgetTests(Base):
             self.assertNotIn('connectivity', ui.conversation.text)
         ui, _ = self.drive(['/s', '\r', completed_not_run, '\r', self.idle])
         self.assertIn('連線：未檢查', ui.conversation.text)
+        ui, _ = self.drive(['/a', '\r',
+                            lambda ui: (self.assertEqual(ui.input.text, '/attention'),
+                                        self.assertNotIn('注意事項：尚未連線 PM',
+                                                         ui.conversation.text)),
+                            '\r'])
+        self.assertIn('注意事項：尚未連線 PM。先 /pm connect。', ui.conversation.text)
         ui, _ = self.drive(['/status\r', '/zzz\r', 'plain chat\r', self.idle])
         self.assertIn('連線：未檢查', ui.conversation.text)
         self.assertIn('unknown chat command', ui.conversation.text.lower())
@@ -922,24 +931,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 25)
+            self.assertEqual(len(ui.menu_items), 26)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/pm connect', rows[0])
-            self.assertIn('20 more (0 above, 20 below)', rows[-1])
+            self.assertIn('21 more (0 above, 21 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
             self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('20 more (2 above, 18 below)', rows[-1])
+            self.assertIn('21 more (2 above, 19 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 24)
-            self.assertIn('/pm accounts', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(20 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 25)
+            self.assertIn('/attention', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(21 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -1958,6 +1967,43 @@ class StatusProjectionTests(unittest.TestCase):
         self.assertEqual(self.status.stage(gated)[0], 'BLOCKED')
         self.assertIn('Recovery: Core missing_gates must pass: tests, review',
                       self.status.summary_text(gated))
+
+    def test_attention_items_map_terminal_and_evidence_states(self):
+        blocked = _record(developer=_developer(state='DEVELOPER_OUTCOME_UNKNOWN',
+                                               error_code='CODEX_BLOCKED',
+                                               blocked_reason='needs Owner decision'))
+        unavailable = _record(state='PM_UNAVAILABLE')
+        failed = _record(state='INPUT_REJECTED')
+        callback_ready = _record(developer=_developer(direct_result_callback={
+            'state': 'PM_EVIDENCE_READY'}))
+        completion_ready = _record(developer=_developer(), completion={
+            'state': 'PM_EVIDENCE_READY'})
+        running = _record(developer={'state': 'DEVELOPER_DISPATCHING'})
+        items = self.status.attention_items(
+            [blocked, unavailable, failed, callback_ready, completion_ready, running])
+        self.assertEqual([item['label'] for item in items], [
+            '卡住', '供應商不可用', '失敗', '證據已就緒，等 PM 處理', '證據已就緒，等 PM 處理'])
+        self.assertEqual(items[0], {'label': '卡住', 'task': 'e' * 32,
+                                    'reason': 'Developer: needs Owner decision'})
+        self.assertEqual(items[1]['reason'], '')
+        self.assertEqual(items[2]['reason'], '')
+        self.assertEqual(self.status.attention_items([running]), [])
+
+    def test_read_attention_uses_session_records_and_read_only_peek(self):
+        from llmtool import active_pm_inbox
+        session = 'e' * 32
+        store = object()
+        record = _record(developer=_developer(state='DEVELOPER_OUTCOME_UNKNOWN',
+                                              error_code='CODEX_BLOCKED',
+                                              blocked_reason='blocked'))
+        inbox = {'events': [{'event_id': 'a'}], 'pending': [{'event_id': 'b'}]}
+        with patch.object(active_pm_inbox, '_session_records', return_value=([record], 0)) as rows, \
+                patch.object(active_pm_inbox, 'peek_inbox', return_value=inbox) as peek:
+            result = self.status.read_attention(session, store=store)
+        self.assertEqual(result['items'][0]['label'], '卡住')
+        self.assertEqual(result['unread'], 2)
+        rows.assert_called_once_with(store, 'pm-' + session)
+        peek.assert_called_once_with(store, 'pm-' + session)
 
     def test_latest_high_debug_attempt_is_shown_without_changing_the_stage(self):
         def attempt(status, report):
@@ -5427,6 +5473,110 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('主題（本機設定）：', status)
         self.assertNotIn('供應商', status)
         self.assertNotIn('provider:', status)
+
+    def test_attention_lines_cover_core_unread_queue_error_and_stale_session(self):
+        def inspect(ui):
+            key = ui.pm_target[0]
+            ui.attention_key = key
+            ui.attention = {'items': [
+                {'label': '卡住', 'task': '12345678' + 'a' * 24, 'reason': 'blocked'},
+                {'label': '失敗', 'task': 'abcdefgh', 'reason': ''}], 'unread': 2}
+            ui.pm_outbox.append('queued')
+            ui.pm_outbox_paused = '上一回合失敗'
+            ui.pm_state = 'error(TEST_ERROR)'
+            self.assertEqual(ui.attention_lines(), [
+                '卡住｜12345678｜blocked', '失敗｜abcdefgh', 'PM 有 2 則未讀事件',
+                'PM 佇列暫停：上一回合失敗', '最近的 PM 回合出錯'])
+            ui.attention_key = 'f' * 32
+            self.assertEqual(ui.attention_lines(), [
+                'PM 佇列暫停：上一回合失敗', '最近的 PM 回合出錯'])
+            ui.pm_outbox.clear()
+            ui.pm_outbox_paused = None
+            ui.pm_state = 'idle'
+            ui.attention_key = key
+            ui.attention = {'items': [], 'unread': 0}
+            self.assertEqual(ui.attention_lines(), [])  # Owner Esc alone is not an item
+
+        self.drive([self.connect(), self.connected, inspect])
+
+    def test_attention_report_branches_and_final_decision_line(self):
+        ui, _ = self.drive([])
+        self.assertEqual(ui.attention_report(), '注意事項：尚未連線 PM。先 /pm connect。')
+
+        def states(connected):
+            key = connected.pm_target[0]
+            connected.attention = None
+            connected.attention_key = None
+            connected.attention_read_at = None
+            self.assertEqual(connected.attention_report(), '注意事項：讀取中，稍後再試。')
+            connected.finish_attention(key, None)
+            connected.pm_state = 'error(FAIL)'
+            connected.pm_outbox.append('draft')
+            connected.pm_outbox_paused = '失敗'
+            self.assertEqual(connected.attention_report(),
+                             '注意事項：UNKNOWN（TaskStore 無法讀取）\n'
+                             '  PM 佇列暫停：失敗\n  最近的 PM 回合出錯\n'
+                             '  需要你決定：無法提供（Core 尚未記錄）')
+            connected.finish_attention(key, {'items': [], 'unread': 0})
+            self.assertEqual(connected.attention_report(),
+                             '注意事項（2 項）\n  來源：TaskStore（本機）｜讀取於 '
+                             + connected.attention_read_at + '\n  PM 佇列暫停：失敗\n'
+                             '  最近的 PM 回合出錯\n'
+                             '  需要你決定：無法提供（Core 尚未記錄）')
+            connected.pm_outbox.clear()
+            connected.pm_outbox_paused = None
+            connected.pm_state = 'idle'
+            connected.attention_read_at = '12:34:56'
+            self.assertEqual(connected.attention_report(),
+                             '注意事項（0 項）\n'
+                             '  來源：TaskStore（本機）｜讀取於 12:34:56\n'
+                             '  目前沒有\n'
+                             '  需要你決定：無法提供（Core 尚未記錄）')
+
+        self.drive([self.connect(), self.connected, states])
+
+    def test_attention_status_field_is_conditional_and_dropped_first(self):
+        def inspect(ui):
+            key = ui.pm_target[0]
+            empty = ui.status_text()
+            ui.attention_key = key
+            ui.attention = {'items': [], 'unread': 0}
+            self.assertEqual(ui.status_text(), empty)
+            ui.attention = {'items': [
+                {'label': '卡住', 'task': 'a' * 32, 'reason': ''},
+                {'label': '失敗', 'task': 'b' * 32, 'reason': ''}], 'unread': 0}
+            self.assertIn('注意 2', ui.status_text())
+            self.assertEqual(chat_tui.PM_STATUS_DROP_ORDER[0], 'attention')
+            ui.app.output.get_size = lambda: Size(rows=24, columns=70)
+            narrow = ui.status_text()
+            self.assertNotIn('注意 2', narrow)
+            self.assertIn('▸▸ PM 模式', narrow)
+            ui.attention = {'items': [], 'unread': 0}
+            self.assertEqual(ui.status_text(), empty)
+
+        self.drive([self.connect(), self.connected, inspect])
+
+    def test_attention_command_runs_on_exact_enter_and_read_failure_keeps_background(self):
+        self.drive([self.connect(), self.connected,
+                    lambda ui: self.until(ui, lambda ui: ui.attention_read_at is not None,
+                                          'attention refresh'),
+                    '/attention\r',
+                    lambda ui: self.assertIn('注意事項（0 項）', ui.conversation.text)])
+
+        ui, _ = self.drive([])
+        callbacks = []
+
+        class Loop:
+            def call_soon_threadsafe(self, callback, *args):
+                callbacks.append((callback.__name__, args))
+
+        with patch.object(chat_tui_status, 'read_background', return_value=[]), \
+                patch.object(chat_tui_status, 'read_attention', side_effect=RuntimeError('read')):
+            ui._read_background(Loop(), 'session')
+        self.assertEqual([name for name, _args in callbacks],
+                         ['finish_attention', 'finish_background'])
+        self.assertIsNone(callbacks[0][1][1])
+        self.assertEqual(callbacks[1][1][1], ([], None))
 
     def test_status_background_read_failure_shows_unknown_source_and_reason(self):
         reason = 'TaskStore read denied'
