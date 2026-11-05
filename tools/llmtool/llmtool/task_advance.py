@@ -1098,6 +1098,23 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
             elif missing:
                 codes.extend(missing)
                 step = 'WAITING_EXECUTOR'
+            if 'CI_WORKFLOW_JOBS_INVALID' in missing:
+                try:
+                    label_result = label_mac_ci_for_skipped_check(
+                        task_id=task_id, store=store, pr_number=number,
+                        github_get=get, merge_gh_runner=merge_gh_runner, cwd=cwd)
+                    if type(label_result) is dict:
+                        if label_result.get('step') == 'WAITING_CI':
+                            step = 'WAITING_CI'
+                            codes.append('MAC_CI_LABEL_READY')
+                        elif label_result.get('step') == 'MERGE_REFUSED':
+                            step = 'WAITING_CI'
+                            label_codes = label_result.get('codes', [])
+                            if type(label_codes) is list:
+                                codes.extend(label_codes)
+                except Exception:
+                    step = 'WAITING_CI'
+                    codes.append('MAC_CI_LABEL_FAILED')
         except Exception as exc:
             codes.append(_refusal(exc, 'completion_code'))
     elif step == 'READY_FOR_INTEGRATION':
