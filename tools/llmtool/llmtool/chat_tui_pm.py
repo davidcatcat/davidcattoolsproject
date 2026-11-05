@@ -201,7 +201,7 @@ _USAGE_KEYS = ('input_tokens', 'output_tokens', 'cache_read_input_tokens',
 
 def usage_totals(turns):
     """Return recorded token totals and the number of recorded and missing turns."""
-    totals = {key: 0 for key in _USAGE_KEYS}
+    totals = {key: None for key in _USAGE_KEYS}
     counted = missing = 0
     for turn in turns:
         usage = turn.get('usage') if type(turn) is dict else None
@@ -210,6 +210,8 @@ def usage_totals(turns):
             for key in _USAGE_KEYS:
                 value = usage.get(key)
                 if type(value) is int and value >= 0:
+                    if totals[key] is None:
+                        totals[key] = 0
                     totals[key] += value
                     recorded = True
         if recorded:
@@ -226,10 +228,12 @@ def usage_status_line(turns, formatter):
     totals, counted, missing = usage_totals(turns)
     if not counted:
         return '用量（本 session）：UNKNOWN（%d 回合沒有用量紀錄）' % missing
+    def display(key):
+        return '未回報' if totals[key] is None else formatter(totals[key])
+
     line = ('用量（本 session）：輸入 %s · 輸出 %s · 快取讀取 %s · 快取建立 %s tokens（%d 回合'
-            % (formatter(totals['input_tokens']), formatter(totals['output_tokens']),
-               formatter(totals['cache_read_input_tokens']),
-               formatter(totals['cache_creation_input_tokens']), counted))
+            % (display('input_tokens'), display('output_tokens'),
+               display('cache_read_input_tokens'), display('cache_creation_input_tokens'), counted))
     if missing:
         line += '，%d 回合沒有紀錄' % missing
     return line + '）'

@@ -92,6 +92,24 @@ class PMUsageStatusTests(unittest.TestCase):
                          "用量（本 session）：輸入 2.4k · 輸出 10 · 快取讀取 3 · 快取建立 1.0k tokens"
                          "（1 回合）")
 
+    def test_missing_cache_usage_is_reported_and_recorded_zero_stays_zero(self):
+        formatter = chat_tui._short_count
+        turns = [{"usage": {"input_tokens": 22, "output_tokens": 14}}]
+        totals, counted, missing = chat_tui_pm.usage_totals(turns)
+        self.assertEqual(totals, {"input_tokens": 22, "output_tokens": 14,
+                                  "cache_read_input_tokens": None,
+                                  "cache_creation_input_tokens": None})
+        self.assertEqual((counted, missing), (1, 0))
+        self.assertEqual(chat_tui_pm.usage_status_line(turns, formatter),
+                         "用量（本 session）：輸入 22 · 輸出 14 · 快取讀取 未回報 · 快取建立 未回報 tokens"
+                         "（1 回合）")
+
+        zero_cache = [{"usage": {"input_tokens": 22, "output_tokens": 14,
+                                  "cache_read_input_tokens": 0}}]
+        self.assertEqual(chat_tui_pm.usage_status_line(zero_cache, formatter),
+                         "用量（本 session）：輸入 22 · 輸出 14 · 快取讀取 0 · 快取建立 未回報 tokens"
+                         "（1 回合）")
+
     def test_read_all_turns_pages_until_empty_page(self):
         turns = [{"seq": index} for index in range(1, 451)]
         calls = []
