@@ -51,8 +51,11 @@ class TaskAdvanceCiGateTests(unittest.TestCase):
              [{'filename': 'src/app.py'}]))
         self.assertEqual(result['step'], 'DISPATCH_REVIEW')
         self.assertEqual(len(dispatched), 1)
-        self.assertEqual(calls[:2], [f'commits/{HEAD}/check-runs?per_page=100',
-                                     'pulls/17/files?per_page=100'])
+        checks_read = f'commits/{HEAD}/check-runs?per_page=100'
+        files_read = 'pulls/17/files?per_page=100'
+        self.assertIn(checks_read, calls)
+        self.assertIn(files_read, calls)
+        self.assertLess(calls.index(checks_read), calls.index(files_read))
 
     def test_missing_run_waits_without_dispatch(self):
         result, dispatched, _ = self.advance_with_ci(

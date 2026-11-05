@@ -56,8 +56,9 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
 
 def green_linux_ci(path, pr=PR):
     if path.startswith('commits/') and path.endswith('/check-runs?per_page=100'):
+        head = path[len('commits/'):].split('/', 1)[0]
         return {'total_count': 1, 'check_runs': [{'id': 1, 'name': 'check (Linux 3.14)',
-            'head_sha': HEAD, 'status': 'completed', 'conclusion': 'success'}]}
+            'head_sha': head, 'status': 'completed', 'conclusion': 'success'}]}
     if path.startswith('pulls/') and path.endswith('/files?per_page=100'):
         return [{'filename': 'src/module.py'}]
     if path.startswith('pulls/'):
