@@ -69,7 +69,8 @@ PM 備援規則：
 - **交接：** 任務狀態存在 llmtool（TaskStore），不存在 Claude 的對話裡，Codex 讀紀錄接手。
 - **單一 PM：** 同一時間只能有一個 PM；Claude 恢復後，等 Codex 手上的判斷告一段落再切回。
 - **通知：** 切換時通知 Owner 一次。
-- **避免審查卡死：** Codex 暫代期間，PM 自己的改動改給 Claude 審；PM 派工時避開 Codex developer，改派由 Codex 審的路線（OpenCode、AGY 等），因為 Claude 不可用時 Codex 寫的程式碼沒有人能審。
+- **暫代 PM 不寫程式：** Codex 暫代期間只負責派工與管理，不直接修改程式碼或文件；所有改動都交給 developer，走正常的跨模型審查。
+- **避免審查卡死：** Claude 不可用時，Codex 寫的程式碼沒有合格的跨模型 Reviewer，所以暫代 PM 派工時避開 Codex developer，改派由 Codex 審的路線（OpenCode、AGY 等）。某個任務若找不到合格的跨模型 Reviewer，就標記為等待並記下恢復條件，不得自行放行；其他可執行的任務照常進行。
 
 ## 4. 公司 LLM 接入
 
@@ -209,13 +210,13 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | OpenCode 預審 | 保留現行的免費跨模型預審 |
 | 測試重跑 | 只有環境異常或疑似不穩定的測試才重跑一次；程式錯誤直接退回 |
 | merge 後壞掉 | 回退，再開新任務修 |
-| 程式碼送外部 AI | 不限制；密碼與權杖一律擋 |
+| 程式碼送外部 AI | 一般專案原始碼可依 Owner 授權交給各 AI 路線，不另設限制；密碼、權杖、私鑰一律不得外傳；個資、客戶資料、受限制日誌仍依 [CLAUDE.md](../../CLAUDE.md) 的資料保護規則處理；變更既有的資料外傳權限（例如 `gw-agent` 的資料類別）仍須走授權程序 |
 | 公司 LLM | 開放真實任務，經 API Agent Gateway，用法同 Codex、Claude |
 | 舊提案模式 | gateway 功能完成後移除 |
 | 平行任務 | 依 Git 規則與精神：一任務一分支、PR 盡量小、後 merge 的解衝突 |
 | llmtool 自我更新 | 新版 merge 後通知 Owner，Owner 按了才自動安裝 |
 | 選 developer | 由 PM 選 |
-| PM 備援 | Claude 為主，Codex 在 Claude 不可用時暫代 |
+| PM 備援 | Claude 為主，Codex 在 Claude 不可用時暫代；暫代 PM 不寫程式，找不到合格 Reviewer 的任務標記等待 |
 | EC2 測試時機 | 推臨時分支、不開 PR 先測，通過才開 PR（取代原先「推上 GitHub 前測試」的 A 方案，見第 8 節） |
 | #877 | 不採用 Scheduler、Evidence Graph 等提案 |
 
