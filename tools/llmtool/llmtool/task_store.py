@@ -1495,10 +1495,20 @@ def _validate(record):
                 result = developer['claude_result']
                 if (developer['provider_profile'] != 'claude' or
                         type(result) is not dict or
-                        set(result) != {'executor_task_id', 'head_sha', 'recorded_at'} or
+                        set(result) != {'executor_task_id', 'head_sha', 'recorded_at',
+                                        'author_session_ids', 'claim_id'} or
                         not _safe_identifier(result['executor_task_id'], D6_TASK_ID) or
                         type(result['head_sha']) is not str or
                         re.fullmatch(r'[0-9a-f]{40}', result['head_sha']) is None or
+                        type(result['author_session_ids']) is not list or
+                        not result['author_session_ids'] or
+                        any(type(session) is not str or not re.fullmatch(
+                            r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+                            session) for session in result['author_session_ids']) or
+                        len(result['author_session_ids']) != len(set(result['author_session_ids'])) or
+                        (result['claim_id'] is not None and
+                         (type(result['claim_id']) is not str or
+                          re.fullmatch(r'[0-9a-f]{32}', result['claim_id']) is None)) or
                         type(result['recorded_at']) is not str or
                         re.fullmatch(r'\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z',
                                      result['recorded_at']) is None):
@@ -2685,11 +2695,15 @@ class TaskStore:
                 continue
         _fail('TASK_STORE_BUSY')
 
-    def record_claude_result(self, task_id, *, pm_session_id, executor_task_id, head_sha):
-        """Record the one PM-bound result transition for a Claude Developer Task."""
+    def record_claude_result(self, task_id, *, pm_session_id, executor_task_id, head_sha,
+                             session_id, claim_id=None):
+        """Record the initial result or one dispatched Claude repair result."""
         if (not _safe_identifier(pm_session_id, SESSION_ID) or
                 not _safe_identifier(executor_task_id, D6_TASK_ID) or
-                type(head_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', head_sha) is None):
+                type(head_sha) is not str or re.fullmatch(r'[0-9a-f]{40}', head_sha) is None or
+                type(session_id) is not str or re.fullmatch(
+                    r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
+                    session_id) is None):
             _fail('CLAUDE_RESULT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
@@ -2698,15 +2712,32 @@ class TaskStore:
             developer = current.get('developer')
             if current.get('pm_session_id') != pm_session_id:
                 _fail('CLAUDE_RESULT_BINDING_MISMATCH')
-            if (type(developer) is not dict or
-                    developer.get('provider_profile') != 'claude' or
-                    developer.get('state') != 'DEVELOPER_PENDING' or
+            if (type(developer) is not dict or developer.get('provider_profile') != 'claude' or
                     developer.get('executor_task_id') != executor_task_id):
                 _fail('CLAUDE_RESULT_STATE_INVALID')
+            previous = developer.get('claude_result')
+            claims = current.get('review_repair_claims', [])
+            if previous is None:
+                if developer.get('state') != 'DEVELOPER_PENDING' or claim_id is not None:
+                    _fail('CLAUDE_RESULT_STATE_INVALID')
+                sessions = [session_id]
+            else:
+                eligible = [claim for claim in claims if claim.get('executor_task') == executor_task_id]
+                claim = eligible[-1] if eligible else None
+                if (claim_id is None or type(claim) is not dict or
+                        claim.get('repair_task_id') != claim_id or
+                        claim.get('state') != 'DISPATCHED' or
+                        previous.get('claim_id') == claim_id or
+                        claim.get('head_sha') == head_sha or
+                        previous.get('head_sha') == head_sha or
+                        session_id in previous.get('author_session_ids', [])):
+                    _fail('CLAUDE_RESULT_STATE_INVALID')
+                sessions = list(previous['author_session_ids']) + [session_id]
             responded = dict(developer)
             responded.update(state='DEVELOPER_RESPONDED', claude_result={
                 'executor_task_id': executor_task_id, 'head_sha': head_sha,
                 'recorded_at': self._completion_now(),
+                'author_session_ids': sessions, 'claim_id': claim_id,
             })
             try:
                 return self._update(task_id,

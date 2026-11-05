@@ -276,6 +276,8 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     task = store.get(task_id)
     if type(task) is not dict or task.get('task_id') != task_id:
         _refuse('REPAIR_TASK_INVALID')
+    if task.get('abandonment') is not None:
+        _refuse('CLAUDE_TASK_ABANDONED')
     developer = task.get('developer')
     completion = task.get('completion')
     if (type(developer) is not dict or type(completion) is not dict or
@@ -286,10 +288,21 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     worker = _worker_key(profile)
     if worker is None:
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
-    if profile == 'company-gw':
+    if profile in ('company-gw', 'gw-agent'):
         _refuse('REPAIR_DEVELOPER_ROUTE_UNSUPPORTED')
     if profile in ('codex', 'claude') and shutil.which(profile) is None:
         _refuse('RUNTIME_NOT_ON_PATH')
+    provenance = task.get('pm_provenance')
+    assignment = task.get('pm_assignment')
+    acceptance = developer.get('acceptance')
+    if (type(provenance) is not dict or
+            type(provenance.get('pm_native_session_id')) is not str or
+            type(provenance.get('pm_cwd')) is not str):
+        _refuse('REPAIR_PM_SESSION_UNAVAILABLE')
+    if (type(assignment) is not dict or type(assignment.get('goal')) is not str or
+            type(acceptance) is not list or
+            not all(type(item) is str for item in acceptance)):
+        _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
     if remote_test_receipt is None:
         packet, _event = _failed_event(task, executor_task=executor_task,
                                        pr_number=pr_number, github_get=github_get)
@@ -298,8 +311,15 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
                                       pr_number=pr_number, receipt=remote_test_receipt)
     if _current_d6_head(task, executor_task, current_head) != packet['failed_head']:
         _refuse('REPAIR_HEAD_MOVED')
+    if profile == 'claude':
+        developer_executor = developer.get('executor_task_id')
+        if (developer_executor != completion.get('executor_task_id') or
+                developer_executor != executor_task):
+            _refuse('REPAIR_DEVELOPER_BINDING_INVALID')
+    decision_task_id = (developer.get('executor_task_id') if profile == 'claude'
+                        else task_id)
     decision = worker_dispatch.evaluate(
-        worker, developer.get('owner_assignment_ref'), task_id)
+        worker, developer.get('owner_assignment_ref'), decision_task_id)
     if not decision.allowed:
         _refuse(decision.reason_code)
     family = f'pr-{pr_number}' if family is None else family
@@ -349,6 +369,28 @@ def repair_review(*, store, task_id, executor_task, pr_number, family=None, gith
     if attempt > MAX_REPAIR_ATTEMPTS:
         # Stop after two failed corrections; continue through High Debug or reassignment.
         _refuse('REPAIR_LIMIT_REACHED')
+    if profile == 'claude':
+        claims = task.get('review_repair_claims', [])
+        if len(claims) >= 64:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        repair_task_id = new_id()
+        claim = {
+            'executor_task': executor_task, 'pr': pr_number,
+            'head_sha': packet['failed_head'], 'version': claim_version,
+            'attempt': attempt, 'family': family, 'state': 'DISPATCHED',
+            'repair_task_id': repair_task_id,
+            'comment_id': (None if packet_version == 0 else packet.get('verdict_comment_id')),
+            'packet_sha256': packet_sha, 'claimed_at': _now(),
+        }
+        try:
+            store.compare_and_update(
+                task_id, expected={'record_sha256': task['record_sha256']},
+                review_repair_claims=list(claims) + [claim])
+        except Exception:
+            _refuse('REPAIR_CLAIM_UNAVAILABLE')
+        return {'claim': claim, 'repair_task_id': repair_task_id, 'replayed': False,
+                'next_action': 'claude-result', 'failed_head': packet['failed_head'],
+                'findings_packet': packet}
     repair_task_id = new_id()
     claim = {
         'executor_task': executor_task, 'pr': pr_number,

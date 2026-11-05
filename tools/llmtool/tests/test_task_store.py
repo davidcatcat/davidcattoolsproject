@@ -481,33 +481,41 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id='pm-' + new_id(),
-                executor_task_id='executor-1', head_sha='a' * 40)
+                executor_task_id='executor-1', head_sha='a' * 40,
+                session_id='12345678-1234-1234-1234-123456789abc')
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='executor-1', head_sha='bad')
+                executor_task_id='executor-1', head_sha='bad',
+                session_id='12345678-1234-1234-1234-123456789abc')
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='different-executor', head_sha='a' * 40)
+                executor_task_id='different-executor', head_sha='a' * 40,
+                session_id='12345678-1234-1234-1234-123456789abc')
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             saved = self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='executor-1', head_sha='a' * 40)
+                executor_task_id='executor-1', head_sha='a' * 40,
+                session_id='12345678-1234-1234-1234-123456789abc')
         result = saved['developer']['claude_result']
         self.assertEqual(saved['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(result['executor_task_id'], 'executor-1')
         self.assertEqual(result['head_sha'], 'a' * 40)
+        self.assertEqual(result['author_session_ids'],
+                         ['12345678-1234-1234-1234-123456789abc'])
         self.assertRegex(result['recorded_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
-                executor_task_id='executor-1', head_sha='a' * 40)
+                executor_task_id='executor-1', head_sha='a' * 40,
+                session_id='12345678-1234-1234-1234-123456789abc')
 
     def test_claude_result_cli_requires_invoking_pm_session(self):
         task = self._claude_result_task()
         args = SimpleNamespace(task_id=task['task_id'], executor_task='executor-1',
-                               head='a' * 40)
+                               head='a' * 40,
+                               session='12345678-1234-1234-1234-123456789abc')
         with self.assertRaises(LLMToolError):
             task_submission_cli_module.run_task_claude_result(args, store=self.store)
         args.pm_session = 'pm-not-the-original'
@@ -519,21 +527,21 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
                          'DEVELOPER_PENDING')
         args.pm_session = task['pm_session_id']
-        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
-            self.assertEqual(task_submission_cli_module.run_task_claude_result(
-                args, store=self.store, stdout=io.StringIO()), 0)
+        with self.assertRaises(LLMToolError):
+            task_submission_cli_module.run_task_claude_result(
+                args, store=self.store, stdout=io.StringIO())
         self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
-                         'DEVELOPER_RESPONDED')
+                         'DEVELOPER_PENDING')
 
         native_pm_session_id = str(uuid.uuid4())
         uuid_task = self._claude_result_task(pm_session_id='pm-' + native_pm_session_id)
         args.task_id = uuid_task['task_id']
         args.pm_session = native_pm_session_id
-        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
-            self.assertEqual(task_submission_cli_module.run_task_claude_result(
-                args, store=self.store, stdout=io.StringIO()), 0)
+        with self.assertRaises(LLMToolError):
+            task_submission_cli_module.run_task_claude_result(
+                args, store=self.store, stdout=io.StringIO())
         self.assertEqual(self.store.get(uuid_task['task_id'])['developer']['state'],
-                         'DEVELOPER_RESPONDED')
+                         'DEVELOPER_PENDING')
 
     def test_claude_result_rejects_wrong_state(self):
         task = self._codex_dispatch_task()
@@ -541,7 +549,8 @@ class TaskStoreTests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=task['pm_session_id'],
-                executor_task_id='executor-1', head_sha='a' * 40)
+                executor_task_id='executor-1', head_sha='a' * 40,
+                session_id='12345678-1234-1234-1234-123456789abc')
 
     def _allow_codex_dispatch(self):
         policy_path = Path(worker_dispatch._POLICY_PATH)

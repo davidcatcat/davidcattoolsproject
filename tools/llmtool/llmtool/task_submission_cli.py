@@ -832,6 +832,10 @@ def add_task_submission_parsers(actions):
                                help='40-character result HEAD SHA')
     claude_result.add_argument('--pm-session', required=True,
                                help='original Claude Code PM session ID or stored pm- session ID')
+    claude_result.add_argument('--session', required=True,
+                               help='actual resumed Claude Developer session UUID')
+    claude_result.add_argument('--claim-id',
+                               help='DISPATCHED repair claim id for a subsequent result')
     review_prompt = actions.add_parser(
         'review-prompt', help='Print a Reviewer prompt after verifying Task, D6 and PR HEAD bindings')
     review_prompt.add_argument('task_id', help='existing durable Task ID')
@@ -1157,15 +1161,81 @@ def run_task_drive(args, *, store=None, sleep=None, advance_call=None, **adapter
 
 
 def run_task_claude_result(args, *, store=None, stdout=None):
-    """Persist the one Claude Developer result against its original PM session."""
+    """Persist a Claude Developer result against its original PM and author sessions."""
     store = TaskStore() if store is None else store
     pm_session_id = getattr(args, 'pm_session', None)
     if type(pm_session_id) is not str or not pm_session_id:
         raise LLMToolError('original PM session is required')
     pm_session_id = active_pm_inbox.pm_session_key(pm_session_id)
+    task = store.get(args.task_id)
+    if task.get('abandonment') is not None:
+        raise LLMToolError('CLAUDE_TASK_ABANDONED')
+    developer = task.get('developer')
+    completion = task.get('completion')
+    if (type(developer) is not dict or type(completion) is not dict or
+            developer.get('provider_profile') != 'claude' or
+            developer.get('executor_task_id') != args.executor_task or
+            completion.get('executor_task_id') != args.executor_task):
+        raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
+    try:
+        registration = task_completion.read_d6_registration(
+            args.executor_task, completion['evidence']['common_dir'],
+            allowed_states=task_completion._D6_EVIDENCE_STATES)
+        snapshot = task_completion.collect_git_snapshot(registration.root)
+    except Exception:
+        raise LLMToolError('CLAUDE_RESULT_STATE_INVALID') from None
+    if (snapshot.head != args.head or not snapshot.clean or
+            snapshot.head != registration.result_sha or snapshot.root != registration.root or
+            snapshot.common_dir != registration.common_dir or snapshot.branch != registration.branch):
+        raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
+    previous_result = developer.get('claude_result')
+    claim_id = getattr(args, 'claim_id', None)
+    if previous_result is not None:
+        claims = task.get('review_repair_claims', [])
+        eligible = [claim for claim in claims if claim.get('executor_task') == args.executor_task]
+        latest = eligible[-1] if eligible else None
+        if (type(latest) is not dict or latest.get('state') != 'DISPATCHED' or
+                latest.get('repair_task_id') != claim_id or
+                latest.get('head_sha') != previous_result.get('head_sha') or
+                args.head == previous_result.get('head_sha')):
+            raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
+        try:
+            task_completion._git(registration.root, (
+                'merge-base', '--is-ancestor', latest['head_sha'], args.head), limit=4096)
+        except Exception:
+            raise LLMToolError('CLAUDE_RESULT_STATE_INVALID') from None
+    elif claim_id is not None:
+        raise LLMToolError('CLAUDE_RESULT_STATE_INVALID')
+    try:
+        merges = task_completion._git(registration.root, (
+            'rev-list', '--merges', developer['source_sha'] + '..' + args.head, '--'),
+            limit=1024 * 1024)
+        trusted = developer['source_sha']
+        if merges.strip():
+            trusted = _capture_trusted_main_pin(task, developer['source_sha'])['sha']
+        changed = task_completion._developer_changed_paths(
+            registration.root, developer['source_sha'], args.head, trusted)
+    except LLMToolError:
+        raise
+    except Exception:
+        raise LLMToolError('RESULT_SCOPE_MISMATCH') from None
+    if (not changed or len(changed) > 32 or
+            not set(changed).issubset(set(developer.get('write_paths', [])))):
+        raise LLMToolError('RESULT_SCOPE_MISMATCH')
+    session_id = getattr(args, 'session', None)
+    try:
+        role = role_config.resolve_role('claude-developer')
+        if type(role.get('config_dir')) is not str:
+            raise LLMToolError('Claude Developer role account is unavailable')
+        active_pm_inbox.observe_claude_session(
+            session_id, registration.root,
+            {'CLAUDE_CONFIG_DIR': role['config_dir']})
+    except Exception:
+        raise LLMToolError('CLAUDE_RESULT_SESSION_INVALID') from None
     result = store.record_claude_result(
         args.task_id, pm_session_id=pm_session_id,
-        executor_task_id=args.executor_task, head_sha=args.head)
+        executor_task_id=args.executor_task, head_sha=args.head,
+        session_id=session_id, claim_id=getattr(args, 'claim_id', None))
     _print(_task_view(result), stdout=stdout)
     return 0
 
@@ -1196,11 +1266,14 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
             snapshot.branch != registration.branch or snapshot.head != registration.result_sha or
             not snapshot.clean):
         raise LLMToolError('Claude D6 binding requires a clean registered D6 HEAD')
-    changed_raw = task_completion._git(registration.root, (
-        'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--no-renames',
-        registration.source_sha, registration.result_sha, '--'), limit=1024 * 1024)
-    changed_paths = sorted(set(path for path in
-        changed_raw.decode('utf-8', 'strict').split('\x00') if path))
+    merges = task_completion._git(registration.root, (
+        'rev-list', '--merges', registration.source_sha + '..' + registration.result_sha,
+        '--'), limit=1024 * 1024)
+    trusted = registration.source_sha
+    if merges.strip():
+        trusted = _capture_trusted_main_pin(task, registration.source_sha)['sha']
+    changed_paths = task_completion._developer_changed_paths(
+        registration.root, registration.source_sha, registration.result_sha, trusted)
     if not changed_paths or len(changed_paths) > 32:
         raise LLMToolError('Claude D6 binding requires a bounded committed result diff')
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
@@ -5156,6 +5229,18 @@ def run_task_complete(args, *, store=None, reviewer_adapter=None):
                 except LLMToolError:
                     # The primary collector already records unavailable D6
                     # registration as a fail-closed reviewer gate.
+                    pass
+            if claude_route and type(claude_result) is dict:
+                try:
+                    reviewer_registration = task_completion.read_d6_registration(
+                        args.reviewer_task, git_evidence['common_dir'])
+                    reviewer_native = reviewer_registration.native_session_id
+                    if reviewer_native in claude_result.get('author_session_ids', []):
+                        github['missing_gates'] = sorted(set(
+                            github['missing_gates'] +
+                            ['REVIEWER_NATIVE_SESSION_NOT_INDEPENDENT']))
+                        github['evidence']['formal_review_state'] = 'UNVERIFIED'
+                except LLMToolError:
                     pass
             evidence['review_pr_ci'] = github['evidence']
             missing.extend(github['missing_gates'])
