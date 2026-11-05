@@ -2040,7 +2040,7 @@ class StatusProjectionTests(unittest.TestCase):
             _record(task_id='f' * 32, abandonment={'reason': 'done'}),
         ]
         items = self.status.attention_items(
-            records, ready_task_ids={'b' * 32, 'a' * 32, 'f' * 32})
+            records, ready_task_ids={'b' * 32, 'f' * 32})
         self.assertEqual([item['label'] for item in items],
                          ['卡住', '供應商不可用', '失敗', '證據已就緒，等 PM 處理'])
         self.assertEqual(items[0], {'label': '卡住', 'task': 'c' * 32,
@@ -2063,7 +2063,7 @@ class StatusProjectionTests(unittest.TestCase):
                 result = self.status.read_attention(key, store=store)
                 self.assertEqual((result['task_unreadable_count'],
                                   result['inbox_unreadable_count']), (task_bad, inbox_bad))
-                self.assertEqual(result['items'][0]['label'], '證據已就緒，等 PM 處理')
+                self.assertEqual(result['items'], [])
             peek.return_value = {'events': [], 'pending': [{'task_id': 'a' * 32,
                                                               'state': 'NOT_YET_RECORDED'}],
                                  'unreadable_task_count': 0}
@@ -5595,15 +5595,19 @@ class PMConversationTests(BoundedPMTest):
 
         ui, _ = self.drive([self.connect(), self.connected])
         self.assertEqual(ui.attention_report(), '注意事項：讀取中，稍後再試。')
+        ui.pm_state = 'error(PM_PROCESS_EXITED)'
         ui.finish_attention(self.session_id, None)
-        self.assertEqual(ui.attention_report(), '注意事項：UNKNOWN（TaskStore 無法讀取）')
+        self.assertEqual(ui.attention_report(), '注意事項：UNKNOWN（TaskStore 無法讀取）\n'
+                         '  來源：TaskStore（本機）｜讀取於 ' + ui.attention_read_at + '\n'
+                         '  最近的 PM 回合出錯\n'
+                         '  需要你決定：無法提供（Core 尚未記錄）')
 
         partial = {'items': [], 'unread': 0, 'task_unreadable_count': 1,
                    'inbox_unreadable_count': 0}
         ui.finish_attention(self.session_id, partial)
         report = ui.attention_report()
         self.assertEqual(report, '注意事項：UNKNOWN（TaskStore 部分無法讀取）\n'
-                         '來源：TaskStore（本機）｜讀取於 ' + ui.attention_read_at + '\n'
+                         '  來源：TaskStore（本機）｜讀取於 ' + ui.attention_read_at + '\n'
                          '  部分讀取失敗：Tasks 1；PM inbox 0（計數可能重複；注意事項與未讀事件總數未知）\n'
                          '  需要你決定：無法提供（Core 尚未記錄）')
         self.assertNotIn('目前沒有', report)
@@ -5613,7 +5617,7 @@ class PMConversationTests(BoundedPMTest):
                                                'task_unreadable_count': 0,
                                                'inbox_unreadable_count': 0})
         self.assertEqual(ui.attention_report(), '注意事項（0 項）\n'
-                         '來源：TaskStore（本機）｜讀取於 ' + ui.attention_read_at + '\n'
+                         '  來源：TaskStore（本機）｜讀取於 ' + ui.attention_read_at + '\n'
                          '  目前沒有\n  需要你決定：無法提供（Core 尚未記錄）')
 
         ui.pm_outbox.append('draft')
@@ -5657,7 +5661,7 @@ class PMConversationTests(BoundedPMTest):
                                                'task_unreadable_count': 0,
                                                'inbox_unreadable_count': 0})
         report = ui.attention_report()
-        self.assertTrue(report.startswith('注意事項（25 項）\n來源：TaskStore（本機）'))
+        self.assertTrue(report.startswith('注意事項（25 項）\n  來源：TaskStore（本機）'))
         self.assertEqual(sum(line.startswith('  卡住｜') for line in report.splitlines()), 20)
         self.assertIn('  另有 5 項未顯示', report)
         self.assertTrue(report.endswith('  需要你決定：無法提供（Core 尚未記錄）'))

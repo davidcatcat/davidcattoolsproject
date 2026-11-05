@@ -1703,15 +1703,23 @@ class ChatTUI:
         if self.attention_key != key:
             return "注意事項：讀取中，稍後再試。"
         if self.attention is None:
-            return "注意事項：UNKNOWN（TaskStore 無法讀取）"
+            rows = ["注意事項：UNKNOWN（TaskStore 無法讀取）"]
+            if self.attention_read_at:
+                rows.append("  " + _attention_text(
+                    "來源：TaskStore（本機）｜讀取於 " + self.attention_read_at))
+            rows.extend("  " + _attention_text(line)
+                        for line in self.attention_lines())
+            rows.append("  需要你決定：無法提供（Core 尚未記錄）")
+            return "\n".join(rows)
         value = self.attention
         partial = (value.get("task_unreadable_count", 0) > 0 or
                    value.get("inbox_unreadable_count", 0) > 0)
         lines = self.attention_lines()
         heading = ("注意事項：UNKNOWN（TaskStore 部分無法讀取）" if partial else
                    "注意事項（%d 項）" % len(lines))
-        rows = [heading, "來源：TaskStore（本機）｜讀取於 " + self.attention_read_at]
-        rows.extend(_attention_text("  " + line) for line in lines[:20])
+        rows = [heading, "  " + _attention_text(
+            "來源：TaskStore（本機）｜讀取於 " + self.attention_read_at)]
+        rows.extend("  " + _attention_text(line) for line in lines[:20])
         if len(lines) > 20:
             rows.append("  另有 %d 項未顯示" % (len(lines) - 20))
         elif not lines and not partial:
