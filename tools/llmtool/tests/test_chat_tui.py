@@ -378,6 +378,32 @@ class WidgetTests(Base):
         self.assertEqual(seen['argument_draft'], '/pm new --runtime')
         self.assertEqual(ui.input.text, '/pm new --runtime')
 
+    def test_settings_ghost_hints_render_without_editing_input(self):
+        seen = {}
+
+        def capture(ui, key):
+            screen = ui.app.renderer.last_rendered_screen
+            size = ui.app.output.get_size()
+            seen[key] = "".join(screen.data_buffer[y][x].char
+                                for y in range(size.rows) for x in range(size.columns))
+            seen[key + "_draft"] = ui.input.text
+
+        ui, _ = self.drive(['/settings', lambda ui: capture(ui, 'command'),
+                            ' ', lambda ui: capture(ui, 'command_space'),
+                            'auto-resume', lambda ui: capture(ui, 'setting'),
+                            ' ', lambda ui: capture(ui, 'setting_space'),
+                            'on', lambda ui: capture(ui, 'value')])
+        self.assertIn('auto-resume on|off', seen['command'])
+        self.assertIn('auto-resume on|off', seen['command_space'])
+        self.assertIn('on|off', seen['setting'])
+        self.assertIn('on|off', seen['setting_space'])
+        self.assertNotIn('on|off', seen['value'])
+        self.assertEqual(seen['command_draft'], '/settings')
+        self.assertEqual(seen['command_space_draft'], '/settings ')
+        self.assertEqual(seen['setting_draft'], '/settings auto-resume')
+        self.assertEqual(seen['setting_space_draft'], '/settings auto-resume ')
+        self.assertEqual(seen['value_draft'], '/settings auto-resume on')
+
     def test_saved_history_is_identified_in_opening_text(self):
         history_path = self.temp_root / '.local/state/llmtool/chat/history.json'
         self.session = ChatSession(self.session.config, history_path=history_path)
@@ -718,7 +744,8 @@ class WidgetTests(Base):
 
     def test_picker_completes_draft_without_executing(self):
         def open_menu(ui):
-            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill', '/settings'])
+            self.assertEqual([c[0] for c in ui.menu_items],
+                             ['/status', '/skill', '/settings'])
         ui, _ = self.drive(['/s', open_menu, '\x1b[B', '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/skill '),
                             lambda ui: self.assertEqual(ui.menu_items, []),
@@ -738,6 +765,28 @@ class WidgetTests(Base):
                             '\x15', '/provider', '\t',
                             lambda ui: self.assertEqual(ui.input.text, '/provider ')])
         self.assertEqual(ui.menu_items, [])
+        self.factory.assert_not_called()
+
+    def test_settings_exact_command_still_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_settings_with_trailing_space_runs_from_the_draft(self):
+        ui, _ = self.drive(['/settings ', '\r',
+                            lambda ui: self.assertEqual(ui.input.text, '')])
+        self.assertIn('Settings: auto-resume', ui.conversation.text)
+
+    def test_tab_keeps_settings_command_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/settings', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
+        self.factory.assert_not_called()
+
+    def test_tab_keeps_settings_prefix_draft_and_closes_picker(self):
+        ui, _ = self.drive(['/sett', '\t',
+                            lambda ui: self.assertEqual(ui.input.text, '/settings '),
+                            lambda ui: self.assertEqual(ui.menu_items, [])])
         self.factory.assert_not_called()
 
     def test_tab_extends_ambiguous_prefix_and_lists_candidates(self):
@@ -799,7 +848,8 @@ class WidgetTests(Base):
 
     def test_picker_esc_enter_inserts_newline_instead_of_closing_and_submitting(self):
         def open_menu(ui):
-            self.assertEqual([c[0] for c in ui.menu_items], ['/status', '/skill', '/settings'])
+            self.assertEqual([c[0] for c in ui.menu_items],
+                             ['/status', '/skill', '/settings'])
             # The short lone-Esc timeout applies only while the picker is open.
             self.assertEqual(ui.app.timeoutlen, chat_tui.ESC_SEQUENCE_TIMEOUT)
         ui, _ = self.drive(['/s', open_menu, '\x1b\r',
@@ -841,6 +891,19 @@ class WidgetTests(Base):
         self.assertIn('/task ...', shown)
         self.assertNotIn('Ctrl-J', shown)
         self.factory.assert_not_called()
+
+    def test_help_points_to_pm_setup_guide_before_chat_heading(self):
+        ui, _ = self.drive(['/help\r'])
+        shown = ui.conversation.text.split('> /help', 1)[1]
+        guide = 'docs/guides/llmtool-pm-setup-zh-tw.md'
+        self.assertIn(guide, shown)
+        self.assertLess(shown.index(guide), shown.index('Chat'))
+
+    def test_key_help_points_to_pm_setup_guide(self):
+        help_text = chat_tui.key_help(False)
+        guide = 'docs/guides/llmtool-pm-setup-zh-tw.md'
+        self.assertIn(guide, help_text)
+        self.assertGreater(help_text.index(guide), help_text.index('/pm queue'))
 
     def test_picker_enter_on_exact_typed_command_submits_like_no_picker(self):
         # Rule: Enter only completes a draft that differs from the chosen suggestion and
@@ -1837,6 +1900,7 @@ class W57ChatTests(Base):
         self.assertIn('狀態：待命', status)
         self.assertNotIn('not probed', status)
         self.assertNotIn('connectivity', status)
+        self.assertNotIn('用量（本 session）', status)
 
     def test_chat_status_shows_the_served_model_of_the_last_reply(self):
         self.client.complete.return_value = Reply('reply', {'served_model': 'qwen3-coder-480b'})
@@ -3735,8 +3799,6 @@ class PMTypewriterTests(Base):
     def shown(self):
         """Text of the last PM block as the pane shows it (None: no block opened)."""
         text = self.ui.conversation.text
-        if self.ui.pm_working_at is not None:   # the working line below the block (W52 F1)
-            text = text[:self.ui.pm_working_at]
         if text.endswith('\nPM'):
             return ''                                # the label opened; no text yet
         if '\nPM\n' not in text:
@@ -4763,7 +4825,7 @@ class PMConversationTests(BoundedPMTest):
         seen = {}
 
         async def thinking(ui):
-            await self.until(ui, lambda ui: ui.conversation.text.endswith('PM 思考中… 0s'),
+            await self.until(ui, lambda ui: '思考中…（' in ui._pm_busy_line(),
                              'working line')
             self.assertIsNotNone(ui._pm_working_handle)
             seen['seq'] = ui._pm_turn_seq
@@ -4772,8 +4834,8 @@ class PMConversationTests(BoundedPMTest):
             await self.until(ui, lambda ui: ui.pm_runtime is None and not ui.pm_pending,
                              'disconnected')
             self.assertFalse(ui.pm_turn_active)
+            self.assertFalse(ui._pm_busy_wanted())
             self.assertIsNone(ui._pm_working_handle)
-            self.assertIsNone(ui.pm_working_at)
             ui.append('later output')
             self.assertIsNone(ui._pm_working_handle)
             self.assertTrue(ui.conversation.text.endswith('later output'))
@@ -4787,8 +4849,8 @@ class PMConversationTests(BoundedPMTest):
 
         ui, _ = self.drive([self.connect(), self.connected, 'think\r', thinking,
                             '/pm disconnect\r', disconnected])
-        self.assertNotIn('PM 思考中', ui.conversation.text)
-        self.assertNotIn('PM 處理中', ui.conversation.text)
+        self.assertNotIn('思考中', ui.conversation.text)
+        self.assertNotIn('處理中', ui.conversation.text)
 
     def test_exit_mid_turn_cancels_every_timer(self):
         self.turns = [_thinking() + ['HOLD', _result('late')]]
@@ -4954,19 +5016,17 @@ class PMConversationTests(BoundedPMTest):
         self.assertEqual([u['message']['content'][0]['text'] for u in self.fakes[0].users()],
                          ['PM request', 'queued'])     # Esc paused the queue; send resumed it
 
-    def test_working_line_shows_at_once_ticks_each_second_and_gives_way_to_text(self):
-        # W52 F1: a long think showed only "owner → PM:"; now the pane says so, every second.
+    def test_busy_line_ticks_while_reply_streams_and_disappears_at_turn_end(self):
         self.turns = [_thinking() + ['HOLD', _delta('答案', index=1), 'HOLD',
                                      _assistant({'type': 'text', 'text': '答案'}), _result('答案')]]
         seen = {}
 
         async def working(ui):
-            await self.until(ui, lambda ui: '\n\nPM ' in ui.conversation.text, 'working line')
             await self.until(ui, lambda ui: ui.pm_state == 'thinking', 'thinking')
-            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 0s'))
+            self.assertIn('思考中…（0 秒）', ui._pm_busy_line())
             await asyncio.sleep(1.2)
-            self.assertTrue(ui.conversation.text.endswith('PM 思考中… 1s'))
-            self.assertEqual(ui.conversation.text.count('PM 思考中…'), 1)   # redrawn in place
+            self.assertIn('思考中…（1 秒）', ui._pm_busy_line())
+            self.assertNotIn('思考中', ui.conversation.text)
             self.assertNotIn('PRIVATE_REASONING', ui.conversation.text)
             self.fakes[0].gate.set()
 
@@ -4977,9 +5037,10 @@ class PMConversationTests(BoundedPMTest):
 
         ui, _ = self.drive([self.connect(), self.connected, '想一想\r', working, text_arrived,
                             self.turn_done])
-        self.assertNotIn('思考中', seen['text'])     # replaced when the text arrived
-        self.assertNotIn('PM 思考中', ui.conversation.text)
-        self.assertNotIn('PM 處理中', ui.conversation.text)
+        self.assertNotIn('思考中', seen['text'])
+        self.assertFalse(ui._pm_busy_wanted())
+        self.assertNotIn('思考中', ui.conversation.text)
+        self.assertNotIn('處理中', ui.conversation.text)
         self.assertIsNone(ui._pm_working_handle)
 
     def test_escape_interrupts_and_ctrl_c_interrupts_then_exits(self):
@@ -5425,8 +5486,27 @@ class PMConversationTests(BoundedPMTest):
         self.assertIn('佇列（本機設定）：沒有', status)
         self.assertRegex(status, '背景：(讀取中|UNKNOWN（TaskStore：.*）|[0-9]+ 件進行中)')
         self.assertIn('主題（本機設定）：', status)
+        ordered = ['狀態（PM 模式）', 'PM session：', 'Claude 帳號目錄：',
+                   '權限模式（本機設定）：', 'PM 狀態：', '背景：', '佇列（本機設定）：',
+                   '主題（本機設定）：', '用量（本 session）：', 'Context 與額度：']
+        positions = [status.index(line) for line in ordered]
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(status.rstrip().splitlines()[-2:], [
+            '  用量（本 session）：尚無回合',
+            '  Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）'])
         self.assertNotIn('供應商', status)
         self.assertNotIn('provider:', status)
+
+    def test_status_pm_history_read_failure_shows_unknown_and_returns(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_all_turns',
+                                               Mock(side_effect=OSError('history unavailable'))),
+                            '/status\r',
+                            lambda ui: self.until(ui, lambda ui: '狀態（PM 模式）' in
+                                                  ui.conversation.text)])
+        status = ui.conversation.text.split('> /status', 1)[1]
+        self.assertIn('用量（本 session）：UNKNOWN（PM 歷史無法讀取）', status)
+        self.assertIn('Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）', status)
 
     def test_status_background_read_failure_shows_unknown_source_and_reason(self):
         reason = 'TaskStore read denied'

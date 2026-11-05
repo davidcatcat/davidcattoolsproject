@@ -606,6 +606,10 @@ select account directories, they must agree. Account directory metadata is check
 when the selected role uses the account. General `llmtool config` output does not
 include account or role configuration.
 
+To set up a PM in the TUI (Claude account folder, Codex runtime, working
+directory and default PM), read the [PM setup guide](../../docs/guides/llmtool-pm-setup-zh-tw.md)
+and the [offline acceptance pack](../../docs/guides/llmtool-codex-pm-offline-acceptance-zh-tw.md).
+
 ### Project config 的低信任邊界
 
 `.llmtool.yaml` **只能**修改已由 user/default 定義的 provider 的 `model`、
