@@ -41,6 +41,14 @@ These checks prevent refusals that cost a dispatch round (2026-11-02):
 - **Never wrap dispatch or repair in `timeout`.** It can kill Codex with signal 9. Run `llmtool task delegate` and any helper that runs it in the background, then poll. Set `ANTHROPIC_MODEL` explicitly for a background Claude dispatch until central role config (D1) lands.
 - Stopping a waiting shell kills background work that shell started; account for that before stopping it.
 
+### Sensitive-screen refusals (Owner 2026-11-05, #981)
+
+On any sensitive-screen refusal, stop and read the refusal first. Find the actual rule and line with a local metadata-only check that prints rule names, line numbers and lengths, never text; record the refusal on the Task or Issue before anything else.
+Do not reword evidence, reports or fixtures, retry, or tell a model how to word output until the cause is confirmed, even when the refusal looks like a false positive.
+For `task high-debug`, a rerun on the same Task and family is refused until `python -m llmtool.high_debug screen-disposition` records every listed rule and line.
+Joined-string credential-shaped fixtures are allowed only in tests of screen tools, as synthetic data labelled `# synthetic-fixture: screen-tool test`, confirmed by an independent Reviewer; once merged, check them with `tools/llmtool/scripts/fixture_check.py`.
+A refused local commit must not reach origin, including in history. This is limited permission for test data and does not permit bypassing a formal security check. [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6651110328).
+
 ### Sub-agent PMs (Owner D8 2026-11-02)
 
 The main PM may use sub-agent PMs proactively. Mode A is read-only and returns text only. Mode B owns exactly one named work package (WP) and dispatches its Developer, formal Reviewer, EC2 remote-test and repairs through the normal gates: cross-family review, one writer per D6 and required remote tests.
