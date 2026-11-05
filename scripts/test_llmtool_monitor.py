@@ -2689,6 +2689,58 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((task_rows[0].state, task_rows[0].evidence),
                          (mon.WORKING, "程序"))
 
+    def test_closed_parent_does_not_promote_unfinished_subagent(self):
+        self._register("wp-1", str(self.task), branch="feature/closed-parent")
+        prs = {"feature/closed-parent": (966, "MERGED")}
+        for child_state in (mon.WORKING, mon.STALLED):
+            for parent_state, expected_running, expected_phase, expected_session in (
+                    (mon.IDLE, {"wp-1"}, "執行中", None),
+                    (mon.CLOSED, set(), "已完成，待收尾", "沒有 session 在跑")):
+                with self.subTest(parent=parent_state, child=child_state):
+                    parent = mon.OfficeRow("claude developer", parent_state, "parent", 1.0, 10,
+                                           key="claude:parent", task="task wp-1")
+                    child = mon.OfficeRow("claude subagent", child_state, "child", 1.0, 10,
+                                          group="claude:parent", kind="subagent")
+                    rows = [parent, child]
+                    self.assertEqual(mon._d6_running_tasks(rows), expected_running)
+                    line = next(line for line in mon.d6_task_lines(
+                        self.canonical, rows, self.NOW, prs) if "wp-1" in line)
+                    self.assertIn(expected_phase, line)
+                    if expected_session:
+                        self.assertIn(expected_session, line)
+
+    def test_done_rows_only_cover_matching_live_claude_one_shot(self):
+        self._register("wp-1", str(self.task), branch="feature/done-coverage")
+        prs = {"feature/done-coverage": (967, "MERGED")}
+
+        def check(rows, processes, process_expected, phase):
+            added = mon._d6_process_rows(processes, rows, self.canonical,
+                                         lambda pid: str(self.task), self.NOW)
+            task_rows = [row for row in added if row.evidence == "程序"]
+            self.assertEqual(len(task_rows), int(process_expected))
+            line = next(line for line in mon.d6_task_lines(
+                self.canonical, rows + task_rows, self.NOW, prs) if "wp-1" in line)
+            self.assertIn(phase, line)
+            if not process_expected:
+                self.assertIn("沒有 session 在跑", line)
+            return task_rows
+
+        codex_done = mon.OfficeRow("codex developer", mon.DONE, "finished", 1.0, 10,
+                                   key="codex:done", task="task wp-1")
+        claude_done = mon.OfficeRow("claude developer", mon.DONE, "finished", 1.0, 10,
+                                    key="claude:one-shot", task="task wp-1")
+        codex = mon.Process(80, 1, 80, "00:12", "S", "Codex CLI", "codex", "")
+        claude = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+
+        check([codex_done], [claude], False, "已完成，待收尾")
+        check([claude_done], [codex], False, "已完成，待收尾")
+        check([codex_done], [codex], False, "已完成，待收尾")
+        check([claude_done], [claude], True, "執行中")
+
+        # The covered Codex candidate must not mark the task seen before Claude is considered.
+        task_rows = check([codex_done, claude_done], [codex, claude], True, "執行中")
+        self.assertEqual(task_rows[0].name, "claude developer")
+
     def test_d6_process_role_comes_from_registered_agent_id(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-reviewer-agent")
         proc = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")

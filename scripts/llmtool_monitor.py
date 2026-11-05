@@ -2743,7 +2743,8 @@ def _d6_running_tasks(office: list) -> set[str]:
                     if row.kind == "subagent" and row.group
                     and row.state in (WORKING, STALLED)}
     running.update(row.task[5:] for row in office
-                   if row.task.startswith("task ") and row.key in running_keys)
+                   if row.task.startswith("task ") and row.state != CLOSED
+                   and row.key in running_keys)
     return running
 
 
@@ -6383,9 +6384,11 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
                     cwd_of=process_cwd, now: float | None = None) -> list[OfficeRow]:
     """Show a live agent CLI in its registered D6 task even without a transcript."""
     now = time.time() if now is None else now
-    covered = {row.task[5:] for row in rows
-               if row.task.startswith("task ") and row.state not in (CLOSED, DONE)}
-    seen = set(covered)
+    covered = {}
+    for row in rows:
+        if row.task.startswith("task ") and row.state != CLOSED:
+            covered.setdefault(row.task[5:], []).append(row)
+    seen = set()
     out = []
     for proc in sorted(processes, key=lambda item: item.pid):
         base_role = proc.role.removesuffix(" (node launcher)")
@@ -6400,6 +6403,10 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         cwd = cwd_of(proc.pid)
         place = _place(cwd, canonical)
         if not place or place[0] != "task" or place[1] in seen:
+            continue
+        if any(not (family == "claude" and row.state == DONE and row.key.startswith("claude:"))
+               for row in covered.get(place[1], ())):
+            # At this revision a DONE claude: session row is a one-shot, and only a Claude process can outlive its inactivity-based DONE state.
             continue
         registered = registered_tasks(canonical).get(place[1])
         if not registered or os.path.realpath(cwd) != registered[0]:
