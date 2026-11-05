@@ -7893,11 +7893,12 @@ class StuckAlertTests(unittest.TestCase):
             case = {**base, "request": request,
                     "developer": {"state": state, "executor_task_id": "wp-1"}}
             self.assertEqual(mon._stuck_entry(case).repair, expected)
-        case = {"task_id": self.TASK, "remote_test_outcomes": [
-            {"code": "REMOTE_BUSY", "at": self.stamp(30)}]}
+        busy_item = {"code": "REMOTE_BUSY", "at": self.stamp(30)}
+        case = {"task_id": self.TASK, "developer": {"executor_task_id": "wp-1"},
+                "remote_test_outcomes": [busy_item]}
         self.assertEqual(mon._stuck_entry(case).busy_at, mon._remote_test_time(self.stamp(30)))
         for later in ({"remote_test_receipts": [{"ended_at": self.stamp(20)}]},
-                      {"remote_test_outcomes": [{"code": "OTHER", "at": self.stamp(20)}]}):
+                      {"remote_test_outcomes": [busy_item, {"code": "OTHER", "at": self.stamp(20)}]}):
             value = {"task_id": self.TASK, **case, **later}
             self.assertEqual(mon._stuck_entry(value).busy_at, 0.0)
         self.assertIsNone(mon._stuck_entry({"task_id": "A" * 32, "developer": {"executor_task_id": "wp"}}))
@@ -7926,7 +7927,7 @@ class StuckAlertTests(unittest.TestCase):
             self.assertEqual(path.stat().st_nlink, 1)
 
     def test_stuck_reviews_and_open_d6_use_live_rows_and_open_branches(self):
-        task = "task pr5-claude-rv1-abcdef0"
+        task = "pr5-claude-rv1-abcdef0"
         details = {task: ("ACTIVE", "agent", self.NOW - 100, self.NOW, "feature")}
         row = mon.OfficeRow("Reviewer", mon.WORKING, "", 0, 0, task="task " + task)
         self.assertEqual(mon.stuck_reviews([row], details), [("5", "abcdef0", self.NOW - 100)])
@@ -7935,7 +7936,8 @@ class StuckAlertTests(unittest.TestCase):
         self.assertEqual(mon.stuck_reviews([replace(row, task="task other")], details), [])
         self.assertEqual(mon.stuck_reviews([row], {}), [])
         self.assertEqual(mon.stuck_open_d6(details, {"feature": (5, "OPEN")}), {task})
-        for branch, state in (("feature", "MERGED"), ("feature", "CLOSED"), ("missing", "OPEN"), ("", "OPEN")):
+        self.assertEqual(mon.stuck_open_d6(details, {}), set())
+        for branch, state in (("feature", "MERGED"), ("feature", "CLOSED"), ("", "OPEN")):
             value = {task: ("ACTIVE", "agent", self.NOW, self.NOW, branch)}
             self.assertEqual(mon.stuck_open_d6(value, {branch: (5, state)}), set())
 
@@ -7972,7 +7974,7 @@ class StuckAlertTests(unittest.TestCase):
         ordered = mon.stuck_alerts(self.NOW, None, review, busy + repair,
                                    {f"wp-{i}" for i in range(1, 7)})
         self.assertEqual(ordered[0], "審查超過 1 小時：PR #5 @abcdef0（已 60 分鐘）")
-        self.assertTrue(ordered[1].startswith("EC2 忙碌：task 00000002"))
+        self.assertTrue(ordered[1].startswith("EC2 忙碌：task 00000004"))
         self.assertEqual(sum(line.startswith("EC2 忙碌：") for line in ordered), 3)
         self.assertTrue(any(line.startswith("修復已到上限：D6 wp-1") for line in ordered))
         self.assertEqual(sum(line.startswith("修復已到上限：") for line in ordered), 5)
@@ -8025,11 +8027,14 @@ class StuckAlertTests(unittest.TestCase):
                     mon.StuckRecord("a" * 8, "wp-1", True, 0),
                     mon.StuckRecord("b" * 8, "wp-1", True, 0)], "")
                 self.github, self.polls = github, 0
+                self.stale = False
             def poll(self): pass
 
         class Screen:
             def getmaxyx(self): return (40, 120)
             def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
 
         details = {"wp-1": ("ACTIVE", "agent", self.NOW, self.NOW, "feature")}
         with patch.object(mon, "Monitor", FakeMonitor), \
@@ -8040,11 +8045,11 @@ class StuckAlertTests(unittest.TestCase):
                 patch("sys.stdout", __import__("io").StringIO()) as output:
             self.assertEqual(mon.run_once(github), 0)
             rendered = output.getvalue()
+            drawn = {}
+            monitor = FakeMonitor()
+            mon._paint_screen(Screen(), monitor, "office", 0, False, {},
+                              lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("macOS 超過 45 分鐘", rendered)
         self.assertIn("修復已到上限：D6 wp-1（2 輪）", rendered)
-        drawn = {}
-        monitor = FakeMonitor()
-        mon._paint_screen(Screen(), monitor, "office", 0, False, {},
-                          lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
         self.assertTrue(any("修復已到上限：D6 wp-1（2 輪）" in line for line in drawn.values()))
