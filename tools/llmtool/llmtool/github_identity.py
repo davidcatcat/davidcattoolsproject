@@ -43,6 +43,27 @@ def ai_gh_config_dir(home):
     return str(home_path / ".config" / "gh-ai")
 
 
+def ai_github_env(base_env, home):
+    """Return an environment isolated for AI GitHub and Git credentials."""
+    env = dict(base_env)
+    for name in tuple(env):
+        if (name.startswith(("GH_", "GITHUB_", "GIT_CONFIG_KEY_",
+                             "GIT_CONFIG_VALUE_", "SSH_"))
+                or name in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
+                            "GIT_ASKPASS", "GIT_SSH_COMMAND")):
+            del env[name]
+
+    env["GH_CONFIG_DIR"] = ai_gh_config_dir(home)
+    env["GIT_CONFIG_COUNT"] = "3"
+    env["GIT_CONFIG_KEY_0"] = "credential.helper"
+    env["GIT_CONFIG_VALUE_0"] = ""
+    env["GIT_CONFIG_KEY_1"] = "credential.helper"
+    env["GIT_CONFIG_VALUE_1"] = "!gh auth git-credential"
+    env["GIT_CONFIG_KEY_2"] = "url.https://github.com/.insteadOf"
+    env["GIT_CONFIG_VALUE_2"] = "git@github.com:"
+    return env
+
+
 def github_identity(home):
     """Return the fixed identities and AI gh config path for ``home``."""
     owner = owner_login()
