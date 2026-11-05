@@ -211,6 +211,23 @@ class ClaudeRouteTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, expected)
             self.assertEqual(calls, [])
 
+    def test_leftover_claude_temp_file_is_out_of_scope(self):
+        temp_path = self.root / 'source.py.tmp.123.0123456789ab'
+
+        def runner(argv, cwd, env, timeout):
+            (self.root / 'source.py').write_text('changed\n')
+            temp_path.write_text('left behind')
+            return 0, self.envelope(), b''
+
+        try:
+            with self.assertRaises(RouteError) as caught:
+                run_route(self.route, self.request(), gate=lambda: True, runner=runner,
+                          boundary=Boundary(), snapshot=capture_snapshot)
+            self.assertEqual(caught.exception.code, 'CLAUDE_WRITE_SCOPE_VIOLATION')
+        finally:
+            temp_path.unlink(missing_ok=True)
+            (self.root / 'source.py').write_text('original\n')
+
     def test_run_route_classifies_nonzero_provider_failures_before_exit(self):
         cases = (
             (self.envelope(is_error=True, subtype='error_api',

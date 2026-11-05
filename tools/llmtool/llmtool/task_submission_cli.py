@@ -3329,7 +3329,9 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
     route_config.update(executable=executable, config_dir=config_dir)
     route = ClaudeRoute(route_config)
     try:
-        boundary_impl = for_platform(denied_dirs=route_config['denied_dirs'])
+        # #1002's kernel log observed Claude writing <target>.tmp.<pid>.<12 hex>.
+        boundary_impl = for_platform(denied_dirs=route_config['denied_dirs'],
+                                     allow_claude_tmp=True)
     except Exception:
         raise LLMToolError('BLOCKED_WRITE_ISOLATION') from None
     if isinstance(boundary_impl, UnsupportedBoundary):
@@ -3441,6 +3443,7 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
                             if hasattr(proof, 'get') else None}
                 return proof
         execute = run_route if route_runner is None else route_runner
+        result = None
         result = execute(route, {
             'root': registration.root, 'model': model, 'effort': effort,
             'expected_branch': registration.branch, 'expected_head': snapshot.head,
@@ -3476,6 +3479,17 @@ def run_task_claude_delegate(args, *, store, route_runner=None):
         error_code = ('CLAUDE_DISPATCH_DENIED' if owner_gate_denied else exc.code)
         developer.update(state='BLOCKED', provider_type='claude-cli', model=model,
                          error_code=error_code, artifact=None, artifact_sha256=None)
+        if (result is not None and exc.code in (
+                'CLAUDE_NO_CHANGES', 'CLAUDE_WRITE_SCOPE_VIOLATION',
+                'CLAUDE_OUTPUT_TOO_LARGE', 'CLAUDE_D6_BINDING_CHANGED')):
+            usage = _normalize_agy_usage(result.usage)
+            developer.update(execution={
+                'status': 'BLOCKED', 'native_session_id': result.session_id,
+                'process_exit_code': result.exit_code, 'stdout_sha256': result.stdout_sha256,
+                'elapsed_ms': result.elapsed_ms, 'cleanup_status': result.cleanup_status,
+                'usage_source': 'CLI_REPORTED' if usage is not None else 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None}, usage=usage)
         if owner_gate_denied:
             developer['blocked_reason'] = 'OWNER_DISPATCH_DENIED'
         elif exc.blocked_reason is not None:
