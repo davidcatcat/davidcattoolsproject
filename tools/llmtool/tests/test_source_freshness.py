@@ -276,6 +276,9 @@ class SourceFreshnessTests(unittest.TestCase):
         def directory(path):
             path.mkdir(mode=0o700)
 
+        def fifo(path):
+            os.mkfifo(path, 0o600)
+
         def writable_parent(path):
             path.parent.chmod(0o720)
             path.write_bytes(valid)
@@ -292,6 +295,7 @@ class SourceFreshnessTests(unittest.TestCase):
             ('dangling symlink', dangling_symlink),
             ('hard link', hard_link),
             ('directory', directory),
+            ('FIFO', fifo),
             ('group writable parent', writable_parent),
             ('oversize', oversized),
             ('bad JSON', lambda p: self._write_raw(p, b'{')),

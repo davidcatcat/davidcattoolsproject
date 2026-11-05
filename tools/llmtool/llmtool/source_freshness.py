@@ -61,7 +61,7 @@ def read_pin():
                 stat.S_IMODE(parent_info.st_mode) & 0o022):
             raise ValueError('invalid pin directory')
 
-        flags = os.O_RDONLY | os.O_NOFOLLOW
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
         fd = os.open(path, flags)
         try:
             info = os.fstat(fd)
@@ -116,7 +116,7 @@ def _fetch_origin_main(repo_root):
 
 
 def source_freshness():
-    """Return OK, STALE, DIRTY, or UNKNOWN for the installed package checkout."""
+    """Return OK, STALE, UNAPPROVED, DIRTY, or UNKNOWN for the installed package checkout."""
     try:
         package_file = Path(llmtool.__file__).resolve()
         # llmtool lives at <repo>/tools/llmtool/llmtool/__init__.py.
