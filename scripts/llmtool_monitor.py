@@ -32,6 +32,8 @@ list each poll and from `ps -A` every 15 seconds (it prints the same rows but
 costs ~0.1 s CPU a call): only the R/S letter in STAT, and a new root or system
 daemon process, may lag by that. The EC2 remote-test worker gets one row: the Task, SHA and modules of a
 running `llmtool task remote-test`, else its newest local receipt or outcome.
+The work board PR section uses the already-read pulls and workflow-runs pages,
+verdict comments, live D6 review tasks and bounded local Task receipts/outcomes.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -43,7 +45,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from collections import deque
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 import math
 import os
@@ -877,6 +879,7 @@ class Monitor:
         self.quota: list[str] = []
         self.quota_due = 0.0
         self.d6: list = []   # D6 task lines, refreshed with the office view
+        self.ec2_heads = None
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
         self.stale = False   # the file on disk changed since start: a restart is needed
@@ -1038,6 +1041,10 @@ class Monitor:
                                             self.github.verdicts if self.github else None)
                 except Exception:  # optional, like task evidence; never show a stale list
                     self.d6 = []
+                try:
+                    self.ec2_heads = ec2_head_results()
+                except Exception:  # optional local evidence; preserve the last good snapshot
+                    pass
         if self.short_lived and now - self.last_summary >= self.summary_every:
             new += self._flush_short_lived(stamp)
             self.last_summary = now
@@ -1872,6 +1879,7 @@ class GitHubSource:
         self.board_page_count: int | None = None
         self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
+        self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
         self.main_health: MainHealth | None = None
@@ -2164,6 +2172,7 @@ class GitHubSource:
                 return found
             try:
                 payload = self._get(f"repos/{self.repo}/actions/runs?per_page=30")
+                self.ci_heads = ci_head_runs(payload)
                 stamps = {run.get("id"): str(run.get("updated_at") or "")
                           for run in (payload.get("workflow_runs") if type(payload) is dict else None) or []
                           if type(run) is dict and type(run.get("id")) is int and run.get("status") in CI_ACTIVE}
@@ -2177,6 +2186,7 @@ class GitHubSource:
                     self._finished[run] = ci_finished_jobs(jobs_of(run), text)
             except errors:
                 self.ci_runs = None
+                self.ci_heads = None
                 queued = []
             last: dict = {}
             for jobs in self._finished.values():
@@ -2337,7 +2347,9 @@ def _activity_screen_lines(lines: list[str], width: int) -> list[str]:
 #   - one-shot reviews: the PR number and head named in the PM's call, and the
 #     verdict word on its own line in the call's result;
 #   - OpenCode/Kilo session titles and timestamps, typed error codes;
-#   - worker-dispatch.json switches, the D6 registry, llmtool task state codes.
+#   - worker-dispatch.json switches, the D6 registry, llmtool task state codes;
+#     the PR board keeps only pulls/runs already fetched, verdict words, active
+#     review PR/head pairs and valid local Task receipt/outcome SHA/result words.
 # Titles and descriptions are model- or prompt-derived text: they are passed
 # through the same redaction as Activity headlines and shortened. Prompts, other
 # model text, reasoning, commands and tool output are never shown; private paths
@@ -3604,6 +3616,30 @@ COMMIT_ID = re.compile(r"\b[0-9a-fA-F]{7,40}\b")
 CI_ACTIVE = ("in_progress", "queued", "waiting", "pending", "requested")
 
 
+def ci_head_runs(payload) -> dict:
+    """Newest recognized Linux/Mac workflow run for each seven-character head."""
+    found = {}
+    runs = payload.get("workflow_runs") if type(payload) is dict else None
+    for run in runs if type(runs) is list else []:
+        if type(run) is not dict:
+            continue
+        name, sha, run_id = run.get("name"), run.get("head_sha"), run.get("id")
+        status, conclusion = run.get("status"), run.get("conclusion")
+        if (name not in ("llmtool Linux CI", "llmtool Mac CI")
+                or type(sha) is not str or not HEX_SHA.fullmatch(sha)
+                or type(run_id) is not int or type(status) is not str
+                or (conclusion is not None and type(conclusion) is not str)):
+            continue
+        sha7 = sha[:7].lower()
+        workflow = "linux" if name == "llmtool Linux CI" else "mac"
+        per_head = found.setdefault(sha7, {})
+        previous = per_head.get(workflow)
+        if previous is None or run_id > previous[0]:
+            per_head[workflow] = (run_id, (status, conclusion or ""))
+    return {sha: {workflow: result for workflow, (_, result) in workflows.items()}
+            for sha, workflows in found.items()}
+
+
 def ci_runs(payload) -> list:
     """Workflow runs not finished yet, oldest first: (status, text, started,
     runner, run id); runner is None until ci_runner_names() fills it in.
@@ -3806,6 +3842,7 @@ class WorkBoard:
     skipped: int
     note: str = ""
     window_hours: int = 12
+    prs: list = field(default_factory=list)
 
 
 # File format: a JSON object with schema_version 1, UTC updated_at, string
@@ -3912,12 +3949,99 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
     return out
 
 
+@dataclass(frozen=True)
+class PrRow:
+    number: int
+    head: str
+    review: str
+    ec2: str
+    linux: str
+    mac: str
+    next: str
+    owner: str
+
+
+def pr_reviewing(office) -> set[tuple[str, str]]:
+    """PR/head pairs with a live D6 review task."""
+    result = set()
+    for task_id in _d6_running_tasks(office if type(office) is list else []):
+        match = _review_task(task_id)
+        if match:
+            result.add((str(match[0]), match[1].lower()))
+    return result
+
+
+def _ci_word(entry, known: bool) -> str:
+    if not known or entry is None:
+        return "?"
+    status, conclusion = entry
+    if status in CI_ACTIVE:
+        return "排隊" if status in ("queued", "waiting", "pending", "requested") else "執行中"
+    if status == "completed":
+        return CI_CONCLUSIONS.get(conclusion, "結果不明")
+    return "?"
+
+
+def pr_board_rows(pulls, verdicts, ci_heads, ec2, reviewing, pending) -> list[PrRow]:
+    """Build the read-only PR status table from already-read local/GitHub data."""
+    rows = []
+    for pull in sorted((item for item in pulls or []
+                        if isinstance(item, BoardPull) and item.state == "OPEN"),
+                       key=lambda item: item.number):
+        number, head = str(pull.number), pull.head.lower()
+        review = "未審" if head else "?"
+        if head and (number, head) in (reviewing or set()):
+            review = "審查中"
+        else:
+            matches = [entry for entry in (verdicts or {}).get(number, [])
+                       if type(entry) in (tuple, list) and len(entry) >= 3
+                       and head and head in entry[2]]
+            if matches:
+                verdict = max(matches, key=lambda entry: entry[0])[1]
+                review = {"PASS": "通過", "FAIL": "要修"}.get(verdict, "未確認")
+        ec2_word = "?" if not head or ec2 is None else (
+            ec2[0].get(head, "?") if head in ec2[0] else "?" if ec2[1] else "—")
+        ci = (ci_heads or {}).get(head, {}) if head else {}
+        linux = _ci_word(ci.get("linux"), ci_heads is not None)
+        mac = _ci_word(ci.get("mac"), ci_heads is not None)
+        waiting_owner = any(type(item) is OwnerPending and item.kind == "waiting_owner"
+                            and item.reference == f"#{number}" for item in pending or [])
+        next_step, owner = "未確認", "PM"
+        if waiting_owner:
+            next_step, owner = "等你決定", "Owner"
+        elif pull.draft:
+            next_step, owner = "草稿", "Developer"
+        elif review == "審查中":
+            next_step, owner = "等審查", "Reviewer"
+        elif review == "要修":
+            next_step, owner = "修復", "Developer"
+        elif any(word in (linux, mac) for word in ("失敗", "逾時", "取消")):
+            next_step, owner = "修 CI", "PM"
+        elif ec2_word in ("FAIL", "SHA_MISMATCH", "TIMEOUT"):
+            next_step, owner = "修 EC2 失敗", "PM"
+        elif review == "通過":
+            if linux in ("略過", "結果不明") or mac in ("?", "結果不明"):
+                next_step, owner = "未確認 CI", "PM"
+            elif linux in ("執行中", "排隊"):
+                next_step, owner = "等 CI", "CI"
+            elif mac == "成功" and linux in ("成功", "?"):
+                next_step, owner = "可合併", "PM"
+            elif mac in ("執行中", "排隊"):
+                next_step, owner = "等 macOS", "CI"
+            else:
+                next_step, owner = "加 mac-ci", "PM"
+        elif review == "未審":
+            next_step, owner = "派審查", "PM"
+        rows.append(PrRow(pull.number, head, review, ec2_word, linux, mac, next_step, owner))
+    return rows
+
+
 def _board_ref_number(ref):
     match = re.fullmatch(r"(?:PR )?#([0-9]{1,7})", ref or "")
     return int(match.group(1)) if match else None
 
 
-def work_board(github, board: PmBoard, now) -> WorkBoard:
+def work_board(github, board: PmBoard, now, *, ec2=None, reviewing=None) -> WorkBoard:
     pulls = github.board_pulls if github is not None else None
     github_known = bool(github is not None and github.successful_read)
     board_known = board.status in ("ok", "stale")
@@ -3972,9 +4096,11 @@ def work_board(github, board: PmBoard, now) -> WorkBoard:
     github_status = ("未讀 GitHub" if github is None else
                      "GitHub 讀取失敗，以下可能過時" if github.read_failed else
                      "GitHub 尚未讀取" if not github_known else "")
+    prs = (pr_board_rows(pulls, github.verdicts, getattr(github, "ci_heads", None),
+                         ec2, reviewing, github.pending) if github_known else [])
     return WorkBoard(owner, running, queue, blocked, done, github_known, board_known,
                      github_status, board.status, board.age, board.skipped, note,
-                     int(github.window // 3600) if github is not None else 12)
+                     int(github.window // 3600) if github is not None else 12, prs)
 
 
 def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
@@ -4014,7 +4140,8 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         append_header(work.note, "!")
     sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known),
                 ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
-                (f"今天完成（累計 {today}）", work.done, work.github_known))
+                (f"今天完成（累計 {today}）", work.done, work.github_known),
+                ("PR 看板", work.prs, work.github_known))
     for title, items, known in sections:
         append_header(f"── {title} ──", "section")
         if not items:
@@ -4026,6 +4153,10 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
             if isinstance(item, BoardPull):
                 ref = f"PR #{item.number}"
                 rest = f"{item.title}  → {datetime.fromtimestamp(item.merged_at).astimezone():%H:%M}"
+            elif isinstance(item, PrRow):
+                ref = f"PR #{item.number}"
+                rest = (f"審查 {item.review} · EC2 {item.ec2} · Linux {item.linux} · "
+                        f"macOS {item.mac}  → {item.next}（{item.owner}）")
             elif isinstance(item, OwnerPending):
                 ref = item.reference
                 rest = f"{item.summary or item.status}  → 你"
@@ -5459,10 +5590,12 @@ REMOTE_TEST_SKEW = 300.0      # receipts carry the EC2 clock; file times the loc
 REMOTE_TEST_RELIST = 60.0     # seconds a task-file listing is reused while the folder is unchanged
 REMOTE_TEST_SCAN = 4096       # folder entries looked at per listing, at most
 REMOTE_TEST_BUDGET = 4 << 20  # bytes of task files read per office rebuild, in total
+EC2_HEAD_BUDGET = 4 << 20
 REMOTE_TEST_CAPPED = "task 目錄超過上限，結果可能不是最新"
 REMOTE_TEST_OVER_BUDGET = "task 紀錄超過讀取上限，結果可能不是最新"
 _remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths, capped)
 _remote_test_parsed: dict = {}    # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
+_ec2_parsed: dict = {}
 
 
 def _remote_test_paths(root: str) -> tuple[list, bool]:
@@ -5622,7 +5755,8 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
             budget -= len(raw or b"")
             record = _remote_test_json(raw) if raw else None
             entry = extract(record)
-            record_entries = (entry,) if entry is not None else ()
+            record_entries = (tuple(entry) if type(entry) in (tuple, list)
+                              else (entry,) if entry is not None else ())
         kept[path] = (key, record_entries)
         entries.extend(record_entries)
     if root not in cache and len(cache) >= 8:
@@ -5630,6 +5764,46 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
     cache[root] = kept
     problem = REMOTE_TEST_CAPPED if capped else REMOTE_TEST_OVER_BUDGET if short else ""
     return entries, problem
+
+
+def _ec2_head_entry(record) -> tuple:
+    """Extract valid SHA-bound remote-test results from one Task."""
+    if type(record) is not dict:
+        return ()
+    found = []
+    receipts = record.get("remote_test_receipts")
+    outcomes = record.get("remote_test_outcomes")
+    for item in receipts if type(receipts) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        sha = item.get("source_sha") if type(item) is dict else None
+        when = _remote_test_time(item.get("ended_at")) if type(item) is dict else 0
+        if (type(result) is str and result in REMOTE_TEST_RESULTS
+                and type(sha) is str and HEX_SHA.fullmatch(sha) and when > 0):
+            found.append((sha[:7].lower(), when, result))
+    for item in outcomes if type(outcomes) is list else []:
+        result = item.get("result") if type(item) is dict else None
+        sha = item.get("sha") if type(item) is dict else None
+        when = _remote_test_time(item.get("at")) if type(item) is dict else 0
+        if (type(result) is str and result in REMOTE_TEST_OUTCOMES
+                and type(sha) is str and HEX_SHA.fullmatch(sha) and when > 0):
+            found.append((sha[:7].lower(), when, result))
+    return tuple(found)
+
+
+def ec2_head_results(root: str | None = None) -> tuple[dict, str]:
+    """Newest local remote-test result per head SHA, read with bounded caching."""
+    root = LLMTOOL_TASKS if root is None else root
+    entries, problem = _bounded_task_entries(root, _ec2_parsed,
+                                             EC2_HEAD_BUDGET, _ec2_head_entry)
+    if not problem:
+        paths, _ = _remote_test_paths(root)
+        if len(paths) >= REMOTE_TEST_FILES:
+            problem = "task 僅讀最近 32 筆，未見結果未確認"
+    latest = {}
+    for sha, when, word in entries:
+        if when > latest.get(sha, (0, ""))[0]:
+            latest[sha] = (when, word)
+    return ({sha: word for sha, (_, word) in latest.items()}, problem)
 
 
 def pm_last_dispatch(now: float, root: str | None = None) -> tuple[DispatchRecord | None, str]:
@@ -7027,7 +7201,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
                                  scope=github.scope if github is not None else "",
                                  top=office_top(github, mon.quota, time.time()))))
     print("\n".join(line for line, _ in board_view(
-        work_board(github, mon.pm_board, time.time()))))
+        work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
+                   reviewing=pr_reviewing(mon.office)))))
     print()
     print("\n".join(table_lines(mon.processes)))
     print("\n".join(["", *d6_lines(mon.d6), "", *record_lines(mon.records), "",
@@ -7220,7 +7395,9 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         hint = ("Tab/1-6: log·tasks·processes·Activity·辦公室·白板  ↑↓ PgUp/PgDn: scroll  "
                 f"a: {'摺疊' if expanded else '展開'}灰色  q: quit")
     elif view == "board":
-        lines = board_view(work_board(mon.github, mon.pm_board, time.time()), w - 1)
+        lines = board_view(work_board(mon.github, mon.pm_board, time.time(),
+                                      ec2=mon.ec2_heads,
+                                      reviewing=pr_reviewing(mon.office)), w - 1)
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD,
                   "!": colors.get("!", 0) | curses.A_BOLD,
