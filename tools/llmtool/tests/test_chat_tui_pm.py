@@ -169,6 +169,35 @@ class PMUsageStatusTests(unittest.TestCase):
 
 
 class PMLogsTests(unittest.TestCase):
+    def test_log_lines_screens_and_bounds_tool_names(self):
+        turns = [
+            {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+             "tool_names": ["/bin/echo hi"]},
+            {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+             "tool_names": ["a" + chr(10) + "b"]},
+            {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+             "tool_names": ["a" * 61]},
+        ]
+        for turn in turns[:2]:
+            rows = chat_tui_pm.log_lines([turn])
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0].endswith("Tool"))
+        rows = chat_tui_pm.log_lines([turns[2]])
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].endswith("a" * 59 + "…"))
+
+    def test_log_lines_screens_status_and_reason_with_safe_code(self):
+        rows = chat_tui_pm.log_lines([
+            {"status": "plain status words"},
+            {"status": 7},
+            {"status": "COMPLETED", "reason": "plain reason words"},
+            {"status": "COMPLETED", "reason": 7},
+        ])
+        self.assertEqual(rows[0].split("｜")[1], "UNKNOWN")
+        self.assertEqual(rows[1].split("｜")[1], "UNKNOWN")
+        self.assertEqual(rows[2].split("｜")[-1], "UNKNOWN")
+        self.assertEqual(rows[3].split("｜")[-1], "UNKNOWN")
+
     def test_log_lines_statuses_origin_tools_reason_and_invalid_rows(self):
         with patch.object(chat_tui_pm, "safe_name",
                           side_effect=lambda name: "[withheld]" if name == "stubbed-tool" else name):
@@ -188,6 +217,11 @@ class PMLogsTests(unittest.TestCase):
         self.assertEqual(rows[3].split("｜")[1:], ["進行中", "前景", "無工具"])
         self.assertEqual(rows[4].split("｜")[1:], ["OTHER", "前景", "無工具"])
         self.assertEqual(len(rows), 5)
+
+    def test_tool_label_keeps_existing_description_and_name_behavior(self):
+        self.assertEqual(chat_tui_pm.tool_label({"name": "Read", "description": "Read docs/a.md"}),
+                         "Read docs/a.md")
+        self.assertEqual(chat_tui_pm.tool_label({"name": "/bin/echo hi"}), "Tool")
 
     def test_log_lines_never_shows_message_or_tool_input_fields(self):
         row = {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",

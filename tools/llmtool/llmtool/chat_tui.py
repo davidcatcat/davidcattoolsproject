@@ -91,7 +91,7 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         no SESSION is given; "pm>" prompt, Enter sends
   /pm disconnect        End the connection and return to chat mode
   /pm history           Show the turns pm_runtime stored for this PM session
-  /logs                Show recent PM turns
+  /logs                Show the turns pm_runtime stored for this PM session
   /pm                   Show the connected PM and its state
   Enter (during a turn) Queue the draft (已排入佇列（第 N 則）): queued messages are sent one turn
                         at a time, in order, each after the previous turn COMPLETED; a
@@ -2614,12 +2614,12 @@ class ChatTUI:
             try:
                 turns = self.pm_api.read_recent_turns(
                     self.pm_target[0], chat_tui_pm.LOGS_SHOWN)
+                rows = chat_tui_pm.log_lines(turns)
             except Exception:
                 self.append("PM 紀錄：UNKNOWN（PM 歷史無法讀取）")
                 return
-            rows = chat_tui_pm.log_lines(turns)
             if not rows:
-                self.append("PM 紀錄：尚無回合.")
+                self.append("PM 紀錄：尚無回合")
                 return
             self.append("PM 紀錄（最近 %d 回合）\n" % len(rows)
                         + "\n".join("  " + row for row in rows)

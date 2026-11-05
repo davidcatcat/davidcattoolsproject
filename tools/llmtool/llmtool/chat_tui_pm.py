@@ -380,6 +380,15 @@ def safe_name(name):
     return "[withheld]" if _emitted_sensitive(name) else name
 
 
+def display_tool_name(raw_name):
+    """Return a safe, bounded tool name for tool summaries and /logs."""
+    name = safe_name(raw_name)
+    if (not isinstance(raw_name, str) or '/' in raw_name
+            or not all(char.isprintable() for char in raw_name)):
+        return "Tool"
+    return name if len(name) <= 60 else name[:59] + "…"
+
+
 def safe_code(value):
     """A typed code (error, status, reason) shown only when it has the code shape."""
     return value if type(value) is str and _CODE.fullmatch(value) else UNKNOWN
@@ -411,10 +420,7 @@ def tool_label(event):
     from .tui_markdown import display_width
     from . import pm_runtime
     raw_name = event.get("name")
-    name = safe_name(raw_name)
-    if (not isinstance(raw_name, str) or '/' in raw_name
-            or not all(char.isprintable() for char in raw_name)):
-        name = "Tool"
+    name = display_tool_name(raw_name)
     text = event.get("description")
     if type(text) is not str:
         return name
@@ -457,7 +463,7 @@ def log_lines(turns, now=None):
         status = safe_code(turn.get("status"))
         origin = "背景" if turn.get("origin") == "background" else "前景"
         names = turn.get("tool_names")
-        tools = ",".join(safe_name(name) for name in names) if type(names) is list else ""
+        tools = ",".join(display_tool_name(name) for name in names) if type(names) is list else ""
         if not tools:
             tools = "無工具"
         fields = [_local_time(turn.get("started_at"), now),

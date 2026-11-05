@@ -5527,7 +5527,17 @@ class PMConversationTests(BoundedPMTest):
                             lambda ui: setattr(ui.pm_api, 'read_recent_turns',
                                                Mock(return_value=[])),
                             '/logs\r'])
-        self.assertEqual(ui.conversation.text.splitlines()[-1], 'PM 紀錄：尚無回合.')
+        self.assertEqual(ui.conversation.text.splitlines()[-1], 'PM 紀錄：尚無回合')
+
+    def test_logs_formatter_failure_shows_unknown(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns',
+                                               Mock(return_value=[])),
+                            lambda ui: patch.object(chat_tui_pm, 'log_lines',
+                                                    side_effect=RuntimeError('plain failure')).start(),
+                            '/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         'PM 紀錄：UNKNOWN（PM 歷史無法讀取）')
 
     def test_logs_shows_oldest_first_and_requests_at_most_twenty(self):
         turns = [
