@@ -697,6 +697,12 @@ class TaskSubmissionCLITests(unittest.TestCase):
         })
         parsed = parser_for_cli().parse_args(['task', 'record-pm', '--stdin-json'])
         self.assertEqual(parsed.action, 'record-pm')
+        claude_binding = parser_for_cli().parse_args([
+            'task', 'claude-bind', 'a' * 32, '--executor-task', 'executor-task-1',
+            '--owner-ref', 'https://github.com/davidcatcat/davidcattoolsproject/'
+            'issues/289#issuecomment-1'])
+        self.assertEqual((claude_binding.action, claude_binding.executor_task),
+                         ('claude-bind', 'executor-task-1'))
         output = io.StringIO()
         with patch.dict(os.environ, {'HOME': str(self.home)}), redirect_stdout(output):
             self.assertEqual(main(['task', 'show', saved['task_id']]), 0)
@@ -881,7 +887,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
     def test_record_pm_accepts_codex_low_risk_and_refuses_other_routes_or_risk(self):
         for route, risk, expected in (
                 ('codex', 'LOW', True), ('opencode', 'LOW', True),
-                ('company-gw', 'LOW', True), ('none', 'LOW', False),
+                ('company-gw', 'LOW', True), ('claude', 'LOW', True),
+                ('none', 'LOW', False),
                 ('codex', 'OTHER', False)):
             with self.subTest(route=route, risk=risk):
                 response = json.dumps({
@@ -907,6 +914,134 @@ class TaskSubmissionCLITests(unittest.TestCase):
                         run_task_record_pm(Namespace(stdin_json=True), store=store,
                                            input_stream=io.StringIO(envelope))
                     self.assertFalse(store.root.exists())
+
+    def test_claude_task_binding_and_result_use_registered_d6_authority(self):
+        from types import SimpleNamespace
+        from llmtool.review_dispatch import _preflight, _select_reviewer
+
+        owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                     'issues/289#issuecomment-6641326482')
+        d6_task_id = '14ffbf93461373873bb32fbdb83924a0'
+        policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
+        policy['workers']['claude-developer']['owner_assignments'] = [{
+            'task_id': d6_task_id, 'owner_assignment_ref': owner_ref}]
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        store = TaskStore(Path(self.temp.name).resolve() / 'claude-bind-store')
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bind the existing Claude D6.',
+            'developer_assignment': {
+                'route': 'claude', 'risk': 'LOW', 'goal': 'Complete the assigned task.',
+                'acceptance': ['The result is recorded.'],
+            },
+        })
+        envelope = json.dumps({'request': 'Implement the bounded change.',
+                               'response': response})
+        task = run_task_record_pm(Namespace(stdin_json=True), store=store,
+                                  input_stream=io.StringIO(envelope), return_record=True)
+        (self.executor_root / 'changed.py').write_text('CLAUDE_RESULT = True\n')
+        subprocess.run(['/usr/bin/git', 'add', 'changed.py'], cwd=self.executor_root,
+                       check=True, capture_output=True)
+        subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture Claude result'],
+                       cwd=self.executor_root, check=True, capture_output=True)
+        result_head = subprocess.check_output(
+            ['/usr/bin/git', 'rev-parse', 'HEAD'], cwd=self.executor_root,
+            text=True).strip()
+        registration = SimpleNamespace(
+            task_id=d6_task_id, common_dir=self.executor_common_dir,
+            root=str(self.executor_root), branch='feat/test-executor',
+            source_sha=self.executor_head, result_sha=result_head)
+        with patch.object(submission_cli.task_completion, 'read_d6_registration',
+                          return_value=registration):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(submission_cli.run_task_claude_bind(Namespace(
+                    task_id=task['task_id'], executor_task=d6_task_id,
+                    owner_ref=owner_ref, common_dir=self.executor_common_dir),
+                    store=store), 0)
+            bound = store.get(task['task_id'])
+            self.assertEqual(bound['developer']['provider_profile'], 'claude')
+            self.assertEqual(bound['developer']['executor_task_id'], d6_task_id)
+            self.assertEqual(bound['developer']['source_sha'], self.executor_head)
+            self.assertEqual(bound['developer']['write_paths'], ['changed.py'])
+            self.assertEqual(bound['dispatch_audit'][-1]['worker_key'], 'claude-developer')
+            self.assertEqual(bound['dispatch_audit'][-1]['reason_code'],
+                             'OWNER_ASSIGNMENT_MATCHED')
+            self.assertEqual(bound['completion']['executor_task_id'], d6_task_id)
+            self.assertEqual(bound['completion']['evidence']['source_sha'],
+                             self.executor_head)
+            self.assertEqual(_select_reviewer(bound), 'codex-reviewer')
+            with self.assertRaises(LLMToolError):
+                submission_cli.run_task_claude_bind(Namespace(
+                    task_id=task['task_id'], executor_task=d6_task_id,
+                    owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+
+            with self.assertRaises(LLMToolError):
+                submission_cli.run_task_claude_result(Namespace(
+                    task_id=task['task_id'], executor_task='a' * 32,
+                    head=result_head, pm_session=task['pm_session_id']), store=store)
+            with redirect_stdout(io.StringIO()):
+                submission_cli.run_task_claude_result(Namespace(
+                    task_id=task['task_id'], executor_task=d6_task_id,
+                    head=result_head, pm_session=task['pm_session_id']), store=store)
+            completed = store.get(task['task_id'])
+            self.assertEqual(completed['developer']['state'], 'DEVELOPER_RESPONDED')
+            self.assertEqual(completed['developer']['claude_result']['executor_task_id'],
+                             d6_task_id)
+
+            with self.assertRaises(LLMToolError):
+                submission_cli.run_task_remote_test(Namespace(
+                    task_id=task['task_id'], executor_task=d6_task_id,
+                    sha=result_head, ref=None, module=[], pr=None), store=store)
+            with self.assertRaises(LLMToolError) as same_family:
+                _preflight(store, task['task_id'], d6_task_id, 1, 1,
+                           reviewer='claude-reviewer')
+            self.assertEqual(same_family.exception.review_dispatch_code,
+                             'REVIEWER_SAME_FAMILY')
+
+    def test_claude_binding_refuses_wrong_d6_missing_ref_and_paused_worker(self):
+        from types import SimpleNamespace
+
+        owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
+                     'issues/289#issuecomment-6641326482')
+        authorized_d6 = '14ffbf93461373873bb32fbdb83924a0'
+        policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
+        policy['workers']['claude-developer']['owner_assignments'] = [{
+            'task_id': authorized_d6, 'owner_assignment_ref': owner_ref}]
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        store = TaskStore(Path(self.temp.name).resolve() / 'claude-refusal-store')
+        response = json.dumps({
+            'schema_version': 1, 'summary': 'Bind an existing Claude D6.',
+            'developer_assignment': {'route': 'claude', 'risk': 'LOW',
+                'goal': 'Complete the task.', 'acceptance': ['Result is recorded.']}})
+        task = run_task_record_pm(Namespace(stdin_json=True), store=store,
+            input_stream=io.StringIO(json.dumps({'request': 'Bounded request.',
+                                                'response': response})),
+            return_record=True)
+
+        def attempt(d6_id, ref, worker_state='OWNER_ASSIGNMENT_ONLY'):
+            registration = SimpleNamespace(task_id=d6_id,
+                common_dir=self.executor_common_dir, root=str(self.executor_root),
+                branch='feat/test-executor', source_sha=self.executor_head,
+                result_sha=self.executor_head)
+            updated_policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
+            updated_policy['workers']['claude-developer']['dispatch'] = worker_state
+            self.policy_path.write_text(json.dumps(updated_policy), encoding='utf-8')
+            with patch.object(submission_cli.task_completion, 'read_d6_registration',
+                              return_value=registration), \
+                    patch.object(submission_cli.task_completion, '_git',
+                                 return_value=b'sample.py\x00'):
+                return submission_cli.run_task_claude_bind(Namespace(
+                    task_id=task['task_id'], executor_task=d6_id, owner_ref=ref,
+                    common_dir=self.executor_common_dir), store=store)
+
+        for d6_id, ref, state in (
+                ('a' * 32, owner_ref, 'OWNER_ASSIGNMENT_ONLY'),
+                (authorized_d6, None, 'OWNER_ASSIGNMENT_ONLY'),
+                (authorized_d6, owner_ref, 'PAUSED')):
+            with self.subTest(d6_id=d6_id, ref=ref, state=state), \
+                    self.assertRaises(worker_dispatch.WorkerDispatchDenied):
+                attempt(d6_id, ref, state)
+        self.assertIsNone(store.get(task['task_id'])['developer'])
 
     def _pm_task_with_assignment(self):
         acceptance = ['new test passes']

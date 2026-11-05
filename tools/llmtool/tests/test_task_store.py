@@ -453,6 +453,7 @@ class TaskStoreTests(unittest.TestCase):
         developer['owner_assignment_ref'] = (
             'https://github.com/davidcatcat/davidcattoolsproject/issues/289'
             '#issuecomment-1')
+        developer['executor_task_id'] = 'executor-1'
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             self.store.compare_and_update(
                 task['task_id'], expected={'developer': None}, developer=developer)
@@ -485,6 +486,10 @@ class TaskStoreTests(unittest.TestCase):
             self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,
                 executor_task_id='executor-1', head_sha='bad')
+        with self.assertRaises(LLMToolError):
+            self.store.record_claude_result(
+                task['task_id'], pm_session_id=pm_session,
+                executor_task_id='different-executor', head_sha='a' * 40)
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             saved = self.store.record_claude_result(
                 task['task_id'], pm_session_id=pm_session,

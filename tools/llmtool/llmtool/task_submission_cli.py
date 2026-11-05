@@ -304,7 +304,7 @@ def _pm_assignment(response):
             return None
         if (type(assignment) is not dict or
                 set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
-                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
+                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
                 type(assignment['acceptance']) is not list or
@@ -327,7 +327,7 @@ def _pm_assignment_limit_error(response):
                 type(value.get('schema_version')) is not int or
                 type(assignment) is not dict or
                 set(assignment) != {'route', 'risk', 'goal', 'acceptance'} or
-                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
+                assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                 assignment['risk'] not in ('LOW', 'OTHER') or
                 type(assignment['goal']) is not str or
                 type(assignment['acceptance']) is not list):
@@ -412,7 +412,7 @@ def _read_pm_record_input(stream=None):
     except (ValueError, TypeError):
         raise LLMToolError('PM response must be one strict JSON object') from None
     assignment = _pm_assignment(response)
-    if (assignment is None or assignment['route'] not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy') or
+    if (assignment is None or assignment['route'] not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy', 'claude') or
             assignment['risk'] != 'LOW'):
         limit_error = _pm_assignment_limit_error(response)
         if limit_error is not None:
@@ -739,6 +739,15 @@ def add_task_submission_parsers(actions):
                         help='Owner assignment comment URL for OWNER_ASSIGNMENT_ONLY workers')
     assign.add_argument('--expires-in', type=int, default=600,
                         help='seconds until an unclaimed assignment expires (1-900, default 600)')
+    claude_bind = actions.add_parser(
+        'claude-bind', help='Bind an existing authorized Claude Developer D6 without launching a provider')
+    claude_bind.add_argument('task_id', help='existing durable Task ID')
+    claude_bind.add_argument('--executor-task', required=True,
+                             help='registered ACTIVE Claude Developer D6 task id')
+    claude_bind.add_argument('--owner-ref', required=True,
+                             help='Owner assignment comment URL matching worker-dispatch.json')
+    claude_bind.add_argument('--common-dir',
+                             help='Git common dir holding the D6 registry (default: from cwd)')
     assignments = actions.add_parser(
         'assignments', help='List live Developer assignment ids for one worker')
     assignments.add_argument('--worker', required=True, help='worker-dispatch key')
@@ -970,7 +979,7 @@ def run_task_review_prompt(args, *, store=None):
             type(pm_assignment.get('schema_version')) is not int or
             pm_assignment['schema_version'] != 1 or
             pm_assignment.get('route') not in ('company-gw', 'gw-agent', 'codex',
-                                                'opencode', 'agy', 'none') or
+                                                'opencode', 'agy', 'claude', 'none') or
             pm_assignment.get('risk') not in ('LOW', 'OTHER') or
             type(pm_assignment.get('goal')) is not str or
             type(pm_assignment.get('acceptance')) is not list or
@@ -1154,6 +1163,87 @@ def run_task_claude_result(args, *, store=None, stdout=None):
         args.task_id, pm_session_id=pm_session_id,
         executor_task_id=args.executor_task, head_sha=args.head)
     _print(_task_view(result), stdout=stdout)
+    return 0
+
+
+def run_task_claude_bind(args, *, store=None, stdout=None):
+    """Bind an existing, registered Claude D6 to an eligible Task without a provider call."""
+    store = TaskStore() if store is None else store
+    task = store.get(args.task_id)
+    assignment = task.get('pm_assignment')
+    if (type(assignment) is not dict or assignment.get('route') != 'claude' or
+            assignment.get('risk') != 'LOW' or task.get('state') != 'PM_RESPONDED' or
+            type(task.get('pm_provenance')) is not dict or
+            task['pm_provenance'].get('source') != 'ACTIVE_PM_RUNTIME' or
+            task['pm_provenance'].get('provider_invoked') is not False):
+        raise LLMToolError('Claude binding requires a low-risk active-PM Claude Task')
+    common_dir = getattr(args, 'common_dir', None)
+    if common_dir is None:
+        common_dir = task_completion.collect_git_snapshot(os.getcwd()).common_dir
+    registration = task_completion.read_d6_registration(
+        args.executor_task, common_dir, allowed_states=('ACTIVE',))
+    snapshot = task_completion.collect_git_snapshot(registration.root)
+    if (snapshot.root != registration.root or snapshot.common_dir != registration.common_dir or
+            snapshot.branch != registration.branch or snapshot.head != registration.result_sha or
+            not snapshot.clean):
+        raise LLMToolError('Claude D6 binding requires a clean registered D6 HEAD')
+    changed_raw = task_completion._git(registration.root, (
+        'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv', '--no-renames',
+        registration.source_sha, registration.result_sha, '--'), limit=1024 * 1024)
+    changed_paths = sorted(set(path for path in
+        changed_raw.decode('utf-8', 'strict').split('\x00') if path))
+    if not changed_paths or len(changed_paths) > 32:
+        raise LLMToolError('Claude D6 binding requires a bounded committed result diff')
+    decision = worker_dispatch.evaluate('claude-developer', args.owner_ref,
+                                         registration.task_id)
+    if not decision.allowed:
+        raise worker_dispatch.WorkerDispatchDenied(decision.reason_code)
+    current = task.get('developer')
+    if current is not None:
+        raise LLMToolError('Task already has a Developer binding')
+    request = task.get('request') or ''
+    context = '\n'.join((request, assignment['goal'], *assignment['acceptance']))
+    context_bytes = len(context.encode('utf-8'))
+    if context_bytes > 64 * 1024:
+        raise LLMToolError('Claude binding context exceeds the supported Task limit')
+    developer = {
+        'assignment_id': new_id(), 'selection_source': 'PM',
+        'state': 'DEVELOPER_PENDING', 'provider_profile': 'claude',
+        'provider_type': None, 'model': None,
+        'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
+        'session_id': 'dev-' + new_id(), 'source_sha': registration.source_sha,
+        'source_sha_binding': 'D6_REGISTRY_OBSERVED',
+        'read_paths': changed_paths, 'write_paths': changed_paths,
+        'acceptance': list(assignment['acceptance']),
+        'context_sha256': hashlib.sha256(context.encode('utf-8')).hexdigest(),
+        'egress_basis': 'Existing Owner-authorized Claude Developer D6 bound to this Task.',
+        'input_bytes': max(1, context_bytes), 'max_tokens': None,
+        'artifact_format': 'unified_diff', 'artifact': None, 'artifact_sha256': None,
+        'usage': None, 'error_code': None, 'created_at': _now(),
+        'owner_assignment_ref': args.owner_ref,
+        'executor_task_id': registration.task_id,
+    }
+    completion = {
+        'state': 'WAITING_EXECUTOR', 'executor_task_id': registration.task_id,
+        'reviewer_task_id': None,
+        'evidence': {
+            'task_id': task['task_id'], 'run_id': task['run_id'],
+            'contract_digest': task['task_binding']['contract_digest'],
+            'execution_mode': 'DIRECT_D6', 'root': registration.root,
+            'common_dir': registration.common_dir, 'branch': registration.branch,
+            'source_sha': registration.source_sha,
+            'executor_identity': registration.trusted_agent_id,
+            'executor_session_ref': registration.session_ref,
+            'executor_native_session_id': registration.native_session_id,
+            'executor_native_session': registration.native_session_id,
+        },
+        'missing_gates': [], 'pm_dispatch': 'NOT_STARTED', 'pm_response': None,
+        'pm_recommendation': None, 'pm_usage': None, 'pm_error_code': None,
+    }
+    saved = store.compare_and_update(
+        args.task_id, expected={'developer': None, 'completion': None},
+        developer=developer, completion=completion)
+    _print(_task_view(saved), stdout=stdout)
     return 0
 
 

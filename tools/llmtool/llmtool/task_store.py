@@ -1243,7 +1243,7 @@ def _validate(record):
         if assignment is not None:
             if (type(assignment) is not dict or set(assignment) != _PM_ASSIGNMENT_FIELDS or
                     type(assignment['schema_version']) is not int or assignment['schema_version'] != 1 or
-                    assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
+                    assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
                     len(assignment['goal'].encode('utf-8')) > 512 or
@@ -1291,7 +1291,7 @@ def _validate(record):
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
                     type(assignment) is not dict or
-                    assignment.get('route') not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy') or
+                    assignment.get('route') not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy', 'claude') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {
@@ -2649,7 +2649,8 @@ class TaskStore:
                 _fail('CLAUDE_RESULT_BINDING_MISMATCH')
             if (type(developer) is not dict or
                     developer.get('provider_profile') != 'claude' or
-                    developer.get('state') != 'DEVELOPER_PENDING'):
+                    developer.get('state') != 'DEVELOPER_PENDING' or
+                    developer.get('executor_task_id') != executor_task_id):
                 _fail('CLAUDE_RESULT_STATE_INVALID')
             responded = dict(developer)
             responded.update(state='DEVELOPER_RESPONDED', claude_result={
