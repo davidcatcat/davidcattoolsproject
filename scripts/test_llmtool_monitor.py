@@ -2484,6 +2484,129 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("wp-1  執行中  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
+    def test_d6_phase_uses_running_rows_but_keeps_finished_rows_named(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        tasks = {
+            "working-open": ("ACTIVE", "branch-working-open", mon.WORKING),
+            "working-merged": ("ACTIVE", "branch-working-merged", mon.WORKING),
+            "stalled-open": ("ACTIVE", "branch-stalled-open", mon.STALLED),
+            "attention-open": ("ACTIVE", "branch-attention-open", mon.ATTENTION),
+            "done-merged": ("ACTIVE", "branch-done-merged", mon.DONE),
+            "idle-merged": ("ACTIVE", "branch-idle-merged", mon.IDLE),
+            "pr941-claude-rv2-0aa754d": ("ACTIVE", "review/941", mon.IDLE),
+            "done-open": ("ACTIVE", "branch-done-open", mon.DONE),
+            "repair-hd2-abcdef0": ("ACTIVE", "branch-debug", mon.DONE),
+            "idle-unknown": ("REPAIR", "branch-unknown", mon.IDLE),
+        }
+        rows = []
+        prs = {}
+        for task_id, (record_state, branch, row_state) in tasks.items():
+            self._register(task_id, str(self.task), state=record_state, branch=branch,
+                           last_verified_at=stamp,
+                           trusted_agent_id=mon.CODEX_HIGH_DEBUG_AGENT if "-hd" in task_id else "claude-ui-agent")
+            rows.append(mon.OfficeRow(f"session {task_id}", row_state, "fixture", 1.0, 1,
+                                      task=f"task {task_id}"))
+            if task_id == "working-merged" or task_id in ("done-merged", "idle-merged"):
+                prs[branch] = (901, "MERGED")
+            elif task_id.startswith("pr941-"):
+                prs[branch] = (941, "OPEN")
+            elif task_id != "idle-unknown":
+                prs[branch] = (902, "OPEN")
+
+        verdicts = {"941": [(self.NOW - 30, "REVIEW_PASS", ["0aa754d"])]}
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, verdicts)
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in tasks}
+        for task_id in ("working-open", "working-merged", "stalled-open", "attention-open"):
+            self.assertIn("執行中", by_task[task_id])
+        self.assertIn("已完成，待收尾", by_task["done-merged"])
+        self.assertIn("已完成，待收尾", by_task["idle-merged"])
+        self.assertIn("session done-merged 完成", by_task["done-merged"])
+        self.assertIn("session idle-merged 待命", by_task["idle-merged"])
+        self.assertIn("審查已結束，待收尾", by_task["pr941-claude-rv2-0aa754d"])
+        self.assertIn("等審查或 CI", by_task["done-open"])
+        self.assertIn("診斷沒在跑，待收尾", by_task["repair-hd2-abcdef0"])
+
+        no_github_lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
+        unknown = next(line for line in no_github_lines if "idle-unknown" in line)
+        self.assertIn("修復中", unknown)
+
+    def test_d6_running_phase_uses_live_main_subagent_and_codex_family(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        cases = {
+            "subagent-live": "subagent-live-branch",
+            "failed-codex": "failed-codex-branch",
+            "pr941-claude-rv2-0aa754d": "review-live-branch",
+            "repair-hd2-abcdef0": "debug-live-branch",
+            "claude-attention": "claude-attention-branch",
+        }
+        for task_id, branch in cases.items():
+            self._register(task_id, str(self.task), state="ACTIVE", branch=branch,
+                           last_verified_at=stamp)
+        rows = [
+            mon.OfficeRow("claude developer", mon.IDLE, "prompt", 10, 10,
+                          key="claude:main.jsonl", task="task subagent-live"),
+            mon.OfficeRow("claude subagent", mon.WORKING, "working", 10, 20,
+                          group="claude:main.jsonl", kind="subagent"),
+            mon.OfficeRow("codex developer", mon.ATTENTION, "failed", 10, 10,
+                          key="codex:failed", task="task failed-codex", exec_result="failed",
+                          alert="Codex turn failed"),
+            mon.OfficeRow("codex reviewer", mon.ATTENTION, "failed", 10, 10,
+                          key="codex:review", task="task pr941-claude-rv2-0aa754d",
+                          exec_result="failed"),
+            mon.OfficeRow("codex debug reviewer", mon.ATTENTION, "failed", 10, 10,
+                          key="codex:debug", task="task repair-hd2-abcdef0",
+                          exec_result="failed"),
+            mon.OfficeRow("claude developer", mon.ATTENTION, "at prompt", 10, 10,
+                          key="claude:attention.jsonl", task="task claude-attention"),
+        ]
+        prs = {
+            cases["pr941-claude-rv2-0aa754d"]: (941, "OPEN"),
+            cases["failed-codex"]: (942, "MERGED"),
+            cases["subagent-live"]: (943, "MERGED"),
+            cases["repair-hd2-abcdef0"]: (944, "MERGED"),
+            cases["claude-attention"]: (945, "MERGED"),
+        }
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in cases}
+        self.assertIn("執行中", by_task["subagent-live"])
+        self.assertIn("已完成，待收尾", by_task["failed-codex"])
+        self.assertIn("⚠ PR #942 已合併", by_task["failed-codex"])
+        self.assertIn("審查沒在跑，查不到結論", by_task["pr941-claude-rv2-0aa754d"])
+        self.assertIn("診斷沒在跑，待收尾", by_task["repair-hd2-abcdef0"])
+        self.assertIn("執行中", by_task["claude-attention"])
+        self.assertTrue(any("⚠" in line and "Codex turn failed" in line
+                            for line in mon.office_lines(rows, expand=True)))
+
+    def test_d6_live_reviewer_and_debug_rows_and_done_row_phases(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        tasks = ("pr942-claude-rv1-1234567", "pr943-claude-rv1-7654321",
+                 "inspect-hd1-abcdef0", "active-empty-prs")
+        for task_id in tasks:
+            self._register(task_id, str(self.task), state="ACTIVE", branch=f"branch/{task_id}",
+                           last_verified_at=stamp)
+        rows = [
+            mon.OfficeRow("claude reviewer", mon.WORKING, "review", 10, 10,
+                          key="claude:review.jsonl", task=f"task {tasks[0]}"),
+            mon.OfficeRow("claude reviewer", mon.DONE, "review finished", 10, 10,
+                          key="claude:done.jsonl", task=f"task {tasks[1]}"),
+            mon.OfficeRow("codex debug reviewer", mon.WORKING, "debug", 10, 10,
+                          key="codex:debug", task=f"task {tasks[2]}"),
+        ]
+        prs = {f"branch/{tasks[0]}": (942, "OPEN"),
+               f"branch/{tasks[1]}": (943, "OPEN"),
+               f"branch/{tasks[2]}": (944, "OPEN")}
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line)
+                   for task_id in tasks[:3]}
+        self.assertIn("執行中", by_task[tasks[0]])
+        self.assertIn("審查沒在跑，查不到結論", by_task[tasks[1]])
+        self.assertIn("執行中", by_task[tasks[2]])
+        done_row = mon.OfficeRow("claude reviewer", mon.DONE, "review finished", 10, 10,
+                                 key="claude:done.jsonl", task=f"task {tasks[3]}")
+        done_lines = mon.d6_task_lines(self.canonical, [done_row], self.NOW, {})
+        done_task_line = next(line for line in done_lines if tasks[3] in line)
+        self.assertIn("進行中", done_task_line)
+
     def test_agent_process_cwd_binds_transcript_free_d6_session(self):
         stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 600))
         self._register("wp-1", str(self.task), last_verified_at=stamp,
@@ -2523,6 +2646,26 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual([(row.state, row.evidence) for row in task_rows],
                          [(mon.IDLE, "claude 紀錄")])
 
+    def test_done_claude_one_shot_does_not_cover_live_d6_process(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        self._register("wp-1", str(self.task), branch="feature/one-shot",
+                       last_verified_at=stamp)
+        self._write(self.claude / "proj" / "one-shot.jsonl", [
+            {"type": "user", "cwd": str(self.task), "entrypoint": "sdk-cli"}], age=300)
+        proc = mon.Process(81, 1, 81, "00:05", "S", "Claude Code CLI",
+                           "sdk-cli claude -p transcript", "")
+        for pr_state in ("OPEN", "MERGED"):
+            with self.subTest(pr_state=pr_state):
+                rows = self.rows([proc], prs={"feature/one-shot": (965, pr_state)},
+                                 cwd_of=lambda pid: str(self.task))
+                lines = mon.d6_task_lines(self.canonical, rows, self.NOW,
+                                          {"feature/one-shot": (965, pr_state)})
+                self.assertIn("執行中", next(line for line in lines if "wp-1" in line))
+        no_process = self.rows(prs={"feature/one-shot": (965, "MERGED")})
+        lines = mon.d6_task_lines(self.canonical, no_process, self.NOW,
+                                  {"feature/one-shot": (965, "MERGED")})
+        self.assertIn("已完成，待收尾", next(line for line in lines if "wp-1" in line))
+
     def test_idle_codex_session_row_covers_its_d6_process(self):
         self._codex("completed", {"id": "T9", "cwd": str(self.task),
                                   "thread_source": "user", "originator": "codex-tui"},
@@ -2545,6 +2688,64 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(len(task_rows), 1)
         self.assertEqual((task_rows[0].state, task_rows[0].evidence),
                          (mon.WORKING, "程序"))
+
+    def test_closed_parent_does_not_promote_unfinished_subagent(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        self._register("wp-1", str(self.task), branch="feature/closed-parent",
+                       last_verified_at=stamp)
+        prs = {"feature/closed-parent": (966, "MERGED")}
+        for child_state in (mon.WORKING, mon.STALLED):
+            for parent_state, expected_running, expected_phase, expected_session in (
+                    (mon.IDLE, {"wp-1"}, "執行中", None),
+                    (mon.CLOSED, set(), "已完成，待收尾", "沒有 session 在跑")):
+                with self.subTest(parent=parent_state, child=child_state):
+                    parent = mon.OfficeRow("claude developer", parent_state, "parent", 1.0, 10,
+                                           key="claude:parent", task="task wp-1")
+                    child = mon.OfficeRow("claude subagent", child_state, "child", 1.0, 10,
+                                          group="claude:parent", kind="subagent")
+                    rows = [parent, child]
+                    self.assertEqual(mon._d6_running_tasks(rows), expected_running)
+                    line = next(line for line in mon.d6_task_lines(
+                        self.canonical, rows, self.NOW, prs) if "wp-1" in line)
+                    self.assertIn(expected_phase, line)
+                    if expected_session:
+                        self.assertIn(expected_session, line)
+
+    def test_done_rows_only_cover_matching_live_claude_one_shot(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        self._register("wp-1", str(self.task), branch="feature/done-coverage",
+                       last_verified_at=stamp)
+        prs = {"feature/done-coverage": (967, "MERGED")}
+
+        def check(rows, processes, process_expected, phase):
+            added = mon._d6_process_rows(processes, rows, self.canonical,
+                                         lambda pid: str(self.task), self.NOW)
+            task_rows = [row for row in added if row.evidence == "程序"]
+            self.assertEqual(len(task_rows), int(process_expected))
+            line = next(line for line in mon.d6_task_lines(
+                self.canonical, rows + task_rows, self.NOW, prs) if "wp-1" in line)
+            self.assertIn(phase, line)
+            for row in rows:
+                self.assertIn(f"{row.name} {row.state}", line)
+            return task_rows
+
+        codex_done = mon.OfficeRow("codex developer", mon.DONE, "finished", 1.0, 10,
+                                   key="codex:done", task="task wp-1")
+        claude_done = mon.OfficeRow("claude developer", mon.DONE, "finished", 1.0, 10,
+                                    key="claude:one-shot", task="task wp-1")
+        codex = mon.Process(80, 1, 80, "00:12", "S", "Codex CLI", "codex", "")
+        claude = mon.Process(81, 1, 81, "00:12", "S", "Claude Code CLI", "claude", "")
+
+        check([codex_done], [claude], False, "已完成，待收尾")
+        check([claude_done], [codex], False, "已完成，待收尾")
+        check([codex_done], [codex], False, "已完成，待收尾")
+        check([claude_done], [claude], True, "執行中")
+
+        check([codex_done, claude_done], [codex, claude], False, "已完成，待收尾")
+
+        # The covered Codex candidate must not mark the task seen before Claude is considered.
+        task_rows = check([claude_done], [codex, claude], True, "執行中")
+        self.assertEqual(task_rows[0].name, "claude")
 
     def test_d6_process_role_comes_from_registered_agent_id(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-reviewer-agent")

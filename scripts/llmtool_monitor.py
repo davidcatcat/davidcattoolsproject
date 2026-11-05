@@ -2689,6 +2689,7 @@ def d6_task_lines(canonical: str, office: list, now: float,
     for row in office:
         if row.task.startswith("task ") and row.state != CLOSED:
             live.setdefault(row.task[5:], []).append(f"{row.name} {row.state}")
+    running = _d6_running_tasks(office)
     # A recorded time in the future would pin a task on top: use the write time.
     stamped = ((task_id, state, agent, verified if verified <= now + 300 else written, branch)
                for task_id, (state, agent, verified, written, branch) in details.items())
@@ -2703,12 +2704,12 @@ def d6_task_lines(canonical: str, office: list, now: float,
         pr_state = prs.get(branch, (None, ""))[1] if branch and prs else ""
         reviewer_done = False
         match = _review_task(task_id)
-        if match and not live.get(task_id):
+        if match and task_id not in running:
             reviewer_done = any(match[1].lower() in ids
                                 for _, _, ids in (verdicts or {}).get(match[0], []))
-        if not live.get(task_id) and not prs:
+        if task_id not in running and not prs:
             phase = D6_STATES.get(state, state)
-        elif match and not live.get(task_id):
+        elif match and task_id not in running:
             reviewer_pr = pr_numbers.get(int(match[0]), "")
             if reviewer_done:
                 phase = "審查已結束，待收尾"
@@ -2716,10 +2717,10 @@ def d6_task_lines(canonical: str, office: list, now: float,
                 phase = "已完成，待收尾"
             else:
                 phase = "審查沒在跑，查不到結論"
-        elif not live.get(task_id) and CODEX_HIGH_DEBUG_TASK.search(task_id):
+        elif task_id not in running and CODEX_HIGH_DEBUG_TASK.search(task_id):
             phase = "診斷沒在跑，待收尾"
         else:
-            phase = d6_phase(state, bool(live.get(task_id)), pr_state, reviewer_done)
+            phase = d6_phase(state, task_id in running, pr_state, reviewer_done)
         note = f"  ⚠ PR #{done[0]} {PR_DONE_WORDS[done[1]]}，登記還是{D6_STATES.get(state, state)}" if done else ""
         lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
                      f"{phase}  →  {who}  （{agent or '未綁定 agent'}）{note}")
@@ -2729,6 +2730,22 @@ def d6_task_lines(canonical: str, office: list, now: float,
         lines.append(D6_STALE_HEAD + f"{len(older)} 筆較舊的 D6 登記還是進行中，但 PR 已合併或關閉："
                      + "、".join(older[:6]) + ("…" if len(older) > 6 else ""))
     return lines
+
+
+def _d6_running_tasks(office: list) -> set[str]:
+    """Return D6 tasks with live work, based on row family and state."""
+    running = {row.task[5:] for row in office
+               if row.task.startswith("task ")
+               and (row.state in (WORKING, STALLED)
+                    or row.state == ATTENTION and not row.key.startswith("codex:"))}
+    # Claude subagent rows carry no task; their parent session supplies it.
+    running_keys = {row.group for row in office
+                    if row.kind == "subagent" and row.group
+                    and row.state in (WORKING, STALLED)}
+    running.update(row.task[5:] for row in office
+                   if row.task.startswith("task ") and row.state != CLOSED
+                   and row.key in running_keys)
+    return running
 
 
 def _review_task(task_id: str) -> tuple[str, str] | None:
@@ -6367,9 +6384,11 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
                     cwd_of=process_cwd, now: float | None = None) -> list[OfficeRow]:
     """Show a live agent CLI in its registered D6 task even without a transcript."""
     now = time.time() if now is None else now
-    covered = {row.task[5:] for row in rows
-               if row.task.startswith("task ") and row.state != CLOSED}
-    seen = set(covered)
+    covered = {}
+    for row in rows:
+        if row.task.startswith("task ") and row.state != CLOSED:
+            covered.setdefault(row.task[5:], []).append(row)
+    seen = set()
     out = []
     for proc in sorted(processes, key=lambda item: item.pid):
         base_role = proc.role.removesuffix(" (node launcher)")
@@ -6384,6 +6403,10 @@ def _d6_process_rows(processes: list[Process], rows: list[OfficeRow], canonical:
         cwd = cwd_of(proc.pid)
         place = _place(cwd, canonical)
         if not place or place[0] != "task" or place[1] in seen:
+            continue
+        if any(not (family == "claude" and row.state == DONE and row.key.startswith("claude:"))
+               for row in covered.get(place[1], ())):
+            # At this revision a DONE claude: session row is a one-shot, and only a Claude process can outlive its inactivity-based DONE state.
             continue
         registered = registered_tasks(canonical).get(place[1])
         if not registered or os.path.realpath(cwd) != registered[0]:
