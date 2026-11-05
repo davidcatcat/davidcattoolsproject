@@ -1243,7 +1243,7 @@ def _validate(record):
         if assignment is not None:
             if (type(assignment) is not dict or set(assignment) != _PM_ASSIGNMENT_FIELDS or
                     type(assignment['schema_version']) is not int or assignment['schema_version'] != 1 or
-                    assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'none') or
+                    assignment['route'] not in ('company-gw', 'gw-agent', 'codex', 'opencode', 'agy', 'claude', 'none') or
                     assignment['risk'] not in ('LOW', 'OTHER') or
                     type(assignment['goal']) is not str or not assignment['goal'] or
                     len(assignment['goal'].encode('utf-8')) > 512 or
@@ -1291,7 +1291,7 @@ def _validate(record):
                     record['request_sha256'] is None or record['usage'] is not None or
                     record['error_code'] is not None or
                     type(assignment) is not dict or
-                    assignment.get('route') not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy') or
+                    assignment.get('route') not in ('company-gw', 'gw-agent', 'opencode', 'codex', 'agy', 'claude') or
                     assignment.get('risk') != 'LOW' or
                     type(response_object) is not dict or
                     set(response_object) != {
@@ -2361,6 +2361,55 @@ class TaskStore:
             _fail()
         return self._update(task_id, expected=expected, changes=changes)
 
+    def claude_bind_compare_and_update(self, task_id, *, executor_task_id,
+                                       expected, **changes):
+        """Atomically ensure a D6 is not already held by another live Task."""
+        if (type(executor_task_id) is not str or not executor_task_id or
+                type(expected) is not dict or not expected):
+            _fail('TASK_D6_BINDING_SCAN_FAILED')
+        directory = self._dirfd()
+        lock_fd = None
+        try:
+            lock_fd = self._lock_sidecar(directory, '.claude-d6-binding.lock',
+                                         exclusive=True, code='TASK_D6_BINDING')
+            try:
+                ids = self.task_ids()
+                for other_id in ids:
+                    if other_id == task_id:
+                        continue
+                    try:
+                        other = self.get(other_id)
+                    except Exception:
+                        _fail('TASK_D6_BINDING_SCAN_FAILED')
+                    if other.get('abandonment') is not None:
+                        continue
+                    dev = other.get('developer')
+                    completion = other.get('completion')
+                    if ((type(dev) is dict and
+                         dev.get('executor_task_id') == executor_task_id) or
+                            (type(completion) is dict and
+                             completion.get('executor_task_id') == executor_task_id)):
+                        _fail('TASK_D6_ALREADY_BOUND')
+                target = self.get(task_id)
+                if target.get('abandonment') is not None:
+                    _fail('CLAUDE_TASK_ABANDONED')
+                update_expected = dict(expected)
+                update_expected['record_sha256'] = target['record_sha256']
+                try:
+                    return self.compare_and_update(
+                        task_id, expected=update_expected, **changes)
+                except TaskStoreConflict:
+                    if self.get(task_id).get('abandonment') is not None:
+                        _fail('CLAUDE_TASK_ABANDONED')
+                    raise
+            except LLMToolError:
+                raise
+            except Exception:
+                _fail('TASK_D6_BINDING_SCAN_FAILED')
+        finally:
+            self._unlock_sidecar(lock_fd)
+            os.close(directory)
+
     def record_published_pr(self, task_id, pr, head_sha):
         """Record or replace the PR linked to this Task's published HEAD."""
         if (type(pr) is not int or not 1 <= pr <= 9999999 or
@@ -2644,12 +2693,15 @@ class TaskStore:
             _fail('CLAUDE_RESULT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
+            if current.get('abandonment') is not None:
+                _fail('CLAUDE_TASK_ABANDONED')
             developer = current.get('developer')
             if current.get('pm_session_id') != pm_session_id:
                 _fail('CLAUDE_RESULT_BINDING_MISMATCH')
             if (type(developer) is not dict or
                     developer.get('provider_profile') != 'claude' or
-                    developer.get('state') != 'DEVELOPER_PENDING'):
+                    developer.get('state') != 'DEVELOPER_PENDING' or
+                    developer.get('executor_task_id') != executor_task_id):
                 _fail('CLAUDE_RESULT_STATE_INVALID')
             responded = dict(developer)
             responded.update(state='DEVELOPER_RESPONDED', claude_result={

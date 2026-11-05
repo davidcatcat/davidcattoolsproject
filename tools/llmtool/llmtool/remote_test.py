@@ -393,6 +393,10 @@ def run_remote_test(task_id, *, executor_task, sha, ref, modules=(), pr=None,
         return _record_outcome(store, task_id, task, result='ADMISSION_DENIED',
                                code=code, executor_task=executor_task, sha=sha,
                                modules=modules if type(modules) in (tuple, list, set) else ())
+    if (type(task.get('developer')) is dict and
+            task['developer'].get('provider_profile') == 'claude' and
+            task.get('abandonment') is not None):
+        return denied('CLAUDE_TASK_ABANDONED')
     if (type(executor_task) is not str or not _TASK.fullmatch(executor_task) or
             type(sha) is not str or not _SHA.fullmatch(sha) or
             type(ref) is not str or not _REF.fullmatch(ref)):
