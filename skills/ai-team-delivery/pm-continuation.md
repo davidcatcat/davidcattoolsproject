@@ -56,7 +56,7 @@ A refused local commit must not reach origin, including in history. This is a PM
 
 A PR that changes a path in `tools/llmtool/sensitive-paths.json` needs Owner approval before merge, on top of formal review and exact-head CI. Check the list as installed, not the PR head, and count a rename out of a listed path. If the list cannot be read, treat the PR as sensitive. `CLAUDE.md`, `AGENTS.md` and `skills/` are not listed for now (S3).
 
-Approval is the Owner's own local terminal confirmation (S1), through `llmtool approval grant` once it lands, bound to the PR and exact HEAD, single use and expiring. A new HEAD needs a new approval. Ask with `pm_owner_marker.py`. No AI answers the challenge, and no response is not consent: remind the Owner, never pass the gate automatically. Until the gate is live, the PM applies this rule by hand.
+Approval is the Owner's own local terminal confirmation (S1), through `llmtool owner-approval grant` once it lands, bound to the PR and exact HEAD, single use and expiring. A new HEAD needs a new approval. Ask with `pm_owner_marker.py`. No AI answers the challenge, and no response is not consent: remind the Owner, never pass the gate automatically. Until the gate is live, the PM applies this rule by hand.
 
 These are accident guards, not a security boundary (S2): until the GitHub phase a same-user AI can still run `gh pr merge`, set `LLMTOOL_ALLOW_STALE_SOURCE=1` or fast-forward the checkout itself. Report that plainly and never claim the gates prevent it. Urgent llmtool fixes wait for the Owner like any other sensitive PR.
 
