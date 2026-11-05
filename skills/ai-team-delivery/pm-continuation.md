@@ -43,11 +43,13 @@ These checks prevent refusals that cost a dispatch round (2026-11-02):
 
 ### Sensitive-screen refusals (Owner 2026-11-05, #981)
 
-On any sensitive-screen refusal, stop and read the refusal first. Find the actual rule and line with a local metadata-only check that prints rule names, line numbers and lengths, never text; record the refusal on the Task or Issue before anything else.
-Do not reword evidence, reports or fixtures, retry, or tell a model how to word output until the cause is confirmed, even when the refusal looks like a false positive.
-For `task high-debug`, a rerun on the same Task and family is refused until `python -m llmtool.high_debug screen-disposition` records every listed rule and line.
-Joined-string credential-shaped fixtures are allowed only in tests of screen tools, as synthetic data labelled `# synthetic-fixture: screen-tool test`, confirmed by an independent Reviewer; once merged, check them with `tools/llmtool/scripts/fixture_check.py`.
-A refused local commit must not reach origin, including in history. This is limited permission for test data and does not permit bypassing a formal security check. [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6651110328).
+On a sensitive-screen refusal, stop. The cause is confirmed only when both the blocked content and triggering rule are established. An independent Reviewer or the PM establishes both locally, in memory, printing metadata only; refusal text must never reach GitHub, logs or a provider. If this is not possible, leave the item unconfirmed and stopped.
+No one tells a model how to word output to pass the screen, before or after the cause is confirmed.
+Until confirmation, do not reword evidence, reports or fixtures, or retry. After confirmation, removing a real value or changing test design is a different action.
+For `task high-debug`, disposition requires `--hit` for every stored hit; read the hits from the local record because refusal detail can be shortened with `more=N`. It also requires `--classification` and `--ref`. `--ref` must be an Issue comment URL of form `issues/N#issuecomment-M`, not a PR comment. If detail says `screen_record=UNRECORDED`, no record exists and the rule holds by hand. This gate covers task high-debug only so far.
+No real credentials may be used. The older hygiene guidance to describe credential-shaped text in words applies to PM-written Task text before dispatch, not advice after a refusal.
+Joined-string credential-shaped fixtures are allowed only in screen-tool tests as synthetic data labelled `# synthetic-fixture: screen-tool test`, confirmed by an independent Reviewer; once merged, check with `tools/llmtool/scripts/fixture_check.py`. This does not permit bypassing a formal security check. [Owner decision](https://github.com/davidcatcat/davidcattoolsproject/issues/763#issuecomment-6651110328).
+A refused local commit must not reach origin, including in history. This is a PM rule under #981, not part of the Owner decision.
 
 ### Sub-agent PMs (Owner D8 2026-11-02)
 
