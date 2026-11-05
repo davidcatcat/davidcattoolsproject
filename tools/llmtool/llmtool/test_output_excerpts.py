@@ -37,11 +37,12 @@ _PYTEST_STATS = re.compile(
     r'([0-9][^\n]*?) in [0-9]+(?:\.[0-9]+)?s(?: \([0-9:]+\))?')
 _SENSITIVE_PREFIX = (
     r'-----BEGIN (?:[A-Z ]+ )?PRIVATE KEY-----|'
-    r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b|\bsk-[A-Za-z0-9_-]{12,}|'
-    r'\b(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
-    r'\bxox[abprs]-[A-Za-z0-9-]{20,}|'
-    r'\b(?:bearer|basic)\s+\S+|'
-    r'["\']?\b(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
+    r'(?<![A-Za-z0-9_])(?:AKIA|ASIA)[A-Z0-9]{16}(?![A-Za-z0-9_])|'
+    r'(?<![A-Za-z0-9_])sk-[A-Za-z0-9_-]{12,}|'
+    r'(?<![A-Za-z0-9_])(?:gh[pousr]_|github_pat_)[A-Za-z0-9_]{20,}|'
+    r'(?<![A-Za-z0-9_])xox[abprs]-[A-Za-z0-9-]{20,}|'
+    r'(?<![A-Za-z0-9_])(?:bearer|basic)\s+\S+|'
+    r'["\']?(?<![A-Za-z0-9_])(?:api[_-]?key|password|passwd|token|secret|access[_-]?token|'
     r'client[_-]?secret|aws_secret_access_key)["\']?\s*[:=]')
 # A keyword assignment whose whole remaining line is a null/boolean literal
 # (e.g. `token = None`, `password: null`) carries no value. Any other text
@@ -58,8 +59,8 @@ _SENSITIVE_JSON = re.compile(
 _LOG_ERROR = re.compile(r'ERROR:[\w.-]+:')
 _PYTEST_LOG_ERROR = re.compile(r'ERROR(?::[\w.-]+:| {4}\S)')
 _JWT_SEGMENT = re.compile(r'[A-Za-z0-9_-]+', re.IGNORECASE)
-_JWT_START = re.compile(r'\beyJ', re.IGNORECASE)
-_JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}\b', re.IGNORECASE)
+_JWT_START = re.compile(r'(?<![A-Za-z0-9_])eyJ', re.IGNORECASE)
+_JWT_END = re.compile(r'[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_])', re.IGNORECASE)
 _URL_SCHEME = re.compile(r'[a-z][a-z0-9+.-]*', re.IGNORECASE)
 _URL_AUTHORITY = re.compile(r'[^\s/]+')
 

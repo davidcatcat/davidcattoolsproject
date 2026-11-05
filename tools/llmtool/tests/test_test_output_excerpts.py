@@ -395,6 +395,68 @@ class TestOutputExcerptsTests(unittest.TestCase):
                 self.assertNotIn(indicator, str(caught.exception))
                 self.assertNotIn(str(self.path), str(caught.exception))
 
+    def test_sensitive_patterns_reject_credentials_after_cjk_and_cloud_before_cjk(self):
+        # synthetic-fixture: screen-tool test.
+        cloud_akia = ''.join(('AK', 'IA', 'SYNTHETIC0', 'TEST16'))
+        # synthetic-fixture: screen-tool test.
+        cloud_asia = ''.join(('AS', 'IA', 'SYNTHETIC0', 'TEST16'))
+        # synthetic-fixture: screen-tool test.
+        sk_key = ''.join(('s', 'k-', 'SYNTHETIC', 'VALUE123456'))
+        # synthetic-fixture: screen-tool test.
+        gh_key = ''.join(('gh', 'p_', 'SYNTHETIC', 'VALUE12345678901'))
+        # synthetic-fixture: screen-tool test.
+        xox_key = ''.join(('xo', 'xb-', 'SYNTHETIC', 'VALUE12345678901'))
+        # synthetic-fixture: screen-tool test.
+        bearer_auth = ''.join(('Bear', 'er ', 'SYNTHETIC_VALUE'))
+        # synthetic-fixture: screen-tool test.
+        basic_auth = ''.join(('Ba', 'sic ', 'SYNTHETIC_VALUE'))
+        # synthetic-fixture: screen-tool test.
+        keyword_assignment = ''.join(('to', 'ken', ' = ', 'SYNTHETIC_VALUE'))
+        # synthetic-fixture: screen-tool test.
+        jwt = ''.join(('ey', 'J', 'a' * 8, '.', 'b' * 8, '.', 'c' * 8))
+
+        after_cjk = (
+            '測' + cloud_akia, '測' + cloud_asia, '測' + sk_key, '測' + gh_key,
+            '測' + xox_key, '測' + bearer_auth, '測' + basic_auth,
+            '測' + keyword_assignment, '測' + jwt, jwt + '測',
+        )
+        for credential in after_cjk:
+            with self.subTest(credential=credential[:12]):
+                self.assert_rejected((credential + '\n' + UNIT_FAILURE.decode()).encode())
+
+        for cloud_key in (cloud_akia, cloud_asia):
+            with self.subTest(cloud_key=cloud_key[:4], side='after'):
+                self.assert_rejected((cloud_key + '測\n' + UNIT_FAILURE.decode()).encode())
+
+    def test_ascii_identifiers_containing_sensitive_letters_remain_accepted(self):
+        # synthetic-fixture: screen-tool test.
+        cloud_key = ''.join(('AK', 'IA', 'SYNTHETIC0', 'TEST16'))
+        # synthetic-fixture: screen-tool test.
+        sk_key = ''.join(('s', 'k-', 'SYNTHETIC', 'VALUE123456'))
+        # synthetic-fixture: screen-tool test.
+        gh_key = ''.join(('gh', 'p_', 'SYNTHETIC', 'VALUE12345678901'))
+        # synthetic-fixture: screen-tool test.
+        xox_key = ''.join(('xo', 'xb-', 'SYNTHETIC', 'VALUE12345678901'))
+        # synthetic-fixture: screen-tool test.
+        bearer_auth = ''.join(('Bear', 'er ', 'SYNTHETIC_VALUE'))
+        # synthetic-fixture: screen-tool test.
+        basic_auth = ''.join(('Ba', 'sic ', 'SYNTHETIC_VALUE'))
+        # synthetic-fixture: screen-tool test.
+        keyword_assignment = ''.join(('to', 'ken', ' = ', 'SYNTHETIC_VALUE'))
+        # synthetic-fixture: screen-tool test.
+        jwt = ''.join(('ey', 'J', 'a' * 8, '.', 'b' * 8, '.', 'c' * 8))
+
+        embedded_identifiers = (
+            'prefix' + cloud_key, 'prefix' + sk_key, 'prefix' + gh_key,
+            'prefix' + xox_key, 'prefix' + bearer_auth, 'prefix' + basic_auth,
+            'x_' + keyword_assignment, 'a' + jwt,
+        )
+        for identifier in embedded_identifiers:
+            with self.subTest(identifier=identifier[:12]):
+                result = self.select(unittest_capture([
+                    ('FAIL', FAIL_ID, FAIL_BODY + '\n' + identifier)]))
+                self.assertEqual(result['status'], 'COMPLETE')
+
     def assert_emitted_excerpt_rejected(self, raw, **bounds):
         self.path.write_bytes(raw)
         with self.assertRaises(LLMToolError) as caught:
