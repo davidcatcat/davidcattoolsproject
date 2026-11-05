@@ -84,6 +84,7 @@ class ClaudeRouteTests(unittest.TestCase):
                                snapshot=capture_snapshot)
             return result, calls
         finally:
+            (self.root / 'source.py').write_text('original\n')
             (self.root / 'other.py').unlink(missing_ok=True)
 
     def test_success_exact_argv_usage_and_prompt_delimiter(self):
@@ -141,19 +142,23 @@ class ClaudeRouteTests(unittest.TestCase):
             self.assertEqual(caught.exception.code, 'CLAUDE_ENV_INVALID')
 
     def test_invalid_envelopes_duplicate_and_quota_parse(self):
-        invalid = [self.envelope(is_error=1), self.envelope(subtype='error_max_turns'),
-                   self.envelope(session_id='not-a-uuid'),
+        invalid = [self.envelope(is_error=1), self.envelope(session_id='not-a-uuid'),
                    b'{"type":"result","type":"result"}', b'not-json']
         missing = json.loads(self.envelope())
         missing.pop('session_id')
         invalid.append(json.dumps(missing).encode())
         for raw in invalid:
-            with self.subTest(raw=raw), self.assertRaises(RouteError) as caught:
-                self.route.parse_output(raw, b'', '')
-            self.assertEqual(caught.exception.code, 'CLAUDE_OUTPUT_INVALID')
+            with self.subTest(raw=raw):
+                with self.assertRaises(RouteError) as caught:
+                    self.route.parse_output(raw, b'', '')
+                self.assertEqual(caught.exception.code, 'CLAUDE_OUTPUT_INVALID')
         parsed = self.route.parse_output(b'not-json', b'rate limit reached', '')
         self.assertEqual(parsed, {'status': 'error', 'summary': '', 'session_id': None,
                                   'usage': None, 'raw': {}})
+        with self.subTest(subtype='error_max_turns'):
+            with self.assertRaises(RouteError) as caught:
+                self.run_case(stdout=self.envelope(is_error=True, subtype='error_max_turns'))
+            self.assertEqual(caught.exception.code, 'CLAUDE_STATUS_FAILED')
 
     def test_model_usage_and_status_cases(self):
         cases = [({'claude-opus-5-5': {'outputTokens': 1},
@@ -183,16 +188,19 @@ class ClaudeRouteTests(unittest.TestCase):
                                  ({'claude-opus-5-5': {'outputTokens': 0}},
                                   'CLAUDE_MODEL_UNVERIFIED')):
             raw = self.envelope(modelUsage=models)
-            with self.subTest(models=models), self.assertRaises(RouteError) as caught:
-                self.run_case(stdout=raw)
-            self.assertEqual(caught.exception.code, expected)
+            with self.subTest(models=models):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_case(stdout=raw)
+                self.assertEqual(caught.exception.code, expected)
 
     def test_run_route_exit_scope_gate_and_boundary(self):
-        for kwargs, expected in (({'code': 1}, 'CLAUDE_EXIT_NONZERO'),
-                                 ({'outside': True}, 'CLAUDE_WRITE_SCOPE_VIOLATION')):
-            with self.assertRaises(RouteError) as caught:
-                self.run_case(**kwargs)
-            self.assertEqual(caught.exception.code, expected)
+        for kwargs, expected in (({'code': 1, 'outside': True},
+                                  'CLAUDE_WRITE_SCOPE_VIOLATION'),
+                                 ({'code': 1}, 'CLAUDE_EXIT_NONZERO')):
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_case(**kwargs)
+                self.assertEqual(caught.exception.code, expected)
         for gate, verified, expected in ((False, True, 'CLAUDE_DISPATCH_DENIED'),
                                          (True, False, 'BLOCKED_WRITE_ISOLATION')):
             calls = []
@@ -202,6 +210,21 @@ class ClaudeRouteTests(unittest.TestCase):
                     snapshot=capture_snapshot)
             self.assertEqual(caught.exception.code, expected)
             self.assertEqual(calls, [])
+
+    def test_run_route_classifies_nonzero_provider_failures_before_exit(self):
+        cases = (
+            (self.envelope(is_error=True, subtype='error_api',
+                           result='rate limit reached'), b'',
+             'CLAUDE_QUOTA_EXHAUSTED'),
+            (self.envelope(is_error=True, subtype='error_api', result='request failed'), b'',
+             'CLAUDE_STATUS_FAILED'),
+            (self.envelope(), b'', 'CLAUDE_EXIT_NONZERO'),
+        )
+        for stdout, stderr, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaises(RouteError) as caught:
+                    self.run_case(code=1, stdout=stdout, stderr=stderr)
+                self.assertEqual(caught.exception.code, expected)
 
     def test_quota_only_for_failed_runs(self):
         failed = self.route.parse_output(self.envelope(is_error=True, subtype='error_api',
@@ -213,7 +236,7 @@ class ClaudeRouteTests(unittest.TestCase):
                                                        api_error_status=429), b'', '')
         self.assertTrue(self.route.quota_exhausted(failed, b''))
         with self.assertRaises(RouteError) as caught:
-            self.run_case(stdout=b'invalid JSON', stderr=b'rate-limit response')
+            self.run_case(code=1, stdout=b'invalid JSON', stderr=b'rate-limit response')
         self.assertEqual(caught.exception.code, 'CLAUDE_QUOTA_EXHAUSTED')
         result, _calls = self.run_case(stdout=self.envelope(result='quota mentioned, success'))
         self.assertEqual(result.status, 'DONE')

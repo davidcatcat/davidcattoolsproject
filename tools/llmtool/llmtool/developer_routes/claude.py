@@ -154,14 +154,11 @@ class ClaudeRoute(DeveloperRoute):
             return requested
         candidates = [(details.get('outputTokens'), key)
                       for key, details in model_usage.items() if type(details) is dict and
-                      type(details.get('outputTokens')) is int]
+                      type(details.get('outputTokens')) is int and
+                      details['outputTokens'] > 0]
         if not candidates:
             return None
         return max(candidates, key=lambda item: item[0])[1]
-
-    def validate_exit(self, exit_code, parsed):
-        if exit_code != 0:
-            raise RouteError('CLAUDE_EXIT_NONZERO')
 
     def validate_status(self, parsed):
         if parsed.get('status') != 'DONE':
