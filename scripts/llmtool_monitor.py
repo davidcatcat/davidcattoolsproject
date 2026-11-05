@@ -2602,19 +2602,34 @@ def d6_task_lines(canonical: str, office: list, now: float,
                     key=lambda item: -item[3])
     width = max((len(item[0]) for item in recent), default=0)
     lines = []
+    pr_numbers = {number: state for number, state in prs.values()}
     for task_id, state, agent, when, branch in recent:
         who = "、".join(live.get(task_id, [])) or "沒有 session 在跑"
         done = stale(state, branch)
         pr_state = prs.get(branch, (None, ""))[1] if branch and prs else ""
         reviewer_done = False
-        match = re.fullmatch(r"pr(\d+)-claude-rv[A-Za-z0-9._-]*?-([0-9a-fA-F]{7})", task_id)
+        match = re.fullmatch(
+            r"pr(\d+)-(?:claude-rv|codex-rv)[A-Za-z0-9._-]*?-([0-9a-fA-F]{7})",
+            task_id)
         if match is None:
             match = re.search(r"pr(\d+).*?-crv[A-Za-z0-9._-]*?-([0-9a-fA-F]{7})", task_id)
         if match and not live.get(task_id):
             reviewer_done = any(match.group(2).lower() in ids
                                 for _, _, ids in (verdicts or {}).get(match.group(1), []))
-        phase = (D6_STATES.get(state, state) if not live.get(task_id) and not prs
-                 else d6_phase(state, bool(live.get(task_id)), pr_state, reviewer_done))
+        if not live.get(task_id) and not prs:
+            phase = D6_STATES.get(state, state)
+        elif match and not live.get(task_id):
+            reviewer_pr = pr_numbers.get(int(match.group(1)), "")
+            if reviewer_done:
+                phase = "審查已結束，待收尾"
+            elif reviewer_pr in PR_DONE_WORDS:
+                phase = "已完成，待收尾"
+            else:
+                phase = "審查沒在跑，查不到結論"
+        elif not live.get(task_id) and CODEX_HIGH_DEBUG_TASK.search(task_id):
+            phase = "診斷沒在跑，待收尾"
+        else:
+            phase = d6_phase(state, bool(live.get(task_id)), pr_state, reviewer_done)
         note = f"  ⚠ PR #{done[0]} {PR_DONE_WORDS[done[1]]}，登記還是{D6_STATES.get(state, state)}" if done else ""
         lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
                      f"{phase}  →  {who}  （{agent or '未綁定 agent'}）{note}")
@@ -4087,7 +4102,9 @@ def quota_warnings(now, codex_root=None, claude_root=None) -> list[str]:
                 window_text = ("5 小時額度" if window == 300 else
                                "7 天額度" if window == 10080 else f"{window:g} 分鐘額度")
                 age = max(0, int((now - rate_modified) // 60))
-                line = (f"Codex {window_text}已用 {used:g}%，{datetime.fromtimestamp(reset):%H:%M} 重置"
+                reset_local = datetime.fromtimestamp(reset)
+                reset_format = "%H:%M" if reset_local.date() == datetime.fromtimestamp(now).date() else "%m-%d %H:%M"
+                line = (f"Codex {window_text}已用 {used:g}%，{reset_local:{reset_format}} 重置"
                         f"（紀錄 {age} 分鐘前）")
                 if line not in out:
                     out.append(line)

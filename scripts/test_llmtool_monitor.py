@@ -226,6 +226,25 @@ class QuotaWarningTests(unittest.TestCase):
             self._write(path, [entry("90", self.NOW + 3600)])
             self.assertEqual(mon.quota_warnings(self.NOW, temp, []), [])
 
+    def test_codex_reset_displays_date_only_when_reset_is_not_today(self):
+        with tempfile.TemporaryDirectory() as temp:
+            folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
+            path = folder / "rollout-a.jsonl"
+
+            def warning(reset):
+                entry = {"type": "event_msg", "payload": {"rate_limits": {
+                    "primary": {"used_percent": 85, "window_minutes": 10080,
+                                "resets_at": reset}}}}
+                self._write(path, [entry])
+                return mon.quota_warnings(self.NOW, temp, [])[0]
+
+            same_day = self.NOW + 3600
+            later_day = self.NOW + 2 * 86400
+            self.assertIn(time.strftime("%H:%M", time.localtime(same_day)) + " 重置",
+                          warning(same_day))
+            self.assertIn(time.strftime("%m-%d %H:%M", time.localtime(later_day)) + " 重置",
+                          warning(later_day))
+
     def test_codex_rate_limit_reached_is_suppressed_after_all_windows_reset(self):
         with tempfile.TemporaryDirectory() as temp:
             folder = Path(temp) / time.strftime("%Y/%m/%d", time.localtime(self.NOW))
@@ -1828,6 +1847,48 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((len(shown), shown[-1]), (17, lines[-1]))   # 15 tasks, then the summary
         # Without GitHub nothing is flagged.
         self.assertFalse(any("⚠" in line for line in mon.d6_task_lines(self.canonical, [], self.NOW)))
+
+    def test_d6_reviewer_and_high_debug_phases_use_pr_number_and_completion_order(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        names = ("pr941-claude-rv2-0aa754d", "pr961-codex-rv2-f400ef6")
+        for index, task_id in enumerate(names):
+            root = Path(self.tmp.name) / f"review-{index}"
+            root.mkdir()
+            self._register(task_id, str(root), branch=f"review/{task_id}",
+                           last_verified_at=stamp, trusted_agent_id="codex-reviewer")
+
+        # Reviewer branches do not match branch_prs keys. The PR number map still
+        # supplies PR completion, while a matching verdict takes precedence.
+        prs = {"unrelated/branch": (941, "OPEN"),
+               "another/branch": (961, "OPEN")}
+        verdicts = {"941": [(self.NOW - 30, "REVIEW_PASS", ["0aa754d"])],
+                    "961": [(self.NOW - 30, "REVIEW_PASS", ["f400ef6"])]}
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, verdicts)
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in names}
+        self.assertIn("審查已結束，待收尾", by_task[names[0]])
+        self.assertIn("審查已結束，待收尾", by_task[names[1]])
+
+        prs = {"unrelated/branch": (941, "MERGED"),
+               "another/branch": (961, "MERGED")}
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in names}
+        self.assertIn("已完成，待收尾", by_task[names[0]])
+        self.assertIn("已完成，待收尾", by_task[names[1]])
+
+        prs = {"unrelated/branch": (941, "OPEN"),
+               "another/branch": (961, "OPEN")}
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, {})
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in names}
+        self.assertIn("審查沒在跑，查不到結論", by_task[names[0]])
+        self.assertIn("審查沒在跑，查不到結論", by_task[names[1]])
+
+        root = Path(self.tmp.name) / "debug"
+        root.mkdir()
+        high_debug = "repair-hd2-abcdef0"
+        self._register(high_debug, str(root), last_verified_at=stamp,
+                       trusted_agent_id=mon.CODEX_HIGH_DEBUG_AGENT)
+        lines = mon.d6_task_lines(self.canonical, [], self.NOW, prs, {})
+        self.assertIn("診斷沒在跑，待收尾", next(line for line in lines if high_debug in line))
 
     def test_d6_task_lines_list_recent_tasks_with_their_live_session(self):
         stamp = lambda age: mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - age))
