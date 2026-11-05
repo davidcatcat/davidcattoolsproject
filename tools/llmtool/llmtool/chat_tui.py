@@ -3505,6 +3505,8 @@ class ChatTUI:
     def _pm_resume(self, everything):
         """/pm queue send resumes the whole queue; Enter on an empty draft (W55) sends only
         the next queued draft and the rest stays paused."""
+        if self.pm_outbox:
+            self._auto_resume_pending = False
         again = "/pm queue send" if everything else "Enter"
         if not self.pm_outbox:
             self.append("llmtool: PM 佇列是空的")
@@ -3695,7 +3697,8 @@ class ChatTUI:
         connection = object()
         self._auto_resume_connection = connection
         self._auto_resume_sent = False
-        self._auto_resume_pending = self.settings.get("auto_resume", "on") == "on"
+        self._auto_resume_pending = (self.settings.get("auto_resume", "on") == "on"
+                                     and not self.pm_outbox and self.pm_outbox_paused is None)
         self._auto_resume_unconfirmed = self._auto_resume_pending
         self.pm_binding = outcome.get("binding")
         if callable(getattr(self.pm_runtime, "background_turn", None)):
@@ -3962,6 +3965,7 @@ class ChatTUI:
             if turn_id in self._pm_held_attempts:
                 return
             self._pm_held_attempts.add(turn_id)
+        self._auto_resume_pending = False
         self.pm_outbox.appendleft(text)
         if not self._pm_stale(seq):
             self.pm_turn_status = status
