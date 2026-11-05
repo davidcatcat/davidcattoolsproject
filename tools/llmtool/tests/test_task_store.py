@@ -522,6 +522,35 @@ class TaskStoreTests(unittest.TestCase):
                 expected={'record_sha256': current['record_sha256']}, developer=blocked)
         self.assertEqual(saved['developer']['state'], 'BLOCKED')
 
+    def test_claude_cli_rejects_mismatched_callback_executor(self):
+        task = self._claude_cli_task()
+        current = self.store.get(task['task_id'])
+        developer = dict(current['developer'])
+        developer['direct_result_callback'] = dict(
+            developer['direct_result_callback'], executor_task_id='other-executor')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, developer=developer)
+
+    def test_claude_cli_rejects_record_only_result_field(self):
+        task = self._claude_cli_task()
+        current = self.store.get(task['task_id'])
+        developer = dict(current['developer'], claude_result={})
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, developer=developer)
+
+    def test_record_only_claude_rejects_cli_provider_type(self):
+        task = self._claude_result_task()
+        current = self.store.get(task['task_id'])
+        developer = dict(current['developer'], provider_type='claude-cli')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, developer=developer)
+
     def test_claude_assignment_rejects_invalid_repository_config(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
