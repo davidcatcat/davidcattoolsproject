@@ -53,10 +53,15 @@ PM 由 Claude 擔任，Claude 不可用時由 Codex 暫代；Reviewer 一律跟�
 | Developer | OpenCode | 免費模型 |
 | Developer | AGY | 底層為 Claude Sonnet |
 | Developer | 公司 LLM | 經 API Agent Gateway 在 worktree 裡讀寫，用法同 Codex、Claude |
-| Reviewer | Claude | 審 Codex 寫的程式碼 |
-| Reviewer | Codex | 審 Claude、AGY、OpenCode、公司 LLM 寫的程式碼 |
+| Reviewer | Claude | 審 OpenAI 系模型（Codex）寫的程式碼 |
+| Reviewer | Codex | 審 Claude 系模型（Claude、AGY）、OpenCode、公司 LLM 寫的程式碼 |
 | AI Debug | Codex 高階模型 | 唯讀除錯，每個任務最多介入一次 |
 | 顧問 | ChatGPT | Owner 的技術顧問，不接入 llmtool、不派工 |
+
+Reviewer 配對規則：
+
+- **看實際模型，不看路線名稱：** llmtool 在正式審查前驗證 developer 實際使用的模型家族、reviewer 實際模型、`worker-dispatch.json` 授權狀態與工作階段獨立性；任何一項不滿足就不接受正式 PASS。上表是依各路線目前的預設模型推得的配對，例如 AGY 底層是 Claude Sonnet，所以由 Codex 審。
+- **OpenCode 預審保留：** 沿用現行規則，OpenCode 交付前仍須先過一次實際免費、跨模型家族的預審；預審不是正式審查。
 
 PM 備援規則：
 
@@ -68,7 +73,9 @@ PM 備援規則：
 
 ## 4. 公司 LLM 接入
 
-公司 LLM 開放做真實任務，透過 [API Agent Gateway](../../tools/api-agent-gateway/README.md)（`gw-agent`）在 worktree 裡工作，跟 Codex、Claude 一樣走完整流程。
+**目標：** 公司 LLM 做真實任務，透過 [API Agent Gateway](../../tools/api-agent-gateway/README.md)（`gw-agent`）在 worktree 裡工作，跟 Codex、Claude 一樣走完整流程。
+
+**現況（2026-11-06）：** gateway 仍是 Phase 1 離線 MVP，只有對假伺服器的測試證據，尚未有真實 provider 呼叫驗證；`gw-agent` 目前只授權 synthetic 測試內容。本節描述的是遷移第 6 步完成後的狀態，不是已完成的能力。
 
 ```mermaid
 flowchart TB
@@ -115,9 +122,11 @@ flowchart TD
     H --> I{"llmtool：審查通過？"}
     I -- 是 --> J{"Mac CI（Mac ×2）過？"}
     J -- 否 --> D
-    J -- 是 --> K{"同步 main 並重測（排隊）OK？"}
-    K -- 否 --> D
-    K -- 是 --> S["敏感檔案：等 Owner 核准"]
+    J -- 是 --> K{"同步 main（排隊）：HEAD 有變？"}
+    K -- 否 --> S["敏感檔案：等 Owner 核准"]
+    K -- 是 --> R{"新 HEAD：CI 重跑，Reviewer 審同步差異，皆過？"}
+    R -- 否 --> D
+    R -- 是 --> S
     S --> M["llmtool merge（結案）"]
     I -- 否 --> N{"審查失敗幾次？"}
     N -- "1 次：PM 續用或換人" --> C
@@ -129,8 +138,9 @@ flowchart TD
 ```
 
 - 三道測試由便宜到昂貴：EC2 擋明顯錯誤、Linux CI 通過才送審、Mac CI 留給已過審的程式碼。
-- 測試或同步失敗：同一 commit 先重跑一次，仍失敗才退回 developer，不計審查次數。
-- 任何修改後都從 EC2 重新走一遍；審查一律對最新 commit。
+- 測試或同步失敗都退回 developer，不計審查次數。只有 runner、網路、環境異常或疑似不穩定的測試，才在同一 commit 重跑一次；確定是程式錯誤的直接退回，不重跑。
+- 同步 main 若改變了 HEAD（包含解衝突），舊 commit 的審查與 CI 結果都不能沿用：新 HEAD 必須重跑必要 CI，並由 Reviewer 對新 HEAD 給出正式結果（可以只看同步帶進來的差異，但 PASS 必須綁定新的完整 HEAD）。
+- 任何 developer 修改後都從 EC2 重新走一遍；審查與 CI 一律對最新 commit（exact-head）。
 - 沒碰敏感檔案時，「等 Owner 核准」一步直接通過。
 
 ## 7. 失敗、迴圈與卡住
@@ -142,8 +152,8 @@ flowchart TD
 | 情況 | 規則 |
 | --- | --- |
 | 審查失敗後換 developer | 失敗次數跟著任務累計，換人不歸零 |
-| 測試或同步失敗 | 整個任務的測試失敗總數有上限（數字待定），超過就通知 Owner；不是每一關各自算 |
-| 不穩定的測試 | 同一 commit 先重跑一次，兩次都失敗才退回 |
+| 測試或同步失敗 | 整個任務的測試失敗總數有上限，超過就通知 Owner；不是每一關各自算。上限數字是待定的實作參數，定案前這條迴圈還不算有完整上限 |
+| 環境異常或疑似不穩定的測試 | 只有這類失敗才在同一 commit 重跑一次，兩次都失敗才退回；確定是程式錯誤的直接退回 |
 | main 一直在變 | merge 排隊，同一時間只讓一個任務做「同步 main、重測、merge」 |
 | merge 後 main 壞掉 | 先回退那次 merge，PM 再開新任務修 |
 
@@ -174,6 +184,7 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | Mac CI | Owner Mac 上 2 個 runner | 審查通過後觸發 | merge 前 |
 
 - **EC2 測試的程式碼來源：** llmtool 先把 worktree 推到 GitHub 的臨時分支（不開 PR；`llmtool Linux CI` 只在 PR 與 main push 觸發，所以不會佔用 runner），EC2 從那裡下載測試，通過後才開 PR。現行做法是先開 PR 再跑 EC2；`run_remote_test` 的 `pr` 參數本來就是選填，改動小。
+- **與原先 A 方案的差異：** Owner 最初選的 A 方案是「推上 GitHub 之前」就在 EC2 測試。了解現行 remote-test 是從 GitHub 取得指定 commit 後，Owner 改採臨時分支做法（「先按照你的做法」）。兩者的目標相同，都是開 PR 前先擋掉便宜的錯誤；差別在於臨時分支做法下，程式碼會先推到 GitHub，但不觸發 CI、也不開 PR。好處是不用另外開發把程式碼傳到 EC2 的機制。
 - **外部監控：** 放在 EC2 上用排程定期檢查 llmtool，不在 Mac 上常駐背景程式。
 
 ## 9. 決定紀錄
@@ -193,7 +204,10 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | Mac CI 失敗後 | 修改後要重新審查 |
 | 修改後 | 任何修改都從 EC2 重新走一遍 |
 | 結案 | 不通知 Owner；進度由 Owner 自己詢問 |
-| merge 前 | llmtool 同步 main，有衝突或重測失敗才退回 |
+| merge 前 | llmtool 同步 main；HEAD 有變就重跑 CI，並由 Reviewer 對新 HEAD 給出正式結果；有衝突或重測失敗才退回 |
+| Reviewer 配對 | 依實際模型家族由 llmtool 驗證，不滿足就不接受 PASS |
+| OpenCode 預審 | 保留現行的免費跨模型預審 |
+| 測試重跑 | 只有環境異常或疑似不穩定的測試才重跑一次；程式錯誤直接退回 |
 | merge 後壞掉 | 回退，再開新任務修 |
 | 程式碼送外部 AI | 不限制；密碼與權杖一律擋 |
 | 公司 LLM | 開放真實任務，經 API Agent Gateway，用法同 Codex、Claude |
@@ -202,7 +216,7 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | llmtool 自我更新 | 新版 merge 後通知 Owner，Owner 按了才自動安裝 |
 | 選 developer | 由 PM 選 |
 | PM 備援 | Claude 為主，Codex 在 Claude 不可用時暫代 |
-| EC2 測試時機 | 推臨時分支、不開 PR 先測，通過才開 PR |
+| EC2 測試時機 | 推臨時分支、不開 PR 先測，通過才開 PR（取代原先「推上 GitHub 前測試」的 A 方案，見第 8 節） |
 | #877 | 不採用 Scheduler、Evidence Graph 等提案 |
 
 **敏感檔案清單（Owner 授權先由 AI 團隊決定，有疑問再問）：** llmtool 閘門與權限檢查程式、權限設定檔（例如 `worker-dispatch.json`）、權杖與帳號相關程式、CI 設定與 runner 安裝腳本、敏感檔案清單本身。改到這些檔案的 PR，merge 前要 Owner 核准。
@@ -218,10 +232,17 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 | 0 | 盤點缺口（唯讀） | PM 逐條對照本文件與 main，列出已有／要改／要新做，並對到現有 Issue 去重 |
 | 1 | 先上保護 | 敏感檔案清單、merge 前等 Owner 核准、llmtool 新版要 Owner 按了才安裝。必須最先做：後面每一步都是 AI 在改 llmtool 的閘門 |
 | 2 | 只改設定 | Claude developer 改成一般路線；決定紀錄寫進 `CLAUDE.md`、`AGENTS.md` |
-| 3 | GitHub 只走 llmtool | 配合 #926 上線 AI 帳號，收回各角色直接寫 GitHub 的路徑；分多個 PR |
+| 3 | GitHub 只走 llmtool | 配合 #926 上線 AI 帳號，收回各角色直接寫 GitHub 的路徑；分多個 PR；完成條件見下方負面測試 |
 | 4 | 流程調整 | EC2 改在開 PR 前、審查結果由 llmtool 判斷、失敗次數跟著任務算、不穩定測試先重跑、merge 排隊與回退 |
 | 5 | 卡住的出口 | 任務總時限直接通知 Owner、EC2 外部監控、PM 自動切換 Codex 備援 |
 | 6 | 公司 LLM | gw-agent 解除只限 synthetic 的限制、開放真實任務，穩定後移除舊提案模式 |
+
+第 3 步的驗收條件：「角色不碰 GitHub」不能只靠規定，例如 developer 若有 shell 又與 llmtool 共用作業系統帳號，就可能讀到 Git 憑證、`gh` 設定或環境變數而繞過中樞。完成前必須有實際的負面測試證明：
+
+- AI developer、reviewer 的執行環境取不到任何 GitHub 權杖。
+- 在 worktree 內直接執行 `git push` 或 `gh pr create` 會被擋下。
+- llmtool 仍能正常推分支、開 PR、發審查、merge。
+- AI 專用帳號與 Owner 帳號的憑證分開存放，不會互相使用。
 
 ## 11. 待辦事項
 
@@ -232,7 +253,10 @@ GitHub 付費託管 runner 已停用，Actions 只負責把 job 派給自架 run
 - [ ] EC2 測試改成「推臨時分支、不開 PR」後再測
 - [ ] PM 備援：偵測 Claude 不可用、切換 Codex、單一 PM 鎖、切回規則
 - [ ] 失敗次數跟著任務累計；決定測試失敗總數上限
-- [ ] 測試失敗先同 commit 重跑一次
+- [ ] 測試失敗分類：環境異常或疑似不穩定才同 commit 重跑一次
+- [ ] 同步 main 改變 HEAD 時，重跑 CI 並對新 HEAD 取得正式審查
+- [ ] llmtool 驗證 reviewer 配對的實際模型家族
+- [ ] GitHub 憑證隔離的負面測試（第 10 節第 3 步驗收條件）
 - [ ] merge 排隊與 merge 後回退
 - [ ] worktree 寫入權租期
 - [ ] 任務總時限，超過直接通知 Owner
