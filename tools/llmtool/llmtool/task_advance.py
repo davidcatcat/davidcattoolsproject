@@ -5,6 +5,7 @@ import contextlib
 import io
 import importlib.util
 import json
+import math
 import os
 import re
 import shutil
@@ -176,6 +177,96 @@ def _merge_checks(record, number, head, pr, github_get, *, allow_missing_macos=F
         return ('MERGE_MACOS_CHECK_MISSING' if allow_missing_macos else
                 'MERGE_REQUIRED_CHECK_MISSING')
     return None
+
+
+def _review_ci_gate(number, head, github_get):
+    """Require the newest exact-head Linux CI check to pass before review."""
+    try:
+        checks = github_get(f'commits/{head}/check-runs?per_page=100')
+        files = github_get(f'pulls/{number}/files?per_page=100')
+    except Exception:
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    if (type(checks) is not dict or type(checks.get('check_runs')) is not list or
+            type(checks.get('total_count')) is not int or
+            checks['total_count'] < len(checks['check_runs']) or
+            checks['total_count'] < 0 or len(checks['check_runs']) > 100 or
+            type(files) is not list or len(files) >= 100):
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    paths = []
+    for item in files:
+        path = item.get('filename') if type(item) is dict else None
+        if type(path) is not str:
+            return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+        paths.append(path)
+    required_name = ('check (docs)' if task_completion._docs_only_ci(paths)
+                     else 'check (Linux 3.14)')
+    runs = checks['check_runs']
+    if any(type(item) is not dict for item in runs):
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    candidates = [item for item in runs if item.get('head_sha') == head and
+                  item.get('name') == required_name]
+    for item in candidates:
+        if (type(item.get('id')) is not int or item['id'] < 1 or
+                type(item.get('status')) is not str):
+            return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    if not candidates:
+        return 'WAITING_CI', 'LINUX_CI_PENDING'
+    latest = max(candidates, key=lambda item: item['id'])
+    if latest['status'] != 'completed':
+        return 'WAITING_CI', 'LINUX_CI_PENDING'
+    if type(latest.get('conclusion')) is not str:
+        return 'WAITING_CI', 'LINUX_CI_UNAVAILABLE'
+    if latest['conclusion'] == 'success':
+        return None, None
+    return 'CI_FAILED', 'LINUX_CI_FAILED'
+
+
+def _remote_test_receipt_summary(record, head):
+    receipts = record.get('remote_test_receipts', []) if type(record) is dict else []
+    if type(receipts) is not list:
+        return None
+    for receipt in reversed(receipts):
+        if type(receipt) is not dict or receipt.get('source_sha') != head:
+            continue
+        digest = receipt.get('receipt_digest')
+        modules = receipt.get('modules')
+        elapsed = receipt.get('elapsed_s')
+        if (type(digest) is not str or re.fullmatch(r'[0-9a-f]{64}', digest) is None or
+                receipt.get('result') not in ('PASS', 'FAIL', 'TIMEOUT', 'SHA_MISMATCH') or
+                type(modules) is not list or not modules or
+                any(type(module) is not str or
+                    re.fullmatch(r'[A-Za-z0-9_.-]{1,128}', module) is None
+                    for module in modules) or
+                type(receipt.get('ran_total')) is not int or receipt['ran_total'] < 0 or
+                type(elapsed) not in (int, float) or not math.isfinite(elapsed) or
+                elapsed < 0):
+            return None
+        digest_input = dict(receipt)
+        digest_input.pop('receipt_digest', None)
+        try:
+            if hashlib.sha256(_json_bytes(digest_input)).hexdigest() != digest:
+                return None
+        except Exception:
+            return None
+        return {
+            'result': receipt.get('result'),
+            'modules': receipt.get('modules'),
+            'ran_total': receipt.get('ran_total'),
+            'elapsed_s': receipt.get('elapsed_s'),
+            'receipt_digest': digest[:8],
+        }
+    return None
+
+
+def _post_remote_test_comment(gh_runner, root, number, task_id, d6, head, summary):
+    modules = ','.join(summary['modules'])
+    body = ('<!-- activity: type=task actor=PM target=PR status=TRACKING -->\n'
+            f"EC2 remote-test, result={summary['result']}, modules={modules}, "
+            f"tests run={summary['ran_total']}, seconds={summary['elapsed_s']}, "
+            f"receipt={summary['receipt_digest']}, Task={task_id}, D6={d6.get('root')}, head={head}")
+    response = gh_runner(root, ['pr', 'comment', str(number), '--body', body])
+    if getattr(response, 'returncode', 1) != 0:
+        raise _PublishRefusal('REMOTE_TEST_COMMENT_FAILED')
 
 
 def _merge_pass_claim(record, number, head, events):
@@ -999,9 +1090,28 @@ def advance(*, task_id, store=None, pr_number=None, integration_pr=None, merge=F
                 codes.append(code)
             result = {'task_id': task_id, 'executor_task': executor_task,
                       'head': d6['result_head']}
+            try:
+                fresh_record = store.get(task_id)
+            except Exception:
+                fresh_record = None
+            summary = _remote_test_receipt_summary(fresh_record, d6['result_head'])
+            if summary is not None:
+                result['remote_test'] = summary
+                if number is not None:
+                    try:
+                        _post_remote_test_comment(
+                            _publish_run_gh if publish_gh_runner is None else publish_gh_runner,
+                            d6.get('root') or cwd or os.getcwd(), number, task_id,
+                            d6, d6['result_head'], summary)
+                    except Exception:
+                        codes.append('REMOTE_TEST_COMMENT_FAILED')
         except Exception as exc:
             codes.append(_refusal(exc, 'remote_test_code'))
     elif step == 'DISPATCH_REVIEW':
+        step, ci_code = _review_ci_gate(number, d6['result_head'], get)
+        if ci_code is not None:
+            codes.append(ci_code)
+    if step == 'DISPATCH_REVIEW':
         claims = _claims(record)
         versions = [c.get('version', 0) for c in claims if type(c) is dict and
                     type(c.get('version')) is int]
