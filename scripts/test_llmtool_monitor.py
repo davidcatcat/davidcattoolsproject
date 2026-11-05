@@ -795,7 +795,7 @@ class ActivityViewTests(unittest.TestCase):
             drawn.clear()
             mon._paint_screen(Screen(height), monitor, "activity", 0, False, {},
                               lambda row, text, attr=0: drawn.__setitem__(row, text))
-            self.assertTrue(any("Tab/1-5" in text for text in drawn.values()))
+            self.assertTrue(any("Tab/1-6" in text and "白板" in text for text in drawn.values()))
             self.assertNotIn("PM 上次派工", drawn[height - 1])
             self.assertFalse(any("GitHub #" in text for row, text in drawn.items()
                                  if row >= height - 1))
@@ -6329,3 +6329,151 @@ class DiskUsageTests(unittest.TestCase):
             statvfs.assert_called_once_with("/home/test")
             monitor.refresh_disk_usage(now=60)
         self.assertEqual(statvfs.call_count, 2)
+
+
+class WorkBoardTests(unittest.TestCase):
+    STAMP = datetime.fromtimestamp(NOW, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    def _write_board(self, path, **fields):
+        value = {"schema_version": 1, "updated_at": self.STAMP,
+                 "updated_by": "PM", "running": [], "queue": [], "blocked": []}
+        value.update(fields)
+        Path(path).write_text(json.dumps(value), encoding="utf-8")
+
+    def _board(self, **fields):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "board.json"
+            self._write_board(path, **fields)
+            return mon.read_pm_board(NOW, str(path))
+
+    @staticmethod
+    def _pull(number, *, state="open", title=None, sha=None, merged=None,
+              updated=None, draft=False, repo="o/r"):
+        iso = lambda value: datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if value else None
+        return {"number": number, "title": title or f"Work {number}", "state": state,
+                "merged_at": iso(merged), "updated_at": iso(updated or NOW), "draft": draft,
+                "head": {"sha": sha or "a" * 40, "repo": {"full_name": repo}}}
+
+    @staticmethod
+    def _github(pulls=None, verdicts=None, **fields):
+        from types import SimpleNamespace
+        values = {"board_pulls": pulls, "verdicts": verdicts or {}, "pending": [],
+                  "successful_read": pulls is not None, "read_failed": False}
+        values.update(fields)
+        return SimpleNamespace(**values)
+
+    def test_pm_board_read_statuses_and_rejects_fifo_or_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertEqual(mon.read_pm_board(NOW, str(root / "missing")).status, "missing")
+            fifo = root / "fifo"
+            os.mkfifo(fifo)
+            self.assertEqual(mon.read_pm_board(NOW, str(fifo)).status, "unreadable")
+            source = root / "source"
+            self._write_board(source)
+            self.assertEqual(mon.read_pm_board(NOW, str(source)).status, "ok")
+            link = root / "link"
+            link.symlink_to(source)
+            self.assertEqual(mon.read_pm_board(NOW, str(link)).status, "unreadable")
+            self.assertEqual(mon.read_pm_board(NOW, str(root)).status, "unreadable")
+            malformed = root / "malformed"
+            malformed.write_text("{", encoding="utf-8")
+            self.assertEqual(mon.read_pm_board(NOW, str(malformed)).status, "malformed")
+            undated = root / "undated"
+            self._write_board(undated, updated_at="bad")
+            self.assertEqual(mon.read_pm_board(NOW, str(undated)).status, "undated")
+            seed = root / "seed"
+            seed.write_text(json.dumps({"schema_version": 1, "updated_by": "PM", "note": "seed"}),
+                            encoding="utf-8")
+            self.assertEqual(mon.read_pm_board(NOW, str(seed)).status, "undated")
+            stale = root / "stale"
+            self._write_board(stale, updated_at="2026-11-05T02:00:00Z",
+                              running=[{"ref": "#965", "what": "still here", "next": "PM"}])
+            parsed = mon.read_pm_board(NOW, str(stale))
+            self.assertEqual(parsed.status, "stale")
+            self.assertEqual([item.ref for item in parsed.running], ["#965"])
+
+    def test_pm_board_validates_item_shape_and_caps_each_list_at_50(self):
+        entries = [{"ref": f"#{i}", "what": "x" * 80, "next": "", "reason": "r" * 80}
+                   for i in range(1, 53)]
+        entries += [{"ref": "not a ref", "what": "bad", "next": "PM"},
+                    {"ref": "#2", "what": 3, "next": "PM"}]
+        board = self._board(running=entries, queue="not a list")
+        self.assertEqual(board.status, "malformed")
+        board = self._board(running=entries)
+        self.assertEqual(len(board.running), 50)
+        self.assertEqual(board.skipped, 4)
+        self.assertEqual(len(board.running[0].what), 61)
+        self.assertEqual(board.running[0].next, "未確認")
+        self.assertEqual(len(board.running[0].reason), 61)
+
+    def test_open_pr_rows_use_only_newest_verdict_for_the_current_head(self):
+        pulls = [self._pull(1, title="Pass", sha="a" * 40),
+                 self._pull(2, title="Fail", sha="b" * 40),
+                 self._pull(3, title="Unknown", sha="c" * 40),
+                 self._pull(4, title="Draft", sha="d" * 40, draft=True)]
+        verdicts = {"1": [(1, "FAIL", frozenset({"aaaaaaa"})),
+                           (2, "PASS", frozenset({"aaaaaaa"}))],
+                    "2": [(3, "PASS", frozenset({"bbbbbbb"})),
+                          (4, "FAIL", frozenset({"bbbbbbb"}))],
+                    "3": [(5, "PASS", frozenset({"eeeeeee"}))]}
+        work = mon.work_board(self._github(pulls, verdicts),
+                              mon.PmBoard("ok", 0, [], [], []), NOW)
+        rows = {item.ref: (item.what, item.next) for item in work.running}
+        self.assertEqual(rows["PR #1"], ("Pass", "PM"))
+        self.assertEqual(rows["PR #2"], ("Fail", "Developer"))
+        self.assertEqual(rows["PR #3"], ("Unknown「未見審查結論」", "未確認"))
+        self.assertEqual(rows["PR #4"], ("Draft 草稿「未見審查結論」", "未確認"))
+
+    def test_board_pulls_use_the_same_fork_filter_and_safe_head_prefix(self):
+        pulls = [self._pull(1, sha="ABCDEF0123456789"),
+                 self._pull(2, repo="someone/fork"),
+                 self._pull(3, sha="not-a-commit"),
+                 {"number": 4, "state": "open", "title": "missing head"}]
+        rows = mon.board_pulls(pulls, "o/r")
+        self.assertEqual([(row.number, row.head, row.state) for row in rows],
+                         [(1, "abcdef0", "OPEN"), (3, "", "OPEN")])
+
+    def test_file_items_override_github_and_refs_compare_by_number(self):
+        pulls = [self._pull(7), self._pull(8), self._pull(9)]
+        board = mon.PmBoard("ok", 0,
+                            [mon.PmBoardItem("#7", "local running", "PM")],
+                            [mon.PmBoardItem("#8", "queued", "PM", "waiting")],
+                            [mon.PmBoardItem("PR #9", "blocked", "Developer", "needs fix")])
+        work = mon.work_board(self._github(pulls), board, NOW)
+        self.assertEqual([item.ref for item in work.running], ["#7"])
+        self.assertEqual([item.ref for item in work.queue], ["#8"])
+        self.assertEqual([item.ref for item in work.blocked], ["PR #9"])
+        shown = "\n".join(line for line, _ in mon.board_view(work))
+        self.assertIn("queued：waiting", shown)
+        self.assertIn("blocked：needs fix", shown)
+
+    def test_done_rows_obey_local_midnight_and_keep_all_with_full_page_note(self):
+        local_now = datetime(2026, 11, 5, 12, tzinfo=timezone.utc).astimezone()
+        midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        pulls = [self._pull(i, state="closed", merged=midnight + i, updated=midnight + i)
+                 for i in range(1, 101)]
+        pulls.extend([self._pull(101, state="closed", merged=midnight, updated=midnight + 1),
+                      self._pull(102, state="closed", merged=midnight - 1, updated=midnight + 1)])
+        work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), local_now.timestamp())
+        self.assertEqual(len(work.done), 101)
+        self.assertEqual(work.done[0].number, 100)
+        self.assertTrue(work.note)
+        pulls[0] = self._pull(1, state="closed", merged=midnight - 1, updated=midnight - 1)
+        work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), local_now.timestamp())
+        self.assertEqual(len(work.done), 100)
+
+    def test_unknown_counts_sections_and_narrow_rows_preserve_refs(self):
+        unknown = mon.work_board(self._github(None, successful_read=False),
+                                 mon.PmBoard("missing", None, [], [], []), NOW)
+        lines = [line for line, _ in mon.board_view(unknown)]
+        self.assertIn("?", lines[1])
+        self.assertIn("未知", lines)
+        self.assertIn("無", [line for line, _ in mon.board_view(
+            mon.work_board(self._github([], successful_read=True),
+                           mon.PmBoard("ok", 0, [], [], []), NOW))])
+        work = mon.work_board(self._github([self._pull(976, title="long title here")]),
+                              mon.PmBoard("ok", 0, [], [], []), NOW)
+        rows = [line for line, _ in mon.board_view(work, width=10) if line.startswith("PR #")]
+        self.assertTrue(rows)
+        self.assertTrue(rows[0].startswith("PR #976"))
