@@ -31,9 +31,10 @@ recover() is for restart only: run while another process is between consume
 and finalization, it makes that redemption report EFFECT_UNKNOWN (never a
 repeated effect or a false success).
 
-At most one receipt ever exists per exact binding, in any status: issuing the
-same decision again is NOT_ALLOWED. The redeem run id is part of the binding,
-so a new run needs a new decide() call.
+At most one receipt ever exists per exact binding, in any status for all kinds
+except OWNER_APPROVAL. For OWNER_APPROVAL, a consumed or expired binding can be
+issued again after a new Owner challenge. The redeem run id is part of the D1
+binding, so a new run needs a new decide() call.
 
 Host responsibilities / accepted D1 limits: redeem() does not re-check
 policy or issuer revocation; it trusts the decision at issue time for at most
@@ -620,6 +621,8 @@ class ReceiptLedger:
 
     def recover(self):
         """After a restart: every CONSUMED receipt becomes EFFECT_UNKNOWN."""
+        if self.kind == 'OWNER_APPROVAL':
+            _fail(LedgerCode.NOT_ALLOWED)
         with self._transaction():
             return self._db.execute("UPDATE receipts SET status = 'EFFECT_UNKNOWN' "
                                     "WHERE status = 'CONSUMED'").rowcount

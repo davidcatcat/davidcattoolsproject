@@ -1,8 +1,10 @@
 """Issue real Owner approval receipts after a direct terminal challenge.
 
-This is an accident guard against AI error; a same-user process that can open
-a pseudo-terminal can still answer, so it is not OS isolation (Owner accepted
-this residual, #1019 S2). No F2 repository effect happens here.
+This is an accident guard against AI error, not a security boundary. A same-user
+process can answer through a pseudo-terminal, call the ledger or write its file
+directly with no terminal, restore an older copy of it, or point HOME at another
+one (Owner accepted this residual, #1019 S2). The challenge cannot be skipped
+through this module's CLI. No F2 repository effect happens here.
 """
 
 import argparse
@@ -45,11 +47,37 @@ def _valid_sha(value):
     return type(value) is str and _SHA.fullmatch(value) is not None
 
 
-def merge_binding(pr, head):
-    if type(pr) is not int or pr <= 0 or not _valid_sha(head):
+def _repository_slug():
+    try:
+        from .config import repository_config
+
+        slug = repository_config()['slug']
+        if (type(slug) is not str or len(slug.split('/')) != 2 or
+                any(not part for part in slug.split('/'))):
+            raise ValueError('invalid repository slug')
+        return slug
+    except Exception:
+        _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
+
+
+def merge_binding(pr, head, base_ref, repository):
+    slug = _repository_slug()
+    if (type(pr) is not int or pr <= 0 or not _valid_sha(head) or
+            base_ref != 'main' or repository != slug):
         raise ValueError('invalid merge binding')
     return json.dumps({'action': 'MERGE_SENSITIVE_PR', 'head': head, 'pr': pr,
-                       'version': 1}, sort_keys=True, separators=(',', ':'))
+                       'base_ref': base_ref, 'repository': repository, 'version': 1},
+                      sort_keys=True, separators=(',', ':'))
+
+
+def merge_binding_from_pr(pr):
+    try:
+        return merge_binding(pr['number'], pr['head']['sha'], pr['base']['ref'],
+                             pr['base']['repo']['full_name'])
+    except OwnerApprovalRefusal:
+        raise
+    except Exception:
+        raise ValueError('invalid pull request') from None
 
 
 def install_binding(old_sha, new_sha):
@@ -117,7 +145,9 @@ def confirm_on_tty(lines):
             _refuse('OWNER_APPROVAL_NOT_INTERACTIVE')
         code = secrets.token_hex(6)
         body = ''.join(str(line) + '\n' for line in lines)
-        body += ('Only the Owner may answer. No AI may type the code.\n' + code + '\n')
+        body += ('Only the Owner may answer. No AI may type the code.\n'
+                 'Type the code below and press Enter only if you approve. '
+                 'Press Enter alone to refuse.\n' + code + '\n')
         payload = body.encode('utf-8')
         offset = 0
         while offset < len(payload):
@@ -219,12 +249,12 @@ def add_owner_approval_parser(subparsers):
     return parser
 
 
-def _gh_pr_view(number):
+def _gh_api(path):
     try:
+        slug = _repository_slug()
         root = Path(__file__).resolve().parents[3]
         result = subprocess.run(
-            ['gh', 'pr', 'view', str(number), '--json',
-             'number,title,state,headRefOid,files'],
+            ['gh', 'api', 'repos/' + slug + '/' + path],
             cwd=root, timeout=30, capture_output=True, check=False)
         if result.returncode != 0:
             _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
@@ -233,38 +263,78 @@ def _gh_pr_view(number):
         raise
     except (OSError, subprocess.SubprocessError, UnicodeError, ValueError):
         _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
+    return data
+
+
+def _metadata(data, number):
     if (type(data) is not dict or type(data.get('number')) is not int or
-            data.get('number') != number or type(data.get('title')) is not str or
-            type(data.get('state')) is not str or not _valid_sha(data.get('headRefOid')) or
-            type(data.get('files')) is not list or any(
-                type(item) is not dict or type(item.get('path')) is not str
-                for item in data['files'])):
+            data['number'] != number or type(data.get('title')) is not str or
+            type(data.get('state')) is not str or type(data.get('merged')) is not bool or
+            not _valid_sha(data.get('head', {}).get('sha') if type(data.get('head')) is dict else None) or
+            type(data.get('base')) is not dict or type(data['base'].get('ref')) is not str or
+            type(data['base'].get('repo')) is not dict or
+            type(data['base']['repo'].get('full_name')) is not str or
+            type(data.get('changed_files')) is not int):
         _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
     return data
+
+
+def _read_pr(number):
+    first = _metadata(_gh_api(f'pulls/{number}'), number)
+    files = _gh_api(f'pulls/{number}/files?per_page=100')
+    second = _metadata(_gh_api(f'pulls/{number}'), number)
+    if (any(first[key] != second[key] for key in ('state', 'merged', 'changed_files')) or
+            first['head']['sha'] != second['head']['sha'] or
+            first['base']['ref'] != second['base']['ref']):
+        _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
+    if (type(files) is not list or any(
+            type(item) is not dict or type(item.get('filename')) is not str or
+            type(item.get('status')) is not str or
+            ('previous_filename' in item and type(item['previous_filename']) is not str)
+            for item in files)):
+        _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
+    return second, files
 
 
 def safe_terminal_text(value, limit):
     if type(value) is not str:
         value = str(value)
-    return ''.join('?' if unicodedata.category(char).startswith('C') else char
-                   for char in value)[:limit]
+    fillers = {'\u115f', '\u1160', '\u3164', '\uffa0'}
+    cleaned = ''.join('?' if (unicodedata.category(char).startswith('C') or
+                              unicodedata.category(char) in ('Zl', 'Zp') or char in fillers)
+                      else char for char in value)
+    cleaned = ' '.join(cleaned.split())
+    if len(cleaned) > limit:
+        return cleaned[:max(0, limit - len(' [cut]'))] + ' [cut]'
+    return cleaned
 
 
-def _display_lines(data, number, head):
-    if data.get('state') != 'OPEN':
+def _display_lines(data, files, number, head):
+    if data.get('state') != 'open' or data.get('merged') is True:
         _refuse('OWNER_APPROVAL_PR_NOT_OPEN')
-    if data.get('headRefOid') != head:
+    if data['head']['sha'] != head:
         _refuse('OWNER_APPROVAL_HEAD_MISMATCH')
-    title = safe_terminal_text(data.get('title', ''), 120)
-    raw_files = data.get('files')
-    if type(raw_files) is not list:
-        _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
-    paths = [safe_terminal_text(item.get('path', '') if type(item) is dict else item, 200)
-             for item in raw_files[:50]]
-    lines = [f'PR {number}: {title}', f'HEAD: {head}', f'File count: {len(raw_files)}']
-    lines.extend('  ' + path for path in paths)
-    if len(raw_files) > 50:
-        lines.append(f'  +{len(raw_files) - 50} more')
+    if data['base']['ref'] != 'main':
+        _refuse('OWNER_APPROVAL_BASE_NOT_MAIN')
+    if data['base']['repo']['full_name'] != _repository_slug():
+        _refuse('OWNER_APPROVAL_REPOSITORY_MISMATCH')
+    if data['changed_files'] >= 100 or len(files) != data['changed_files']:
+        _refuse('OWNER_APPROVAL_TOO_MANY_FILES')
+    if any(len(item['filename']) > 1024 or len(item.get('previous_filename', '')) > 1024
+           for item in files):
+        _refuse('OWNER_APPROVAL_DISPLAY_TOO_LARGE')
+    title = safe_terminal_text(data.get('title', ''), 300)
+    repository = safe_terminal_text(data['base']['repo']['full_name'], 255)
+    lines = [f'Action: merge PR #{number} into main of {repository} '
+             '(MERGE_SENSITIVE_PR).', f'Title: {title}', f'HEAD: {head}',
+             f'Base: {data["base"]["ref"]}', f'Files: {len(files)}']
+    for item in files:
+        filename = safe_terminal_text(item['filename'], 4096)
+        previous = item.get('previous_filename')
+        path = (safe_terminal_text(previous, 4096) + ' -> ' + filename
+                if previous is not None else filename)
+        status = safe_terminal_text(item['status'], 32)
+        lines.append(f'{status}: {path}')
     lines.append(f'Approval expires in {APPROVAL_TTL_SECONDS} seconds.')
     return lines
 
@@ -273,9 +343,11 @@ def run_owner_approval(args):
     try:
         if type(args.pr) is not int or args.pr <= 0 or not _valid_sha(args.head):
             _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
-        data = _gh_pr_view(args.pr)
-        lines = _display_lines(data, args.pr, args.head)
-        binding = merge_binding(args.pr, args.head)
+        data, files = _read_pr(args.pr)
+        lines = _display_lines(data, files, args.pr, args.head)
+        binding = merge_binding_from_pr(data)
+        if is_approved(binding):
+            _refuse('OWNER_APPROVAL_ALREADY_LIVE')
         expires_at = grant(binding, lines)
         print(f'OWNER_APPROVAL_GRANTED pr={args.pr} head={args.head} expires_at={expires_at}')
         return 0
