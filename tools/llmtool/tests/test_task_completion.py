@@ -569,7 +569,7 @@ class TaskCompletionTests(unittest.TestCase):
         info_attributes.parent.mkdir(parents=True, exist_ok=True)
         info_attributes.write_text(self.source_path + ' filter=marker\n')
         with self.assertRaises(LLMToolError) as rejected:
-            self._collect_result(result_sha, artifact)
+            self._collect_result(result_sha, artifact, trusted_base_sha=main_sha)
         self.assertEqual(rejected.exception.completion_code, 'RESULT_DIFF_INVALID')
         self.assertFalse(marker.exists())
 

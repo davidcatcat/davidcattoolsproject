@@ -1811,7 +1811,7 @@ def verify_artifact_checkpoint(root, artifact, artifact_sha256, source_sha,
     if total > _PROPOSAL_TREE_LIMIT:
         _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
     expected = _apply_artifact_expected(root, artifact, source_sha, patch_paths)
-    _refuse_custom_merge_drivers(root)
+    _validate_remerge_config(root)
     raw = _git(root, ('rev-list', '--first-parent', '--reverse', source_sha + '..' +
                       endpoint_sha), limit=1024 * 1024)
     try:
