@@ -5590,14 +5590,16 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                             if p.role in CLAUDE_CLI_ROLES + ("Claude Code background session",)}
     live = {sid: (entry, answerer(owners.get(entry.get("pid"), "")))
             for sid, entry in live_sessions.items()}
-    listed_agents = (agents or {}).items()
-    if registered is not None:
-        registered_sessions = set(live_sessions)
-        listed_agents = ((sid, entry) for sid, entry in listed_agents
-                         if entry.get("jobState") != "blocked"
-                         or sid in registered_sessions
-                         or (type(entry.get("listedPid")) is int
-                             and entry["listedPid"] in running_claude_pids))
+    registered_sessions = set(live_sessions)
+
+    def has_running_evidence(sid: str, entry: dict) -> bool:
+        return (registered is None or sid in registered_sessions
+                or (type(entry.get("listedPid")) is int
+                    and entry["listedPid"] in running_claude_pids))
+
+    listed_agents = [(sid, entry) for sid, entry in (agents or {}).items()
+                     if entry.get("jobState") != "blocked"
+                     or has_running_evidence(sid, entry)]
     for sid, listed in listed_agents:
         # What `claude agents` says beats the registry's own status word unless the registry is more urgent.
         # Blocked listings need running evidence before they can ask for attention or keep a transcript open.
@@ -5623,13 +5625,10 @@ def office_rows(processes: list[Process], now: float | None = None, *,
                        codex_running=codex_running, codex_execs=codex_execs)
             + claude_rows(now, claude_root, canonical, live))
     rows = _closed_codex_cli(rows, sum(family(p.role) == "Codex" for p in clis))
+    keep_agents = ((sid, entry) for sid, entry in listed_agents
+                   if entry.get("jobState") == "blocked")
     rows = _closed_claude_cli(rows, sessions, processes,
-                              keep={f"claude:{sid}.jsonl" for sid, entry in (agents or {}).items()
-                                    if entry.get("jobState") == "blocked"
-                                    and (registered is None
-                                         or sid in live_sessions
-                                         or (type(entry.get("listedPid")) is int
-                                             and entry["listedPid"] in running_claude_pids))})
+                              keep={f"claude:{sid}.jsonl" for sid, _ in keep_agents})
     # A resident OpenCode SERVER alone is not a member; each CLI/TUI or `run`
     # client is.
     _forget_cwds(processes)

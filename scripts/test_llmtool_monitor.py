@@ -2885,7 +2885,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(asked, [str(self.claude.parent)])
         self.assertEqual(sorted(listed), ["aaaaaaaa-0001", "bbbbbbbb-0002", "ffffffff-0006"])
         running = self._registry(61, sessionId="aaaaaaaa-0001", kind="bg", status="busy",
-                                 name="claude-developer", cwd=self.canonical)
+                                 name="claude-developer", cwd=str(self.task))
         rows = [row for row in mon.office_rows(
             [running], self.NOW, codex_root=str(self.codex), claude_root=str(self.claude),
             canonical=self.canonical, agents=listed) if row.kind != "worker"]
@@ -2909,7 +2909,7 @@ class OfficeViewTests(unittest.TestCase):
         self._write(self.claude / "proj" / "aaaaaaaa-0001.jsonl", [
             {"type": "user", "cwd": self.canonical, "entrypoint": "cli"},
             {"type": "ai-title", "aiTitle": "title a"}], age=600)
-        (self.claude.parent / "sessions").mkdir(exist_ok=True)   # registry readable, no CLI in it
+        (self.claude.parent / "sessions").mkdir(exist_ok=True)   # registry readable; the CLI below is registered
         listed = mon.parse_claude_agents(json.dumps(
             [{"sessionId": "aaaaaaaa-0001", "state": "blocked", "status": "waiting",
               "pid": 61, "cwd": self.canonical}]))
@@ -2951,7 +2951,8 @@ class OfficeViewTests(unittest.TestCase):
     def test_claude_agents_blocked_listed_pid_must_name_a_claude_process(self):
         (self.claude.parent / "sessions").mkdir(exist_ok=True)
         listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
-                                     "jobState": "blocked", "listedPid": 61}}
+                                     "jobState": "blocked", "listedPid": 61,
+                                     "listed": True, "cwd": self.canonical}}
         self.assertFalse(any(row.sid == "aaaaaaaa" for row in self.rows([], agents=listed)))
         non_claude = mon.Process(61, 1, 61, "05:00", "S", "Codex daemon", "codex", "")
         self.assertFalse(any(row.sid == "aaaaaaaa" for row in
@@ -2960,7 +2961,8 @@ class OfficeViewTests(unittest.TestCase):
     def test_claude_agents_blocked_listed_pid_accepts_running_background_session(self):
         (self.claude.parent / "sessions").mkdir(exist_ok=True)
         listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
-                                     "jobState": "blocked", "listedPid": 61}}
+                                     "jobState": "blocked", "listedPid": 61,
+                                     "listed": True, "cwd": self.canonical}}
         background = mon.Process(61, 7, 7, "05:00", "S", "Claude Code background session",
                                  "claude", "Claude Code daemon 7")
         rows = [row for row in self.rows([background], agents=listed) if row.kind != "worker"]
@@ -2968,7 +2970,11 @@ class OfficeViewTests(unittest.TestCase):
 
     def test_claude_agents_blocked_without_readable_registry_keeps_attention(self):
         listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
-                                     "jobState": "blocked"}}
+                                     "jobState": "blocked", "listed": True,
+                                     "cwd": self.canonical}}
+        sessions = mon.claude_sessions(str(self.claude))
+        self.assertTrue(all(not os.path.exists(directory) for directory in sessions))
+        self.assertIsNone(mon._claude_registered(sessions, []))
         rows = [row for row in self.rows([], agents=listed) if row.kind != "worker"]
         self.assertEqual([(row.sid, row.state) for row in rows], [("aaaaaaaa", mon.ATTENTION)])
 
@@ -2978,7 +2984,8 @@ class OfficeViewTests(unittest.TestCase):
         (self.claude.parent / "sessions" / "61.json").write_text(json.dumps(
             {"pid": 61, "sessionId": "aaaaaaaa-0001", "status": "busy"}), encoding="utf-8")
         listed = {"aaaaaaaa-0001": {"sessionId": "aaaaaaaa-0001", "status": "busy",
-                                     "jobState": "blocked"}}
+                                     "jobState": "blocked", "listed": True,
+                                     "cwd": self.canonical}}
         captured = {}
         original = mon.claude_rows
         def capture(now, root=None, canonical=None, live=None):
