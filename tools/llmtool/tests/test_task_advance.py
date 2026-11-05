@@ -2266,5 +2266,65 @@ class TaskAdvanceMacLabelTests(unittest.TestCase):
             ['pr', 'edit', '17', '--add-label', 'mac-ci'])])
 
 
+class TaskAdvanceCodexVerdictTests(unittest.TestCase):
+    def _advance_dispatch_result(self, reply, gh_runner):
+        record = base_record()
+
+        class Store:
+            def get(self, _task_id):
+                return record
+
+        with patch.object(task_advance, '_d6_snapshot', return_value=d6()), \
+             patch.object(task_advance, '_review_outcomes', return_value=[]):
+            result = task_advance.advance(
+                task_id=record['task_id'], store=Store(), pr_number=17,
+                github_get=green_linux_ci,
+                dispatch_review_call=lambda **_kwargs: reply,
+                publish_gh_runner=gh_runner)
+        return result
+
+    def test_completed_review_posts_verbatim_comment_and_bounds_result(self):
+        review_text = 'Verdict: PASS\nFORMAL SECURITY/FUNCTIONAL/QA ACCEPT\n'
+        calls = []
+
+        def runner(root, argv):
+            calls.append((root, argv))
+            return subprocess.CompletedProcess(argv, 0)
+
+        result = self._advance_dispatch_result(
+            {'state': 'COMPLETED', 'verdict': 'PASS', 'review_text': review_text}, runner)
+
+        self.assertEqual(calls, [('/repo/task',
+            ['pr', 'comment', '17', '--body', review_text])])
+        self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+        self.assertEqual(result['result'], {'state': 'COMPLETED', 'verdict': 'PASS'})
+
+    def test_withheld_and_dispatched_results_do_not_post_comments(self):
+        for reply in (
+                {'state': 'COMPLETED', 'verdict': 'BLOCKED',
+                 'review_dispatch_code': 'REVIEW_TEXT_WITHHELD'},
+                {'state': 'COMPLETED', 'verdict': 'PASS', 'review_text': ''},
+                {'state': 'DISPATCHED', 'verdict': 'PENDING'}):
+            with self.subTest(state=reply['state'], verdict=reply['verdict']):
+                calls = []
+                result = self._advance_dispatch_result(reply, lambda *_args: calls.append(_args))
+                self.assertEqual(calls, [])
+                self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+                self.assertNotIn('review_text', result['result'])
+
+    def test_comment_failure_and_exception_keep_dispatch_step_and_append_code(self):
+        review = {'state': 'COMPLETED', 'verdict': 'FAIL', 'review_text': 'Verdict: FAIL'}
+        runners = (
+            lambda *_args: subprocess.CompletedProcess([], 1),
+            lambda *_args: (_ for _ in ()).throw(RuntimeError('comment failed')),
+        )
+        for runner in runners:
+            with self.subTest(runner=runner):
+                result = self._advance_dispatch_result(review, runner)
+                self.assertEqual(result['step'], 'DISPATCH_REVIEW')
+                self.assertIn('REVIEW_VERDICT_COMMENT_FAILED', result['codes'])
+                self.assertEqual(result['result'], {'state': 'COMPLETED', 'verdict': 'FAIL'})
+
+
 if __name__ == '__main__':
     unittest.main()
