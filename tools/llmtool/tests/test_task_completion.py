@@ -500,6 +500,13 @@ class TaskCompletionTests(unittest.TestCase):
 
     def test_first_parent_merge_from_main_and_developer_side_branch_pass(self):
         self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        readme = self.root / 'README.md'
+        readme.write_text('Main branch update.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'advance main README')
+        trusted_base_sha = self._git('rev-parse', 'HEAD')
+
         self._git('checkout', '-b', 'developer-side')
         side_path = 'side.txt'
         (self.root / side_path).write_text('Side branch change.\n')
@@ -513,18 +520,23 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('commit', '-m', 'developer before merge')
         self._git('merge', '--no-ff', 'main', '-m', 'merge main')
         main_merge_tip = self._git('rev-parse', 'HEAD')
+        parents = self._git('rev-list', '--parents', '-n', '1', main_merge_tip).split()
+        self.assertEqual(len(parents), 3)
         main_path.write_text(main_path.read_text() + '# after main merge\n')
         self._git('add', self.source_path)
         self._git('commit', '-m', 'developer after merge')
         main_result = self._git('rev-parse', 'HEAD')
-        self.assertEqual(task_completion._developer_changed_paths(
-            str(self.root), self.source_sha, main_result, self.source_sha),
-            (self.source_path,))
+        main_paths = task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, main_result, trusted_base_sha)
+        self.assertIn('README.md', self._git('diff', '--name-only', self.source_sha,
+                                             main_result).splitlines())
+        self.assertNotIn('README.md', main_paths)
+        self.assertEqual(main_paths, (self.source_path,))
 
         self._git('merge', '--no-ff', side_tip, '-m', 'merge developer side branch')
         side_result = self._git('rev-parse', 'HEAD')
         self.assertEqual(task_completion._developer_changed_paths(
-            str(self.root), self.source_sha, side_result, self.source_sha),
+            str(self.root), self.source_sha, side_result, trusted_base_sha),
             (side_path, self.source_path))
 
     def test_parentless_commits_in_range_or_broken_first_parent_chain_are_refused(self):
@@ -548,13 +560,24 @@ class TaskCompletionTests(unittest.TestCase):
                 str(self.root), self.source_sha, broken, self.source_sha)
         self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
 
-        # The repair segment starts at Developer commit but reaches it only as
-        # the second parent of the segment end.
-        end = self._commit_tree(root_tree, parentless, developer,
+        # Both commits are on source history, but start is reachable from end
+        # only through the second parent; no parentless commit is in the range.
+        self._git('checkout', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        (self.root / 'README.md').write_text('Source X.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'source X')
+        x_commit = self._git('rev-parse', 'HEAD')
+        (self.root / 'README.md').write_text('Source start.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'source start')
+        start = self._git('rev-parse', 'HEAD')
+        start_tree = self._git('rev-parse', start + '^{tree}')
+        end = self._commit_tree(start_tree, x_commit, start,
                                 message='repair segment second parent')
         with self.assertRaises(LLMToolError) as raised:
             task_completion._developer_changed_paths(
-                str(self.root), developer, end, developer)
+                str(self.root), start, end, start)
         self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
 
     def test_parentless_head_refused_and_shallow_boundary_is_detected(self):
