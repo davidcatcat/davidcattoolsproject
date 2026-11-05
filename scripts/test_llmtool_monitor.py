@@ -1741,7 +1741,7 @@ class OfficeViewTests(unittest.TestCase):
                 (codex, "codex-reviewer", ("codex reviewer", "reviewer")),
                 (codex, "codex-high-debug-gpt-6.1-sol", ("codex developer", "developer")),
                 (codex, {"x": 1}, ("codex developer", "developer")),   # unreadable id, not a -crv- name
-                (claude, "claude-developer-ui", ("claude ui", "ui")),   # as SESSION_ROLE reads it
+                (claude, "claude-developer-ui", ("claude developer", "developer")),
                 (claude, "claude-pm-1ec9782e", ("claude pm", "pm")),
                 (claude, {"x": 1}, ("claude", ""))):   # other families claim no role
             with self.subTest(agent=agent, family=proc.role):
@@ -1749,6 +1749,26 @@ class OfficeViewTests(unittest.TestCase):
                 rows = mon._d6_process_rows([proc], [], self.canonical, lambda pid: str(self.task))
                 self.assertEqual([(row.name, row.role) for row in rows], [expected])
                 self.assertEqual(rows[0].detail, "task wp-1（程序 cwd）")
+
+    def test_codex_high_debug_d6_run_shows_debug_reviewer_only_for_bound_run(self):
+        task_id = "diagnostic-hd2-a1b2c3d"
+        root = self.task.parent / task_id
+        os.makedirs(root)
+        self._register(task_id, str(root), trusted_agent_id="codex-high-debug-gpt-6.1-sol")
+        self._codex("high-debug", {"id": "T-HD", "cwd": str(root), "thread_source": "user",
+                                   "originator": "codex-tui"}, ["task_started"], age=30)
+        row = next(row for row in self.rows() if row.task == f"task {task_id}")
+        self.assertEqual((row.name, row.role), ("codex debug reviewer", "debug reviewer"))
+
+        other_id = "diagnostic-hd3-b2c3d4e"
+        other_root = self.task.parent / other_id
+        os.makedirs(other_root)
+        self._register(other_id, str(other_root), trusted_agent_id="codex-developer-gpt-6-luna")
+        self._codex("ordinary", {"id": "T-ordinary", "cwd": str(other_root),
+                                  "thread_source": "user", "originator": "codex-tui"},
+                    ["task_started"], age=30)
+        ordinary = next(row for row in self.rows() if row.task == f"task {other_id}")
+        self.assertEqual((ordinary.name, ordinary.role), ("codex developer", "developer"))
 
     def test_codex_session_in_a_d6_shows_the_role_its_record_binds(self):
         # Owner #564: the Codex Reviewer of PR #525 (registry trusted_agent_id
@@ -1773,7 +1793,7 @@ class OfficeViewTests(unittest.TestCase):
         # "developer by placement" default; without either, no role is claimed.
         for agent, launcher, expected in (
                 ("claude-reviewer", "claude-developer-g8", ("claude reviewer", "reviewer")),
-                ("claude-developer-ui-486c15a4", None, ("claude ui", "ui")),
+                ("claude-developer-ui-486c15a4", None, ("claude developer", "developer")),
                 ("codex-developer-gpt-6-luna", None, ("claude developer", "developer")),
                 ({"x": 1}, "claude-reviewer", ("claude reviewer", "reviewer")),   # launcher record
                 ({"x": 1}, None, ("claude", ""))):
@@ -2789,15 +2809,15 @@ class OfficeViewTests(unittest.TestCase):
         # Only an exact claude-<role>[-suffix] name binds a role; anything else stays unnamed.
         self.assertEqual(got, {"title r": ("claude reviewer（背景）", "reviewer"),
                                "title p": ("claude pm（互動）", "pm"),
-                               "title d": ("claude ui（互動）", "ui"),
-                               "title u": ("claude ui（互動）", "ui"),
+                               "title d": ("claude developer（互動）", "developer"),
+                               "title u": ("claude 互動", ""),
                                "title q": ("claude developer（互動）", "developer"),
                                "title x": ("claude 互動", ""),
                                "title y": ("claude 互動", "")})
 
     def test_closed_claude_session_keeps_its_launcher_role_but_claims_no_mode(self):
-        # A stopped background Reviewer, a stopped UI Agent in its D6 task and a
-        # stopped unnamed session: no CLI reports on them any more.
+        # A stopped background Reviewer, a stopped Developer in its D6 task and
+        # a stopped unnamed session: no CLI reports on them any more.
         for sid, cwd, name in (("r", self.canonical, "claude-reviewer"),
                                ("u", str(self.task), "claude-developer-ui"),
                                ("n", self.canonical, None)):
@@ -2809,7 +2829,7 @@ class OfficeViewTests(unittest.TestCase):
         rows = self.rows()
         got = {row.detail.split("｜")[0]: (row.name, row.role) for row in rows if row.kind != "worker"}
         self.assertEqual(got, {"title r": ("claude reviewer", "reviewer"),
-                               "title u": ("claude ui", "ui"),
+                               "title u": ("claude developer", "developer"),
                                "title n": ("claude", "")})
         # A name that is not exactly claude-<role> still binds nothing.
         self._write(self.claude / "proj" / "r.jsonl", [
@@ -3184,13 +3204,14 @@ class OfficeViewTests(unittest.TestCase):
         # Kept as the running CLI's session, with no claimed mode.
         self.assertEqual((row.state, row.role, row.detail), (mon.IDLE, "reviewer", "title r"))
 
-    def test_launcher_names_never_end_in_a_dash(self):
-        for name in ("claude-ui-", "claude-developer-ui-", "claude-developer-", "claude-pm-x-"):
+    def test_launcher_roles_only_include_supported_names(self):
+        for name in ("claude-developer-", "claude-pm-x-", "claude-ui", "claude-ui-2"):
             self.assertIsNone(mon.SESSION_ROLE.fullmatch(name), name)
-        for name, role in (("claude-ui-2", "ui"), ("claude-developer-ui", "ui"),
-                           ("claude-developer-ui-x", "ui"), ("claude-developer-g8", "developer")):
+        for name, role in (("claude-developer-ui", "developer"),
+                           ("claude-developer-ui-x", "developer"),
+                           ("claude-developer-g8", "developer")):
             found = mon.SESSION_ROLE.fullmatch(name)
-            self.assertEqual(found.group(1) or found.group(2), role)
+            self.assertEqual(found.group(1), role)
 
     def test_claude_sessions_of_every_account_are_shown(self):
         other = self.claude.parent / "claude-account2" / "projects"
