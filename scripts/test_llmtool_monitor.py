@@ -122,6 +122,24 @@ class MonitorTrustTests(unittest.TestCase):
         self.assertEqual(mon.owner_count_line(Github()),
                          ("等你決定：1 件（另有 1 筆其他 Owner 請求）", "!"))
 
+    def test_owner_waiting_requires_a_complete_successful_read(self):
+        self.assertIsNone(mon.owner_waiting(None))
+
+        class Github:
+            successful_read = False
+            read_failed = False
+            pending = [mon.OwnerPending(1, "#1", "WAITING", "", "waiting_owner")]
+
+        github = Github()
+        self.assertIsNone(mon.owner_waiting(github))
+        github.successful_read, github.read_failed = True, True
+        self.assertIsNone(mon.owner_waiting(github))
+        github.read_failed = False
+        github.pending = [mon.OwnerPending(1, "#1", "WAITING", "", "waiting_owner"),
+                          mon.OwnerPending(2, "#2", "WAITING", "", "repair_gate"),
+                          mon.OwnerPending(3, "#3", "WAITING", "", "waiting_owner")]
+        self.assertEqual(mon.owner_waiting(github), 2)
+
     def test_d6_phases_and_unknown_pr_state(self):
         self.assertEqual(mon.d6_phase("ACTIVE", True, "", False), "執行中")
         self.assertEqual(mon.d6_phase("ACTIVE", False, "MERGED", False), "已完成，待收尾")
@@ -2605,7 +2623,7 @@ class OfficeViewTests(unittest.TestCase):
                 mon.OfficeRow("claude 互動", mon.CLOSED, "y", 1.0, 10, task="task wp-2")]
         lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
         self.assertEqual(len(lines), 2)
-        self.assertIn("wp-2  進行中  →  沒有 session 在跑  （未綁定 agent）", lines[0])
+        self.assertIn("wp-2  進行中  →  未確認  （未綁定 agent）", lines[0])
         self.assertIn("wp-1  執行中  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
@@ -2654,6 +2672,61 @@ class OfficeViewTests(unittest.TestCase):
         no_github_lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
         unknown = next(line for line in no_github_lines if "idle-unknown" in line)
         self.assertIn("修復中", unknown)
+
+    def test_d6_idle_words_follow_phase_and_live_session_presence(self):
+        words = {
+            "已完成，待收尾": "已結束",
+            "審查已結束，待收尾": "已結束",
+            "診斷沒在跑，待收尾": "已結束",
+            "已驗收，可收尾": "已結束",
+            "等審查或 CI": "等結果",
+            "修復中": "等結果",
+            "等審查": "等結果",
+            "審查沒在跑，查不到結論": "異常：沒有 session 在跑",
+            "閒置（查不到 PR）": "異常：沒有 session 在跑",
+            "保留待處置": "異常：沒有 session 在跑",
+            "進行中": "未確認",
+        }
+        for phase, word in words.items():
+            with self.subTest(phase=phase):
+                self.assertEqual(mon.d6_idle_word(phase), word)
+
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                  mon.time.gmtime(self.NOW - 60))
+        cases = {
+            "merged": "branch/merged",
+            "open": "branch/open",
+            "missing-pr": "branch/missing",
+            "no-pr-data": "branch/no-data",
+            "pr123-claude-rv1-abcdef0": "branch/reviewer",
+            "inspect-hd1-abcdef0": "branch/debug",
+            "done-row": "branch/done-row",
+        }
+        for task_id, branch in cases.items():
+            self._register(task_id, str(self.task), state="ACTIVE", branch=branch,
+                           last_verified_at=stamp)
+        prs = {"branch/merged": (901, "MERGED"), "branch/open": (902, "OPEN"),
+               "branch/reviewer": (123, "OPEN"), "unrelated": (999, "OPEN"),
+               "branch/debug": (903, "OPEN")}
+        done = mon.OfficeRow("DONE session", mon.DONE, "finished", 0, 1,
+                             task="task done-row")
+
+        def task_line(task_id, pr_data, verdicts=None, rows=None):
+            lines = mon.d6_task_lines(self.canonical, rows or [], self.NOW,
+                                      pr_data, verdicts or {})
+            return next(line for line in lines if task_id in line)
+
+        self.assertIn("已結束", task_line("merged", prs))
+        self.assertIn("等結果", task_line("open", prs))
+        self.assertIn("異常：沒有 session 在跑", task_line("missing-pr", prs))
+        self.assertIn("未確認", task_line("no-pr-data", {}))
+        reviewer = "pr123-claude-rv1-abcdef0"
+        self.assertIn("異常：沒有 session 在跑", task_line(reviewer, prs))
+        verdicts = {"123": [(self.NOW - 30, "REVIEW_PASS", ["abcdef0"])]}
+        reviewer_line = task_line(reviewer, prs, verdicts)
+        self.assertIn("已結束", reviewer_line)
+        self.assertIn("已結束", task_line("inspect-hd1-abcdef0", prs))
+        self.assertIn("DONE session 完成", task_line("done-row", {}, rows=[done]))
 
     def test_d6_running_phase_uses_live_main_subagent_and_codex_family(self):
         stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
@@ -2822,7 +2895,7 @@ class OfficeViewTests(unittest.TestCase):
         for child_state in (mon.WORKING, mon.STALLED):
             for parent_state, expected_running, expected_phase, expected_session in (
                     (mon.IDLE, {"wp-1"}, "執行中", None),
-                    (mon.CLOSED, set(), "已完成，待收尾", "沒有 session 在跑")):
+                    (mon.CLOSED, set(), "已完成，待收尾", "已結束")):
                 with self.subTest(parent=parent_state, child=child_state):
                     parent = mon.OfficeRow("claude developer", parent_state, "parent", 1.0, 10,
                                            key="claude:parent", task="task wp-1")
@@ -4465,7 +4538,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual((live.name, live.state, live.kind, live.group),
                          ("claude", mon.IDLE, "agent", ""))
         lines = mon.office_lines(rows, expand=True)   # gray rows listed, not folded
-        self.assertEqual(lines[0], "辦公室 · 2 位工作中 · 共 9 位")   # incl. the EC2 and gw agent workers
+        self.assertEqual(lines[0], "辦公室 · 工作中 2 · 等你 ?")
         live = lines.index(f"── {mon.LIVE_SECTION} ──")
         pm = next(i for i, line in enumerate(lines) if "codex 主對話" in line)
         self.assertLess(live, pm)
@@ -5653,6 +5726,7 @@ class OfficeViewTests(unittest.TestCase):
         rest = [text for text, _ in listed[at + 1:at + 10] if text.startswith(" ")]
         self.assertEqual(sum(text.count("x") for text in rest) + line.count("x") - 1, 200)   # 1 = "codex"
         self.assertTrue(all(view[text] == "+" for text in rest))
+
         # a blank line sits above the Worker section
         texts = [text for text, _ in listed]
         self.assertEqual(texts[texts.index(f"── {mon.STATUS_SECTION} ──") - 1], "")
@@ -5673,6 +5747,21 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(view[next(iter(view))], "title")
         # without a width (--once) nothing is cut
         self.assertIn("x" * 200, "\n".join(mon.office_lines(rows)))
+
+    def test_office_header_shows_working_and_waiting_counts_or_unknown(self):
+        rows = [mon.OfficeRow("working", mon.WORKING, "", 0, 1),
+                mon.OfficeRow("shared", mon.IDLE, "", 0, 2, kind="shared"),
+                mon.OfficeRow("idle", mon.IDLE, "", 0, 3)]
+        title, style = mon.office_view(rows, waiting=0)[0]
+        self.assertEqual((title, style), ("辦公室 · 工作中 1 · 等你 0", "title"))
+        title_without_shared, shared_style = mon.office_view(
+            [rows[0], rows[2]], waiting=0)[0]
+        self.assertEqual((title_without_shared, shared_style), (title, style))
+        title, style = mon.office_view(rows, waiting=3)[0]
+        self.assertEqual((title, style), ("辦公室 · 工作中 1 · 等你 3", "title"))
+        self.assertEqual(mon.office_lines(rows, waiting=3)[0],
+                         "辦公室 · 工作中 1 · 等你 3")
+        self.assertEqual(mon.office_lines(rows)[0], "辦公室 · 工作中 1 · 等你 ?")
 
     def _listed(self, rows, **kw):
         """Row lines of the office view (no title, alerts, sections or legend)."""
@@ -5772,7 +5861,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertEqual(texts.count("codex developer" + texts[-3][len("codex developer"):]), 1)
         self.assertTrue(any(text.startswith("… 灰色 2 項") and style == "dim" for text, style in folded))
         self.assertFalse(any(text.startswith(("codex 主對話", "claude pm")) for text in texts))
-        self.assertEqual(folded[0][0], "辦公室 · 1 位工作中 · 共 3 位")   # the title counts everyone
+        self.assertEqual(folded[0][0], "辦公室 · 工作中 1 · 等你 ?")
         unfolded = [text for text, _ in mon.office_view(rows, expand=True)]
         self.assertTrue(any(text.startswith("codex 主對話") for text in unfolded))
         self.assertTrue(any(text.startswith("claude pm") for text in unfolded))
@@ -5817,7 +5906,7 @@ class OfficeViewTests(unittest.TestCase):
         lines = [text for text, _ in view]
         self.assertEqual(names(lines), ["mac ci runner #2", "公司 gw", "mac ci runner #1",
                                         "mac ci 兩台共用", "EC2 remote-test"])
-        self.assertTrue(lines[0].startswith("辦公室 · 2 位工作中 · 共 5 位"), lines[0])
+        self.assertTrue(lines[0].startswith("辦公室 · 工作中 2 · 等你 ?"), lines[0])
         shared = next(text for text, _ in view if text.startswith("mac ci 兩台共用"))
         self.assertIn("排隊 1 個：llmtool Mac CI（PR #341 @bbbbbbb）", shared)
         self.assertFalse(shared.rstrip().endswith("前"))   # no time of its own
@@ -8205,7 +8294,8 @@ class StuckAlertTests(unittest.TestCase):
         github = mon.GitHubSource("o/r", runner=FakeRun(), clock=lambda: self.NOW)
         github.ci_runs = [("queued", "llmtool Mac CI", self.NOW - 2701, None, 7)]
         github.branch_prs = {"feature": (5, "OPEN")}
-        github.verdicts, github.pending, github.scope = {}, [], ""
+        github.verdicts, github.pending, github.scope = {}, [
+            mon.OwnerPending(965, "#965", "WAITING", "", "waiting_owner")], ""
         github.board_pulls, github.ci_heads = [], {}
         github.successful_read, github.read_failed = True, False
         github.board_page_count, github.board_oldest_updated = 0, None
@@ -8250,7 +8340,10 @@ class StuckAlertTests(unittest.TestCase):
         self.assertIn("macOS 超過 45 分鐘", rendered)
         self.assertIn("修復已到上限：D6 wp-1（至少 2 輪）", rendered)
         self.assertIn("PM 進度：上次派工 12 分鐘前 · 排隊 0", rendered)
+        self.assertIn("辦公室 · 工作中 0 · 等你 1", rendered)
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
         self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
         self.assertTrue(any("PM 進度：上次派工 12 分鐘前 · 排隊 0" in line
+                            for line in drawn.values()))
+        self.assertTrue(any("辦公室 · 工作中 0 · 等你 1" in line
                             for line in drawn.values()))

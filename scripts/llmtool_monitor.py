@@ -2680,6 +2680,17 @@ PR_DONE_WORDS = {"MERGED": "已合併", "CLOSED": "已關閉"}
 AGENT_ID = re.compile(r"[A-Za-z0-9._-]{1,96}")
 
 
+def d6_idle_word(phase: str) -> str:
+    if phase in ("已完成，待收尾", "審查已結束，待收尾", "診斷沒在跑，待收尾",
+                 "已驗收，可收尾"):
+        return "已結束"
+    if phase in ("等審查或 CI", "修復中", "等審查"):
+        return "等結果"
+    if phase in ("審查沒在跑，查不到結論", "閒置（查不到 PR）", "保留待處置"):
+        return "異常：沒有 session 在跑"
+    return "未確認"
+
+
 def d6_phase(state: str, sessions: bool, pr: str, reviewer_done: bool) -> str:
     if sessions:
         return "執行中"
@@ -2722,7 +2733,6 @@ def d6_task_lines(canonical: str, office: list, now: float,
     lines = []
     pr_numbers = {number: state for number, state in prs.values()}
     for task_id, state, agent, when, branch in recent:
-        who = "、".join(live.get(task_id, [])) or "沒有 session 在跑"
         done = stale(state, branch)
         pr_state = prs.get(branch, (None, ""))[1] if branch and prs else ""
         reviewer_done = False
@@ -2744,6 +2754,7 @@ def d6_task_lines(canonical: str, office: list, now: float,
             phase = "診斷沒在跑，待收尾"
         else:
             phase = d6_phase(state, task_id in running, pr_state, reviewer_done)
+        who = "、".join(live.get(task_id, [])) or d6_idle_word(phase)
         note = f"  ⚠ PR #{done[0]} {PR_DONE_WORDS[done[1]]}，登記還是{D6_STATES.get(state, state)}" if done else ""
         lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
                      f"{phase}  →  {who}  （{agent or '未綁定 agent'}）{note}")
@@ -7240,6 +7251,12 @@ def owner_count_line(github) -> tuple[str, str]:
     return text, "!" if count or others else ""
 
 
+def owner_waiting(github) -> int | None:
+    if (github is None or not github.successful_read or github.read_failed):
+        return None
+    return sum(item.kind == "waiting_owner" for item in github.pending)
+
+
 def stuck_lines(mon, now) -> list[str]:
     try:
         github = mon.github
@@ -7268,6 +7285,7 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
                 width: int | None = None, expand: bool = False,
                 pending: list[OwnerPending] | None = None,
                 now: float | None = None, scope: str = "", *,
+                waiting: int | None = None,
                 top: list[tuple[str, str]] | None = None) -> list[tuple[str, str]]:
     """[(line, style)]: style is "title", "!", "+", "dim", "section" or "".
     With a screen width, each detail is cut so the time column stays visible.
@@ -7275,8 +7293,8 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
     the gray rows are folded into one count per section (key a in the TUI).
     pending: GitHub requests waiting for the Owner, shown first."""
     working = sum(row.state == WORKING for row in rows)
-    members = sum(row.kind != "shared" for row in rows)   # a shared line is not a member
-    out = [(f"辦公室 · {working} 位工作中 · 共 {members} 位", "title")]
+    waiting_text = "?" if waiting is None else str(waiting)
+    out = [(f"辦公室 · 工作中 {working} · 等你 {waiting_text}", "title")]
     now = time.time() if now is None else now
     for text, style in top or []:
         out += [(('  ' if i else '') + piece, style) for i, piece in
@@ -7364,9 +7382,10 @@ def office_view(rows: list[OfficeRow], error: str | None = None,
 def office_lines(rows: list[OfficeRow], error: str | None = None,
                  width: int | None = None, expand: bool = False,
                  pending: list[OwnerPending] | None = None, scope: str = "", *,
+                 waiting: int | None = None,
                  top: list[tuple[str, str]] | None = None) -> list[str]:
     return [line for line, _ in office_view(rows, error, width, expand, pending,
-                                             scope=scope, top=top)]
+                                             scope=scope, waiting=waiting, top=top)]
 
 
 def office_events(old: dict, rows: list[OfficeRow]) -> tuple[dict, list[tuple[str, str]]]:
@@ -7413,6 +7432,7 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True,
                                  pending=github.pending if github is not None else None,
                                  scope=github.scope if github is not None else "",
+                                 waiting=owner_waiting(github or mon.github),
                                  top=office_top(github, mon.quota, time.time(),
                                                 stuck=stuck_lines(mon, time.time()),
                                                 progress=pm_progress(mon, time.time())))))
@@ -7602,6 +7622,7 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         lines = office_view(mon.office, mon.office_error, w - 1, expanded,
                             pending=mon.github.pending if mon.github is not None else None,
                             scope=mon.github.scope if mon.github is not None else "",
+                            waiting=owner_waiting(mon.github),
                             top=office_top(mon.github, mon.quota, time.time(),
                                            stuck=stuck_lines(mon, time.time()),
                                            progress=pm_progress(mon, time.time())))
