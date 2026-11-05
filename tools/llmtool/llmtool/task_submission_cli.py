@@ -746,6 +746,10 @@ def add_task_submission_parsers(actions):
                              help='registered ACTIVE Claude Developer D6 task id')
     claude_bind.add_argument('--owner-ref', required=True,
                              help='Owner assignment comment URL matching worker-dispatch.json')
+    claude_bind.add_argument('--read-path', action='append', required=True,
+                             help='authorized relative context path; repeat as needed')
+    claude_bind.add_argument('--write-path', action='append', required=True,
+                             help='authorized relative target path; repeat as needed')
     claude_bind.add_argument('--common-dir',
                              help='Git common dir holding the D6 registry (default: from cwd)')
     assignments = actions.add_parser(
@@ -1170,6 +1174,8 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
     """Bind an existing, registered Claude D6 to an eligible Task without a provider call."""
     store = TaskStore() if store is None else store
     task = store.get(args.task_id)
+    if task.get('abandonment') is not None:
+        raise LLMToolError('CLAUDE_TASK_ABANDONED')
     assignment = task.get('pm_assignment')
     if (type(assignment) is not dict or assignment.get('route') != 'claude' or
             assignment.get('risk') != 'LOW' or task.get('state') != 'PM_RESPONDED' or
@@ -1197,6 +1203,11 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         changed_raw.decode('utf-8', 'strict').split('\x00') if path))
     if not changed_paths or len(changed_paths) > 32:
         raise LLMToolError('Claude D6 binding requires a bounded committed result diff')
+    read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
+    if not set(changed_paths).issubset(write_paths):
+        raise LLMToolError('RESULT_SCOPE_MISMATCH')
+    if not _remote_task_test_paths(task, read_paths=read_paths):
+        raise LLMToolError('CLAUDE_REMOTE_TEST_PATHS_MISSING')
     decision = worker_dispatch.evaluate('claude-developer', args.owner_ref,
                                          registration.task_id)
     if not decision.allowed:
@@ -1216,7 +1227,7 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
         'backend_session_semantics': 'NO_NATIVE_SESSION_ID_EXPOSED',
         'session_id': 'dev-' + new_id(), 'source_sha': registration.source_sha,
         'source_sha_binding': 'D6_REGISTRY_OBSERVED',
-        'read_paths': changed_paths, 'write_paths': changed_paths,
+        'read_paths': read_paths, 'write_paths': write_paths,
         'acceptance': list(assignment['acceptance']),
         'context_sha256': hashlib.sha256(context.encode('utf-8')).hexdigest(),
         'egress_basis': 'Existing Owner-authorized Claude Developer D6 bound to this Task.',
@@ -1245,7 +1256,6 @@ def run_task_claude_bind(args, *, store=None, stdout=None):
     }
     saved = store.claude_bind_compare_and_update(
         args.task_id, executor_task_id=registration.task_id,
-        common_dir=registration.common_dir,
         expected={'developer': None, 'completion': None},
         developer=developer, completion=completion)
     _print(_task_view(saved), stdout=stdout)
@@ -2609,7 +2619,7 @@ def _agy_developer_profile(route_config):
     return model, effort
 
 
-def run_task_opencode_delegate(args, *, store, d6_binding=None):
+def run_task_opencode_delegate(args, *, store):
     """Claim one PM-bound OpenCode run and capture its real scoped workspace diff."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -2632,8 +2642,7 @@ def run_task_opencode_delegate(args, *, store, d6_binding=None):
             raise LLMToolError('no validated low-risk OpenCode recommendation from the selected PM')
         if args.acceptance != pm_assignment['acceptance']:
             raise LLMToolError('acceptance differs from the selected PM assignment')
-    registration, snapshot = (d6_binding if d6_binding is not None else
-                              _delegate_d6_binding(args))
+    registration, snapshot = _delegate_d6_binding(args)
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
     read_paths, write_paths = _assignment_paths(args.read_path, args.write_path)
@@ -3015,7 +3024,7 @@ def _codex_developer_profile():
     return provider, effort
 
 
-def run_task_agy_delegate(args, *, store, route_runner=None, d6_binding=None):
+def run_task_agy_delegate(args, *, store, route_runner=None):
     """Run the provider-neutral AGY adapter against its registered D6 task."""
     owner_ref = getattr(args, 'owner_ref', None)
     if (type(owner_ref) is not str or
@@ -3046,8 +3055,7 @@ def run_task_agy_delegate(args, *, store, route_runner=None, d6_binding=None):
         if (type(assignment) is not dict or assignment.get('route') != 'agy' or
                 assignment.get('risk') != 'LOW' or args.acceptance != assignment.get('acceptance')):
             raise LLMToolError('no matching low-risk AGY recommendation from the selected PM route')
-    registration, snapshot = (d6_binding if d6_binding is not None else
-                              _delegate_d6_binding(args))
+    registration, snapshot = _delegate_d6_binding(args)
     if previous_developer is None:
         _reject_claude_reserved_d6(registration)
     # A fresh Owner decision is required before creating the durable assignment.
@@ -3701,11 +3709,11 @@ def _delegate_d6_binding(args):
 
 
 def _reject_claude_reserved_d6(registration):
-    if registration.trusted_agent_id == 'claude-developer':
+    if getattr(registration, 'trusted_agent_id', None) == 'claude-developer':
         raise LLMToolError('D6_CLAUDE_RESERVED')
 
 
-def run_task_codex_delegate(args, *, store, d6_binding=None):
+def run_task_codex_delegate(args, *, store):
     """Run Codex's own agent loop inside the assigned D6 workspace."""
     task = store.get(args.task_id)
     previous_developer = task.get('developer')
@@ -3760,8 +3768,7 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         run_id=task.get('run_id'),
         contract_digest=task.get('task_binding', {}).get('contract_digest'))
     try:
-        registration, snapshot = (d6_binding if d6_binding is not None else
-                                  _delegate_d6_binding(args))
+        registration, snapshot = _delegate_d6_binding(args)
     except LLMToolError as exc:
         raise LLMToolError(
             'Codex direct D6 binding failed (' + codex_direct_developer.adapter_error_code(
@@ -4337,11 +4344,8 @@ def run_task_delegate(args, *, store=None):
         if getattr(args, 'owner_ref', None) is None:
             raise LLMToolError('--provider agy requires --owner-ref')
         _validate_acceptance_scope(getattr(args, 'acceptance', None))
-        binding = _delegate_d6_binding(args)
-        if store.get(args.task_id).get('developer') is None:
-            _reject_claude_reserved_d6(binding[0])
-        _check_delegate_repair_cap(args, store, binding)
-        return run_task_agy_delegate(args, store=store, d6_binding=binding)
+        _check_delegate_repair_cap(args, store)
+        return run_task_agy_delegate(args, store=store)
     if args.provider == 'gw-agent':
         if getattr(args, 'mode', 'proposal') != 'direct':
             raise LLMToolError('--provider gw-agent requires --mode direct')
@@ -4351,17 +4355,11 @@ def run_task_delegate(args, *, store=None):
     if getattr(args, 'mode', 'proposal') == 'direct':
         if args.provider != 'codex':
             raise LLMToolError('--mode direct is supported only for the Codex Developer route')
-        binding = _delegate_d6_binding(args)
-        if store.get(args.task_id).get('developer') is None:
-            _reject_claude_reserved_d6(binding[0])
-        _check_delegate_repair_cap(args, store, binding)
-        return run_task_codex_delegate(args, store=store, d6_binding=binding)
+        _check_delegate_repair_cap(args, store)
+        return run_task_codex_delegate(args, store=store)
     if args.provider == 'opencode':
-        binding = _delegate_d6_binding(args)
-        if store.get(args.task_id).get('developer') is None:
-            _reject_claude_reserved_d6(binding[0])
-        _check_delegate_repair_cap(args, store, binding)
-        return run_task_opencode_delegate(args, store=store, d6_binding=binding)
+        _check_delegate_repair_cap(args, store)
+        return run_task_opencode_delegate(args, store=store)
     if args.provider not in ('company-gw', 'codex'):
         raise LLMToolError('unsupported Developer route')
     if not getattr(args, 'context_stdin', False) and not hasattr(args, 'context'):

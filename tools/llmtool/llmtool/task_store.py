@@ -2362,10 +2362,9 @@ class TaskStore:
         return self._update(task_id, expected=expected, changes=changes)
 
     def claude_bind_compare_and_update(self, task_id, *, executor_task_id,
-                                       common_dir, expected, **changes):
+                                       expected, **changes):
         """Atomically ensure a D6 is not already held by another live Task."""
         if (type(executor_task_id) is not str or not executor_task_id or
-                type(common_dir) is not str or not os.path.isabs(common_dir) or
                 type(expected) is not dict or not expected):
             _fail('TASK_D6_BINDING_SCAN_FAILED')
         directory = self._dirfd()
@@ -2386,15 +2385,23 @@ class TaskStore:
                         continue
                     dev = other.get('developer')
                     completion = other.get('completion')
-                    evidence = completion.get('evidence') if type(completion) is dict else None
-                    if (type(evidence) is dict and
-                            evidence.get('common_dir') == common_dir and
-                            ((type(dev) is dict and
-                              dev.get('executor_task_id') == executor_task_id) or
-                             (type(completion) is dict and
-                              completion.get('executor_task_id') == executor_task_id))):
+                    if ((type(dev) is dict and
+                         dev.get('executor_task_id') == executor_task_id) or
+                            (type(completion) is dict and
+                             completion.get('executor_task_id') == executor_task_id)):
                         _fail('TASK_D6_ALREADY_BOUND')
-                return self.compare_and_update(task_id, expected=expected, **changes)
+                target = self.get(task_id)
+                if target.get('abandonment') is not None:
+                    _fail('CLAUDE_TASK_ABANDONED')
+                update_expected = dict(expected)
+                update_expected['record_sha256'] = target['record_sha256']
+                try:
+                    return self.compare_and_update(
+                        task_id, expected=update_expected, **changes)
+                except TaskStoreConflict:
+                    if self.get(task_id).get('abandonment') is not None:
+                        _fail('CLAUDE_TASK_ABANDONED')
+                    raise
             except LLMToolError:
                 raise
             except Exception:
@@ -2686,6 +2693,8 @@ class TaskStore:
             _fail('CLAUDE_RESULT_INVALID')
         for _ in range(5):
             current = self.get(task_id)
+            if current.get('abandonment') is not None:
+                _fail('CLAUDE_TASK_ABANDONED')
             developer = current.get('developer')
             if current.get('pm_session_id') != pm_session_id:
                 _fail('CLAUDE_RESULT_BINDING_MISMATCH')

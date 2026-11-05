@@ -132,12 +132,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
                           'test_task_submission_cli.py')
         target_fixture.parent.mkdir(parents=True, exist_ok=True)
         target_fixture.write_text('old\n')
+        unchanged_test_fixture = target_fixture.parent / 'test_fixture.py'
+        unchanged_test_fixture.write_text('UNCHANGED = True\n')
         report_dir = self.executor_root / 'tools' / 'llmtool'
         report_dir.mkdir(parents=True, exist_ok=True)
         (report_dir / '.gitignore').write_text('/.d6-bootstrap-report.json\n')
         subprocess.run(['/usr/bin/git', 'add', 'sample.py', 'README.md',
                         'tools/llmtool/.gitignore',
-                        'tools/llmtool/tests/test_task_submission_cli.py'],
+                        'tools/llmtool/tests/test_task_submission_cli.py',
+                        'tools/llmtool/tests/test_fixture.py'],
                        cwd=self.executor_root, check=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture source'],
                        cwd=self.executor_root, check=True, capture_output=True)
@@ -700,7 +703,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
         claude_binding = parser_for_cli().parse_args([
             'task', 'claude-bind', 'a' * 32, '--executor-task', 'executor-task-1',
             '--owner-ref', 'https://github.com/davidcatcat/davidcattoolsproject/'
-            'issues/289#issuecomment-1'])
+            'issues/289#issuecomment-1', '--read-path',
+            'tools/llmtool/tests/test_fixture.py', '--write-path',
+            'tools/llmtool/tests/test_fixture.py'])
         self.assertEqual((claude_binding.action, claude_binding.executor_task),
                          ('claude-bind', 'executor-task-1'))
         output = io.StringIO()
@@ -959,7 +964,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             submission_cli.run_task_claude_bind(Namespace(
                 task_id=task['task_id'], executor_task=d6_task_id,
-                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path], write_path=[declared_test_path]), store=store)
         registered_d6['trusted_agent_id'] = 'claude-developer'
         registered_d6['native_session_id'] = None
         registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
@@ -967,28 +973,83 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with self.assertRaises(LLMToolError):
             submission_cli.run_task_claude_bind(Namespace(
                 task_id=task['task_id'], executor_task=d6_task_id,
-                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path], write_path=[declared_test_path]), store=store)
         registered_d6['native_session_id'] = 'UNKNOWN'
         registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
         registration_path.chmod(0o600)
         with self.assertRaises(LLMToolError):
             submission_cli.run_task_claude_bind(Namespace(
                 task_id=task['task_id'], executor_task=d6_task_id,
-                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path], write_path=[declared_test_path]), store=store)
         registered_d6['native_session_id'] = 'claude-native-session'
         registration_path.write_text(json.dumps(registered_d6), encoding='utf-8')
         registration_path.chmod(0o600)
+        scope_mismatch_task = run_task_record_pm(
+            Namespace(stdin_json=True), store=store,
+            input_stream=io.StringIO(envelope), return_record=True)
+        with self.assertRaises(LLMToolError) as scope_error:
+            submission_cli.run_task_claude_bind(Namespace(
+                task_id=scope_mismatch_task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path, 'sample.py'],
+                write_path=['sample.py']), store=store)
+        self.assertIn('RESULT_SCOPE_MISMATCH', str(scope_error.exception))
+        no_test_task = run_task_record_pm(
+            Namespace(stdin_json=True), store=store,
+            input_stream=io.StringIO(envelope), return_record=True)
+        original_git = submission_cli.task_completion._git
+
+        def no_test_diff(root, git_args, **kwargs):
+            if (root == str(self.executor_root) and len(git_args) > 0 and
+                    git_args[0] == 'diff' and '--name-only' in git_args):
+                return b'README.md\x00'
+            return original_git(root, git_args, **kwargs)
+
+        with self.assertRaises(LLMToolError) as no_test_error:
+            with patch.object(submission_cli.task_completion, '_git',
+                              side_effect=no_test_diff):
+                submission_cli.run_task_claude_bind(Namespace(
+                    task_id=no_test_task['task_id'], executor_task=d6_task_id,
+                    owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                    read_path=['README.md'], write_path=['README.md']), store=store)
+        self.assertIn('CLAUDE_REMOTE_TEST_PATHS_MISSING', str(no_test_error.exception))
+        abandoned_task = run_task_record_pm(
+            Namespace(stdin_json=True), store=store,
+            input_stream=io.StringIO(envelope), return_record=True)
+        store.abandon(abandoned_task['task_id'],
+                      pm_session_id=abandoned_task['pm_session_id'], reason='superseded')
+        abandoned_before = store.get(abandoned_task['task_id'])
+        with self.assertRaises(LLMToolError) as abandoned_bind:
+            submission_cli.run_task_claude_bind(Namespace(
+                task_id=abandoned_task['task_id'], executor_task=d6_task_id,
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path], write_path=[declared_test_path]), store=store)
+        self.assertIn('CLAUDE_TASK_ABANDONED', str(abandoned_bind.exception))
+        with self.assertRaises(LLMToolError) as abandoned_result:
+            submission_cli.run_task_claude_result(Namespace(
+                task_id=abandoned_task['task_id'], executor_task=d6_task_id,
+                head=result_head, pm_session=abandoned_task['pm_session_id']), store=store)
+        self.assertEqual(abandoned_result.exception.task_store_error_code,
+                         'CLAUDE_TASK_ABANDONED')
+        self.assertEqual(store.get(abandoned_task['task_id'])['record_sha256'],
+                         abandoned_before['record_sha256'])
         output = io.StringIO()
         with redirect_stdout(output):
             self.assertEqual(submission_cli.run_task_claude_bind(Namespace(
                 task_id=task['task_id'], executor_task=d6_task_id,
-                owner_ref=owner_ref, common_dir=self.executor_common_dir),
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path, 'tools/llmtool/tests/test_fixture.py'],
+                write_path=[declared_test_path]),
                 store=store), 0)
         bound = store.get(task['task_id'])
         self.assertEqual(bound['developer']['provider_profile'], 'claude')
         self.assertEqual(bound['developer']['executor_task_id'], d6_task_id)
         self.assertEqual(bound['developer']['source_sha'], self.executor_head)
         self.assertEqual(bound['developer']['write_paths'], [declared_test_path])
+        self.assertEqual(bound['developer']['read_paths'], sorted([
+            declared_test_path, 'tools/llmtool/tests/test_fixture.py']))
         self.assertEqual(bound['dispatch_audit'][-1]['worker_key'], 'claude-developer')
         self.assertEqual(bound['dispatch_audit'][-1]['reason_code'],
                          'OWNER_ASSIGNMENT_MATCHED')
@@ -1006,13 +1067,15 @@ class TaskSubmissionCLITests(unittest.TestCase):
         with self.assertRaises(LLMToolError) as collision:
             submission_cli.run_task_claude_bind(Namespace(
                 task_id=second_task['task_id'], executor_task=d6_task_id,
-                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path], write_path=[declared_test_path]), store=store)
         self.assertEqual(collision.exception.task_store_error_code,
                          'TASK_D6_ALREADY_BOUND')
         with self.assertRaises(LLMToolError):
             submission_cli.run_task_claude_bind(Namespace(
                 task_id=task['task_id'], executor_task=d6_task_id,
-                owner_ref=owner_ref, common_dir=self.executor_common_dir), store=store)
+                owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                read_path=[declared_test_path], write_path=[declared_test_path]), store=store)
 
         with self.assertRaises(LLMToolError):
             submission_cli.run_task_claude_result(Namespace(
@@ -1026,6 +1089,22 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(completed['developer']['state'], 'DEVELOPER_RESPONDED')
         self.assertEqual(completed['developer']['claude_result']['executor_task_id'],
                          d6_task_id)
+        holder_developer = completed['developer']
+        holder_completion = completed['completion']
+        for holder_dev, holder_comp in (
+                (holder_developer, None),
+                (None, holder_completion),
+                (None, dict(holder_completion, evidence=None))):
+            store.update(task['task_id'], developer=holder_dev, completion=holder_comp)
+            with self.assertRaises(LLMToolError) as d6_collision:
+                store.claude_bind_compare_and_update(
+                    second_task['task_id'], executor_task_id=d6_task_id,
+                    expected={'developer': None, 'completion': None},
+                    developer=None, completion=None)
+            self.assertEqual(d6_collision.exception.task_store_error_code,
+                             'TASK_D6_ALREADY_BOUND')
+        store.update(task['task_id'], developer=holder_developer,
+                     completion=holder_completion)
 
         policy['workers']['codex-reviewer']['dispatch'] = 'ALLOWED'
         policy['workers']['codex-reviewer']['reason'] = 'test fixture allows isolated route checks'
@@ -1123,7 +1202,8 @@ class TaskSubmissionCLITests(unittest.TestCase):
                 barrier.wait(timeout=5)
                 result = submission_cli.run_task_claude_bind(Namespace(
                     task_id=candidate['task_id'], executor_task=d6_task_id,
-                    owner_ref=owner_ref, common_dir=self.executor_common_dir),
+                    owner_ref=owner_ref, common_dir=self.executor_common_dir,
+                    read_path=[declared_test_path], write_path=[declared_test_path]),
                     store=store, stdout=io.StringIO())
                 outcome = result
             except LLMToolError as exc:
@@ -1194,7 +1274,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                  side_effect=git_side_effect):
                 return submission_cli.run_task_claude_bind(Namespace(
                     task_id=task['task_id'], executor_task=d6_id, owner_ref=ref,
-                    common_dir=self.executor_common_dir), store=store)
+                    common_dir=self.executor_common_dir,
+                    read_path=['sample.py', 'tools/llmtool/tests/test_fixture.py'],
+                    write_path=['sample.py']), store=store)
 
         for d6_id, ref, state in (
                 ('a' * 32, owner_ref, 'OWNER_ASSIGNMENT_ONLY'),

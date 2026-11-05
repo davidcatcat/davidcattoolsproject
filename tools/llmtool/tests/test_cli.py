@@ -142,7 +142,9 @@ class CLITests(unittest.TestCase):
                 patch.object(task_submission_cli, 'run_task_claude_bind',
                              side_effect=lambda args: called.append(args) or 0):
             rc = main(['task', 'claude-bind', 'a' * 32, '--executor-task', 'd6-task',
-                       '--owner-ref', 'https://github.com/example/repo/issues/1'])
+                       '--owner-ref', 'https://github.com/example/repo/issues/1',
+                       '--read-path', 'tools/llmtool/tests/test_fixture.py',
+                       '--write-path', 'tools/llmtool/tests/test_fixture.py'])
         self.assertEqual(rc, 0)
         self.assertEqual(len(called), 1)
         self.assertEqual(called[0].action, 'claude-bind')

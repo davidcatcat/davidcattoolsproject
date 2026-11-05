@@ -4058,7 +4058,9 @@ class TaskCompletionTests(unittest.TestCase):
             contract_digest = task['task_binding']['contract_digest']
 
             rc, _ = call(['task', 'claude-bind', task_id, '--executor-task',
-                          d6_task, '--owner-ref', owner_ref, '--common-dir', self.common])
+                          d6_task, '--owner-ref', owner_ref, '--common-dir', self.common,
+                          '--read-path', self.source_path,
+                          '--write-path', self.source_path])
             self.assertEqual(rc, 0)
             if not old_sha_receipt:
                 rc, _ = call(['task', 'claude-result', task_id, '--executor-task',
@@ -4208,8 +4210,9 @@ class TaskCompletionTests(unittest.TestCase):
         task = store.get(context['task_id'])
         store.abandon(context['task_id'], pm_session_id=task['pm_session_id'],
                       reason='superseded')
-        with self.assertRaisesRegex(LLMToolError, 'CLAUDE_TASK_ABANDONED'):
-            self._complete_claude_bound_context(context)
+        rc, result = self._complete_claude_bound_context(context)
+        self.assertNotEqual(rc, 0)
+        self.assertNotEqual(result['completion']['state'], 'PM_EVIDENCE_READY')
 
         with self.assertRaises(LLMToolError) as review_error:
             review_dispatch._preflight(store, context['task_id'], '4' * 32, 10, 'v1')
@@ -4227,16 +4230,18 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(ssh_calls, [])
 
     def test_abandonment_does_not_apply_to_non_claude_task(self):
+        from types import SimpleNamespace
         from llmtool import review_dispatch
 
         context = self._claude_bound_task_context()
         store = context['store']
         task = store.get(context['task_id'])
+        task = dict(task)
         developer = dict(task['developer'])
         developer['provider_profile'] = 'opencode'
-        store.update(context['task_id'], developer=developer)
-        store.abandon(context['task_id'], pm_session_id=task['pm_session_id'],
-                      reason='superseded')
+        task['developer'] = developer
+        task['abandonment'] = {'reason': 'superseded'}
+        store = SimpleNamespace(get=lambda _task_id: dict(task))
         with self.assertRaises(LLMToolError) as review_error:
             review_dispatch._preflight(store, context['task_id'], '4' * 32, 10, 'v1')
         self.assertNotEqual(getattr(review_error.exception, 'review_dispatch_code', None),
