@@ -2362,6 +2362,9 @@ class RuleAlertTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = os.path.join(self.tmp.name, "state", "rule-file-alerts.json")
+        rule_alert_file = patch.object(mon, "RULE_ALERT_FILE", self.path)
+        rule_alert_file.start()
+        self.addCleanup(rule_alert_file.stop)
         self.source = mon.GitHubSource("o/r", clock=lambda: self.NOW)
 
     def tearDown(self):
@@ -2451,38 +2454,37 @@ class RuleAlertTests(unittest.TestCase):
         self.assertEqual(self._read()["alerts"][0]["paths"], ["<sensitive-list-unreadable>"])
 
     def test_lines_limits_order_and_malformed_record(self):
-        self.assertEqual(mon.rule_alert_lines(self.path), [])
+        self.assertEqual(mon.rule_alert_lines(), [])
         alerts = [{"pr": n, "title": f"private title {n}", "paths": ["x"]}
                   for n in range(1, 8)]
         self._record(alerts=alerts)
-        lines = mon.rule_alert_lines(self.path)
+        lines = mon.rule_alert_lines()
         self.assertEqual([line for line, _ in lines[:5]], [
             f"規則檔已變更：PR #{n}，1 個檔（看過後請 PM 清除）" for n in (7, 6, 5, 4, 3)])
         self.assertEqual(lines[-1], ("另有 2 件規則檔告警", "!"))
         self.assertTrue(all("private title" not in line for line, _ in lines))
         Path(self.path).write_text("{", encoding="utf-8")
-        self.assertEqual(mon.rule_alert_lines(self.path), [("規則檔告警紀錄無法讀取", "!")])
+        self.assertEqual(mon.rule_alert_lines(), [("規則檔告警紀錄無法讀取", "!")])
 
     def test_clear_removes_alert_and_preserves_checked_without_github_or_subprocess(self):
         alert = {"pr": 12, "title": "title", "paths": [self.MATCHED]}
         self._record(checked=[12], alerts=[alert])
-        with patch.object(mon, "RULE_ALERT_FILE", self.path), \
-                patch("subprocess.run", side_effect=AssertionError("subprocess")), \
+        with patch("subprocess.run", side_effect=AssertionError("subprocess")), \
                 patch("subprocess.Popen", side_effect=AssertionError("subprocess")), \
                 patch("builtins.print") as output:
             self.assertEqual(mon.main(["--clear-rule-alert", "12"]), 0)
         self.assertEqual(self._read()["checked"], [12])
         self.assertEqual(self._read()["alerts"], [])
         self.assertEqual(output.call_args.args, ("RULE_ALERT_CLEARED pr=12",))
-        self.assertEqual(mon.rule_alert_lines(self.path), [])
-        with patch.object(mon, "RULE_ALERT_FILE", self.path), patch("builtins.print") as output:
+        self.assertEqual(mon.rule_alert_lines(), [])
+        with patch("builtins.print") as output:
             self.assertEqual(mon.main(["--clear-rule-alert", "13"]), 1)
         self.assertEqual(output.call_args.args, ("RULE_ALERT_NOT_FOUND pr=13",))
 
     def test_clear_malformed_record_is_unchanged_and_save_uses_private_modes(self):
         Path(self.path).write_bytes(b"{bad")
         original = Path(self.path).read_bytes()
-        with patch.object(mon, "RULE_ALERT_FILE", self.path), patch("builtins.print") as output:
+        with patch("builtins.print") as output:
             self.assertEqual(mon.main(["--clear-rule-alert", "12"]), 1)
         self.assertEqual(Path(self.path).read_bytes(), original)
         self.assertEqual(output.call_args.args, ("RULE_ALERT_RECORD_BAD",))
@@ -2495,15 +2497,14 @@ class RuleAlertTests(unittest.TestCase):
         github = SimpleNamespace(successful_read=True, read_failed=False, pending=[], window=43200,
                                  comments_cut=False, main_health=None, main_error="")
         self._record(alerts=[{"pr": 21, "title": "hidden", "paths": ["x"]}])
-        with patch.object(mon, "RULE_ALERT_FILE", self.path):
-            top = mon.office_top(github, [], 0, install=mon.rule_alert_lines() + [])
+        top = mon.office_top(github, [], 0, install=mon.rule_alert_lines() + [])
         self.assertEqual(top[1], ("規則檔已變更：PR #21，1 個檔（看過後請 PM 清除）", "!"))
 
     def test_persistence_and_presentation_run_no_subprocess(self):
         self._record(alerts=[{"pr": 22, "title": "hidden", "paths": ["x"]}])
         with patch("subprocess.run", side_effect=AssertionError("subprocess")), \
                 patch("subprocess.Popen", side_effect=AssertionError("subprocess")):
-            self.assertEqual(mon.rule_alert_lines(self.path)[0][1], "!")
+            self.assertEqual(mon.rule_alert_lines()[0][1], "!")
 
 
 class InstallLinesTests(unittest.TestCase):

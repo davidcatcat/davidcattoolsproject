@@ -7964,7 +7964,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"RULE_ALERT_NOT_FOUND pr={number}")
             return 1
         state["alerts"] = [alert for alert in state["alerts"] if alert["pr"] != number]
-        state["checked"] = (state["checked"] + [number])[-500:]
+        if number not in state["checked"]:
+            state["checked"] = (state["checked"] + [number])[-500:]
         try:
             _save_rule_alerts(RULE_ALERT_FILE, state)
         except Exception:
