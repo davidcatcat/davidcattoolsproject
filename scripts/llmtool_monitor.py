@@ -6315,13 +6315,16 @@ def _codex_work_rows(rows: list[OfficeRow], now: float, canonical: str,
             out.append(row)
             continue
         task_id = row.task[5:] if row.task.startswith("task ") else ""
+        bound = False
         if task_id in registered:
             review = _review_task(task_id) if row.role == "reviewer" else None
             if review:
                 work = f"審查 PR #{review[0]} @{review[1]}"
+                bound = True
             elif row.role == "debug reviewer" and CODEX_HIGH_DEBUG_TASK.search(task_id):
                 name = re.sub(r"-hd[0-9]+-[0-9a-fA-F]{7}$", "", task_id)
                 work = f"診斷 D6 {name} @{task_id[-7:]}"
+                bound = True
             else:
                 match = _codex_work_match(entries, task_id, row.codex_session,
                                           row.codex_started, row.codex_exec)
@@ -6329,13 +6332,14 @@ def _codex_work_rows(rows: list[OfficeRow], now: float, canonical: str,
                     branch = registered[task_id][4]
                     pr = prs.get(branch, (None, ""))[0] if prs is not None and branch else None
                     work = _codex_work_label(match, pr)
+                    bound = True
                 else:
                     work = (f"工作紀錄未讀完，未確認（D6 {task_id}）" if problem
                             else f"未綁定工作（D6 {task_id}）")
         else:
             work = "未綁定工作"
         detail = row.detail
-        if row.codex_title and detail.startswith(row.codex_title):
+        if bound and row.codex_title and detail.startswith(row.codex_title):
             detail = detail[len(row.codex_title):].lstrip("；")
         out.append(replace(row, work=work, detail=detail))
     return out

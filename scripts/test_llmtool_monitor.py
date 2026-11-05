@@ -1878,13 +1878,14 @@ class OfficeViewTests(unittest.TestCase):
         tasks = Path(self.tmp.name) / "tasks"
         self._work_record(tasks, "1" * 32, session=session,
                           summary="Work board view from existing state and current activity")
-        self._codex_for_task("bound", self.task, session)
+        self._codex_for_task("bound", self.task, session, originator="codex_exec")
         with patch.object(mon, "codex_title", return_value="Original title"), \
              patch.object(mon, "_codex_action", return_value="Current action"):
             row = next(row for row in self.rows(llmtool_tasks=str(tasks),
                          prs={"feature/board": (977, "OPEN")}) if row.task == "task wp-1")
         self.assertEqual(row.work, "#965 · PR #977 · task 11111111 · D6 wp-1：Work board view from existing state and …")
-        self.assertEqual(row.detail, "Current action")
+        self.assertTrue(row.detail.startswith("Current action"), row.detail)
+        self.assertNotIn("Original title", row.detail)
         self.assertIn(row.work, "\n".join(mon.office_lines([row])))
         self.assertNotIn("GOAL-SECRET", row.work + row.detail)
         self.assertNotIn("REPORTED-SECRET", row.work + row.detail)
@@ -1948,8 +1949,10 @@ class OfficeViewTests(unittest.TestCase):
         os.chmod(wrong, 0o600)
         link = tasks / f"{'9' * 32}.json"
         link.symlink_to(good)
-        hard = tasks / f"{'a' * 32}.json"
-        os.link(good, hard)
+        extra = self._work_record(tasks, "a" * 32, request="no issue here",
+                                  response={"summary": "Extra safe summary"})
+        hard = tasks / f"{'b' * 32}.json"
+        os.link(extra, hard)
         entries, problem = mon.codex_work_records(str(tasks))
         self.assertEqual(problem, "")
         self.assertEqual(len(entries), 1)
