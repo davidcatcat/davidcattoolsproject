@@ -775,6 +775,8 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                 'session_id': 'developer-session', 'usage': {},
                 'source_sha': 'e' * 40, 'read_paths': ['src.py'],
                 'write_paths': ['src.py'], 'executor_task_id': 'executor-d6',
+                'artifact': 'diff', 'artifact_sha256': 'a' * 64,
+                'direct_result_callback': {'evidence': {'test_policy': 'REMOTE_RECEIPT'}},
                 'claude_result': {'executor_task_id': 'executor-d6'},
                 'execution': {'status': 'DONE', 'process_exit_code': 0,
                               'native_session_id': executor_session}}
@@ -810,7 +812,7 @@ class ClaudeRouteWiringTests(unittest.TestCase):
                  patch.object(task_submission_cli, '_validate_trusted_main_pin'), \
                  patch.object(task_submission_cli, '_completion_repair_artifact_segments',
                               return_value=None), \
-                 patch.object(task_submission_cli.task_completion, 'collect_claude_result',
+                 patch.object(task_submission_cli.task_completion, 'collect_executor_result',
                     return_value={'result_head': head, 'source_sha': 'e' * 40,
                         'root': '/worktree', 'common_dir': '/common',
                         'executor_identity': 'claude-developer', 'changed_paths': ['src.py']}), \
