@@ -1149,6 +1149,7 @@ def _developer_changed_paths(root, source_sha, result_sha, trusted_base_sha=None
 
 def _remerge_diff_paths_raw(root, commit):
     """Read resolution paths while containing synthetic merge object writes."""
+    _validate_remerge_config(root)
     try:
         objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path', 'objects'),
                        limit=4096).decode('utf-8', 'strict').strip()
@@ -1173,14 +1174,17 @@ def _remerge_diff_paths_raw(root, commit):
 
 
 def _is_ancestor(root, ancestor, descendant):
-    result = subprocess.run(['/usr/bin/git', '-c', 'core.useReplaceRefs=false',
-        '-C', root, 'merge-base', '--is-ancestor', ancestor, descendant],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, timeout=_TIMEOUT,
-        env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
-             'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_OPTIONAL_LOCKS': '0',
-             'GIT_NO_LAZY_FETCH': '1', 'GIT_NO_REPLACE_OBJECTS': '1'},
-        shell=False, check=False)
+    try:
+        result = subprocess.run(['/usr/bin/git', '-c', 'core.useReplaceRefs=false',
+            '-C', root, 'merge-base', '--is-ancestor', ancestor, descendant],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, timeout=_TIMEOUT,
+            env={'PATH': '/usr/bin:/bin', 'LC_ALL': 'C', 'GIT_CONFIG_NOSYSTEM': '1',
+                 'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_OPTIONAL_LOCKS': '0',
+                 'GIT_NO_LAZY_FETCH': '1', 'GIT_NO_REPLACE_OBJECTS': '1'},
+            shell=False, check=False)
+    except subprocess.TimeoutExpired:
+        _stop('GIT_INSPECTION_TIMEOUT')
     if result.returncode not in (0, 1):
         _stop('GIT_INSPECTION_FAILED')
     return result.returncode == 0
@@ -1617,6 +1621,9 @@ def _apply_artifact_expected(root, artifact, source_sha, patch_paths):
                     continue
                 if not stat.S_ISREG(actual_stat.st_mode):
                     _stop('DEVELOPER_ARTIFACT_RESULT_TREE_MISMATCH')
+                remaining = _PROPOSAL_TREE_LIMIT - total_blob_bytes
+                if actual_stat.st_size > remaining:
+                    _stop('DEVELOPER_ARTIFACT_TREE_TOO_LARGE')
                 content = target.read_bytes()
                 total_blob_bytes += len(content)
                 if total_blob_bytes > _PROPOSAL_TREE_LIMIT:
@@ -1714,7 +1721,7 @@ def _merge_attributes_safe(root, tree_sha, deadline):
 
 def _merge_attribute_content_safe(content):
     try:
-        lines = content.decode('utf-8', 'strict').splitlines()
+        lines = content.decode('utf-8', 'strict').split('\n')
     except UnicodeError:
         return False
     allowed = {'text', 'binary', 'union'}
@@ -1723,6 +1730,8 @@ def _merge_attribute_content_safe(content):
             continue
         fields = line.split()
         for attribute in fields[1:]:
+            if attribute == 'filter' or attribute.startswith(('filter=', '-filter', '!filter')):
+                return False
             if attribute in ('merge', '-merge', '!merge'):
                 continue
             if attribute.startswith('merge=') and attribute[6:] in allowed:
@@ -1733,15 +1742,28 @@ def _merge_attribute_content_safe(content):
     return True
 
 
-def _refuse_custom_merge_drivers(root):
-    _, status = _git(root, ('config', '--null', '--get-regexp',
-                            r'^merge\..*\.driver$'), limit=64 * 1024,
-                     allow_exit_1=True, return_exit_code=True)
-    if status == 0:
+def _validate_remerge_config(root):
+    """Reject repository merge/filter settings that can change remerge behavior."""
+    raw = _git(root, ('config', '--null', '--list'), limit=64 * 1024)
+    try:
+        entries = raw.decode('utf-8', 'strict').split('\x00')
+        allowed_merge = {'merge.renames', 'merge.conflictstyle'}
+        for entry in entries:
+            if not entry:
+                continue
+            key, separator, _ = entry.partition('\n')
+            key = key.lower()
+            if not separator:
+                _stop('RESULT_DIFF_INVALID')
+            if key.startswith('filter.') or (key.startswith('merge.') and
+                                               key not in allowed_merge):
+                _stop('RESULT_DIFF_INVALID')
+    except UnicodeError:
         _stop('RESULT_DIFF_INVALID')
 
 
 def _remerge_tree(root, first_parent, second_parent):
+    _validate_remerge_config(root)
     try:
         objects = _git(root, ('rev-parse', '--path-format=absolute', '--git-path',
                               'objects'), limit=4096).decode('utf-8', 'strict').strip()
@@ -1753,8 +1775,9 @@ def _remerge_tree(root, first_parent, second_parent):
         with tempfile.TemporaryDirectory(prefix='llmtool-merge-proof-') as temporary:
             object_dir = Path(temporary) / 'objects'
             object_dir.mkdir(mode=0o700)
-            raw, status = _git(root, ('-c', 'merge.renames=true', '-c',
-                'merge.conflictStyle=merge', 'merge-tree', '--write-tree',
+            raw, status = _git(root, ('-c', 'merge.renormalize=false', '-c',
+                'merge.renames=true', '-c', 'merge.conflictStyle=merge',
+                'merge-tree', '--write-tree',
                 first_parent, second_parent), limit=1024 * 1024,
                 allow_exit_1=True, return_exit_code=True, env_overrides={
                     'GIT_OBJECT_DIRECTORY': str(object_dir),
@@ -1848,6 +1871,8 @@ def verify_artifact_checkpoint(root, artifact, artifact_sha256, source_sha,
 def verify_artifact_applied(root, artifact, artifact_sha256, source_sha, result_sha,
                             changed_paths, write_paths, *, scope_paths=None):
     """Apply the proposal in a bounded temp tree and compare result blobs/modes."""
+    if type(result_sha) is not str or _HEX40.fullmatch(result_sha) is None:
+        _stop('DEVELOPER_ARTIFACT_BINDING_INVALID')
     patch_paths = _artifact_patch_paths(artifact, artifact_sha256, source_sha, result_sha)
     scope_paths = patch_paths if scope_paths is None else scope_paths
     if (not patch_paths or len(patch_paths) > _PROPOSAL_FILE_LIMIT or

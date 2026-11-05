@@ -543,6 +543,117 @@ class TaskCompletionTests(unittest.TestCase):
                 str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
                 self.source_sha, endpoint, [self.source_path], main_sha)
 
+    def test_collect_result_rejects_filter_and_renormalize_config_before_remerge(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('main header\nRepository fixture.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main header hunk')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# developer hunk\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        self._git('merge', '--no-ff', 'main', '-m', 'clean merge')
+        result_sha = self._git('rev-parse', 'HEAD')
+        self._bind_result_head(result_sha)
+
+        marker = self.base / 'filter-smudge-ran'
+        self._git('config', 'merge.renormalize', 'true')
+        self._git('config', 'filter.marker.smudge', 'touch ' + str(marker))
+        self._git('config', 'filter.marker.clean', 'cat')
+        info_attributes = Path(self.common) / 'info' / 'attributes'
+        info_attributes.parent.mkdir(parents=True, exist_ok=True)
+        info_attributes.write_text(self.source_path + ' filter=marker\n')
+        with self.assertRaises(LLMToolError) as rejected:
+            self._collect_result(result_sha, artifact)
+        self.assertEqual(rejected.exception.completion_code, 'RESULT_DIFF_INVALID')
+        self.assertFalse(marker.exists())
+
+    def test_checkpoint_verifier_rejects_union_merge_default_on_conflict(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        target = self.root / self.source_path
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_main(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'main conflicting hunk')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_developer(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, self.source_path)
+        target.write_text('import unittest\nclass Fixture(unittest.TestCase):\n'
+                          '    def test_main(self): self.assertTrue(True)\n'
+                          '    def test_developer(self): self.assertTrue(True)\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'union conflict resolution')
+        endpoint = self._git('commit-tree', self._git('rev-parse', 'HEAD^{tree}'),
+                             '-p', checkpoint, '-p', main_sha, '-m', 'union merge')
+        self._git('config', 'merge.default', 'union')
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, endpoint, [self.source_path], main_sha)
+        self.assertEqual(rejected.exception.completion_code, 'RESULT_DIFF_INVALID')
+
+    def test_merge_attribute_parser_only_splits_on_newline(self):
+        self.assertFalse(task_completion._merge_attribute_content_safe(
+            b'*.txt text\x0c*.py merge=evil\n'))
+
+    def test_checkpoint_verifier_ignores_replace_refs_and_refuses_grafts(self):
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# checkpoint hunk\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer checkpoint')
+        endpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(endpoint, self.source_path)
+        replacement = self._git('commit-tree', self._git('rev-parse',
+            self.source_sha + '^{tree}'), '-m', 'replacement source')
+        self._git('replace', self.source_sha, replacement)
+        checkpoint, proofs = task_completion.verify_artifact_checkpoint(
+            str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+            self.source_sha, endpoint, [self.source_path], self.source_sha)
+        self.assertEqual((checkpoint, proofs), (endpoint, []))
+        grafts = Path(self.common) / 'info' / 'grafts'
+        grafts.write_text('')
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion.verify_artifact_checkpoint(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, endpoint, [self.source_path], self.source_sha)
+        self.assertEqual(rejected.exception.completion_code, 'LEGACY_GRAFTS_UNSUPPORTED')
+
+    def test_remerge_tree_does_not_write_new_objects_to_repository(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', 'main')
+        (self.root / 'README.md').write_text('main header\nRepository fixture.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'main update')
+        main_sha = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        (self.root / 'README.md').write_text('Repository fixture.\ndeveloper footer\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'developer update')
+        checkpoint = self._git('rev-parse', 'HEAD')
+        artifact = self._artifact_to(checkpoint, 'README.md')
+        self._git('merge', '--no-ff', 'main', '-m', 'disjoint merge')
+        endpoint = self._git('rev-parse', 'HEAD')
+        object_root = Path(self.common) / 'objects'
+        before = sorted(str(path.relative_to(object_root)) for path in object_root.rglob('*')
+                        if path.is_file())
+        task_completion.verify_artifact_checkpoint(
+            str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+            self.source_sha, endpoint, ['README.md'], main_sha)
+        after = sorted(str(path.relative_to(object_root)) for path in object_root.rglob('*')
+                       if path.is_file())
+        self.assertEqual(after, before)
+
     def test_checkpoint_verifier_rejects_untrusted_second_parent_and_octopus(self):
         target = self.root / self.source_path
         target.write_text(target.read_text() + '\n# developer checkpoint\n')
@@ -1393,6 +1504,15 @@ class TaskCompletionTests(unittest.TestCase):
         self.assertEqual(rejected.exception.completion_code,
                          'DEVELOPER_ARTIFACT_RESULT_MISMATCH')
         temporary_dir.assert_not_called()
+
+    def test_verify_artifact_applied_requires_result_sha(self):
+        _, artifact = self._make_result()
+        with self.assertRaises(LLMToolError) as rejected:
+            task_completion.verify_artifact_applied(
+                str(self.root), artifact, hashlib.sha256(artifact.encode()).hexdigest(),
+                self.source_sha, None, [self.source_path], [self.source_path])
+        self.assertEqual(rejected.exception.completion_code,
+                         'DEVELOPER_ARTIFACT_BINDING_INVALID')
 
     def test_failed_test_subprocess_is_recorded_with_nonzero_status(self):
         result_sha, _ = self._make_result(code='    def test_fail(self): self.fail("expected")\n')
