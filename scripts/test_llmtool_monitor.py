@@ -6697,7 +6697,7 @@ class WorkBoardTests(unittest.TestCase):
         self.assertTrue(any("格式錯誤" in text and attr == 8 | curses.A_BOLD
                             for text, attr in drawn.values()))
         self.assertTrue(all(mon._width(drawn[row][0]) <= 23
-                            for row in range(3, max(drawn)))
+                            for row in range(3, max(drawn))))
         self.assertEqual(max(drawn), 19)
         self.assertIn("q: quit", drawn[19][0])
         scrolled = {}
