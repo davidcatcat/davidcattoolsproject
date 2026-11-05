@@ -239,6 +239,46 @@ class TaskCompletionTests(unittest.TestCase):
         registry_path.chmod(0o600)
         return result_sha
 
+    def _commit_tree(self, tree, *parents, message='crafted commit'):
+        args = ['/usr/bin/git', 'commit-tree', tree]
+        for parent in parents:
+            args.extend(('-p', parent))
+        args.extend(('-m', message))
+        return subprocess.check_output(args, cwd=self.root, text=True).strip()
+
+    def _out_of_scope_merge_head(self):
+        self._git('reset', '--hard', self.source_sha)
+        self._git('checkout', '-b', 'scratch-outside')
+        outside = self.root / 'outside.txt'
+        outside.write_text('Outside the task scope.\n')
+        self._git('add', 'outside.txt')
+        self._git('commit', '-m', 'out of scope branch')
+        tree = self._git('rev-parse', 'HEAD^{tree}')
+        root_commit = self._commit_tree(tree, message='parentless outside root')
+
+        self._git('checkout', 'feat/executor')
+        self._git('reset', '--hard', self.source_sha)
+        self._git('checkout', '-b', 'scratch-developer')
+        source = self.root / self.source_path
+        source.write_text(source.read_text() + '\n# developer change\n')
+        outside.write_text('Outside the task scope.\n')
+        self._git('add', self.source_path, 'outside.txt')
+        self._git('commit', '-m', 'developer tree')
+        developer_commit = self._git('rev-parse', 'HEAD')
+        developer_tree = self._git('rev-parse', 'HEAD^{tree}')
+        result = self._commit_tree(
+            developer_tree, root_commit, developer_commit, message='out of scope merge')
+        self._git('checkout', 'feat/executor')
+        self._git('reset', '--hard', result)
+        registry_path = Path(self.common) / 'llmtool-worktrees' / (self.task_id + '.json')
+        record = json.loads(registry_path.read_text())
+        record['head_sha'] = result
+        self._write_env2_marker(record, self.root, submitted_head=result,
+                                current_head=result)
+        registry_path.write_text(json.dumps(record))
+        registry_path.chmod(0o600)
+        return result, root_commit, developer_commit
+
     def _collect_result(self, result_sha, artifact, *, trusted_base_sha=None):
         return task_completion.collect_executor_result(
             task_id=self.task_id, expected_common_dir=self.common,
@@ -400,6 +440,150 @@ class TaskCompletionTests(unittest.TestCase):
         paths = task_completion._developer_changed_paths(
             str(self.root), self.source_sha, result_sha, old_parent)
         self.assertIn('out.txt', paths)
+
+    def test_out_of_scope_merge_with_unrelated_first_parent_is_refused_by_collectors(self):
+        result_sha, _, _ = self._out_of_scope_merge_head()
+        artifact = subprocess.check_output(
+            ['/usr/bin/git', 'diff', '--binary', self.source_sha, result_sha],
+            cwd=self.root, text=True)
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_result(result_sha, artifact)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+
+        kwargs = {
+            'task_id': self.task_id, 'expected_common_dir': self.common,
+            'expected_root': str(self.root), 'expected_branch': 'feat/executor',
+            'source_sha': self.source_sha,
+            'task_binding': {'task_id': '1' * 32, 'run_id': '2' * 32,
+                             'contract_digest': '3' * 64},
+            'expected_agent': 'executor-agent',
+            'expected_session_ref': 'Executor D6 session',
+            'expected_native_session_id': 'native-executor',
+            'write_paths': [self.source_path],
+            'claude_result': {'executor_task_id': self.task_id, 'head_sha': result_sha},
+            'trusted_base_sha': self.source_sha,
+        }
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion.collect_claude_result(**kwargs)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+
+    def test_undoing_source_change_through_second_parent_is_refused(self):
+        readme = self.root / 'README.md'
+        readme.write_text('Changed source README.\n')
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'advance source')
+        new_source = self._git('rev-parse', 'HEAD')
+        parent_of_source = self._git('rev-parse', new_source + '^')
+        developer = self.root / self.source_path
+        developer.write_text(developer.read_text() + '\n# developer change\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer change')
+        developer_commit = self._git('rev-parse', 'HEAD')
+        tree = self._git('rev-parse', 'HEAD^{tree}')
+        old_readme = subprocess.check_output(
+            ['/usr/bin/git', 'show', self.source_sha + ':README.md'],
+            cwd=self.root, text=True)
+        readme.write_text(old_readme)
+        self._git('add', 'README.md')
+        self._git('commit', '-m', 'restore old README')
+        restored_tree = self._git('rev-parse', 'HEAD^{tree}')
+        result = self._commit_tree(restored_tree, parent_of_source, developer_commit,
+                                   message='undo source via first parent')
+        self._git('reset', '--hard', result)
+        self.source_sha = new_source
+        self._write_registration(self.task_id, 'executor-agent', 'Executor D6 session',
+                                 self.root, 'feat/executor', new_source, result,
+                                 native_session_id='native-executor')
+        with self.assertRaises(LLMToolError) as raised:
+            self._collect_registered_result(result)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+
+    def test_first_parent_merge_from_main_and_developer_side_branch_pass(self):
+        self._git('branch', 'main', self.source_sha)
+        self._git('checkout', '-b', 'developer-side')
+        side_path = 'side.txt'
+        (self.root / side_path).write_text('Side branch change.\n')
+        self._git('add', side_path)
+        self._git('commit', '-m', 'side branch change')
+        side_tip = self._git('rev-parse', 'HEAD')
+        self._git('checkout', 'feat/executor')
+        main_path = self.root / self.source_path
+        main_path.write_text(main_path.read_text() + '\n# before merge\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer before merge')
+        self._git('merge', '--no-ff', 'main', '-m', 'merge main')
+        main_merge_tip = self._git('rev-parse', 'HEAD')
+        main_path.write_text(main_path.read_text() + '# after main merge\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'developer after merge')
+        main_result = self._git('rev-parse', 'HEAD')
+        self.assertEqual(task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, main_result, self.source_sha),
+            (self.source_path,))
+
+        self._git('merge', '--no-ff', side_tip, '-m', 'merge developer side branch')
+        side_result = self._git('rev-parse', 'HEAD')
+        self.assertEqual(task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, side_result, self.source_sha),
+            (side_path, self.source_path))
+
+    def test_parentless_commits_in_range_or_broken_first_parent_chain_are_refused(self):
+        # A parentless commit in the range is refused even when M's first-parent
+        # chain reaches source through the Developer commit.
+        _, parentless, developer = self._out_of_scope_merge_head()
+        developer_tree = self._git('rev-parse', developer + '^{tree}')
+        merge = self._commit_tree(developer_tree, developer, parentless,
+                                  message='parentless second parent')
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion._developer_changed_paths(
+                str(self.root), self.source_sha, merge, self.source_sha)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+
+        # The source is only a second parent; the first parent is unrelated.
+        root_tree = self._git('rev-parse', parentless + '^{tree}')
+        broken = self._commit_tree(root_tree, parentless, self.source_sha,
+                                   message='broken first parent')
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion._developer_changed_paths(
+                str(self.root), self.source_sha, broken, self.source_sha)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+
+        # The repair segment starts at Developer commit but reaches it only as
+        # the second parent of the segment end.
+        end = self._commit_tree(root_tree, parentless, developer,
+                                message='repair segment second parent')
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion._developer_changed_paths(
+                str(self.root), developer, end, developer)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+
+    def test_parentless_head_refused_and_shallow_boundary_is_detected(self):
+        tree = self._git('rev-parse', self.source_sha + '^{tree}')
+        parentless_head = self._commit_tree(tree, message='parentless head')
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion._developer_changed_paths(
+                str(self.root), self.source_sha, parentless_head, self.source_sha)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+
+        (self.root / 'outside.txt').write_text('Outside change.\n')
+        self._git('add', 'outside.txt')
+        self._git('commit', '-m', 'out of scope E')
+        boundary = self._git('rev-parse', 'HEAD')
+        target = self.root / self.source_path
+        target.write_text(target.read_text() + '\n# in scope X\n')
+        self._git('add', self.source_path)
+        self._git('commit', '-m', 'in scope X')
+        result = self._git('rev-parse', 'HEAD')
+        shallow = Path(self.common) / 'shallow'
+        shallow.write_text(boundary + '\n')
+        self.addCleanup(lambda: shallow.unlink(missing_ok=True))
+        with self.assertRaises(LLMToolError) as raised:
+            task_completion._developer_changed_paths(
+                str(self.root), self.source_sha, result, self.source_sha)
+        self.assertEqual(raised.exception.completion_code, 'SOURCE_NOT_ANCESTOR')
+        shallow.unlink()
+        self.assertIn('outside.txt', task_completion._developer_changed_paths(
+            str(self.root), self.source_sha, result, self.source_sha))
 
     def test_invalid_trusted_main_pin_is_rejected(self):
         with self.assertRaises(LLMToolError) as raised:
@@ -4313,6 +4497,26 @@ class TaskCompletionTests(unittest.TestCase):
         context = self._claude_bound_task_context(old_sha_receipt=True)
         self._assert_cli_completion_waits(
             context, 'REMOTE_TEST_RECEIPT_MISSING', 'WAITING_EXECUTOR')
+
+    def test_claude_bound_complete_waits_on_out_of_scope_first_parent_merge(self):
+        original_make_result = self._make_result
+        calls = 0
+
+        def make_result_with_out_of_scope_head(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                result, _, _ = self._out_of_scope_merge_head()
+                patch_text = subprocess.check_output(
+                    ['/usr/bin/git', 'diff', '--binary', self.source_sha, result],
+                    cwd=self.root, text=True)
+                return result, patch_text
+            return original_make_result(**kwargs)
+
+        with patch.object(self, '_make_result', side_effect=make_result_with_out_of_scope_head):
+            context = self._claude_bound_task_context(old_sha_receipt=True)
+        self._assert_cli_completion_waits(
+            context, 'SOURCE_NOT_ANCESTOR', 'WAITING_EXECUTOR')
 
     def test_claude_bound_complete_requires_completed_review_dispatch_claim(self):
         context = self._claude_bound_task_context(skip_completed_claim=True)
