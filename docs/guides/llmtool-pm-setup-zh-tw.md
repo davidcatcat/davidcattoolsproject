@@ -47,7 +47,7 @@ roles:
 
 Claude 是預設 runtime。建立 Codex PM 時使用 `/pm new --runtime codex --account NAME`；該帳戶必須是 `kind: codex`，否則指令會被拒絕。`/pm use` 只選取工作階段，不會連線；選取後還要執行 `/pm connect` 才會連線。`/pm list` 顯示最新的 10 筆，最新在前；`/pm list --all` 顯示所有工作階段，包括最新的 10 筆。
 
-工作目錄（`CWD`）是該 PM 工作階段所在的目錄。建立工作階段時可指定它；連線時提供的目錄必須符合已建立工作階段的目錄。已綁定具名帳戶的工作階段會忽略之後 `roles.pm.account` 的變更；其他 `roles.pm` 欄位（例如 `model`）仍會套用。無效的 `roles.pm` 設定會回報 `PM_CONFIG_INVALID`。要切換帳戶，請用 `/pm new --account NAME` 建立新工作階段。`PM_ACCOUNT_MISMATCH` 只會在工作階段儲存時未綁定帳戶、而目前設定後來選出帳戶時回報。Codex PM 也會以該工作階段目錄作為執行目錄。
+工作目錄（`CWD`）是該 PM 工作階段所在的目錄。建立工作階段時可指定它；連線時提供的目錄必須符合已建立工作階段的目錄。已綁定具名帳戶的工作階段會忽略之後 `roles.pm.account` 的變更；Claude PM 會將 `roles.pm.model` 傳給 Claude CLI，但不會傳入 `effort`、`provider` 或 `provider_profile`；Codex PM 會使用 `pm-codex-binding` 解析已綁定帳戶，不會套用 `roles.pm` 的模型等設定，也不會向 Codex CLI 傳入模型參數。無效的 `roles.pm` 設定會回報 `PM_CONFIG_INVALID`。要切換帳戶，請用 `/pm new --account NAME` 建立新工作階段。`PM_ACCOUNT_MISMATCH` 只會在工作階段儲存時未綁定帳戶、而目前設定後來選出帳戶時回報。Codex PM 也會以該工作階段目錄作為執行目錄。
 
 ## 權限與使用界線
 
