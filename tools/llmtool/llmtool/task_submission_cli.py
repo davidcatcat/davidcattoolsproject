@@ -32,6 +32,7 @@ from . import remote_test
 from . import task_completion
 from . import opencode_direct_developer
 from . import codex_direct_developer
+from .repair_rounds import counts_as_repair_round
 from . import worker_dispatch
 from .run_budget import MAX_REPAIR_ATTEMPTS
 from .developer_output_normalize import _HUNK
@@ -3690,6 +3691,25 @@ def _codex_child_liveness(execution):
     return 'ALIVE'
 
 
+def _codex_changed_files_evidence(root, expected_head, *, recovering_timeout=False):
+    """Return a changed-files fact only after successful status and HEAD reads."""
+    if recovering_timeout:
+        return {}
+    try:
+        status = subprocess.run(
+            ['git', 'status', '--porcelain', '--untracked-files=all'],
+            cwd=str(root), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, check=False, timeout=5)
+        if status.returncode != 0:
+            return {}
+        after = task_completion.collect_git_snapshot(root)
+        if after.head != expected_head:
+            return {}
+        return {'changed_files': bool(status.stdout)}
+    except Exception:
+        return {}
+
+
 def _delegate_d6_binding(args):
     """Bind a delegate to its requested D6 root, defaulting to the CLI cwd."""
     requested_root = getattr(args, 'cwd', None)
@@ -3955,13 +3975,16 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
                 exc.cleanup_status == 'CONFIRMED')
             # Keep a rejected output recordable even when the process evidence
             # is incomplete. TaskStore reserves DONE for fully observed runs.
+            changed_files_evidence = _codex_changed_files_evidence(
+                registration.root, snapshot.head,
+                recovering_timeout=recovering_timeout)
             execution = {'status': 'DONE' if completion_evidence else 'FAILED',
                 'native_session_id': exc.native_session_id,
                 'process_exit_code': exc.process_exit_code, 'stdout_sha256': exc.stdout_sha256,
                 'elapsed_ms': exc.elapsed_ms, 'cleanup_status': exc.cleanup_status,
                 'usage_source': 'CLI_REPORTED' if exc.usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
-                'source_manifest_sha256': None}
+                'source_manifest_sha256': None, **changed_files_evidence}
             recovered = False
             try:
                 after_registration = task_completion.read_d6_registration(
@@ -4021,6 +4044,12 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
                 'usage_source': 'CLI_REPORTED' if exc.usage is not None else 'UNKNOWN',
                 'source_bytes': None, 'source_file_count': None,
                 'source_manifest_sha256': None,
+                **(changed_files_evidence if
+                   exc.direct_codex_code in (
+                       'CODEX_FINAL_INVALID_WITH_CHANGES',
+                       'CODEX_FINAL_JSON_INVALID',
+                       'CODEX_FINAL_MESSAGE_INVALID',
+                       'CODEX_FINAL_MESSAGE_MISSING') else {}),
                 **({'diff_sha256': timeout_diff['diff_sha256'],
                     'diff_base_sha': timeout_diff['base_sha']}
                    if timeout_diff is not None else {})}, usage=exc.usage)
@@ -4072,7 +4101,11 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         'cleanup_status': result.cleanup_status,
         'usage_source': 'CLI_REPORTED' if result.usage is not None else 'UNKNOWN',
         'source_bytes': None, 'source_file_count': None,
-        'source_manifest_sha256': None}
+        'source_manifest_sha256': None,
+        **(_codex_changed_files_evidence(
+            registration.root, snapshot.head,
+            recovering_timeout=recovering_timeout)
+           if result.status == 'BLOCKED' else {})}
     if result.status in ('DONE', 'BLOCKED'):
         developer['reported'] = _codex_developer_report(result)
         if not developer['reported']:
@@ -4110,6 +4143,10 @@ def run_task_codex_delegate(args, *, store, d6_binding=None):
         # truly empty diff for final-message capture.
         empty_diff = (result.status == 'DONE' and not artifact and
                       rejection == 'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
+        if empty_diff:
+            execution.update(_codex_changed_files_evidence(
+                registration.root, snapshot.head,
+                recovering_timeout=recovering_timeout))
         rejection = (ignored_rejection if ignored_rejection is not None else
                      rejection)
         if rejection is not None:
@@ -4185,11 +4222,17 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
         except Exception:
             raise LLMToolError(
                 f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
+        if type(record) is not dict:
+            raise LLMToolError(
+                f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}')
         completion = record.get('completion')
         if (type(completion) is dict and
-                completion.get('executor_task_id') == executor_task and
-                type(record.get('developer')) is dict):
-            created_at = record['developer'].get('created_at')
+                completion.get('executor_task_id') == executor_task):
+            developer = record.get('developer')
+            if type(developer) is not dict:
+                raise LLMToolError(
+                    f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}')
+            created_at = developer.get('created_at')
             try:
                 stamp = datetime.strptime(created_at, '%Y-%m-%dT%H:%M:%SZ')
                 if stamp.strftime('%Y-%m-%dT%H:%M:%SZ') != created_at:
@@ -4197,7 +4240,8 @@ def _check_delegate_repair_cap(args, store, d6_binding=None):
             except (TypeError, ValueError):
                 raise LLMToolError(
                     f'DELEGATE_REPAIR_COUNT_UNAVAILABLE: Task {task_id}') from None
-            count += 1
+            if counts_as_repair_round(developer):
+                count += 1
             newest_assignment = max(newest_assignment, stamp) if newest_assignment else stamp
     if count < 1 + MAX_REPAIR_ATTEMPTS:
         return

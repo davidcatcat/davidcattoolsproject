@@ -355,7 +355,67 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(saved['developer']['error_code'], 'CODEX_BLOCKED')
         self.assertEqual(saved['developer']['blocked_reason'], 'cannot safely edit')
         self.assertEqual(saved['developer']['execution']['status'], 'BLOCKED')
+        self.assertIs(saved['developer']['execution']['changed_files'], False)
         callback.assert_not_called()
+
+    def test_blocked_run_with_tracked_edit_records_changed_files(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='BLOCKED', summary='blocked safely', tests=(),
+            self_review='checked', blocked_reason='cannot safely edit',
+            exit_code=0, thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='a' * 64, elapsed_ms=1, cleanup_status='CONFIRMED',
+            usage=None)
+
+        def blocked_with_edit(**_kwargs):
+            (self.root / 'src.py').write_text('VALUE = 2\n')
+            return result
+
+        with redirect_stdout(io.StringIO()):
+            _result, saved, _callback = self._dispatch(
+                task, codex_error=blocked_with_edit, codex_result=result,
+                empty_diff=True)
+        self.assertIs(saved['developer']['execution']['changed_files'], True)
+
+    def test_blocked_run_with_new_file_records_changed_files(self):
+        task = self._task()
+        result = task_submission_cli.codex_direct_developer.DirectResult(
+            status='BLOCKED', summary='blocked safely', tests=(),
+            self_review='checked', blocked_reason='cannot safely edit',
+            exit_code=0, thread_id='12345678-1234-4234-8234-123456789abc',
+            stdout_sha256='a' * 64, elapsed_ms=1, cleanup_status='CONFIRMED',
+            usage=None)
+
+        def blocked_with_new_file(**_kwargs):
+            (self.root / 'new.py').write_text('VALUE = 2\n')
+            return result
+
+        with redirect_stdout(io.StringIO()):
+            _result, saved, _callback = self._dispatch(
+                task, codex_error=blocked_with_new_file, codex_result=result,
+                empty_diff=True)
+        self.assertIs(saved['developer']['execution']['changed_files'], True)
+
+    def test_failed_status_check_omits_changed_files(self):
+        task = self._task()
+        original_run = subprocess.run
+
+        def failed_status(*args, **kwargs):
+            command = args[0] if args else kwargs.get('args')
+            if command and command[:2] == ['git', 'status']:
+                return SimpleNamespace(returncode=1, stdout=b'')
+            return original_run(*args, **kwargs)
+
+        with patch.object(task_submission_cli.subprocess, 'run', side_effect=failed_status):
+            with redirect_stdout(io.StringIO()):
+                _result, saved, _callback = self._dispatch(
+                    task, codex_result=task_submission_cli.codex_direct_developer.DirectResult(
+                        status='BLOCKED', summary='blocked safely', tests=(),
+                        self_review='checked', blocked_reason='cannot safely edit',
+                        exit_code=0, thread_id='12345678-1234-4234-8234-123456789abc',
+                        stdout_sha256='a' * 64, elapsed_ms=1,
+                        cleanup_status='CONFIRMED', usage=None), empty_diff=True)
+        self.assertNotIn('changed_files', saved['developer']['execution'])
 
     def test_done_result_persists_bounded_developer_report_separately(self):
         task = self._task()
@@ -932,7 +992,20 @@ class CodexDelegateTests(unittest.TestCase):
         self.assertEqual(saved['developer']['error_code'],
                          'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
         self.assertEqual(saved['developer']['execution']['status'], 'FAILED')
+        self.assertIs(saved['developer']['execution']['changed_files'], False)
         self.assertIsNone(saved['developer']['execution']['native_session_id'])
+        callback.assert_not_called()
+
+    def test_empty_diff_envelope_rejection_records_no_changes(self):
+        task = self._task()
+
+        with redirect_stdout(io.StringIO()):
+            result, saved, callback = self._dispatch(task, empty_diff=True)
+        self.assertEqual(result, 1)
+        self.assertEqual(saved['developer']['state'], 'DEVELOPER_OUTPUT_REJECTED')
+        self.assertEqual(saved['developer']['error_code'],
+                         'DEVELOPER_OUTPUT_INVALID_ENVELOPE')
+        self.assertIs(saved['developer']['execution']['changed_files'], False)
         callback.assert_not_called()
 
     def test_invalid_final_with_out_of_scope_changes_remains_rejected(self):

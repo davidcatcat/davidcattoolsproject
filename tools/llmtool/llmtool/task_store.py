@@ -264,6 +264,9 @@ _DIRECT_EXECUTION_FIELDS = frozenset((
     'elapsed_ms', 'cleanup_status', 'usage_source', 'source_bytes',
     'source_file_count', 'source_manifest_sha256',
 ))
+_DIRECT_EXECUTION_CHANGED_FILES_FIELDS = _DIRECT_EXECUTION_FIELDS | frozenset((
+    'changed_files',
+))
 _DIRECT_EXECUTION_BINDING_FIELDS = _DIRECT_EXECUTION_FIELDS | frozenset((
     'native_session_binding',
 ))
@@ -271,6 +274,10 @@ _DIRECT_EXECUTION_CHILD_FIELDS = frozenset((
     'child_pid', 'child_start_time', 'child_pgid',
 ))
 _DIRECT_EXECUTION_LAUNCH_FIELDS = _DIRECT_EXECUTION_FIELDS | _DIRECT_EXECUTION_CHILD_FIELDS
+_DIRECT_EXECUTION_CHANGED_FILES_SHAPES = (
+    _DIRECT_EXECUTION_CHANGED_FILES_FIELDS,
+    _DIRECT_EXECUTION_BINDING_FIELDS | frozenset(('changed_files',)),
+)
 _DEVELOPER_EXECUTION_DIFF_FIELDS = frozenset(('diff_sha256', 'diff_base_sha'))
 _DEVELOPER_EXECUTION_DIFF_SHAPES = (
     _DIRECT_EXECUTION_FIELDS | _DEVELOPER_EXECUTION_DIFF_FIELDS,
@@ -1511,6 +1518,7 @@ def _validate(record):
                             set(execution) not in (
                                 _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,
                                 _DIRECT_EXECUTION_LAUNCH_FIELDS,
+                                *_DIRECT_EXECUTION_CHANGED_FILES_SHAPES,
                                 *_DEVELOPER_EXECUTION_DIFF_SHAPES) or
                             (set(execution) == _DIRECT_EXECUTION_LAUNCH_FIELDS and
                              (developer['provider_profile'] not in ('codex', 'opencode') or
@@ -1565,6 +1573,31 @@ def _validate(record):
                             execution['cleanup_status'] not in ('CONFIRMED', 'UNKNOWN') or
                             execution['usage_source'] not in ('CLI_REPORTED', 'UNKNOWN')):
                         _fail()
+                    if 'changed_files' in execution:
+                        no_work_block = (
+                            developer['state'] == 'DEVELOPER_OUTCOME_UNKNOWN' and
+                            developer.get('error_code') == 'CODEX_BLOCKED' and
+                            execution['status'] == 'BLOCKED')
+                        invalid_final = (
+                            developer['state'] in (
+                                'DEVELOPER_OUTCOME_UNKNOWN', 'DEVELOPER_OUTPUT_REJECTED') and
+                            (developer.get('error_code') in (
+                                'CODEX_FINAL_INVALID_WITH_CHANGES',
+                                'CODEX_FINAL_JSON_INVALID',
+                                'CODEX_FINAL_MESSAGE_INVALID',
+                                'CODEX_FINAL_MESSAGE_MISSING') or
+                             developer.get('error_code') in _DEVELOPER_REJECTION_CODES) and
+                            execution['status'] in ('DONE', 'FAILED'))
+                        invalid_final_response = (
+                            developer['state'] == 'DEVELOPER_RESPONDED' and
+                            developer.get('result_status') == 'UNVERIFIED' and
+                            developer.get('final_answer') == 'INVALID' and
+                            execution['status'] == 'DONE')
+                        if (developer['provider_profile'] != 'codex' or
+                                not (no_work_block or invalid_final or
+                                     invalid_final_response) or
+                                type(execution['changed_files']) is not bool):
+                            _fail()
                     if set(execution) in _DEVELOPER_EXECUTION_DIFF_SHAPES and (
                             developer.get('error_code') != 'CODEX_TIMEOUT_WITH_CHANGES' or
                             developer.get('provider_profile') != 'codex' or

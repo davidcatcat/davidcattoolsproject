@@ -102,6 +102,50 @@ class DelegateRepairCapTests(unittest.TestCase):
     def _at_cap(self, **kwargs):
         return _Store(count=1 + MAX_REPAIR_ATTEMPTS, **kwargs)
 
+    @staticmethod
+    def _assignments(store):
+        return [record['developer'] for record in store.records.values()
+                if type(record.get('developer')) is dict]
+
+    def test_three_no_work_records_do_not_reach_cap(self):
+        store = _Store(count=3)
+        assignments = self._assignments(store)
+        assignments[0].update(state='DEVELOPER_PENDING')
+        assignments[1].update(state='DEVELOPER_UNAVAILABLE')
+        assignments[2].update(state='DEVELOPER_OUTCOME_UNKNOWN',
+            error_code='CODEX_BLOCKED', execution={'changed_files': False})
+
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+
+        self.assertEqual(store.recorded, [])
+
+    def test_two_real_rounds_and_no_work_stay_below_cap(self):
+        store = _Store(count=3)
+        self._assignments(store)[2].update(state='DEVELOPER_PENDING')
+
+        task_submission_cli._check_delegate_repair_cap(_args(), store)
+
+        self.assertEqual(store.recorded, [])
+
+    def test_three_real_rounds_reach_cap_and_require_high_debug(self):
+        store = self._at_cap()
+
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_REPAIR_LIMIT_REACHED'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
+    def test_newer_no_work_assignment_still_dates_high_debug(self):
+        store = self._at_cap(diagnosis=_diagnosis([_entry()]))
+        store.records['00000000000000000000000000000003'] = {
+            'completion': {'executor_task_id': _EXECUTOR_TASK},
+            'developer': {'state': 'DEVELOPER_PENDING',
+                          'created_at': '2026-11-04T00:00:02Z'},
+        }
+
+        with self.assertRaisesRegex(LLMToolError, 'DELEGATE_HIGH_DEBUG_TASK_INVALID'):
+            task_submission_cli._check_delegate_repair_cap(_args(), store)
+        self.assertEqual(store.recorded, [])
+
     def test_below_cap_ignores_high_debug_task_option(self):
         store = _Store(count=MAX_REPAIR_ATTEMPTS)
         args = _args(high_debug_task='invalid')
