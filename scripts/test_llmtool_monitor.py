@@ -3084,7 +3084,7 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIsNot(agents.thread, first)
         agents.thread.join(5)
 
-    def test_d6_developer_binding_preserves_explicit_ui_session_label(self):
+    def test_d6_developer_binding_uses_normal_claude_developer_label(self):
         self._register("wp-1", str(self.task), trusted_agent_id="claude-" + "developer")
         ui_name = "claude-" + "developer-" + "ui"
         ui_sid = "aaaa" + "1111-0001"
@@ -3104,7 +3104,7 @@ class OfficeViewTests(unittest.TestCase):
         rows = [row for row in self.rows([ui, developer]) if row.kind != "worker"]
 
         self.assertEqual({row.sid: row.name for row in rows}, {
-            "aaaa1111": "claude ui（背景）",
+            "aaaa1111": "claude developer（背景）",
             "bbbb2222": "claude developer（背景）",
         })
 
