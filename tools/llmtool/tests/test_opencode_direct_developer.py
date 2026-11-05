@@ -302,6 +302,44 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         sid, text, _ = parse_json_events(raw)
         self.assertEqual((sid, text), ('ses_Abc123', None))
 
+    def test_exit_zero_transport_recovery_requires_ordered_completion(self):
+        transport = {'type': 'provider.transport'}
+        unavailable = {'type': 'provider.unavailable'}
+        cases = (
+            ('finish before transport', (
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+            ), set()),
+            ('only earlier transport recovered', (
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+            ), {0}),
+            ('text and finish before transport', (
+                {'type': 'text', 'sessionID': 'ses_Abc123', 'part': {'text': 'done'}},
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+            ), set()),
+            ('later provider error remains fatal', (
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': transport},
+                {'type': 'step_finish', 'sessionID': 'ses_Abc123'},
+                {'type': 'error', 'sessionID': 'ses_Abc123', 'error': unavailable},
+            ), {0}),
+        )
+        for name, events, recovered_indices in cases:
+            with self.subTest(name=name):
+                self.assertEqual(_recovered_transport_indices(events),
+                                 recovered_indices)
+                raw = ('\n'.join(json.dumps(event) for event in events) + '\n').encode()
+                with self.assertRaises(DirectOpenCodeError) as caught:
+                    self.run_with_valid_binding(
+                        root=self.root, read_paths=['source.py'],
+                        write_paths=['source.py'], prompt='bounded task prompt',
+                        timeout_seconds=5, executable=self.fake_cli(raw.decode(),
+                                                                    exit_code=0))
+                self.assertEqual(caught.exception.direct_opencode_code,
+                                 'OPENCODE_PROVIDER_FAILED')
+
     def test_transport_error_text_only_or_different_session_is_not_recovery(self):
         transport = self.event('error', error={'type': 'provider.transport'})
         text_only = self.event('text', part={'text': 'completed'})
@@ -334,15 +372,31 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                              'OPENCODE_PROVIDER_FAILED')
 
     def test_transport_recovery_scans_large_event_stream(self):
+        class CountingList(list):
+            def __init__(self, values):
+                super().__init__(values)
+                self.element_reads = 0
+
+            def __getitem__(self, index):
+                value = super().__getitem__(index)
+                self.element_reads += len(value) if isinstance(index, slice) else 1
+                return value
+
+            def __iter__(self):
+                for value in super().__iter__():
+                    self.element_reads += 1
+                    yield value
+
         count = 20_000
         transport = {'type': 'error', 'sessionID': 'ses_Abc123',
                      'error': {'type': 'provider.transport'}}
-        events = [transport.copy() for _ in range(count)]
+        events = CountingList(transport.copy() for _ in range(count))
         events.append({'type': 'step_finish', 'sessionID': 'ses_Abc123'})
         recovered = _recovered_transport_indices(events)
         self.assertEqual(len(recovered), count)
         self.assertEqual(min(recovered), 0)
         self.assertEqual(max(recovered), count - 1)
+        self.assertLessEqual(events.element_reads, 2 * len(events))
 
     def test_non_dict_json_line_keeps_later_error_classification(self):
         failed = (b'[]\n' + self.event(
