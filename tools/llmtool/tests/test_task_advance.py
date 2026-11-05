@@ -53,6 +53,39 @@ def remote_receipt(record, *, source_sha=HEAD, result='PASS', excerpt=None,
     return receipt
 
 
+class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
+    def _merge_checks(self, paths, check_names, *, allow_missing_macos=False):
+        check_runs = [{'name': name, 'head_sha': HEAD, 'status': 'completed',
+                       'conclusion': 'success'} for name in check_names]
+
+        def github_get(path):
+            if path.startswith('commits/'):
+                return {'total_count': len(check_runs), 'check_runs': check_runs}
+            if path.startswith('pulls/'):
+                return [{'filename': item} for item in paths]
+            raise AssertionError(path)
+
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open',
+              'merged': False, 'mergeable': True}
+        return task_advance._merge_checks(
+            base_record(), 17, HEAD, pr, github_get,
+            allow_missing_macos=allow_missing_macos)
+
+    def test_skills_json_and_docs_markdown_need_only_docs_check(self):
+        self.assertIsNone(self._merge_checks(
+            ['skills/x.json', 'docs/y.md'], ['check (docs)']))
+
+    def test_deep_llmtool_markdown_requires_code_checks(self):
+        paths = ['tools/llmtool/llmtool/deep/z.md']
+        self.assertEqual(self._merge_checks(paths, ['check (docs)']),
+                         'MERGE_REQUIRED_CHECK_MISSING')
+        self.assertIsNone(self._merge_checks(
+            paths, ['check (Linux 3.14)', 'check (macOS 3.13)']))
+
+    def test_top_level_readme_stays_docs_only(self):
+        self.assertIsNone(self._merge_checks(['README.md'], ['check (docs)']))
+
+
 class TaskAdvanceTests(unittest.TestCase):
     def _completed_codex_review(self, verdict, *, recorded=True):
         task_id, run_id, contract_digest = '1' * 32, '2' * 32, 'd' * 64
