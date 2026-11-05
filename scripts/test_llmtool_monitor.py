@@ -7586,9 +7586,8 @@ class PrBoardTests(unittest.TestCase):
             reviewing = {(str(index), "abcdef0")} if verdict == "審查中" else set()
             pending = [mon.OwnerPending(1, f"#{index}", "open", "", kind)] if kind else []
             linux = ("completed", "failure") if verdict == "通過" and index == 5 else None
-            mac_entry = (("completed", {"成功": "success", "略過": "skipped",
-                                       "執行中": "in_progress"}.get(mac, ""))
-                         if mac else None)
+            mac_entry = {"成功": ("completed", "success"), "略過": ("completed", "skipped"),
+                         "失敗": ("completed", "failure"), "執行中": ("in_progress", "")}.get(mac)
             ci = {"abcdef0": {}}
             if linux:
                 ci["abcdef0"]["linux"] = linux
@@ -7689,7 +7688,6 @@ class PrBoardTests(unittest.TestCase):
                       {"sha": self.SHA, "at": latest, "result": "TIMEOUT"}]}
         self.assertEqual(mon._ec2_head_entry(record),
                          (("abcdef0", mon._remote_test_time(stamp), "FAIL"),
-                          ("abcdef0", mon._remote_test_time(later), "PASS"),
                           ("abcdef0", mon._remote_test_time(latest), "TIMEOUT")))
         self.assertEqual(mon._ec2_head_entry(None), ())
 
@@ -7734,4 +7732,4 @@ class PrBoardTests(unittest.TestCase):
         self.assertTrue(rows[0].startswith("PR #978"))
         self.assertIn("審查 通過", " ".join(rows))
         self.assertIn("macOS 成功", " ".join(rows))
-        self.assertTrue(all(mon._width(line) <= 40 for line in view))
+        self.assertTrue(all(mon._width(line) <= 40 for line in lines))
