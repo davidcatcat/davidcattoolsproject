@@ -1356,7 +1356,7 @@ def _validate(record):
                                                'DEVELOPER_OUTPUT_REJECTED', 'BLOCKED') or
                     developer['provider_profile'] not in ('company-gw', 'codex', 'opencode', 'claude', 'agy', 'gw-agent') or
                     developer['provider_type'] not in (
-                        None, 'openai-compatible', 'codex-cli', 'opencode-cli', 'agy-cli', 'gw-agent-cli') or
+                        None, 'openai-compatible', 'codex-cli', 'opencode-cli', 'agy-cli', 'gw-agent-cli', 'claude-cli') or
                     developer['backend_session_semantics'] not in (
                         'NO_NATIVE_SESSION_ID_EXPOSED', 'CLI_REPORTED_SESSION_ID') or
                     not _safe_identifier(developer['session_id'], DEV_SESSION_ID) or
@@ -1479,21 +1479,29 @@ def _validate(record):
                      developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
                      developer['max_tokens'] is not None)):
                 _fail()
-            if (developer['provider_profile'] == 'claude' and
-                    (developer['provider_type'] is not None or
-                     developer['backend_session_semantics'] != 'NO_NATIVE_SESSION_ID_EXPOSED' or
-                     developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_RESPONDED') or
-                     'owner_assignment_ref' not in developer or
-                     (developer['state'] == 'DEVELOPER_PENDING' and
-                      'claude_result' in developer) or
-                     (developer['state'] == 'DEVELOPER_RESPONDED' and
-                      ('claude_result' not in developer or developer['artifact'] is not None or
-                       developer['usage'] is not None or developer['error_code'] is not None or
-                       developer['model'] is not None)))):
-                _fail()
+            if developer['provider_profile'] == 'claude':
+                semantics = developer['backend_session_semantics']
+                record_only = semantics == 'NO_NATIVE_SESSION_ID_EXPOSED'
+                cli_route = semantics == 'CLI_REPORTED_SESSION_ID'
+                if ('owner_assignment_ref' not in developer or
+                        (record_only and (developer['provider_type'] is not None or
+                         developer['state'] not in ('DEVELOPER_PENDING', 'DEVELOPER_RESPONDED') or
+                         (developer['state'] == 'DEVELOPER_PENDING' and 'claude_result' in developer) or
+                         (developer['state'] == 'DEVELOPER_RESPONDED' and
+                          ('claude_result' not in developer or developer['artifact'] is not None or
+                           developer['usage'] is not None or developer['error_code'] is not None or
+                           developer['model'] is not None)))) or
+                        (cli_route and (developer['provider_type'] not in (None, 'claude-cli') or
+                         developer['max_tokens'] is not None or 'executor_task_id' not in developer or
+                         'claude_result' in developer or
+                         type(developer.get('direct_result_callback')) is not dict or
+                         developer['direct_result_callback'].get('executor_task_id') !=
+                         developer.get('executor_task_id')))):
+                    _fail()
             if 'claude_result' in developer:
                 result = developer['claude_result']
                 if (developer['provider_profile'] != 'claude' or
+                        developer.get('backend_session_semantics') != 'NO_NATIVE_SESSION_ID_EXPOSED' or
                         type(result) is not dict or
                         set(result) != {'executor_task_id', 'head_sha', 'recorded_at'} or
                         not _safe_identifier(result['executor_task_id'], D6_TASK_ID) or
@@ -1506,7 +1514,7 @@ def _validate(record):
             if 'execution' in developer:
                 execution = developer['execution']
                 if execution is not None:
-                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy') or
+                    if (developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'claude') or
                             type(execution) is not dict or
                             set(execution) not in (
                                 _DIRECT_EXECUTION_FIELDS, _DIRECT_EXECUTION_BINDING_FIELDS,
@@ -1653,12 +1661,24 @@ def _validate(record):
                     developer['state'] == 'BLOCKED' and
                     developer['error_code'] == 'AGY_DISPATCH_DENIED' and
                     reason == 'OWNER_DISPATCH_DENIED')
+                claude_isolation_block = (
+                    developer['provider_profile'] == 'claude' and
+                    developer['state'] == 'BLOCKED' and
+                    developer['error_code'] == 'BLOCKED_WRITE_ISOLATION' and
+                    reason in ('BLOCKED_WRITE_ISOLATION', 'UNSUPPORTED_BOUNDARY',
+                               'BOUNDARY_PREPARATION_FAILED', 'BOUNDARY_UNVERIFIED'))
+                claude_dispatch_block = (
+                    developer['provider_profile'] == 'claude' and
+                    developer['state'] == 'BLOCKED' and
+                    developer['error_code'] == 'CLAUDE_DISPATCH_DENIED' and
+                    reason == 'OWNER_DISPATCH_DENIED')
                 codex_block = (
                     developer['provider_profile'] == 'codex' and
                     developer['state'] == 'DEVELOPER_OUTCOME_UNKNOWN' and
                     developer['error_code'] == 'CODEX_BLOCKED' and
                     type(execution) is dict and execution.get('status') == 'BLOCKED')
-                if (not (agy_isolation_block or agy_dispatch_block or codex_block) or
+                if (not (agy_isolation_block or agy_dispatch_block or claude_isolation_block or
+                         claude_dispatch_block or codex_block) or
                         type(reason) is not str or
                         len(reason.encode('utf-8')) > 2048 or
                         any((ord(char) < 32 and char not in '\t\n\r') or
@@ -1672,17 +1692,19 @@ def _validate(record):
                 'opencode': 'opencode-cli',
                 'agy': 'agy-cli',
                 'gw-agent': 'gw-agent-cli',
+                'claude': ('claude-cli' if developer.get('backend_session_semantics') ==
+                           'CLI_REPORTED_SESSION_ID' else None),
             }.get(developer['provider_profile'])
             token_cap_required = not (
-                developer['provider_profile'] in ('codex', 'agy', 'gw-agent') and
-                developer['provider_type'] in ('codex-cli', 'agy-cli', 'gw-agent-cli'))
+                developer['provider_profile'] in ('codex', 'agy', 'gw-agent', 'claude') and
+                developer['provider_type'] in ('codex-cli', 'agy-cli', 'gw-agent-cli', 'claude-cli'))
             if dev_state == 'DEVELOPER_PENDING' and (
                     developer['provider_type'] is not None or developer['model'] is not None or
                     artifact is not None or usage is not None or developer['error_code'] is not None):
                 _fail()
             if 'progress' in developer:
                 progress = developer['progress']
-                if (developer['provider_profile'] != 'agy' or
+                if (developer['provider_profile'] not in ('agy', 'claude') or
                         developer['state'] != 'BLOCKED' or type(progress) is not dict or
                         set(progress) != {'state', 'head_sha', 'changed_files',
                                           'unfinished_checks', 'session_id'} or
@@ -1718,15 +1740,17 @@ def _validate(record):
                       type(developer.get('execution')) is not dict or
                       developer['execution'].get('usage_source') != 'CLI_REPORTED'))):
                 _fail()
-            if (dev_state == 'DEVELOPER_RESPONDED' and
-                    developer['provider_profile'] != 'claude' and (
+            claude_record_only = (developer['provider_profile'] == 'claude' and
+                                  developer.get('backend_session_semantics') ==
+                                  'NO_NATIVE_SESSION_ID_EXPOSED')
+            if (dev_state == 'DEVELOPER_RESPONDED' and not claude_record_only and (
                     developer['provider_type'] is None or artifact is None or
                     developer['error_code'] is not None or
                     (token_cap_required and developer['max_tokens'] is None))):
                 _fail()
             if dev_state == 'BLOCKED' and (
-                    developer['provider_profile'] != 'agy' or
-                    developer['provider_type'] != 'agy-cli' or
+                    developer['provider_profile'] not in ('agy', 'claude') or
+                    developer['provider_type'] != expected_provider or
                     developer['error_code'] is None or artifact is not None):
                 _fail()
             if developer['provider_profile'] == 'opencode':
@@ -1760,7 +1784,7 @@ def _validate(record):
                     'PM_DISPATCHING': 'CLAIMED',
                     'PM_RETURNED': 'RETURNED', 'PM_RESPONSE_REJECTED': 'RETURNED',
                     'PM_UNAVAILABLE': 'UNAVAILABLE', 'PM_OUTCOME_UNKNOWN': 'UNKNOWN'}
-                if (developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent') or
+                if (developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent', 'claude') or
                         type(callback) is not dict or
                         set(callback) not in (callback_fields, callback_fields | {'review_handoff'},
                             callback_fields | {'review_handoff', 'review_return'}) or
@@ -2700,6 +2724,7 @@ class TaskStore:
                 _fail('CLAUDE_RESULT_BINDING_MISMATCH')
             if (type(developer) is not dict or
                     developer.get('provider_profile') != 'claude' or
+                    developer.get('backend_session_semantics') != 'NO_NATIVE_SESSION_ID_EXPOSED' or
                     developer.get('state') != 'DEVELOPER_PENDING' or
                     developer.get('executor_task_id') != executor_task_id):
                 _fail('CLAUDE_RESULT_STATE_INVALID')

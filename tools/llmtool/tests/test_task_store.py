@@ -459,6 +459,100 @@ class TaskStoreTests(unittest.TestCase):
                 task['task_id'], expected={'developer': None}, developer=developer)
         return task
 
+    def _claude_cli_task(self):
+        task = self._codex_dispatch_task()
+        self.store.create(task)
+        registration = SimpleNamespace(
+            task_id='executor-claude', root='/registered/root', common_dir='/repo/.git',
+            branch='task-branch', result_sha='a' * 40, trusted_agent_id='claude-developer',
+            session_ref='session-ref', native_session_id=None)
+        developer = self._developer_assignment(provider='claude')
+        developer.update(
+            backend_session_semantics='CLI_REPORTED_SESSION_ID',
+            owner_assignment_ref=('https://github.com/davidcatcat/davidcattoolsproject/issues/289'
+                                  '#issuecomment-1'),
+            executor_task_id=registration.task_id,
+            execution=None,
+            direct_result_callback=task_submission_cli_module._direct_result_callback(
+                task, registration, 'a' * 40, test_policy='LOCAL'))
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.store.compare_and_update(
+                task['task_id'], expected={'developer': None}, developer=developer)
+        return task
+
+    def test_claude_cli_record_lifecycle_and_record_only_result_refusal(self):
+        task = self._claude_cli_task()
+        developer = self.store.get(task['task_id'])['developer']
+        self.assertEqual(developer['backend_session_semantics'], 'CLI_REPORTED_SESSION_ID')
+        with self.assertRaises(LLMToolError) as caught:
+            self.store.record_claude_result(
+                task['task_id'], pm_session_id=task['pm_session_id'],
+                executor_task_id='executor-claude', head_sha='a' * 40)
+        self.assertEqual(caught.exception.task_store_error_code, 'CLAUDE_RESULT_STATE_INVALID')
+
+        dispatching = dict(developer, state='DEVELOPER_DISPATCHING',
+                           provider_type='claude-cli', model='claude-test-1',
+                           execution=None)
+        initial = self.store.get(task['task_id'])
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.store.compare_and_update(task['task_id'],
+                expected={'record_sha256': initial['record_sha256']}, developer=dispatching)
+        responded = dict(dispatching, state='DEVELOPER_RESPONDED',
+            artifact='diff --git a/src.py b/src.py\n',
+            artifact_sha256=hashlib.sha256(b'diff --git a/src.py b/src.py\n').hexdigest(),
+            execution={'status': 'DONE', 'native_session_id': '12345678-1234-4234-8234-123456789abc',
+                'process_exit_code': 0, 'stdout_sha256': 'c' * 64, 'elapsed_ms': 1,
+                'cleanup_status': 'CONFIRMED', 'usage_source': 'UNKNOWN',
+                'source_bytes': None, 'source_file_count': None,
+                'source_manifest_sha256': None})
+        current = self.store.get(task['task_id'])
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            self.store.compare_and_update(task['task_id'],
+                expected={'record_sha256': current['record_sha256']}, developer=responded)
+        self.assertEqual(self.store.get(task['task_id'])['developer']['state'],
+                         'DEVELOPER_RESPONDED')
+
+    def test_claude_cli_accepts_blocked_isolation_record(self):
+        task = self._claude_cli_task()
+        developer = self.store.get(task['task_id'])['developer']
+        blocked = dict(developer, state='BLOCKED', provider_type='claude-cli',
+                       model='claude-test-1', error_code='BLOCKED_WRITE_ISOLATION',
+                       blocked_reason='BLOCKED_WRITE_ISOLATION', execution=None)
+        current = self.store.get(task['task_id'])
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            saved = self.store.compare_and_update(task['task_id'],
+                expected={'record_sha256': current['record_sha256']}, developer=blocked)
+        self.assertEqual(saved['developer']['state'], 'BLOCKED')
+
+    def test_claude_cli_rejects_mismatched_callback_executor(self):
+        task = self._claude_cli_task()
+        current = self.store.get(task['task_id'])
+        developer = dict(current['developer'])
+        developer['direct_result_callback'] = dict(
+            developer['direct_result_callback'], executor_task_id='other-executor')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, developer=developer)
+
+    def test_claude_cli_rejects_record_only_result_field(self):
+        task = self._claude_cli_task()
+        current = self.store.get(task['task_id'])
+        developer = dict(current['developer'], claude_result={})
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, developer=developer)
+
+    def test_record_only_claude_rejects_cli_provider_type(self):
+        task = self._claude_result_task()
+        current = self.store.get(task['task_id'])
+        developer = dict(current['developer'], provider_type='claude-cli')
+        with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
+            with self.assertRaises(LLMToolError):
+                self.store.compare_and_update(task['task_id'],
+                    expected={'record_sha256': current['record_sha256']}, developer=developer)
+
     def test_claude_assignment_rejects_invalid_repository_config(self):
         task = self._codex_dispatch_task()
         self.store.create(task)
