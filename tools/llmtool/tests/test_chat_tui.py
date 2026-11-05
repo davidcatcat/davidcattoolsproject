@@ -724,11 +724,12 @@ class WidgetTests(Base):
     def test_slash_picker_lists_only_existing_commands(self):
         labels = [c[0] for c in chat_tui.SLASH_COMMANDS]
         self.assertEqual(labels, ['/pm connect', '/pm new', '/pm', '/pm disconnect',
-                                  '/pm history', '/pm queue', '/help', '/status', '/provider', '/skill',
+                                  '/pm history', '/pm queue', '/help', '/status',
+                                  '/provider', '/skill',
                                   '/clear', '/history', '/exit', '/quit', '/task submit',
                                   '/task show', '/task mode', '/task list', '/task events',
                                   '/theme', '/links', '/settings', '/pm list', '/pm use',
-                                  '/pm accounts'])
+                                  '/pm accounts', '/logs'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/s')][:3],
                          ['/status', '/skill', '/settings'])
         self.assertEqual([c[0] for c in chat_tui.slash_matches('/p')][:3],
@@ -985,24 +986,24 @@ class WidgetTests(Base):
 
     def test_picker_scrolls_and_counts_hidden_entries(self):
         def first_page(ui):
-            self.assertEqual(len(ui.menu_items), 25)
+            self.assertEqual(len(ui.menu_items), 26)
             rows = self.menu_rows(ui)
             self.assertEqual(len(rows), chat_tui.MENU_LIMIT + 1)
             self.assertIn('/pm connect', rows[0])
-            self.assertIn('20 more (0 above, 20 below)', rows[-1])
+            self.assertIn('21 more (0 above, 21 below)', rows[-1])
 
         def scrolled(ui):
             rows = self.menu_rows(ui)
             self.assertEqual(ui.menu_index, 6)
             self.assertNotIn('/pm connect', ''.join(rows))
             self.assertIn('/help', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('20 more (2 above, 18 below)', rows[-1])
+            self.assertIn('21 more (2 above, 19 below)', rows[-1])
 
         def wrapped(ui):
             rows = self.menu_rows(ui)
-            self.assertEqual(ui.menu_index, 24)
-            self.assertIn('/pm accounts', rows[chat_tui.MENU_LIMIT - 1])
-            self.assertIn('(20 above, 0 below)', rows[-1])
+            self.assertEqual(ui.menu_index, 25)
+            self.assertIn('/logs', rows[chat_tui.MENU_LIMIT - 1])
+            self.assertIn('(21 above, 0 below)', rows[-1])
         ui, _ = self.drive(['/', first_page, '\x1b[B' * 6, scrolled, '\r',
                             lambda ui: self.assertEqual(ui.input.text, '/help'),
                             '\x7f' * 5, '/', '\x1b[A', wrapped],
@@ -5507,6 +5508,54 @@ class PMConversationTests(BoundedPMTest):
         status = ui.conversation.text.split('> /status', 1)[1]
         self.assertIn('用量（本 session）：UNKNOWN（PM 歷史無法讀取）', status)
         self.assertIn('Context 與額度：UNAVAILABLE（llmtool 沒有這項資料）', status)
+
+    def test_logs_disconnected_and_picker_enter_on_exact_command_runs(self):
+        expected = 'PM 紀錄：尚未連線 PM。先 /pm connect。'
+        ui, _ = self.drive(['/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1], expected)
+        ui, _ = self.drive(['/logs', '\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1], expected)
+
+    def test_logs_read_failure_and_empty_history_have_exact_text(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns',
+                                               Mock(side_effect=OSError('history unavailable'))),
+                            '/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         'PM 紀錄：UNKNOWN（PM 歷史無法讀取）')
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns',
+                                               Mock(return_value=[])),
+                            '/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1], 'PM 紀錄：尚無回合')
+
+    def test_logs_formatter_failure_shows_unknown(self):
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns',
+                                               Mock(return_value=[])),
+                            lambda ui: patch.object(chat_tui_pm, 'log_lines',
+                                                    side_effect=RuntimeError('plain failure')).start(),
+                            '/logs\r'])
+        self.assertEqual(ui.conversation.text.splitlines()[-1],
+                         'PM 紀錄：UNKNOWN（PM 歷史無法讀取）')
+
+    def test_logs_shows_oldest_first_and_requests_at_most_twenty(self):
+        turns = [
+            {'started_at': '2026-10-28T00:00:00+00:00', 'status': 'COMPLETED',
+             'origin': 'foreground', 'tool_names': ['first-tool']},
+            {'started_at': '2026-10-28T00:01:00+00:00', 'status': 'INTERRUPTED',
+             'origin': 'background', 'tool_names': ['second-tool'], 'reason': 'USER_INTERRUPT'},
+        ]
+        read = Mock(return_value=turns)
+        ui, _ = self.drive([self.connect(), self.connected,
+                            lambda ui: setattr(ui.pm_api, 'read_recent_turns', read),
+                            '/logs\r'])
+        text = ui.conversation.text.split('> /logs', 1)[1]
+        self.assertEqual(read.call_args.args[1], chat_tui_pm.LOGS_SHOWN)
+        self.assertEqual(read.call_args.args[0], self.session_id)
+        self.assertLess(text.index('first-tool'), text.index('second-tool'))
+        self.assertIn('PM 紀錄（最近 2 回合）', text)
+        self.assertIn('  不顯示工具指令與輸出', text)
 
     def test_status_background_read_failure_shows_unknown_source_and_reason(self):
         reason = 'TaskStore read denied'

@@ -168,5 +168,77 @@ class PMUsageStatusTests(unittest.TestCase):
                                  ("session-id", 450, 200, "state-root")])
 
 
+class PMLogsTests(unittest.TestCase):
+    def test_log_lines_screens_and_bounds_tool_names(self):
+        turns = [
+            {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+             "tool_names": ["/bin/echo hi"]},
+            {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+             "tool_names": ["a" + chr(10) + "b"]},
+            {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+             "tool_names": ["a" * 70]},
+        ]
+        for turn in turns[:2]:
+            rows = chat_tui_pm.log_lines([turn])
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0].endswith("Tool"))
+        rows = chat_tui_pm.log_lines([turns[2]])
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0].endswith("a" * 59 + "…"))
+        self.assertEqual(chat_tui_pm.tool_label({"name": "a" * 70}), "a" * 70)
+
+    def test_log_lines_screens_status_and_reason_with_safe_code(self):
+        rows = chat_tui_pm.log_lines([
+            {"status": "plain status words"},
+            {"status": 7},
+            {"status": "COMPLETED", "reason": "plain reason words"},
+            {"status": "COMPLETED", "reason": 7},
+        ])
+        self.assertEqual(rows[0].split("｜")[1], "UNKNOWN")
+        self.assertEqual(rows[1].split("｜")[1], "UNKNOWN")
+        self.assertEqual(rows[2].split("｜")[-1], "UNKNOWN")
+        self.assertEqual(rows[3].split("｜")[-1], "UNKNOWN")
+
+    def test_log_lines_statuses_origin_tools_reason_and_invalid_rows(self):
+        with patch.object(chat_tui_pm, "safe_name",
+                          side_effect=lambda name: "[withheld]" if name == "stubbed-tool" else name):
+            rows = chat_tui_pm.log_lines([
+                {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+                 "origin": "foreground", "tool_names": ["stubbed-tool"]},
+                {"started_at": "2026-10-28T00:00:00+00:00", "status": "INTERRUPTED",
+                 "origin": "background", "tool_names": [], "reason": "USER_INTERRUPT"},
+                {"started_at": "2026-10-28T00:00:00+00:00", "status": "ERROR"},
+                {"started_at": "2026-10-28T00:00:00+00:00", "status": "ACTIVE"},
+                {"started_at": "2026-10-28T00:00:00+00:00", "status": "OTHER"},
+                "skip this row",
+            ], now=datetime.fromisoformat("2026-10-28T00:00:00+00:00"))
+        self.assertIn("｜完成｜前景｜[withheld]", rows[0])
+        self.assertEqual(rows[1].split("｜")[1:], ["已中斷", "背景", "無工具", "USER_INTERRUPT"])
+        self.assertEqual(rows[2].split("｜")[1:], ["錯誤", "前景", "無工具"])
+        self.assertEqual(rows[3].split("｜")[1:], ["進行中", "前景", "無工具"])
+        self.assertEqual(rows[4].split("｜")[1:], ["OTHER", "前景", "無工具"])
+        self.assertEqual(len(rows), 5)
+
+    def test_tool_label_keeps_existing_description_and_name_behavior(self):
+        self.assertEqual(chat_tui_pm.tool_label({"name": "Read", "description": "Read docs/a.md"}),
+                         "Read docs/a.md")
+        self.assertEqual(chat_tui_pm.tool_label({"name": "/bin/echo hi"}), "Tool")
+
+    def test_log_lines_never_shows_message_or_tool_input_fields(self):
+        row = {"started_at": "2026-10-28T00:00:00+00:00", "status": "COMPLETED",
+               "owner_text": "plain owner fixture", "result_text": "plain result fixture",
+               "tool_names": ["plain-tool"], "input": {"command": "plain command fixture"}}
+        rendered = "\n".join(chat_tui_pm.log_lines([row]))
+        for private_value in (row["owner_text"], row["result_text"], row["input"]["command"]):
+            self.assertNotIn(private_value, rendered)
+
+    def test_read_recent_turns_passes_latest_and_state_root(self):
+        expected = [{"seq": 1}]
+        with patch("llmtool.pm_runtime.read_history", return_value={"turns": expected}) as read:
+            api = chat_tui_pm.PMRuntimeAPI(state_root="state-root")
+            self.assertIs(api.read_recent_turns("session-id", 20), expected)
+        read.assert_called_once_with("session-id", latest=20, state_root="state-root")
+
+
 if __name__ == "__main__":
     unittest.main()
