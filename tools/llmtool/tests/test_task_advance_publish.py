@@ -1,7 +1,7 @@
 import json
 import subprocess
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 from llmtool import task_advance
 from test_task_advance import HEAD, base_record, d6
@@ -10,6 +10,7 @@ from test_task_advance import HEAD, base_record, d6
 class TaskAdvancePublishTests(unittest.TestCase):
     def setUp(self):
         self.record = base_record()
+        self.record['remote_test_outcomes'] = []
         self.snapshot = dict(d6(), branch='feature/task', dirty=False)
         self.gh_calls = []
 
@@ -95,6 +96,43 @@ class TaskAdvancePublishTests(unittest.TestCase):
         create = next(args for args in calls if args[:2] == ['pr', 'create'])
         self.assertEqual(create, ['pr', 'create', '--head', 'feature/task',
             '--base', 'main', '--title', 'Task summary', '--body', 'Task body'])
+
+    def test_stale_open_pr_head_catches_up_on_second_read(self):
+        old_head = 'b' * 40
+        pulls = [
+            [{'number': 41, 'headRefOid': old_head}],
+            [{'number': 41, 'headRefOid': HEAD}],
+        ]
+
+        def gh(_root, args):
+            self.gh_calls.append(list(args))
+            self.assertEqual(args[:2], ['pr', 'list'])
+            return subprocess.CompletedProcess(['gh', *args], 0,
+                json.dumps(pulls.pop(0)).encode(), b'')
+
+        with patch.object(task_advance, '_publish_pause') as pause:
+            number = task_advance._publish_pr(gh, '/d6', 'feature/task',
+                self.record['task_id'], HEAD, 'Task summary', 'Task body')
+        self.assertEqual(number, 41)
+        self.assertEqual(len(self.gh_calls), 2)
+        pause.assert_called_once_with(2)
+
+    def test_stale_open_pr_head_fails_after_four_reads_without_sleep(self):
+        old_head = 'b' * 40
+
+        def gh(_root, args):
+            self.gh_calls.append(list(args))
+            self.assertEqual(args[:2], ['pr', 'list'])
+            return subprocess.CompletedProcess(['gh', *args], 0,
+                json.dumps([{'number': 41, 'headRefOid': old_head}]).encode(), b'')
+
+        with patch.object(task_advance, '_publish_pause') as pause:
+            with self.assertRaises(task_advance._PublishRefusal) as caught:
+                task_advance._publish_pr(gh, '/d6', 'feature/task',
+                    self.record['task_id'], HEAD, 'Task summary', 'Task body')
+        self.assertEqual(caught.exception.code, 'PUBLISH_GITHUB_FAILED')
+        self.assertEqual(len(self.gh_calls), 4)
+        self.assertEqual(pause.call_args_list, [call(2)] * 3)
 
 
 if __name__ == '__main__':

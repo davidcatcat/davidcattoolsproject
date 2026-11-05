@@ -226,7 +226,8 @@ class TaskAdvanceTests(unittest.TestCase):
         self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]), d6(False), PR, related),
                          'PUBLISH')
         new_head = 'b' * 40
-        self.assertEqual(task_advance.decide(base_record(review_dispatch_claim=[claim]),
+        self.assertEqual(task_advance.decide(base_record(
+            review_dispatch_claim=[claim], remote_test_outcomes=[]),
             {'root': '/repo/task', 'result_head': new_head, 'recorded_result_head': new_head,
              'dirty': False}, {'number': 17, 'head': {'sha': new_head}},
             {'events': [{'source': 'REVIEWER', 'source_sha': HEAD, 'version': 1,

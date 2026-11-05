@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 from pathlib import Path
 from argparse import Namespace
 
@@ -33,6 +34,10 @@ def _publish_run_gh(root, args):
     return subprocess.run(['gh', *args], cwd=root, stdin=subprocess.DEVNULL,
                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                           check=False, timeout=30)
+
+
+def _publish_pause(seconds):
+    time.sleep(seconds)
 
 
 def _publish_output(result):
@@ -130,15 +135,26 @@ def _publish_pr(gh_runner, root, branch, task_id, expected_head, title, body):
             pulls = json.loads(output)
         except (ValueError, TypeError):
             raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
-    if type(pulls) is not list or not pulls:
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    pull = pulls[0]
-    number = pull.get('number') if type(pull) is dict else None
-    head = pull.get('headRefOid') if type(pull) is dict else None
-    if (type(number) is not int or number < 1 or type(head) is not str or
-            head != expected_head):
-        raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
-    return number
+    for attempt in range(4):
+        if type(pulls) is not list or not pulls:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        pull = pulls[0]
+        number = pull.get('number') if type(pull) is dict else None
+        head = pull.get('headRefOid') if type(pull) is dict else None
+        if type(number) is not int or number < 1 or type(head) is not str:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        if head == expected_head:
+            return number
+        if attempt == 3:
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED')
+        _publish_pause(2)
+        output = _publish_command(gh_runner, root,
+            ['pr', 'list', '--head', branch, '--state', 'open',
+             '--json', 'number,headRefOid'], code='PUBLISH_GITHUB_FAILED')
+        try:
+            pulls = json.loads(output)
+        except (ValueError, TypeError):
+            raise _PublishRefusal('PUBLISH_GITHUB_FAILED') from None
 
 
 def _merge_refusal(code):
