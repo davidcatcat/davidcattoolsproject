@@ -6411,10 +6411,25 @@ class WorkBoardTests(unittest.TestCase):
     @staticmethod
     def _github(pulls=None, verdicts=None, **fields):
         from types import SimpleNamespace
+        raw_count = len(pulls) if type(pulls) is list else None
+        raw_times = []
+        if type(pulls) is list:
+            for pull in pulls:
+                value = pull.get("updated_at") if type(pull) is dict else None
+                try:
+                    if type(value) is not str:
+                        raise ValueError
+                    raw_times.append(datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+                                     .replace(tzinfo=timezone.utc).timestamp())
+                except ValueError:
+                    raw_times.append(None)
+        oldest = (min(raw_times) if raw_times and all(value is not None for value in raw_times)
+                  else None)
         values = {"board_pulls": mon.board_pulls(pulls, "o/r") if pulls is not None else None,
                   "verdicts": verdicts or {}, "pending": [],
                   "successful_read": pulls is not None, "read_failed": False,
-                  "window": 43200}
+                  "window": 43200, "board_page_count": raw_count,
+                  "board_oldest_updated": oldest}
         values.update(fields)
         return SimpleNamespace(**values)
 
@@ -6441,13 +6456,41 @@ class WorkBoardTests(unittest.TestCase):
             seed = root / "seed"
             seed.write_text(json.dumps({"schema_version": 1, "updated_by": "PM", "note": "seed"}),
                             encoding="utf-8")
-            self.assertEqual(mon.read_pm_board(NOW, str(seed)).status, "undated")
+            self.assertEqual(mon.read_pm_board(NOW, str(seed)).status, "malformed")
             stale = root / "stale"
             self._write_board(stale, updated_at="2026-11-05T02:00:00Z",
                               running=[{"ref": "#965", "what": "still here", "next": "PM"}])
             parsed = mon.read_pm_board(NOW, str(stale))
             self.assertEqual(parsed.status, "stale")
             self.assertEqual([item.ref for item in parsed.running], ["#965"])
+
+    def test_pm_board_requires_all_lists_before_timestamp_validation(self):
+        valid = {"schema_version": 1, "updated_by": "PM", "updated_at": self.STAMP,
+                 "running": [], "queue": [], "blocked": []}
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "board.json"
+            for omitted in ("running", "queue", "blocked", "all"):
+                value = dict(valid)
+                if omitted == "all":
+                    value.pop("running"); value.pop("queue"); value.pop("blocked")
+                else:
+                    value.pop(omitted)
+                path.write_text(json.dumps(value), encoding="utf-8")
+                self.assertEqual(mon.read_pm_board(NOW, str(path)).status, "malformed", omitted)
+            for name, bad in (("running", None), ("queue", {}), ("blocked", "bad")):
+                value = dict(valid, **{name: bad})
+                path.write_text(json.dumps(value), encoding="utf-8")
+                self.assertEqual(mon.read_pm_board(NOW, str(path)).status, "malformed", name)
+            value = dict(valid, updated_at="bad")
+            path.write_text(json.dumps(value), encoding="utf-8")
+            self.assertEqual(mon.read_pm_board(NOW, str(path)).status, "undated")
+
+    def test_pm_board_future_stamp_is_undated_but_equal_and_stale_are_controls(self):
+        self.assertEqual(self._board(updated_at="2099-01-01T00:00:00Z").status, "undated")
+        self.assertEqual(self._board(updated_at=self.STAMP).status, "ok")
+        stale_stamp = datetime.fromtimestamp(NOW - mon.PM_BOARD_STALE - 1, timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        self.assertEqual(self._board(updated_at=stale_stamp).status, "stale")
 
     def test_pm_board_validates_item_shape_and_caps_each_list_at_50(self):
         entries = [{"ref": f"#{i}", "what": "word " * 20, "next": "", "reason": "note " * 20}
@@ -6467,18 +6510,28 @@ class WorkBoardTests(unittest.TestCase):
         pulls = [self._pull(1, title="Pass", sha="a" * 40),
                  self._pull(2, title="Fail", sha="b" * 40),
                  self._pull(3, title="Unknown", sha="c" * 40),
+                 self._pull(5, title="Changes", sha="f" * 40),
+                 self._pull(6, title="Unknown verdict", sha="1" * 40),
+                 self._pull(7, title="Wrong head", sha="7" * 40),
                  self._pull(4, title="Draft", sha="d" * 40, draft=True)]
         verdicts = {"1": [(1, "FAIL", frozenset({"aaaaaaa"})),
                            (2, "PASS", frozenset({"aaaaaaa"}))],
                     "2": [(3, "PASS", frozenset({"bbbbbbb"})),
                           (4, "FAIL", frozenset({"bbbbbbb"}))],
-                    "3": [(5, "PASS", frozenset({"eeeeeee"}))]}
+                    "3": [(5, "PASS", frozenset({"eeeeeee"}))],
+                    "5": [(1, "CHANGES_REQUIRED", frozenset({"fffffff"}))],
+                    "6": [(1, "PASS", frozenset({"1111111"})),
+                          (2, "UNKNOWN", frozenset({"1111111"}))],
+                    "7": [(1, "PASS", frozenset({"8888888"}))]}
         work = mon.work_board(self._github(pulls, verdicts),
                               mon.PmBoard("ok", 0, [], [], []), NOW)
         rows = {item.ref: (item.what, item.next) for item in work.running}
         self.assertEqual(rows["PR #1"], ("Pass", "PM"))
         self.assertEqual(rows["PR #2"], ("Fail", "Developer"))
         self.assertEqual(rows["PR #3"], ("Unknown「未見審查結論」", "未確認"))
+        self.assertEqual(rows["PR #5"], ("Changes「已見審查結論，下一步未確認」", "未確認"))
+        self.assertEqual(rows["PR #6"], ("Unknown verdict「已見審查結論，下一步未確認」", "未確認"))
+        self.assertEqual(rows["PR #7"], ("Wrong head「未見審查結論」", "未確認"))
         self.assertEqual(rows["PR #4"], ("Draft 草稿「未見審查結論」", "未確認"))
 
     def test_board_pulls_use_the_same_fork_filter_and_safe_head_prefix(self):
@@ -6507,8 +6560,9 @@ class WorkBoardTests(unittest.TestCase):
         self.assertIn("blocked：needs fix", shown)
 
     def test_done_rows_obey_local_midnight_and_keep_all_with_full_page_note(self):
-        local_now = datetime(2026, 11, 5, 12, tzinfo=timezone.utc).astimezone()
-        midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        local_now = datetime(2026, 11, 5, 12, tzinfo=timezone.utc).timestamp()
+        local = datetime.fromtimestamp(local_now)
+        midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
         pulls = [self._pull(i, state="closed", merged=midnight + i, updated=midnight + i)
                  for i in range(1, 101)]
         pulls.extend([self._pull(101, state="closed", merged=midnight, updated=midnight + 1),
@@ -6520,6 +6574,168 @@ class WorkBoardTests(unittest.TestCase):
         pulls[0] = self._pull(1, state="closed", merged=midnight - 1, updated=midnight - 1)
         work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), local_now.timestamp())
         self.assertEqual(len(work.done), 100)
+
+    def test_today_note_uses_raw_page_count_and_unknown_oldest_keeps_note(self):
+        local_midnight = datetime.fromtimestamp(NOW).replace(
+            hour=0, minute=0, second=0, microsecond=0).timestamp()
+        raw = [self._pull(i, updated=local_midnight - 3600) for i in range(1, 101)]
+        raw[-1] = dict(raw[-1], head={"sha": "a" * 40, "repo": {"full_name": "fork/r"}})
+        work = mon.work_board(self._github(raw), mon.PmBoard("ok", 0, [], [], []), NOW)
+        self.assertEqual(len(work.running), 99)
+        self.assertEqual(work.note, "進行中的 GitHub 來源只看最近更新的 100 筆 PR，可能不完整")
+        invalid = [self._pull(i, updated=NOW) for i in range(1, 101)]
+        invalid[0] = dict(invalid[0], updated_at="bad")
+        work = mon.work_board(self._github(invalid), mon.PmBoard("ok", 0, [], [], []), NOW)
+        self.assertIn("今天完成可能不完整", work.note)
+        work = mon.work_board(self._github(raw[:99]), mon.PmBoard("ok", 0, [], [], []), NOW)
+        self.assertEqual(work.note, "")
+
+    def test_owner_section_keeps_every_pending_item_and_splits_count(self):
+        pending = [mon.OwnerPending(NOW, "#1", "open", "repair", "repair_gate")]
+        github = self._github([], pending=pending)
+        board = mon.work_board(github, mon.PmBoard("ok", 0, [], [], []), NOW)
+        lines = [line for line, _ in mon.board_view(board)]
+        self.assertIn("等你 1（等你決定 0，其他 Owner 請求 1）", lines[1])
+        self.assertIn("#1  repair  → 你", lines)
+        mixed = self._github([], pending=[pending[0],
+            mon.OwnerPending(NOW, "#2", "open", "approval", "waiting_owner")])
+        lines = [line for line, _ in mon.board_view(
+            mon.work_board(mixed, mon.PmBoard("ok", 0, [], [], []), NOW))]
+        self.assertIn("等你 2（等你決定 1，其他 Owner 請求 1）", lines[1])
+
+    def test_running_section_requires_github_even_with_known_empty_file(self):
+        github = self._github(None, successful_read=False)
+        lines = [line for line, _ in mon.board_view(
+            mon.work_board(github, mon.PmBoard("ok", 0, [], [], []), NOW))]
+        index = lines.index("── 進行中 ──")
+        self.assertEqual(lines[index + 1], "未知")
+        github = self._github([], successful_read=True)
+        lines = [line for line, _ in mon.board_view(
+            mon.work_board(github, mon.PmBoard("ok", 0, [], [], []), NOW))]
+        index = lines.index("── 進行中 ──")
+        self.assertEqual(lines[index + 1], "無")
+
+    def test_local_midnight_uses_dst_aware_tzset(self):
+        if not hasattr(time, "tzset"):
+            self.skipTest("time.tzset unavailable")
+        old = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "America/New_York"
+            time.tzset()
+            for date, utc_hour in (("2026-03-08", 5), ("2026-11-01", 4)):
+                midnight = datetime.strptime(date, "%Y-%m-%d").replace(
+                    hour=utc_hour, tzinfo=timezone.utc).timestamp()
+                local_midnight = datetime.fromtimestamp(midnight + 3600).replace(
+                    hour=0, minute=0, second=0, microsecond=0).timestamp()
+                self.assertEqual(local_midnight, midnight)
+                pulls = [self._pull(1, state="closed", merged=midnight - 1, updated=midnight),
+                         self._pull(2, state="closed", merged=midnight, updated=midnight),
+                         self._pull(3, state="closed", merged=midnight + 1, updated=midnight + 1)]
+                now = midnight + 3600
+                work = mon.work_board(self._github(pulls), mon.PmBoard("ok", 0, [], [], []), now)
+                self.assertEqual([item.number for item in work.done], [3, 2])
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
+    def test_github_pull_page_metadata_and_failed_refresh_preserve_snapshot(self):
+        raw = [self._pull(i, updated=NOW) for i in range(1, 101)]
+        raw[-1] = dict(raw[-1], head={"sha": "a" * 40, "repo": {"full_name": "fork/r"}})
+        source = mon.GitHubSource("o/r", clock=lambda: NOW)
+        with patch.object(source, "_get", side_effect=[[], raw]), patch.object(source, "refresh_ci"):
+            source.refresh(force=True)
+        self.assertEqual(source.board_page_count, 100)
+        self.assertEqual(source.board_oldest_updated, NOW)
+        self.assertEqual(len(source.board_pulls), 99)
+        previous = (source.board_pulls, source.board_page_count, source.board_oldest_updated)
+        with patch.object(source, "_get", side_effect=[[], {}]), patch.object(source, "refresh_ci"):
+            source.refresh(force=True)
+        self.assertTrue(source.read_failed)
+        self.assertEqual((source.board_pulls, source.board_page_count, source.board_oldest_updated), previous)
+        self.assertIn("讀取失敗", source.status)
+
+    def test_github_bad_first_pull_page_leaves_board_unknown(self):
+        for bad in ({}, None):
+            source = mon.GitHubSource("o/r", clock=lambda: NOW)
+            with patch.object(source, "_get", side_effect=[[], bad]), patch.object(source, "refresh_ci"):
+                source.refresh(force=True)
+            self.assertFalse(source.successful_read)
+            self.assertIsNone(source.board_page_count)
+            self.assertIsNone(source.board_pulls)
+            work = mon.work_board(source, mon.PmBoard("missing", None, [], [], []), NOW)
+            lines = [line for line, _ in mon.board_view(work)]
+            self.assertIn("?", lines[1])
+            self.assertIn("未知", lines)
+
+    def test_board_paint_wraps_styles_scrolls_and_reserves_footer(self):
+        monitor = mon.Monitor()
+        pending = [mon.OwnerPending(NOW, "#965", "open", "repair_gate", "repair_gate")]
+        pending.extend(mon.OwnerPending(NOW, f"#{n}", "open", "request", "repair_gate")
+                       for n in range(966, 985))
+        monitor.github = self._github([], pending=pending)
+        monitor.pm_board = mon.PmBoard("malformed", None, [], [], [])
+        class Screen:
+            def getmaxyx(self): return (20, 24)
+            def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
+        drawn = {}
+        put = lambda row, text, attr=0: drawn.__setitem__(row, (text, attr))
+        offset = mon._paint_screen(Screen(), monitor, "board", 0, False,
+                                   {"!": 8, "section": 4}, put)
+        self.assertEqual(offset, 0)
+        self.assertTrue(any("等你 20" in text for text, _ in drawn.values()))
+        self.assertTrue(any("── 等你 ──" in text for text, _ in drawn.values()))
+        self.assertTrue(any("格式錯誤" in text and attr == 8 for text, attr in drawn.values()))
+        self.assertTrue(all(mon._width(text) <= 23 for text, _ in drawn.values()))
+        self.assertEqual(max(drawn), 19)
+        self.assertIn("q: quit", drawn[19][0])
+        scrolled = {}
+        offset = mon._paint_screen(Screen(), monitor, "board", 100, False,
+                                   {"!": 8, "section": 4},
+                                   lambda row, text, attr=0: scrolled.__setitem__(row, (text, attr)))
+        self.assertGreater(offset, 0)
+        self.assertEqual(max(scrolled), 19)
+        self.assertIn("q: quit", scrolled[19][0])
+
+    def test_curses_board_shortcut_and_tab_cycle_reset_offset(self):
+        monitor = mon.Monitor()
+        class Screen:
+            keys = []
+            def getmaxyx(self): return (30, 100)
+            def timeout(self, value): pass
+            def keypad(self, value): pass
+            def erase(self): pass
+            def move(self, y, x): pass
+            def refresh(self): pass
+            def addnstr(self, y, x, text, n, attr): pass
+            def getch(self): return self.keys.pop(0)
+            def clearok(self, value): pass
+        screen = Screen()
+        screen.keys = []
+        painted = []
+        original = mon._paint_screen
+        def record(*args):
+            painted.append((args[2], args[3]))
+            return original(*args)
+        with patch.object(screen, "keys", [ord("6"), ord("q")]), \
+             patch.object(mon, "_paint_screen", side_effect=record), \
+             patch.object(monitor, "poll"), patch.object(mon.GitHubSource, "refresh_in_background"), \
+             patch("curses.curs_set"):
+            mon.run_curses(screen, 60, False, monitor)
+        self.assertIn(("board", 0), painted)
+        screen.keys = [9, 9, 9, 9, 9, 9, ord("q")]
+        painted.clear()
+        with patch.object(mon, "_paint_screen", side_effect=record), \
+             patch.object(monitor, "poll"), patch.object(mon.GitHubSource, "refresh_in_background"), \
+             patch("curses.curs_set"):
+            mon.run_curses(screen, 60, False, monitor)
+        self.assertEqual([view for view, _ in painted],
+                         ["office", "board", "log", "tasks", "table", "activity", "office"])
+        self.assertTrue(all(offset == 0 for _, offset in painted))
 
     def test_unknown_counts_sections_and_narrow_rows_preserve_refs(self):
         unknown = mon.work_board(self._github(None, successful_read=False),

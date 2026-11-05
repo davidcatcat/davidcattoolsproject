@@ -1837,6 +1837,8 @@ class GitHubSource:
         self.branch_prs: dict[str, tuple[int, str]] = {}   # head branch -> (PR, MERGED/CLOSED/OPEN)
         self.verdicts: dict | None = None   # review_verdicts(); None until GitHub was read
         self.board_pulls: list[BoardPull] | None = None  # same pulls page as branch_prs
+        self.board_page_count: int | None = None
+        self.board_oldest_updated: float | None = None
         self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
@@ -1985,6 +1987,21 @@ class GitHubSource:
                 more = not (type(probe) is list and not probe)
             pulls = self._get(f"repos/{self.repo}/pulls?state=all&sort=updated"
                               "&direction=desc&per_page=100")
+            if type(pulls) is not list:
+                raise ValueError("pulls page")
+            board_page_count = len(pulls)
+            updated_times = []
+            for pull in pulls:
+                updated = pull.get("updated_at") if type(pull) is dict else None
+                try:
+                    if type(updated) is not str:
+                        raise ValueError("invalid updated_at")
+                    updated_times.append(datetime.strptime(updated, "%Y-%m-%dT%H:%M:%SZ")
+                                         .replace(tzinfo=timezone.utc).timestamp())
+                except (ValueError, OverflowError):
+                    updated_times.append(math.nan)
+            board_oldest_updated = (min(updated_times) if updated_times
+                                    and all(math.isfinite(value) for value in updated_times) else None)
             # A comment posted between page reads shifts the pages: list it once.
             seen, unique = set(), []
             for item in comments:
@@ -2001,6 +2018,8 @@ class GitHubSource:
                      + "；監控開著時，更早還沒回覆的也會留著")
             self.events, self.pending, self.branch_prs, self.scope = events, pending, prs, scope
             self.board_pulls = work_pulls
+            self.board_page_count = board_page_count
+            self.board_oldest_updated = board_oldest_updated
             self.verdicts = review_verdicts(unique)
             self.status = (f"GitHub {self.repo}：最近 {int(self.window // 3600)} 小時，"
                            f"{datetime.now():%H:%M:%S} 更新（每 {int(GITHUB_REFRESH)} 秒）"
@@ -3696,7 +3715,7 @@ class WorkBoard:
 
 
 # File format: a JSON object with schema_version 1, UTC updated_at, string
-# updated_by, and running/queue/blocked lists of {ref, what, next, reason?}.
+# updated_by, and required running/queue/blocked lists of {ref, what, next, reason?}.
 def read_pm_board(now, path=None) -> PmBoard:
     """Read schema_version 1 from ~/.local/state/llmtool/pm-board.json.
 
@@ -3735,20 +3754,23 @@ def read_pm_board(now, path=None) -> PmBoard:
     if (type(value) is not dict or type(value.get("schema_version")) is not int
             or value["schema_version"] != 1 or type(value.get("updated_by")) is not str):
         return PmBoard("malformed", None, [], [], [])
+    for name in ("running", "queue", "blocked"):
+        if type(value.get(name)) is not list:
+            return PmBoard("malformed", None, [], [], [])
     stamp = value.get("updated_at")
     try:
         if type(stamp) is not str or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z", stamp):
             raise ValueError("invalid timestamp")
         parsed = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-        age = max(0.0, float(now) - parsed.timestamp())
+        age = float(now) - parsed.timestamp()
+        if age < 0:
+            return PmBoard("undated", None, [], [], [])
     except (TypeError, ValueError, OverflowError):
         return PmBoard("undated", None, [], [], [])
     lists = {}
     skipped = 0
     for name in ("running", "queue", "blocked"):
-        entries = value.get(name, [])
-        if type(entries) is not list:
-            return PmBoard("malformed", None, [], [], [])
+        entries = value[name]
         valid = []
         for item in entries[:50]:
             if type(item) is not dict or type(item.get("ref")) is not str or not PM_BOARD_REF.fullmatch(item["ref"]):
@@ -3805,8 +3827,7 @@ def work_board(github, board: PmBoard, now) -> WorkBoard:
     pulls = github.board_pulls if github is not None else None
     github_known = bool(github is not None and github.successful_read)
     board_known = board.status in ("ok", "stale")
-    owner = [item for item in (github.pending if github is not None else [])
-             if item.kind == "waiting_owner"]
+    owner = list(github.pending if github is not None else [])
     running = list(board.running) if board_known else []
     queue = list(board.queue) if board_known else []
     blocked = list(board.blocked) if board_known else []
@@ -3826,6 +3847,9 @@ def work_board(github, board: PmBoard, now) -> WorkBoard:
                 next_step = "Developer"
             elif matching and matching[0][1] == "PASS":
                 next_step = "PM"
+            elif matching:
+                next_step = "未確認"
+                what += "「已見審查結論，下一步未確認」"
             else:
                 next_step = "未確認"
                 what += "「未見審查結論」"
@@ -3836,13 +3860,21 @@ def work_board(github, board: PmBoard, now) -> WorkBoard:
     # A local reason is part of the row text for queued or blocked work.
     queue = [replace(item, what=item.what + (f"：{item.reason}" if item.reason else "")) for item in queue]
     blocked = [replace(item, what=item.what + (f"：{item.reason}" if item.reason else "")) for item in blocked]
-    local = datetime.fromtimestamp(float(now)).astimezone()
+    local = datetime.fromtimestamp(float(now))
     midnight = local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
     done = sorted((pull for pull in (pulls or []) if pull.state == "MERGED" and pull.merged_at >= midnight),
                   key=lambda pull: pull.merged_at, reverse=True)
-    note = ("今天完成可能不完整（只讀最近 100 筆 PR）"
-            if github_known and len(pulls or []) >= 100 and pulls
-            and min(pull.updated_at for pull in pulls) >= midnight else "")
+    page_count = getattr(github, "board_page_count", None) if github is not None else None
+    oldest = getattr(github, "board_oldest_updated", None) if github is not None else None
+    # Test doubles and older snapshots may not carry raw-page metadata.
+    if page_count is None and github_known:
+        page_count = len(pulls or [])
+    notes = []
+    if github_known and page_count is not None and page_count >= 100:
+        notes.append("進行中的 GitHub 來源只看最近更新的 100 筆 PR，可能不完整")
+        if oldest is None or oldest >= midnight:
+            notes.append("今天完成可能不完整（只讀最近 100 筆 PR）")
+    note = "；".join(notes)
     github_status = ("未讀 GitHub" if github is None else
                      "GitHub 讀取失敗，以下可能過時" if github.read_failed else
                      "GitHub 尚未讀取" if not github_known else "")
@@ -3858,9 +3890,13 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
 
     today = len(work.done) if work.github_known else "?"
     known_running = len(work.running)
+    waiting_owner = sum(item.kind == "waiting_owner" for item in work.owner)
+    other_owner = len(work.owner) - waiting_owner
+    owner_count = (f"{len(work.owner)}（等你決定 {waiting_owner}，其他 Owner 請求 {other_owner}）"
+                   if work.github_known else "?")
     counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
               f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
-              f"等你 {len(work.owner) if work.github_known else '?'} · 排隊 {len(work.queue) if work.board_known else '?'} · "
+              f"等你 {owner_count} · 排隊 {len(work.queue) if work.board_known else '?'} · "
               f"卡住 {len(work.blocked) if work.board_known else '?'}")
     out = []
     append_header("工作白板", "title")
@@ -3882,7 +3918,7 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
         append_header(f"白板檔有 {work.skipped} 筆略過", "!")
     if work.note:
         append_header(work.note, "!")
-    sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known or work.board_known),
+    sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known),
                 ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
                 (f"今天完成（累計 {today}）", work.done, work.github_known))
     for title, items, known in sections:
