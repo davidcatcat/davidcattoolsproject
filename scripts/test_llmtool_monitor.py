@@ -6865,13 +6865,22 @@ class ProcessTableDisplayTests(unittest.TestCase):
 
     def test_minimum_narrow_widths_and_missing_owner(self):
         process = mon.Process(2, 0, 2, "01:02", "S", "Role", "codex", "")
-        at_51 = mon.table_lines([process], 51)
-        self.assertTrue(at_51[0].endswith("ELAPSED    "))
-        self.assertNotIn("OWNER", at_51[0])
-        self.assertTrue(at_51[1].endswith("01:02      "))
+        at_52 = mon.table_lines([process], 52)
+        self.assertTrue(at_52[0].endswith("ELAPSED    "))
+        self.assertNotIn("OWNER", at_52[0])
+        self.assertTrue(at_52[1].endswith("01:02      "))
         self.assertIn("-", mon.table_lines([process], 60)[1])
+        at_53 = mon.table_lines([process], 53)
+        self.assertEqual(len(at_53[0]), 53)
+        self.assertEqual(len(at_53[1]), 53)
+        self.assertEqual(at_53[0][-1], "…")
         self.assertTrue(mon.table_lines([process], 52))
         self.assertTrue(mon.table_lines([process], 1))
+
+    def test_narrow_table_separates_elapsed_and_owner(self):
+        process = mon.Process(3, 0, 3, "07-06:00:31", "S", "Role", "codex", "-")
+        row = mon.table_lines([process], 80)[1]
+        self.assertIn("07-06:00:31 -", row)
 
     def test_process_view_supplies_narrow_width(self):
         class Screen:

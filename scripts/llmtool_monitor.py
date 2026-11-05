@@ -843,10 +843,10 @@ def table_lines(processes: list[Process], width: int | None = None) -> list[str]
         lines += [f"{_fit(p.role, 25):<25} {_fit(p.name, 12):<12} {p.pid:<7} {_fit(p.owner or '-', 30):<30} "
                   f"{p.pgid:<7} {p.state:<5} {p.elapsed}" for p in processes]
         return lines
-    owner_width = max(0, width - 51)
+    owner_width = max(0, width - 52)
     header = f"{'ROLE':<25} {'PID':<7} {'STATE':<5} {'ELAPSED':<11}"
     if owner_width:
-        header += f"{'OWNER':<{owner_width}}"
+        header += f" {_fit('OWNER', owner_width):<{owner_width}}"
     lines = [header]
     for process in processes:
         line = (f"{_fit(process.role, 25):<25} {process.pid:<7} "
@@ -854,7 +854,7 @@ def table_lines(processes: list[Process], width: int | None = None) -> list[str]
         if owner_width:
             owner = process.owner or "-"
             fitted = _fit(owner, owner_width) if owner_width >= 2 else "…"
-            line += f"{fitted:<{owner_width}}"
+            line += f" {fitted:<{owner_width}}"
         lines.append(line)
     return lines
 
