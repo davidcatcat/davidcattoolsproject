@@ -626,17 +626,21 @@ class ClaudeRouteWiringTests(unittest.TestCase):
             self.assertEqual(denied.exception.dispatch_code, 'OWNER_ASSIGNMENT_REQUIRED')
             self.assertIsNone(store.get(denied_task_id)['developer'])
 
+            llm_keyed_id = '8' * 32
             policy_workers['claude-developer']['owner_assignments'] = [{
-                'task_id': task_id, 'owner_assignment_ref': owner_ref}]
+                'task_id': llm_keyed_id, 'owner_assignment_ref': owner_ref}]
             policy_path.write_text(json.dumps({'schema_version': 1,
                 'workers': policy_workers}), encoding='utf-8')
-            llm_keyed_id = '8' * 32
             llm_keyed = record_for(llm_keyed_id, d6_id,
                 developer=developer_for(d6_id, llm_keyed_id))
             with self.assertRaises(worker_dispatch.WorkerDispatchDenied) as denied:
                 store.create(llm_keyed)
             self.assertEqual(denied.exception.dispatch_code, 'OWNER_ASSIGNMENT_REQUIRED')
-            self.assertIsNone(store.get(llm_keyed_id)['developer'])
+            denied_saved = store.get(llm_keyed_id)
+            self.assertIsNone(denied_saved['developer'])
+            self.assertEqual(denied_saved['dispatch_audit'][-1]['worker_key'],
+                             'claude-developer')
+            self.assertEqual(denied_saved['dispatch_audit'][-1]['decision'], 'BLOCKED')
 
     def test_task_complete_accepts_cli_claude_binding_and_rejects_record_only_without_result(self):
         task_id = 'a' * 32
