@@ -1372,6 +1372,7 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertEqual(sorted((e.reference, e.event_type) for e in events),
                          [("#7", "pr_merged"), ("#7", "pr_opened"), ("#8", "pr_closed")])
 
+    @patch.object(mon.shutil, 'which', new=lambda name: '/usr/bin/gh')
     def test_ci_runs_are_read_only_while_a_runner_is_here_and_never_break_the_source(self):
         runs = {"workflow_runs": [{"status": "in_progress", "name": "llmtool Mac CI",
                                    "head_sha": "a" * 40, "pull_requests": [{"number": 7}]}]}
@@ -6060,6 +6061,7 @@ class GitHubRunnerTests(unittest.TestCase):
         self.assertEqual(rendered.count("Mac workflow: check"), 1)
         self.assertEqual(rendered.count("Unmatched workflow: test"), 1)
 
+    @patch.object(mon.shutil, 'which', new=lambda name: '/usr/bin/gh')
     def test_api_failures_and_old_data_say_unconfirmed_never_offline(self):
         for answer, words in (((1, b"gh: Must have admin rights (HTTP 403)"), "沒有權限（HTTP 403）"),
                               (subprocess.TimeoutExpired("gh", 20), "逾時")):
@@ -7180,6 +7182,74 @@ class WorkBoardTests(unittest.TestCase):
         values.update(fields)
         return SimpleNamespace(**values)
 
+    @staticmethod
+    def _progress_work(*, queue=None, done=None, board_known=True, github_known=True,
+                       board_status="ok", note=""):
+        return mon.WorkBoard(owner=[], running=[], queue=[] if queue is None else queue,
+                             blocked=[], done=[] if done is None else done,
+                             github_known=github_known, board_known=board_known,
+                             github_status="", board_status=board_status, board_age=0,
+                             skipped=0, note=note)
+
+    def test_pm_progress_line_text_and_staleness(self):
+        entry = mon.DispatchRecord(NOW - 60, "codex-cli", "965")
+        work = self._progress_work(queue=[object()], done=[object()])
+        self.assertEqual(mon.pm_progress_line(work, (entry, ""), NOW),
+                         ("PM 進度：上次派工 1 分鐘前 · 排隊 1 · 今天合併 1", ""))
+        self.assertEqual(mon.pm_progress_line(work, None, NOW),
+                         ("PM 進度：上次派工 ? · 排隊 1 · 今天合併 1", ""))
+        self.assertEqual(mon.pm_progress_line(work, (entry, "capped"), NOW),
+                         ("PM 進度：上次派工 ? · 排隊 1 · 今天合併 1", ""))
+        self.assertEqual(mon.pm_progress_line(work, (None, ""), NOW),
+                         ("PM 進度：上次派工 沒有紀錄 · 排隊 1 · 今天合併 1", ""))
+        unknown_queue = self._progress_work(queue=[object()], board_known=False)
+        self.assertEqual(mon.pm_progress_line(unknown_queue, (entry, ""), NOW),
+                         ("PM 進度：上次派工 1 分鐘前 · 排隊 ? · 今天合併 0", ""))
+        stale = self._progress_work(queue=[object()], board_status="stale")
+        self.assertEqual(mon.pm_progress_line(stale, (entry, ""), NOW),
+                         ("PM 進度：上次派工 1 分鐘前 · 排隊 1（可能過時） · 今天合併 0", ""))
+        unknown_github = self._progress_work(queue=[], github_known=False)
+        self.assertEqual(mon.pm_progress_line(unknown_github, (entry, ""), NOW),
+                         ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 ?", ""))
+        incomplete = self._progress_work(queue=[], note="今天完成可能不完整")
+        self.assertEqual(mon.pm_progress_line(incomplete, (entry, ""), NOW),
+                         ("PM 進度：上次派工 1 分鐘前 · 排隊 0 · 今天合併 0+", ""))
+
+        queued = self._progress_work(queue=[object()])
+        empty_queue = self._progress_work()
+        self.assertEqual(mon.pm_progress_line(queued, (mon.DispatchRecord(NOW - 1800, "", ""), ""), NOW)[1], "")
+        self.assertEqual(mon.pm_progress_line(queued, (mon.DispatchRecord(NOW - 1801, "", ""), ""), NOW)[1], "!")
+        self.assertEqual(mon.pm_progress_line(empty_queue, (mon.DispatchRecord(NOW - 1801, "", ""), ""), NOW)[1], "")
+        self.assertEqual(mon.pm_progress_line(queued, None, NOW)[1], "")
+        self.assertEqual(mon.pm_progress_line(unknown_queue, (mon.DispatchRecord(NOW - 1801, "", ""), ""), NOW)[1], "")
+        future = (mon.DispatchRecord(NOW + 60, "", ""), "")
+        self.assertEqual(mon.pm_progress_line(queued, future, NOW),
+                         ("PM 進度：上次派工 剛剛 · 排隊 1 · 今天合併 0", ""))
+
+    def test_pm_progress_handles_read_failures_and_unknown_merges(self):
+        from types import SimpleNamespace
+        monitor = SimpleNamespace(github=None, pm_board=mon.PmBoard("ok", 0, [], [], []))
+        with patch.object(mon, "pm_last_dispatch", side_effect=OSError("unavailable")):
+            text, style = mon.pm_progress(monitor, NOW)
+        self.assertEqual((text, style), ("PM 進度：上次派工 ? · 排隊 0 · 今天合併 ?", ""))
+        with patch.object(mon, "work_board", side_effect=OSError("unavailable")):
+            self.assertEqual(mon.pm_progress(monitor, NOW), ("PM 進度：未確認", ""))
+
+    def test_office_top_places_progress_between_health_and_quota(self):
+        from types import SimpleNamespace
+        github = SimpleNamespace(successful_read=True, read_failed=False, pending=[], window=43200,
+                                 main_health=None, main_error="")
+        progress = ("PM 進度：上次派工 ? · 排隊 0 · 今天合併 ?", "")
+        expected = [mon.owner_count_line(github), mon.main_health_line(None, "", NOW), progress,
+                    ("quota", "!"), ("stuck", "!")]
+        self.assertEqual(mon.office_top(github, ["quota"], NOW, stuck=["stuck"],
+                                        progress=progress), expected)
+        self.assertEqual(mon.office_top(None, [], NOW), [mon.owner_count_line(None)])
+
+    def test_office_top_without_progress_keeps_existing_order(self):
+        self.assertEqual(mon.office_top(None, ["quota"], NOW, stuck=["stuck"]),
+                         [("等你決定：未讀 GitHub", ""), ("quota", "!"), ("stuck", "!")])
+
     def test_pm_board_read_statuses_and_rejects_fifo_or_symlink(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -8064,6 +8134,8 @@ class StuckAlertTests(unittest.TestCase):
                 patch.object(mon, "ClaudeAgents"), \
                 patch.object(mon, "canonical_root", return_value="root"), \
                 patch.object(mon, "registry_details", return_value=details), \
+                patch.object(mon, "pm_last_dispatch",
+                             return_value=(mon.DispatchRecord(self.NOW - 720, "codex-cli", "965"), "")), \
                 patch.object(mon.time, "time", return_value=self.NOW), \
                 patch("sys.stdout", __import__("io").StringIO()) as output:
             self.assertEqual(mon.run_once(github), 0)
@@ -8074,5 +8146,8 @@ class StuckAlertTests(unittest.TestCase):
                               lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("macOS 超過 45 分鐘", rendered)
         self.assertIn("修復已到上限：D6 wp-1（至少 2 輪）", rendered)
+        self.assertIn("PM 進度：上次派工 12 分鐘前 · 排隊 0", rendered)
         self.assertTrue(any("macOS 超過 45 分鐘" in line for line in drawn.values()))
         self.assertTrue(any("修復已到上限：D6 wp-1（至少 2 輪）" in line for line in drawn.values()))
+        self.assertTrue(any("PM 進度：上次派工 12 分鐘前 · 排隊 0" in line
+                            for line in drawn.values()))
