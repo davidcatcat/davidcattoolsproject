@@ -1991,7 +1991,7 @@ class StatusProjectionTests(unittest.TestCase):
 
     def test_read_attention_uses_session_records_and_read_only_peek(self):
         from llmtool import active_pm_inbox
-        session = 'e' * 32
+        session = '11111111-1111-4111-8111-111111111111'
         store = object()
         record = _record(developer=_developer(state='DEVELOPER_OUTCOME_UNKNOWN',
                                               error_code='CODEX_BLOCKED',
@@ -2002,8 +2002,8 @@ class StatusProjectionTests(unittest.TestCase):
             result = self.status.read_attention(session, store=store)
         self.assertEqual(result['items'][0]['label'], '卡住')
         self.assertEqual(result['unread'], 2)
-        rows.assert_called_once_with(store, 'pm-' + session)
-        peek.assert_called_once_with(store, 'pm-' + session)
+        rows.assert_called_once_with(store, active_pm_inbox.pm_session_key(session))
+        peek.assert_called_once_with(store, active_pm_inbox.pm_session_key(session))
 
     def test_latest_high_debug_attempt_is_shown_without_changing_the_stage(self):
         def attempt(status, report):
@@ -5538,6 +5538,7 @@ class PMConversationTests(BoundedPMTest):
     def test_attention_status_field_is_conditional_and_dropped_first(self):
         def inspect(ui):
             key = ui.pm_target[0]
+            ui.app.output.get_size = lambda: Size(rows=24, columns=140)
             empty = ui.status_text()
             ui.attention_key = key
             ui.attention = {'items': [], 'unread': 0}
@@ -5552,14 +5553,15 @@ class PMConversationTests(BoundedPMTest):
             self.assertNotIn('注意 2', narrow)
             self.assertIn('▸▸ PM 模式', narrow)
             ui.attention = {'items': [], 'unread': 0}
+            ui.app.output.get_size = lambda: Size(rows=24, columns=140)
             self.assertEqual(ui.status_text(), empty)
 
         self.drive([self.connect(), self.connected, inspect])
 
     def test_attention_command_runs_on_exact_enter_and_read_failure_keeps_background(self):
         self.drive([self.connect(), self.connected,
-                    lambda ui: self.until(ui, lambda ui: ui.attention_read_at is not None,
-                                          'attention refresh'),
+                    lambda ui: ui.finish_attention(ui.pm_target[0],
+                                                   {'items': [], 'unread': 0}),
                     '/attention\r',
                     lambda ui: self.assertIn('注意事項（0 項）', ui.conversation.text)])
 

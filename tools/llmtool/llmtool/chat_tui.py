@@ -97,7 +97,7 @@ Talk to the PM: the dedicated PM (/pm …) is the product entry
                         notice during a streaming reply is shown below it, never inside it
   /pm queue             List the queued messages; /pm queue clear drops them,
                         /pm queue send resumes a paused queue (sends them all)
-  /attention            Show what needs attention after /status
+  /attention            Show what needs attention. Move nothing.
   Esc (during a turn)   Interrupt the PM turn (focus in the input or the conversation pane)
                         and pause the queue: nothing more is sent. Enter on an empty draft
                         sends the next queued message, /pm queue send resumes them all.
@@ -1573,7 +1573,7 @@ class ChatTUI:
             "  /pm disconnect         Leave the PM session",
             "Chat",
             "  /status                 Show the current chat or PM status",
-            "  /attention              Show what needs attention after /status",
+            "  /attention              Show what needs attention. Move nothing.",
             "  /provider [PROFILE]     List or switch chat profiles",
             "  /skill [NAME]           List, choose, or clear a skill",
             "  /history                Show recent chat turns",
