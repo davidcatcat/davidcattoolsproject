@@ -558,7 +558,7 @@ class TaskCompletionTests(unittest.TestCase):
         self._git('merge', '--no-ff', '-m', 'octopus main merge',
                   'main-side-one', 'main-side-two')
         trusted = self._git('rev-parse', 'HEAD')
-        self._git('checkout', '-b', 'feat/executor', source)
+        self._git('checkout', 'feat/executor')
         target = self.root / self.source_path
         target.write_text(target.read_text() + '\n# developer change\n')
         self._git('add', self.source_path)
