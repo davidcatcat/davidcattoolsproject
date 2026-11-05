@@ -157,11 +157,12 @@ class OwnerApprovalCliTests(unittest.TestCase):
         hostile = {'state': 'OPEN', 'headRefOid': SHA,
                    'title': 'title\x1b[31m\u202e',
                    'files': [{'path': 'bad\x1b[2J\u202e.py'}]}
-        with patch.object(owner, 'confirm_on_tty', return_value=True) as challenge, \
-                patch.object(owner, 'grant', return_value=123):
+        with patch.object(owner, 'grant', return_value=123) as granted:
             with patch.object(owner, '_gh_pr_view', return_value=hostile), patch('sys.stdout'):
                 self.assertEqual(owner.run_owner_approval(SimpleNamespace(pr=7, head=SHA)), 0)
-            lines = challenge.call_args.args[0]
+            lines = granted.call_args.args[1]
+        self.assertTrue(lines)
+        self.assertTrue(any('PR 7: title' in line for line in lines))
         self.assertTrue(all('\x1b' not in line and '\u202e' not in line for line in lines))
         parser = cli.parser_for_cli()
         parsed = parser.parse_args(['owner-approval', 'grant', '--pr', '7', '--head', SHA])

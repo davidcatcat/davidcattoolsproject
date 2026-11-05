@@ -243,7 +243,7 @@ def _gh_pr_view(number):
     return data
 
 
-def _safe_terminal_text(value, limit):
+def safe_terminal_text(value, limit):
     if type(value) is not str:
         value = str(value)
     return ''.join('?' if unicodedata.category(char).startswith('C') else char
@@ -255,11 +255,11 @@ def _display_lines(data, number, head):
         _refuse('OWNER_APPROVAL_PR_NOT_OPEN')
     if data.get('headRefOid') != head:
         _refuse('OWNER_APPROVAL_HEAD_MISMATCH')
-    title = _safe_terminal_text(data.get('title', ''), 120)
+    title = safe_terminal_text(data.get('title', ''), 120)
     raw_files = data.get('files')
     if type(raw_files) is not list:
         _refuse('OWNER_APPROVAL_PR_UNAVAILABLE')
-    paths = [_safe_terminal_text(item.get('path', '') if type(item) is dict else item, 200)
+    paths = [safe_terminal_text(item.get('path', '') if type(item) is dict else item, 200)
              for item in raw_files[:50]]
     lines = [f'PR {number}: {title}', f'HEAD: {head}', f'File count: {len(raw_files)}']
     lines.extend('  ' + path for path in paths)
