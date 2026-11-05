@@ -2405,14 +2405,48 @@ class InstallLinesTests(unittest.TestCase):
             path.symlink_to(target)
             self.assertEqual(mon.install_lines(self._github(), str(path)), [self.UNREADABLE])
 
-    def test_counts_only_waiting_owner_approval_summaries(self):
-        pending = [mon.OwnerPending(1, "#1", "open", "Need owner-approval grant", "waiting_owner"),
-                   mon.OwnerPending(2, "#2", "open", "Other owner request", "waiting_owner"),
-                   mon.OwnerPending(3, "#3", "open", "owner-approval", "repair_gate")]
+    def test_counts_owner_approval_from_full_waiting_comment_and_carries_forward(self):
+        marker = "<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\n"
+        prefix = "**Owner decision needed (asked in the PM chat, 2026-11-06T01:02:03Z):**"
+        long_ask = prefix + " " + ("x" * 90) + " owner-approval grant"
+        mixed_case = "Please run OWNER-APPROVAL grant"
+        comments = [
+            comment(101, NOW - 100, marker + long_ask),
+            comment(102, NOW - 90, marker + mixed_case),
+            comment(103, NOW - 80, marker + "An unrelated request"),
+            comment(104, NOW - 70, marker + "owner-approval grant"),
+            comment(104, NOW - 60,
+                    "<!-- activity: type=waiting_owner actor=Owner target=PM status=ANSWERED -->\n"
+                    "Settled"),
+        ]
+        pending = mon.owner_pending(comments, [])
+        self.assertEqual([item.reference for item in pending], ["#101", "#102", "#103"])
+        long_item = pending[0]
+        self.assertEqual(long_item.summary, mon._headline(long_ask))
+        self.assertNotIn("owner-approval", long_item.summary.casefold())
+        self.assertTrue(long_item.needs_owner_approval)
+        self.assertTrue(pending[1].needs_owner_approval)
+        self.assertFalse(pending[2].needs_owner_approval)
+
+        carried = mon.owner_pending([], [], earlier=pending)
+        self.assertEqual([item.needs_owner_approval for item in carried], [True, True, False])
         with tempfile.TemporaryDirectory() as directory:
-            self.assertEqual(mon.install_lines(self._github(pending=pending),
+            self.assertEqual(mon.install_lines(self._github(pending=carried),
                                                os.path.join(directory, 'missing.json')),
-                             [self.APPROVAL])
+                             [("等你終端核准：2 件（請在自己的終端執行 llmtool owner-approval grant）", "!")])
+
+    def test_failed_read_hides_install_lines_and_later_success_restores_them(self):
+        pending = mon.owner_pending([comment(
+            105, NOW - 10,
+            "<!-- activity: type=waiting_owner actor=PM target=Owner status=WAITING -->\n"
+            "owner-approval grant")], [])
+        github = self._github(pending=pending)
+        github.read_failed = True
+        with tempfile.TemporaryDirectory() as directory:
+            pin = os.path.join(directory, "missing.json")
+            self.assertEqual(mon.install_lines(github, pin), [])
+            github.read_failed = False
+            self.assertEqual(mon.install_lines(github, pin), [self.APPROVAL])
 
     def test_office_top_places_install_after_owner_and_before_main(self):
         github = self._github()

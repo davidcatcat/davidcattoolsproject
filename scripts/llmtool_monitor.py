@@ -1741,6 +1741,7 @@ class OwnerPending:
     status: str
     summary: str
     kind: str = ""
+    needs_owner_approval: bool = False
 
 
 _MARKER_ROLES = {name.casefold(): name for name in ("PM", "Integrator", "Owner")}
@@ -1800,7 +1801,9 @@ def owner_pending(comments, pulls, earlier=()) -> list[OwnerPending]:
             open_requests.pop(number, None)
         elif fields.get("target") == "owner" and when:
             open_requests[number] = OwnerPending(when, f"#{number}", status, _headline(body),
-                                                fields.get("type", "").casefold())
+                                                fields.get("type", "").casefold(),
+                                                fields.get("type", "").casefold() == "waiting_owner"
+                                                and "owner-approval" in body.casefold())
     return sorted((item for number, item in open_requests.items()
                    if closed.get(number, 0.0) <= item.when), key=lambda item: item.when)
 
@@ -7317,12 +7320,13 @@ def owner_count_line(github) -> tuple[str, str]:
 
 def install_lines(github, pin_file=None) -> list[tuple[str, str]]:
     """Show Owner approval and pinned-install updates without changing state."""
-    if github is None or not github.successful_read:
+    if (github is None or not github.successful_read
+            or getattr(github, "read_failed", False)):
         return []
 
     out = []
     approvals = sum(
-        item.kind == "waiting_owner" and "owner-approval" in item.summary.lower()
+        item.needs_owner_approval
         for item in github.pending
     )
     if approvals:
