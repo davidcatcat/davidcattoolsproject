@@ -49,12 +49,52 @@ class AiGithubExecTests(unittest.TestCase):
             ["--", "gh", "auth", "login"],
             ["--", "gh", "auth", "token"],
             ["--", "gh", "auth"],
+            ["--", "gh", "auth", "status", "-t"],
+            ["--", "gh", "auth", "status", "-at"],
+            ["--", "gh", "auth", "status", "--show-token"],
+            ["--", "gh", "auth", "status", "--show-token=true"],
+            ["--", "gh", "auth", "status", "--hostname", "github.com"],
             ["--", "/usr/bin/gh", "auth", "switch", "--user", "owner"],
+            ["--", "GH", "auth", "login"],
         ):
             with self.subTest(argv=argv):
                 code, stderr = self.invoke(argv)
                 self.assertEqual(code, 2)
                 self.assertEqual(stderr, "AI_GH_AUTH_REFUSED\n")
+
+    def test_plain_auth_status_launches(self):
+        launched = []
+        runner = lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, b"ddavidccatssun\n", b""
+        )
+        code, stderr = self.invoke(
+            ["--", "gh", "auth", "status"], runner,
+            lambda file, argv, env: launched.append((file, argv)),
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(stderr, "")
+        self.assertEqual(launched, [("gh", ["gh", "auth", "status"])])
+
+    def test_relative_home_refusal(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            code = main(["--", "echo", "ok"], base_env=self.base_env,
+                        home="relative/home")
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr.getvalue(), "AI_GH_CONFIG_MISSING\n")
+
+    def test_exec_failure_has_stable_refusal(self):
+        runner = lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0, b"ddavidccatssun\n", b""
+        )
+
+        def fail_exec(*args):
+            raise OSError("private path detail")
+
+        code, stderr = self.invoke(["--", "git", "status"], runner, fail_exec)
+        self.assertEqual(code, 2)
+        self.assertEqual(stderr, "AI_GH_EXEC_FAILED\n")
+        self.assertNotIn("private path detail", stderr)
 
     def test_login_check_uses_isolated_environment_and_launches_command(self):
         seen = {}

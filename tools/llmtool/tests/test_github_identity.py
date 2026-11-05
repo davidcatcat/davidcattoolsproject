@@ -71,7 +71,15 @@ class GitHubIdentityTests(unittest.TestCase):
             "GIT_CONFIG_VALUE_0": "unsafe-value",
             "GIT_ASKPASS": "/askpass",
             "SSH_ASKPASS": "/ssh-askpass",
+            "SSH_AUTH_SOCK": "/tmp/ssh-agent.sock",
             "GIT_SSH_COMMAND": "ssh unsafe",
+            "GIT_SSH": "/usr/bin/ssh",
+            "GIT_SSH_VARIANT": "ssh",
+            "GIT_CONFIG_GLOBAL": "/unsafe/global",
+            "GIT_CONFIG_SYSTEM": "/unsafe/system",
+            "GIT_CURL_VERBOSE": "1",
+            "GIT_TRACE": "/tmp/git-trace",
+            "GIT_TRACE_SETUP": "1",
             "KEEP": "value",
         }
         original = dict(base_env)
@@ -97,7 +105,12 @@ class GitHubIdentityTests(unittest.TestCase):
         self.assertNotIn("GIT_CONFIG_PARAMETERS", result)
         self.assertNotIn("GIT_ASKPASS", result)
         self.assertNotIn("SSH_ASKPASS", result)
+        self.assertNotIn("SSH_AUTH_SOCK", result)
         self.assertNotIn("GIT_SSH_COMMAND", result)
+        for name in ("GIT_SSH", "GIT_SSH_VARIANT", "GIT_CONFIG_GLOBAL",
+                     "GIT_CONFIG_SYSTEM", "GIT_CURL_VERBOSE", "GIT_TRACE",
+                     "GIT_TRACE_SETUP"):
+            self.assertNotIn(name, result)
 
 
 if __name__ == "__main__":

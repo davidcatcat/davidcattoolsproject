@@ -48,9 +48,12 @@ def ai_github_env(base_env, home):
     env = dict(base_env)
     for name in tuple(env):
         if (name.startswith(("GH_", "GITHUB_", "GIT_CONFIG_KEY_",
-                             "GIT_CONFIG_VALUE_", "SSH_"))
+                             "GIT_CONFIG_VALUE_", "SSH_", "GIT_TRACE"))
                 or name in ("GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT",
-                            "GIT_ASKPASS", "GIT_SSH_COMMAND")):
+                            "GIT_ASKPASS", "GIT_SSH_COMMAND", "GIT_SSH",
+                            "GIT_SSH_VARIANT", "GIT_CONFIG_GLOBAL",
+                            "GIT_CONFIG_SYSTEM", "GIT_CURL_VERBOSE")):
+            # The SSH_ prefix also removes SSH_AUTH_SOCK, keeping default agent keys out.
             del env[name]
 
     env["GH_CONFIG_DIR"] = ai_gh_config_dir(home)
