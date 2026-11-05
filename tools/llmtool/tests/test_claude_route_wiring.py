@@ -1,4 +1,5 @@
 import contextlib
+import json
 import unittest
 from argparse import ArgumentParser, Namespace
 from types import SimpleNamespace
@@ -115,7 +116,8 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         ]
         return task_submission_cli, store, args, registration, evaluations, prompts, requests, patches, route_runner
 
-    def _assert_prewrite_refusal(self, *, configure, message=None, binding_error=None):
+    def _assert_prewrite_refusal(self, configure=lambda *_args: None, *,
+                                 message=None, binding_error=None):
         cli, store, args, _registration, _evaluations, _prompts, requests, patches, runner = self._setup()
         configure(cli, store, args, patches)
         if binding_error is not None:
@@ -334,6 +336,110 @@ class ClaudeRouteWiringTests(unittest.TestCase):
         self.assertEqual(captured['args'].provider, 'claude')
         self.assertEqual(captured['args'].mode, 'direct')
         self.assertEqual(captured['args'].owner_ref, 'owner-ref')
+
+    def test_repair_review_rechecks_dispatch_with_profile_specific_task_binding(self):
+        failed_head = 'a' * 40
+        packet = {'version': 1, 'verdict_comment_id': 17, 'failed_head': failed_head}
+
+        for profile, expected_worker, expected_task in (
+                ('claude', 'claude-developer', 'd6-owner-task'),
+                ('codex', 'codex-developer', 'original-task')):
+            with self.subTest(profile=profile):
+                task = {
+                    'task_id': 'original-task',
+                    'developer': {'provider_profile': profile,
+                        'state': 'DEVELOPER_RESPONDED',
+                        'owner_assignment_ref': 'owner-ref', 'model': 'model'},
+                    'completion': {'executor_task_id': 'd6-owner-task'},
+                    'review_repair_claims': [], 'record_sha256': 'b' * 64,
+                }
+
+                class Store:
+                    def __init__(self):
+                        self.value = dict(task)
+
+                    def get(self, _task_id):
+                        return dict(self.value)
+
+                    def compare_and_update(self, _task_id, *, expected, **updates):
+                        self.value.update(updates)
+                        return dict(self.value)
+
+                store = Store()
+                with patch.object(review_repair.shutil, 'which', return_value='/usr/bin/cli'), \
+                     patch.object(review_repair, '_remote_test_failure', return_value=packet), \
+                     patch.object(review_repair, '_current_d6_head', return_value=failed_head), \
+                     patch.object(review_repair, 'new_id', return_value='repair-task'), \
+                     patch.object(review_repair.worker_dispatch, 'evaluate',
+                                  return_value=SimpleNamespace(allowed=True)) as evaluate:
+                    result = review_repair.repair_review(
+                        store=store, task_id='original-task', executor_task='d6-owner-task',
+                        pr_number=12, remote_test_receipt={},
+                        repair_task_recorder=lambda **request: {
+                            'task_id': request['repair_task_id']},
+                        dispatch_adapter=lambda **_request: 'dispatched')
+                self.assertEqual(result['result'], 'dispatched')
+                self.assertEqual(evaluate.call_count, 2)
+                self.assertEqual(evaluate.call_args_list[0].args,
+                                 (expected_worker, 'owner-ref', expected_task))
+                self.assertEqual(evaluate.call_args_list[1].args,
+                                 (expected_worker, 'owner-ref', expected_task))
+
+    def test_task_complete_accepts_cli_claude_binding_and_rejects_record_only_without_result(self):
+        task_id = 'a' * 32
+        args = Namespace(task_id=task_id, executor_task='d6-owner-task',
+                          reviewer_task=None, pr=None)
+        completion = {'executor_task_id': 'd6-owner-task', 'pm_dispatch': 'NOT_STARTED',
+                      'evidence': {}}
+        common = {'schema_version': 2, 'state': 'PM_RESPONDED', 'task_id': task_id,
+            'task_binding': {}, 'pm_route_binding': {'type': 'openai-compatible'},
+            'completion': completion}
+
+        class Store:
+            def __init__(self, value):
+                self.value = value
+
+            def get(self, _task_id):
+                return self.value
+
+        cli_developer = {'provider_profile': 'claude',
+            'backend_session_semantics': 'CLI_REPORTED_SESSION_ID',
+            'state': 'DEVELOPER_RESPONDED', 'executor_task_id': 'd6-owner-task'}
+        cli_task = dict(common, developer=cli_developer)
+        sentinel = LLMToolError('AFTER_CLAUDE_BINDING')
+        with patch.object(task_submission_cli.task_completion, 'validate_task_binding',
+                          side_effect=sentinel):
+            with self.assertRaisesRegex(LLMToolError, 'AFTER_CLAUDE_BINDING'):
+                task_submission_cli.run_task_complete(args, store=Store(cli_task))
+
+        record_only = dict(cli_developer,
+            backend_session_semantics='NO_NATIVE_SESSION_ID_EXPOSED')
+        record_task = dict(common, developer=record_only)
+        with self.assertRaisesRegex(LLMToolError, 'CLAUDE_RESULT_BINDING_INVALID'):
+            task_submission_cli.run_task_complete(args, store=Store(record_task))
+
+    def test_codex_and_agy_delegates_refuse_claude_reserved_d6(self):
+        registration = SimpleNamespace(task_id='d6-owner-task',
+            trusted_agent_id='claude-developer')
+        snapshot = SimpleNamespace(head='d' * 40)
+        for provider in ('codex', 'agy'):
+            with self.subTest(provider=provider):
+                _cli, store, args, *_rest = self._setup()
+                store.task['pm_assignment'].update(route=provider)
+                args.provider = provider
+                args.executor_task = registration.task_id
+                args.selection_source = 'PM'
+                args.acceptance = store.task['pm_assignment']['acceptance']
+                with patch.object(task_submission_cli.task_completion,
+                                  'validate_task_binding'), \
+                     patch.object(task_submission_cli, '_delegate_d6_binding',
+                                  return_value=(registration, snapshot)):
+                    with self.assertRaisesRegex(LLMToolError, 'D6_CLAUDE_RESERVED'):
+                        if provider == 'codex':
+                            task_submission_cli.run_task_codex_delegate(
+                                args, store=store, d6_binding=(registration, snapshot))
+                        else:
+                            task_submission_cli.run_task_agy_delegate(args, store=store)
 
     def test_repair_task_recorder_accepts_claude_route(self):
         task = {'task_id': 'original-task', 'pm_assignment': {'goal': 'repair the bounded change'},

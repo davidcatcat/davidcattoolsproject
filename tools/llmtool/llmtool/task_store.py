@@ -1479,15 +1479,6 @@ def _validate(record):
                      developer['backend_session_semantics'] != 'CLI_REPORTED_SESSION_ID' or
                      developer['max_tokens'] is not None)):
                 _fail()
-            if (developer['provider_profile'] == 'claude' and
-                    developer['backend_session_semantics'] == 'CLI_REPORTED_SESSION_ID' and
-                    (developer['provider_type'] not in (None, 'claude-cli') or
-                     developer['max_tokens'] is not None or
-                     'executor_task_id' not in developer or 'claude_result' in developer or
-                     type(developer.get('direct_result_callback')) is not dict or
-                     developer['direct_result_callback'].get('executor_task_id') !=
-                         developer.get('executor_task_id'))):
-                _fail()
             if developer['provider_profile'] == 'claude':
                 semantics = developer['backend_session_semantics']
                 record_only = semantics == 'NO_NATIVE_SESSION_ID_EXPOSED'

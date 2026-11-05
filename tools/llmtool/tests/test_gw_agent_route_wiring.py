@@ -348,7 +348,7 @@ class GwAgentRouteWiringTests(unittest.TestCase):
         # The callback profile allowlist is enforced in TaskStore._validate;
         # guard its gw-agent entry without creating a TaskStore root or record.
         validator = inspect.getsource(task_store._validate)
-        self.assertIn("developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent')",
+        self.assertIn("developer['provider_profile'] not in ('opencode', 'codex', 'agy', 'gw-agent', 'claude')",
                       validator)
 
     def test_pending_gw_agent_provider_binding_is_validated_at_dispatch(self):

@@ -472,6 +472,7 @@ class TaskStoreTests(unittest.TestCase):
             owner_assignment_ref=('https://github.com/davidcatcat/davidcattoolsproject/issues/289'
                                   '#issuecomment-1'),
             executor_task_id=registration.task_id,
+            execution=None,
             direct_result_callback=task_submission_cli_module._direct_result_callback(
                 task, registration, 'a' * 40, test_policy='LOCAL'))
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
@@ -490,7 +491,8 @@ class TaskStoreTests(unittest.TestCase):
         self.assertEqual(caught.exception.task_store_error_code, 'CLAUDE_RESULT_STATE_INVALID')
 
         dispatching = dict(developer, state='DEVELOPER_DISPATCHING',
-                           provider_type='claude-cli', model='claude-test-1')
+                           provider_type='claude-cli', model='claude-test-1',
+                           execution=None)
         initial = self.store.get(task['task_id'])
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             self.store.compare_and_update(task['task_id'],
@@ -515,7 +517,7 @@ class TaskStoreTests(unittest.TestCase):
         developer = self.store.get(task['task_id'])['developer']
         blocked = dict(developer, state='BLOCKED', provider_type='claude-cli',
                        model='claude-test-1', error_code='BLOCKED_WRITE_ISOLATION',
-                       blocked_reason='BLOCKED_WRITE_ISOLATION')
+                       blocked_reason='BLOCKED_WRITE_ISOLATION', execution=None)
         current = self.store.get(task['task_id'])
         with patch.object(worker_dispatch, 'authorize_task_store_change', return_value=None):
             saved = self.store.compare_and_update(task['task_id'],
