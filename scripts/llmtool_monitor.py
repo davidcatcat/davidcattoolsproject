@@ -34,6 +34,9 @@ daemon process, may lag by that. The EC2 remote-test worker gets one row: the Ta
 running `llmtool task remote-test`, else its newest local receipt or outcome.
 The work board PR section uses the already-read pulls and workflow-runs pages,
 verdict comments, live D6 review tasks and bounded local Task receipts/outcomes.
+Stuck alerts use only local Task id, request, developer executor task id/state,
+remote-test receipts/outcomes, live office rows, registry details, and already-read
+CI runs and branch PRs.
 
 Also lists the other members of every observed agent process group, plus their
 descendants, including zombies (state Z). A lingering member after its leader
@@ -880,6 +883,7 @@ class Monitor:
         self.quota_due = 0.0
         self.d6: list = []   # D6 task lines, refreshed with the office view
         self.ec2_heads = None
+        self.stuck_records = None
         self.version = monitor_version()   # the code this process loaded
         self.digest = script_digest()
         self.stale = False   # the file on disk changed since start: a restart is needed
@@ -1043,6 +1047,10 @@ class Monitor:
                     self.d6 = []
                 try:
                     self.ec2_heads = ec2_head_results()
+                except Exception:  # optional local evidence; preserve the last good snapshot
+                    pass
+                try:
+                    self.stuck_records = stuck_records()
                 except Exception:  # optional local evidence; preserve the last good snapshot
                     pass
         if self.short_lived and now - self.last_summary >= self.summary_every:
@@ -2350,6 +2358,8 @@ def _activity_screen_lines(lines: list[str], width: int) -> list[str]:
 #   - worker-dispatch.json switches, the D6 registry, llmtool task state codes;
 #     the PR board keeps only pulls/runs already fetched, verdict words, active
 #     review PR/head pairs and valid local Task receipt/outcome SHA/result words.
+#   - stuck alerts: Task task_id, request, developer.executor_task_id/state,
+#     remote_test_receipts and remote_test_outcomes.
 # Titles and descriptions are model- or prompt-derived text: they are passed
 # through the same redaction as Activity headlines and shortened. Prompts, other
 # model text, reasoning, commands and tool output are never shown; private paths
@@ -2361,7 +2371,8 @@ import unicodedata
 
 CODEX_SESSIONS = os.path.expanduser("~/.codex/sessions")
 # The office reads only task_id, developer.provider_type/state/created_at/
-# executor_task_id/execution.native_session_id, request, and response JSON summary
+# executor_task_id/execution.native_session_id, request, remote_test_receipts,
+# remote_test_outcomes, and response JSON summary
 # when binding a Codex session to local Task work.
 CODEX_HISTORY = os.path.expanduser("~/.codex/thread_history_1.sqlite")
 CODEX_STATE = os.path.expanduser("~/.codex/state_5.sqlite")
@@ -5596,6 +5607,136 @@ REMOTE_TEST_OVER_BUDGET = "task 紀錄超過讀取上限，結果可能不是最
 _remote_test_listing: dict = {}   # root -> (folder mtime_ns, listed at, newest paths, capped)
 _remote_test_parsed: dict = {}    # root -> {path: ((st_ino, st_mtime_ns, st_size), entries)}
 _ec2_parsed: dict = {}
+STUCK_REVIEW = 3600
+STUCK_MAC = 2700
+STUCK_BUSY_WINDOW = 1800
+STUCK_REPAIR_CAP = 2
+STUCK_BUDGET = 4 << 20
+_stuck_parsed: dict = {}
+
+
+@dataclass(frozen=True)
+class StuckRecord:
+    task: str
+    d6: str
+    repair: bool
+    busy_at: float
+
+
+def _stuck_entry(record) -> StuckRecord | None:
+    """Extract only the bounded, non-free-text fields needed by stuck alerts."""
+    if type(record) is not dict:
+        return None
+    task = record.get("task_id")
+    if type(task) is not str or re.fullmatch(r"[0-9a-f]{32}", task) is None:
+        return None
+    request = record.get("request")
+    developer = record.get("developer")
+    if type(developer) is not dict:
+        developer = {}
+    state = developer.get("state")
+    d6 = developer.get("executor_task_id")
+    d6 = d6 if type(d6) is str else ""
+    repair = (type(request) is str and request.startswith("Repair round")
+              and type(state) is str and state in DISPATCH_ACCEPTED)
+    events = []
+    receipts = record.get("remote_test_receipts")
+    outcomes = record.get("remote_test_outcomes")
+    for item in receipts if type(receipts) is list else []:
+        if type(item) is dict:
+            when = _remote_test_time(item.get("ended_at"))
+            if when > 0:
+                events.append((when, False))
+    for item in outcomes if type(outcomes) is list else []:
+        if type(item) is dict:
+            when = _remote_test_time(item.get("at"))
+            if when > 0:
+                events.append((when, item.get("code") == "REMOTE_BUSY"))
+    latest = max(events, default=(0.0, False))
+    busy_at = latest[0] if latest[1] else 0.0
+    if not d6 and not busy_at:
+        return None
+    return StuckRecord(task[:8], d6, repair, busy_at)
+
+
+def stuck_records(root: str | None = None) -> tuple[list[StuckRecord], str]:
+    """Read bounded cached Task fields used by stuck alerts."""
+    root = LLMTOOL_TASKS if root is None else root
+    return _bounded_task_entries(root, _stuck_parsed, STUCK_BUDGET, _stuck_entry)
+
+
+def stuck_reviews(office, details) -> list[tuple[str, str, float]]:
+    found = []
+    running = _d6_running_tasks(office if type(office) is list else [])
+    for task_id in running:
+        match = _review_task(task_id)
+        if match and task_id in details:
+            found.append((match[0], match[1], details[task_id][2]))
+    return sorted(found)
+
+
+def stuck_open_d6(details, prs) -> set[str]:
+    return {task_id for task_id, value in details.items()
+            if value[4] and prs.get(value[4], (None, ""))[1] == "OPEN"}
+
+
+def stuck_alerts(now, ci, reviews, records, open_d6) -> list[str]:
+    alerts = []
+    for pr, head, since in sorted(reviews or []):
+        if type(since) not in (int, float) or since <= 0:
+            continue
+        age = now - since
+        if age > STUCK_REVIEW:
+            alerts.append(f"審查超過 1 小時：PR #{pr} @{head}（已 {int(age // 60)} 分鐘）")
+    runs = {}
+    if ci is not None:
+        for index, entry in enumerate(ci):
+            if type(entry) not in (tuple, list) or len(entry) != 5:
+                continue
+            status, text, started, runner, run_id = entry
+            if (type(text) is not str or not text.startswith("llmtool Mac CI")
+                    or type(started) not in (int, float) or not math.isfinite(started)
+                    or started <= 0):
+                continue
+            key = ("id", run_id) if type(run_id) is int else ("entry", index)
+            previous = runs.get(key)
+            if previous is None:
+                runs[key] = [started, status == "in_progress", text]
+            else:
+                oldest = previous[0]
+                previous[0] = min(previous[0], started)
+                previous[1] = previous[1] or status == "in_progress"
+                if started < oldest:
+                    previous[2] = text
+        mac = []
+        for started, active, text in runs.values():
+            age = now - started
+            if age > STUCK_MAC:
+                mac.append((started, f"macOS 超過 45 分鐘：{text}（{'執行中' if active else '排隊'}，已 {int(age // 60)} 分鐘）"))
+        alerts.extend(line for _, line in sorted(mac))
+    busy = []
+    if records is not None:
+        for record in records:
+            if not isinstance(record, StuckRecord) or record.busy_at <= 0:
+                continue
+            age = now - record.busy_at
+            if 0 <= age <= STUCK_BUSY_WINDOW:
+                busy.append((record.busy_at, record.task,
+                             f"EC2 忙碌：task {record.task}（REMOTE_BUSY，{int(age // 60)} 分鐘前）"))
+        alerts.extend(item[2] for item in sorted(busy, key=lambda item: (-item[0], item[1]))[:3])
+    repairs = {}
+    if records is not None:
+        allowed = open_d6 or set()
+        for record in records:
+            if isinstance(record, StuckRecord) and record.repair and record.d6 in allowed:
+                repairs[record.d6] = repairs.get(record.d6, 0) + 1
+    # Only the newest Task files are read, so this count is a lower bound.
+    limited = sorted((d6, count) for d6, count in repairs.items()
+                     if count >= STUCK_REPAIR_CAP)
+    alerts.extend(f"修復已到上限：D6 {d6}（至少 {count} 輪）" for d6, count in limited[:5])
+    if len(limited) > 5:
+        alerts.append(f"另有 {len(limited) - 5} 件到達修復上限")
+    return alerts
 
 
 def _remote_test_paths(root: str) -> tuple[list, bool]:
@@ -7042,11 +7183,25 @@ def owner_count_line(github) -> tuple[str, str]:
     return text, "!" if count or others else ""
 
 
-def office_top(github, quota, now) -> list[tuple[str, str]]:
+def stuck_lines(mon, now) -> list[str]:
+    try:
+        github = mon.github
+        prs = github.branch_prs if github is not None else {}
+        details = registry_details(canonical_root())
+        records = mon.stuck_records[0] if mon.stuck_records is not None else None
+        return stuck_alerts(now, github.ci_runs if github is not None else None,
+                            stuck_reviews(mon.office, details), records,
+                            stuck_open_d6(details, prs))
+    except Exception:
+        return []
+
+
+def office_top(github, quota, now, stuck=None) -> list[tuple[str, str]]:
     out = [owner_count_line(github)]
     if github is not None:
         out.append(main_health_line(github.main_health, github.main_error, now))
     out.extend((line, "!") for line in (quota or []))
+    out.extend((line, "!") for line in (stuck or []))
     return out
 
 
@@ -7199,7 +7354,8 @@ def run_once(github: "GitHubSource | None" = None) -> int:
     print("\n".join(office_lines(mon.office, mon.office_error, expand=True,
                                  pending=github.pending if github is not None else None,
                                  scope=github.scope if github is not None else "",
-                                 top=office_top(github, mon.quota, time.time()))))
+                                 top=office_top(github, mon.quota, time.time(),
+                                                stuck=stuck_lines(mon, time.time())))))
     print("\n".join(line for line, _ in board_view(
         work_board(github, mon.pm_board, time.time(), ec2=mon.ec2_heads,
                    reviewing=pr_reviewing(mon.office)))))
@@ -7386,7 +7542,8 @@ def _paint_screen(stdscr, mon, view, offset, expanded, colors, put, *, noise=Fal
         lines = office_view(mon.office, mon.office_error, w - 1, expanded,
                             pending=mon.github.pending if mon.github is not None else None,
                             scope=mon.github.scope if mon.github is not None else "",
-                            top=office_top(mon.github, mon.quota, time.time()))
+                            top=office_top(mon.github, mon.quota, time.time(),
+                                           stuck=stuck_lines(mon, time.time())))
         offset = max(0, min(offset, len(lines) - body))
         styles = {"title": colors.get("title", 0) | curses.A_BOLD, "!": colors.get("!", 0),
                   "+": colors.get("+", 0), "dim": curses.A_DIM, "section": curses.A_BOLD}
