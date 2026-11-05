@@ -5,6 +5,8 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest import mock
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "fixture_check.py"
@@ -30,6 +32,9 @@ class FixtureCheckTests(unittest.TestCase):
 
     def findings(self, body, module="ordinary_test"):
         source = "def sample():\n" + "\n".join("    " + line for line in body.splitlines()) + "\n"
+        return self.findings_source(source, module)
+
+    def findings_source(self, source, module="ordinary_test"):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / (module + ".py")
             path.write_text(source, encoding="utf-8")
@@ -50,6 +55,42 @@ class FixtureCheckTests(unittest.TestCase):
     def test_outer_fold_is_counted_once(self):
         self.assertEqual(len(self.findings("value = ('mar' + 'k') + 'er'")), 1)
 
+    def test_keyword_value_is_scanned(self):
+        self.assertEqual(len(self.findings("call(value='mark' + 'er')")), 1)
+
+    def test_comprehension_clauses_are_scanned(self):
+        self.assertEqual(len(self.findings("value = [item for item in ('mark' + 'er',) if item]")), 1)
+
+    def test_with_item_is_scanned(self):
+        self.assertEqual(len(self.findings("with ('mark' + 'er') as value:\n    pass")), 1)
+
+    def test_except_handler_body_is_scanned(self):
+        self.assertEqual(len(self.findings(
+            "try:\n    pass\nexcept Exception:\n    value = 'mark' + 'er'")), 1)
+
+    def test_match_case_body_is_scanned(self):
+        self.assertEqual(len(self.findings(
+            "match value:\n    case _:\n        result = 'mark' + 'er'")), 1)
+
+    def test_module_class_nested_method_and_module_if_are_scanned(self):
+        self.assertEqual(len(self.findings_source(
+            "module_value = 'mark' + 'er'\n"
+            "class Outer:\n    attribute = 'mark' + 'er'\n"
+            "    class Inner:\n        def method(self):\n            value = 'mark' + 'er'\n"
+            "if True:\n    def nested():\n        value = 'mark' + 'er'")), 4)
+
+    def test_top_level_method_decorators_and_defaults_are_scanned(self):
+        self.assertEqual(len(self.findings_source(
+            "@decorate('mark' + 'er')\n"
+            "def sample(value='mark' + 'er'): pass\n"
+            "class Example:\n    @decorate('mark' + 'er')\n"
+            "    def method(self, value='mark' + 'er'): pass")), 4)
+
+    def test_augmented_assignment_uses_statement_line(self):
+        findings = self.findings("value = 'mark'\nvalue += 'er'")
+        self.assertEqual(len(findings), 1)
+        self.assertIn(":3:", findings[0])
+
     def test_plain_literal_is_ignored(self):
         self.assertEqual(self.findings("value = 'marker'"), [])
 
@@ -59,6 +100,13 @@ class FixtureCheckTests(unittest.TestCase):
     def test_direct_label_allows_screen_tool_fixture(self):
         self.assertEqual(self.findings(
             "# synthetic-fixture: screen-tool test\nvalue = 'mar' + 'ker'",
+            "test_fixture_check",
+        ), [])
+
+    def test_label_above_multiline_enclosing_statement_allows_fixture(self):
+        self.assertEqual(self.findings(
+            "# synthetic-fixture: screen-tool test\n"
+            "value = (\n    'mark' +\n    'er'\n)",
             "test_fixture_check",
         ), [])
 
@@ -82,6 +130,26 @@ class FixtureCheckTests(unittest.TestCase):
         self.assertFalse(under)
         self.assertTrue(any("can shrink" in item for item in under_findings))
 
+    def test_assignment_targets_clear_tracked_names(self):
+        source = "part = 'mark'\nfor part in ():\n    pass\nvalue = part + 'er'"
+        self.assertEqual(self.findings(source), [])
+
+    def test_with_as_target_clears_tracked_names(self):
+        source = "part = 'mark'\nwith context as part:\n    pass\nvalue = part + 'er'"
+        self.assertEqual(self.findings(source), [])
+
+    def test_deep_expression_is_rejected_with_fixed_limit_error(self):
+        source = "value = " + " + ".join("'x'" for _ in range(1600))
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "test_deep.py"
+            path.write_text(source, encoding="utf-8")
+            output = StringIO()
+            with mock.patch.object(fixture_check, "_module_paths", return_value=[path]), \
+                    redirect_stdout(output):
+                status = fixture_check.main([])
+        self.assertEqual(status, 2)
+        self.assertEqual(output.getvalue(), "fixture-check: input exceeds fixture-check limits\n")
+
     def test_parse_error_is_not_a_pass(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "broken.py"
@@ -95,12 +163,21 @@ class FixtureCheckTests(unittest.TestCase):
         self.assertIn("ordinary_test.py:2: cloud_key", output)
         self.assertNotIn("marker", output)
 
-    def test_repository_check_passes(self):
-        # This is run by CI; local intake explicitly prohibits running tests.
-        with mock.patch.object(fixture_check, "_emitted_sensitive", wraps=fixture_check._emitted_sensitive), \
-                mock.patch.object(fixture_check, "_screen_hits", wraps=fixture_check._screen_hits):
-            status, _findings = fixture_check.check()
-        self.assertEqual(status, 0)
+
+
+class RepositoryFixtureCheckTests(unittest.TestCase):
+    def test_repository_check_fails_above_lowered_temporary_baseline(self):
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = Path(directory) / "baseline.json"
+            baseline.write_text('{"test_test_output_excerpts.py": 0}\n', encoding="utf-8")
+            original_baseline = fixture_check.BASELINE
+            try:
+                fixture_check.BASELINE = baseline
+                status, findings = fixture_check.check()
+            finally:
+                fixture_check.BASELINE = original_baseline
+        self.assertEqual(status, 1)
+        self.assertTrue(any("test_test_output_excerpts.py" in item for item in findings))
 
 
 if __name__ == "__main__":

@@ -29,6 +29,8 @@ SCREEN_TOOL_TEST_MODULES = (
 )
 LABEL = "# synthetic-fixture: screen-tool test"
 BASELINE = REPO / "tools" / "llmtool" / "tests" / "fixture_check_baseline.json"
+MAX_FOLDED_LENGTH = 65536
+MAX_FOLDED_PARTS = 16384
 
 
 def _constant_string(node: ast.AST) -> str | None:
@@ -41,6 +43,8 @@ def _fold(node: ast.AST, names: dict[str, str]) -> tuple[str, list[str]] | None:
     """Return a foldable string and its independent text parts."""
     literal = _constant_string(node)
     if literal is not None:
+        if len(literal) > MAX_FOLDED_LENGTH:
+            return None
         return literal, [literal]
     if isinstance(node, ast.Name):
         value = names.get(node.id)
@@ -48,6 +52,10 @@ def _fold(node: ast.AST, names: dict[str, str]) -> tuple[str, list[str]] | None:
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
         left, right = _fold(node.left, names), _fold(node.right, names)
         if left is None or right is None:
+            return None
+        if len(left[0]) + len(right[0]) > MAX_FOLDED_LENGTH:
+            return None
+        if len(left[1]) + len(right[1]) > MAX_FOLDED_PARTS:
             return None
         return left[0] + right[0], left[1] + right[1]
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Mult):
@@ -57,7 +65,7 @@ def _fold(node: ast.AST, names: dict[str, str]) -> tuple[str, list[str]] | None:
             base, count = _fold(node.right, names), node.left.value
         else:
             return None
-        if base is None or abs(count) > 10000:
+        if base is None or abs(count) > 10000 or len(base[0]) * abs(count) > MAX_FOLDED_LENGTH:
             return None
         return base[0] * count, base[1]
     if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
@@ -65,12 +73,17 @@ def _fold(node: ast.AST, names: dict[str, str]) -> tuple[str, list[str]] | None:
             and not node.keywords):
         separator = _constant_string(node.func.value)
         sequence = node.args[0]
-        if separator is None or not isinstance(sequence, (ast.Tuple, ast.List)):
+        if (separator is None or len(separator) > MAX_FOLDED_LENGTH
+                or not isinstance(sequence, (ast.Tuple, ast.List))):
             return None
         values = [_fold(item, names) for item in sequence.elts]
         if any(value is None for value in values):
             return None
         folded = [value for value in values if value is not None]
+        if sum(len(value[0]) for value in folded) + max(0, len(folded) - 1) * len(separator) > MAX_FOLDED_LENGTH:
+            return None
+        if 1 + sum(len(value[1]) for value in folded) > MAX_FOLDED_PARTS:
+            return None
         text = separator.join(value[0] for value in folded)
         parts: list[str] = [separator]
         for value in folded:
@@ -86,44 +99,51 @@ class _ModuleScan:
         self.filename = filename
         self.hits: list[tuple[int, tuple[str, ...]]] = []
 
-    def _check(self, node: ast.AST, folded: tuple[str, list[str]]) -> None:
-        text, parts = folded
-        if _emitted_sensitive(text) and not any(_emitted_sensitive(part) for part in parts):
-            rules = tuple(sorted({rule for rule, _line in _screen_hits(text)}))
-            if rules:
-                self.hits.append((getattr(node, "lineno", 1), rules))
-
-    def _expr(self, node: ast.AST, names: dict[str, str]) -> tuple[str, list[str]] | None:
+    def _expr(self, node: ast.AST, names: dict[str, str], statement_line: int) -> tuple[str, list[str]] | None:
         folded = _fold(node, names)
         if folded is not None:
             # A folded outer expression owns its descendants; don't count them twice.
             if not isinstance(node, ast.Constant) and not isinstance(node, ast.Name):
-                self._check(node, folded)
+                self._check_line(statement_line, folded)
             return folded
         for child in ast.iter_child_nodes(node):
-            if isinstance(child, ast.expr):
-                self._expr(child, names)
+            self._expr(child, names, statement_line)
         return None
+
+    def _check_line(self, line: int, folded: tuple[str, list[str]]) -> None:
+        text, parts = folded
+        if _emitted_sensitive(text) and not any(_emitted_sensitive(part) for part in parts):
+            rules = tuple(sorted({rule for rule, _line in _screen_hits(text)}))
+            if rules:
+                self.hits.append((line, rules))
 
     def _target_names(self, target: ast.AST) -> Iterable[str]:
         if isinstance(target, ast.Name):
             yield target.id
+        elif isinstance(target, ast.Starred):
+            yield from self._target_names(target.value)
         elif isinstance(target, (ast.Tuple, ast.List)):
             for item in target.elts:
                 yield from self._target_names(item)
 
     def _block(self, statements: list[ast.stmt], names: dict[str, str]) -> None:
         for statement in statements:
+            line = getattr(statement, "lineno", 1)
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                self._function(statement)
-                # Decorators/defaults execute in the containing scope.
-                for expr in [*statement.decorator_list, *statement.args.defaults,
-                             *statement.args.kw_defaults]:
+                for expr in [*statement.decorator_list, *statement.args.defaults, *statement.args.kw_defaults]:
                     if expr is not None:
-                        self._expr(expr, names)
+                        self._expr(expr, names, line)
+                self._block(statement.body, {})
+                names.pop(statement.name, None)
+                continue
+            if isinstance(statement, ast.ClassDef):
+                for expr in [*statement.decorator_list, *statement.bases, *(keyword.value for keyword in statement.keywords)]:
+                    self._expr(expr, names, line)
+                self._block(statement.body, {})
+                names.pop(statement.name, None)
                 continue
             if isinstance(statement, ast.Assign):
-                folded = self._expr(statement.value, names)
+                folded = self._expr(statement.value, names, line)
                 for target in statement.targets:
                     for name in self._target_names(target):
                         if folded is not None:
@@ -133,7 +153,7 @@ class _ModuleScan:
                 continue
             if isinstance(statement, ast.AnnAssign):
                 if statement.value is not None:
-                    folded = self._expr(statement.value, names)
+                    folded = self._expr(statement.value, names, line)
                     for name in self._target_names(statement.target):
                         if folded is not None:
                             names[name] = folded[0]
@@ -141,7 +161,8 @@ class _ModuleScan:
                             names.pop(name, None)
                 continue
             if isinstance(statement, ast.AugAssign):
-                folded = self._expr(ast.BinOp(statement.target, statement.op, statement.value), names)
+                expression = ast.copy_location(ast.BinOp(statement.target, statement.op, statement.value), statement)
+                folded = self._expr(expression, names, line)
                 for name in self._target_names(statement.target):
                     if folded is not None:
                         names[name] = folded[0]
@@ -149,38 +170,57 @@ class _ModuleScan:
                         names.pop(name, None)
                 continue
             if isinstance(statement, ast.Expr):
-                self._expr(statement.value, names)
+                self._expr(statement.value, names, line)
                 continue
-            # Visit nested blocks in source order. Assignments inside a branch
-            # become available only to later source statements in this function.
-            for field, value in ast.iter_fields(statement):
-                if isinstance(value, list):
-                    for item in value:
-                        if isinstance(item, ast.stmt):
-                            self._block([item], names)
-                        elif isinstance(item, ast.expr):
-                            self._expr(item, names)
-                elif isinstance(value, ast.expr):
-                    self._expr(value, names)
-
-    def _function(self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda) -> None:
-        self._block(node.body, {})
+            if isinstance(statement, (ast.For, ast.AsyncFor)):
+                self._expr(statement.iter, names, line)
+                self._expr(statement.target, names, line)
+                for name in self._target_names(statement.target):
+                    names.pop(name, None)
+                self._block(statement.body, names)
+                self._block(statement.orelse, names)
+                continue
+            if isinstance(statement, (ast.With, ast.AsyncWith)):
+                for item in statement.items:
+                    self._expr(item.context_expr, names, line)
+                    if item.optional_vars is not None:
+                        self._expr(item.optional_vars, names, line)
+                        for name in self._target_names(item.optional_vars):
+                            names.pop(name, None)
+                self._block(statement.body, names)
+                continue
+            if isinstance(statement, ast.Try):
+                self._block(statement.body, names)
+                for handler in statement.handlers:
+                    if handler.type is not None:
+                        self._expr(handler.type, names, line)
+                    self._block(handler.body, names)
+                    if handler.name:
+                        names.pop(handler.name, None)
+                self._block(statement.orelse, names)
+                self._block(statement.finalbody, names)
+                continue
+            if isinstance(statement, ast.Match):
+                self._expr(statement.subject, names, line)
+                for case in statement.cases:
+                    self._expr(case.pattern, names, line)
+                    if case.guard is not None:
+                        self._expr(case.guard, names, line)
+                    self._block(case.body, names)
+                continue
+            for child in ast.iter_child_nodes(statement):
+                if isinstance(child, ast.expr):
+                    self._expr(child, names, line)
+                elif isinstance(child, ast.stmt):
+                    self._block([child], names)
 
     def run(self) -> list[tuple[int, tuple[str, ...]]]:
-        # Module-level test setup is not resolved across functions; only scan
-        # function bodies, whose locals have the required same-function scope.
-        for node in self.tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                self._function(node)
-            elif isinstance(node, ast.ClassDef):
-                for member in node.body:
-                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        self._function(member)
+        self._block(self.tree.body, {})
         return sorted(self.hits)
 
 
 def _module_paths() -> list[Path]:
-    return sorted((LLMTOOL / "tests").glob("*.py")) + sorted((LLMTOOL / "scripts").glob("test_*.py"))
+    return sorted((LLMTOOL / "tests").glob("*.py")) + sorted((REPO / "scripts").glob("test_*.py"))
 
 
 def _labelled_lines(lines: list[str], line: int) -> bool:
@@ -192,7 +232,11 @@ def analyze_source(source: str, module_name: str, filename: str) -> list[str]:
     tree = ast.parse(source, filename=filename)
     lines = source.splitlines()
     findings = []
-    for line, rules in _ModuleScan(tree, module_name, filename).run():
+    try:
+        hits = _ModuleScan(tree, module_name, filename).run()
+    except (RecursionError, MemoryError):
+        raise ValueError("input exceeds fixture-check limits") from None
+    for line, rules in hits:
         if module_name in SCREEN_TOOL_TEST_MODULES and _labelled_lines(lines, line):
             continue
         findings.append(f"{filename}:{line}: {','.join(rules)}")
@@ -233,6 +277,8 @@ def check(*, write_baseline: bool = False) -> tuple[int, list[str]]:
             findings = analyze_path(path, path.stem)
         except (OSError, UnicodeError, SyntaxError) as exc:
             raise ValueError(f"could not parse {path.relative_to(REPO)} ({type(exc).__name__})") from None
+        except (RecursionError, MemoryError):
+            raise ValueError("input exceeds fixture-check limits") from None
         # analyze_path uses a display name without exposing source text.
         findings = [item.replace(path.name + ":", str(path.relative_to(REPO)) + ":", 1)
                     for item in findings]
