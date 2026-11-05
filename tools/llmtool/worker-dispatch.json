@@ -11,17 +11,13 @@
     "claude-developer": {
       "dispatch": "OWNER_ASSIGNMENT_ONLY",
       "decided_by": "Owner",
-      "decided_at": "2026-11-05",
-      "reason": "Owner assigned the gw-agent repair and one #1002 acceptance D6 to Claude Developer; all other Claude Developer work stays paused",
+      "decided_at": "2026-11-04",
+      "reason": "Owner assigned only the gw-agent repair to Claude Developer; all other Claude Developer work stays paused",
       "evidence": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6641326482",
       "owner_assignments": [
         {
           "task_id": "14ffbf93461373873bb32fbdb83924a0",
           "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6641326482"
-        },
-        {
-          "task_id": "0f37eb31f61806d8c6b6182f2513f206",
-          "owner_assignment_ref": "https://github.com/davidcatcat/davidcattoolsproject/issues/289#issuecomment-6659750091"
         }
       ]
     },

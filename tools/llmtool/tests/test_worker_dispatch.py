@@ -283,12 +283,6 @@ class WorkerDispatchTests(unittest.TestCase):
         self.assertEqual(worker['dispatch'], 'OWNER_ASSIGNMENT_ONLY')
         self.assertEqual(worker['owner_assignments'], [
             {'task_id': task_id, 'owner_assignment_ref': ref},
-            {
-                'task_id': '0f37eb31f61806d8c6b6182f2513f206',
-                'owner_assignment_ref': (
-                    'https://github.com/davidcatcat/davidcattoolsproject/'
-                    'issues/289#issuecomment-6659750091'),
-            },
         ])
 
     def test_owner_assignment_policy_rejects_duplicate_or_malformed_bindings(self):
