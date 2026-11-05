@@ -535,6 +535,43 @@ def read_background(pm_session, store=None):
     return background_items(records)
 
 
+def attention_items(records):
+    """Tasks for this PM that have a recorded attention state."""
+    from . import task_status
+
+    labels = {"BLOCKED": "卡住", "UNAVAILABLE": "供應商不可用", "FAILED": "失敗"}
+    items = []
+    for record in records:
+        record = _dict(record) or {}
+        state = task_status.derive_state(record)
+        label = labels.get(state)
+        if label is None:
+            developer = _dict(record.get("developer")) or {}
+            callback = _dict(developer.get("direct_result_callback")) or {}
+            completion = _dict(record.get("completion")) or {}
+            if (callback.get("state") == "PM_EVIDENCE_READY" or
+                    completion.get("state") == "PM_EVIDENCE_READY"):
+                label = "證據已就緒，等 PM 處理"
+            else:
+                continue
+        items.append({"label": label, "task": value(record, "task_id"),
+                      "reason": blocked_reason(record) or ""})
+    return items
+
+
+def read_attention(pm_session, store=None):
+    """Attention items and unread completion events for one PM session, without writes."""
+    from .active_pm_inbox import _session_records, peek_inbox, pm_session_key
+    from .task_store import TaskStore
+
+    store = TaskStore() if store is None else store
+    key = pm_session_key(pm_session)
+    records, _unreadable = _session_records(store, key)
+    inbox = peek_inbox(store, key)
+    unread = len(inbox.get("events", [])) + len(inbox.get("pending", []))
+    return {"items": attention_items(records), "unread": unread}
+
+
 def age_text(timestamp, now=None):
     """Compact age of a Core timestamp ("45s", "12m", "3h", "2d"); "?" when unreadable."""
     try:
