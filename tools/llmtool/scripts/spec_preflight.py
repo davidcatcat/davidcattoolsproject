@@ -10,7 +10,7 @@ from typing import Any
 
 
 LLMTOOL_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LLMTOOL_ROOT.parent))
+sys.path.insert(0, str(LLMTOOL_ROOT))
 
 from llmtool.test_output_excerpts import _emitted_sensitive  # noqa: E402
 

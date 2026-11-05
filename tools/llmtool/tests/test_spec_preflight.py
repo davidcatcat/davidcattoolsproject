@@ -2,6 +2,8 @@ import contextlib
 import importlib.util
 import io
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +37,20 @@ class SpecPreflightTests(unittest.TestCase):
         self.assertEqual(check(self.spec), [])
         status, output = self.run_main(self.spec)
         self.assertEqual((status, output), (0, "SPEC_PREFLIGHT_OK\n"))
+
+    def test_script_runs_without_site_packages_from_temp_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "spec.json"
+            path.write_text(json.dumps(self.spec), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-S", "-B", str(SCRIPT), str(path)],
+                cwd=directory,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, "SPEC_PREFLIGHT_OK\n")
 
     def test_sensitive_value_in_each_field_is_not_printed(self):
         sensitive_value = "private-fixture-value"
