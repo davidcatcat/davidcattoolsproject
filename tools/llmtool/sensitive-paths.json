@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "exact": [
+    "tools/llmtool/worker-dispatch.json",
+    "tools/llmtool/developer-routes.json",
+    "tools/llmtool/execution-resources.json",
+    "tools/llmtool/sensitive-paths.json",
+    "tools/llmtool/scripts/d6_worktree_lifecycle.py",
+    "tools/llmtool/scripts/ci_path_classes.py",
+    "tools/llmtool/scripts/ci_mac_modules.py",
+    "tools/llmtool/llmtool/developer_routes/write_boundary.py",
+    "tools/llmtool/llmtool/developer_routes/base.py",
+    "tools/llmtool/llmtool/worker_dispatch.py",
+    "tools/llmtool/llmtool/dispatch_check.py",
+    "tools/llmtool/llmtool/task_advance.py",
+    "tools/llmtool/llmtool/task_completion.py",
+    "tools/llmtool/llmtool/task_store.py",
+    "tools/llmtool/llmtool/task_submission_cli.py",
+    "tools/llmtool/llmtool/review_authority.py",
+    "tools/llmtool/llmtool/review_dispatch.py",
+    "tools/llmtool/llmtool/review_result.py",
+    "tools/llmtool/llmtool/review_repair.py",
+    "tools/llmtool/llmtool/github_identity.py",
+    "tools/llmtool/llmtool/ai_github_exec.py",
+    "tools/llmtool/llmtool/action_contract.py",
+    "tools/llmtool/llmtool/trust.py",
+    "tools/llmtool/llmtool/source_freshness.py",
+    "tools/llmtool/llmtool/remote_test.py",
+    "tools/llmtool/llmtool/log_safety.py",
+    "tools/llmtool/llmtool/sensitive_paths.py",
+    "tools/llmtool/llmtool/owner_tty_issuer.py",
+    "tools/llmtool/llmtool/self_update.py"
+  ],
+  "prefixes": [
+    ".github/",
+    "tools/ec2-runner/",
+    "tools/mac-runner/",
+    "tools/api-agent-gateway/api_agent_gateway/"
+  ],
+  "globs": [
+    "tools/llmtool/llmtool/authorization_*.py"
+  ]
+}
