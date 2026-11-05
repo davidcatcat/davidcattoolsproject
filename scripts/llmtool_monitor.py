@@ -3789,6 +3789,7 @@ def board_pulls(pulls, repo: str) -> list[BoardPull]:
             continue
         sha = head_data.get("sha")
         head = sha[:7].lower() if type(sha) is str and re.fullmatch(r"[0-9a-fA-F]+", sha) else ""
+        title = re.sub(r"#(?=[0-9])", "", title)
         out.append(BoardPull(pull["number"], _label(title, 60), state,
                              _github_time(pull.get("merged_at")), _github_time(pull.get("updated_at")),
                              head, pull.get("draft") is True))
@@ -3851,15 +3852,21 @@ def work_board(github, board: PmBoard, now) -> WorkBoard:
 
 
 def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
+    def append_header(text, style=""):
+        lines = _wrap(text, width) if width is not None else [text]
+        out.extend((line, style) for line in lines)
+
     today = len(work.done) if work.github_known else "?"
     known_running = len(work.running)
     counts = (f"今天合併 {today} · 進行中 {known_running if work.github_known else '?'} · "
               f"等 PM {sum(item.next == 'PM' for item in work.running + work.queue + work.blocked) if work.github_known and work.board_known else '?'} · "
               f"等你 {len(work.owner) if work.github_known else '?'} · 排隊 {len(work.queue) if work.board_known else '?'} · "
               f"卡住 {len(work.blocked) if work.board_known else '?'}")
-    out = [("工作白板", "title"), (counts, "")]
+    out = []
+    append_header("工作白板", "title")
+    append_header(counts)
     if work.github_status:
-        out.append((work.github_status, "!"))
+        append_header(work.github_status, "!")
     board_warnings = {
         "missing": "PM 白板檔不存在，排隊和卡住未知",
         "unreadable": "PM 白板檔無法讀取，排隊和卡住未知",
@@ -3868,18 +3875,18 @@ def board_view(work: WorkBoard, width=None) -> list[tuple[str, str]]:
     }
     if work.board_status == "stale":
         minutes = int((work.board_age or 0) // 60)
-        out.append((f"PM 白板檔已 {minutes} 分鐘沒更新，排隊和卡住可能過時", "!"))
+        append_header(f"PM 白板檔已 {minutes} 分鐘沒更新，排隊和卡住可能過時", "!")
     elif work.board_status in board_warnings:
-        out.append((board_warnings[work.board_status], "!"))
+        append_header(board_warnings[work.board_status], "!")
     if work.skipped:
-        out.append((f"白板檔有 {work.skipped} 筆略過", "!"))
+        append_header(f"白板檔有 {work.skipped} 筆略過", "!")
     if work.note:
-        out.append((work.note, "!"))
+        append_header(work.note, "!")
     sections = (("等你", work.owner, work.github_known), ("進行中", work.running, work.github_known or work.board_known),
                 ("排隊", work.queue, work.board_known), ("卡住", work.blocked, work.board_known),
                 (f"今天完成（累計 {today}）", work.done, work.github_known))
     for title, items, known in sections:
-        out.append((f"── {title} ──", "section"))
+        append_header(f"── {title} ──", "section")
         if not items:
             empty = (f"無（只看最近 {work.window_hours} 小時留言）"
                      if known and title == "等你" else "無" if known else "未知")

@@ -104,7 +104,8 @@ class MonitorTrustTests(unittest.TestCase):
         github.successful_read = True
         github.pending = [mon.OwnerPending(1, "#1", "WAITING", "", "waiting_owner"),
                           mon.OwnerPending(2, "#2", "WAITING", "", "repair_gate")]
-        self.assertEqual(mon.owner_count_line(github), ("等你決定：1 件", "!"))
+        self.assertEqual(mon.owner_count_line(github),
+                         ("等你決定：1 件（另有 1 筆其他 Owner 請求）", "!"))
         github.pending = []
         self.assertEqual(mon.owner_count_line(github),
                          ("等你決定：0 件（只看最近 6 小時留言）", ""))
@@ -183,7 +184,7 @@ class MonitorTrustTests(unittest.TestCase):
         malformed._get = lambda path: bad_paths[path]
         malformed.refresh_main()
         self.assertIsNone(malformed.main_health)
-        self.assertEqual(malformed.main_error, "main commit")
+        self.assertEqual(malformed.main_error, "ValueError")
         malformed_run = mon.GitHubSource("o/r", clock=lambda: self.NOW)
         bad_paths = dict(paths)
         linux_key = base + "actions/runs?branch=main&event=push&per_page=30"
@@ -617,6 +618,7 @@ class MonitorTaskBaselineTests(unittest.TestCase):
         class Screen:
             def getmaxyx(self): return (40, 120)
             def erase(self): pass
+            def move(self, y, x): pass
         mon._paint_screen(Screen(), self.monitor, "tasks", 0, False, {},
                           lambda row, text, attr=0: drawn.__setitem__(row, text))
         self.assertIn("OpenCode Task 紀錄讀取失敗，狀態未確認", drawn.values())
@@ -6410,7 +6412,8 @@ class WorkBoardTests(unittest.TestCase):
         from types import SimpleNamespace
         values = {"board_pulls": mon.board_pulls(pulls, "o/r") if pulls is not None else None,
                   "verdicts": verdicts or {}, "pending": [],
-                  "successful_read": pulls is not None, "read_failed": False}
+                  "successful_read": pulls is not None, "read_failed": False,
+                  "window": 43200}
         values.update(fields)
         return SimpleNamespace(**values)
 
@@ -6479,12 +6482,14 @@ class WorkBoardTests(unittest.TestCase):
 
     def test_board_pulls_use_the_same_fork_filter_and_safe_head_prefix(self):
         pulls = [self._pull(1, sha="ABCDEF0123456789"),
+                 self._pull(5, title="Fix (#965)"),
                  self._pull(2, repo="someone/fork"),
                  self._pull(3, sha="not-a-commit"),
                  {"number": 4, "state": "open", "title": "missing head"}]
         rows = mon.board_pulls(pulls, "o/r")
         self.assertEqual([(row.number, row.head, row.state) for row in rows],
-                         [(1, "abcdef0", "OPEN"), (3, "", "OPEN")])
+                         [(1, "abcdef0", "OPEN"), (5, "aaaaaaa", "OPEN"), (3, "", "OPEN")])
+        self.assertEqual(rows[1].title, "Fix (965)")
 
     def test_file_items_override_github_and_refs_compare_by_number(self):
         pulls = [self._pull(7), self._pull(8), self._pull(9)]
@@ -6526,10 +6531,13 @@ class WorkBoardTests(unittest.TestCase):
                            mon.PmBoard("ok", 0, [], [], []), NOW))]
         self.assertIn("無（只看最近 12 小時留言）", empty_lines)
         work = mon.work_board(self._github([self._pull(976, title="很長的中文標題用來測試窄螢幕換行")]),
-                              mon.PmBoard("ok", 0, [], [], []), NOW)
-        rows = [line for line, _ in mon.board_view(work, width=14)
+                              mon.PmBoard("stale", 3600, [], [], []), NOW)
+        view = mon.board_view(work, width=14)
+        rows = [line for line, _ in view
                 if line.startswith("PR #") or line.startswith("  ")]
         self.assertTrue(rows)
         self.assertEqual(rows[0], "PR #976")
         self.assertTrue(all(mon._width(line) <= 14 for line in rows))
         self.assertTrue(all(line.startswith("  ") for line in rows[1:]))
+        self.assertTrue(any(style == "!" for _, style in view))
+        self.assertTrue(all(mon._width(line) <= 14 for line, _ in view))
