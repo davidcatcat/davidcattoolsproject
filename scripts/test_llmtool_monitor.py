@@ -1167,6 +1167,8 @@ class GitHubActivityTests(unittest.TestCase):
             ("Ordinary progress headline\nD6: wp-1\nFamily: fixture-family",
              "Ordinary progress headline"),
             (task + "\nD6: bad name\nFamily: fixture-family", "Family fixture-family"),
+            (task + "\nD6: wp-1\nFamily: bad name", "D6 wp-1"),
+            (task + "\nD6: wp-1\nsee Family: other", "D6 wp-1"),
         )
         for body, expected in cases:
             with self.subTest(expected=expected):
@@ -1222,6 +1224,8 @@ class GitHubActivityTests(unittest.TestCase):
         self.assertTrue(any("Correction updated details" in line for line in shown))
         self.assertTrue(any("subpm-lease" in line for line in shown))
         self.assertTrue(any("Correction progress" in line for line in shown))
+        leases = mon.github_events([comment(67, NOW - 1, "subpm-leases are still visible")], [], NOW - 99)
+        self.assertTrue(any("subpm-leases are still visible" in line for line in mon.render_activity(leases)))
         corrections = mon.github_events([comment(66, NOW - 1, "corrections are still visible")],
                                         [], NOW - 99)
         self.assertTrue(any("corrections are still visible" in line
