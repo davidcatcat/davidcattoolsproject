@@ -59,6 +59,7 @@ class SpecPreflightTests(unittest.TestCase):
 
     def test_sensitive_value_in_each_field_is_not_printed(self):
         sensitive_value = "private-fixture-value"
+        # synthetic-fixture: screen-tool test
         sensitive_text = "tok" + "en = " + sensitive_value
         cases = (
             ("request", sensitive_text, "request"),
@@ -164,7 +165,9 @@ class SpecPreflightTests(unittest.TestCase):
                                  (1, f"SPEC_PREFLIGHT_FAIL:{label}\n"))
 
     def test_check_matches_record_pm_refusals(self):
+        # synthetic-fixture: screen-tool test
         credential_null = "".join(("api", "_key", " = ", "null"))
+        # synthetic-fixture: screen-tool test
         credential_tab = "".join(("api", "_key\t", " = ", "fixture"))
         cases = (
             ("summary too long", dict(self.spec, summary="a" * 2049)),
