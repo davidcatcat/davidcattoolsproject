@@ -13,7 +13,10 @@ from io import StringIO
 
 from llmtool import high_debug
 from llmtool import cli
+from llmtool import test_output_excerpts
 from llmtool.errors import LLMToolError
+from llmtool.task_store import TaskStore, new_id
+from llmtool.task_verification import AcceptanceCriterion, CriterionKind, TaskContract
 
 _REAL_POST_GITHUB_RECORD = high_debug._post_github_record
 
@@ -305,9 +308,9 @@ class HighDebugTests(unittest.TestCase):
             ({'runner_error': subprocess.TimeoutExpired('codex', 1800)},
              'HIGH_DEBUG_RUN_FAILED'),
             ({'dirty': True}, 'HIGH_DEBUG_WROTE_FILES'),
-            # synthetic-fixture: screen-tool test
             ({'report': 'private report ' + 'x' * 20000},
              'HIGH_DEBUG_REPORT_INVALID'),
+            # synthetic-fixture: screen-tool test
             ({'report': 'safe head ' + 'x' * 17000 + '\nBear' + 'er ' + 'c' * 40},
              'HIGH_DEBUG_REPORT_INVALID'),
         )
@@ -689,6 +692,94 @@ class HighDebugTests(unittest.TestCase):
         with patch.object(high_debug, '_SENSITIVE', re.compile(r'FLAG.*END', re.S)):
             self.assertEqual(high_debug._screen_hits('FLAG\nEND'),
                              [('unclassified', 1)])
+
+    def test_screen_rules_match_the_output_excerpt_sensitive_prefix(self):
+        self.assertEqual('|'.join(pattern.pattern for _name, pattern
+                                  in high_debug._SCREEN_RULES),
+                         test_output_excerpts._SENSITIVE_PREFIX)
+        self.assertTrue(all(pattern.flags & re.IGNORECASE
+                            for _name, pattern in high_debug._SCREEN_RULES))
+
+    @staticmethod
+    def _real_task_store_task():
+        request = 'Bounded non-sensitive TaskStore test record.'
+        task_id, run_id = new_id(), new_id()
+        request_sha = hashlib.sha256(request.encode()).hexdigest()
+        contract = TaskContract(
+            schema_version=1, task_id=task_id, contract_version=1,
+            previous_digest=None, goal='PM intake request sha256:' + request_sha,
+            authorized_scope=('pm-planning',), forbidden_scope=(),
+            criteria=(AcceptanceCriterion(
+                'pm_response', CriterionKind.ARTIFACT,
+                'Record the PM reply or unavailable status.'),),
+        )
+        return {
+            'schema_version': 1, 'task_id': task_id, 'run_id': run_id,
+            'pm_session_id': 'pm-' + new_id(), 'pm_provider_profile': 'pm',
+            'pm_provider_type': 'codex-cli',
+            'backend_session_semantics': 'EPHEMERAL_SINGLE_CALL',
+            'native_session_id': None, 'state': 'PM_PENDING',
+            'created_at': '2026-10-21T00:00:00Z',
+            'updated_at': '2026-10-21T00:00:00Z',
+            'task_contract': contract.to_dict(),
+            'task_binding': contract.binding(run_id).to_dict(),
+            'request': request, 'request_sha256': request_sha,
+            'response': None, 'usage': None, 'error_code': None,
+            'record_sha256': None,
+        }
+
+    def test_sensitive_rejection_report_is_bounded_and_real_store_validates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TaskStore(Path(directory) / 'tasks')
+            task = self._real_task_store_task()
+            store.create(task)
+            hits = [('rule', line) for line in range(1, 601)]
+            report = high_debug._report_rejection(
+                'HIGH_DEBUG_REPORT_INVALID', 'SENSITIVE', 600, 'benign text', hits)
+            entry = high_debug._failed_entry(
+                family='test-family', failed_corrections=2, early_reason=None,
+                head='a' * 40, d6='executor-hd1-aaaaaaa',
+                code='HIGH_DEBUG_REPORT_INVALID', report=report,
+                observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN',
+                recorded_at='2026-10-27T00:00:00Z')
+            saved = store.append_high_debug(task['task_id'], entry)
+            stored = store.get(task['task_id'])['high_debug']
+
+            self.assertEqual(len(stored), 1)
+            self.assertEqual(stored[0]['status'], 'RUN_FAILED')
+            self.assertEqual(saved['high_debug'], stored)
+            self.assertEqual(sum(line.startswith('hit: ')
+                                 for line in report.splitlines()), 32)
+            self.assertTrue(report.endswith('omitted hits: 568'))
+            self.assertEqual(stored[0]['report_sha256'],
+                             hashlib.sha256(report.encode('utf-8')).hexdigest())
+            self.assertLessEqual(len(report.encode('utf-8')), 16384)
+            self.assertFalse(test_output_excerpts._emitted_sensitive(stored[0]['report']))
+
+    def test_real_store_rejects_clean_oversized_high_debug_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = TaskStore(Path(directory) / 'tasks')
+            task = self._real_task_store_task()
+            store.create(task)
+            prior = high_debug._failed_entry(
+                family='test-family', failed_corrections=2, early_reason=None,
+                head='a' * 40, d6='executor-hd1-aaaaaaa',
+                code='HIGH_DEBUG_RUN_FAILED', observed='UNKNOWN',
+                effort='UNKNOWN', usage='UNKNOWN',
+                recorded_at='2026-10-27T00:00:00Z')
+            store.append_high_debug(task['task_id'], prior)
+            oversized = high_debug._failed_entry(
+                family='test-family', failed_corrections=2, early_reason=None,
+                head='a' * 40, d6='executor-hd2-aaaaaaa',
+                code='HIGH_DEBUG_REPORT_INVALID', report='x' * 16385,
+                observed='UNKNOWN', effort='UNKNOWN', usage='UNKNOWN',
+                recorded_at='2026-10-27T00:00:00Z')
+
+            with self.assertRaises(LLMToolError) as caught:
+                store.append_high_debug(task['task_id'], oversized)
+            self.assertEqual(caught.exception.task_store_error_code,
+                             'HIGH_DEBUG_INVALID')
+            self.assertEqual(store.get(task['task_id'])['high_debug'], [prior])
 
     def test_screen_rule_first_match_and_unclassified(self):
         table = tuple((name, re.compile(pattern)) for name, pattern in

@@ -287,7 +287,7 @@ def _screen_rule(match_text):
 
 
 def _screen_hits(text):
-    """Return bounded, text-free locations from the real output screen."""
+    """Return sorted, unique, text-free locations from the real output screen."""
     located = set()
     ascii_text = text.encode('ascii', 'backslashreplace').decode('ascii')
     for value in (text, ascii_text):
@@ -580,7 +580,13 @@ def _report_rejection(code, checks, byte_count, report, hits=()):
                    'limit: ' + str(_REPORT_LIMIT))
     fixed = '\n'.join(fixed_lines)
     if 'SENSITIVE' in checks:
-        return fixed + ''.join(f'\nhit: {rule} line={line}' for rule, line in hits)
+        kept_hits = sorted(set(hits))
+        omitted = max(0, len(kept_hits) - _SCREEN_HIT_LIMIT)
+        rendered = ''.join(f'\nhit: {rule} line={line}'
+                           for rule, line in kept_hits[:_SCREEN_HIT_LIMIT])
+        if omitted:
+            rendered += f'\nomitted hits: {omitted}'
+        return fixed + rendered
     marker = '\nreport truncated\n'
     available = _REPORT_LIMIT - len((fixed + marker).encode('utf-8'))
     if available < 0:
