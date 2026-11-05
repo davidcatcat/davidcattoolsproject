@@ -66,6 +66,43 @@ def green_linux_ci(path, pr=PR):
     return []
 
 
+class TaskAdvanceMergeDocsRuleTests(unittest.TestCase):
+    """_merge_checks must use the shared docs-only rule of CI and task complete."""
+
+    def _checks(self, filenames, names):
+        pr = {'number': 17, 'head': {'sha': HEAD}, 'state': 'open', 'mergeable': True}
+
+        def github_get(path):
+            if path.startswith('commits/') and path.endswith('/check-runs?per_page=100'):
+                runs = [{'id': index + 1, 'name': name, 'head_sha': HEAD,
+                         'status': 'completed', 'conclusion': 'success'}
+                        for index, name in enumerate(names)]
+                return {'total_count': len(runs), 'check_runs': runs}
+            if path.startswith('pulls/') and path.endswith('/files?per_page=100'):
+                return [{'filename': name} for name in filenames]
+            return pr
+
+        return task_advance._merge_checks({}, 17, HEAD, pr, github_get)
+
+    def test_skills_json_and_docs_markdown_need_only_docs_check(self):
+        self.assertIsNone(self._checks(['skills/x.json', 'docs/y.md'], ['check (docs)']))
+
+    def test_deep_llmtool_markdown_needs_code_checks(self):
+        self.assertEqual(
+            self._checks(['tools/llmtool/llmtool/deep/z.md'], ['check (docs)']),
+            'MERGE_REQUIRED_CHECK_MISSING')
+        self.assertEqual(
+            self._checks(['tools/llmtool/llmtool/deep/z.md'],
+                         ['check (docs)', 'check (Linux 3.14)']),
+            'MERGE_REQUIRED_CHECK_MISSING')
+        self.assertIsNone(
+            self._checks(['tools/llmtool/llmtool/deep/z.md'],
+                         ['check (Linux 3.14)', 'check (macOS 3.13)']))
+
+    def test_top_level_readme_stays_docs_only(self):
+        self.assertIsNone(self._checks(['README.md'], ['check (docs)']))
+
+
 class TaskAdvanceTests(unittest.TestCase):
     def _completed_codex_review(self, verdict, *, recorded=True):
         task_id, run_id, contract_digest = '1' * 32, '2' * 32, 'd' * 64
