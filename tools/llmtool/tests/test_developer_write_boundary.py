@@ -199,9 +199,11 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
             profile = boundary._profile(paths, states, (), paths)
             boundary._prepared = (str(policy_root), ('src/file.py',), (), paths, states,
                                   profile, hashlib.sha256(profile.encode()).hexdigest())
+            programs = []
 
             def runner(argv, *_args):
                 code = argv[-1]
+                programs.append(code)
                 if "0123456789ab" in code:
                     return 1, b'', b''
                 if 'os.link' in code:
@@ -212,6 +214,9 @@ class DeveloperWriteBoundaryTests(unittest.TestCase):
 
             proof = boundary.verify(root, ['src/file.py'], (), runner=runner)
             self.assertFalse(proof['verified'])
+            self.assertTrue(programs)
+            for code in programs:
+                compile(code, 'probe', 'exec')
             self.assertTrue(any(probe.get('operation') == 'claude_tmp_rename' and
                                 not probe['passed'] for probe in proof['probes']))
 

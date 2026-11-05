@@ -286,7 +286,7 @@ class SandboxExecBoundary(WriteBoundary):
                 for path in invalid:
                     code = ('from pathlib import Path\n'
                             'p=Path(' + repr(path) + ')\n'
-                            'p.write_bytes(b"probe")\n p.unlink()\n')
+                            'p.write_bytes(b"probe")\np.unlink()\n')
                     try:
                         rc, out, err = runner([self.executable, '-p', profile, python, '-c', code],
                                               str(root), {'PATH': os.environ.get('PATH', '/usr/bin:/bin'),
