@@ -2652,6 +2652,7 @@ D6_STATES = {   # D6 record state -> plain words
 }
 D6_WINDOW = 24 * 3600
 D6_OPEN_STATES = frozenset({"ACTIVE", "REPAIR", "REVIEW_PENDING"})
+D6_RUNNING_STATES = frozenset({WORKING, STALLED, ATTENTION})
 D6_STALE_HEAD = "⚠ 另有 "
 PR_DONE_WORDS = {"MERGED": "已合併", "CLOSED": "已關閉"}
 AGENT_ID = re.compile(r"[A-Za-z0-9._-]{1,96}")
@@ -2689,6 +2690,9 @@ def d6_task_lines(canonical: str, office: list, now: float,
     for row in office:
         if row.task.startswith("task ") and row.state != CLOSED:
             live.setdefault(row.task[5:], []).append(f"{row.name} {row.state}")
+    running = {row.task[5:] for row in office
+               if row.task.startswith("task ") and row.state in D6_RUNNING_STATES
+               and row.state != CLOSED}
     # A recorded time in the future would pin a task on top: use the write time.
     stamped = ((task_id, state, agent, verified if verified <= now + 300 else written, branch)
                for task_id, (state, agent, verified, written, branch) in details.items())
@@ -2703,12 +2707,12 @@ def d6_task_lines(canonical: str, office: list, now: float,
         pr_state = prs.get(branch, (None, ""))[1] if branch and prs else ""
         reviewer_done = False
         match = _review_task(task_id)
-        if match and not live.get(task_id):
+        if match and task_id not in running:
             reviewer_done = any(match[1].lower() in ids
                                 for _, _, ids in (verdicts or {}).get(match[0], []))
-        if not live.get(task_id) and not prs:
+        if task_id not in running and not prs:
             phase = D6_STATES.get(state, state)
-        elif match and not live.get(task_id):
+        elif match and task_id not in running:
             reviewer_pr = pr_numbers.get(int(match[0]), "")
             if reviewer_done:
                 phase = "審查已結束，待收尾"
@@ -2716,10 +2720,10 @@ def d6_task_lines(canonical: str, office: list, now: float,
                 phase = "已完成，待收尾"
             else:
                 phase = "審查沒在跑，查不到結論"
-        elif not live.get(task_id) and CODEX_HIGH_DEBUG_TASK.search(task_id):
+        elif task_id not in running and CODEX_HIGH_DEBUG_TASK.search(task_id):
             phase = "診斷沒在跑，待收尾"
         else:
-            phase = d6_phase(state, bool(live.get(task_id)), pr_state, reviewer_done)
+            phase = d6_phase(state, task_id in running, pr_state, reviewer_done)
         note = f"  ⚠ PR #{done[0]} {PR_DONE_WORDS[done[1]]}，登記還是{D6_STATES.get(state, state)}" if done else ""
         lines.append(f"{time.strftime('%m-%d %H:%M', time.localtime(when))}  {task_id:<{width}}  "
                      f"{phase}  →  {who}  （{agent or '未綁定 agent'}）{note}")

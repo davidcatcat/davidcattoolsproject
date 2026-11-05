@@ -2484,6 +2484,52 @@ class OfficeViewTests(unittest.TestCase):
         self.assertIn("wp-1  執行中  →  claude developer（互動） 需注意  （claude-ui-agent）", lines[1])
         self.assertNotIn("SECRET", "\n".join(lines))
 
+    def test_d6_phase_uses_running_rows_but_keeps_finished_rows_named(self):
+        stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 60))
+        tasks = {
+            "working-open": ("ACTIVE", "branch-working-open", mon.WORKING),
+            "working-merged": ("ACTIVE", "branch-working-merged", mon.WORKING),
+            "stalled-open": ("ACTIVE", "branch-stalled-open", mon.STALLED),
+            "attention-open": ("ACTIVE", "branch-attention-open", mon.ATTENTION),
+            "done-merged": ("ACTIVE", "branch-done-merged", mon.DONE),
+            "idle-merged": ("ACTIVE", "branch-idle-merged", mon.IDLE),
+            "pr941-claude-rv2-0aa754d": ("ACTIVE", "review/941", mon.IDLE),
+            "done-open": ("ACTIVE", "branch-done-open", mon.DONE),
+            "repair-hd2-abcdef0": ("ACTIVE", "branch-debug", mon.DONE),
+            "idle-unknown": ("REPAIR", "branch-unknown", mon.IDLE),
+        }
+        rows = []
+        prs = {}
+        for task_id, (record_state, branch, row_state) in tasks.items():
+            self._register(task_id, str(self.task), state=record_state, branch=branch,
+                           last_verified_at=stamp,
+                           trusted_agent_id=mon.CODEX_HIGH_DEBUG_AGENT if "-hd" in task_id else "claude-ui-agent")
+            rows.append(mon.OfficeRow(f"session {task_id}", row_state, "fixture", 1.0, 1,
+                                      task=f"task {task_id}"))
+            if task_id == "working-merged" or task_id in ("done-merged", "idle-merged"):
+                prs[branch] = (901, "MERGED")
+            elif task_id.startswith("pr941-"):
+                prs[branch] = (941, "OPEN")
+            elif task_id != "idle-unknown":
+                prs[branch] = (902, "OPEN")
+
+        verdicts = {"941": [(self.NOW - 30, "REVIEW_PASS", ["0aa754d"])]}
+        lines = mon.d6_task_lines(self.canonical, rows, self.NOW, prs, verdicts)
+        by_task = {task_id: next(line for line in lines if task_id in line) for task_id in tasks}
+        for task_id in ("working-open", "working-merged", "stalled-open", "attention-open"):
+            self.assertIn("執行中", by_task[task_id])
+        self.assertIn("已完成，待收尾", by_task["done-merged"])
+        self.assertIn("已完成，待收尾", by_task["idle-merged"])
+        self.assertIn("session done-merged 完成", by_task["done-merged"])
+        self.assertIn("session idle-merged 待命", by_task["idle-merged"])
+        self.assertIn("審查已結束，待收尾", by_task["pr941-claude-rv2-0aa754d"])
+        self.assertIn("等審查或 CI", by_task["done-open"])
+        self.assertIn("診斷沒在跑，待收尾", by_task["repair-hd2-abcdef0"])
+
+        no_github_lines = mon.d6_task_lines(self.canonical, rows, self.NOW)
+        unknown = next(line for line in no_github_lines if "idle-unknown" in line)
+        self.assertIn("修復中", unknown)
+
     def test_agent_process_cwd_binds_transcript_free_d6_session(self):
         stamp = mon.time.strftime("%Y-%m-%dT%H:%M:%SZ", mon.time.gmtime(self.NOW - 600))
         self._register("wp-1", str(self.task), last_verified_at=stamp,
