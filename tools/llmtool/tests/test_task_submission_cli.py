@@ -916,6 +916,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
                     self.assertFalse(store.root.exists())
 
     def test_claude_task_binding_and_result_use_registered_d6_authority(self):
+        from types import SimpleNamespace
         from llmtool.review_dispatch import _preflight, _select_reviewer
 
         owner_ref = ('https://github.com/davidcatcat/davidcattoolsproject/'
@@ -937,8 +938,9 @@ class TaskSubmissionCLITests(unittest.TestCase):
                                'response': response})
         task = run_task_record_pm(Namespace(stdin_json=True), store=store,
                                   input_stream=io.StringIO(envelope), return_record=True)
-        (self.executor_root / 'changed.py').write_text('CLAUDE_RESULT = True\n')
-        subprocess.run(['/usr/bin/git', 'add', 'changed.py'], cwd=self.executor_root,
+        declared_test_path = 'tools/llmtool/tests/test_task_submission_cli.py'
+        (self.executor_root / declared_test_path).write_text('new\n')
+        subprocess.run(['/usr/bin/git', 'add', declared_test_path], cwd=self.executor_root,
                        check=True, capture_output=True)
         subprocess.run(['/usr/bin/git', 'commit', '-m', 'fixture Claude result'],
                        cwd=self.executor_root, check=True, capture_output=True)
@@ -961,7 +963,7 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(bound['developer']['provider_profile'], 'claude')
         self.assertEqual(bound['developer']['executor_task_id'], d6_task_id)
         self.assertEqual(bound['developer']['source_sha'], self.executor_head)
-        self.assertEqual(bound['developer']['write_paths'], ['changed.py'])
+        self.assertEqual(bound['developer']['write_paths'], [declared_test_path])
         self.assertEqual(bound['dispatch_audit'][-1]['worker_key'], 'claude-developer')
         self.assertEqual(bound['dispatch_audit'][-1]['reason_code'],
                          'OWNER_ASSIGNMENT_MATCHED')
@@ -987,12 +989,81 @@ class TaskSubmissionCLITests(unittest.TestCase):
         self.assertEqual(completed['developer']['claude_result']['executor_task_id'],
                          d6_task_id)
 
-        remote_result = submission_cli.run_task_remote_test(Namespace(
+        policy['workers']['codex-reviewer']['dispatch'] = 'ALLOWED'
+        policy['workers']['codex-reviewer']['reason'] = 'test fixture allows isolated route checks'
+        self.policy_path.write_text(json.dumps(policy), encoding='utf-8')
+        denied_stdout = io.StringIO()
+        self.assertEqual(submission_cli.run_task_remote_test(Namespace(
             task_id=task['task_id'], executor_task=d6_task_id,
             sha=result_head, ref='refs/heads/feat/test-executor',
-            module=['test_task_store'], pr=None), store=store)
-        self.assertEqual(remote_result['result'], 'ADMISSION_DENIED')
-        self.assertEqual(remote_result['code'], 'MODULE_NOT_ADMITTED')
+            module=['test_task_store'], pr=None), store=store,
+            stdout=denied_stdout), 0)
+        denied_result = json.loads(denied_stdout.getvalue())
+        self.assertEqual(denied_result['result'], 'ADMISSION_DENIED')
+        self.assertEqual(denied_result['code'], 'MODULE_NOT_ADMITTED')
+
+        transport_calls = []
+
+        def transport(argv, script, timeout):
+            transport_calls.append((argv, script, timeout))
+            return subprocess.CompletedProcess(argv, 255, b'', b'')
+
+        remote_stdout = io.StringIO()
+        real_remote_test = remote_test.run_remote_test
+
+        def run_with_transport(*args, **kwargs):
+            return real_remote_test(*args, transport=transport, **kwargs)
+
+        with patch.object(remote_test, 'run_remote_test', side_effect=run_with_transport), \
+                patch.object(remote_test, '_config', return_value={
+                    'host': 'ec2.example', 'user': 'tester',
+                    'repo_path': '/srv/repo', 'python': '/usr/bin/python3'}):
+            self.assertEqual(submission_cli.run_task_remote_test(Namespace(
+                task_id=task['task_id'], executor_task=d6_task_id,
+                sha=result_head, ref='refs/heads/feat/test-executor',
+                module=['test_task_submission_cli'], pr=None), store=store,
+                stdout=remote_stdout), 0)
+        remote_result = json.loads(remote_stdout.getvalue())
+        self.assertEqual(remote_result['result'], 'UNAVAILABLE')
+        self.assertEqual(remote_result['code'], 'SSH_FAILED')
+        self.assertEqual(len(transport_calls), 1)
+        self.assertIn('test_task_submission_cli', transport_calls[0][0])
+
+        from llmtool import review_dispatch
+        real_read_registration = submission_cli.task_completion.read_d6_registration
+        reviewer_registration = SimpleNamespace(
+            task_id='reviewer-fixture', root=str(self.executor_root),
+            common_dir=self.executor_common_dir, branch='feat/test-executor',
+            result_sha=result_head, trusted_agent_id='codex-reviewer')
+
+        def read_registration(task_id, *args, **kwargs):
+            if task_id == d6_task_id:
+                return real_read_registration(task_id, *args, **kwargs)
+            return reviewer_registration
+
+        review_text = 'Verdict: PASS for the bound D6 and PR HEAD.'
+        with patch.object(submission_cli.task_completion, 'read_d6_registration',
+                          side_effect=read_registration), \
+                patch.object(submission_cli.task_completion, '_github_get',
+                    return_value={'number': 123, 'head': {'sha': result_head},
+                                  'base': {'sha': self.executor_head}}), \
+                patch.object(review_dispatch, '_resolve_github_login',
+                             return_value='reviewer-fixture'):
+            review_result = review_dispatch.dispatch_review(
+                store=store, task_id=task['task_id'], executor_task=d6_task_id,
+                pr_number=123, reviewer='codex-reviewer',
+                create_d6=lambda **kwargs: None,
+                codex_runner=lambda **kwargs: {
+                    'thread_id': 'codex-review-thread', 'verdict': 'PASS',
+                    'review_text': review_text},
+                bind_session=lambda **kwargs: None)
+        self.assertEqual(review_result['state'], 'COMPLETED')
+        self.assertEqual(review_result['verdict'], 'PASS')
+        self.assertEqual(review_result['review_text'], review_text)
+        claim = store.get(task['task_id'])['review_dispatch_claim'][-1]
+        self.assertEqual(claim['executor_task'], d6_task_id)
+        self.assertEqual(claim['head_sha'], result_head)
+        self.assertEqual(claim['pr'], 123)
         with self.assertRaises(LLMToolError) as same_family:
             _preflight(store, task['task_id'], d6_task_id, 1, 1,
                        reviewer='claude-reviewer')
@@ -1027,10 +1098,20 @@ class TaskSubmissionCLITests(unittest.TestCase):
             updated_policy = json.loads(self.policy_path.read_text(encoding='utf-8'))
             updated_policy['workers']['claude-developer']['dispatch'] = worker_state
             self.policy_path.write_text(json.dumps(updated_policy), encoding='utf-8')
+            original_git = submission_cli.task_completion._git
+            committed_diff_args = (
+                'diff', '--name-only', '-z', '--no-ext-diff', '--no-textconv',
+                '--no-renames', registration.source_sha, registration.result_sha, '--')
+
+            def git_side_effect(root, args, **kwargs):
+                if root == registration.root and args == committed_diff_args:
+                    return b'sample.py\x00'
+                return original_git(root, args, **kwargs)
+
             with patch.object(submission_cli.task_completion, 'read_d6_registration',
                               return_value=registration), \
                     patch.object(submission_cli.task_completion, '_git',
-                                 return_value=b'sample.py\x00'):
+                                 side_effect=git_side_effect):
                 return submission_cli.run_task_claude_bind(Namespace(
                     task_id=task['task_id'], executor_task=d6_id, owner_ref=ref,
                     common_dir=self.executor_common_dir), store=store)
