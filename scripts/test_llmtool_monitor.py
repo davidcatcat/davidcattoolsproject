@@ -1131,7 +1131,7 @@ def comment(number, seconds, body, kind="issues", association="OWNER"):
 
 class GitHubActivityTests(unittest.TestCase):
     def test_progress_summary_shows_only_valid_d6_and_family_labels(self):
-        marker = "<!-- activity: type=developer_progress actor=Codex target=Root status=ACTIVE -->\n"
+        marker = "<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->\n"
         task = "Task: " + "a" * 32
         cases = (
             (task + "\nD6: wp-1\nFamily: fixture-family", "Family fixture-family（D6 wp-1）"),
@@ -1150,7 +1150,7 @@ class GitHubActivityTests(unittest.TestCase):
                 self.assertEqual(events[0].summary, expected)
                 self.assertNotIn("a" * 32, events[0].summary)
         other = marker.replace("developer_progress", "test_result").replace(
-            "target=Root", "target=Tests").replace("status=ACTIVE", "status=PASS")
+            "target=PM", "target=Tests").replace("status=WAITING", "status=PASS")
         other += task + "\nD6: wp-1\nFamily: fixture-family"
         event = mon.github_events([comment(52, NOW - 9, other)], [], NOW - 99)[0]
         self.assertEqual(event.event_type, "test_result")
@@ -1161,13 +1161,13 @@ class GitHubActivityTests(unittest.TestCase):
                     comment(62, NOW - 5, "Correction updated details"),
                     comment(63, NOW - 4, "ordinary text mentions subpm-lease"),
                     comment(64, NOW - 3,
-                            "<!-- activity: type=developer_progress actor=Codex target=Root status=ACTIVE -->\n"
+                            "<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->\n"
                             "Correction progress"),
                     comment(65, NOW - 2, "final visible comment")]
         events = mon.github_events(comments, [], NOW - 99)
         hidden = mon.render_activity(events, limit=1)
         self.assertIn("已隱藏 2 筆 lease／更正留言", hidden)
-        visible_events = [line for line in hidden if line.startswith("GitHub") or "Codex → Root" in line]
+        visible_events = [line for line in hidden if "GitHub #65" in line or "Codex → PM" in line]
         self.assertEqual(len(visible_events), 1)
         self.assertIn("final visible comment", visible_events[0])
         shown = mon.render_activity(events, show_noise=True)
