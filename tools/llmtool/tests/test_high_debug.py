@@ -7,7 +7,7 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 
 from llmtool import high_debug
@@ -16,6 +16,19 @@ from llmtool.errors import LLMToolError
 
 
 class HighDebugTests(unittest.TestCase):
+    def setUp(self):
+        self.unposted_root = tempfile.TemporaryDirectory()
+        self.addCleanup(self.unposted_root.cleanup)
+        self._poster_patch = patch.object(high_debug, '_post_github_record',
+                                          return_value=True)
+        self._poster = self._poster_patch.start()
+        self.addCleanup(self._poster_patch.stop)
+        self._store_root_patch = patch.object(
+            high_debug.task_store, 'default_root',
+            return_value=Path(self.unposted_root.name) / 'tasks')
+        self._store_root_patch.start()
+        self.addCleanup(self._store_root_patch.stop)
+
     @staticmethod
     def _report(outcome_lines, prose=''):
         parts = []
@@ -167,6 +180,7 @@ class HighDebugTests(unittest.TestCase):
                     failed_corrections=2, runner=runner, create_d6=recording_create,
                     repo_root=str(root),
                     read_registration=lambda *_args, **_kwargs: registration)
+        self._last_failing_exception = caught.exception
         return caught.exception.high_debug_code, created
 
     def test_failed_codex_attempts_are_recorded_and_retry_uses_a_new_d6(self):
@@ -254,10 +268,154 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(entry['report'].split('\nreport truncated\n', 1)[0],
                          'HIGH_DEBUG_REPORT_INVALID\ncheck: SIZE\nbytes: 20000\nlimit: 16384')
         self.assertTrue(entry['report'].endswith('x' * 100))
-        with self.assertRaises(LLMToolError) as caught:
-            self._failing_case(_Store(), self._repo(), report=report)
-        self.assertEqual(caught.exception.high_debug_detail,
+        self._failing_case(_Store(), self._repo(), report=report)
+        self.assertEqual(self._last_failing_exception.high_debug_detail,
                          'check=SIZE bytes=20000 limit=16384')
+
+    def test_success_posts_one_metadata_only_monitor_comment(self):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_CONFIRMED\nprivate report phrase'
+        self._run_case(report)
+        self._poster.assert_called_once()
+        args, kwargs = self._poster.call_args
+        body = args[1]
+        self.assertEqual(body.splitlines()[0],
+            '<!-- activity: type=developer_progress actor=Codex target=PM status=RCA_CONFIRMED -->')
+        for field in ('Task: ' + 'a' * 32, 'D6: executor-hd1-aaaaaaa',
+                      'Family: family', 'Examined SHA: ' + 'a' * 40,
+                      'Requested model: gpt-6.1-sol', 'Observed model: UNKNOWN',
+                      'Effort: UNKNOWN', 'Status: RCA_CONFIRMED', 'Report SHA-256:',
+                      'Usage: UNKNOWN'):
+            self.assertIn(field, body)
+        self.assertNotIn('private report phrase', body)
+        self.assertNotIn('Details.', body)
+
+    def test_failed_attempt_variants_post_once_with_blocked_marker(self):
+        cases = (
+            ({'returncode': 1}, 'HIGH_DEBUG_RUN_FAILED'),
+            ({'runner_error': subprocess.TimeoutExpired('codex', 1800)},
+             'HIGH_DEBUG_RUN_FAILED'),
+            ({'dirty': True}, 'HIGH_DEBUG_WROTE_FILES'),
+            ({'report': 'private report ' + 'x' * 20000},
+             'HIGH_DEBUG_REPORT_INVALID'),
+            ({'report': 'safe head ' + 'x' * 17000 + '\nBear' + 'er ' + 'c' * 40},
+             'HIGH_DEBUG_REPORT_INVALID'),
+        )
+        for kwargs, code in cases:
+            with self.subTest(code=code):
+                self._poster.reset_mock()
+                self._failing_case(_Store(), self._repo(), **kwargs)
+                self._poster.assert_called_once()
+                body = self._poster.call_args.args[1]
+                self.assertEqual(body.splitlines()[0],
+                    '<!-- activity: type=developer_progress actor=Codex target=PM status=BLOCKED -->')
+                self.assertIn('Refusal code: ' + code, body)
+                self.assertNotIn('private report', body)
+                self.assertNotIn('safe head', body)
+
+    def test_unsafe_observed_model_becomes_unknown_in_comment(self):
+        entry = {'d6': 'run-1', 'family': 'family', 'examined_sha': 'a' * 40,
+                 'model_requested': 'gpt-6.1-sol', 'model_observed': 'unsafe model',
+                 'effort_observed': 'high', 'status': 'RCA_UNCONFIRMED',
+                 'report_sha256': 'b' * 64, 'usage': {'input': 1, 'cached': 0,
+                 'output': 2, 'reasoning': 1}}
+        body = high_debug._record_body(entry, 'a' * 32)
+        self.assertIn('Observed model: UNKNOWN', body)
+        self.assertIn('Effort: high', body)
+        self.assertIn('Usage: input=1,cached=0,output=2,reasoning=1', body)
+
+    def test_github_poster_uses_trusted_slug_argv_and_stdin(self):
+        completed = subprocess.CompletedProcess([], 0, stdout=b'', stderr=b'')
+        with patch.object(high_debug.shutil, 'which', return_value='/trusted/gh') as which, \
+             patch.object(high_debug.task_completion, '_trusted_slug',
+                          return_value='owner/repo'), \
+             patch.object(high_debug.subprocess, 'run', return_value=completed) as run, \
+             patch.dict(high_debug.os.environ, {'GH_CONFIG_DIR': '/safe/gh-config',
+                                                'GH_TOKEN': 'ambient-secret'}):
+            self.assertTrue(high_debug._post_github_record(17, 'monitor body', '/repo'))
+        which.assert_called_once_with('gh', path=high_debug.task_completion._GH_PATH)
+        args, kwargs = run.call_args
+        self.assertEqual(args[0], ['/trusted/gh', 'pr', 'comment', '17', '--repo',
+                                   'owner/repo', '--body-file', '-'])
+        self.assertEqual(kwargs['input'], b'monitor body')
+        self.assertEqual(kwargs['cwd'], '/repo')
+        self.assertFalse(kwargs['shell'])
+        self.assertEqual(kwargs['timeout'], 30)
+        self.assertEqual(kwargs['env']['GH_CONFIG_DIR'], '/safe/gh-config')
+        self.assertNotIn('GH_TOKEN', kwargs['env'])
+
+    def test_unposted_failure_preserves_run_and_writes_private_retry_record(self):
+        store = _Store()
+        self._poster.return_value = False
+        caught, _created = self._failing_case(store, self._repo(), returncode=1)
+        self.assertEqual(caught, 'HIGH_DEBUG_RUN_FAILED')
+        self.assertEqual(len(store.entries), 1)
+        self.assertEqual(store.events, [])
+        self.assertEqual(self._last_failing_exception.high_debug_detail,
+                         'github_record=UNPOSTED')
+        record_path = Path(self.unposted_root.name) / 'high-debug-unposted' / \
+            (store.entries[0]['d6'] + '.json')
+        saved = json.loads(record_path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['reason'], 'POST_FAILED')
+        self.assertEqual(saved['task_id'], 'a' * 32)
+        self.assertIn('Refusal code: HIGH_DEBUG_RUN_FAILED', saved['body'])
+        self.assertEqual(record_path.stat().st_mode & 0o777, 0o600)
+
+    def test_success_result_and_event_survive_false_or_raising_poster(self):
+        report = ''.join('## ' + heading + '\nDetails.\n'
+                         for heading in high_debug.REPORT_SECTIONS)
+        report += 'RCA_UNCONFIRMED'
+        for poster_result in (False, RuntimeError('post failed')):
+            with self.subTest(poster_result=type(poster_result).__name__):
+                self._poster.reset_mock()
+                if isinstance(poster_result, Exception):
+                    self._poster.side_effect = poster_result
+                else:
+                    self._poster.side_effect = None
+                    self._poster.return_value = poster_result
+                output = StringIO()
+                with redirect_stdout(output):
+                    _result, _invoke, store = self._run_case(report)
+                self.assertEqual(len(store.entries), 1)
+                self.assertEqual(store.entries[0]['status'], 'RCA_UNCONFIRMED')
+                self.assertEqual(len(store.events), 1)
+                record_path = Path(self.unposted_root.name) / 'high-debug-unposted' / \
+                    (store.entries[0]['d6'] + '.json')
+                saved = json.loads(record_path.read_text(encoding='utf-8'))
+                self.assertEqual(saved['reason'], 'POST_FAILED')
+                self.assertEqual(record_path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads(output.getvalue())['github_record'], 'UNPOSTED')
+        self._poster.side_effect = None
+
+    def test_screen_rejection_stores_no_body_and_skips_poster(self):
+        entry = {'d6': 'run-1', 'family': 'family', 'examined_sha': 'a' * 40,
+                 'model_requested': 'gpt-6.1-sol', 'model_observed': 'UNKNOWN',
+                 'effort_observed': 'UNKNOWN', 'status': 'RUN_FAILED',
+                 'report_sha256': 'b' * 64, 'usage': 'UNKNOWN'}
+        with patch.object(high_debug, '_emitted_sensitive', return_value=True):
+            self.assertFalse(high_debug._post_record(entry, 17, '/repo', 'a' * 32,
+                                                     'HIGH_DEBUG_RUN_FAILED'))
+        self._poster.assert_not_called()
+        path = Path(self.unposted_root.name) / 'high-debug-unposted' / 'run-1.json'
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        self.assertEqual(saved['reason'], 'SCREEN_REJECTED')
+        self.assertNotIn('body', saved)
+
+    def test_unposted_write_failure_is_swallowed(self):
+        self._poster.return_value = False
+        with patch.object(high_debug, '_write_unposted', side_effect=OSError('no space')):
+            self.assertFalse(high_debug._post_record(
+                {'d6': 'run-1', 'status': 'RCA_CONFIRMED', 'report_sha256': 'b' * 64},
+                17, '/repo', 'a' * 32))
+
+    def test_pre_attempt_refusal_does_not_post(self):
+        store = SimpleNamespace(get=lambda _task: {'task_id': 'a' * 32})
+        with self.assertRaises(LLMToolError):
+            high_debug.run_high_debug(store=store, task_id='a' * 32,
+                executor_task='executor', pr_number=1, family='family',
+                failed_corrections=1)
+        self._poster.assert_not_called()
 
     def test_oversized_evidence_refusal_has_size_detail(self):
         store = _Store()
