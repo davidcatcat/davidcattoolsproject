@@ -164,17 +164,14 @@ def _has_provider_auth_error(raw):
     return False
 
 
-def _has_output_truncation(raw, *, stderr=False):
+def _has_output_truncation(events, *, stderr=False):
     """Recognize bounded truncation markers without retaining provider output."""
     try:
-        decoded = raw.decode('utf-8', 'replace')
         if stderr:
+            decoded = events.decode('utf-8', 'replace')
             return ('StepFailedError' in decoded or
                     'Response still truncated' in decoded)
-        for line in decoded.splitlines():
-            if not line:
-                continue
-            event = json.loads(line)
+        for event in events:
             if type(event) is not dict or event.get('type') != 'error':
                 continue
             error = event.get('error')
@@ -195,6 +192,7 @@ def _has_output_truncation(raw, *, stderr=False):
 def _json_event_prefix(raw):
     """Decode valid JSON events up to the first malformed line."""
     events = []
+    complete = True
     for raw_line in raw.splitlines():
         try:
             line = raw_line.decode('utf-8')
@@ -207,9 +205,12 @@ def _json_event_prefix(raw):
         except (ValueError, RecursionError):
             return events, False
         if type(event) is not dict:
-            return events, False
+            # A valid non-object is invalid for the strict event parser, but
+            # later objects still carry useful structured failure evidence.
+            complete = False
+            continue
         events.append(event)
-    return events, True
+    return events, complete
 
 
 def _recovered_transport_indices(events):
@@ -219,16 +220,20 @@ def _recovered_transport_indices(events):
     inferred from the strongest available structured completion evidence.
     """
     recovered = set()
-    for index, event in enumerate(events):
+    finished_sessions = set()
+    for index in range(len(events) - 1, -1, -1):
+        event = events[index]
         error = event.get('error')
         session_id = event.get('sessionID')
         if (event.get('type') != 'error' or type(error) is not dict or
                 error.get('type') != 'provider.transport' or
                 type(session_id) is not str or _SESSION.fullmatch(session_id) is None):
+            if (event.get('type') == 'step_finish' and
+                    type(session_id) is str and
+                    _SESSION.fullmatch(session_id) is not None):
+                finished_sessions.add(session_id)
             continue
-        if any(later.get('type') == 'step_finish' and
-               later.get('sessionID') == session_id
-               for later in events[index + 1:]):
+        if session_id in finished_sessions:
             recovered.add(index)
     return recovered
 
@@ -268,15 +273,10 @@ def _classify_provider_events(events, *, stderr=b''):
         return 'OPENCODE_FREE_LIMIT'
     if has_rate_limit:
         return 'OPENCODE_RATE_LIMITED'
-    if (_has_output_truncation(_events_raw(events)) or
+    if (_has_output_truncation(events) or
             _has_output_truncation(stderr, stderr=True)):
         return 'OPENCODE_OUTPUT_TRUNCATED'
     return 'OPENCODE_PROVIDER_FAILED' if has_error else None
-
-
-def _events_raw(events):
-    """Serialize parsed events for the structured output-limit classifier."""
-    return ('\n'.join(json.dumps(event) for event in events)).encode('utf-8')
 
 
 def _classify_provider_error(raw, *, stderr=b''):

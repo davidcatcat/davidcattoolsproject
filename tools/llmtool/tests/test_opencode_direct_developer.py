@@ -11,8 +11,8 @@ from unittest.mock import patch
 
 from llmtool.opencode_direct_developer import (
     AGENT, MAX_OUTPUT_BYTES, MAX_OUTPUT_TOKENS, MAX_SOURCE_FILE_BYTES, MODEL,
-    DirectOpenCodeError, _classify_provider_error, configuration,
-    parse_json_events, run,
+    DirectOpenCodeError, _classify_provider_error, _classify_provider_events,
+    _recovered_transport_indices, configuration, parse_json_events, run,
 )
 from llmtool.providers.cli_lifecycle import CLIHostTermination
 from llmtool import worker_dispatch
@@ -318,6 +318,51 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
                 self.assertEqual(caught.exception.direct_opencode_code,
                                  'OPENCODE_PROVIDER_FAILED')
 
+        missing_session = {'type': 'error', 'error': {'type': 'provider.transport'}}
+        malformed_session = {
+            'type': 'error', 'sessionID': 'not-a-session',
+            'error': {'type': 'provider.transport'},
+        }
+        for transport_event in (missing_session, malformed_session):
+            raw = (json.dumps(transport_event) + '\n' +
+                   self.event('step_finish', part={}) + '\n').encode()
+            self.assertEqual(_classify_provider_error(raw),
+                             'OPENCODE_PROVIDER_FAILED')
+            with self.assertRaises(DirectOpenCodeError) as caught:
+                parse_json_events(raw)
+            self.assertEqual(caught.exception.direct_opencode_code,
+                             'OPENCODE_PROVIDER_FAILED')
+
+    def test_transport_recovery_scans_large_event_stream(self):
+        count = 20_000
+        transport = {'type': 'error', 'sessionID': 'ses_Abc123',
+                     'error': {'type': 'provider.transport'}}
+        events = [transport.copy() for _ in range(count)]
+        events.append({'type': 'step_finish', 'sessionID': 'ses_Abc123'})
+        recovered = _recovered_transport_indices(events)
+        self.assertEqual(len(recovered), count)
+        self.assertEqual(min(recovered), 0)
+        self.assertEqual(max(recovered), count - 1)
+
+    def test_non_dict_json_line_keeps_later_error_classification(self):
+        failed = (b'[]\n' + self.event(
+            'error', error={'type': 'provider.unavailable'}).encode() + b'\n')
+        self.assertEqual(_classify_provider_error(failed),
+                         'OPENCODE_PROVIDER_FAILED')
+
+        invalid = (b'[]\n' + self.event('step_start').encode() + b'\n')
+        with self.assertRaises(DirectOpenCodeError) as caught:
+            parse_json_events(invalid)
+        self.assertEqual(caught.exception.direct_opencode_code,
+                         'OPENCODE_OUTPUT_INVALID')
+
+    def test_output_truncation_classification_does_not_serialize_events(self):
+        nested = {}
+        for _ in range(1_100):
+            nested = {'nested': nested}
+        event = {'type': 'text', 'sessionID': 'ses_Abc123', 'deep': nested}
+        self.assertIsNone(_classify_provider_events([event]))
+
     def test_provider_transport_error_without_later_completion_stays_failed(self):
         transport = self.event('error', error={
             'type': 'provider.transport', 'message': 'UNTRUSTED TRANSPORT PROSE',
@@ -343,8 +388,12 @@ class DirectOpenCodeDeveloperTests(unittest.TestCase):
         other_error = self.event('error', error={'type': 'provider.unavailable'})
         cases = (
             ('nonzero after recovery', '\n'.join((transport, finish, text)) + '\n', 7),
-            ('later provider error', '\n'.join((transport, other_error, finish, text)) + '\n', 7),
-            ('unrecovered transport', transport + '\n', 7),
+            ('later provider error', '\n'.join((transport, other_error, finish, text)) + '\n', 0),
+            ('unrecovered transport', transport + '\n', 0),
+            ('other error before finish', '\n'.join((other_error, finish, text)) + '\n', 0),
+            ('unknown error before finish', '\n'.join((
+                self.event('error', error={'type': 'provider.unknown'}),
+                finish, text)) + '\n', 0),
         )
         for label, body, exit_code in cases:
             with self.subTest(label=label), self.assertRaises(DirectOpenCodeError) as caught:
