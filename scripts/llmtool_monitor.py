@@ -1878,7 +1878,7 @@ class GitHubSource:
         self.board_pulls: list[BoardPull] | None = None  # same pulls page as branch_prs
         self.board_page_count: int | None = None
         self.board_oldest_updated: float | None = None
-    self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
+        self.ci_runs: list | None = None    # ci_runs(); None until GitHub was read
         self.ci_heads: dict | None = None   # latest Linux/Mac run per head from same page
         self.want_ci = False   # set while a self-hosted runner is on this Mac
         self.want_main = False
@@ -5750,7 +5750,8 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
             budget -= len(raw or b"")
             record = _remote_test_json(raw) if raw else None
             entry = extract(record)
-            record_entries = (entry,) if entry is not None else ()
+            record_entries = (tuple(entry) if type(entry) in (tuple, list)
+                              else (entry,) if entry is not None else ())
         kept[path] = (key, record_entries)
         entries.extend(record_entries)
     if root not in cache and len(cache) >= 8:
@@ -5760,10 +5761,10 @@ def _bounded_task_entries(root: str, cache: dict, budget: int, extract):
     return entries, problem
 
 
-def _ec2_head_entry(record) -> tuple | None:
-    """Extract the newest valid SHA-bound remote-test result from one Task."""
+def _ec2_head_entry(record) -> tuple:
+    """Extract valid SHA-bound remote-test results from one Task."""
     if type(record) is not dict:
-        return None
+        return ()
     found = []
     receipts = record.get("remote_test_receipts")
     outcomes = record.get("remote_test_outcomes")
@@ -5781,7 +5782,7 @@ def _ec2_head_entry(record) -> tuple | None:
         if (type(result) is str and result in REMOTE_TEST_OUTCOMES
                 and type(sha) is str and HEX_SHA.fullmatch(sha) and when > 0):
             found.append((sha[:7].lower(), when, result))
-    return max(found, key=lambda entry: entry[1]) if found else None
+    return tuple(found)
 
 
 def ec2_head_results(root: str | None = None) -> tuple[dict, str]:

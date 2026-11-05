@@ -7515,7 +7515,9 @@ class WorkBoardTests(unittest.TestCase):
         work = mon.work_board(self._github([self._pull(976, title="很長的中文標題用來測試窄螢幕換行")]),
                               mon.PmBoard("stale", 3600, [], [], []), NOW)
         view = mon.board_view(work, width=14)
-        rows = [line for line, _ in view
+        pr_start = next(index for index, (line, _) in enumerate(view)
+                        if line == "── PR 看板 ──")
+        rows = [line for line, _ in view[:pr_start]
                 if line.startswith("PR #") or line.startswith("  ")]
         self.assertTrue(rows)
         self.assertEqual(rows[0], "PR #976")
@@ -7579,7 +7581,7 @@ class PrBoardTests(unittest.TestCase):
             ("", False, "未確認", "", "未確認", "PM"),
         ]
         for index, (kind, draft, verdict, mac, expected_next, expected_owner) in enumerate(cases, 1):
-            review = {"PASS": "PASS", "FAIL": "FAIL", "未確認": "MAYBE"}.get(verdict)
+            review = {"通過": "PASS", "要修": "FAIL", "未確認": "MAYBE"}.get(verdict)
             verdicts = self._verdict(review, number=str(index)) if review else {}
             reviewing = {(str(index), "abcdef0")} if verdict == "審查中" else set()
             pending = [mon.OwnerPending(1, f"#{index}", "open", "", kind)] if kind else []
@@ -7612,7 +7614,7 @@ class PrBoardTests(unittest.TestCase):
                                            {"abcdef0": {"mac": ("completed", "success"),
                                                          "linux": ("completed", "failure")}},
                                            ({}, ""), set(), [mon.OwnerPending(1, "#2", "open", "", "waiting_owner")])[0].next,
-                         "修 CI")
+                         "修復")
 
     def test_next_step_priority_pairs_and_pending_exact_match(self):
         pull = self._pull(1, draft=True)
@@ -7686,8 +7688,24 @@ class PrBoardTests(unittest.TestCase):
                   "remote_test_outcomes": [
                       {"sha": self.SHA, "at": latest, "result": "TIMEOUT"}]}
         self.assertEqual(mon._ec2_head_entry(record),
-                         ("abcdef0", mon._remote_test_time(latest), "TIMEOUT"))
-        self.assertIsNone(mon._ec2_head_entry(None))
+                         (("abcdef0", mon._remote_test_time(stamp), "FAIL"),
+                          ("abcdef0", mon._remote_test_time(later), "PASS"),
+                          ("abcdef0", mon._remote_test_time(latest), "TIMEOUT")))
+        self.assertEqual(mon._ec2_head_entry(None), ())
+
+    def test_ec2_head_entry_keeps_receipts_for_multiple_heads(self):
+        record = {"remote_test_receipts": [
+            {"source_sha": self.SHA, "ended_at": "2026-11-05T00:00:00Z", "result": "PASS"},
+            {"source_sha": "1234567" + "2" * 33,
+             "ended_at": "2026-11-05T00:01:00Z", "result": "FAIL"}]}
+        self.assertEqual(mon._ec2_head_entry(record),
+                         (("abcdef0", mon._remote_test_time("2026-11-05T00:00:00Z"), "PASS"),
+                          ("1234567", mon._remote_test_time("2026-11-05T00:01:00Z"), "FAIL")))
+        with tempfile.TemporaryDirectory() as tasks:
+            (Path(tasks) / "task.json").write_text(json.dumps(record), encoding="utf-8")
+            results, problem = mon.ec2_head_results(tasks)
+        self.assertEqual(results, {"abcdef0": "PASS", "1234567": "FAIL"})
+        self.assertEqual(problem, "")
 
     def test_pr_section_unknown_empty_and_narrow_row(self):
         unknown = mon.work_board(None, mon.PmBoard("missing", None, [], [], []), NOW)
@@ -7711,7 +7729,8 @@ class PrBoardTests(unittest.TestCase):
         work = mon.work_board(github, mon.PmBoard("ok", 0, [], [], []), NOW,
                               ec2=({}, ""), reviewing=set())
         view = mon.board_view(work, 40)
-        rows = [line for line, _ in view if line.startswith("PR #") or line.startswith("  ")]
+        lines = [line for line, _ in view]
+        rows = [line for line in lines if line.startswith("PR #") or line.startswith("  ")]
         self.assertTrue(rows[0].startswith("PR #978"))
         self.assertIn("審查 通過", " ".join(rows))
         self.assertIn("macOS 成功", " ".join(rows))
