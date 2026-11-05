@@ -30,7 +30,7 @@ _REFUSAL_CODES = frozenset((
 def _record_body(entry, task_id, refusal_code=None):
     """Build a monitor-only comment using recorded metadata, never report text."""
     status = entry.get('status')
-    marker_status = status if status in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED') else 'BLOCKED'
+    marker_status = 'WAITING' if status in ('RCA_CONFIRMED', 'RCA_UNCONFIRMED') else 'BLOCKED'
     observed = entry.get('model_observed')
     effort = entry.get('effort_observed')
     observed = observed if type(observed) is str and _RECORD_TOKEN.fullmatch(observed) else 'UNKNOWN'
@@ -68,6 +68,8 @@ def _post_github_record(pr_number, body, repo_root):
     if gh is None:
         return False
     slug = task_completion._trusted_slug()
+    if slug is None:
+        return False
     env = {'PATH': task_completion._GH_PATH, 'HOME': os.path.expanduser('~'),
            'LC_ALL': 'C', 'GH_PROMPT_DISABLED': '1',
            'GH_NO_UPDATE_NOTIFIER': '1', 'NO_COLOR': '1'}

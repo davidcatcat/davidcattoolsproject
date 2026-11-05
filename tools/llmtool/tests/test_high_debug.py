@@ -14,6 +14,8 @@ from llmtool import high_debug
 from llmtool import cli
 from llmtool.errors import LLMToolError
 
+_REAL_POST_GITHUB_RECORD = high_debug._post_github_record
+
 
 class HighDebugTests(unittest.TestCase):
     def setUp(self):
@@ -244,13 +246,14 @@ class HighDebugTests(unittest.TestCase):
     def test_cut_that_creates_sensitive_match_falls_back_to_fixed_lines(self):
         report = 'x' * 17000
         store = _Store()
-        with patch.object(high_debug, '_emitted_sensitive', side_effect=(False, True)) as scan:
+        with patch.object(high_debug, '_emitted_sensitive',
+                          side_effect=(False, True, False)) as scan:
             self._failing_case(store, self._repo(), report=report)
         stored = store.entries[0]['report']
         self.assertEqual(stored,
                          'HIGH_DEBUG_REPORT_INVALID\ncheck: SIZE\nbytes: 17000\nlimit: 16384')
-        self.assertEqual(scan.call_count, 2)
-        self.assertFalse(high_debug._emitted_sensitive(stored))
+        self.assertEqual(scan.call_count, 3)
+        self._poster.assert_called_once()
 
     def test_kept_truncated_report_with_sections_and_outcome_stays_run_failed(self):
         complete = ''.join('## ' + heading + '\nDetails.\n'
@@ -281,7 +284,7 @@ class HighDebugTests(unittest.TestCase):
         args, kwargs = self._poster.call_args
         body = args[1]
         self.assertEqual(body.splitlines()[0],
-            '<!-- activity: type=developer_progress actor=Codex target=PM status=RCA_CONFIRMED -->')
+            '<!-- activity: type=developer_progress actor=Codex target=PM status=WAITING -->')
         for field in ('Task: ' + 'a' * 32, 'D6: executor-hd1-aaaaaaa',
                       'Family: family', 'Examined SHA: ' + 'a' * 40,
                       'Requested model: gpt-6.1-sol', 'Observed model: UNKNOWN',
@@ -333,7 +336,7 @@ class HighDebugTests(unittest.TestCase):
              patch.object(high_debug.subprocess, 'run', return_value=completed) as run, \
              patch.dict(high_debug.os.environ, {'GH_CONFIG_DIR': '/safe/gh-config',
                                                 'GH_TOKEN': 'ambient-secret'}):
-            self.assertTrue(high_debug._post_github_record(17, 'monitor body', '/repo'))
+            self.assertTrue(_REAL_POST_GITHUB_RECORD(17, 'monitor body', '/repo'))
         which.assert_called_once_with('gh', path=high_debug.task_completion._GH_PATH)
         args, kwargs = run.call_args
         self.assertEqual(args[0], ['/trusted/gh', 'pr', 'comment', '17', '--repo',
@@ -344,6 +347,13 @@ class HighDebugTests(unittest.TestCase):
         self.assertEqual(kwargs['timeout'], 30)
         self.assertEqual(kwargs['env']['GH_CONFIG_DIR'], '/safe/gh-config')
         self.assertNotIn('GH_TOKEN', kwargs['env'])
+
+    def test_github_poster_without_trusted_slug_does_not_run_subprocess(self):
+        with patch.object(high_debug.shutil, 'which', return_value='/trusted/gh'), \
+             patch.object(high_debug.task_completion, '_trusted_slug', return_value=None), \
+             patch.object(high_debug.subprocess, 'run') as run:
+            self.assertFalse(_REAL_POST_GITHUB_RECORD(17, 'monitor body', '/repo'))
+        run.assert_not_called()
 
     def test_unposted_failure_preserves_run_and_writes_private_retry_record(self):
         store = _Store()
